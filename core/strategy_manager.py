@@ -78,25 +78,32 @@ class StrategyManager:
                 
                 strategy_class = self._load_strategy_class(strategy_key)
 
-                self.strategy_registry[strategy_key] = {
-                    "config": config,
-                    "class": strategy_class, # Stocke la classe (peut être None si non trouvée)
-                    "last_modified": config_path.stat().st_mtime,
-                }
-                # La base de connaissance doit aussi stocker la classe pour le scoring/l'IA
-                self._config_knowledge_base[strategy_key] = {
-                    "config": config,
-                    "class": strategy_class,
-                    "version": str(config_path.stat().st_mtime)
-                }
-                self.logger.debug(f"[load_all_strategies] Stratégie '{strategy_key}' chargée depuis '{config_file}'. Classe: {strategy_class}.")
+                # CORRECTION MAJEURE: Utiliser le 'strategy_name' du fichier de config comme clé principale du registre
+                # Car les recherches ultérieures (via get_strategy_class par exemple) se font par ce nom.
+                strategy_name_from_config = config.get("strategy_name")
+                if strategy_name_from_config:
+                    self.strategy_registry[strategy_name_from_config] = { # <-- CLÉ CHANGÉE ICI
+                        "config": config,
+                        "class": strategy_class, # Stocke la classe (peut être None si non trouvée)
+                        "last_modified": config_path.stat().st_mtime,
+                    }
+                    # Mettre à jour _config_knowledge_base avec la même clé cohérente
+                    self._config_knowledge_base[strategy_name_from_config] = { # <-- CLÉ CHANGÉE ICI
+                        "config": config,
+                        "class": strategy_class,
+                        "version": str(config_path.stat().st_mtime)
+                    }
+                    self.logger.debug(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}.")
+                else:
+                    self.logger.error(f"[load_all_strategies] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre.")
+
             except ConfigValidationError as e:
                 self.logger.error(f"[load_all_strategies] Erreur de validation pour la stratégie '{strategy_key}' : {str(e)}")
             except FileNotFoundError:
                 self.logger.error(f"[load_all_strategies] Fichier de configuration introuvable : {config_path}")
             except Exception as e:
                 self.logger.error(f"[load_all_strategies] Erreur lors du chargement de '{strategy_key}' : {str(e)}", exc_info=True)
-
+                
     def _load_strategy_class(self, strategy_key: str) -> Optional[Type]:
         """
         Charge dynamiquement la classe Python d'une stratégie à partir de sa clé.
