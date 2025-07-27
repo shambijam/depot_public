@@ -350,7 +350,7 @@ def run_single_pipeline_cycle(
         if not mt5_connector.is_connected:
             raise RuntimeError("MT5 a perdu la connexion persistante.")
 
-        # --- ÉTAPE 1 : COLLECTE DES DONNÉES DE MARCHÉ ---
+        # --- ÉTAPE 1 : COLLECTE DES DONNÉES DE MARCHÉ (AVANT TOUTE DÉCISION) ---
         base_config = config_manager.get_current_dynamic_config()
         active_mt5_account_details = config_manager.get_mt5_account_credentials(mode=base_config.get("mode_execution", "DEMO").upper())
         
@@ -414,7 +414,7 @@ def run_single_pipeline_cycle(
             active_mt5_account_details,
         )
 
-        # --- ÉTAPE 3 : PIPELINE DE DÉCISION ---
+        # --- ÉTAPE 3 : PIPELINE DE DÉCISION (MAINTENANT AVEC LES BONNES DONNÉES) ---
         decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
