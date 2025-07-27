@@ -48,50 +48,7 @@ class ConfigLoader:
         base_configs: Dict[str, Any] = {}
         broker_accounts_config: Dict[str, Any] = {"accounts": []}
 
-        # --- Chargement des variables d'environnement (filtrées) ---
-        env_schema_path = Path(__file__).parent.parent / "config" / "env_vars_schema.json"
-        all_env_vars_from_schema: List[str] = []
-
-        if env_schema_path.exists():
-            try:
-                with open(env_schema_path, "r", encoding="utf-8") as f:
-                    schema = json.load(f)
-                    all_env_vars_from_schema = schema.get("required_env_vars", [])
-                self.logger.info(f"Noms des variables d'environnement chargés depuis le schéma : {env_schema_path}")
-            except json.JSONDecodeError as e:
-                self.logger.error(
-                    f"Erreur de syntaxe JSON dans le schéma '{env_schema_path}': {e}. Le chargement des variables d'environnement va échouer.",
-                    exc_info=True,
-                )
-                all_env_vars_from_schema = []
-        else:
-            self.logger.critical(
-                f"FATAL: Le schéma 'env_vars_schema.json' est introuvable à '{env_schema_path}'. Impossible de charger les variables d'environnement en production. Le bot ne peut pas démarrer en toute sécurité."
-            )
-            raise FileNotFoundError(f"Schéma des variables d'environnement manquant : {env_schema_path}")
-
-        env_vars_dict = {}
-        mt5_generic_env_vars = [
-            "MT5_LOGIN_LIVE", "MT5_PASSWORD_LIVE", "MT5_SERVER_LIVE",
-            "MT5_LOGIN_DEMO", "MT5_PASSWORD_DEMO", "MT5_SERVER_DEMO",
-        ]
-
-        # Utilisation de os.getenv pour charger les variables d'environnement
-        for var_name in all_env_vars_from_schema:
-            if var_name in mt5_generic_env_vars:
-                self.logger.debug(f"Variable d'environnement '{var_name}' ignorée : gérée via 'broker_accounts.json'.")
-                continue
-
-            value = os.getenv(var_name)
-            if var_name == "BOT_MODE":
-                env_vars_dict[var_name] = value.upper() if value else "DEMO"
-            elif value is not None:
-                env_vars_dict[var_name] = value
-
-        base_configs["env_vars"] = env_vars_dict
-        self.logger.info(f"{len(env_vars_dict)} variables d'environnement chargées dans la configuration de base.")
-
-        # --- Chargement du fichier `broker_accounts.json` ---
+        # --- Chargement du fichier `broker_accounts.json` EN PREMIER ---
         broker_accounts_path = Path(__file__).parent.parent / "config" / "broker_accounts.json"
 
         if broker_accounts_path.exists():
@@ -119,8 +76,64 @@ class ConfigLoader:
             raise FileNotFoundError(f"Fichier des comptes brokers manquant : {broker_accounts_path}")
 
         base_configs["_broker_accounts_config"] = broker_accounts_config
-        return base_configs
 
+        # --- Chargement des variables d'environnement (filtrées) ---
+        env_schema_path = Path(__file__).parent.parent / "config" / "env_vars_schema.json"
+        all_env_vars_from_schema: List[str] = []
+
+        if env_schema_path.exists():
+            try:
+                with open(env_schema_path, "r", encoding="utf-8") as f:
+                    schema = json.load(f)
+                    all_env_vars_from_schema = schema.get("required_env_vars", [])
+                self.logger.info(f"Noms des variables d'environnement chargés depuis le schéma : {env_schema_path}")
+            except json.JSONDecodeError as e:
+                self.logger.error(
+                    f"Erreur de syntaxe JSON dans le schéma '{env_schema_path}': {e}. Le chargement des variables d'environnement va échouer.",
+                    exc_info=True,
+                )
+                all_env_vars_from_schema = []
+        else:
+            # Note : C'est une erreur FATALE si env_vars_schema.json est manquant en production.
+            self.logger.critical(
+                f"FATAL: Le schéma 'env_vars_schema.json' est introuvable à '{env_schema_path}'. Impossible de charger les variables d'environnement en production. Le bot ne peut pas démarrer en toute sécurité."
+            )
+            raise FileNotFoundError(f"Schéma des variables d'environnement manquant : {env_schema_path}")
+
+        env_vars_dict = {}
+        # Collecter tous les noms de variables d'environnement nécessaires
+        # Inclure ceux du schéma et ceux des comptes brokers
+        vars_to_load_from_env = set(all_env_vars_from_schema)
+
+        # AJOUT : Récupérer dynamiquement les noms des variables MT5_LOGIN/PASSWORD_ENV_VAR depuis broker_accounts_config
+        for account in broker_accounts_config.get("accounts", []):
+            login_var = account.get("login_env_var")
+            password_var = account.get("password_env_var")
+            server_var = account.get("server_env_var") # Si vous avez des variables pour le serveur aussi
+
+            if login_var:
+                vars_to_load_from_env.add(login_var)
+            if password_var:
+                vars_to_load_from_env.add(password_var)
+            if server_var: # Ajouter si pertinent
+                vars_to_load_from_env.add(server_var)
+
+        # Utilisation de os.getenv pour charger les variables d'environnement
+        for var_name in vars_to_load_from_env:
+            value = os.getenv(var_name)
+            if var_name == "BOT_MODE": # Gérer BOT_MODE spécifiquement si nécessaire
+                env_vars_dict[var_name] = value.upper() if value else "DEMO"
+            elif value is not None:
+                env_vars_dict[var_name] = value
+            else:
+                self.logger.debug(f"Variable d'environnement '{var_name}' n'est pas définie dans l'environnement.")
+
+
+        base_configs["env_vars"] = env_vars_dict
+        self.logger.info(f"{len(env_vars_dict)} variables d'environnement (incluant les MT5) chargées dans la configuration de base.")
+
+        return base_configs
+        
     # Ces méthodes étaient dans ConfigManager et sont déplacées ici.
     def parse_set_file(self, set_path: str) -> Dict[str, Any]:
         """
