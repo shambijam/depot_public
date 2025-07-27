@@ -1297,34 +1297,39 @@ class ConfigManager:
         """
         self.logger.info("Orchestration du pipeline de décision institutionnel...")
 
-        # Supprimer l'appel à build_config_knowledge_base car cette responsabilité
-        # a été déplacée vers StrategyManager lors de son initialisation.
-        # strategy_config_dir = self.get("paths.strategy_configs", "config/")
-        # self.build_config_knowledge_base(config_dir=strategy_config_dir) # Ligne à supprimer
-
         analyzed_context = self.analyze_context(context)
 
         all_assets_market_data_from_context = context.get("market_data", {})
 
+        # CORRECTION du problème : le dictionnaire 'data' passé à detect_market_regime est vide
+        # car 'market_data' du context n'est pas encore rempli à ce stade de l'exécution dans run_single_pipeline_cycle.
+        # Cette logique de détection du régime de marché DOIT utiliser les vraies données de marché,
+        # qui ne sont collectées qu'après. La logique d'appel à organize_pipeline_decision a été déplacée plus tôt
+        # dans run_single_pipeline_cycle pour permettre la SELECTION de la stratégie,
+        # mais la détection du régime a besoin des données réelles.
+        # Pour l'instant, on laisse l'appel à detect_market_regime ici, mais il se peut que `all_assets_market_data_from_context`
+        # soit vide au premier appel à organize_pipeline_decision (dans run_single_pipeline_cycle)
+        # car les données ne sont collectées qu'après le retour de cette fonction.
+        # C'est un problème d'ordre d'appel plus global. Pour le moment, nous allons juste faire attention à la `select_optimal_config`.
         analyzed_context["current_market_regime"] = self.detect_market_regime(
-            analyzed_context, all_assets_market_data_from_context
+            analyzed_context, all_assets_market_data_from_context # Cette donnée peut être vide à ce point
         )
 
-        # CORRECTION : Accéder à _config_knowledge_base via l'instance du StrategyManager.
-        # StrategyManager est un attribut de ConfigManager.
+        # CORRECTION : Accéder à select_optimal_config via l'instance du DecisionPipeline.
+        # DecisionPipeline est un attribut de ConfigManager.
+        if not hasattr(self, 'decision_pipeline') or self.decision_pipeline is None:
+            self.logger.critical("ERREUR: DecisionPipeline n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie.")
+            raise RuntimeError("DecisionPipeline non initialisé.")
+
+        # Assurez-vous que strategy_manager est initialisé et a chargé les stratégies.
         if not hasattr(self, 'strategy_manager') or self.strategy_manager is None:
             self.logger.critical("ERREUR: StrategyManager n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie.")
             raise RuntimeError("StrategyManager non initialisé.")
 
-        # La base de connaissance des stratégies se trouve dans strategy_manager.strategy_registry
-        # ou strategy_manager._config_knowledge_base (si vous voulez conserver cette nomenclature interne)
-        # Dans StrategyManager, load_all_strategies peuple strategy_registry.
-        # Assurez-vous que strategy_registry est l'attribut correct contenant les configs complètes.
-        # Ici, nous allons l'appeler strategy_registry qui est peuplé de la même manière.
+        # La base de connaissance des stratégies est dans strategy_manager.strategy_registry
         config_knowledge_base_from_strategy_manager = self.strategy_manager.strategy_registry
 
-
-        optimal_config_content = self.select_optimal_config(
+        optimal_config_content = self.decision_pipeline.select_optimal_config( # <-- CORRECTION ICI
             analyzed_context, config_knowledge_base_from_strategy_manager
         )
         if not optimal_config_content:
@@ -1334,6 +1339,7 @@ class ConfigManager:
                 "config_used": self.get_current_dynamic_config(),
             }
 
+        # La fusion et l'adaptation de la config se font toujours ici car c'est la config globale qui est affectée.
         config_for_this_cycle = self.get_current_dynamic_config()
         config_for_this_cycle = self._merge_dicts(
             config_for_this_cycle, optimal_config_content
@@ -1343,7 +1349,8 @@ class ConfigManager:
         )
 
         signals = analyzed_context.get("trading_signals", {})
-        trade_decision = self.decide_trade_to_execute(
+        # decide_trade_to_execute devrait aussi être appelée via decision_pipeline
+        trade_decision = self.decision_pipeline.decide_trade_to_execute( # <-- CORRECTION ICI
             analyzed_context, config_for_this_cycle, signals
         )
 
@@ -1353,80 +1360,85 @@ class ConfigManager:
             "config_used": config_for_this_cycle,
             "final_decision": trade_decision,
         }
-        def issue_trade_order(
-            self,
-            trade_decision: Dict[str, Any],
-            config: Dict[str, Any],
-            context: Dict[str, Any],
-        ) -> Dict[str, Any]:
-            """
-            Prépare et transmet l'ordre de trade final au module d'exécution.
-            Cette fonction agrège toutes les informations nécessaires pour former un ordre structuré.
-            """
-            self.logger.info(
-                f"Préparation de l'ordre de trade pour {trade_decision.get('asset')} (Stratégie: {trade_decision.get('strategy_type')})..."
+
+        # NOTE : La fonction issue_trade_order DOIT être une méthode de la classe ConfigManager,
+        # et non imbriquée dans organize_pipeline_decision.
+        # Je la place ici comme une méthode de la classe ConfigManager.
+        
+def issue_trade_order(
+        self,
+        trade_decision: Dict[str, Any],
+        config: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Prépare et transmet l'ordre de trade final au module d'exécution.
+        Cette fonction agrège toutes les informations nécessaires pour former un ordre structuré.
+        """
+        self.logger.info(
+            f"Préparation de l'ordre de trade pour {trade_decision.get('asset')} (Stratégie: {trade_decision.get('strategy_type')})..."
+        )
+
+        if (
+            not trade_decision
+            or not trade_decision.get("action")
+            or not trade_decision.get("volume", 0) > 0
+        ):
+            self.logger.warning(
+                "Décision de trade invalide ou volume nul. Ordre non émis."
             )
+            return {}
 
-            if (
-                not trade_decision
-                or not trade_decision.get("action")
-                or not trade_decision.get("volume", 0) > 0
-            ):
-                self.logger.warning(
-                    "Décision de trade invalide ou volume nul. Ordre non émis."
-                )
-                return {}
+        comment_template = self.get(
+            "trading.order_comment_template", "SNIPER_X | {strategy} | {rule}"
+        )
+        max_comment_length = self.get("trading.comment_max_length", 31)
+        comment = comment_template.format(
+            strategy=config.get("strategy_name", "N/A"),
+            rule=trade_decision.get("rule_name", "N/A"),
+        )[:max_comment_length]
 
-            comment_template = self.get(
-                "trading.order_comment_template", "SNIPER_X | {strategy} | {rule}"
+        magic_number = trade_decision.get("magic_number", config.get("magic_number"))
+        if magic_number is None:
+            self.logger.warning(
+                f"Magic number non trouvé pour le trade {trade_decision.get('asset')}. Utilisation de 0."
             )
-            max_comment_length = self.get("trading.comment_max_length", 31)
-            comment = comment_template.format(
-                strategy=config.get("strategy_name", "N/A"),
-                rule=trade_decision.get("rule_name", "N/A"),
-            )[:max_comment_length]
+            magic_number = 0
 
-            magic_number = trade_decision.get("magic_number", config.get("magic_number"))
-            if magic_number is None:
-                self.logger.warning(
-                    f"Magic number non trouvé pour le trade {trade_decision.get('asset')}. Utilisation de 0."
-                )
-                magic_number = 0
+        active_broker_account_details = context.get("active_broker_account", {})
 
-            active_broker_account_details = context.get("active_broker_account", {})
+        order = {
+            "order_id": str(uuid.uuid4()),
+            "timestamp": datetime.now(UTC).isoformat(),
+            "action": trade_decision["action"],
+            "asset": trade_decision["asset"],
+            "volume": trade_decision["volume"],
+            "order_type": trade_decision["order_type"],
+            "entry_price": trade_decision.get("entry_price"),
+            "stop_loss_pips": trade_decision.get("target_sl_pips"),
+            "take_profit_pips": trade_decision.get("target_tp_pips"),
+            "magic_number": magic_number,
+            "comment": comment,
+            "strategy_name": trade_decision.get("strategy_type"),
+            "rule_name": trade_decision.get("rule_name"),
+            "account_id": active_broker_account_details.get("account_id"),
+            "broker_name": active_broker_account_details.get("broker_name"),
+        }
 
-            order = {
-                "order_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(UTC).isoformat(),
-                "action": trade_decision["action"],
-                "asset": trade_decision["asset"],
-                "volume": trade_decision["volume"],
-                "order_type": trade_decision["order_type"],
-                "entry_price": trade_decision.get("entry_price"),
-                "stop_loss_pips": trade_decision.get("target_sl_pips"),
-                "take_profit_pips": trade_decision.get("target_tp_pips"),
-                "magic_number": magic_number,
-                "comment": comment,
-                "strategy_name": trade_decision.get("strategy_type"),
-                "rule_name": trade_decision.get("rule_name"),
-                "account_id": active_broker_account_details.get("account_id"),
-                "broker_name": active_broker_account_details.get("broker_name"),
-            }
+        message_template = self.get(
+            "telegram.templates.trade_confirmed",
+            "🚀 **Trade Confirmé**\nSymbol: `{asset}` | Action: `{action}`\nVolume: `{volume}` lots | Stratégie: `{strategy}`",
+        )
+        message = message_template.format(
+            asset=order.get("asset"),
+            action=order.get("action"),
+            volume=order.get("volume"),
+            strategy=order.get("strategy_name"),
+        )
+        self.send_alert(message, "telegram_trade_confirmed")
 
-            message_template = self.get(
-                "telegram.templates.trade_confirmed",
-                "🚀 **Trade Confirmé**\nSymbol: `{asset}` | Action: `{action}`\nVolume: `{volume}` lots | Stratégie: `{strategy}`",
-            )
-            message = message_template.format(
-                asset=order.get("asset"),
-                action=order.get("action"),
-                volume=order.get("volume"),
-                strategy=order.get("strategy_name"),
-            )
-            self.send_alert(message, "telegram_trade_confirmed")
-
-            self.logger.debug(f"Ordre structuré prêt pour exécution : {order}")
-            return order
+        self.logger.debug(f"Ordre structuré prêt pour exécution : {order}")
+        return order
 
     def log_decision(
         self,
