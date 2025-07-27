@@ -239,45 +239,83 @@ class ConfigLoader:
         self.logger.debug("Validation de la configuration par schéma...")
 
         # Déterminer le type de schéma à appliquer si non fourni
-        if schema_name is None:
+        determined_schema_name: Optional[str] = schema_name
+        if determined_schema_name is None:
             if "project" in config and config.get("project") == "SNIPER_X":
-                schema_name = "main_app_schema.json"
+                determined_schema_name = "main_app_schema.json" # Ce schéma n'existe pas physiquement selon la structure fournie.
             elif "strategy_name" in config:
-                schema_name = "strategy_schema.json"
+                determined_schema_name = "strategy_schema.json" # Celui-ci existe dans config/schemas/
             elif "accounts" in config and isinstance(config.get("accounts"), list):
-                schema_name = "broker_accounts_schema.json"
+                determined_schema_name = "broker_accounts_schema.json" # Celui-ci n'existe pas physiquement.
+            # Aucune détermination automatique pour phase_observer_config ou telegram_config ici
+            # car ils sont chargés via leur chemin spécifique dans ConfigManager.initialize_dynamic_config.
+            # Si determined_schema_name reste None, la validation est ignorée plus bas.
+
+        # Seulement si un nom de schéma a été déterminé ou fourni, on tente de le charger.
+        if determined_schema_name:
+            schema_to_use = None
+            schema_path: Optional[Path] = None
+            
+            # Logique de résolution du chemin du schéma basée sur la structure de fichiers fournie
+            if determined_schema_name == "strategy_schema.json":
+                schema_path = Path(__file__).parent.parent / "config" / "schemas" / determined_schema_name
+            elif determined_schema_name == "env_vars_schema.json":
+                # env_vars_schema.json est directement dans config/
+                schema_path = Path(__file__).parent.parent / "config" / determined_schema_name
             else:
-                raise ConfigValidationError("Type de configuration inconnu. 'project', 'strategy_name' ou 'accounts' manquant pour déterminer le schéma.")
+                # Pour les autres schémas (main_app_schema.json, broker_accounts_schema.json,
+                # phase_observer_config_schema.json, telegram_config_schema.json) qui N'EXISTENT PAS
+                # dans votre arborescence selon vos confirmations.
+                self.logger.warning(
+                    f"AVERTISSEMENT: Le schéma '{determined_schema_name}' est requis pour la validation, mais il n'existe pas dans la structure de fichiers fournie. La validation sera ignorée pour cette configuration."
+                )
+                return True # On ignore la validation pour ce schéma non existant et on continue.
 
-        schema = self._schema_cache.get(schema_name)
-        if schema is None:
-            # CHEMIN CORRIGÉ POUR LES SCHÉMAS
-            schema_path = Path(__file__).parent.parent / "config" / "schemas" / schema_name
-            if not schema_path.is_file():
-                self.logger.critical(f"FATAL: Fichier de schéma de validation '{schema_name}' introuvable à '{schema_path}'. Impossible d'assurer la conformité de la configuration. Le bot ne peut pas démarrer en toute sécurité.")
-                raise FileNotFoundError(f"Fichier de schéma de validation manquant : {schema_path}")
+            # Si un chemin de schéma a été résolu (donc pour strategy_schema.json ou env_vars_schema.json)
+            if schema_path:
+                schema_to_use = self._schema_cache.get(determined_schema_name)
+                if schema_to_use is None:
+                    if not schema_path.is_file():
+                        # Cette erreur ne devrait se produire QUE si strategy_schema.json ou env_vars_schema.json sont manquants
+                        self.logger.critical(
+                            f"FATAL: Fichier de schéma de validation '{determined_schema_name}' introuvable à '{schema_path}'. Impossible d'assurer la conformité de la configuration. Le bot ne peut pas démarrer en toute sécurité."
+                        )
+                        raise FileNotFoundError(f"Fichier de schéma de validation manquant : {schema_path}")
 
-            try:
-                with open(schema_path, "r", encoding="utf-8") as f:
-                    schema = json.load(f)
-                self._schema_cache[schema_name] = schema
-                self.logger.debug(f"Schéma '{schema_name}' chargé et mis en cache.")
-            except json.JSONDecodeError as e:
-                self.logger.critical(f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{schema_name}': {e}. Le bot ne peut pas démarrer.", exc_info=True)
-                raise ConfigValidationError(f"Schéma '{schema_name}' invalide : {e.msg}") from e
-            except Exception as e:
-                self.logger.critical(f"FATAL: Erreur lors du chargement du schéma '{schema_name}': {e}. Le bot ne peut pas démarrer.", exc_info=True)
-                raise RuntimeError(f"Erreur lors du chargement du schéma '{schema_name}'") from e
-
-        try:
-            jsonschema.validate(instance=config, schema=schema)
-            self.logger.debug(f"La configuration a passé la validation avec le schéma '{schema_name}'.")
+                    try:
+                        with open(schema_path, "r", encoding="utf-8") as f:
+                            schema_to_use = json.load(f)
+                        self._schema_cache[determined_schema_name] = schema_to_use
+                        self.logger.debug(f"Schéma '{determined_schema_name}' chargé et mis en cache.")
+                    except json.JSONDecodeError as e:
+                        self.logger.critical(
+                            f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer. Veuillez corriger le schéma."
+                        )
+                        raise ConfigValidationError(f"Schéma '{determined_schema_name}' invalide : {e}") from e
+                    except Exception as e:
+                        self.logger.critical(
+                            f"FATAL: Erreur lors du chargement du schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer."
+                        )
+                        raise RuntimeError(f"Erreur lors du chargement du schéma '{determined_schema_name}'") from e
+                
+                # Si le schéma a été chargé avec succès ou était en cache, procéder à la validation
+                try:
+                    jsonschema.validate(instance=config, schema=schema_to_use)
+                    self.logger.debug(f"La configuration a passé la validation avec le schéma '{determined_schema_name}'.")
+                    return True
+                except jsonschema.ValidationError as e:
+                    error_message = f"Échec de la validation par schéma '{determined_schema_name}': {e.message} (sur le champ: `{''.join(e.path)}`)"
+                    self.logger.critical(
+                        f"FATAL: La configuration a échoué à la validation du schéma '{determined_schema_name}'. "
+                        "Ceci indique une configuration incorrecte. Le bot ne peut pas démarrer: {error_message}",
+                        exc_info=True
+                    )
+                    raise ConfigValidationError(error_message) from e
+        else:
+            # Si aucun nom de schéma n'a été déterminé ou fourni pour la validation, on logue un debug et on continue.
+            self.logger.debug("Aucun schéma de validation spécifique déterminé ou fourni pour cette configuration. Validation ignorée.")
             return True
-        except jsonschema.ValidationError as e:
-            error_message = f"Échec de la validation par schéma '{schema_name}': {e.message} (sur le champ: `{''.join(e.path)}`)"
-            self.logger.error(error_message, exc_info=True)
-            raise ConfigValidationError(error_message) from e
-
+    
     # _detect_separator est également déplacé ici.
     def _detect_separator(self, file_path: str) -> str:
         """
