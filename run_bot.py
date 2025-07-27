@@ -384,12 +384,9 @@ def run_single_pipeline_cycle(
         # Contient les paramètres de la stratégie sélectionnée et les adaptations.
         active_config = config_manager.get_current_dynamic_config()
 
-        # --- Débogage stratégique : Vérifier le nom de la stratégie après chargement ---
-        # Cette ligne est essentielle pour confirmer que la stratégie est bien reconnue.
         logger.info(
             f"Active Config strategy_name: {active_config.get('strategy_name', 'NON_DEFINI')}"
-        )  # DEBUG retiré pour le mode INFO par défaut
-        # --- FIN DÉBOGAGE ---
+        )
 
         # Vérification de la limite de trades quotidiens (sécurité globale)
         max_trades_per_day = active_config.get("max_trades_per_day", 999)
@@ -402,24 +399,23 @@ def run_single_pipeline_cycle(
                 f"Limite de {max_trades_per_day} trades atteinte.",
                 alert_type="telegram_info",
             )
-            time.sleep(60)  # Pause pour éviter le spam de logs/CPU
+            time.sleep(60)
             return False
 
-        # Récupération des détails du compte MT5 actif
-        # CORRECTION ICI : Assurer que bot_mode est bien 'DEMO' ou 'LIVE' avant l'appel.
-        # Le mode est déterminé une fois pour toutes au début de main.py et doit être cohérent.
-        # Nous allons nous assurer que la valeur passée ici est celle que ConfigManager attend.
-        current_bot_mode = config_manager.get("mode_execution", "DEMO").upper() # Récupère le mode réel du bot
+        # CORRECTION ICI : Récupérer le mode d'exécution réel qui a été validé et corrigé dans main.py.
+        # Ce mode est garanti d'être 'DEMO' ou 'LIVE'.
+        validated_bot_mode = config_manager.get("mode_execution", "DEMO").upper() # Récupère le mode final du config_manager
+
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
-            mode=current_bot_mode # Utilise le mode déterminé de la config manager.
+            mode=validated_bot_mode # Utilise le mode validé et corrigé.
         )
         if active_mt5_account_details is None:
             logger.critical(
-                f"Aucun compte MT5 actif ou valide trouvé pour le mode '{current_bot_mode}'. Cycle annulé."
+                f"Aucun compte MT5 actif ou valide trouvé pour le mode '{validated_bot_mode}'. Cycle annulé."
             )
             config_manager.send_alert(
                 "CRITIQUE",
-                f"Compte MT5 invalide pour '{current_bot_mode}'. Cycle annulé.",
+                f"Compte MT5 invalide pour '{validated_bot_mode}'. Cycle annulé.",
                 alert_type="telegram_critical",
             )
             return False
@@ -431,12 +427,11 @@ def run_single_pipeline_cycle(
         crypto_symbols_from_config = active_config.get("global_safety", {}).get(
             "crypto_symbols", []
         )
-        is_weekend = datetime.now(UTC).weekday() >= 5  # Lundi=0, Dimanche=6
+        is_weekend = datetime.now(UTC).weekday() >= 5
 
         tradeable_assets = (
             crypto_symbols_from_config if is_weekend else all_symbols_from_config
         )
-        # Filtrer par les symboles autorisés par le compte MT5 connecté
         tradeable_assets = [
             asset
             for asset in tradeable_assets
@@ -463,76 +458,53 @@ def run_single_pipeline_cycle(
 
         for asset in tradeable_assets:
             try:
-                # Fusion des configs : Global + Stratégie active + Spécifique à l'actif.
-                # Cette merged_config est utilisée pour mettre à jour PhaseObserver.
                 merged_config_for_phase_observer = _get_merged_config_for_asset(
                     active_config, config_manager, asset
                 )
 
-                # Mise à jour des paramètres du PhaseObserver pour l'actif/stratégie en cours.
                 phase_observer.update_parameters_from_config(
                     merged_config_for_phase_observer
                 )
 
-                # Récupération des informations du symbole et des données historiques.
                 symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
-                if (
-                    symbol_info_mt5 is None
-                ):  # Si infos symbole non dispo, passer à l'actif suivant.
+                if symbol_info_mt5 is None:
                     logger.warning(
                         f"Informations de symbole MT5 non trouvées pour '{asset}'. Actif ignoré."
                     )
                     continue
 
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
-                if (
-                    rates_df is None or rates_df.empty
-                ):  # Si données historiques manquantes/vides.
+                if rates_df is None or rates_df.empty:
                     logger.warning(
                         f"Aucune donnée historique récupérée pour '{asset}' ({timeframe_str}). Actif ignoré."
                     )
                     continue
 
-                # Ajout des infos MT5 (spread, point, tick size) au DataFrame pour PhaseObserver.
-                # Essentiel pour l'analyse des signaux dépendants de ces valeurs.
-                if symbol_info_mt5:  # s'assurer que symbol_info_mt5 est valide
+                if symbol_info_mt5:
                     rates_df["spread"] = symbol_info_mt5.spread
                     rates_df["point"] = symbol_info_mt5.point
                     rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
-                    # Ajouter trade_contract_size pour le calcul de risque si nécessaire plus tard
-                    rates_df["trade_contract_size"] = (
-                        symbol_info_mt5.trade_contract_size
-                    )
+                    rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
 
-                # Vérification si le marché est fermé (si pas le week-end).
                 if not is_weekend and _is_market_closed(rates_df, active_config):
                     logger.info(f"Marché pour {asset} semble fermé. Actif ignoré.")
                     continue
 
-                # Analyse des données par PhaseObserver : Détection des phases et signaux SMC.
-                # Annotated_rates_df est le DataFrame enrichi par le PhaseObserver.
                 annotated_rates_df = phase_observer.analyze(rates_df.copy())
-                # ATTENTION : analyze() peut retourner None si la validation Pydantic échoue.
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     logger.critical(
                         f"Analyse PhaseObserver a échoué ou a retourné un DataFrame vide pour '{asset}'. Actif ignoré, ou bot potentiellement arrêté par alerte CRITIQUE."
                     )
-                    # Si analyze() retourne None à cause d'une validation Pydantic critique, ConfigManager.send_alert
-                    # aura déjà été appelé, et le cycle pourrait être bloqué.
                     continue
 
                 latest_signals_row = annotated_rates_df.iloc[-1]
-                # Log du PhaseObserver : La Confiance est maintenant 0.00 car elle n'est plus calculée par PhaseObserver.
-                # Cette ligne est modifiée pour ne plus afficher la "Confiance".
                 logger.info(
                     f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
                 )
 
-                # Construction des dictionnaires de signaux et données de marché par actif.
                 all_assets_trading_signals[asset] = _build_asset_trading_signals(
                     latest_signals_row, symbol_info_mt5
                 )
-                # all_assets_market_data inclut le DataFrame annoté complet.
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
                 )
@@ -547,17 +519,14 @@ def run_single_pipeline_cycle(
                     f"Erreur traitement actif '{asset}': {e}",
                     alert_type="telegram_error",
                 )
-                continue  # Continuer avec les autres actifs en cas d'erreur.
+                continue
 
-        # Point de contrôle : Si aucun actif n'a pu être traité, sortir.
         if not all_assets_trading_signals:
             logger.warning(
                 "Aucun signal valide généré pour aucun actif. Pipeline ignoré."
             )
             return False
 
-        # --- Construction du Contexte Global Complet (La Fondamental des Décisions) ---
-        # Ce contexte est passé au ConfigManager pour toutes les décisions.
         global_context = _build_global_context(
             mt5_connector,
             all_assets_market_data,
@@ -569,36 +538,26 @@ def run_single_pipeline_cycle(
             active_mt5_account_details,
         )
 
-        # --- Intégration MAJEURE : Décision de Sortie des Positions Ouvertes (La Perle Scintillante) ---
-        # Priorité absolue : Gérer le risque et clôturer les positions existantes avant d'envisager de nouvelles entrées.
-        current_open_positions = (
-            trade_executor.get_open_positions()
-        )  # Récupère les positions actives via TradeExecutor
+        current_open_positions = trade_executor.get_open_positions()
 
         if current_open_positions:
             logger.info(
                 f"Vérification des {len(current_open_positions)} positions ouvertes pour des opportunités de sortie."
             )
 
-            # Demander au ConfigManager de décider quelles positions fermer.
-            # Le ConfigManager utilisera les exit_rules des stratégies et le global_context complet.
             exit_decisions = config_manager.decide_exit_trades(
-                context=global_context,  # Le contexte complet, riche et précieux.
+                context=global_context,
                 open_positions=current_open_positions,
-                active_config=active_config,  # Passer la configuration active pour accéder aux exit_rules
+                active_config=active_config,
             )
 
             if exit_decisions:
                 logger.info(
                     f"Le ConfigManager a recommandé {len(exit_decisions)} ordre(s) de sortie."
                 )
-                # Exécuter les ordres de sortie via le TradeExecutor.
-                # is_dry_run est important pour éviter des trades réels en simulation.
-                # L'exécution des sorties peut modifier le nombre de positions ouvertes.
                 trade_executor.execute_exit_orders(
                     exit_decisions, is_dry_run=is_dry_run
                 )
-                # Mettre à jour le statut du cycle si une sortie a été exécutée.
                 trade_executed_successfully = True
             else:
                 logger.info(
@@ -607,30 +566,21 @@ def run_single_pipeline_cycle(
         else:
             logger.info("Aucune position ouverte à vérifier.")
 
-        # --- Décision d'Entrée de Nouveau Trade (Le Rubis Étincelant) ---
-        # Cette section ne s'exécute que si aucune sortie majeure n'a entraîné la fermeture du cycle,
-        # ou si des sorties ont eu lieu mais qu'il y a toujours des opportunités d'entrée.
         logger.info("Évaluation des opportunités pour de nouvelles entrées de trade.")
         pipeline_output = config_manager.organize_pipeline_decision(global_context)
 
         trade_decision = pipeline_output.get("final_decision", {})
 
-        # `trade_decision` contient maintenant 'action', 'asset', 'volume', 'strategy_type', etc.
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL", "CLOSE"]:
-            # Si une décision de trade est prise (BUY/SELL/CLOSE), la préparer pour exécution.
-            # La décision 'CLOSE' ici est pour une clôture unique (pas une gestion de position existante).
             decision_package = {
-                "market_context": global_context,  # Contexte complet au moment de la décision d'entrée.
-                "active_config": pipeline_output.get(
-                    "config_used"
-                ),  # La config spécifique utilisée pour cette décision.
-                "trade_decision": trade_decision,  # La décision d'entrée/clôture unique.
+                "market_context": global_context,
+                "active_config": pipeline_output.get("config_used"),
+                "trade_decision": trade_decision,
             }
 
             logger.info(
                 f"Le ConfigManager a décidé une entrée: {trade_decision.get('action')} {trade_decision.get('asset')}"
             )
-            # Exécuter le nouveau trade (ou clôture unique) via le TradeExecutor.
             feedback = run_trade_execution_pipeline(
                 trade_executor, decision_package, is_dry_run=is_dry_run
             )
@@ -638,10 +588,8 @@ def run_single_pipeline_cycle(
             if feedback:
                 trade_executed_successfully = (
                     feedback.get("execution_status") == "executed"
-                )  # Met à jour le statut du cycle.
-                # Fournir un feedback au ConfigManager sur le résultat du trade exécuté.
+                )
                 config_manager.feedback_on_trade_result(trade_decision, feedback)
-                # Mise à jour du compteur de trades quotidiens si un trade d'entrée a été exécuté.
                 if trade_executed_successfully and trade_decision.get("action") in [
                     "BUY",
                     "SELL",
@@ -652,7 +600,6 @@ def run_single_pipeline_cycle(
                     "L'exécution du trade d'entrée a échoué ou n'a pas retourné de feedback valide."
                 )
         else:
-            # Si aucune opportunité d'entrée n'est trouvée.
             regime = pipeline_output.get("context", {}).get(
                 "current_market_regime", "inconnu"
             )
@@ -661,17 +608,15 @@ def run_single_pipeline_cycle(
             )
 
     except Exception as e:
-        mecano.log_exception("Pipeline Cycle", e)  # Log via Mecano.
+        mecano.log_exception("Pipeline Cycle", e)
         config_manager.send_alert(
             f"CRITIQUE: Erreur dans le cycle du pipeline: {e}", "telegram_critical"
         )
-        trade_executed_successfully = (
-            False  # S'assurer que le statut est False en cas d'exception.
-        )
+        trade_executed_successfully = False
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
+    
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,

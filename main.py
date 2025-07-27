@@ -188,23 +188,33 @@ def main(args: argparse.Namespace) -> None:
     logger = logging.getLogger(__name__)
 
     # 2. Initialisation du ConfigManager (Singleton)
-    config_manager = ConfigManager()  # L'instance Singleton
+    config_manager = ConfigManager()
 
     # 3. Définir le mode d'exécution du bot (CLI > Config > Défaut)
-    # AJOUT/CORRECTION : Assurer que bot_mode est strictement DEMO ou LIVE.
-    # L'erreur venait de l'utilisation de config_manager.get("mode_execution")
-    # qui, si args.mode n'est pas défini, pouvait ramener "INFO" si "mode_execution"
-    # n'était pas correctement surchargé par "log_level".
-    cli_mode = args.mode.upper() if args.mode else None
-    config_mode = config_manager.get("mode_execution", "DEMO").upper() # Assure d'être en majuscules
+    # CORRECTION DÉFINITIVE DU MODE : Assurer que bot_mode est STRICTEMENT 'DEMO' ou 'LIVE'.
+    cli_mode_arg = args.mode.upper() if args.mode else None
+    
+    # Le mode du ConfigManager est celui qui sera effectivement utilisé par le bot pour toutes les opérations.
+    # On le récupère d'abord, puis on le force si l'argument CLI est valide.
+    config_mode_from_file = config_manager.get("mode_execution", "DEMO").upper() # Récupère le mode tel que dans le fichier
 
-    if cli_mode in ["DEMO", "LIVE"]:
-        bot_mode = cli_mode
-    elif config_mode in ["DEMO", "LIVE"]:
-        bot_mode = config_mode
+    if cli_mode_arg in ["DEMO", "LIVE"]:
+        bot_mode = cli_mode_arg
+        if cli_mode_arg != config_mode_from_file:
+            logger.warning(f"Mode CLI '{cli_mode_arg}' surcharge le mode configuré '{config_mode_from_file}'.")
+    elif config_mode_from_file in ["DEMO", "LIVE"]:
+        bot_mode = config_mode_from_file
     else:
-        bot_mode = "DEMO" # Fallback sécurisé si aucune configuration valide
-        logger.warning(f"Mode d'exécution non valide ('{config_mode}'). Utilisation du mode par défaut : '{bot_mode}'.")
+        # Fallback si ni CLI ni config ne fournissent un mode valide
+        bot_mode = "DEMO" # Mode par défaut si la config est invalide
+        logger.critical(f"Mode d'exécution configuré '{config_mode_from_file}' est invalide ou manquant. Forçage au mode par défaut: '{bot_mode}'.")
+    
+    # S'assurer que le ConfigManager interne a le bon mode d'exécution défini pour toutes les utilisations ultérieures.
+    # C'est crucial car get_mt5_account_credentials utilise config_manager.get("mode_execution").
+    if config_manager.get("mode_execution") != bot_mode:
+         config_manager.update_dynamic_config({"mode_execution": bot_mode}, source="mode_startup_correction")
+         logger.info(f"Mode d'exécution du ConfigManager mis à jour en interne à '{bot_mode}'.")
+
 
     is_dry_run = args.dry_run
 
@@ -213,39 +223,31 @@ def main(args: argparse.Namespace) -> None:
     )
 
     startup_delay_seconds = config_manager.get("app.startup_delay_seconds", 3)
-    time.sleep(startup_delay_seconds)  # Pause configurable au démarrage
+    time.sleep(startup_delay_seconds)
 
     # --- Initialisation et Connexion des Modules Fondamentaux ---
-    mt5_connector = None  # Initialiser à None pour le bloc finally
+    mt5_connector = None
     try:
-        # Construit les chemins dynamiquement pour l'initialisation du ConfigManager
         config_dir_path = Path(config_manager.get("paths.configs", "config/"))
         main_config_file_name = config_manager.get(
             "paths.main_config_file_name", "prod_config.json"
         )
-        # Récupère le chemin des stratégies à passer à initialize_dynamic_config
         strategy_configs_path = Path(
             config_manager.get("paths.strategy_configs", "config/strategy/")
         )
         config_file_path = config_dir_path / main_config_file_name
-        config_file_path.parent.mkdir(
-            parents=True, exist_ok=True
-        )  # S'assurer que le dossier 'config' existe
+        config_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialise/Réinitialise la configuration dynamique avec le chemin principal
         config_manager.initialize_dynamic_config(
             template_path=str(config_file_path),
             output_path=str(config_file_path),
             config_dir=str(strategy_configs_path),
         )
 
-        # Instancier et Injecter les Dépendances
         mt5_connector = MT5Connector()
 
-        # Vérification proactive de la connexion MT5 et réconciliation
-        # Le mode passé ici est maintenant garanti d'être 'DEMO' ou 'LIVE'
         active_account_details = config_manager.get_mt5_account_credentials(
-            mode=bot_mode
+            mode=bot_mode # bot_mode est maintenant garanti d'être 'DEMO' ou 'LIVE'
         )
         if not mt5_connector.connect(active_account_details):
             raise RuntimeError(
@@ -406,8 +408,6 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
     finally:
-        # S'assurer de la sauvegarde de l'historique des suggestions AI si l'objet existe
-        # et que l'IA est encore activée dans la config pour l'audit.
         if (
             config_manager.get("ai.enabled", False)
             and "ai_decision" in locals()
@@ -418,7 +418,6 @@ def main(args: argparse.Namespace) -> None:
             )
             ai_decision._save_suggestion_history()
 
-        # S'assurer de la déconnexion de MT5 si l'objet existe et est connecté
         if "mt5_connector" in locals() and mt5_connector.is_connected:
             mt5_connector.disconnect()
 
