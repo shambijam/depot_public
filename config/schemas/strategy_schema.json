@@ -1,0 +1,181 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Schéma de Validation pour une Stratégie SNIPER_X",
+    "description": "Définit la structure et les contraintes pour un fichier de configuration de stratégie (ex: config_trade_scalping.json).",
+    "type": "object",
+    "properties": {
+        "strategy_name": {
+            "description": "Nom unique et descriptif de la stratégie.",
+            "type": "string",
+            "minLength": 3
+        },
+        "tradeable_assets": {
+            "description": "Liste des symboles d'actifs autorisés pour cette stratégie.",
+            "type": "array",
+            "items": {
+                "type": "string",
+                "pattern": "^[A-Z0-9]+$"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+        },
+        "magic_number": {
+            "description": "Numéro unique (Magic Number) pour identifier les ordres de cette stratégie sur MT5.",
+            "type": "integer",
+            "minimum": 1
+        },
+        "risk_per_trade_percent": {
+            "description": "Pourcentage du capital à risquer sur un seul trade.",
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 10
+        },
+        "max_daily_loss_percent": {
+            "description": "Perte journalière maximale autorisée avant l'arrêt de la stratégie.",
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 20
+        },
+        "max_drawdown_percent": {
+            "description": "Drawdown maximal autorisé pour cette stratégie.",
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 30
+        },
+        "max_trades_per_day": {
+            "description": "Nombre maximum de trades autorisés par jour.",
+            "type": "integer",
+            "minimum": 1
+        },
+        "take_profit_pips": {
+            "description": "Objectif de Take Profit en pips.",
+            "type": "number",
+            "minimum": 0
+        },
+        "stop_loss_pips": {
+            "description": "Niveau de Stop Loss en pips.",
+            "type": "number",
+            "minimum": 1
+        },
+        "max_spread_points": {
+            "description": "Spread maximal autorisé en points pour ouvrir un trade.",
+            "type": "number",
+            "minimum": 0
+        },
+        "halt_on_major_news": {
+            "description": "Indique si la stratégie doit s'arrêter avant les annonces économiques majeures.",
+            "type": "boolean"
+        },
+        "phase_detection": {
+            "description": "Paramètres pour le module de détection de phase.",
+            "type": "object",
+            "properties": {
+                "lookback_window": {
+                    "type": "integer",
+                    "minimum": 5
+                },
+                "volatility_threshold": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "volume_zscore": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "eq_level_tolerance": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "impulse_threshold": {
+                    "type": "number",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "lookback_window",
+                "volatility_threshold",
+                "volume_zscore"
+            ]
+        },
+        "decision_rules": {
+            "description": "Ensemble des règles de décision pour le moteur de trading.",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "conditions": {
+                        "type": "object",
+                        "properties": {
+                            "signal_must_contain": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "phase_must_contain": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "min_confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1
+                            }
+                        },
+                        "required": [
+                            "min_confidence"
+                        ]
+                    },
+                    "order_type": {
+                        "type": "string",
+                        "enum": [
+                            "MARKET",
+                            "LIMIT",
+                            "STOP"
+                        ]
+                    },
+                    "action_logic": {
+                        "type": "object",
+                        "properties": {
+                            "BUY": {
+                                "type": "string"
+                            },
+                            "SELL": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "BUY",
+                            "SELL"
+                        ]
+                    }
+                },
+                "required": [
+                    "name",
+                    "priority",
+                    "conditions",
+                    "order_type",
+                    "action_logic"
+                ]
+            }
+        }
+    },
+    "required": [
+        "strategy_name",
+        "tradeable_assets",
+        "magic_number",
+        "risk_per_trade_percent",
+        "stop_loss_pips",
+        "decision_rules"
+    ]
+}

@@ -1,0 +1,156 @@
+{
+    "description": "Fichier de configuration spécifique pour l'actif LTCUSD. Il définit les préférences de timeframes, les phases de marché d'intérêt, les paramètres de volatilité et de risque, les bascules de stratégie, les cibles intelligentes, les biais institutionnels, les contextes temporels et les pondérations de signaux pour le trading de cet actif.",
+    "symbol": "LTCUSD",
+    "type": "crypto",
+    "profile": "institutionnel",
+    "last_updated": "2025-07-24",
+    "timeframe_preference": {
+        "description": "Liste ordonnée des timeframes préférés pour l'analyse et le trading de cet actif, du plus court au plus long. Le PhaseObserver utilisera ces préférences.",
+        "list": [
+            "M1",
+            "M5",
+            "M15",
+            "H1"
+        ]
+    },
+    "phases_of_interest": {
+        "description": "Phases de marché principales d'intérêt pour cet actif. Si la valeur est 'true', la stratégie peut y opérer activement ou rechercher des setups pertinents. Ces phases sont détectées par le PhaseObserver.",
+        "range": true,
+        "trend_up": true,
+        "trend_down": true,
+        "manipulation": true,
+        "compression": true,
+        "expansion": true
+    },
+    "volatility": {
+        "description": "Paramètres liés à la gestion de la volatilité pour cet actif. Utilisés pour l'adaptation de la stratégie et les vérifications pré-trade.",
+        "expected_daily_range_percent": {
+            "description": "Pourcentage de la fourchette de prix quotidienne attendue pour cet actif. Utilisé pour l'analyse de liquidité et l'adaptation des stratégies.",
+            "value": 3.5
+        },
+        "max_allowed_spread_points": {
+            "description": "Spread maximal autorisé en points MT5 pour trader cet actif. Si le spread actuel dépasse cette valeur, le trading peut être bloqué.",
+            "value": 2000
+        },
+        "min_tradable_range_points": {
+            "description": "Fourchette minimale en points MT5 que l'actif doit avoir pour être considéré comme tradable (pertinent pour les stratégies de range ou de scalping).",
+            "value": 80
+        },
+        "max_drawdown_allowed_percent": {
+            "description": "Pourcentage de drawdown maximal toléré par trade pour cet actif spécifique. C'est une limite de sécurité.",
+            "value": 1.8
+        }
+    },
+    "risk_management": {
+        "description": "Paramètres de gestion des risques spécifiques à cet actif. Ces valeurs peuvent être supplantées par des règles globales ou de stratégie, mais servent de base.",
+        "base_lot_size": {
+            "description": "Taille de lot de base suggérée pour cet actif, avant tout ajustement de risque dynamique.",
+            "value": 0.005
+        },
+        "max_risk_per_trade_percent": {
+            "description": "Pourcentage maximum du capital du compte à risquer par trade pour cet actif.",
+            "value": 1.2
+        },
+        "daily_loss_limit_percent": {
+            "description": "Pourcentage de perte maximale du capital du compte autorisé par jour pour cet actif. Le trading peut être suspendu si cette limite est atteinte.",
+            "value": 3.5
+        },
+        "weekly_loss_limit_percent": {
+            "description": "Pourcentage de perte maximale du capital du compte autorisé par semaine pour cet actif. Le trading peut être suspendu si cette limite est atteinte.",
+            "value": 12.0
+        }
+    },
+    "strategy_toggles": {
+        "description": "Interrupteurs pour activer/désactiver des comportements stratégiques spécifiques à cet actif. Ces paramètres peuvent affiner l'exécution des stratégies définies globalement.",
+        "enable_scalping_mode": {
+            "description": "Active ou désactive le mode scalping pour cet actif (peut influencer la taille des SL/TP ou la fréquence des trades).",
+            "value": true
+        },
+        "enable_trailing_stop": {
+            "description": "Active ou désactive l'utilisation du trailing stop pour les trades sur cet actif.",
+            "value": true
+        },
+        "enable_grid_in_range_only": {
+            "description": "Si activé, les stratégies de grille ne seront utilisées que lorsque l'actif est détecté dans une phase de 'range'.",
+            "value": false
+        },
+        "auto_blacklist_high_spread_assets": {
+            "description": "Si activé, l'actif sera automatiquement blacklisté pour une période si son spread dépasse les seuils définis.",
+            "value": true
+        }
+    },
+    "smart_targets": {
+        "description": "Multiplicateurs et seuils pour le calcul dynamique des Take Profit et Stop Loss (SL/TP). Utilisés pour adapter les cibles en fonction de la volatilité ou du setup.",
+        "take_profit_multiplier": {
+            "description": "Multiplicateur appliqué à la distance du Stop Loss pour calculer la cible du Take Profit (basé sur le ratio Risque/Récompense).",
+            "value": 2.2
+        },
+        "stop_loss_multiplier": {
+            "description": "Multiplicateur ou ajustement appliqué au Stop Loss calculé (par exemple, pour ajouter un buffer).",
+            "value": 1.1
+        },
+        "trailing_stop_start_after_percent": {
+            "description": "Pourcentage de profit (par rapport au prix d'entrée) après lequel le trailing stop est activé pour cet actif.",
+            "value": 1.5
+        },
+        "trailing_step_points": {
+            "description": "Nombre de points MT5 par lesquels le trailing stop se déplacera pour cet actif.",
+            "value": 100
+        }
+    },
+    "institutional_bias": {
+        "description": "Préférences ou biais de trading institutionnels spécifiques à cet actif, influençant la détection de setups et la décision du ConfigManager.",
+        "favor_fake_breakouts": {
+            "description": "Si activé, la stratégie favorisera les trades basés sur des faux breakouts (mouvements inverses après une cassure apparente).",
+            "value": true
+        },
+        "watch_liquidity_zones": {
+            "description": "Si activé, la stratégie accordera une attention particulière aux zones de liquidité (EQH/EQL, Order Blocks) pour les entrées et sorties.",
+            "value": true
+        },
+        "aggressive_entry_in_expansion": {
+            "description": "Si activé, la stratégie adoptera une approche plus agressive pour les entrées pendant les phases d'expansion rapide.",
+            "value": true
+        },
+        "conservative_entry_in_compression": {
+            "description": "Si activé, la stratégie sera plus prudente pour les entrées pendant les phases de compression/consolidation.",
+            "value": false
+        }
+    },
+    "temporal_context": {
+        "description": "Paramètres liés aux heures et jours de trading spécifiques à cet actif. Ces règles sont appliquées en complément des règles globales.",
+        "avoid_trading_hours": {
+            "description": "Liste d'heures (format 'HH:MM' en UTC) pendant lesquelles le trading de cet actif est à éviter (par exemple, faible liquidité ou spreads élevés).",
+            "list": [
+                "00:00",
+                "01:00",
+                "02:00",
+                "03:00",
+                "04:00"
+            ]
+        },
+        "monitor_hours": {
+            "description": "Heures (format 'HH:MM' en UTC) où l'actif doit être activement surveillé pour des opportunités (par exemple, ouverture de sessions importantes).",
+            "list": [
+                "08:00",
+                "13:00",
+                "16:00",
+                "21:00"
+            ]
+        },
+        "high_risk_news_days": {
+            "description": "Jours de la semaine (format 'Monday', 'Tuesday', etc.) où des annonces de nouvelles à fort impact sont fréquemment attendues pour cet actif.",
+            "list": []
+        }
+    },
+    "weighting": {
+        "description": "Poids attribués aux différents signaux détectés par le PhaseObserver pour cet actif. Utilisés par le ConfigManager pour le scoring des opportunités ou la décision de confluence des règles de stratégie.",
+        "breaker_block": 1.0,
+        "liquidity_zone": 1.0,
+        "fvg_zone": 1.0,
+        "micro_phase_signal": 1.0,
+        "market_structure_shift": 1.0,
+        "volume_spike": 1.0,
+        "smart_spread_indicator": 1.0
+    }
+}

@@ -1,0 +1,121 @@
+{
+  "strategy_name": "Scalping Institutional",
+  "description": "Stratégie de scalping axée sur des mouvements de prix rapides et des setups institutionnels à haute fréquence, optimisée pour capturer de petits gains sur de courtes périodes.",
+  "strategy_tags": [
+    "scalping",
+    "intraday",
+    "high_frequency",
+    "quick_exit",
+    "crypto"
+  ],
+  "tradeable_assets": [
+      "EURUSD",
+      "GBPUSD",
+      "USDCHF",
+      "XAUUSD",
+      "BTCUSD",
+      "ETHUSD",
+      "LTCUSD"
+  ],
+  "magic_number": 30303,
+  "risk_per_trade_percent": 2,
+  "max_daily_loss_percent": 1.0,
+  "max_drawdown_percent": 3.0,
+  "max_trades_per_day": 15,
+  "max_spread_pips": 1.2,
+  "halt_on_major_news": true,
+  "phase_detection": {
+    "description": "Paramètres spécifiques pour la détection des phases de marché et des signaux SMC par PhaseObserver, adaptés à la haute fréquence et aux timeframes courts du scalping.",
+    "lookback_window": 10,
+    "volatility_threshold": 0.0003,
+    "volume_zscore": 2.5,
+    "eq_level_tolerance": 0.0001,
+    "impulse_threshold": 0.0005,
+    "detection_toggles": {
+      "detect_fvg": true,
+      "detect_order_block": true,
+      "detect_bos_mss": true,
+      "detect_liquidity_grab": true,
+      "detect_volume_anomaly": true,
+      "detect_eqh_eql": true
+    }
+  },
+  "smart_targets": {
+    "description": "Configuration pour le calcul dynamique du Stop Loss et Take Profit. Permet de choisir différentes méthodes de calcul pour le SL et le TP.",
+    "enabled": true,
+    "sl": {
+      "method": "SWING",
+      "swing_lookback_period": 10,
+      "swing_buffer_pips": 2,
+      "fixed_pips": 4
+    },
+    "tp": {
+      "method": "RR",
+      "rr_ratio": 1.5,
+      "fixed_pips": 8
+    }
+  },
+  "decision_rules": [
+    {
+      "name": "Scalp Haute Prob: Comblement de FVG (Fair Value Gap)",
+      "description": "Règle d'entrée de haute probabilité pour exploiter le comblement de Fair Value Gaps (FVG) dans des phases d'expansion ou de retournement rapide.",
+      "priority": 0.8,
+      "conditions": {
+        "signal_must_contain": [
+          "fvg_detected"
+        ],
+        "phase_must_contain": [
+          "expansion",
+          "reversal"
+        ],
+        "min_confidence": 0.2
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "expansion_up",
+        "SELL": "expansion_down"
+      }
+    },
+    {
+      "name": "Scalp Moyenne Prob: Micro Rupture de Structure (BOS)",
+      "description": "Règle d'entrée sur micro-rupture de structure (Break of Structure - BOS) pour la continuation de tendance à court terme, typique des mouvements de scalping.",
+      "priority": 2,
+      "conditions": {
+        "signal_must_contain": [
+           "bos_mss_detected"
+        ],
+        "phase_must_contain": [
+          "expansion",
+          "scalp_burst"
+        ],
+        "min_confidence": 0.2
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "expansion_up",
+        "SELL": "expansion_down"
+      }
+    },
+    {
+      "name": "Scalp: Rejet sur Order Block M1/M5",
+      "description": "Règle d'entrée basée sur le rejet de prix sur un Order Block détecté sur des timeframes très courts (M1/M5), indiquant une zone de réaction institutionnelle.",
+      "priority": 3,
+      "conditions": {
+        "signal_must_contain": [
+          "order_block_detected"
+        ],
+        "phase_must_contain": [
+          "reversal",
+          "manipulation"
+        ],
+        "min_confidence": 0.2
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "reversal_up",
+        "SELL": "reversal_down"
+      }
+    }
+  ],
+  "exit_rules": []
+}

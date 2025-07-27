@@ -1,0 +1,134 @@
+# Fichier: prompts.yaml
+# Ce fichier centralise tous les prompts utilisés par le module AIDecision.
+
+# --- Prompts pour le conseil en trading ---
+decide_trade_type: >
+  Étant donné le contexte de marché et les signaux suivants, déterminez le type de trade le plus optimal
+  (ex: scalping, swing, liquidity, manipulation, event-driven).
+  Fournissez une réponse JSON avec les clés 'trade_type' et 'reason'.
+  Contexte Marché: {context}
+  Signaux: {signals}
+
+suggest_trading_improvements: >
+  Analysez les journaux de trading et le contexte actuel du bot. Identifiez les domaines d'amélioration
+  dans les stratégies de trading, la gestion des risques ou l'analyse de marché. Proposez des suggestions concrètes.
+  Formatez votre réponse en tant qu'objet JSON avec 'summary', 'explanation', 'plan_of_action', 'priority' (0-1),
+  et 'suggestion_type': 'trading_improvement'.
+  Journaux de Trading (dernières entrées): {logs}
+  Contexte Actuel: {context}
+
+# --- Prompts pour l'audit de projet ---
+review_code: >
+  Passez en revue l'extrait de code Python suivant pour les meilleures pratiques, les bugs potentiels,
+  les goulots d'étranglement de performance et la maintenabilité.
+  Fournissez un objet JSON avec 'review_summary', 'identified_issues' (liste de dicts),
+  'suggestions' (liste de dicts), et 'suggestion_type': 'code_review'.
+  Extrait de Code:
+  ```python
+  {code_snippet}
+
+simulate_strategy: >
+  Simulez la stratégie de trading suivante en utilisant les données historiques et le contexte fournis.
+  Estimez les métriques de performance clés telles que le PnL net, le max drawdown, le win rate, et le nombre total de trades.
+  Fournissez les résultats sous forme d'objet JSON avec les clés 'strategy_name', 'net_pnl', 'max_drawdown', 'win_rate', 'total_trades', 'sim_details'.
+  
+  Stratégie à Simuler: {strategy}
+  
+  Contexte Initial: {context}
+  
+  Échantillon de Données Historiques: {historical_data}  
+
+compare_strategies: >
+  Comparez les stratégies de trading suivantes en fonction de leurs caractéristiques et/ou de leurs performances simulées.
+  Recommandez la meilleure stratégie pour le contexte de marché actuel.
+  Fournissez un objet JSON avec les clés 'best_strategy', 'rationale', 'comparison_summary'.
+
+  Stratégies à Comparer:
+  {strategies}
+
+  Contexte de Marché Actuel:
+  {context}  
+
+suggest_dev_improvements: >
+  Basé sur une analyse simulée de la base de code, suggérez des améliorations de développement complètes.
+  Fournissez un JSON avec 'summary', 'explanation', 'plan_of_action', 'priority', 'suggestion_type': 'dev_improvement'.
+  
+  Analyse Simulée: 
+  {simulated_analysis}  
+
+  analyze_dependencies: >
+  Effectuez une analyse simulée des dépendances du projet. Identifiez les paquets obsolètes, les vulnérabilités de sécurité et les dépendances inutiles.
+  Proposez un plan d'action. Fournissez un JSON avec 'summary', 'issues_found', 'recommendations', 'priority', 'suggestion_type': 'dependency_audit'.
+  
+  Scan Simulé:
+  {simulated_dependencies} 
+
+audit_project: >
+  Effectuez un audit simulé complet de l'architecture du projet.
+  Évaluez la modularité, le versioning, les pratiques CI/CD, le logging, le monitoring et la scalabilité globale.
+  Fournissez un objet JSON avec 'audit_summary', 'findings', 'risks_identified', 'recommendations', 'priority', 'suggestion_type': 'project_audit'.
+
+  Données d'Audit Simulées:
+  {simulated_audit_findings}  
+
+
+generate_project_documentation: >
+  Générez des suggestions pour améliorer ou créer la documentation du projet.
+  Concentrez-vous sur les docstrings, la documentation de l'API, les documents de conception du système et les guides d'intégration.
+  Fournissez un objet JSON avec 'summary', 'gaps_identified', 'documentation_plan', 'priority', 'suggestion_type': 'documentation_improvement'.
+
+  Besoins en Documentation Simulés:
+  {simulated_doc_needs}
+
+check_compliance: >
+  Effectuez un audit de conformité simulé pour le projet SNIPER_X, en tenant compte des normes de trading institutionnel, du RGPD et des meilleures pratiques de sécurité.
+  Identifiez les lacunes de conformité et proposez des actions correctives.
+  Fournissez un objet JSON avec 'audit_summary', 'issues', 'risks', 'recommended_actions', 'priority', 'suggestion_type': 'compliance_audit'.
+
+  Contexte Actuel:
+  {context}
+
+  Résultats de Conformité Simulés:
+  {simulated_compliance_issues}  
+
+audit_trading_performance: >
+  Effectuez un audit complet de la performance de trading en vous basant sur les journaux fournis pour la période suivante : {period}.
+  Calculez les métriques clés telles que le PnL total, le win rate, le loss rate, la durée moyenne des trades, le max drawdown, et identifiez les meilleurs/pires actifs/stratégies.
+  Fournissez un objet JSON avec 'audit_summary', 'metrics', 'strengths', 'weaknesses', 'actionable_insights', et 'priority'.
+  
+  Journaux de Trading Pertinents:
+  {logs} 
+
+adapt_strategy: >
+  En vous basant sur les données de feedback agrégées suivantes, suggérez des ajustements à l'approche de l'IA pour les décisions de trading, les revues de code ou la gestion de projet.
+  Concentrez-vous sur les schémas récurrents dans les suggestions réussies et infructueuses.
+  Fournissez un objet JSON avec 'adaptation_summary', 'identified_patterns', 'proposed_adjustments', 'expected_impact'.
+
+  Résumé des Feedbacks Agrégés:
+  {aggregated_feedback}
+
+  Échantillon de Feedbacks Bruts (les 5 derniers):
+  {raw_feedback_sample}  
+
+train_user: >
+  Générez un contenu de formation concis et complet sur le sujet suivant : '{topic}'.
+  Adaptez le contenu pour un niveau de compétence '{level}'.
+  Incluez les concepts clés, des exemples pratiques et les meilleures pratiques. Organisez clairement l'information.  
+
+# Prompt pour qu'un agent génère une suggestion
+multi_agent_suggestion: >
+  Vous êtes {agent_name}, un expert IA dont le rôle est : '{agent_role}'.
+  Étant donné le problème : '{problem_statement}', proposez une suggestion détaillée.
+  Formatez votre réponse en JSON avec les clés 'agent_name', 'suggestion_summary', 'details', 'estimated_impact', 'risk_level' (low/medium/high).
+
+# Prompt pour que l'IA évalue les suggestions des agents
+multi_agent_voting: >
+  Analysez les suggestions suivantes pour le problème : '{problem_statement}'.
+  Attribuez un score à chaque suggestion (0-1) en fonction de sa faisabilité, de son impact et de son alignement avec les objectifs du bot.
+  Déterminez la suggestion gagnante.
+  Fournissez un objet JSON avec 'problem', 'suggestions_with_scores' (liste de dicts), 'winning_suggestion' (le dict complet du gagnant), 'rationale_for_winner'.
+
+  Problème: {problem_statement}
+  
+  Suggestions à évaluer:
+  {suggestions}  

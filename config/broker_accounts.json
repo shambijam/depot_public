@@ -1,0 +1,76 @@
+{
+    "accounts": [
+        {
+            "account_id": "main_live_broker_A",
+            "mode": "LIVE",
+            "broker_name": "Fusion Markets",
+            "server_type": "FusionMarkets-Live",
+            "login_env_var": "MT5_LOGIN_LIVE_FUSION_A",
+            "password_env_var": "MT5_PASSWORD_LIVE_FUSION_A",
+            "is_active": true,
+            "priority": 1,
+            "allowed_symbols": [
+                "EURUSD",
+                "GBPUSD",
+                "USDCHF",
+                "XAUUSD",
+                "BTCUSD",
+                "ETHUSD",
+                "SOLUSD"
+            ],
+            "account_type": "STANDARD",
+            "trade_settings": {
+                "max_lot": 10.0,
+                "min_lot": 0.01,
+                "lot_step": 0.01
+            }
+        },
+        {
+            "account_id": "main_demo_broker_A",
+            "mode": "DEMO",
+            "broker_name": "Fusion Markets",
+            "server_type": "FusionMarkets-Demo",
+            "login_env_var": "MT5_LOGIN_DEMO_FUSION_A",
+            "password_env_var": "MT5_PASSWORD_DEMO_FUSION_A",
+            "is_active": true,
+            "priority": 2,
+            "allowed_symbols": [
+                "EURUSD",
+                "GBPUSD",
+                "USDCHF",
+                "XAUUSD",
+                "BTCUSD",
+                "ETHUSD",
+                "SOLUSD"
+            ],
+            "account_type": "STANDARD",
+            "trade_settings": {
+                "max_lot": 50.0,
+                "min_lot": 0.01,
+                "lot_step": 0.01
+            }
+        },
+        {
+            "account_id": "backup_live_broker_B",
+            "mode": "LIVE",
+            "broker_name": "IC Markets",
+            "server_type": "ICMarkets-Live01",
+            "login_env_var": "MT5_LOGIN_LIVE_ICM_B",
+            "password_env_var": "MT5_PASSWORD_LIVE_ICM_B",
+            "is_active": false,
+            "priority": 3,
+            "allowed_symbols": [
+                "EURUSD",
+                "GBPUSD",
+                "USDCHF",
+                "XAUUSD",
+                "BTCUSD",
+                "ETHUSD",
+                "SOLUSD"
+            ],
+            "account_type": "RAW_SPREAD"
+        }
+    ],
+    "default_live_account": "main_live_broker_A",
+    "default_demo_account": "main_demo_broker_A"
+}
