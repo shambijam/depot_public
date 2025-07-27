@@ -98,32 +98,55 @@ class StrategyManager:
         try:
             python_module_name = strategy_key.lower().replace(" ", "_")
             module_path = Path(__file__).parent.parent / "strategy" / f"{python_module_name}.py"
+            
+            self.logger.debug(f"[_load_strategy_class] Recherche du module Python pour la clé '{strategy_key}'. Chemin attendu: '{module_path}'.")
+
             if not module_path.is_file():
-                self.logger.warning(f"Module '{python_module_name}.py' introuvable pour '{strategy_key}'.")
+                self.logger.warning(f"[_load_strategy_class] Module '{python_module_name}.py' introuvable à '{module_path}' pour la stratégie '{strategy_key}'.")
                 return None
 
             module_name = f"strategy.{python_module_name}"
             spec = importlib.util.find_spec(module_name)
+            
             if spec is None or spec.loader is None:
-                self.logger.error(f"Module '{module_name}' introuvable.")
+                self.logger.error(f"[_load_strategy_class] Spécification ou chargeur de module introuvable pour '{module_name}'. Impossible d'importer la stratégie '{strategy_key}'.")
                 return None
 
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            
+            # AJOUT : Tenter d'exécuter le module et capturer les exceptions
+            try:
+                spec.loader.exec_module(module)
+                self.logger.debug(f"[_load_strategy_class] Module '{module_name}' exécuté avec succès.")
+            except Exception as module_exec_e:
+                self.logger.error(f"[_load_strategy_class] Erreur lors de l'exécution du module '{module_name}' pour la stratégie '{strategy_key}': {module_exec_e}", exc_info=True)
+                # Envoyer une alerte critique car c'est une erreur bloquante pour le chargement de la stratégie
+                if self.config_manager:
+                    self.config_manager.send_alert(f"CRITIQUE: Erreur chargement module stratégie '{strategy_key}': {module_exec_e}", "telegram_critical")
+                return None
+
             strategy_class_name = "".join([s.capitalize() for s in python_module_name.split("_")]) + "Strategy"
             strategy_class = getattr(module, strategy_class_name, None)
 
+            self.logger.debug(f"[_load_strategy_class] Nom de classe attendu pour '{strategy_key}': '{strategy_class_name}'. Classe trouvée: '{strategy_class}'")
+
             if strategy_class and issubclass(strategy_class, BaseStrategy) and strategy_class is not BaseStrategy:
-                self.logger.debug(f"Classe '{strategy_class_name}' chargée pour '{strategy_key}'.")
+                self.logger.debug(f"[_load_strategy_class] Classe '{strategy_class_name}' chargée et validée avec succès pour '{strategy_key}'.")
                 return strategy_class
             else:
-                self.logger.error(f"Classe '{strategy_class_name}' invalide pour '{strategy_key}'.")
+                # AJOUT : Diagnostic plus fin si la classe n'est pas trouvée ou n'est pas valide
+                if strategy_class is None:
+                    self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' introuvable dans le module '{module_name}' pour la stratégie '{strategy_key}'. Vérifiez le nom de la classe dans le fichier Python.")
+                elif not issubclass(strategy_class, BaseStrategy):
+                    self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' trouvée pour '{strategy_key}' mais elle n'est pas une sous-classe de BaseStrategy. Impossible de l'utiliser.")
+                elif strategy_class is BaseStrategy:
+                    self.logger.error(f"[_load_strategy_class] La classe trouvée pour '{strategy_key}' est BaseStrategy elle-même. Ceci n'est pas une stratégie implémentée.")
                 return None
         except ImportError as e:
-            self.logger.error(f"Erreur d'importation pour '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(f"[_load_strategy_class] Erreur d'importation générale pour la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
             return None
         except Exception as e:
-            self.logger.error(f"Erreur inattendue pour '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(f"[_load_strategy_class] Erreur inattendue lors du chargement de la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
             return None
 
     def load_strategy(self, strategy_key: str) -> bool:
