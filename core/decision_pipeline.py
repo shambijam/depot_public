@@ -534,7 +534,7 @@ class DecisionPipeline:
             context (Dict): Le contexte de marché et système enrichi.
             current_config (Dict): La configuration de la stratégie active à utiliser pour ce cycle.
             signals (Dict): Les signaux de trading générés pour les actifs (provenant de PhaseObserver).
-            strategy_manager_instance: L'instance du StrategyManager.
+            strategy_manager_instance: L'instance du StrategyManager. # Ce paramètre est maintenant redondant
 
         Returns:
             Dict: Le dictionnaire de la décision de trade, ou un dictionnaire vide si aucune opportunité n'est trouvée.
@@ -553,15 +553,15 @@ class DecisionPipeline:
         strategy_name = current_config.get("strategy_name")
         strategy_class = None
 
-        if strategy_manager_instance:
-            strategy_class = strategy_manager_instance.get_strategy_class(strategy_name) # Nouvelle méthode à créer dans StrategyManager
-        else: # Fallback temporaire
-            self.logger.warning("StrategyManager non injecté. Accès direct à _config_knowledge_base pour la classe de stratégie (temporaire).")
-            if hasattr(self.config_manager, '_config_knowledge_base'):
-                for config_data in self.config_manager._config_knowledge_base.values():
-                    if config_data.get("content", {}).get("strategy_name") == strategy_name:
-                        strategy_class = config_data.get("strategy_class")
-                        break
+        # CORRECTION MAJEURE : Utiliser l'attribut self.strategy_manager qui a été injecté dans __init__.
+        # Le paramètre strategy_manager_instance de la fonction n'est plus pertinent.
+        if self.strategy_manager: # Vérifie que self.strategy_manager est bien initialisé
+            strategy_class = self.strategy_manager.get_strategy_class(strategy_name) # Utilise self.strategy_manager
+        else:
+            self.logger.critical("ERREUR ARCHITECTURALE : L'instance de StrategyManager n'est pas disponible dans DecisionPipeline. Impossible de récupérer la classe de stratégie.")
+            # Ne pas tenter de fallback via config_manager._config_knowledge_base, car c'est une mauvaise pratique.
+            return {}
+
 
         if not strategy_class:
             self.logger.critical(f"ERREUR ARCHITECTURALE : Aucune classe Python de stratégie trouvée pour '{strategy_name}'. Impossible de prendre une décision.")
@@ -592,6 +592,7 @@ class DecisionPipeline:
             self.logger.warning(f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}.")
             return {}
 
+        # calculate_risk_parameters est une méthode de DecisionPipeline
         risk_params = self.calculate_risk_parameters(context, current_config, trade_decision)
         if not risk_params.get("volume", 0.0) > 0:
             self.logger.warning("Calcul de risque invalide ou volume nul. Trade annulé.")
@@ -606,7 +607,7 @@ class DecisionPipeline:
             f"Décision de la stratégie '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
         return trade_decision
-
+    
     def _evaluate_rule(self, rule: Dict[str, Any], asset_signals: Dict[str, Any]) -> bool:
         """
         Évalue si un ensemble de signaux d'actif satisfait les conditions d'une règle.
