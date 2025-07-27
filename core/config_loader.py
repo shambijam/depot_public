@@ -255,85 +255,90 @@ class ConfigLoader:
         determined_schema_name: Optional[str] = schema_name
         if determined_schema_name is None:
             if "project" in config and config.get("project") == "SNIPER_X":
-                determined_schema_name = "main_app_schema.json" # Ce schéma n'existe pas physiquement selon la structure fournie.
+                # Le schéma main_app_schema.json n'existe pas, donc nous ne le recherchons pas.
+                # Suppression de la ligne: determined_schema_name = "main_app_schema.json"
+                pass # Ne tente rien ici si le schéma n'est pas censé exister.
             elif "strategy_name" in config:
                 determined_schema_name = "strategy_schema.json" # Celui-ci existe dans config/schemas/
             elif "accounts" in config and isinstance(config.get("accounts"), list):
-                determined_schema_name = "broker_accounts_schema.json" # Celui-ci n'existe pas physiquement.
+                # Le schéma broker_accounts_schema.json n'existe pas, donc nous ne le recherchons pas.
+                # Suppression de la ligne: determined_schema_name = "broker_accounts_schema.json"
+                pass # Ne tente rien ici.
             # Aucune détermination automatique pour phase_observer_config ou telegram_config ici
             # car ils sont chargés via leur chemin spécifique dans ConfigManager.initialize_dynamic_config.
-            # Si determined_schema_name reste None, la validation est ignorée plus bas.
 
-        # Seulement si un nom de schéma a été déterminé ou fourni, on tente de le charger.
-        if determined_schema_name:
-            schema_to_use = None
-            schema_path: Optional[Path] = None
-            
-            # Logique de résolution du chemin du schéma basée sur la structure de fichiers fournie
-            if determined_schema_name == "strategy_schema.json":
-                schema_path = Path(__file__).parent.parent / "config" / "schemas" / determined_schema_name
-            elif determined_schema_name == "env_vars_schema.json":
-                # env_vars_schema.json est directement dans config/
-                schema_path = Path(__file__).parent.parent / "config" / determined_schema_name
-            else:
-                # Pour les autres schémas (main_app_schema.json, broker_accounts_schema.json,
-                # phase_observer_config_schema.json, telegram_config_schema.json) qui N'EXISTENT PAS
-                # dans votre arborescence selon vos confirmations.
-                # CHANGEMENT CRUCIAL ICI : PAS DE 'raise FileNotFoundError' pour ces schémas non existants.
-                self.logger.warning(
-                    f"AVERTISSEMENT: Le schéma '{determined_schema_name}' est requis pour la validation, mais il n'existe pas dans la structure de fichiers fournie. La validation sera ignorée pour cette configuration."
-                )
-                return True # On ignore la validation pour ce schéma non existant et on continue.
+        # Liste des schémas qui DOIVENT exister et être validés.
+        # Tout autre nom sera ignoré sans avertissement car il n'est pas censé exister.
+        known_existing_schemas = [
+            "strategy_schema.json", # Existe bien dans config/schemas/
+            "env_vars_schema.json"  # Existe bien dans config/
+            # Ajoutez ici d'autres schémas réels si vous les créez plus tard.
+        ]
 
-            # Si un chemin de schéma a été résolu (donc pour strategy_schema.json ou env_vars_schema.json)
-            if schema_path:
-                schema_to_use = self._schema_cache.get(determined_schema_name)
-                if schema_to_use is None:
-                    if not schema_path.is_file():
-                        # Cette erreur ne devrait se produire QUE si strategy_schema.json ou env_vars_schema.json sont MANQUANTS
-                        # de leur emplacement ATTENDU.
-                        self.logger.critical(
-                            f"FATAL: Fichier de schéma de validation '{determined_schema_name}' introuvable à '{schema_path}'. Impossible d'assurer la conformité de la configuration. Le bot ne peut pas démarrer en toute sécurité."
-                        )
-                        raise FileNotFoundError(f"Fichier de schéma de validation manquant : {schema_path}")
+        # Si le schéma déterminé n'est pas dans la liste des schémas connus existants,
+        # ou si aucun schéma n'a été déterminé (determined_schema_name est toujours None après la détermination),
+        # alors on ignore la validation sans erreur ni avertissement.
+        if determined_schema_name not in known_existing_schemas:
+            self.logger.debug(f"Schéma '{determined_schema_name}' n'est pas un schéma connu pour la validation. Validation ignorée.")
+            return True # Ne pas lever d'erreur ni d'avertissement, car il n'est pas censé exister.
 
-                    try:
-                        with open(schema_path, "r", encoding="utf-8") as f:
-                            schema_to_use = json.load(f)
-                        self._schema_cache[determined_schema_name] = schema_to_use
-                        self.logger.debug(f"Schéma '{determined_schema_name}' chargé et mis en cache.")
-                    except json.JSONDecodeError as e:
-                        # Si le schéma existe mais est malformé
-                        self.logger.critical(
-                            f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer. Veuillez corriger le schéma."
-                        )
-                        raise ConfigValidationError(f"Schéma '{determined_schema_name}' invalide : {e}") from e
-                    except Exception as e:
-                        # Si une autre erreur survient lors du chargement d'un schéma existant
-                        self.logger.critical(
-                            f"FATAL: Erreur lors du chargement du schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer."
-                        )
-                        raise RuntimeError(f"Erreur lors du chargement du schéma '{determined_schema_name}'") from e
-                
-                # Si le schéma a été chargé avec succès ou était en cache, procéder à la validation
-                try:
-                    jsonschema.validate(instance=config, schema=schema_to_use)
-                    self.logger.debug(f"La configuration a passé la validation avec le schéma '{determined_schema_name}'.")
-                    return True
-                except jsonschema.ValidationError as e:
-                    # Si la validation échoue contre un schéma EXISTANT et valide
-                    error_message = f"Échec de la validation par schéma '{determined_schema_name}': {e.message} (sur le champ: `{''.join(e.path)}`)"
-                    self.logger.critical(
-                        f"FATAL: La configuration a échoué à la validation du schéma '{determined_schema_name}'. "
-                        "Ceci indique une configuration incorrecte. Le bot ne peut pas démarrer: {error_message}",
-                        exc_info=True
-                    )
-                    raise ConfigValidationError(error_message) from e
+        # Si le schéma est dans known_existing_schemas, on procède au chargement et à la validation.
+        schema_to_use = self._schema_cache.get(determined_schema_name)
+        schema_path: Path # Déclaration pour garantir qu'elle est définie.
+
+        if determined_schema_name == "strategy_schema.json":
+            schema_path = Path(__file__).parent.parent / "config" / "schemas" / determined_schema_name
+        elif determined_schema_name == "env_vars_schema.json":
+            schema_path = Path(__file__).parent.parent / "config" / determined_schema_name
         else:
-            # Si aucun nom de schéma n'a été déterminé ou fourni pour la validation, on logue un debug et on continue.
-            self.logger.debug("Aucun schéma de validation spécifique déterminé ou fourni pour cette configuration. Validation ignorée.")
-            return True
+            # Cette branche ne devrait pas être atteinte avec la logique ci-dessus.
+            # Si par un cas inattendu un determined_schema_name non reconnu parvient ici,
+            # on considère cela comme une erreur de logique.
+            self.logger.critical(f"Erreur logique: Chemin du schéma non géré pour '{determined_schema_name}'.")
+            return False # Ne devrait pas arriver avec la logique ci-dessus.
 
+
+        if schema_to_use is None:
+            if not schema_path.is_file():
+                # Cette erreur se produit si un SCHEMA CENSÉ EXISTER est manquant.
+                self.logger.critical(
+                    f"FATAL: Fichier de schéma de validation '{determined_schema_name}' introuvable à '{schema_path}'. Impossible d'assurer la conformité de la configuration. Le bot ne peut pas démarrer en toute sécurité."
+                )
+                raise FileNotFoundError(f"Fichier de schéma de validation manquant : {schema_path}")
+
+            try:
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    schema_to_use = json.load(f)
+                self._schema_cache[determined_schema_name] = schema_to_use
+                self.logger.debug(f"Schéma '{determined_schema_name}' chargé et mis en cache.")
+            except json.JSONDecodeError as e:
+                # Si le schéma existe mais est malformé
+                self.logger.critical(
+                    f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer. Veuillez corriger le schéma."
+                )
+                raise ConfigValidationError(f"Schéma '{determined_schema_name}' invalide : {e}") from e
+            except Exception as e:
+                # Si une autre erreur survient lors du chargement d'un schéma existant
+                self.logger.critical(
+                    f"FATAL: Erreur lors du chargement du schéma '{determined_schema_name}': {e}. Le bot ne peut pas démarrer."
+                )
+                raise RuntimeError(f"Erreur lors du chargement du schéma '{determined_schema_name}'") from e
+        
+        # Si le schéma a été chargé avec succès ou était en cache, procéder à la validation
+        try:
+            jsonschema.validate(instance=config, schema=schema_to_use)
+            self.logger.debug(f"La configuration a passé la validation avec le schéma '{determined_schema_name}'.")
+            return True
+        except jsonschema.ValidationError as e:
+            # Si la validation échoue contre un schéma EXISTANT et valide
+            error_message = f"Échec de la validation par schéma '{determined_schema_name}': {e.message} (sur le champ: `{''.join(e.path)}`)"
+            self.logger.critical(
+                f"FATAL: La configuration a échoué à la validation du schéma '{determined_schema_name}'. "
+                "Ceci indique une configuration incorrecte. Le bot ne peut pas démarrer: {error_message}",
+                exc_info=True
+            )
+            raise ConfigValidationError(error_message) from e
+    
     # _detect_separator est également déplacé ici.
     def _detect_separator(self, file_path: str) -> str:
         """
@@ -356,3 +361,47 @@ class ConfigLoader:
         except Exception as e:
             self.logger.error(f"Erreur lors de la détection du séparateur pour '{file_path}': {e}", exc_info=True)
             return ","
+
+    def load_asset_config(self, asset_symbol: str) -> Dict[str, Any]:
+        """
+        Charge la configuration spécifique à un actif (symbol) depuis le dossier `config/assets_config/`.
+
+        Args:
+            asset_symbol (str): Le symbole de l'actif (ex: "EURUSD", "BTCUSD").
+
+        Returns:
+            Dict[str, Any]: Le dictionnaire de configuration de l'actif.
+
+        Raises:
+            FileNotFoundError: Si le fichier de configuration de l'actif n'est pas trouvé.
+            IOError: Pour d'autres erreurs de lecture ou de parsing.
+        """
+        if not self.config_manager:
+            self.logger.error("ConfigManager non disponible dans ConfigLoader. Impossible de charger les chemins d'actifs.")
+            raise RuntimeError("ConfigManager est requis pour load_asset_config.")
+
+        # Récupérer le chemin de base des configurations d'actifs depuis ConfigManager
+        asset_configs_dir = Path(self.config_manager.get("paths.asset_configs", "config/assets_config/"))
+        
+        # Construire le chemin complet du fichier de configuration de l'actif
+        asset_config_path = asset_configs_dir / f"{asset_symbol}.json"
+
+        self.logger.info(f"Tentative de chargement de la configuration pour l'actif '{asset_symbol}' depuis '{asset_config_path}'...")
+
+        if not asset_config_path.is_file():
+            self.logger.critical(f"Fichier de configuration d'actif introuvable: {asset_config_path}. Impossible de charger la configuration pour cet actif.")
+            raise FileNotFoundError(f"Fichier de configuration d'actif manquant pour '{asset_symbol}': {asset_config_path}")
+
+        try:
+            # Utiliser la méthode générique load_dynamic_config pour charger et valider le JSON
+            # Note: Il n'y a pas de schéma spécifique pour les configs d'actifs dans la structure fournie.
+            # La validation sera donc ignorée (log WARNING dans validate_config) si aucun schéma n'est trouvé.
+            config = self.load_dynamic_config(str(asset_config_path))
+            self.logger.info(f"Configuration pour l'actif '{asset_symbol}' chargée avec succès.")
+            return config
+        except ConfigValidationError as e:
+            self.logger.error(f"Validation de la configuration de l'actif '{asset_symbol}' échouée: {e}")
+            raise # Propage l'exception de validation
+        except Exception as e:
+            self.logger.error(f"Erreur inattendue lors du chargement de la configuration pour l'actif '{asset_symbol}': {e}", exc_info=True)
+            raise IOError(f"Impossible de charger la configuration pour l'actif '{asset_symbol}'") from e
