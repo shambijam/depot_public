@@ -1,7 +1,7 @@
 {
     "project": "SNIPER_X",
     "mode_execution": "DEMO",
-    "log_level": "DEBUG",
+    "log_level": "INFO",
     "app": {
         "backup_on_initial_save": false,
         "save_on_initial_load": false,
