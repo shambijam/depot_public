@@ -7,7 +7,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from core.config_manager import ConfigValidationError # Maintenue pour la validation
+from core.utils import ConfigValidationError
 
 logger = logging.getLogger(__name__)
 

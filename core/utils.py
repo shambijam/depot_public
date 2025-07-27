@@ -5,6 +5,11 @@ from datetime import datetime
 import pandas as pd
 from typing import Dict, Any, List # Importations nécessaires
 
+# Définition de l'exception ConfigValidationError
+class ConfigValidationError(ValueError):
+    """Exception levée lorsqu'une validation de configuration échoue."""
+    pass
+
 class CustomJSONEncoder(json.JSONEncoder):
     """
     Encodeur JSON personnalisé pour gérer la sérialisation des types de données

@@ -1,5 +1,4 @@
 # core/decision_pipeline.py
-
 import logging
 import json
 import pandas as pd
@@ -7,17 +6,12 @@ import numpy as np
 from datetime import datetime, UTC
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
-
-# Importations des modules avec lesquels DecisionPipeline interagit
-# ConfigManager sera l'orchestrateur parent, d'où l'import de son type pour les hints
-from core.config_manager import ConfigManager, ConfigValidationError, TradeStatus
+from core.config_manager import ConfigManager, TradeStatus 
 from core.ai_interface import AIInterface
-# StrategyManager sera importé ici une fois qu'il sera créé
-# from core.strategy_manager import StrategyManager
+from core.utils import ConfigValidationError 
 
 
 logger = logging.getLogger(__name__)
-
 class DecisionPipeline:
     """
     Orchestre le pipeline de décision de trading, intégrant l'analyse de marché,
