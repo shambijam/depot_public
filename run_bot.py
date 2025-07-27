@@ -376,12 +376,18 @@ def run_single_pipeline_cycle(
                 if rates_df is None or rates_df.empty:
                     logger.warning(f"Aucune donnée historique pour '{asset}'. Actif ignoré.")
                     continue
+
+                symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
+                if symbol_info_mt5:
+                    rates_df["point"] = symbol_info_mt5.point
+                    rates_df["spread"] = symbol_info_mt5.spread
+                    rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
+                    rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
                 
                 annotated_rates_df = phase_observer.analyze(rates_df.copy())
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     continue
-
-                symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
+                
                 latest_signals_row = annotated_rates_df.iloc[-1]
                 logger.info(f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}")
 
