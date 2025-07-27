@@ -22,12 +22,12 @@ from typing import Dict, Any, List, Optional, Tuple
 from functools import lru_cache
 
 # Importation des modules refactorisés
-from core.config_loader import ConfigLoader, ConfigValidationError
+from core.config_loader import ConfigLoader
 from core.ai_interface import AIInterface
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
 from core.decision_pipeline import DecisionPipeline
-from core.utils import CustomJSONEncoder, get_diff # Nouveaux imports pour les utilitaires
+from core.utils import CustomJSONEncoder, get_diff, ConfigValidationError # NOUVEL IMPORT DEPUIS UTILS
 
 logger = logging.getLogger(__name__)
 
