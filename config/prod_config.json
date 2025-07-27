@@ -341,7 +341,7 @@
         "log_file_name": "mt5_connector.log",
         "trade_history_start_date": "2020-01-01",
         "enable_console_logging": true,
-        "log_level": "DEBUG",
+        "log_level": "INFO",
         "csv_separators_to_test": [
             ";",
             ",",

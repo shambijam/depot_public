@@ -1701,18 +1701,21 @@ class ConfigManager:
             alert_type (str): Le type d'alerte (ex: 'telegram_critical', 'telegram_trade_confirmed').
                             Utilisé pour déterminer le canal ou le traitement spécifique.
         """
+        # Vérifier si Telegram est globalement activé avant de loguer la tentative d'envoi.
+        telegram_globally_enabled = self.get("telegram.enabled", False) #
+        
+        if not telegram_globally_enabled:
+            # Si Telegram est désactivé, ne pas loguer la tentative d'envoi et s'arrêter là.
+            self.logger.debug(f"Alerte de type '{alert_type}' ignorée : Telegram est globalement désactivé dans la configuration.")
+            return
+
+        # Si Telegram est activé, alors loguer la tentative d'envoi.
         self.logger.info(
             f"Tentative d'envoi d'alerte de type '{alert_type}' : {message[:100]}..."
-        )  # Log les 100 premiers caractères
+        ) # Log les 100 premiers caractères
 
         if hasattr(self, "audit_logger") and self.audit_logger is not None:
-            # L'AuditLogger aura la logique d'envoi réelle (ex: vers Telegram)
-            # Nous assumons que AuditLogger a une méthode pour gérer l'envoi d'alertes.
-            # Si AuditLogger n'a pas encore de méthode 'send_telegram_alert' ou similaire,
-            # il faudra l'ajouter à AuditLogger dans une étape ultérieure.
             try:
-                # Ici, nous appelons une méthode générique de l'AuditLogger pour gérer l'alerte.
-                # L'AuditLogger devra être étendu pour router ces alertes vers les bons canaux (ex: Telegram).
                 self.audit_logger.queue_or_send_alert(message, alert_type)
                 self.logger.debug(f"Alerte '{alert_type}' transmise à l'AuditLogger.")
             except Exception as e:

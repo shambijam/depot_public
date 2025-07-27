@@ -261,9 +261,12 @@ class MT5Connector:
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
         file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(
+            getattr(logging, log_level_str, logging.INFO)
+        )  # Définir correctement le niveau du FileHandler
         mt5_logger.addHandler(file_handler)
 
-        # Ajouter un Console handler si les logs de MT5Connector doivent aussi apparaître sur la console. (TODO implémenté)
+        # Ajouter un Console handler si les logs de MT5Connector doivent aussi apparaître sur la console.
         if enable_console_logging:
             console_handler = logging.StreamHandler(sys.stdout)
             # Utilise un formatateur plus concis pour la console
@@ -271,6 +274,9 @@ class MT5Connector:
                 "%(asctime)s - %(levelname)s - [MT5C] - %(message)s"
             )  # [MT5C] pour identification
             console_handler.setFormatter(console_formatter)
+            console_handler.setLevel(
+                getattr(logging, log_level_str, logging.INFO)
+            )  # Définir correctement le niveau du ConsoleHandler
             mt5_logger.addHandler(console_handler)
 
         # Désactiver la propagation pour éviter le double logging avec le logger racine
