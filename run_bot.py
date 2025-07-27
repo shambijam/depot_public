@@ -163,7 +163,9 @@ def _get_merged_config_for_asset(
     Garantit que les paramètres essentiels du ConfigManager (comme le strategy_name)
     sont toujours propagés.
     """
-    asset_specific_config = config_manager.load_asset_config(asset)
+    # CORRECTION : Accéder à load_asset_config via l'instance de ConfigLoader
+    # qui est un attribut du ConfigManager.
+    asset_specific_config = config_manager.config_loader.load_asset_config(asset)
     merged_config = active_config.copy()
 
     # S'assurer que le strategy_name de la stratégie active est toujours propagé.
@@ -197,7 +199,6 @@ def _get_merged_config_for_asset(
             }
 
     return merged_config
-
 
 def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
     """Vérifie si le marché pour un actif semble fermé en semaine."""
