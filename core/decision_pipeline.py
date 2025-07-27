@@ -42,8 +42,7 @@ class DecisionPipeline:
         """
         Orchestre le pipeline de décision de haut niveau pour un cycle de trading.
         Cette fonction exécute la séquence complète d'analyse et de décision en utilisant une
-        configuration transitoire en mémoire pour une efficacité maximale. Elle ne modifie pas
-        la configuration sur le disque sauf si une action explicite (ex: recommandation IA) est validée.
+        configuration transitoire en mémoire pour une efficacité maximale.
 
         Args:
             context (Dict): Le contexte système et marché complet pour le cycle actuel.
@@ -53,71 +52,27 @@ class DecisionPipeline:
         """
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
 
-        # 1. Analyse et enrichissement du contexte (appel aux méthodes de ConfigManager ou de ce module)
-        analyzed_context = self.config_manager.analyze_context(context) # analyze_context reste dans ConfigManager
+        # 1. Analyse et enrichissement du contexte
+        analyzed_context = self.config_manager.analyze_context(context)
 
-        # La détection du régime de marché est déjà faite par analyze_context
-        # et stockée dans analyzed_context["current_market_regime"].
-        # analyzed_context["current_market_regime"] = self.config_manager.detect_market_regime(
-        #     analyzed_context, context.get("market_data", {})
-        # )
-
-        # 2. Construction de la base de connaissance des stratégies disponibles (déléguée à StrategyManager)
-        # self.strategy_manager.build_config_knowledge_base() # Sera appelée ici quand StrategyManager sera prêt.
-        # Pour l'instant, nous accédons directement à l'attribut de ConfigManager si nécessaire, ou on simule.
-        # config_knowledge_base = self.config_manager._config_knowledge_base # Accès temporaire, sera via StrategyManager
-
-        # 3. Consultation de l'IA (si activée)
+        # 2. Consultation facultative de l'IA
         if self.config_manager.get("ai.enabled", False):
-            # filter_real_opportunities est maintenant une méthode de DecisionPipeline
-            opportunities = self.filter_real_opportunities(analyzed_context)
-            ai_response = self.ai_interface.request_ia_advice(opportunities, analyzed_context) # Délégation à AIInterface
+            opportunities = self.select_assets_to_trade(analyzed_context)
+            if opportunities:
+                ai_response = self.ai_interface.request_ia_advice(opportunities, analyzed_context)
+                analyzed_context["ai_advice"] = ai_response
+                analyzed_context["ai_recommendation_score"] = ai_response.get("ai_vote_for_configs", {})
+        
+        # 3. Sélection de la stratégie optimale
+        # CORRECTION : Utilise self.strategy_manager.strategy_registry comme source de vérité
+        if not self.strategy_manager:
+            self.logger.critical("ERREUR ARCHITECTURALE: StrategyManager non disponible dans DecisionPipeline.")
+            raise RuntimeError("StrategyManager non initialisé.")
 
-            analyzed_context["ai_advice"] = ai_response
-            analyzed_context["ai_recommendation_score"] = ai_response.get("ai_vote_for_configs", {})
-
-            apply_threshold = self.config_manager.get("ai.apply_recommendation_threshold", 0.8)
-            # L'IA peut recommander des ajustements de configuration (directement sur les paramètres de prod_config)
-            # MAIS C'EST LE CONFIG_MANAGER QUI DÉCIDE D'APPLIQUER.
-            if (
-                ai_response.get("recommended_config_adjustments")
-                and ai_response.get("analysis_quality_score", 0) >= apply_threshold # Utilise analysis_quality_score, pas confidence_score
-            ):
-                self.logger.info(f"Recommandations de configuration de l'IA (qualité d'analyse >= {apply_threshold:.2f}) à considérer par ConfigManager.")
-                try:
-                    self.config_manager.update_dynamic_config( # ConfigManager applique
-                        ai_response["recommended_config_adjustments"],
-                        source="ai_recommendation",
-                    )
-                    if ai_response.get("recommended_default_strategy"):
-                        self.config_manager.update_dynamic_config( # ConfigManager applique
-                            {"strategies": {"default_strategy": ai_response["recommended_default_strategy"]}},
-                            source="ai_strategy_change",
-                        )
-                        self.logger.info(f"L'IA a recommandé un changement de stratégie par défaut vers : {ai_response['recommended_default_strategy']}. Appliqué par ConfigManager.")
-                except ConfigValidationError as e:
-                    self.logger.error(f"L'IA a recommandé une mise à jour de configuration invalide: {e}. Recommandation ignorée.", exc_info=True)
-                    self.config_manager.audit_logger.log_config_change( # Log via AuditLogger
-                        {"action": "AI_RECOMMENDATION_BLOCKED", "error": str(e)},
-                        source="ai_recommendation_error",
-                        dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy()
-                    )
-                except Exception as e:
-                    self.logger.error(f"Erreur inattendue lors de l'application des recommandations IA: {e}", exc_info=True)
-                    self.config_manager.audit_logger.log_config_change( # Log via AuditLogger
-                        {"action": "AI_RECOMMENDATION_ERROR", "error": str(e)},
-                        source="ai_recommendation_error",
-                        dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy()
-                    )
-            else:
-                self.logger.info(f"Recommandations de l'IA ignorées (qualité d'analyse trop faible ou pas d'ajustements proposés).")
-
-        # 4. Sélection et adaptation de la configuration pour CE cycle
-        # config_knowledge_base sera l'attribut de StrategyManager, pour l'instant un accès temporaire
-        config_knowledge_base_temp = getattr(self.config_manager, '_config_knowledge_base', {})
+        config_knowledge_base = self.strategy_manager.strategy_registry
 
         optimal_config = self.select_optimal_config(
-            analyzed_context, config_knowledge_base_temp # Accès temporaire
+            analyzed_context, config_knowledge_base
         )
         if not optimal_config:
             self.logger.warning("Aucune stratégie optimale sélectionnée pour ce cycle. Pipeline de décision s'arrête.")
@@ -127,33 +82,29 @@ class DecisionPipeline:
                 "final_decision": {},
             }
 
-        adapted_config = self.adapt_config(optimal_config, analyzed_context)
+        # 4. Adaptation de la configuration pour le cycle actuel
+        # On fusionne la config de base avec la config de la stratégie choisie
+        config_for_this_cycle = self.config_manager._merge_dicts(
+            self.config_manager.get_current_dynamic_config(),
+            optimal_config
+        )
+        adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context)
 
-        # ConfigManager fusionne la stratégie adaptée dans sa configuration dynamique active en mémoire.
-        # C'est une responsabilité du ConfigManager, pas du DecisionPipeline de modifier la config globale.
-        self.config_manager._dynamic_config = self.config_manager._merge_dicts(self.config_manager._dynamic_config, adapted_config)
-
-        # 5. Moteur de décision finale basé sur les règles de la configuration adaptée
+        # 5. Décision de trade finale basée sur la stratégie et la configuration adaptées
         signals = analyzed_context.get("trading_signals", {})
         trade_decision = self.decide_trade_to_execute(
             analyzed_context,
-            self.config_manager.get_current_dynamic_config(), # Utilise la configuration dynamique GLOBALE
+            adapted_config, # Utilise la configuration spécifiquement adaptée pour ce cycle
             signals,
         )
 
-        # TODO: Ajouter un mécanisme de "shadow mode" où le pipeline tourne avec une nouvelle
-        #       stratégie candidate sans l'exécuter, juste pour logger ses décisions. (TODO maintenu)
-        # TODO: Le pipeline pourrait être rendu encore plus dynamique en chargeant la séquence
-        #       des étapes depuis un fichier de configuration, permettant différents pipelines. (TODO maintenu)
         return {
             "timestamp_utc": datetime.now(UTC).isoformat(),
             "context": analyzed_context,
-            "config_used": self.config_manager.get_current_dynamic_config(), # Assurez-vous que c'est la config adaptée en mémoire
+            "config_used": adapted_config,
             "final_decision": trade_decision,
         }
-
-    # --- Méthodes de décision déplacées de ConfigManager ---
-
+        
     def select_assets_to_trade(self, context: Dict[str, Any]) -> List[str]:
         """
         Évalue, score et sélectionne dynamiquement les meilleurs actifs à trader pour le cycle actuel.

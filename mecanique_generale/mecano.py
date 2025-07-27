@@ -300,6 +300,60 @@ class Mecano:
         """
         self.ai_analyzer = ai_analyzer_instance
         self.logger.info("Mecano: Instance AIDecision injectée.")
+        
+    def review_and_apply_ai_suggestions(self):
+        """
+        Analyse périodiquement la performance et demande à l'IA des suggestions d'amélioration
+        pour la configuration, puis les applique si elles sont jugées suffisamment fiables.
+        """
+        self.logger.info("Mecano: Démarrage de la revue stratégique par l'IA...")
+
+        if not self.ai_analyzer or not self.config_manager:
+            self.logger.warning("Analyse IA impossible : ai_analyzer ou config_manager ne sont pas injectés.")
+            return
+
+        if not self.config_manager.get("ai.enabled", False):
+            self.logger.info("Revue stratégique par l'IA ignorée (désactivée dans la configuration).")
+            return
+
+        # Construire un contexte pour l'IA basé sur les données de performance collectées par Mecano
+        context_for_ai = {
+            "profiling_data": self.profiling_data,
+            "error_data": self.error_data,
+            "system_metrics": self.system_metrics_history,
+            "current_config": self.config_manager.get_current_dynamic_config()
+        }
+
+        try:
+            # Note : Assurez-vous que votre classe AIDecision a une méthode comme celle-ci
+            ai_advice = self.ai_analyzer.suggest_config_improvements(context_for_ai)
+
+            if not ai_advice or not ai_advice.get("recommended_adjustments"):
+                self.logger.info("L'IA n'a pas de nouvelles recommandations de configuration pour le moment.")
+                return
+
+            # Appliquer les recommandations seulement si le score de confiance est suffisant
+            apply_threshold = self.config_manager.get("ai.apply_recommendation_threshold", 0.8)
+            confidence_score = ai_advice.get("confidence_score", 0.0)
+
+            if confidence_score >= apply_threshold:
+                self.logger.warning(f"L'IA a recommandé des ajustements de configuration avec une confiance de {confidence_score:.2f}. Application en cours...")
+                
+                # Le Mecano demande au ConfigManager de mettre à jour la configuration
+                self.config_manager.update_dynamic_config(
+                    ai_advice["recommended_adjustments"],
+                    source="mecano_ai_optimizer"
+                )
+                
+                self.config_manager.send_alert(
+                    f"🤖 **Mecano IA Optimizer**\nNouvelle configuration appliquée sur suggestion de l'IA (Confiance: {confidence_score:.2f}).",
+                    "telegram_info" # Utilise un canal non-critique pour cette information
+                )
+            else:
+                self.logger.info(f"Suggestion de l'IA ignorée, confiance ({confidence_score:.2f}) trop faible (seuil: {apply_threshold}).")
+
+        except Exception as e:
+            self.log_exception("review_and_apply_ai_suggestions", e)
 
     def _setup_loggers(self) -> None:
         """
