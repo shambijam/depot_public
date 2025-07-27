@@ -1556,7 +1556,7 @@ class ConfigManager:
         )
 
         optimal_config_content = (
-            self.decision_pipeline.select_optimal_config(  # <-- CORRECTION ICI
+            self.decision_pipeline.select_optimal_config(
                 analyzed_context, config_knowledge_base_from_strategy_manager
             )
         )
@@ -1574,7 +1574,8 @@ class ConfigManager:
         config_for_this_cycle = self._merge_dicts(
             config_for_this_cycle, optimal_config_content
         )
-        config_for_this_cycle = self.adapt_config(
+        # CORRECTION : Appeler adapt_config via l'instance du DecisionPipeline.
+        config_for_this_cycle = self.decision_pipeline.adapt_config(
             config_for_this_cycle, analyzed_context
         )
 
