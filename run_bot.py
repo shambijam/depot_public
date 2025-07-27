@@ -383,7 +383,21 @@ def run_single_pipeline_cycle(
 
         # Récupérer la configuration dynamique active pour ce cycle.
         # Contient les paramètres de la stratégie sélectionnée et les adaptations.
-        active_config = config_manager.get_current_dynamic_config()
+        # CORRECTION MAJEURE ICI : Appeler organize_pipeline_decision plus tôt pour obtenir la 'config_used'
+        # qui contient déjà la stratégie sélectionnée et adaptée.
+        global_context_base = _build_global_context(
+            mt5_connector,
+            {}, # Market data sera rempli après
+            {}, # Signals seront remplis après
+            cycle_count,
+            daily_trade_count,
+            config_manager,
+            [], # Tradeable assets sera rempli après
+            config_manager.get_mt5_account_credentials(mode=config_manager.get("mode_execution", "DEMO").upper()) # Obtenir les détails du compte plus tôt.
+        )
+        # Ceci est le cœur de la décision, la sélection de stratégie est ici.
+        pipeline_output = config_manager.organize_pipeline_decision(global_context_base)
+        active_config = pipeline_output.get("config_used", config_manager.get_current_dynamic_config())
 
         logger.info(
             f"Active Config strategy_name: {active_config.get('strategy_name', 'NON_DEFINI')}"
@@ -459,10 +473,12 @@ def run_single_pipeline_cycle(
 
         for asset in tradeable_assets:
             try:
+                # La merged_config_for_phase_observer est maintenant basée sur la STRATÉGIE ACTIVE
                 merged_config_for_phase_observer = _get_merged_config_for_asset(
                     active_config, config_manager, asset
                 )
 
+                # C'est ici que l'update_parameters_from_config est appelé AVEC la config de stratégie
                 phase_observer.update_parameters_from_config(
                     merged_config_for_phase_observer
                 )
@@ -528,6 +544,7 @@ def run_single_pipeline_cycle(
             )
             return False
 
+        # Reconstruire global_context avec les données de marché et de signaux maintenant disponibles
         global_context = _build_global_context(
             mt5_connector,
             all_assets_market_data,
@@ -546,6 +563,8 @@ def run_single_pipeline_cycle(
                 f"Vérification des {len(current_open_positions)} positions ouvertes pour des opportunités de sortie."
             )
 
+            # NOTE: decide_exit_trades utilise aussi la config_manager.decide_exit_trades
+            # La active_config passée ici est la config de stratégie correcte.
             exit_decisions = config_manager.decide_exit_trades(
                 context=global_context,
                 open_positions=current_open_positions,
@@ -568,14 +587,15 @@ def run_single_pipeline_cycle(
             logger.info("Aucune position ouverte à vérifier.")
 
         logger.info("Évaluation des opportunités pour de nouvelles entrées de trade.")
-        pipeline_output = config_manager.organize_pipeline_decision(global_context)
-
+        # La pipeline_output est déjà obtenue plus tôt et contient la config_used correcte
+        # On ne l'appelle pas une seconde fois pour la décision d'entrée.
+        # On utilise directement trade_decision et config_used de pipeline_output.
         trade_decision = pipeline_output.get("final_decision", {})
 
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL", "CLOSE"]:
             decision_package = {
                 "market_context": global_context,
-                "active_config": pipeline_output.get("config_used"),
+                "active_config": active_config, # Utilise la active_config mise à jour.
                 "trade_decision": trade_decision,
             }
 
