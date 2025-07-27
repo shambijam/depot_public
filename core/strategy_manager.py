@@ -123,30 +123,59 @@ class StrategyManager:
         Returns:
             Optional[Type]: La classe Python de la stratégie, ou None si introuvable.
         """
+        import traceback # Import local nécessaire pour capturer les traces d'erreur
+        from datetime import datetime, UTC # Imports locaux pour les timestamps dans le log de debug
+        from pathlib import Path # Import local pour manipuler les chemins de fichiers
+        
+        # Chemin du fichier de log temporaire pour le diagnostic
+        debug_log_file_path = Path("logs/strategy_manager_debug.log")
+        
+        # Assurez-vous que le répertoire 'logs' existe
+        debug_log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Fonction imbriquée pour écrire les logs de debug dans le fichier
+        # Indentation corrigée pour cette fonction imbriquée
+        def write_debug_log(message: str):
+            """Écrit un message de débogage directement dans le fichier temporaire."""
+            try:
+                with open(debug_log_file_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.now(UTC).isoformat()}] [{strategy_key}] {message}\n")
+            except Exception as e:
+                # Fallback pour logger en console si l'écriture fichier échoue (problème de permissions, etc.)
+                self.logger.error(f"Échec de l'écriture dans le fichier de debug de stratégie : {e}. Message : {message}")
+
+        write_debug_log(f"Début _load_strategy_class pour clé '{strategy_key}'.")
+
         try:
             python_module_name = strategy_key.lower().replace(" ", "_")
             module_path = Path(__file__).parent.parent / "strategy" / f"{python_module_name}.py"
-
+            
             self.logger.debug(f"[_load_strategy_class] Recherche du module Python pour la clé '{strategy_key}'. Chemin attendu: '{module_path}'.")
+            write_debug_log(f"Recherche du module Python. Chemin attendu: '{module_path}'.")
 
             if not module_path.is_file():
                 self.logger.warning(f"[_load_strategy_class] Module Python '{python_module_name}.py' introuvable à '{module_path}' pour la stratégie '{strategy_key}'.")
+                write_debug_log(f"Module Python '{python_module_name}.py' introuvable à '{module_path}'.")
                 return None
 
             module_name = f"strategy.{python_module_name}"
             spec = importlib.util.find_spec(module_name)
-
+            
             if spec is None or spec.loader is None:
                 self.logger.error(f"[_load_strategy_class] Spécification ou chargeur de module introuvable pour '{module_name}'. Impossible d'importer la stratégie '{strategy_key}'.")
+                write_debug_log(f"Spécification ou chargeur de module introuvable pour '{module_name}'.")
                 return None
 
             module = importlib.util.module_from_spec(spec)
-
+            
             try:
                 spec.loader.exec_module(module)
                 self.logger.debug(f"[_load_strategy_class] Module '{module_name}' exécuté avec succès.")
+                write_debug_log(f"Module '{module_name}' exécuté avec succès.")
             except Exception as module_exec_e:
+                error_trace = traceback.format_exc()
                 self.logger.error(f"[_load_strategy_class] Erreur lors de l'exécution du module '{module_name}' pour la stratégie '{strategy_key}': {module_exec_e}", exc_info=True)
+                write_debug_log(f"ERREUR lors de l'exécution du module '{module_name}': {module_exec_e}. Trace: {error_trace}")
                 if self.config_manager:
                     self.config_manager.send_alert(f"CRITIQUE: Erreur chargement module stratégie '{strategy_key}': {module_exec_e}", "telegram_critical")
                 return None
@@ -155,25 +184,34 @@ class StrategyManager:
             strategy_class = getattr(module, strategy_class_name, None)
 
             self.logger.debug(f"[_load_strategy_class] Nom de classe attendu pour '{strategy_key}': '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'")
+            write_debug_log(f"Nom de classe attendu: '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'")
 
             if strategy_class and issubclass(strategy_class, BaseStrategy) and strategy_class is not BaseStrategy:
                 self.logger.debug(f"[_load_strategy_class] Classe '{strategy_class_name}' chargée et validée avec succès pour '{strategy_key}'.")
+                write_debug_log(f"Classe '{strategy_class_name}' chargée et validée avec succès.")
                 return strategy_class
             else:
                 if strategy_class is None:
                     self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' introuvable dans le module '{module_name}' pour la stratégie '{strategy_key}'. Vérifiez le nom de la classe dans le fichier Python ou si elle est bien exportée dans __init__.py du package 'strategy'.")
+                    write_debug_log(f"Classe '{strategy_class_name}' introuvable dans le module '{module_name}'.")
                 elif not issubclass(strategy_class, BaseStrategy):
                     self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' trouvée pour '{strategy_key}' mais elle n'est pas une sous-classe de BaseStrategy. Impossible de l'utiliser.")
+                    write_debug_log(f"Classe '{strategy_class_name}' trouvée mais n'est PAS une sous-classe de BaseStrategy.")
                 elif strategy_class is BaseStrategy:
                     self.logger.error(f"[_load_strategy_class] La classe trouvée pour '{strategy_key}' est BaseStrategy elle-même. Ceci n'est pas une stratégie implémentée.")
+                    write_debug_log(f"La classe trouvée est BaseStrategy elle-même (non implémentée).")
                 return None
         except ImportError as e:
+            error_trace = traceback.format_exc()
             self.logger.error(f"[_load_strategy_class] Erreur d'importation générale pour la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
+            write_debug_log(f"ERREUR ImportError: {e}. Trace: {error_trace}")
             return None
         except Exception as e:
+            error_trace = traceback.format_exc()
             self.logger.error(f"[_load_strategy_class] Erreur inattendue lors du chargement de la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
+            write_debug_log(f"ERREUR INATTENDUE: {e}. Trace: {error_trace}")
             return None
-
+        
     def load_strategy(self, strategy_key: str) -> bool:
         """
         Charge une stratégie spécifique dans la configuration dynamique.
