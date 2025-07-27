@@ -17,16 +17,11 @@ from pathlib import Path
 import importlib
 import core.strategy_manager
 
-
-
 # Charger les variables d'environnement dès le début pour les chemins critiques/secrets
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---
-# Imports des Modules du Projet ("Briques LEGO")
-# ---
 try:
     from phase_observer.phase_observer import PhaseObserver
     from core.config_manager import ConfigManager
@@ -49,11 +44,6 @@ except ImportError as e:
         exc_info=True,
     )
     sys.exit(1)
-
-# ---
-# Configuration du Logging de Production
-# ---
-
 
 
 def verify_environment_and_config(
@@ -294,7 +284,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                ai_decision,
+                decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
