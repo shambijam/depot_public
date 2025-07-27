@@ -1,15 +1,15 @@
-
 # core/strategy_manager.py
 
 import logging
 import importlib.util
 import inspect
 from pathlib import Path
-from typing import Dict, Any, Optional, Type
-
-# Importations des dépendances
+from typing import Dict, Any, Optional, Type, TYPE_CHECKING # Ajout de TYPE_CHECKING
 from core.config_loader import ConfigLoader, ConfigValidationError
-from core.config_manager import ConfigManager
+
+# Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
+if TYPE_CHECKING:
+    from core.config_manager import ConfigManager # Importation uniquement pour les hints de type
 
 # Importer BaseStrategy depuis la structure du projet
 try:

@@ -4,11 +4,15 @@ import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, UTC
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING 
 from pathlib import Path
-from core.config_manager import ConfigManager, TradeStatus 
+from core.config_manager import TradeStatus 
 from core.ai_interface import AIInterface
-from core.utils import ConfigValidationError 
+from core.utils import ConfigValidationError
+
+# Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
+if TYPE_CHECKING:
+    from core.config_manager import ConfigManager # Importation uniquement pour les hints de type
 
 
 logger = logging.getLogger(__name__)
