@@ -238,6 +238,7 @@ def main(args: argparse.Namespace) -> None:
         config_file_path = config_dir_path / main_config_file_name
         config_file_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # CET APPEL DOIT ÊTRE AVANT TOUTE TENTATIVE DE LIRE OU MODIFIER config_manager._dynamic_config
         config_manager.initialize_dynamic_config(
             template_path=str(config_file_path),
             output_path=str(config_file_path),
