@@ -1,37 +1,33 @@
 {
-  "strategy_name": "Scalping Institutional",
-  "description": "Stratégie de scalping axée sur des mouvements de prix rapides et des setups institutionnels à haute fréquence, optimisée pour capturer de petits gains sur de courtes périodes.",
+  "strategy_name": "Crypto Institutional",
+  "description": "Stratégie conçue spécifiquement pour les marchés des cryptomonnaies, caractérisés par une forte volatilité. Elle cible les setups institutionnels à haute impulsion et gère le risque de manière adaptée à ces marchés.",
   "strategy_tags": [
-    "scalping",
-    "intraday",
-    "high_frequency",
-    "quick_exit",
-    "crypto"
+    "crypto",
+    "volatile",
+    "breakout",
+    "trend_following",
+    "high_risk_high_reward"
   ],
   "tradeable_assets": [
-    "EURUSD",
-    "GBPUSD",
-    "USDCHF",
-    "XAUUSD",
     "BTCUSD",
     "ETHUSD",
     "LTCUSD"
   ],
-  "magic_number": 30303,
-  "risk_per_trade_percent": 2,
-  "stop_loss_pips": 10,
-  "max_daily_loss_percent": 1.0,
-  "max_drawdown_percent": 3.0,
-  "max_trades_per_day": 15,
-  "max_spread_pips": 1.2,
-  "halt_on_major_news": true,
+  "magic_number": 40404,
+  "risk_per_trade_percent": 3,
+  "stop_loss_pips": 50,
+  "max_daily_loss_percent": 3.0,
+  "max_drawdown_percent": 7.0,
+  "max_trades_per_day": 50,
+  "max_spread_points": 4000,
+  "halt_on_major_news": false,
   "phase_detection": {
-    "description": "Paramètres spécifiques pour la détection des phases de marché et des signaux SMC par PhaseObserver, adaptés à la haute fréquence et aux timeframes courts du scalping.",
+    "description": "Paramètres de détection de phase et de signaux SMC adaptés aux caractéristiques uniques (volatilité, échelle de prix) des marchés de cryptomonnaies.",
     "lookback_window": 10,
-    "volatility_threshold": 0.0003,
-    "volume_zscore": 2.5,
-    "eq_level_tolerance": 0.0001,
-    "impulse_threshold": 0.0005,
+    "volatility_threshold": 5.0,
+    "volume_zscore": 1.5,
+    "eq_level_tolerance": 15.0,
+    "impulse_threshold": 5.0,
     "detection_toggles": {
       "detect_fvg": true,
       "detect_order_block": true,
@@ -42,72 +38,31 @@
     }
   },
   "smart_targets": {
-    "description": "Configuration pour le calcul dynamique du Stop Loss et Take Profit. Permet de choisir différentes méthodes de calcul pour le SL et le TP.",
+    "description": "Configuration pour le calcul dynamique du SL/TP, optimisée pour la haute volatilité des marchés crypto.",
     "enabled": true,
     "sl": {
       "method": "SWING",
-      "swing_lookback_period": 10,
-      "swing_buffer_pips": 2,
-      "fixed_pips": 4
+      "swing_lookback_period": 15,
+      "swing_buffer_pips": 10,
+      "fixed_pips": 20
     },
     "tp": {
       "method": "RR",
-      "rr_ratio": 1.5,
-      "fixed_pips": 8
+      "rr_ratio": 4.0,
+      "fixed_pips": 80
     }
   },
   "decision_rules": [
     {
-      "name": "Scalp Haute Prob: Comblement de FVG (Fair Value Gap)",
-      "description": "Règle d'entrée de haute probabilité pour exploiter le comblement de Fair Value Gaps (FVG) dans des phases d'expansion ou de retournement rapide.",
-      "priority": 0.8,
-      "conditions": {
-        "signal_must_contain": [
-          "fvg_detected"
-        ],
-        "phase_must_contain": [
-          "expansion",
-          "reversal"
-        ],
-        "min_confidence": 0.2
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "expansion_up",
-        "SELL": "expansion_down"
-      }
-    },
-    {
-      "name": "Scalp Moyenne Prob: Micro Rupture de Structure (BOS)",
-      "description": "Règle d'entrée sur micro-rupture de structure (Break of Structure - BOS) pour la continuation de tendance à court terme, typique des mouvements de scalping.",
-      "priority": 2,
-      "conditions": {
-        "signal_must_contain": [
-          "bos_mss_detected"
-        ],
-        "phase_must_contain": [
-          "expansion",
-          "scalp_burst"
-        ],
-        "min_confidence": 0.2
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "expansion_up",
-        "SELL": "expansion_down"
-      }
-    },
-    {
-      "name": "Scalp: Rejet sur Order Block M1/M5",
-      "description": "Règle d'entrée basée sur le rejet de prix sur un Order Block détecté sur des timeframes très courts (M1/M5), indiquant une zone de réaction institutionnelle.",
-      "priority": 3,
+      "name": "Haute Prob: Retournement Crypto sur Order Block",
+      "description": "Règle d'entrée de haute probabilité ciblant les retournements de tendance autour des Order Blocks validés, compte tenu de la forte impulsion des cryptos.",
+      "priority": 1,
       "conditions": {
         "signal_must_contain": [
           "order_block_detected"
         ],
         "phase_must_contain": [
-          "reversal",
-          "manipulation"
+          "reversal"
         ],
         "min_confidence": 0.2
       },
@@ -115,6 +70,44 @@
       "action_logic": {
         "BUY": "reversal_up",
         "SELL": "reversal_down"
+      }
+    },
+    {
+      "name": "Haute Prob: Prise de Liquidité (Liquidity Grab)",
+      "description": "Règle d'entrée basée sur la prise de liquidité (liquidity grab), souvent un signal de manipulation avant un mouvement directionnel important sur les cryptos.",
+      "priority": 2,
+      "conditions": {
+        "signal_must_contain": [
+          "liquidity_grab_detected"
+        ],
+        "phase_must_contain": [
+          "manipulation"
+        ],
+        "min_confidence": 0.3
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "manipulation_up",
+        "SELL": "manipulation_down"
+      }
+    },
+    {
+      "name": "Moyenne Prob: Continuation sur Expansion Forte",
+      "description": "Règle d'entrée ciblant la continuation de tendance après une phase d'expansion forte, capitalisant sur le momentum directionnel des cryptos.",
+      "priority": 3,
+      "conditions": {
+        "signal_must_contain": [
+          "bos_mss_detected"
+        ],
+        "phase_must_contain": [
+          "expansion"
+        ],
+        "min_confidence": 0.25
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "expansion_up",
+        "SELL": "expansion_down"
       }
     }
   ],

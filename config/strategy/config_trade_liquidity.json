@@ -60,7 +60,7 @@
     {
       "name": "TEST LIQUIDITY: Entrée sur Manipulation",
       "description": "Règle d'entrée de test ciblant les phases de manipulation du marché pour des mouvements rapides.",
-      "priority": 0,
+      "priority": 2,
       "conditions": {
         "phase_must_contain": [
           "manipulation_detected"
