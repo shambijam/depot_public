@@ -14,6 +14,7 @@
   ],
   "magic_number": 20202,
   "risk_per_trade_percent": 5,
+  "stop_loss_pips": 30,
   "max_daily_loss_percent": 1.8,
   "max_drawdown_percent": 5.0,
   "max_trades_per_day": 5,

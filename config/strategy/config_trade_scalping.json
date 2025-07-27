@@ -9,16 +9,17 @@
     "crypto"
   ],
   "tradeable_assets": [
-      "EURUSD",
-      "GBPUSD",
-      "USDCHF",
-      "XAUUSD",
-      "BTCUSD",
-      "ETHUSD",
-      "LTCUSD"
+    "EURUSD",
+    "GBPUSD",
+    "USDCHF",
+    "XAUUSD",
+    "BTCUSD",
+    "ETHUSD",
+    "LTCUSD"
   ],
   "magic_number": 30303,
   "risk_per_trade_percent": 2,
+  "stop_loss_pips": 10,
   "max_daily_loss_percent": 1.0,
   "max_drawdown_percent": 3.0,
   "max_trades_per_day": 15,
@@ -82,7 +83,7 @@
       "priority": 2,
       "conditions": {
         "signal_must_contain": [
-           "bos_mss_detected"
+          "bos_mss_detected"
         ],
         "phase_must_contain": [
           "expansion",

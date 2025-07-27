@@ -15,6 +15,7 @@
   ],
   "magic_number": 40404,
   "risk_per_trade_percent": 3,
+  "stop_loss_pips": 50,
   "max_daily_loss_percent": 3.0,
   "max_drawdown_percent": 7.0,
   "max_trades_per_day": 50,
