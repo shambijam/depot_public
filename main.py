@@ -197,19 +197,17 @@ def main(args: argparse.Namespace) -> None:
         main_config_file_name = config_manager.get("paths.main_config_file_name", "prod_config.json")
         config_file_path = config_dir_path / main_config_file_name
         
-        # Définir le chemin des stratégies AVANT l'appel
         strategy_configs_path = Path(config_manager.get("paths.strategy_configs", "config/strategy/"))
         
         config_manager.initialize_dynamic_config(
             template_path=str(config_file_path),
             output_path=str(config_file_path),
-            config_dir=str(strategy_configs_path) # <-- CORRECTION : Argument manquant ajouté ici
+            config_dir=str(strategy_configs_path)
         )
 
         # --- Étape B : Créer et Assembler toutes les "Briques" dans le bon ordre ---
         logger.info("Assemblage des modules principaux de l'application...")
 
-        # Modules fondamentaux
         audit_logger = AuditLogger(config_manager_instance=config_manager)
         mt5_connector = MT5Connector()
         
@@ -219,7 +217,6 @@ def main(args: argparse.Namespace) -> None:
         )
         strategy_manager.initialize_strategies()
 
-        # Modules IA
         models_dir = config_manager.get("paths.models", "models/")
         ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
         ai_decision = AIDecision(
@@ -228,7 +225,6 @@ def main(args: argparse.Namespace) -> None:
         )
         ai_interface = AIInterface(config_manager_instance=config_manager, ai_decision_instance=ai_decision)
 
-        # Modules de Trading et d'Analyse
         decision_pipeline = DecisionPipeline(
             config_manager_instance=config_manager,
             ai_interface_instance=ai_interface,
@@ -238,8 +234,7 @@ def main(args: argparse.Namespace) -> None:
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
         
-        # Injection des dépendances finales
-        config_manager.ai_decision_instance = ai_decision # Assigner l'instance AI au ConfigManager
+        config_manager.ai_decision_instance = ai_decision
 
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode = args.mode.upper() if args.mode else config_manager.get("mode_execution", "DEMO").upper()
@@ -284,7 +279,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                decision_pipeline,
+                decision_pipeline, # <-- CORRECTION : On passe maintenant le decision_pipeline
                 trade_executor,
                 config_manager,
                 mecano,
