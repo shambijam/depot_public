@@ -1675,7 +1675,19 @@ class ConfigManager:
         self.logger.info(
             f"LOG DÉCISION: {reason} | Actif: {trade_decision.get('asset', 'N/A')} | Action: {trade_decision.get('action', 'N/A')}"
         )
-        self._audit_trail.append(decision_log_entry)
+        # CORRECTION : Déléguer l'enregistrement à l'AuditLogger
+        if hasattr(self, 'audit_logger') and self.audit_logger is not None:
+            self.audit_logger.log_config_change( # Cette méthode log_config_change prend un change_info, une source et un snapshot.
+                                                # Elle est utilisée pour les changements de config, mais peut être adaptée ou
+                                                # une nouvelle méthode 'log_decision_event' pourrait être créée dans AuditLogger.
+                                                # Pour l'instant, nous l'adaptons pour utiliser log_config_change.
+                change_info=decision_log_entry, # On passe toute l'entrée comme 'change_info'
+                source="decision_pipeline_log",
+                dynamic_config_snapshot=config.copy() # Le snapshot de la config au moment de la décision
+            )
+            self.logger.debug("Décision de trade transmise à l'AuditLogger.")
+        else:
+            self.logger.critical("ConfigManager ne peut pas loguer la décision : AuditLogger non initialisé. La décision n'est pas enregistrée dans l'audit trail.")
 
     def send_alert(self, message: str, alert_type: str = "telegram_critical") -> None:
         """
