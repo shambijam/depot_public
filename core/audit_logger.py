@@ -155,6 +155,55 @@ class AuditLogger:
         self.logger.info(f"{len(history_df)} entrées retournées de l'historique de configuration.")
         return history_df
 
+    def queue_or_send_alert(self, message: str, alert_type: str) -> None:
+        """
+        Met en file d'attente ou envoie immédiatement une alerte, selon le type.
+        Cette méthode centralise la logique d'envoi d'alertes vers des services externes (ex: Telegram).
+
+        Args:
+            message (str): Le message de l'alerte.
+            alert_type (str): Le type de l'alerte (ex: 'telegram_critical', 'telegram_market_phase').
+        """
+        self.logger.debug(f"AuditLogger reçu alerte de type '{alert_type}': {message[:100]}...")
+
+        if not self.config_manager:
+            self.logger.warning("AuditLogger ne peut pas envoyer d'alertes : ConfigManager n'est pas lié.")
+            return
+
+        telegram_config = self.config_manager.get("telegram", {}) # Récupère la config Telegram complète
+        telegram_enabled = telegram_config.get("enabled", False)
+        
+        if not telegram_enabled:
+            self.logger.debug(f"Alerte de type '{alert_type}' ignorée : Telegram est désactivé dans la configuration.")
+            return
+
+        channels = telegram_config.get("channels", {})
+        target_channel_id = channels.get(alert_type) # Ex: "telegram_critical" -> "YOUR_CRITICAL_CHAT_ID"
+
+        if not target_channel_id:
+            self.logger.warning(f"Aucun ID de canal Telegram configuré pour le type d'alerte '{alert_type}'. Alerte non envoyée.")
+            return
+
+        # Ici, la logique réelle d'envoi à Telegram doit être implémentée.
+        # Pour l'instant, c'est un placeholder.
+        # Vous devrez connecter ceci à un module d'envoi Telegram réel.
+        try:
+            # Exemple de placeholder pour l'envoi (vous devrez remplacer ceci par l'intégration Telegram réelle)
+            # if self.telegram_sender_instance: # Si vous aviez une instance d'un client Telegram ici
+            #    self.telegram_sender_instance.send_message(target_channel_id, message, parse_mode=telegram_config.get("parse_mode", "Markdown"))
+            self.logger.info(f"Alerte envoyée (simulée) vers Telegram Channel ID '{target_channel_id}' pour type '{alert_type}'. Message: {message[:100]}...")
+            # Si c'est une alerte immédiate, ne pas la mettre en file
+            if alert_type in telegram_config.get("immediate_alert_types", []):
+                # Envoyer immédiatement
+                pass # L'envoi réel irait ici
+            else:
+                # Mettre en file pour un résumé périodique (si implémenté)
+                pass # La mise en file irait ici
+
+        except Exception as e:
+            self.logger.error(f"Échec de l'envoi de l'alerte Telegram pour le type '{alert_type}': {e}", exc_info=True)
+
+
     def _rotate_backups(self, backup_dir: Path, max_backups: int) -> None:
         """
         Gère la rotation des backups pour éviter l'accumulation de fichiers.
@@ -179,7 +228,7 @@ class AuditLogger:
         except Exception as e:
             self.logger.error(f"Erreur lors de la rotation des backups dans {backup_dir}: {e}", exc_info=True)
             if self.config_manager: # Tenter d'envoyer une alerte si config_manager est dispo
-                self.config_manager.send_alert(
+                self.config_manager.send_alert( # L'appel send_alert est maintenant géré par la nouvelle méthode dans ConfigManager
                     "CRITIQUE",
                     f"Échec rotation backups: {e}",
                     alert_type="telegram_critical",

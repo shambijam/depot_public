@@ -267,8 +267,30 @@ class ConfigManager:
         if not Path(template_path).exists():
             raise FileNotFoundError(f"Fichier de configuration de base introuvable: {template_path}")
 
+        # Les schémas qui sont censés exister dans config/schemas/
+        # Si un schéma n'existe pas, l'appel à load_dynamic_config ne spécifiera pas schema_name
+        # ce qui permettra à ConfigLoader de loguer un avertissement au lieu d'une erreur fatale.
+        known_schemas_in_schemas_dir = {
+            "main_app_schema.json",
+            "broker_accounts_schema.json",
+            "phase_observer_config_schema.json",
+            "telegram_config_schema.json",
+            "strategy_schema.json"
+        }
+        
         try:
-            base_config = self.config_loader.load_dynamic_config(template_path, schema_name="main_app_schema.json")
+            # Pour prod_config.json, nous ne spécifions pas de schéma si main_app_schema.json n'existe pas.
+            # ConfigLoader.validate_config déterminera si un schéma de ce type est censé exister,
+            # ou loguera un avertissement s'il ne le trouve pas.
+            prod_config_schema_name = "main_app_schema.json"
+            prod_config_schema_path = Path("config") / "schemas" / prod_config_schema_name
+            
+            if prod_config_schema_path.is_file():
+                base_config = self.config_loader.load_dynamic_config(template_path, schema_name=prod_config_schema_name)
+            else:
+                self.logger.warning(f"Schéma '{prod_config_schema_name}' non trouvé à '{prod_config_schema_path}'. Chargement de {template_path} sans validation de schéma explicite.")
+                base_config = self.config_loader.load_dynamic_config(template_path) # Appel sans schema_name
+                
             self._dynamic_config = base_config
             self._dynamic_config_path = output_path
             self.logger.debug(f"DEBUG_INIT_CONFIG_1: _dynamic_config après chargement base_config (prod_config): {self._dynamic_config.get('strategies', {}).get('default_strategy', 'N/A')} - has strategy_name: {'strategy_name' in self._dynamic_config}")
@@ -280,13 +302,20 @@ class ConfigManager:
             "paths.phase_observer_config": "phase_observer_config_schema.json",
             "paths.telegram_config": "telegram_config_schema.json"
         }
-        for config_key, schema_name in configs_to_load.items():
+        for config_key, schema_file_name in configs_to_load.items():
             config_file_path_str = self.get(config_key)
             if config_file_path_str:
                 config_file_path = Path(config_file_path_str)
                 if config_file_path.exists():
                     try:
-                        supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path), schema_name=schema_name)
+                        # Vérifie si le fichier de schéma existe avant de le spécifier
+                        schema_path_for_module = Path("config") / "schemas" / schema_file_name
+                        if schema_path_for_module.is_file():
+                            supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path), schema_name=schema_file_name)
+                        else:
+                            self.logger.warning(f"Schéma '{schema_file_name}' non trouvé à '{schema_path_for_module}'. Chargement de {config_file_path.name} sans validation de schéma explicite.")
+                            supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path)) # Appel sans schema_name
+                            
                         self._dynamic_config = self._merge_dicts(self._dynamic_config, supplemental_config)
                         self.logger.info(f"Configuration modulaire '{config_file_path.name}' chargée et fusionnée.")
                     except Exception as e:
@@ -1474,6 +1503,35 @@ class ConfigManager:
             f"LOG DÉCISION: {reason} | Actif: {trade_decision.get('asset', 'N/A')} | Action: {trade_decision.get('action', 'N/A')}"
         )
         self._audit_trail.append(decision_log_entry)
+
+    def send_alert(self, message: str, alert_type: str = "telegram_critical") -> None:
+        """
+        Envoie une alerte via le système d'alerte configuré (par ex. Telegram).
+        Cette méthode délègue l'envoi réel à l'AuditLogger ou à un module de notification dédié.
+        Elle est un point central pour toutes les alertes du système.
+
+        Args:
+            message (str): Le contenu du message d'alerte.
+            alert_type (str): Le type d'alerte (ex: 'telegram_critical', 'telegram_trade_confirmed').
+                            Utilisé pour déterminer le canal ou le traitement spécifique.
+        """
+        self.logger.info(f"Tentative d'envoi d'alerte de type '{alert_type}' : {message[:100]}...") # Log les 100 premiers caractères
+
+        if hasattr(self, 'audit_logger') and self.audit_logger is not None:
+            # L'AuditLogger aura la logique d'envoi réelle (ex: vers Telegram)
+            # Nous assumons que AuditLogger a une méthode pour gérer l'envoi d'alertes.
+            # Si AuditLogger n'a pas encore de méthode 'send_telegram_alert' ou similaire,
+            # il faudra l'ajouter à AuditLogger dans une étape ultérieure.
+            try:
+                # Ici, nous appelons une méthode générique de l'AuditLogger pour gérer l'alerte.
+                # L'AuditLogger devra être étendu pour router ces alertes vers les bons canaux (ex: Telegram).
+                self.audit_logger.queue_or_send_alert(message, alert_type)
+                self.logger.debug(f"Alerte '{alert_type}' transmise à l'AuditLogger.")
+            except Exception as e:
+                self.logger.error(f"Échec de la transmission de l'alerte à l'AuditLogger: {e}", exc_info=True)
+        else:
+            self.logger.critical("ConfigManager ne peut pas envoyer d'alerte : AuditLogger non initialisé.")
+
 
     def _generate_report_header(self, report_date: datetime) -> List[str]:
         """
