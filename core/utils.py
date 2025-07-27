@@ -3,12 +3,20 @@
 import json
 from datetime import datetime
 import pandas as pd
-from typing import Dict, Any, List # Importations nécessaires
+from typing import Dict, Any, List
+from enum import Enum # Importation nécessaire pour les Énumérations
 
 # Définition de l'exception ConfigValidationError
 class ConfigValidationError(ValueError):
     """Exception levée lorsqu'une validation de configuration échoue."""
     pass
+
+# Définition de l'énumération TradeStatus
+class TradeStatus(Enum):
+    """Énumération pour standardiser les statuts de résultat de trade."""
+    PROFIT = "PROFIT"
+    LOSS = "LOSS"
+    BREAKEVEN = "BREAKEVEN"
 
 class CustomJSONEncoder(json.JSONEncoder):
     """

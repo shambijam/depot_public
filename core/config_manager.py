@@ -14,31 +14,23 @@ import re
 import uuid
 import requests
 import time
-from enum import Enum
 from collections import deque
 from pathlib import Path
 from datetime import datetime, UTC, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING # TYPE_CHECKING est déjà là
 from functools import lru_cache
-
-# Importation des modules refactorisés
 from core.config_loader import ConfigLoader
 from core.ai_interface import AIInterface
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
 from core.decision_pipeline import DecisionPipeline
-from core.utils import CustomJSONEncoder, get_diff, ConfigValidationError # NOUVEL IMPORT DEPUIS UTILS
+from core.utils import CustomJSONEncoder, get_diff, ConfigValidationError, TradeStatus # NOUVEL IMPORT DEPUIS UTILS
+
+# Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
+if TYPE_CHECKING:
+    from core.config_manager import ConfigManager # Importation uniquement pour les hints de type
 
 logger = logging.getLogger(__name__)
-
-# --- Définitions et Énumérations du Module ---
-
-class TradeStatus(Enum):
-    """Énumération pour standardiser les statuts de résultat de trade."""
-    PROFIT = "PROFIT"
-    LOSS = "LOSS"
-    BREAKEVEN = "BREAKEVEN"
-
 class ConfigManager:
     """
     Module Singleton central pour la gestion de la configuration et l'orchestration de SNIPER_X.
