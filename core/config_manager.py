@@ -17,25 +17,42 @@ import time
 from collections import deque
 from pathlib import Path
 from datetime import datetime, UTC, timedelta
-from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING # TYPE_CHECKING est déjà là
+from typing import (
+    Dict,
+    Any,
+    List,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+)  # TYPE_CHECKING est déjà là
 from functools import lru_cache
 from core.config_loader import ConfigLoader
 from core.ai_interface import AIInterface
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
 from core.decision_pipeline import DecisionPipeline
-from core.utils import CustomJSONEncoder, get_diff, ConfigValidationError, TradeStatus # NOUVEL IMPORT DEPUIS UTILS
+from core.utils import (
+    CustomJSONEncoder,
+    get_diff,
+    ConfigValidationError,
+    TradeStatus,
+)  # NOUVEL IMPORT DEPUIS UTILS
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
-    from core.config_manager import ConfigManager # Importation uniquement pour les hints de type
+    from core.config_manager import (
+        ConfigManager,
+    )  # Importation uniquement pour les hints de type
 
 logger = logging.getLogger(__name__)
+
+
 class ConfigManager:
     """
     Module Singleton central pour la gestion de la configuration et l'orchestration de SNIPER_X.
     Il orchestre les interactions entre les modules spécialisés de gestion de la configuration.
     """
+
     _instance: Optional["ConfigManager"] = None
     _initialized: bool = False
 
@@ -62,15 +79,24 @@ class ConfigManager:
         # Instanciation des dépendances. ConfigManager les orchestre.
         self.config_loader = ConfigLoader(config_manager_instance=self)
         self.audit_logger = AuditLogger(config_manager_instance=self)
-        self.ai_interface = AIInterface(config_manager_instance=self) # AIDecision sera injecté plus tard
-        self.strategy_manager = StrategyManager(config_loader_instance=self.config_loader, config_manager_instance=self)
-        self.decision_pipeline = DecisionPipeline(config_manager_instance=self, ai_interface_instance=self.ai_interface, strategy_manager_instance=self.strategy_manager)
-
+        self.ai_interface = AIInterface(
+            config_manager_instance=self
+        )  # AIDecision sera injecté plus tard
+        self.strategy_manager = StrategyManager(
+            config_loader_instance=self.config_loader, config_manager_instance=self
+        )
+        self.decision_pipeline = DecisionPipeline(
+            config_manager_instance=self,
+            ai_interface_instance=self.ai_interface,
+            strategy_manager_instance=self.strategy_manager,
+        )
 
         # Chargement des configurations de base immuables (variables d'environnement et comptes brokers)
         base_configs = self.config_loader.load_base_configs()
         self._config = base_configs
-        self._broker_accounts_config = base_configs.get("_broker_accounts_config", {"accounts": []})
+        self._broker_accounts_config = base_configs.get(
+            "_broker_accounts_config", {"accounts": []}
+        )
 
         # --- Définir le niveau du logger du ConfigManager (sera affiné après initialize_dynamic_config) ---
         log_level_str = self.get("log_level", "INFO").upper()
@@ -81,7 +107,6 @@ class ConfigManager:
 
         self._initialized = True
         self.logger.info("ConfigManager initialisé avec succès (Singleton).")
-
 
     def _reset_session_state(self) -> None:
         """
@@ -103,7 +128,6 @@ class ConfigManager:
             "critical_events": [],
         }
         # Les caches sont maintenant gérés par les modules dédiés.
-
 
     def get_mt5_account_credentials(
         self, account_id: Optional[str] = None, mode: Optional[str] = None
@@ -254,7 +278,6 @@ class ConfigManager:
             return current_level["value"]
         return current_level
 
-
     def initialize_dynamic_config(
         self, template_path: str, output_path: str, config_dir: str
     ) -> None:
@@ -263,35 +286,48 @@ class ConfigManager:
         les configurations modulaires (PhaseObserver, Telegram), et la stratégie par défaut.
         Délègue le chargement et la validation à ConfigLoader.
         """
-        self.logger.info(f"Initialisation de la configuration dynamique depuis '{template_path}'...")
+        self.logger.info(
+            f"Initialisation de la configuration dynamique depuis '{template_path}'..."
+        )
         if not Path(template_path).exists():
-            raise FileNotFoundError(f"Fichier de configuration de base introuvable: {template_path}")
+            raise FileNotFoundError(
+                f"Fichier de configuration de base introuvable: {template_path}"
+            )
 
         # Liste des noms de schémas qui sont censés exister dans config/schemas/
         # et pour lesquels la validation sera tentée.
         # Basé sur votre arborescence, seul strategy_schema.json y est.
         # Les autres schémas ne sont pas présents dans config/schemas/ et ne seront donc pas passés explicitement.
         existing_schemas_in_schemas_dir = {
-            "strategy_schema.json" # Seul celui-ci est dans config/schemas/ selon votre arborescence.
+            "strategy_schema.json"  # Seul celui-ci est dans config/schemas/ selon votre arborescence.
         }
-        
+
         try:
             # Pour prod_config.json, nous ne spécifions PAS de schema_name
             # car main_app_schema.json n'existe pas dans config/schemas/.
             # ConfigLoader.validate_config gérera cela en loguant un avertissement.
-            self.logger.info(f"Chargement de {template_path} sans validation de schéma explicite (schéma main_app_schema.json non trouvé).")
-            base_config = self.config_loader.load_dynamic_config(template_path) # Appel SANS schema_name
-                
+            self.logger.info(
+                f"Chargement de {template_path} sans validation de schéma explicite (schéma main_app_schema.json non trouvé)."
+            )
+            base_config = self.config_loader.load_dynamic_config(
+                template_path
+            )  # Appel SANS schema_name
+
             self._dynamic_config = base_config
             self._dynamic_config_path = output_path
-            self.logger.debug(f"DEBUG_INIT_CONFIG_1: _dynamic_config après chargement base_config (prod_config): {self._dynamic_config.get('strategies', {}).get('default_strategy', 'N/A')} - has strategy_name: {'strategy_name' in self._dynamic_config}")
+            self.logger.debug(
+                f"DEBUG_INIT_CONFIG_1: _dynamic_config après chargement base_config (prod_config): {self._dynamic_config.get('strategies', {}).get('default_strategy', 'N/A')} - has strategy_name: {'strategy_name' in self._dynamic_config}"
+            )
         except Exception as e:
-            self.logger.critical(f"Échec du chargement du fichier de base '{template_path}': {e}", exc_info=True)
+            self.logger.critical(
+                f"Échec du chargement du fichier de base '{template_path}': {e}",
+                exc_info=True,
+            )
             raise
 
         configs_to_load = {
-            "paths.phase_observer_config": "phase_observer_config_schema.json", # Le schéma n'est pas dans config/schemas/
-            "paths.telegram_config": "telegram_config_schema.json" # Le schéma n'est pas dans config/schemas/
+            "paths.phase_observer_config": "phase_observer_config_schema.json",  # Le schéma n'est pas dans config/schemas/
+            "paths.telegram_config": "telegram_config_schema.json",  # Le schéma n'est pas dans config/schemas/
         }
         for config_key, schema_file_name in configs_to_load.items():
             config_file_path_str = self.get(config_key)
@@ -302,15 +338,28 @@ class ConfigManager:
                         # Pour phase_observer_config.json et telegram_config.json,
                         # nous ne spécifions PAS de schema_name.
                         # ConfigLoader.validate_config gérera cela en loguant un avertissement.
-                        self.logger.info(f"Chargement de {config_file_path.name} sans validation de schéma explicite (schéma {schema_file_name} non trouvé).")
-                        supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path)) # Appel SANS schema_name
-                            
-                        self._dynamic_config = self._merge_dicts(self._dynamic_config, supplemental_config)
-                        self.logger.info(f"Configuration modulaire '{config_file_path.name}' chargée et fusionnée.")
+                        self.logger.info(
+                            f"Chargement de {config_file_path.name} sans validation de schéma explicite (schéma {schema_file_name} non trouvé)."
+                        )
+                        supplemental_config = self.config_loader.load_dynamic_config(
+                            str(config_file_path)
+                        )  # Appel SANS schema_name
+
+                        self._dynamic_config = self._merge_dicts(
+                            self._dynamic_config, supplemental_config
+                        )
+                        self.logger.info(
+                            f"Configuration modulaire '{config_file_path.name}' chargée et fusionnée."
+                        )
                     except Exception as e:
-                        self.logger.error(f"Erreur lors du chargement ou de la fusion de '{config_file_path.name}': {e}", exc_info=True)
+                        self.logger.error(
+                            f"Erreur lors du chargement ou de la fusion de '{config_file_path.name}': {e}",
+                            exc_info=True,
+                        )
                 else:
-                    self.logger.warning(f"Fichier de configuration modulaire non trouvé : '{config_file_path_str}'.")
+                    self.logger.warning(
+                        f"Fichier de configuration modulaire non trouvé : '{config_file_path_str}'."
+                    )
 
         if self.get("app.save_on_initial_load", False):
             self.audit_logger.save_dynamic_config(
@@ -323,65 +372,91 @@ class ConfigManager:
 
         # Les stratégies sont maintenant chargées par StrategyManager lors de son initialisation (dans __init__).
 
-        self.logger.debug(f"DEBUG_INIT_CONFIG_3: _dynamic_config après chargement des modules de config: has strategy_name: {'strategy_name' in self._dynamic_config}, strategy_name: {self._dynamic_config.get('strategy_name', 'N/A')}")
+        self.logger.debug(
+            f"DEBUG_INIT_CONFIG_3: _dynamic_config après chargement des modules de config: has strategy_name: {'strategy_name' in self._dynamic_config}, strategy_name: {self._dynamic_config.get('strategy_name', 'N/A')}"
+        )
 
         log_level_str_final = self.get("log_level", "INFO").upper()
         self.logger.setLevel(getattr(logging, log_level_str_final, logging.INFO))
-        self.logger.info("Configuration dynamique entièrement initialisée et fusionnée.")
+        self.logger.info(
+            "Configuration dynamique entièrement initialisée et fusionnée."
+        )
 
-    def _merge_dicts(self, base_dict: Dict[str, Any], new_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_dicts(
+        self, base_dict: Dict[str, Any], new_dict: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Fusionne récursivement deux dictionnaires (deep merge).
         Les valeurs de `new_dict` écrasent celles de `base_dict`. Si une clé
         contient un dictionnaire dans les deux, ils sont fusionnés récursivement.
         """
         for k, v in new_dict.items():
-            self.logger.debug(f"DEBUG_MERGE: Fusion de clé '{k}'. Dans base_dict: {k in base_dict}, Type base: {type(base_dict.get(k))}, Type nouveau: {type(v)}")
-            if k in base_dict and isinstance(base_dict[k], dict) and isinstance(v, dict):
+            self.logger.debug(
+                f"DEBUG_MERGE: Fusion de clé '{k}'. Dans base_dict: {k in base_dict}, Type base: {type(base_dict.get(k))}, Type nouveau: {type(v)}"
+            )
+            if (
+                k in base_dict
+                and isinstance(base_dict[k], dict)
+                and isinstance(v, dict)
+            ):
                 base_dict[k] = self._merge_dicts(base_dict[k], v)
             else:
                 base_dict[k] = v
-        self.logger.debug(f"DEBUG_MERGE: Fusion terminée. Resultat base_dict has strategy_name: {'strategy_name' in base_dict}, strategy_name: {base_dict.get('strategy_name', 'N/A')}")
+        self.logger.debug(
+            f"DEBUG_MERGE: Fusion terminée. Resultat base_dict has strategy_name: {'strategy_name' in base_dict}, strategy_name: {base_dict.get('strategy_name', 'N/A')}"
+        )
         return base_dict
 
-    def update_dynamic_config(self, updates: Dict[str, Any], source: str = "bot_ai") -> None:
+    def update_dynamic_config(
+        self, updates: Dict[str, Any], source: str = "bot_ai"
+    ) -> None:
         """
         Met à jour la configuration dynamique en mémoire avec de nouvelles valeurs via une fusion profonde,
         valide le résultat, puis le sauvegarde de manière atomique.
         """
         target_path = self._dynamic_config_path
         if not target_path:
-            raise ValueError("Le chemin de la configuration dynamique n'est pas défini. Impossible de mettre à jour.")
+            raise ValueError(
+                "Le chemin de la configuration dynamique n'est pas défini. Impossible de mettre à jour."
+            )
 
         old_config = self.get_current_dynamic_config()
 
         new_config = self._merge_dicts(old_config, updates)
 
         try:
-            self.config_loader.validate_config(new_config, schema_name="main_app_schema.json")
+            self.config_loader.validate_config(
+                new_config, schema_name="main_app_schema.json"
+            )
             self._dynamic_config = new_config
 
             backup_on_update = self.get("app.backup_on_update", False)
             self.audit_logger.save_dynamic_config(
-                self._dynamic_config,
-                target_path,
-                backup=backup_on_update
+                self._dynamic_config, target_path, backup=backup_on_update
             )
 
-            change_info = get_diff(old_config, new_config) # Utilise get_diff de core.utils
+            change_info = get_diff(
+                old_config, new_config
+            )  # Utilise get_diff de core.utils
             self.audit_logger.log_config_change(
                 {"action": "update", "updates": change_info},
                 source=source,
-                dynamic_config_snapshot=self._dynamic_config.copy()
+                dynamic_config_snapshot=self._dynamic_config.copy(),
             )
-            self.logger.info(f"Configuration dynamique mise à jour avec succès par '{source}'.")
+            self.logger.info(
+                f"Configuration dynamique mise à jour avec succès par '{source}'."
+            )
         except ConfigValidationError as e:
-            self.logger.warning(f"La mise à jour de la configuration a échoué à la validation : {e}. Les changements ne sont pas appliqués.")
+            self.logger.warning(
+                f"La mise à jour de la configuration a échoué à la validation : {e}. Les changements ne sont pas appliqués."
+            )
             raise
         except Exception as e:
-            self.logger.error(f"Erreur lors de la mise à jour de la configuration dynamique : {e}", exc_info=True)
+            self.logger.error(
+                f"Erreur lors de la mise à jour de la configuration dynamique : {e}",
+                exc_info=True,
+            )
             raise
-
 
     # --- Section 4: Arbitrage & Décision Institutionnelle ---
 
@@ -404,9 +479,13 @@ class ConfigManager:
 
         analyzed_context["is_trading_hours"] = start_hour <= current_hour_utc < end_hour
         analyzed_context["is_trading_day"] = current_weekday in allowed_weekdays
-        analyzed_context["is_market_open"] = analyzed_context["is_trading_hours"] and analyzed_context["is_trading_day"]
+        analyzed_context["is_market_open"] = (
+            analyzed_context["is_trading_hours"] and analyzed_context["is_trading_day"]
+        )
 
-        analyzed_context["market_volatility_index"] = context.get("vix_index", default_vix)
+        analyzed_context["market_volatility_index"] = context.get(
+            "vix_index", default_vix
+        )
 
         current_mt5_login_numeric = context.get("account_info", {}).get("login")
         active_broker_account_details = None
@@ -414,34 +493,53 @@ class ConfigManager:
         if current_mt5_login_numeric:
             try:
                 for account in self._broker_accounts_config.get("accounts", []):
-                    login_value_from_env = self._config.get("env_vars", {}).get(account.get("login_env_var"))
-                    if login_value_from_env and int(login_value_from_env) == current_mt5_login_numeric:
-                        active_broker_account_details = self.get_mt5_account_credentials(
-                            account_id=account.get("account_id")
+                    login_value_from_env = self._config.get("env_vars", {}).get(
+                        account.get("login_env_var")
+                    )
+                    if (
+                        login_value_from_env
+                        and int(login_value_from_env) == current_mt5_login_numeric
+                    ):
+                        active_broker_account_details = (
+                            self.get_mt5_account_credentials(
+                                account_id=account.get("account_id")
+                            )
                         )
                         break
 
                 if active_broker_account_details:
-                    analyzed_context["active_broker_account"] = active_broker_account_details
-                    self.logger.debug(f"Contexte enrichi avec les détails du compte broker actif : {active_broker_account_details.get('account_id')}.")
+                    analyzed_context["active_broker_account"] = (
+                        active_broker_account_details
+                    )
+                    self.logger.debug(
+                        f"Contexte enrichi avec les détails du compte broker actif : {active_broker_account_details.get('account_id')}."
+                    )
                 else:
-                    self.logger.warning(f"Détails du compte broker (Login MT5: {current_mt5_login_numeric}) introuvables ou inactifs dans 'broker_accounts.json'. Contexte non enrichi avec ces détails.")
+                    self.logger.warning(
+                        f"Détails du compte broker (Login MT5: {current_mt5_login_numeric}) introuvables ou inactifs dans 'broker_accounts.json'. Contexte non enrichi avec ces détails."
+                    )
             except (ValueError, RuntimeError) as e:
-                self.logger.error(f"Erreur lors de la récupération des détails du compte broker actif (Login MT5: {current_mt5_login_numeric}): {e}", exc_info=True)
+                self.logger.error(
+                    f"Erreur lors de la récupération des détails du compte broker actif (Login MT5: {current_mt5_login_numeric}): {e}",
+                    exc_info=True,
+                )
                 analyzed_context["active_broker_account"] = {"error": str(e)}
         else:
-            self.logger.debug("Aucun ID de compte MT5 actif dans le contexte pour récupérer les détails du compte broker.")
+            self.logger.debug(
+                "Aucun ID de compte MT5 actif dans le contexte pour récupérer les détails du compte broker."
+            )
 
         all_assets_market_data_from_context = context.get("market_data", {})
         analyzed_context["current_market_regime"] = self.detect_market_regime(
             analyzed_context, all_assets_market_data_from_context
         )
 
-
         self.logger.debug(f"Analyse du contexte terminée.")
         return analyzed_context
 
-    def detect_market_regime(self, context: Dict[str, Any], data: Dict[str, Any]) -> str:
+    def detect_market_regime(
+        self, context: Dict[str, Any], data: Dict[str, Any]
+    ) -> str:
         """
         Détecte le régime de marché actuel en agrégeant les signaux de tous les actifs pertinents
         pour obtenir une vue consensuelle et robuste de l'état du marché.
@@ -452,26 +550,41 @@ class ConfigManager:
         asset_insights = []
 
         if not data:
-            self.logger.warning("Le dictionnaire de données est vide. Régime de marché indéterminé.")
+            self.logger.warning(
+                "Le dictionnaire de données est vide. Régime de marché indéterminé."
+            )
             return "uncertain_no_data_input"
 
         for asset_symbol, asset_data_dict in data.items():
-            if isinstance(asset_data_dict, dict) and "annotated_rates_df" in asset_data_dict:
+            if (
+                isinstance(asset_data_dict, dict)
+                and "annotated_rates_df" in asset_data_dict
+            ):
                 df = asset_data_dict.get("annotated_rates_df")
-                if isinstance(df, pd.DataFrame) and not df.empty and len(df) >= min_data_points:
+                if (
+                    isinstance(df, pd.DataFrame)
+                    and not df.empty
+                    and len(df) >= min_data_points
+                ):
                     last_row = df.iloc[-1]
-                    asset_insights.append({
-                        "symbol": asset_symbol,
-                        "phase": last_row.get("phase", "neutral"),
-                        "confidence": last_row.get("confidence_score", 0.0), # Garder la confiance ici pour l'analyse du régime
-                        "trend": last_row.get("trend", "neutral"),
-                        "volume_momentum": last_row.get("volume_momentum", 0.0),
-                        "bos_mss_detected": last_row.get("bos_mss_detected", False),
-                        "df": df, # Garder le DataFrame pour le calcul de volatilité
-                    })
+                    asset_insights.append(
+                        {
+                            "symbol": asset_symbol,
+                            "phase": last_row.get("phase", "neutral"),
+                            "confidence": last_row.get(
+                                "confidence_score", 0.0
+                            ),  # Garder la confiance ici pour l'analyse du régime
+                            "trend": last_row.get("trend", "neutral"),
+                            "volume_momentum": last_row.get("volume_momentum", 0.0),
+                            "bos_mss_detected": last_row.get("bos_mss_detected", False),
+                            "df": df,  # Garder le DataFrame pour le calcul de volatilité
+                        }
+                    )
 
         if not asset_insights:
-            self.logger.warning("Aucun actif avec des données suffisantes pour déterminer le régime de marché.")
+            self.logger.warning(
+                "Aucun actif avec des données suffisantes pour déterminer le régime de marché."
+            )
             return "uncertain_no_valid_data"
 
         try:
@@ -481,27 +594,37 @@ class ConfigManager:
 
             dominant_phase = max(set(phase_votes), key=phase_votes.count)
 
-            avg_confidence = np.mean([insight["confidence"] for insight in asset_insights])
+            avg_confidence = np.mean(
+                [insight["confidence"] for insight in asset_insights]
+            )
 
             volatility_percentages = []
             atr_period = self.get("market_regime_detection.atr_period", 14)
             for insight in asset_insights:
                 df = insight["df"]
                 if len(df) >= atr_period:
-                    tr = pd.DataFrame({
-                        "tr1": df["high"] - df["low"],
-                        "tr2": abs(df["high"] - df["close"].shift(1)),
-                        "tr3": abs(df["low"] - df["close"].shift(1)),
-                    }).max(axis=1)
+                    tr = pd.DataFrame(
+                        {
+                            "tr1": df["high"] - df["low"],
+                            "tr2": abs(df["high"] - df["close"].shift(1)),
+                            "tr3": abs(df["low"] - df["close"].shift(1)),
+                        }
+                    ).max(axis=1)
                     atr = tr.rolling(window=atr_period).mean().iloc[-1]
                     current_price = df["close"].iloc[-1]
                     if current_price > 0:
                         volatility_percentages.append((atr / current_price) * 100)
 
-            avg_volatility_percent = np.mean(volatility_percentages) if volatility_percentages else 0.0
+            avg_volatility_percent = (
+                np.mean(volatility_percentages) if volatility_percentages else 0.0
+            )
 
-            high_vol_threshold = self.get("market_regime_detection.high_volatility_percent_threshold", 0.5)
-            low_vol_threshold = self.get("market_regime_detection.low_volatility_percent_threshold", 0.1)
+            high_vol_threshold = self.get(
+                "market_regime_detection.high_volatility_percent_threshold", 0.5
+            )
+            low_vol_threshold = self.get(
+                "market_regime_detection.low_volatility_percent_threshold", 0.1
+            )
 
             if avg_volatility_percent > high_vol_threshold:
                 volatility_level = "high_volatility"
@@ -512,9 +635,15 @@ class ConfigManager:
 
             detected_regime = f"{dominant_phase}_{volatility_level}"
 
-            self.logger.info(f"Régime de marché par consensus : {detected_regime} (basé sur {len(asset_insights)} actifs, Volatilité moyenne: {avg_volatility_percent:.2f}%)")
+            self.logger.info(
+                f"Régime de marché par consensus : {detected_regime} (basé sur {len(asset_insights)} actifs, Volatilité moyenne: {avg_volatility_percent:.2f}%)"
+            )
 
-            if self._last_market_regime and self._last_market_regime != detected_regime and self.get("telegram.channels.telegram_market_phase", False):
+            if (
+                self._last_market_regime
+                and self._last_market_regime != detected_regime
+                and self.get("telegram.channels.telegram_market_phase", False)
+            ):
                 message = (
                     f"🚨 **Changement de Régime de Marché**\n"
                     f"Ancien: `{self._last_market_regime}`\n"
@@ -526,11 +655,13 @@ class ConfigManager:
             return detected_regime
 
         except Exception as e:
-            self.logger.critical(f"ERREUR CRITIQUE lors du calcul du régime de marché par consensus: {e}", exc_info=True)
+            self.logger.critical(
+                f"ERREUR CRITIQUE lors du calcul du régime de marché par consensus: {e}",
+                exc_info=True,
+            )
             self.send_alert(f"CRITIQUE: Échec calcul régime: {e}", "telegram_critical")
             self._last_market_regime = "uncertain_calculation_failed"
             return "uncertain_calculation_failed"
-
 
     def calculate_risk_parameters(
         self,
@@ -543,16 +674,25 @@ class ConfigManager:
         Cette fonction est cruciale pour la gestion du risque institutionnelle, en s'assurant
         que chaque trade respecte les limites définies et les spécifications du broker.
         """
-        self.logger.info(f"Calcul des paramètres de risque pour {trade_decision.get('asset')}...")
+        self.logger.info(
+            f"Calcul des paramètres de risque pour {trade_decision.get('asset')}..."
+        )
 
-        equity = context.get("account_info", {}).get("equity", self.get("risk_management_settings.default_account_equity", 10000.0))
+        equity = context.get("account_info", {}).get(
+            "equity",
+            self.get("risk_management_settings.default_account_equity", 10000.0),
+        )
         if equity <= 0:
-            self.logger.error(f"Équité du compte ({equity}) non positive. Impossible de calculer le risque.")
+            self.logger.error(
+                f"Équité du compte ({equity}) non positive. Impossible de calculer le risque."
+            )
             return {}
 
         risk_per_trade_percent = config.get("risk_per_trade_percent", 1.0)
         if not (0 < risk_per_trade_percent <= 100):
-            self.logger.error(f"Pourcentage de risque par trade invalide ({risk_per_trade_percent}%).")
+            self.logger.error(
+                f"Pourcentage de risque par trade invalide ({risk_per_trade_percent}%)."
+            )
             return {}
         max_dollar_risk = equity * (risk_per_trade_percent / 100)
 
@@ -561,35 +701,62 @@ class ConfigManager:
         active_broker_account = context.get("active_broker_account", {})
         account_trade_settings = active_broker_account.get("trade_settings", {})
 
-        asset_mt5_info = context.get("market_data", {}).get(asset, {}).get("symbol_info", {})
+        asset_mt5_info = (
+            context.get("market_data", {}).get(asset, {}).get("symbol_info", {})
+        )
 
-        point = asset_mt5_info.get("point", self.get("risk_management_settings.default_points_in_pip", 0.00001))
-        contract_size = asset_mt5_info.get("trade_contract_size", self.get("risk_management_settings.default_contract_size", 100000))
+        point = asset_mt5_info.get(
+            "point", self.get("risk_management_settings.default_points_in_pip", 0.00001)
+        )
+        contract_size = asset_mt5_info.get(
+            "trade_contract_size",
+            self.get("risk_management_settings.default_contract_size", 100000),
+        )
 
         if point <= 0 or contract_size <= 0:
-            self.logger.error(f"Informations cruciales du symbole manquantes ou invalides (point={point}, contract_size={contract_size}) pour {asset}. Impossible de calculer le risque.")
+            self.logger.error(
+                f"Informations cruciales du symbole manquantes ou invalides (point={point}, contract_size={contract_size}) pour {asset}. Impossible de calculer le risque."
+            )
             return {}
 
         target_sl_pips = trade_decision.get("target_sl_pips")
         if target_sl_pips is None or target_sl_pips <= 0:
-            self.logger.error(f"Stop loss invalide ou nul ({target_sl_pips} pips) pour {asset}. Impossible de calculer le volume. Ordre bloqué pour sécurité.")
-            return {"volume": 0.0, "max_dollar_risk": 0.0,}
+            self.logger.error(
+                f"Stop loss invalide ou nul ({target_sl_pips} pips) pour {asset}. Impossible de calculer le volume. Ordre bloqué pour sécurité."
+            )
+            return {
+                "volume": 0.0,
+                "max_dollar_risk": 0.0,
+            }
 
         sl_distance_in_price = target_sl_pips * point
         dollar_risk_per_lot_estimated = sl_distance_in_price * contract_size
 
         if dollar_risk_per_lot_estimated <= 0:
-            self.logger.warning(f"Le risque par lot estimé est nul ou négatif pour {asset}. Utilisation du volume minimum pour cette estimation.")
-            dollar_risk_per_lot_estimated = self.get("risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0)
+            self.logger.warning(
+                f"Le risque par lot estimé est nul ou négatif pour {asset}. Utilisation du volume minimum pour cette estimation."
+            )
+            dollar_risk_per_lot_estimated = self.get(
+                "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
+            )
 
         calculated_lot_size = max_dollar_risk / dollar_risk_per_lot_estimated
 
-        min_lot_size = account_trade_settings.get("min_lot", self.get("risk_management_settings.min_lot_size_fallback", 0.01))
-        max_lot_size = account_trade_settings.get("max_lot", self.get("global_safety.max_allowed_lot_size", 50.0))
-        lot_step = account_trade_settings.get("lot_step", self.get("risk_management_settings.default_lot_step_fallback", 0.01))
+        min_lot_size = account_trade_settings.get(
+            "min_lot", self.get("risk_management_settings.min_lot_size_fallback", 0.01)
+        )
+        max_lot_size = account_trade_settings.get(
+            "max_lot", self.get("global_safety.max_allowed_lot_size", 50.0)
+        )
+        lot_step = account_trade_settings.get(
+            "lot_step",
+            self.get("risk_management_settings.default_lot_step_fallback", 0.01),
+        )
 
         if lot_step <= 0:
-            self.logger.error(f"Lot step invalide ou nul ({lot_step}) pour {asset}. Utilisation du fallback 0.01.")
+            self.logger.error(
+                f"Lot step invalide ou nul ({lot_step}) pour {asset}. Utilisation du fallback 0.01."
+            )
             lot_step = 0.01
 
         volume = max(min_lot_size, calculated_lot_size)
@@ -597,15 +764,24 @@ class ConfigManager:
 
         volume = round(volume / lot_step) * lot_step
 
-        lot_size_precision = (len(str(lot_step).split(".")[-1]) if "." in str(lot_step) else 0)
+        lot_size_precision = (
+            len(str(lot_step).split(".")[-1]) if "." in str(lot_step) else 0
+        )
         final_volume = round(volume, lot_size_precision)
 
-        self.logger.info(f"Calcul de risque pour {asset}: Equity=${equity:.2f}, Risque={risk_per_trade_percent}%, Max Dollar Risque=${max_dollar_risk:.2f}, Volume Final={final_volume:.{lot_size_precision}f} (Risque Estimé par Lot=${dollar_risk_per_lot_estimated:.2f}).")
+        self.logger.info(
+            f"Calcul de risque pour {asset}: Equity=${equity:.2f}, Risque={risk_per_trade_percent}%, Max Dollar Risque=${max_dollar_risk:.2f}, Volume Final={final_volume:.{lot_size_precision}f} (Risque Estimé par Lot=${dollar_risk_per_lot_estimated:.2f})."
+        )
 
-        return {"volume": final_volume, "max_dollar_risk": max_dollar_risk, "risk_per_trade_percent": risk_per_trade_percent,}
+        return {
+            "volume": final_volume,
+            "max_dollar_risk": max_dollar_risk,
+            "risk_per_trade_percent": risk_per_trade_percent,
+        }
 
-
-    def check_news_schedule(self, context: Dict[str, Any], calendar_data: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def check_news_schedule(
+        self, context: Dict[str, Any], calendar_data: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
         """
         Vérifie le calendrier économique pour les événements à fort impact à venir.
         Utilise des datetimes conscients du fuseau horaire (UTC) pour une robustesse maximale.
@@ -615,68 +791,114 @@ class ConfigManager:
         upcoming_news = None
         highest_impact = -1
 
-        window_before_event_minutes = self.get("news_settings.detection_window.before_event_minutes", 15)
-        window_after_event_minutes = self.get("news_settings.detection_window.after_event_minutes", 60)
-        cooldown_after_event_minutes = self.get("news_settings.detection_window.cooldown_after_event_minutes", 120)
-        impact_map = self.get("news_settings.impact_levels", {"low": 1, "medium": 2, "high": 3})
+        window_before_event_minutes = self.get(
+            "news_settings.detection_window.before_event_minutes", 15
+        )
+        window_after_event_minutes = self.get(
+            "news_settings.detection_window.after_event_minutes", 60
+        )
+        cooldown_after_event_minutes = self.get(
+            "news_settings.detection_window.cooldown_after_event_minutes", 120
+        )
+        impact_map = self.get(
+            "news_settings.impact_levels", {"low": 1, "medium": 2, "high": 3}
+        )
 
         for event in calendar_data:
             if not all(k in event for k in ["time", "impact", "event"]):
-                self.logger.warning(f"Événement de calendrier malformé. Clés manquantes. Ignoré: {event}")
+                self.logger.warning(
+                    f"Événement de calendrier malformé. Clés manquantes. Ignoré: {event}"
+                )
                 continue
 
             try:
                 event_time_str = event.get("time")
-                event_time = datetime.fromisoformat(event_time_str.replace("Z", "+00:00")).astimezone(UTC)
+                event_time = datetime.fromisoformat(
+                    event_time_str.replace("Z", "+00:00")
+                ).astimezone(UTC)
                 time_difference = event_time - current_time_utc
 
-                if timedelta(minutes=-window_before_event_minutes) <= time_difference <= timedelta(minutes=window_after_event_minutes):
+                if (
+                    timedelta(minutes=-window_before_event_minutes)
+                    <= time_difference
+                    <= timedelta(minutes=window_after_event_minutes)
+                ):
                     impact_level = impact_map.get(event.get("impact", "low").lower(), 0)
                     if impact_level > highest_impact:
                         highest_impact, upcoming_news = impact_level, event
 
-                if time_difference < timedelta(minutes=-window_after_event_minutes) and \
-                   time_difference > timedelta(minutes=-(window_after_event_minutes + cooldown_after_event_minutes)):
+                if time_difference < timedelta(
+                    minutes=-window_after_event_minutes
+                ) and time_difference > timedelta(
+                    minutes=-(window_after_event_minutes + cooldown_after_event_minutes)
+                ):
                     impact_level = impact_map.get(event.get("impact", "low").lower(), 0)
-                    if impact_level >= self.get("news_settings.min_impact_for_cooldown", 3):
-                        self.logger.warning(f"Marché en période de cooldown post-actualité majeure : {event.get('event')} (Impact: {event.get('impact')}).")
+                    if impact_level >= self.get(
+                        "news_settings.min_impact_for_cooldown", 3
+                    ):
+                        self.logger.warning(
+                            f"Marché en période de cooldown post-actualité majeure : {event.get('event')} (Impact: {event.get('impact')})."
+                        )
                         return event
 
             except ValueError:
-                self.logger.warning(f"Impossible de parser la date de l'événement économique : '{event.get('time')}'. Événement ignoré.")
+                self.logger.warning(
+                    f"Impossible de parser la date de l'événement économique : '{event.get('time')}'. Événement ignoré."
+                )
                 continue
             except Exception as e:
-                self.logger.error(f"Erreur inattendue lors du traitement d'un événement de calendrier : {e}. Événement: {event}", exc_info=True)
+                self.logger.error(
+                    f"Erreur inattendue lors du traitement d'un événement de calendrier : {e}. Événement: {event}",
+                    exc_info=True,
+                )
                 continue
 
         if upcoming_news:
-            self.logger.warning(f"Annonce économique majeure détectée : {upcoming_news.get('event')} (Impact: {upcoming_news.get('impact')}). Trading potentiellement bloqué.")
+            self.logger.warning(
+                f"Annonce économique majeure détectée : {upcoming_news.get('event')} (Impact: {upcoming_news.get('impact')}). Trading potentiellement bloqué."
+            )
 
         return upcoming_news
 
-    def blacklist_asset_on_bad_conditions(self, asset: str, reason: str, context: Optional[Dict[str, Any]] = None) -> None:
+    def blacklist_asset_on_bad_conditions(
+        self, asset: str, reason: str, context: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Ajoute un actif à une liste noire persistante avec une durée d'expiration configurable
         et une raison standardisée.
         """
-        self.logger.warning(f"Mise sur liste noire de '{asset}' pour la raison : {reason}")
+        self.logger.warning(
+            f"Mise sur liste noire de '{asset}' pour la raison : {reason}"
+        )
 
         if not hasattr(self, "_asset_blacklist"):
             self._asset_blacklist = {}
 
-        blacklist_durations_config = self.get("bot_behavior.blacklist_durations_by_reason", {})
-        duration_minutes = blacklist_durations_config.get(reason, self.get("bot_behavior.blacklist_duration_minutes", 60))
+        blacklist_durations_config = self.get(
+            "bot_behavior.blacklist_durations_by_reason", {}
+        )
+        duration_minutes = blacklist_durations_config.get(
+            reason, self.get("bot_behavior.blacklist_duration_minutes", 60)
+        )
 
         expiration_time = datetime.now(UTC) + timedelta(minutes=duration_minutes)
         self._asset_blacklist[asset] = expiration_time
 
-        self.logger.info(f"Actif '{asset}' mis sur liste noire jusqu'à {expiration_time.strftime('%Y-%m-%d %H:%M:%S UTC')} pour la raison '{reason}'."
+        self.logger.info(
+            f"Actif '{asset}' mis sur liste noire jusqu'à {expiration_time.strftime('%Y-%m-%d %H:%M:%S UTC')} pour la raison '{reason}'."
         )
 
         if asset == "ALL_ASSETS":
-            self.logger.critical(f"TOUS LES ACTIFS mis sur liste noire. Trading suspendu. Raison : {reason}")
-            alert_channel = self.get("alert_settings.global_blacklist_channel", "telegram_critical")
-            self.send_alert(f"CRITIQUE: Tous les actifs suspendus en raison de : {reason}", alert_channel)
+            self.logger.critical(
+                f"TOUS LES ACTIFS mis sur liste noire. Trading suspendu. Raison : {reason}"
+            )
+            alert_channel = self.get(
+                "alert_settings.global_blacklist_channel", "telegram_critical"
+            )
+            self.send_alert(
+                f"CRITIQUE: Tous les actifs suspendus en raison de : {reason}",
+                alert_channel,
+            )
 
         self.log_decision(
             config=self.get_current_dynamic_config(),
@@ -690,13 +912,17 @@ class ConfigManager:
             reason=f"Mise sur liste noire : {asset} - {reason}",
         )
 
-    def feedback_on_trade_result(self, trade_info: Dict[str, Any], result: Dict[str, Any]) -> None:
+    def feedback_on_trade_result(
+        self, trade_info: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
         """
         Traite le résultat d'un trade pour mettre à jour les métriques de performance de la stratégie
         et fournir une boucle de feedback pour l'apprentissage.
         Les templates de messages Telegram sont externalisés pour une flexibilité accrue.
         """
-        self.logger.info(f"Traitement du feedback pour le trade ID: {trade_info.get('order_id', 'N/A')}")
+        self.logger.info(
+            f"Traitement du feedback pour le trade ID: {trade_info.get('order_id', 'N/A')}"
+        )
 
         strategy_name = trade_info.get("strategy_type", "N/A")
         asset = trade_info.get("asset")
@@ -744,7 +970,10 @@ class ConfigManager:
             )
             self._save_config_knowledge_base()
 
-        message_template = self.get("telegram.templates.trade_closed", "📊 **Trade Clôturé**\nSymbol: `{asset}` | Stratégie: `{strategy}`\nP&L: `${pnl:.2f}` (`{status}`)\nHeure: `{time}`")
+        message_template = self.get(
+            "telegram.templates.trade_closed",
+            "📊 **Trade Clôturé**\nSymbol: `{asset}` | Stratégie: `{strategy}`\nP&L: `${pnl:.2f}` (`{status}`)\nHeure: `{time}`",
+        )
         message = message_template.format(
             asset=asset,
             strategy=strategy_name,
@@ -819,16 +1048,12 @@ class ConfigManager:
                     f"Échec du chargement de la base de connaissance des configurations depuis '{kb_path}': {e}",
                     exc_info=True,
                 )
-                self._config_knowledge_base = (
-                    {}
-                )
+                self._config_knowledge_base = {}
         else:
             self.logger.info(
                 "Fichier de base de connaissance des configurations non trouvé. Initialisation vide."
             )
-            self._config_knowledge_base = (
-                {}
-            )
+            self._config_knowledge_base = {}
 
     def auto_update_knowledge_base(self) -> None:
         """
@@ -1094,13 +1319,9 @@ class ConfigManager:
             temp_path.rename(output_path)
             self.logger.info(f"Configuration exportée avec succès vers {output_path}.")
 
-            file_permissions = self.get(
-                "app.file_permissions_octal", "0o644"
-            )
+            file_permissions = self.get("app.file_permissions_octal", "0o644")
             try:
-                os.chmod(
-                    output_path, int(file_permissions, 8)
-                )
+                os.chmod(output_path, int(file_permissions, 8))
                 self.logger.debug(
                     f"Permissions du fichier '{output_path}' définies à {file_permissions}."
                 )
@@ -1235,9 +1456,7 @@ class ConfigManager:
             schema_name = "main_app_schema.json"
         elif "strategy_name" in config:
             schema_name = "strategy_schema.json"
-        elif "accounts" in config and isinstance(
-            config.get("accounts"), list
-        ):
+        elif "accounts" in config and isinstance(config.get("accounts"), list):
             schema_name = "broker_accounts_schema.json"
         else:
             raise ConfigValidationError(
@@ -1312,28 +1531,39 @@ class ConfigManager:
         # car les données ne sont collectées qu'après le retour de cette fonction.
         # C'est un problème d'ordre d'appel plus global. Pour le moment, nous allons juste faire attention à la `select_optimal_config`.
         analyzed_context["current_market_regime"] = self.detect_market_regime(
-            analyzed_context, all_assets_market_data_from_context # Cette donnée peut être vide à ce point
+            analyzed_context,
+            all_assets_market_data_from_context,  # Cette donnée peut être vide à ce point
         )
 
         # CORRECTION : Accéder à select_optimal_config via l'instance du DecisionPipeline.
         # DecisionPipeline est un attribut de ConfigManager.
-        if not hasattr(self, 'decision_pipeline') or self.decision_pipeline is None:
-            self.logger.critical("ERREUR: DecisionPipeline n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie.")
+        if not hasattr(self, "decision_pipeline") or self.decision_pipeline is None:
+            self.logger.critical(
+                "ERREUR: DecisionPipeline n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie."
+            )
             raise RuntimeError("DecisionPipeline non initialisé.")
 
         # Assurez-vous que strategy_manager est initialisé et a chargé les stratégies.
-        if not hasattr(self, 'strategy_manager') or self.strategy_manager is None:
-            self.logger.critical("ERREUR: StrategyManager n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie.")
+        if not hasattr(self, "strategy_manager") or self.strategy_manager is None:
+            self.logger.critical(
+                "ERREUR: StrategyManager n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie."
+            )
             raise RuntimeError("StrategyManager non initialisé.")
 
         # La base de connaissance des stratégies est dans strategy_manager.strategy_registry
-        config_knowledge_base_from_strategy_manager = self.strategy_manager.strategy_registry
+        config_knowledge_base_from_strategy_manager = (
+            self.strategy_manager.strategy_registry
+        )
 
-        optimal_config_content = self.decision_pipeline.select_optimal_config( # <-- CORRECTION ICI
-            analyzed_context, config_knowledge_base_from_strategy_manager
+        optimal_config_content = (
+            self.decision_pipeline.select_optimal_config(  # <-- CORRECTION ICI
+                analyzed_context, config_knowledge_base_from_strategy_manager
+            )
         )
         if not optimal_config_content:
-            self.logger.warning("Aucune stratégie optimale sélectionnée. Fin du pipeline.")
+            self.logger.warning(
+                "Aucune stratégie optimale sélectionnée. Fin du pipeline."
+            )
             return {
                 "final_decision": {},
                 "config_used": self.get_current_dynamic_config(),
@@ -1350,8 +1580,10 @@ class ConfigManager:
 
         signals = analyzed_context.get("trading_signals", {})
         # decide_trade_to_execute devrait aussi être appelée via decision_pipeline
-        trade_decision = self.decision_pipeline.decide_trade_to_execute( # <-- CORRECTION ICI
-            analyzed_context, config_for_this_cycle, signals
+        trade_decision = (
+            self.decision_pipeline.decide_trade_to_execute(  # <-- CORRECTION ICI
+                analyzed_context, config_for_this_cycle, signals
+            )
         )
 
         return {
@@ -1364,81 +1596,6 @@ class ConfigManager:
         # NOTE : La fonction issue_trade_order DOIT être une méthode de la classe ConfigManager,
         # et non imbriquée dans organize_pipeline_decision.
         # Je la place ici comme une méthode de la classe ConfigManager.
-        
-def issue_trade_order(
-        self,
-        trade_decision: Dict[str, Any],
-        config: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Prépare et transmet l'ordre de trade final au module d'exécution.
-        Cette fonction agrège toutes les informations nécessaires pour former un ordre structuré.
-        """
-        self.logger.info(
-            f"Préparation de l'ordre de trade pour {trade_decision.get('asset')} (Stratégie: {trade_decision.get('strategy_type')})..."
-        )
-
-        if (
-            not trade_decision
-            or not trade_decision.get("action")
-            or not trade_decision.get("volume", 0) > 0
-        ):
-            self.logger.warning(
-                "Décision de trade invalide ou volume nul. Ordre non émis."
-            )
-            return {}
-
-        comment_template = self.get(
-            "trading.order_comment_template", "SNIPER_X | {strategy} | {rule}"
-        )
-        max_comment_length = self.get("trading.comment_max_length", 31)
-        comment = comment_template.format(
-            strategy=config.get("strategy_name", "N/A"),
-            rule=trade_decision.get("rule_name", "N/A"),
-        )[:max_comment_length]
-
-        magic_number = trade_decision.get("magic_number", config.get("magic_number"))
-        if magic_number is None:
-            self.logger.warning(
-                f"Magic number non trouvé pour le trade {trade_decision.get('asset')}. Utilisation de 0."
-            )
-            magic_number = 0
-
-        active_broker_account_details = context.get("active_broker_account", {})
-
-        order = {
-            "order_id": str(uuid.uuid4()),
-            "timestamp": datetime.now(UTC).isoformat(),
-            "action": trade_decision["action"],
-            "asset": trade_decision["asset"],
-            "volume": trade_decision["volume"],
-            "order_type": trade_decision["order_type"],
-            "entry_price": trade_decision.get("entry_price"),
-            "stop_loss_pips": trade_decision.get("target_sl_pips"),
-            "take_profit_pips": trade_decision.get("target_tp_pips"),
-            "magic_number": magic_number,
-            "comment": comment,
-            "strategy_name": trade_decision.get("strategy_type"),
-            "rule_name": trade_decision.get("rule_name"),
-            "account_id": active_broker_account_details.get("account_id"),
-            "broker_name": active_broker_account_details.get("broker_name"),
-        }
-
-        message_template = self.get(
-            "telegram.templates.trade_confirmed",
-            "🚀 **Trade Confirmé**\nSymbol: `{asset}` | Action: `{action}`\nVolume: `{volume}` lots | Stratégie: `{strategy}`",
-        )
-        message = message_template.format(
-            asset=order.get("asset"),
-            action=order.get("action"),
-            volume=order.get("volume"),
-            strategy=order.get("strategy_name"),
-        )
-        self.send_alert(message, "telegram_trade_confirmed")
-
-        self.logger.debug(f"Ordre structuré prêt pour exécution : {order}")
-        return order
 
     def log_decision(
         self,
@@ -1531,9 +1688,11 @@ def issue_trade_order(
             alert_type (str): Le type d'alerte (ex: 'telegram_critical', 'telegram_trade_confirmed').
                             Utilisé pour déterminer le canal ou le traitement spécifique.
         """
-        self.logger.info(f"Tentative d'envoi d'alerte de type '{alert_type}' : {message[:100]}...") # Log les 100 premiers caractères
+        self.logger.info(
+            f"Tentative d'envoi d'alerte de type '{alert_type}' : {message[:100]}..."
+        )  # Log les 100 premiers caractères
 
-        if hasattr(self, 'audit_logger') and self.audit_logger is not None:
+        if hasattr(self, "audit_logger") and self.audit_logger is not None:
             # L'AuditLogger aura la logique d'envoi réelle (ex: vers Telegram)
             # Nous assumons que AuditLogger a une méthode pour gérer l'envoi d'alertes.
             # Si AuditLogger n'a pas encore de méthode 'send_telegram_alert' ou similaire,
@@ -1544,10 +1703,14 @@ def issue_trade_order(
                 self.audit_logger.queue_or_send_alert(message, alert_type)
                 self.logger.debug(f"Alerte '{alert_type}' transmise à l'AuditLogger.")
             except Exception as e:
-                self.logger.error(f"Échec de la transmission de l'alerte à l'AuditLogger: {e}", exc_info=True)
+                self.logger.error(
+                    f"Échec de la transmission de l'alerte à l'AuditLogger: {e}",
+                    exc_info=True,
+                )
         else:
-            self.logger.critical("ConfigManager ne peut pas envoyer d'alerte : AuditLogger non initialisé.")
-
+            self.logger.critical(
+                "ConfigManager ne peut pas envoyer d'alerte : AuditLogger non initialisé."
+            )
 
     def process_and_send_summary_alert(self, context: Dict[str, Any]) -> None:
         """
@@ -1558,23 +1721,31 @@ def issue_trade_order(
             context (Dict[str, Any]): Le contexte actuel du bot, incluant l'état du compte,
                                     le nombre de trades, etc.
         """
-        self.logger.debug("Traitement et envoi du résumé périodique de l'état du bot...")
+        self.logger.debug(
+            "Traitement et envoi du résumé périodique de l'état du bot..."
+        )
 
         # Récupérer les paramètres de résumé depuis la configuration
         summary_interval_minutes = self.get("telegram.summary_interval_minutes", 8)
-        
+
         # Vérifier si l'envoi de résumé est activé dans la configuration Telegram
         telegram_enabled = self.get("telegram.enabled", False)
         summary_channel_enabled = self.get("telegram.channels.telegram_summary", False)
 
         if not telegram_enabled or not summary_channel_enabled:
-            self.logger.debug("Envoi de résumé désactivé (Telegram non activé ou canal de résumé non activé).")
+            self.logger.debug(
+                "Envoi de résumé désactivé (Telegram non activé ou canal de résumé non activé)."
+            )
             return
 
         # Vérifier si l'intervalle de temps est écoulé depuis le dernier envoi
         current_time_utc = datetime.now(UTC)
-        if (current_time_utc - self._last_summary_sent_time).total_seconds() < summary_interval_minutes * 60:
-            self.logger.debug(f"Prochain envoi de résumé dans {(summary_interval_minutes * 60) - (current_time_utc - self._last_summary_sent_time).total_seconds():.0f} secondes.")
+        if (
+            current_time_utc - self._last_summary_sent_time
+        ).total_seconds() < summary_interval_minutes * 60:
+            self.logger.debug(
+                f"Prochain envoi de résumé dans {(summary_interval_minutes * 60) - (current_time_utc - self._last_summary_sent_time).total_seconds():.0f} secondes."
+            )
             return
 
         # Construction du message de résumé
@@ -1585,12 +1756,13 @@ def issue_trade_order(
         open_positions = context.get("open_positions_count", 0)
         current_regime = context.get("current_market_regime", "N/A")
 
-        summary_message = self.get("telegram.templates.summary_header", 
-            "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})"
+        summary_message = self.get(
+            "telegram.templates.summary_header",
+            "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
         ).format(
             time=current_time_utc.strftime("%H:%M:%S UTC"),
             account_id=account_id,
-            broker=context.get("active_broker_account", {}).get("broker_name", "N/A")
+            broker=context.get("active_broker_account", {}).get("broker_name", "N/A"),
         )
         summary_message += f"\n\nMode: `{bot_mode}`"
         summary_message += f"\nEquity: `${account_equity:.2f}`"
@@ -1600,10 +1772,11 @@ def issue_trade_order(
 
         # Envoyer le message de résumé via la méthode send_alert
         self.send_alert(summary_message, "telegram_summary")
-        self._last_summary_sent_time = current_time_utc # Mettre à jour le timestamp du dernier envoi
+        self._last_summary_sent_time = (
+            current_time_utc  # Mettre à jour le timestamp du dernier envoi
+        )
 
         self.logger.info("Résumé périodique de l'état du bot envoyé.")
-
 
     def _generate_report_header(self, report_date: datetime) -> List[str]:
         """
