@@ -267,29 +267,20 @@ class ConfigManager:
         if not Path(template_path).exists():
             raise FileNotFoundError(f"Fichier de configuration de base introuvable: {template_path}")
 
-        # Les schémas qui sont censés exister dans config/schemas/
-        # Si un schéma n'existe pas, l'appel à load_dynamic_config ne spécifiera pas schema_name
-        # ce qui permettra à ConfigLoader de loguer un avertissement au lieu d'une erreur fatale.
-        known_schemas_in_schemas_dir = {
-            "main_app_schema.json",
-            "broker_accounts_schema.json",
-            "phase_observer_config_schema.json",
-            "telegram_config_schema.json",
-            "strategy_schema.json"
+        # Liste des noms de schémas qui sont censés exister dans config/schemas/
+        # et pour lesquels la validation sera tentée.
+        # Basé sur votre arborescence, seul strategy_schema.json y est.
+        # Les autres schémas ne sont pas présents dans config/schemas/ et ne seront donc pas passés explicitement.
+        existing_schemas_in_schemas_dir = {
+            "strategy_schema.json" # Seul celui-ci est dans config/schemas/ selon votre arborescence.
         }
         
         try:
-            # Pour prod_config.json, nous ne spécifions pas de schéma si main_app_schema.json n'existe pas.
-            # ConfigLoader.validate_config déterminera si un schéma de ce type est censé exister,
-            # ou loguera un avertissement s'il ne le trouve pas.
-            prod_config_schema_name = "main_app_schema.json"
-            prod_config_schema_path = Path("config") / "schemas" / prod_config_schema_name
-            
-            if prod_config_schema_path.is_file():
-                base_config = self.config_loader.load_dynamic_config(template_path, schema_name=prod_config_schema_name)
-            else:
-                self.logger.warning(f"Schéma '{prod_config_schema_name}' non trouvé à '{prod_config_schema_path}'. Chargement de {template_path} sans validation de schéma explicite.")
-                base_config = self.config_loader.load_dynamic_config(template_path) # Appel sans schema_name
+            # Pour prod_config.json, nous ne spécifions PAS de schema_name
+            # car main_app_schema.json n'existe pas dans config/schemas/.
+            # ConfigLoader.validate_config gérera cela en loguant un avertissement.
+            self.logger.info(f"Chargement de {template_path} sans validation de schéma explicite (schéma main_app_schema.json non trouvé).")
+            base_config = self.config_loader.load_dynamic_config(template_path) # Appel SANS schema_name
                 
             self._dynamic_config = base_config
             self._dynamic_config_path = output_path
@@ -299,8 +290,8 @@ class ConfigManager:
             raise
 
         configs_to_load = {
-            "paths.phase_observer_config": "phase_observer_config_schema.json",
-            "paths.telegram_config": "telegram_config_schema.json"
+            "paths.phase_observer_config": "phase_observer_config_schema.json", # Le schéma n'est pas dans config/schemas/
+            "paths.telegram_config": "telegram_config_schema.json" # Le schéma n'est pas dans config/schemas/
         }
         for config_key, schema_file_name in configs_to_load.items():
             config_file_path_str = self.get(config_key)
@@ -308,13 +299,11 @@ class ConfigManager:
                 config_file_path = Path(config_file_path_str)
                 if config_file_path.exists():
                     try:
-                        # Vérifie si le fichier de schéma existe avant de le spécifier
-                        schema_path_for_module = Path("config") / "schemas" / schema_file_name
-                        if schema_path_for_module.is_file():
-                            supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path), schema_name=schema_file_name)
-                        else:
-                            self.logger.warning(f"Schéma '{schema_file_name}' non trouvé à '{schema_path_for_module}'. Chargement de {config_file_path.name} sans validation de schéma explicite.")
-                            supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path)) # Appel sans schema_name
+                        # Pour phase_observer_config.json et telegram_config.json,
+                        # nous ne spécifions PAS de schema_name.
+                        # ConfigLoader.validate_config gérera cela en loguant un avertissement.
+                        self.logger.info(f"Chargement de {config_file_path.name} sans validation de schéma explicite (schéma {schema_file_name} non trouvé).")
+                        supplemental_config = self.config_loader.load_dynamic_config(str(config_file_path)) # Appel SANS schema_name
                             
                         self._dynamic_config = self._merge_dicts(self._dynamic_config, supplemental_config)
                         self.logger.info(f"Configuration modulaire '{config_file_path.name}' chargée et fusionnée.")
@@ -1531,6 +1520,62 @@ class ConfigManager:
                 self.logger.error(f"Échec de la transmission de l'alerte à l'AuditLogger: {e}", exc_info=True)
         else:
             self.logger.critical("ConfigManager ne peut pas envoyer d'alerte : AuditLogger non initialisé.")
+
+
+    def process_and_send_summary_alert(self, context: Dict[str, Any]) -> None:
+        """
+        Traite le contexte pour générer un résumé périodique et l'envoie via le système d'alerte.
+        Cette méthode est appelée régulièrement pour fournir une vue d'ensemble du bot.
+
+        Args:
+            context (Dict[str, Any]): Le contexte actuel du bot, incluant l'état du compte,
+                                    le nombre de trades, etc.
+        """
+        self.logger.debug("Traitement et envoi du résumé périodique de l'état du bot...")
+
+        # Récupérer les paramètres de résumé depuis la configuration
+        summary_interval_minutes = self.get("telegram.summary_interval_minutes", 8)
+        
+        # Vérifier si l'envoi de résumé est activé dans la configuration Telegram
+        telegram_enabled = self.get("telegram.enabled", False)
+        summary_channel_enabled = self.get("telegram.channels.telegram_summary", False)
+
+        if not telegram_enabled or not summary_channel_enabled:
+            self.logger.debug("Envoi de résumé désactivé (Telegram non activé ou canal de résumé non activé).")
+            return
+
+        # Vérifier si l'intervalle de temps est écoulé depuis le dernier envoi
+        current_time_utc = datetime.now(UTC)
+        if (current_time_utc - self._last_summary_sent_time).total_seconds() < summary_interval_minutes * 60:
+            self.logger.debug(f"Prochain envoi de résumé dans {(summary_interval_minutes * 60) - (current_time_utc - self._last_summary_sent_time).total_seconds():.0f} secondes.")
+            return
+
+        # Construction du message de résumé
+        bot_mode = context.get("bot_mode", "N/A").upper()
+        account_id = context.get("account_info", {}).get("account_id", "N/A")
+        account_equity = context.get("account_info", {}).get("equity", 0.0)
+        daily_trades = context.get("daily_trade_count", 0)
+        open_positions = context.get("open_positions_count", 0)
+        current_regime = context.get("current_market_regime", "N/A")
+
+        summary_message = self.get("telegram.templates.summary_header", 
+            "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})"
+        ).format(
+            time=current_time_utc.strftime("%H:%M:%S UTC"),
+            account_id=account_id,
+            broker=context.get("active_broker_account", {}).get("broker_name", "N/A")
+        )
+        summary_message += f"\n\nMode: `{bot_mode}`"
+        summary_message += f"\nEquity: `${account_equity:.2f}`"
+        summary_message += f"\nTrades Jours: `{daily_trades}`"
+        summary_message += f"\nPos. Ouvertes: `{open_positions}`"
+        summary_message += f"\nRégime Marché: `{current_regime}`"
+
+        # Envoyer le message de résumé via la méthode send_alert
+        self.send_alert(summary_message, "telegram_summary")
+        self._last_summary_sent_time = current_time_utc # Mettre à jour le timestamp du dernier envoi
+
+        self.logger.info("Résumé périodique de l'état du bot envoyé.")
 
 
     def _generate_report_header(self, report_date: datetime) -> List[str]:

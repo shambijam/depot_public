@@ -191,9 +191,21 @@ def main(args: argparse.Namespace) -> None:
     config_manager = ConfigManager()  # L'instance Singleton
 
     # 3. Définir le mode d'exécution du bot (CLI > Config > Défaut)
-    bot_mode = (
-        args.mode if args.mode else config_manager.get("mode_execution", "DEMO").upper()
-    )
+    # AJOUT/CORRECTION : Assurer que bot_mode est strictement DEMO ou LIVE.
+    # L'erreur venait de l'utilisation de config_manager.get("mode_execution")
+    # qui, si args.mode n'est pas défini, pouvait ramener "INFO" si "mode_execution"
+    # n'était pas correctement surchargé par "log_level".
+    cli_mode = args.mode.upper() if args.mode else None
+    config_mode = config_manager.get("mode_execution", "DEMO").upper() # Assure d'être en majuscules
+
+    if cli_mode in ["DEMO", "LIVE"]:
+        bot_mode = cli_mode
+    elif config_mode in ["DEMO", "LIVE"]:
+        bot_mode = config_mode
+    else:
+        bot_mode = "DEMO" # Fallback sécurisé si aucune configuration valide
+        logger.warning(f"Mode d'exécution non valide ('{config_mode}'). Utilisation du mode par défaut : '{bot_mode}'.")
+
     is_dry_run = args.dry_run
 
     logger.critical(
@@ -214,24 +226,24 @@ def main(args: argparse.Namespace) -> None:
         # Récupère le chemin des stratégies à passer à initialize_dynamic_config
         strategy_configs_path = Path(
             config_manager.get("paths.strategy_configs", "config/strategy/")
-        )  # Default fallback should include /strategy/
+        )
         config_file_path = config_dir_path / main_config_file_name
         config_file_path.parent.mkdir(
             parents=True, exist_ok=True
         )  # S'assurer que le dossier 'config' existe
 
         # Initialise/Réinitialise la configuration dynamique avec le chemin principal
-        # IMPORTANT : config_dir doit être passé si la signature de initialize_dynamic_config l'attend.
         config_manager.initialize_dynamic_config(
             template_path=str(config_file_path),
             output_path=str(config_file_path),
-            config_dir=str(strategy_configs_path),  # <-- REPASSER CET ARGUMENT
+            config_dir=str(strategy_configs_path),
         )
 
         # Instancier et Injecter les Dépendances
-        mt5_connector = MT5Connector()  # Instancier le connecteur MT5
+        mt5_connector = MT5Connector()
 
         # Vérification proactive de la connexion MT5 et réconciliation
+        # Le mode passé ici est maintenant garanti d'être 'DEMO' ou 'LIVE'
         active_account_details = config_manager.get_mt5_account_credentials(
             mode=bot_mode
         )
@@ -243,10 +255,8 @@ def main(args: argparse.Namespace) -> None:
             f"Connexion MT5 persistante établie pour '{active_account_details.get('account_id')}'."
         )
 
-        # Le PhaseObserver n'a plus besoin du confidence_score, assurez-vous que c'est l'instance mise à jour.
         phase_observer = PhaseObserver(config_manager=config_manager)
 
-        # L'IA est maintenant purement consultative et d'audit. Son instance est injectée.
         models_dir = config_manager.get("paths.models", "models/")
         ai_model_name_for_init = config_manager.get(
             "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
@@ -257,22 +267,17 @@ def main(args: argparse.Namespace) -> None:
             config_manager_instance=config_manager,
         )
 
-        # TradeExecutor gère l'exécution et la réconciliation.
         trade_executor = TradeExecutor(
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
-        trade_executor.reconcile_state_with_broker()  # Réconciliation initiale
+        trade_executor.reconcile_state_with_broker()
         logger.info(
             "Réconciliation initiale de l'état du TradeExecutor avec le broker effectuée."
         )
 
-        # Mecano pour les métriques système et l'audit.
         mecano = Mecano(config_manager_instance=config_manager)
-        mecano.set_ai_analyzer(
-            ai_decision
-        )  # Mecano utilise toujours l'IA pour ses audits.
+        mecano.set_ai_analyzer(ai_decision)
 
-        # Vérification finale de l'environnement (modèle IA)
         logger.info(
             "Vérification de l'environnement de production et de la configuration chargée..."
         )
@@ -283,14 +288,12 @@ def main(args: argparse.Namespace) -> None:
             raise FileNotFoundError(f"Modèle IA non trouvé à '{model_path}'.")
         logger.info(f"Modèle IA trouvé : {model_path}")
 
-        # Les vérifications Telegram se feront au moment de l'envoi des alertes via ConfigManager.send_alert
-        # Pas besoin de vérification FATAL ici, juste un warning si les identifiants sont manquants et Telegram est activé.
         telegram_token = config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
         telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID")
         telegram_globally_enabled = config_manager.get("telegram.enabled", False)
         if telegram_globally_enabled and (not telegram_token or not telegram_chat_id):
             logger.critical(
-                "FATAL: Le bot token ou l'ID de chat Telegram est manquant. Les notifications sont critiques pour le monitoring quand activées. Sortie du bot."
+                "FATAL: Le bot token ou l'ID de chat Telegram est manquant dans les variables d'environnement chargées par ConfigManager. Les notifications Telegram sont critiques pour le monitoring quand activées. Sortie du bot."
             )
             sys.exit(1)
         elif telegram_globally_enabled:
@@ -300,18 +303,18 @@ def main(args: argparse.Namespace) -> None:
                 "Les notifications Telegram sont globalement désactivées. Le bot continue sans alertes Telegram."
             )
 
-    except SystemExit:  # Capturer SystemExit pour ne pas masquer les messages critiques
+    except SystemExit:
         logger.critical(
             "Le démarrage du bot a été avorté en raison de problèmes critiques de configuration/environnement."
         )
         if (
             "config_manager" in locals() and config_manager
-        ):  # Tenter d'envoyer l'alerte si config_manager est dispo
+        ):
             config_manager.send_alert(
                 f"**SNIPER_X BOT N'A PAS DÉMARRÉ !**\nProblème critique lors de la vérification de l'environnement.",
                 "telegram_critical",
             )
-        sys.exit(1)  # Sortie explicite
+        sys.exit(1)
     except Exception as e:
         logger.critical(
             f"FATAL: Erreur non gérée lors du chargement de la configuration ou de la vérification de l'environnement: {e}",
@@ -319,28 +322,25 @@ def main(args: argparse.Namespace) -> None:
         )
         if (
             "config_manager" in locals() and config_manager
-        ):  # Tenter d'envoyer l'alerte si config_manager est dispo
+        ):
             config_manager.send_alert(
                 f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH AU DÉMARRAGE) !**\nErreur: {type(e).__name__} : {e}",
                 "telegram_critical",
             )
         if "mt5_connector" in locals() and mt5_connector and mt5_connector.is_connected:
             mt5_connector.disconnect()
-        sys.exit(1)  # Sortie explicite
+        sys.exit(1)
 
-    # Déterminer l'intervalle de cycle EFFECTIF
     cycle_interval = args.interval or config_manager.get(
         "bot_behavior.cycle_interval_seconds", 5
     )
     logger.info(f"Intervalle de cycle réglé à : {cycle_interval}s.")
 
-    # Alerte de Démarrage du Bot via Telegram
     config_manager.send_alert(
         message=f"**SNIPER_X Bot Démarré!**\nMode: {'DRY RUN' if is_dry_run else bot_mode}\nIntervalle de Cycle: {cycle_interval}s",
         alert_type="telegram_critical",
     )
 
-    # --- Boucle de Trading Principale ---
     logger.info("SNIPER_X Bot prêt. Démarrage de la boucle de trading...")
     cycle_count = 0
     daily_trade_count = 0
@@ -350,7 +350,6 @@ def main(args: argparse.Namespace) -> None:
             cycle_count += 1
             cycle_start_time = time.time()
 
-            # run_single_pipeline_cycle gérera désormais la décision d'entrée ET de sortie.
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,

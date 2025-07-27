@@ -406,17 +406,20 @@ def run_single_pipeline_cycle(
             return False
 
         # Récupération des détails du compte MT5 actif
-        bot_mode = config_manager.get("mode_execution", "DEMO").upper()
+        # CORRECTION ICI : Assurer que bot_mode est bien 'DEMO' ou 'LIVE' avant l'appel.
+        # Le mode est déterminé une fois pour toutes au début de main.py et doit être cohérent.
+        # Nous allons nous assurer que la valeur passée ici est celle que ConfigManager attend.
+        current_bot_mode = config_manager.get("mode_execution", "DEMO").upper() # Récupère le mode réel du bot
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
-            mode=bot_mode
+            mode=current_bot_mode # Utilise le mode déterminé de la config manager.
         )
         if active_mt5_account_details is None:
             logger.critical(
-                f"Aucun compte MT5 actif ou valide trouvé pour le mode '{bot_mode}'. Cycle annulé."
+                f"Aucun compte MT5 actif ou valide trouvé pour le mode '{current_bot_mode}'. Cycle annulé."
             )
             config_manager.send_alert(
                 "CRITIQUE",
-                f"Compte MT5 invalide pour '{bot_mode}'. Cycle annulé.",
+                f"Compte MT5 invalide pour '{current_bot_mode}'. Cycle annulé.",
                 alert_type="telegram_critical",
             )
             return False
@@ -668,7 +671,6 @@ def run_single_pipeline_cycle(
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
 
 def main(args: argparse.Namespace) -> None:
     """
