@@ -14,6 +14,10 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+import importlib
+import core.strategy_manager
+
+
 
 # Charger les variables d'environnement dès le début pour les chemins critiques/secrets
 from dotenv import load_dotenv
@@ -26,6 +30,7 @@ load_dotenv()
 try:
     from phase_observer.phase_observer import PhaseObserver
     from core.config_manager import ConfigManager
+    importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor
     from ai_core.ai_decision import AIDecision
     from mt5_connector import MT5Connector
