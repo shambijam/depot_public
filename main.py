@@ -207,9 +207,13 @@ def main(args: argparse.Namespace) -> None:
         main_config_file_name = config_manager.get("paths.main_config_file_name", "prod_config.json")
         config_file_path = config_dir_path / main_config_file_name
         
+        # Définir le chemin des stratégies AVANT l'appel
+        strategy_configs_path = Path(config_manager.get("paths.strategy_configs", "config/strategy/"))
+        
         config_manager.initialize_dynamic_config(
             template_path=str(config_file_path),
-            output_path=str(config_file_path)
+            output_path=str(config_file_path),
+            config_dir=str(strategy_configs_path) # <-- CORRECTION : Argument manquant ajouté ici
         )
 
         # --- Étape B : Créer et Assembler toutes les "Briques" dans le bon ordre ---
@@ -219,14 +223,10 @@ def main(args: argparse.Namespace) -> None:
         audit_logger = AuditLogger(config_manager_instance=config_manager)
         mt5_connector = MT5Connector()
         
-        # Le StrategyManager est créé, mais ses stratégies ne sont pas encore chargées
         strategy_manager = StrategyManager(
             config_loader_instance=config_manager.config_loader,
             config_manager_instance=config_manager
         )
-        
-        # *** CORRECTION PRINCIPALE : On charge les stratégies MAINTENANT ***
-        # Cet appel se fait APRÈS que la config a été lue.
         strategy_manager.initialize_strategies()
 
         # Modules IA
@@ -247,6 +247,9 @@ def main(args: argparse.Namespace) -> None:
         phase_observer = PhaseObserver(config_manager=config_manager)
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
+        
+        # Injection des dépendances finales
+        config_manager.ai_decision_instance = ai_decision # Assigner l'instance AI au ConfigManager
 
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode = args.mode.upper() if args.mode else config_manager.get("mode_execution", "DEMO").upper()
@@ -291,7 +294,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                ai_decision, # Note: Pour une architecture parfaite, on passerait le 'decision_pipeline' ici
+                ai_decision,
                 trade_executor,
                 config_manager,
                 mecano,
