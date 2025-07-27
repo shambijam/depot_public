@@ -58,9 +58,17 @@ class StrategyManager:
         self.strategy_registry: Dict[str, Dict[str, Any]] = {} 
         self._config_knowledge_base: Dict[str, Dict[str, Any]] = {} 
 
-        self.load_all_strategies() 
+        # self.load_all_strategies() # RETIRÉ : L'appel est prématuré et cause l'erreur de chargement.
 
-        self.logger.info("StrategyManager initialisé. Toutes les stratégies disponibles ont été chargées.")
+        self.logger.info("StrategyManager initialisé (les stratégies ne sont pas encore chargées).")
+        
+    def initialize_strategies(self) -> None:
+        """
+        Charge toutes les stratégies après que la configuration principale ait été initialisée.
+        Cette méthode sert de point d'entrée pour le chargement post-initialisation.
+        """
+        self.load_all_strategies()
+        self.logger.info("StrategyManager a maintenant chargé toutes les stratégies disponibles.")
 
     def load_all_strategies(self) -> None:
         """
