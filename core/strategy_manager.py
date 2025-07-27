@@ -24,7 +24,7 @@ class StrategyManager:
     Implémente un cache persistant pour les configurations et les classes de stratégies.
     """
 
-    def __init__(self, config_loader_instance: ConfigLoader, config_manager_instance: ConfigManager):
+    def __init__(self, config_loader_instance: ConfigLoader, config_manager_instance: 'ConfigManager'): # 'ConfigManager' entre guillemets
         """
         Initialise le StrategyManager.
 
@@ -41,7 +41,7 @@ class StrategyManager:
         self._config_knowledge_base: Dict[str, Dict[str, Any]] = {}
         self.load_all_strategies()
         self.logger.info("StrategyManager initialisé. Toutes les stratégies disponibles ont été chargées.")
-
+        
     def load_all_strategies(self) -> None:
         """
         Charge toutes les stratégies définies dans le mapping de configuration au démarrage

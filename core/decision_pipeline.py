@@ -23,13 +23,13 @@ class DecisionPipeline:
     C'est le module responsable de la logique de prise de décision institutionnelle.
     """
 
-    def __init__(self, config_manager_instance: ConfigManager, ai_interface_instance: AIInterface, strategy_manager_instance=None):
+    def __init__(self, config_manager_instance: 'ConfigManager', ai_interface_instance: AIInterface, strategy_manager_instance=None): # 'ConfigManager' entre guillemets
         """
         Initialise le pipeline de décision.
 
         Args:
             config_manager_instance (ConfigManager): L'instance du ConfigManager pour accéder
-                                                      à la configuration globale et aux services partagés (logging, alertes).
+                                                    à la configuration globale et aux services partagés (logging, alertes).
             ai_interface_instance (AIInterface): L'instance de l'interface AI pour obtenir les conseils de l'IA.
             strategy_manager_instance: L'instance du StrategyManager pour gérer les stratégies (sera injecté plus tard).
         """
@@ -39,7 +39,7 @@ class DecisionPipeline:
         self.logger = logging.getLogger(__name__)
 
         self.logger.info("DecisionPipeline initialisé.")
-
+    
     def institutional_decision_pipeline(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Orchestre le pipeline de décision de haut niveau pour un cycle de trading.
