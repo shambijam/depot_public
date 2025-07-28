@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from core.config_manager import ConfigManager
-from core.ai_interface import AIInterface  # Import pour couplage avec AIInterface
+from core.ai_interface import AIInterface
 
 # Initialisation du Logger pour ce module
 logger = logging.getLogger(__name__)
@@ -54,22 +54,20 @@ class Mecano:
     """
     Observateur silencieux pour monitoring de performance, erreurs et ressources.
     Collecte métriques et génère rapports sans interférer avec le pipeline.
-    Couplage asynchrone avec AIInterface pour analyses consultatives.
+    Couplage asynchrone avec AIInterface pour analyses consultatives journalières.
     """
 
-    def __init__(self, config_manager_instance: Optional[ConfigManager] = None, ai_interface: Optional[AIInterface] = None):
+    def __init__(self, config_manager_instance: Optional[ConfigManager] = None):
         """
-        Initialise Mecano avec ConfigManager et AIInterface pour rapports.
-
-        Args:
-            config_manager_instance: ConfigManager pour configs dynamiques.
-            ai_interface: AIInterface pour analyses consultatives (injectée).
+        Initialise Mecano avec ConfigManager pour configs dynamiques.
+        Instancie AIInterface pour rapports consultatifs.
         """
         self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager_instance
-        self.ai_interface = ai_interface  # Injectée pour couplage IA
         if self.config_manager is None:
             self.logger.warning("Mecano sans ConfigManager. Chemins non dynamiques.")
+
+        self.ai_interface = AIInterface(config_manager=self.config_manager) if self.config_manager else None
         if self.ai_interface is None:
             self.logger.warning("Mecano sans AIInterface. Rapports IA désactivés.")
 
@@ -106,6 +104,16 @@ class Mecano:
         self.config_snapshots: List[str] = []
 
         self.logger.info("Mecano initialisé. Prêt pour monitoring et rapports.")
+
+    def set_ai_analyzer(self, ai_analyzer_instance):
+        """
+        Injecte l'instance AIDecision dans AIInterface pour couplage.
+        """
+        if self.ai_interface:
+            self.ai_interface.ai_decision_instance = ai_analyzer_instance
+            self.logger.info("AIDecision injectée dans AIInterface pour rapports consultatifs.")
+        else:
+            self.logger.warning("set_ai_analyzer appelé sans AIInterface active.")
 
     def _setup_loggers(self) -> None:
         """
@@ -277,7 +285,7 @@ class Mecano:
         Envoie prompt à AIInterface pour analyse consultative.
         """
         if not self.ai_interface:
-            return {"error": "AIInterface non injectée."}
+            return {"error": "AIInterface non disponible."}
         try:
             analysis = self.ai_interface.get_decision(prompt)  # Adaptez à méthode réelle
             ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
