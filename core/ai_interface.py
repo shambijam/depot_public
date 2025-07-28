@@ -51,7 +51,7 @@ class AIInterface:
             self.prompts_file_name = "prompts.yaml"
 
         self.prompts = {}
-        self._load_prompts() # Charger les prompts au démarrage de l'interface
+        self._load_prompts()  # Charger les prompts au démarrage de l'interface
 
     def _load_prompts(self) -> None:
         """
@@ -59,13 +59,13 @@ class AIInterface:
         Déplacée de AIDecision et adaptée pour AIInterface.
         """
         try:
-            import yaml # Import local
+            import yaml  # Import local
 
             full_prompts_path = Path(self.prompts_base_dir) / self.prompts_file_name
             with open(full_prompts_path, "r", encoding="utf-8") as f:
                 self.prompts = yaml.safe_load(f)
             self.logger.info(f"AIInterface: Prompts chargés avec succès depuis '{full_prompts_path}'.")
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             self.logger.critical(
                 f"AIInterface: Fichier de prompts '{full_prompts_path}' non trouvé. Les fonctions IA basées sur les prompts ne fonctionneront pas."
             )
@@ -76,7 +76,7 @@ class AIInterface:
                     f"AI Prompts Manquants: {full_prompts_path}",
                     alert_type="telegram_critical",
                 )
-            raise # Relance l'exception car c'est critique
+            raise e  # Relance l'exception car c'est critique
         except Exception as e:
             self.logger.critical(
                 f"AIInterface: Erreur lors du chargement de '{full_prompts_path}': {e}. Les fonctions IA basées sur les prompts ne fonctionneront pas.",
@@ -89,7 +89,7 @@ class AIInterface:
                     f"AI Prompts Erreur Chargement: {e}",
                     alert_type="telegram_critical",
                 )
-            raise # Relance l'exception car c'est critique
+            raise e  # Relance l'exception car c'est critique
 
     def build_ia_prompt(self, opportunities: List[str], context: Dict[str, Any]) -> str:
         """
@@ -145,25 +145,15 @@ class AIInterface:
             # Récupérer les données de marché et de signaux annotées par PhaseObserver
             asset_market_data_full = context.get("market_data", {}).get(asset, {})
             # Assurez-vous que c'est le DataFrame annoté et non le dictionnaire résumé
-            if (
-                isinstance(asset_market_data_full, dict)
-                and "market_data_summary" in context
-            ):
+            if isinstance(asset_market_data_full, dict) and "market_data_summary" in context:
                 # Si `market_data` a été résumé par `log_decision`, on utilise le résumé
                 asset_market_data = context["market_data_summary"].get(asset, {})
-                asset_signal_data = (
-                    asset_market_data  # Les signaux sont directement dans ce résumé
-                )
-            elif (
-                isinstance(asset_market_data_full, pd.DataFrame)
-                and not asset_market_data_full.empty
-            ):
+            elif isinstance(asset_market_data_full, pd.DataFrame) and not asset_market_data_full.empty:
                 # Si c'est le DataFrame complet, prendre la dernière ligne
                 asset_market_data = asset_market_data_full.iloc[-1].to_dict()
-                asset_signal_data = asset_market_data  # Signaux dans la dernière ligne
             else:
                 self.logger.warning(f"Données de marché pour l'actif {asset} non trouvées ou malformées pour le prompt IA.")
-                continue # Passer cet actif si les données sont invalides
+                continue  # Passer cet actif si les données sont invalides
 
             # V-- LA LOGIQUE DE CRÉATION DU BLOC D'ACTIF POUR LE PROMPT --V
             asset_info = [f"### Actif: {asset}"]
@@ -224,7 +214,86 @@ class AIInterface:
         # Vérification finale
         if self._estimate_tokens(final_prompt) > max_tokens:
             self.logger.error(f"Le prompt final dépasse la limite de tokens ({max_tokens}). L'analyse IA pourrait être incomplète.")
-            final_prompt = final_prompt[:max_tokens] # Tronquer à la limite absolue si dépasse
+            final_prompt = final_prompt[:max_tokens]  # Tronquer à la limite absolue si dépasse
+
+        self.logger.debug(f"Prompt IA généré (longueur: {len(final_prompt)} caractères).")
+        return final_prompt
+
+    def _build_report_prompt(self, aggregated_data: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """
+        Construit un prompt pour l'IA afin de générer un rapport journalier basé sur données agrégées.
+        Utilise des templates de config pour flexibilité, avec gestion des tokens pour éviter dépassements.
+        
+        Args:
+            aggregated_data (Dict[str, Any]): Les données agrégées journalières (ex. trades, phases, metrics).
+            context (Dict): Le contexte système et marché global (enrichi).
+
+        Returns:
+            str: Le prompt formaté, prêt à être envoyé à l'IA pour génération de rapport.
+        """
+        self.logger.info("Construction du prompt pour l'IA via le moteur de templates pour rapport journalier...")
+
+        if not aggregated_data:
+            self.logger.warning("Impossible de construire le prompt : les données agrégées sont vides.")
+            return ""
+
+        # ZÉRO HARD CODING : Tous les textes sont chargés depuis la configuration.
+        role_def = self.config_manager.get(
+            "prompts.advisor_report.role_definition",
+            "Vous êtes un auditeur IA consultatif pour un bot trading. "
+        )
+        context_tpl = self.config_manager.get(
+            "prompts.advisor_report.global_context_template",
+            "\n## Contexte Global\n- Régime: {market_regime}\n- VIX: {vix}\n"
+        )
+        task_def = self.config_manager.get(
+            "prompts.advisor_report.task_definition",
+            "\n## Votre Tâche\nFournissez un 'diagnostic' global et des 'suggestions' pour améliorer configs/stratégies (ex. pertinence_strategique par actif). Renvoie en JSON structuré."
+        )
+
+        prompt_parts = [role_def]
+        prompt_parts.append(
+            context_tpl.format(
+                market_regime=context.get("current_market_regime", "inconnu"),
+                vix=context.get("vix_index", "N/A"),
+            )
+        )
+        prompt_parts.append("## Analyse des Données Journalières\n")
+
+        max_tokens = self.config_manager.get("ai.generation_params.max_tokens", 4096)
+        ideal_tokens_ratio = self.config_manager.get("ai.generation_params.ideal_tokens_ratio", 0.75)
+        ideal_tokens = int(max_tokens * ideal_tokens_ratio)
+
+        # Adaptation pour données agrégées au lieu d'opportunités par asset
+        data_info = []
+        for key, value in aggregated_data.items():
+            if isinstance(value, list) and value:  # Ex. phases_detected
+                data_info.append(f"- {key}: {', '.join(map(str, value[:10]))} (premiers 10 éléments)")
+            elif isinstance(value, dict):  # Ex. trades par asset
+                for sub_key, sub_value in value.items():
+                    data_info.append(f"- {key}.{sub_key}: {sub_value}")
+            else:
+                data_info.append(f"- {key}: {value}")
+
+        data_block = "\n".join(data_info)
+
+        # Vérification des tokens avant ajout
+        current_prompt_estimate = self._estimate_tokens("\n".join(prompt_parts) + "\n" + data_block)
+        if current_prompt_estimate > ideal_tokens:
+            self.logger.warning(f"Limite de tokens atteinte ({current_prompt_estimate}/{ideal_tokens}), données tronquées.")
+            # Tronquer intelligemment : garder les metrics clés
+            data_info = data_info[:len(data_info)//2]  # Exemple simple de troncature
+            data_block = "\n".join(data_info)
+
+        prompt_parts.append(data_block)
+
+        prompt_parts.append(task_def)
+        final_prompt = "\n".join(prompt_parts)
+
+        # Vérification finale
+        if self._estimate_tokens(final_prompt) > max_tokens:
+            self.logger.error(f"Le prompt final dépasse la limite de tokens ({max_tokens}). L'analyse IA pourrait être incomplète.")
+            final_prompt = final_prompt[:max_tokens]  # Tronquer à la limite absolue si dépasse
 
         self.logger.debug(f"Prompt IA généré (longueur: {len(final_prompt)} caractères).")
         return final_prompt
@@ -248,12 +317,12 @@ class AIInterface:
         prompt = self.build_ia_prompt(opportunities, context)
         if not prompt:
             self.logger.warning("Prompt IA vide, aucune demande de conseil ne sera envoyée.")
-            return {"error": "Prompt IA vide.", "ai_vote_for_configs": {}, "relevance_score": 0.0} # 'relevance_score' au lieu de 'confidence_score'
+            return {"error": "Prompt IA vide.", "ai_vote_for_configs": {}, "analysis_quality_score": 0.5}
 
         # S'assurer que l'instance AIDecision est injectée.
-        if not hasattr(self, "ai_decision_instance") or self.ai_decision_instance is None:
+        if not self.ai_decision_instance:
             self.logger.error("Interaction IA impossible : l'instance de AIDecision n'a pas été injectée dans AIInterface. Retourne une réponse d'erreur.")
-            return {"error": "Module AI non configuré.", "ai_vote_for_configs": {}, "relevance_score": 0.0}
+            return {"error": "Module AI non configuré.", "ai_vote_for_configs": {}, "analysis_quality_score": 0.5}
 
         # Implémenter un cache avec une durée de vie (TTL) pour les réponses de l'IA
         cache_key_elements = {
@@ -265,7 +334,7 @@ class AIInterface:
 
         # Récupérer les paramètres du cache IA
         ia_cache_enabled = self.config_manager.get("ai.cache_settings.enabled", False)
-        ia_cache_ttl_seconds = self.config_manager.get("ai.cache_settings.ttl_seconds", 300) # 5 minutes par défaut
+        ia_cache_ttl_seconds = self.config_manager.get("ai.cache_settings.ttl_seconds", 300)  # 5 minutes par défaut
 
         if ia_cache_enabled and cache_key in self._ai_advice_cache:
             cached_advice, timestamp = self._ai_advice_cache[cache_key]
@@ -274,52 +343,31 @@ class AIInterface:
                 return cached_advice
             else:
                 self.logger.info("Conseil IA dans le cache expiré. Recalcul.")
-                del self._ai_advice_cache[cache_key] # Supprimer l'entrée expirée
+                del self._ai_advice_cache[cache_key]  # Supprimer l'entrée expirée
 
         try:
             # Délégation de l'appel au module expert AIDecision
-            # AIDecision doit maintenant retourner des informations purement consultatives,
-            # sans notions de "score de confiance" de décision.
-            # La méthode appelée peut être get_structured_analysis_from_prompt.
             advice = self.ai_decision_instance.get_structured_analysis_from_prompt(prompt)
             self.logger.info("Analyse de l'IA reçue avec succès.")
 
-            # Pour maintenir la structure de retour attendue par les appelants qui s'attendaient à 'confidence_score' ou 'ai_vote_for_configs'
-            # (même si AIInterface ne les calcule plus), on doit mapper les nouveaux champs de l'IA.
-            # L'IA donne maintenant une "pertinence_strategique" par actif (Faible, Moyenne, Élevée)
-            # Nous pouvons les convertir en un score numérique interne pour l'`ai_vote_for_configs` du ConfigManager.
             ai_vote_for_configs = {}
             if advice.get("asset_analysis"):
                 for asset_entry in advice["asset_analysis"]:
                     asset_symbol = asset_entry.get("asset")
                     strategic_relevance = asset_entry.get("pertinence_strategique", "Faible")
-                    # Mapper la pertinence stratégique en un score numérique de 0.0 à 1.0
-                    if strategic_relevance == "Élevée":
-                        score = 0.9
-                    elif strategic_relevance == "Moyenne":
-                        score = 0.6
-                    else: # Faible ou autre
-                        score = 0.3
+                    score = {"Élevée": 0.9, "Moyenne": 0.6}.get(strategic_relevance, 0.3)
                     if asset_symbol:
-                        # Assurez-vous que la clé est bien le chemin complet de la config si c'est ce que ConfigManager attend.
-                        # Pour l'instant, on simule un mapping simple, le ConfigManager fera le lien.
                         ai_vote_for_configs[asset_symbol] = score
 
-            # La "confiance" de l'IA sur sa propre analyse peut toujours être présente,
-            # mais ce n'est PAS un score de décision pour le trading.
-            # On la renomme en 'analysis_quality_score' pour éviter toute ambiguïté.
             analysis_quality_score = advice.get("analysis_quality_score", 0.5)
 
-            # Reconstruire la réponse pour qu'elle corresponde à la structure attendue par ConfigManager,
-            # sans le "confidence_score" qui était décisionnel.
             structured_advice = {
                 "ai_vote_for_configs": ai_vote_for_configs,
-                "analysis_quality_score": analysis_quality_score, # Indique la confiance de l'IA dans sa propre analyse.
+                "analysis_quality_score": analysis_quality_score,
                 "summary": advice.get("summary", "Analyse IA"),
                 "recommendations": advice.get("recommendations", []),
-                "raw_analysis": advice, # Garder l'analyse brute pour le débogage et l'audit
+                "raw_analysis": advice,  # Garder l'analyse brute pour le débogage et l'audit
             }
-
 
             # Stocker la réponse dans le cache si activé
             if ia_cache_enabled:
@@ -335,7 +383,73 @@ class AIInterface:
                     f"AI Analyse Échec: {e}",
                     alert_type="telegram_critical",
                 )
-            return {"error": f"Échec de la requête d'analyse à l'IA: {e}", "ai_vote_for_configs": {}, "relevance_score": 0.0}
+            return {"error": f"Échec de la requête d'analyse à l'IA: {e}", "ai_vote_for_configs": {}, "analysis_quality_score": 0.5}
+
+    def generate_daily_report(self, aggregated_data: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Génère un rapport journalier basé sur données agrégées via l'IA consultative.
+        Utilise un prompt dédié et parse la réponse en JSON structuré.
+
+        Args:
+            aggregated_data (Dict[str, Any]): Données agrégées journalières.
+            context (Dict): Contexte système et marché.
+
+        Returns:
+            Dict[str, Any]: Rapport structuré ou erreur.
+        """
+        self.logger.info("Génération du rapport journalier via IA...")
+
+        prompt = self._build_report_prompt(aggregated_data, context)
+        if not prompt:
+            self.logger.warning("Prompt rapport vide ; rapport non généré.")
+            return {"error": "Prompt vide.", "summary": "", "suggestions": [], "performance_score": 0.0}
+
+        if not self.ai_decision_instance:
+            self.logger.error("Module AIDecision non injecté ; rapport non généré.")
+            return {"error": "Module AI non configuré.", "summary": "", "suggestions": [], "performance_score": 0.0}
+
+        # Cache pour rapports (similaire à advice)
+        cache_key_elements = {
+            "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "date": datetime.now().strftime("%Y-%m-%d"),
+        }
+        cache_key = json.dumps(cache_key_elements, sort_keys=True)
+
+        ia_cache_enabled = self.config_manager.get("ai.cache_settings.enabled", False)
+        ia_cache_ttl_seconds = self.config_manager.get("ai.cache_settings.ttl_seconds", 300)
+
+        if ia_cache_enabled and cache_key in self._ai_advice_cache:
+            cached_report, timestamp = self._ai_advice_cache[cache_key]
+            if (datetime.now(UTC) - timestamp).total_seconds() < ia_cache_ttl_seconds:
+                self.logger.info("Rapport IA récupéré du cache.")
+                return cached_report
+            else:
+                del self._ai_advice_cache[cache_key]
+
+        try:
+            ai_response = self.ai_decision_instance.get_structured_analysis_from_prompt(prompt)
+            report = self._parse_report_response(ai_response)
+
+            if ia_cache_enabled:
+                self._ai_advice_cache[cache_key] = (report, datetime.now(UTC))
+                self.logger.debug("Rapport IA stocké dans le cache.")
+
+            return report
+        except Exception as e:
+            self.logger.error(f"Échec génération rapport IA : {e}", exc_info=True)
+            if self.config_manager:
+                self.config_manager.send_alert("ALERTE", f"Rapport IA Échec: {e}", alert_type="telegram_critical")
+            return {"error": str(e), "summary": "", "suggestions": [], "performance_score": 0.0}
+
+    def _parse_report_response(self, response: str) -> Dict[str, Any]:
+        """
+        Parse la réponse IA en dict JSON pour rapport (avec robustesse).
+        """
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Erreur parsing réponse rapport IA : {e}. Retour basique.")
+            return {"summary": response, "suggestions": [], "performance_score": 0.0}
 
     def _estimate_tokens(self, text: str) -> int:
         """
@@ -345,7 +459,7 @@ class AIInterface:
         """
         tiktoken_encoding_name = self.config_manager.get(
             "ai.token_estimation_encoding", "cl100k_base"
-        ) # Nouvelle clé pour l'encodage
+        )  # Nouvelle clé pour l'encodage
 
         if TIKTOKEN_AVAILABLE:
             try:
@@ -356,14 +470,12 @@ class AIInterface:
                     f"Erreur lors de l'estimation des tokens avec tiktoken (encoding: {tiktoken_encoding_name}): {e}. Fallback sur l'heuristique.",
                     exc_info=True,
                 )
-                token_estimation_ratio = self.config_manager.get("ai.token_estimation_ratio", 4)
-                return len(text) // token_estimation_ratio
         else:
             if not hasattr(self, "_warned_about_tokenizer"):
                 self.logger.warning(
                     "La bibliothèque 'tiktoken' n'est pas installée. L'estimation du nombre de tokens sera approximative. Installez-la (`pip install tiktoken`) pour une meilleure précision."
                 )
-                self._warned_about_tokenizer = True # N'afficher l'avertissement qu'une seule fois.
+                self._warned_about_tokenizer = True  # N'afficher l'avertissement qu'une seule fois.
 
-            token_estimation_ratio = self.config_manager.get("ai.token_estimation_ratio", 4)
-            return len(text) // token_estimation_ratio
+        token_estimation_ratio = self.config_manager.get("ai.token_estimation_ratio", 4)
+        return len(text) // token_estimation_ratio
