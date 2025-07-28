@@ -13,7 +13,7 @@
     "XAUUSD"
   ],
   "magic_number": 10101,
-  "risk_per_trade_percent": 5,
+  "risk_per_trade_percent": 1,
   "stop_loss_pips": 20,
   "max_daily_loss_percent": 1.5,
   "max_drawdown_percent": 4.0,

@@ -492,6 +492,8 @@ class DecisionPipeline:
         """
         self.logger.info("Orchestration de la décision de trade via la stratégie active...")
 
+        self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
+
         # 1. Filtres pré-décision critiques (sécurité globale)
         if current_config.get("halt_on_major_news", True) and self.config_manager.check_news_schedule(context, context.get("economic_calendar", [])):
             self.logger.warning("Trade suspendu en raison d'un événement d'actualité majeur.")
@@ -502,6 +504,7 @@ class DecisionPipeline:
 
         # 2. Identifier et instancier la classe de la stratégie active
         strategy_name = current_config.get("strategy_name")
+        self.logger.debug(f"Stratégie active: {strategy_name}")
         strategy_class = None
 
         # CORRECTION MAJEURE : Utiliser l'attribut self.strategy_manager qui a été injecté dans __init__.
@@ -525,6 +528,7 @@ class DecisionPipeline:
             # Passe l'instance de ConfigManager à la stratégie
             strategy_instance = strategy_class(config_manager_instance=self.config_manager, strategy_config=current_config)
             trade_decision = strategy_instance.evaluate_entry(context, signals)
+            self.logger.debug(f"Résultat de l'évaluation par la stratégie: {trade_decision}")
         except Exception as e:
             self.logger.error(f"Une erreur est survenue lors de l'évaluation de la stratégie '{strategy_name}': {e}", exc_info=True)
             trade_decision = None
@@ -539,12 +543,15 @@ class DecisionPipeline:
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get("max_open_positions", 999)
         current_open_positions = context.get("open_positions", [])
 
+        self.logger.debug(f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}")
+
         if len(current_open_positions) >= max_positions_for_account:
             self.logger.warning(f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}.")
             return {}
 
         # calculate_risk_parameters est une méthode de DecisionPipeline
         risk_params = self.calculate_risk_parameters(context, current_config, trade_decision)
+        self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
         if not risk_params.get("volume", 0.0) > 0:
             self.logger.warning("Calcul de risque invalide ou volume nul. Trade annulé.")
             return {}
@@ -565,50 +572,79 @@ class DecisionPipeline:
         Déplacée de ConfigManager.
         """
         conditions = rule.get("conditions", {})
+        rule_name = rule.get("name", "Unnamed Rule")
+
+        self.logger.debug(f"Évaluation de la règle '{rule_name}' avec signaux: {asset_signals}")
+
+        min_confidence = conditions.get("min_confidence", 0.0)
+        current_confidence = asset_signals.get("confidence_score", 0.0)
+        if current_confidence < min_confidence:
+            self.logger.debug(f"  Règle '{rule_name}' échouée: Confiance {current_confidence} < seuil min {min_confidence}.")
+            return False
 
         phase_must_contain = conditions.get("phase_must_contain", [])
         current_phase = asset_signals.get("phase", "")
         if phase_must_contain and not any(p in current_phase for p in phase_must_contain):
-            self.logger.debug(f"  Règle échouée: Phase '{current_phase}' ne contient pas les phases requises ({phase_must_contain}).")
+            self.logger.debug(f"  Règle '{rule_name}' échouée: Phase '{current_phase}' ne contient pas les phases requises ({phase_must_contain}).")
             return False
 
         signal_must_contain = conditions.get("signal_must_contain", [])
         for signal in signal_must_contain:
             if signal == "fvg":
-                if not asset_signals.get("fvg_detected", False): return False
+                if not asset_signals.get("fvg_detected", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'fvg' non détecté.")
+                    return False
             elif signal == "order_block":
-                if not asset_signals.get("ob_detected", False): return False
+                if not asset_signals.get("ob_detected", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'order_block' non détecté.")
+                    return False
             elif signal == "bos_mss":
-                if not asset_signals.get("bos_mss_detected", False): return False
+                if not asset_signals.get("bos_mss_detected", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'bos_mss' non détecté.")
+                    return False
             elif signal == "liquidity_grab":
-                if not asset_signals.get("liquidity_grab_detected", False): return False
+                if not asset_signals.get("liquidity_grab_detected", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'liquidity_grab' non détecté.")
+                    return False
             elif signal == "volume_anomaly_spike":
-                if not (asset_signals.get("volume_anomaly_details", {}).get("type") == "spike"): return False
+                if not (asset_signals.get("volume_anomaly_details", {}).get("type") == "spike"):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'volume_anomaly_spike' non détecté.")
+                    return False
             elif signal == "volume_anomaly_drought":
-                if not (asset_signals.get("volume_anomaly_details", {}).get("type") == "drought"): return False
+                if not (asset_signals.get("volume_anomaly_details", {}).get("type") == "drought"):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'volume_anomaly_drought' non détecté.")
+                    return False
             elif signal == "eqh_eql":
-                if not asset_signals.get("eqh_eql_detected", False): return False
+                if not asset_signals.get("eqh_eql_detected", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'eqh_eql' non détecté.")
+                    return False
             elif signal == "entry_confirmation_bullish":
-                if not asset_signals.get("entry_confirmation_bullish", False): return False
+                if not asset_signals.get("entry_confirmation_bullish", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'entry_confirmation_bullish' non détecté.")
+                    return False
             elif signal == "entry_confirmation_bearish":
-                if not asset_signals.get("entry_confirmation_bearish", False): return False
+                if not asset_signals.get("entry_confirmation_bearish", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'entry_confirmation_bearish' non détecté.")
+                    return False
             elif signal == "validated_ob":
-                if not asset_signals.get("validated_ob", False): return False
+                if not asset_signals.get("validated_ob", False):
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Signal 'validated_ob' non détecté.")
+                    return False
             elif not asset_signals.get(signal, False):
-                self.logger.debug(f"  Règle échouée: Signal requis '{signal}' non détecté.")
+                self.logger.debug(f"  Règle '{rule_name}' échouée: Signal requis '{signal}' non détecté.")
                 return False
 
         signal_must_not_contain = conditions.get("signal_must_not_contain", [])
         for signal in signal_must_not_contain:
             if asset_signals.get(f"{signal}_detected", False) or (signal in asset_signals and asset_signals.get(signal) is not False):
-                self.logger.debug(f"  Règle échouée: Signal interdit '{signal}' détecté.")
+                self.logger.debug(f"  Règle '{rule_name}' échouée: Signal interdit '{signal}' détecté.")
                 return False
 
         signal_details_must_validate = conditions.get("signal_details_must_validate", {})
         for signal_key, checks in signal_details_must_validate.items():
             signal_data = asset_signals.get(signal_key, {})
             if not signal_data or not isinstance(signal_data, dict):
-                self.logger.debug(f"  Règle échouée: Détails du signal '{signal_key}' manquants ou mal formés.")
+                self.logger.debug(f"  Règle '{rule_name}' échouée: Détails du signal '{signal_key}' manquants ou mal formés.")
                 return False
             for detail_key, condition in checks.items():
                 value_to_check = signal_data
@@ -618,17 +654,18 @@ class DecisionPipeline:
                 except AttributeError:
                     value_to_check = None
                 if value_to_check is None:
-                    self.logger.debug(f"  Règle échouée: Détail '{detail_key}' du signal '{signal_key}' manquant.")
+                    self.logger.debug(f"  Règle '{rule_name}' échouée: Détail '{detail_key}' du signal '{signal_key}' manquant.")
                     return False
                 if isinstance(condition, (bool, str, int, float)):
                     if value_to_check != condition:
-                        self.logger.debug(f"  Règle échouée: Détail '{detail_key}' ({value_to_check}) ne correspond pas à la valeur requise ({condition}).")
+                        self.logger.debug(f"  Règle '{rule_name}' échouée: Détail '{detail_key}' ({value_to_check}) ne correspond pas à la valeur requise ({condition}).")
                         return False
                 elif isinstance(condition, dict):
                     for op, val in condition.items():
                         if not self._compare_values(value_to_check, op, val):
-                            self.logger.debug(f"  Règle échouée: Comparaison du détail '{detail_key}' ({value_to_check}) avec l'opérateur '{op}' et la valeur '{val}' a échoué.")
+                            self.logger.debug(f"  Règle '{rule_name}' échouée: Comparaison du détail '{detail_key}' ({value_to_check}) avec l'opérateur '{op}' et la valeur '{val}' a échoué.")
                             return False
+        self.logger.debug(f"  Règle '{rule_name}' passée avec succès.")
         return True
 
     def _compare_values(self, actual_value, operator, expected_value) -> bool:

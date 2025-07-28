@@ -13,7 +13,7 @@
     "USDCHF"
   ],
   "magic_number": 20202,
-  "risk_per_trade_percent": 5,
+  "risk_per_trade_percent": 1,
   "stop_loss_pips": 30,
   "max_daily_loss_percent": 1.8,
   "max_drawdown_percent": 5.0,
@@ -65,7 +65,7 @@
         "phase_must_contain": [
           "manipulation_detected"
         ],
-        "min_confidence": 0.45
+        "min_confidence": 0.30
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -85,7 +85,7 @@
         "phase_must_contain": [
           "manipulation_detected"
         ],
-        "min_confidence": 0.75
+        "min_confidence": 0.40
       },
       "order_type": "MARKET",
       "action_logic": {

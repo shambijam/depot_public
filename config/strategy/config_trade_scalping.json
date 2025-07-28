@@ -14,7 +14,7 @@
     "LTCUSD"
   ],
   "magic_number": 40404,
-  "risk_per_trade_percent": 3,
+  "risk_per_trade_percent": 1,
   "stop_loss_pips": 50,
   "max_daily_loss_percent": 3.0,
   "max_drawdown_percent": 7.0,
@@ -24,7 +24,7 @@
   "phase_detection": {
     "description": "Paramètres de détection de phase et de signaux SMC adaptés aux caractéristiques uniques (volatilité, échelle de prix) des marchés de cryptomonnaies.",
     "lookback_window": 10,
-    "volatility_threshold": 5.0,
+    "volatility_threshold": 1.0,
     "volume_zscore": 1.5,
     "eq_level_tolerance": 15.0,
     "impulse_threshold": 5.0,
