@@ -76,15 +76,16 @@ class StrategyManager:
         et les met en cache dans `strategy_registry`.
         """
         self.logger.info("Chargement de toutes les stratégies définies dans le mapping...")
-        config_dir_path = self.config_manager.get("paths.strategy_configs", "config/strategy/")
+        config_dir_path = Path(self.config_manager.get("paths.strategy_configs", "config/strategy/"))
         config_mapping = self.config_manager.get("strategies.config_mapping", {})
 
-        if not Path(config_dir_path).is_dir():
+        if not config_dir_path.is_dir():
             self.logger.warning(f"[load_all_strategies] Le répertoire '{config_dir_path}' n'existe pas. Aucune stratégie à charger.")
             return
 
+        loaded_count = 0
         for strategy_key, config_file in config_mapping.items():
-            config_path = Path(config_dir_path) / config_file
+            config_path = config_dir_path / config_file
             if not config_path.is_file():
                 self.logger.warning(f"[load_all_strategies] Fichier de configuration '{config_path}' manquant pour '{strategy_key}'.")
                 continue
@@ -97,22 +98,30 @@ class StrategyManager:
                 self.logger.debug(f"[load_all_strategies] Tente de charger la classe Python pour la clé '{strategy_key}' associée au fichier '{config_file}'.")
 
                 strategy_class = self._load_strategy_class(strategy_key)
+                if strategy_class is None:
+                    self.logger.error(f"[load_all_strategies] Impossible de charger la classe pour '{strategy_key}'. Stratégie ignorée.")
+                    continue
 
                 strategy_name_from_config = config.get("strategy_name")
-                if strategy_name_from_config:
-                    self.strategy_registry[strategy_name_from_config] = { 
-                        "config": config,
-                        "class": strategy_class, 
-                        "last_modified": config_path.stat().st_mtime,
-                    }
-                    self._config_knowledge_base[strategy_name_from_config] = { 
-                        "config": config,
-                        "class": strategy_class,
-                        "version": str(config_path.stat().st_mtime)
-                    }
-                    self.logger.debug(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}.")
-                else:
+                if not strategy_name_from_config:
                     self.logger.error(f"[load_all_strategies] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre.")
+                    continue
+
+                if strategy_name_from_config in self.strategy_registry:
+                    self.logger.warning(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' déjà présente dans le registre. Mise à jour forcée.")
+
+                self.strategy_registry[strategy_name_from_config] = { 
+                    "config": config,
+                    "class": strategy_class, 
+                    "last_modified": config_path.stat().st_mtime,
+                }
+                self._config_knowledge_base[strategy_name_from_config] = { 
+                    "config": config,
+                    "class": strategy_class,
+                    "version": str(config_path.stat().st_mtime)
+                }
+                self.logger.debug(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}.")
+                loaded_count += 1
 
             except ConfigValidationError as e:
                 self.logger.error(f"[load_all_strategies] Erreur de validation pour la stratégie '{strategy_key}' : {str(e)}")
@@ -120,6 +129,8 @@ class StrategyManager:
                 self.logger.error(f"[load_all_strategies] Fichier de configuration introuvable : {config_path}")
             except Exception as e:
                 self.logger.error(f"[load_all_strategies] Erreur lors du chargement de '{strategy_key}' : {str(e)}", exc_info=True)
+
+        self.logger.info(f"[load_all_strategies] {loaded_count} stratégies chargées avec succès sur {len(config_mapping)} mappées.")
 
     def _load_strategy_class(self, strategy_key: str) -> Optional[Type]:
         """
