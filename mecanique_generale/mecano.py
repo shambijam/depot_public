@@ -105,6 +105,16 @@ class Mecano:
 
         self.logger.info("Mecano initialisé. Prêt pour monitoring et rapports.")
 
+    def set_ai_analyzer(self, ai_analyzer_instance):
+        """
+        Injecte l'instance AIDecision dans AIInterface pour couplage.
+        """
+        if self.ai_interface:
+            self.ai_interface.ai_decision_instance = ai_analyzer_instance
+            self.logger.info("AIDecision injectée dans AIInterface pour rapports consultatifs.")
+        else:
+            self.logger.warning("set_ai_analyzer appelé sans AIInterface active.")
+
     def _setup_loggers(self) -> None:
         """
         Configure loggers pour performance et erreurs, sans duplication.
