@@ -67,7 +67,7 @@ class Mecano:
         if self.config_manager is None:
             self.logger.warning("Mecano sans ConfigManager. Chemins non dynamiques.")
 
-        self.ai_interface = AIInterface(config_manager=self.config_manager) if self.config_manager else None
+        self.ai_interface = AIInterface(config_manager_instance=self.config_manager) if self.config_manager else None
         if self.ai_interface is None:
             self.logger.warning("Mecano sans AIInterface. Rapports IA désactivés.")
 
@@ -104,16 +104,6 @@ class Mecano:
         self.config_snapshots: List[str] = []
 
         self.logger.info("Mecano initialisé. Prêt pour monitoring et rapports.")
-
-    def set_ai_analyzer(self, ai_analyzer_instance):
-        """
-        Injecte l'instance AIDecision dans AIInterface pour couplage.
-        """
-        if self.ai_interface:
-            self.ai_interface.ai_decision_instance = ai_analyzer_instance
-            self.logger.info("AIDecision injectée dans AIInterface pour rapports consultatifs.")
-        else:
-            self.logger.warning("set_ai_analyzer appelé sans AIInterface active.")
 
     def _setup_loggers(self) -> None:
         """
