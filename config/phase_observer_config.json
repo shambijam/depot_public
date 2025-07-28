@@ -11,17 +11,17 @@
             "detect_volume_anomaly": true
         },
         "lookback_window": 20,
-        "volatility_threshold": 0.0003,
-        "volume_zscore": 1.5,
+        "volatility_threshold": 0.0002,
+        "volume_zscore": 1.0,
         "eq_level_tolerance": 0.0001,
-        "impulse_threshold": 0.0005,
+        "impulse_threshold": 0.0003,
         "min_window_order_block": 5,
         "min_window_fvg": 3,
         "min_window_liquidity_grab": 10,
         "min_window_breaker_block": 10,
         "bos_mss_structure_window_ratio": 0.3,
         "min_window_eqh_eql": 10,
-        "min_window_volume_anomaly": 10,
+        "min_window_volume_anomaly": 5,
         "min_std_dev_volume_anomaly": 1e-06,
         "min_window_fvg_presence": 6,
         "fvg_window_slice_size": 3,
@@ -34,14 +34,17 @@
         "default_spread_points": 0.0,
         "default_point_value": 0.00001,
         "default_trade_tick_size": 0.00001,
-        "default_trade_contract_size": 100000.0
+        "default_trade_contract_size": 100000.0,
+        "max_allowed_spread_for_liquid_check": 5,
+        "scalp_burst_volatility_multiplier": 1.5,
+        "consolidation_volatility_multiplier": 0.8
     },
     "market_regime_detection": {
         "description": "Paramètres pour la détection du régime de marché global par le ConfigManager, basée sur les agrégations du PhaseObserver.",
         "min_data_points": 20,
         "atr_period": 14,
-        "high_volatility_percent_threshold": 0.5,
-        "low_volatility_percent_threshold": 0.1,
+        "high_volatility_percent_threshold": 0.3,
+        "low_volatility_percent_threshold": 0.2,
         "default_vix_index": 20,
         "high_volatility_vix_threshold": 25,
         "low_volatility_vix_threshold": 15
@@ -49,7 +52,7 @@
     "phase_detection_adaptation": {
         "description": "Paramètres d'adaptation de la détection de phase en fonction des conditions de volatilité globales (utilisés par ConfigManager pour adapter les stratégies).",
         "lookback_window_high_vol": 10,
-        "volume_zscore_high_vol": 2.5,
+        "volume_zscore_high_vol": 2.0,
         "lookback_window_low_vol": 30,
         "volume_zscore_low_vol": 1.5
     }
