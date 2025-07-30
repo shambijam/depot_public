@@ -41,7 +41,7 @@ except ImportError as e:
 # TODO: Rendre le niveau de log par défaut (`logging.INFO`) configurable via
 #       les paramètres de l'application pour plus de flexibilité en production.
 logging.basicConfig(
-    #level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s"
+    # level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s"
 )
 
 
@@ -800,7 +800,7 @@ class PhaseObserver:
         #       "Isolation Forest" (nécessiterait Scikit-learn), pour identifier des patterns de volume inhabituels plus subtils.
         #       Cela pourrait être une fonction séparée appelée `detect_advanced_volume_patterns`.
         return results
-   
+
     def _get_trend(self, df: pd.DataFrame) -> pd.Series:
         """
         Détermine la tendance dominante pour chaque point de données de manière vectorielle.
@@ -853,7 +853,7 @@ class PhaseObserver:
         trend_outcomes = ["bullish", "bearish"]
 
         return np.select(trend_conditions, trend_outcomes, default="neutral")
- 
+
     def _calculate_phase_confidence(
         self, signals: Dict[str, bool], window: pd.DataFrame
     ) -> float:
@@ -1202,8 +1202,9 @@ class PhaseObserver:
         #       avec un schéma Pydantic ou JSON Schema pour une robustesse maximale.
         pass  # Placeholder pour le code existant qui est déjà de bonne qualité
 
-   
-    def analyze(self, df: pd.DataFrame, asset_symbol: Optional[str] = None) -> Optional[pd.DataFrame]: # LIGNE MODIFIÉE
+    def analyze(
+        self, df: pd.DataFrame, asset_symbol: Optional[str] = None
+    ) -> Optional[pd.DataFrame]:  # LIGNE MODIFIÉE
         """
         Orchestre le pipeline d'analyse complet de manière vectorielle, performante et configurable.
         Cette méthode lit les "detection_toggles" pour n'exécuter que les analyses activées.
@@ -1227,26 +1228,32 @@ class PhaseObserver:
         # def analyze(self, df: pd.DataFrame, asset_symbol: str) -> Optional[pd.DataFrame]:
         # Mais pour rester fidèle à la signature que tu m'as donnée, je vais essayer de le déduire.
 
-      # --- DÉBUT DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE (AMÉLIORÉE) ---
+        # --- DÉBUT DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE (AMÉLIORÉE) ---
         # Utilise le 'asset_symbol' passé en argument en priorité.
         # S'il est None ou 'UNKNOWN_ASSET', tente de le déduire du DataFrame.
-        current_asset_symbol = asset_symbol # Initialise avec l'argument passé
+        current_asset_symbol = asset_symbol  # Initialise avec l'argument passé
         if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
             # Tente de récupérer le symbole de la dernière ligne du DF si une colonne 'symbol' existe
             if "symbol" in df.columns and not df.empty:
                 deduced_symbol = df["symbol"].iloc[-1]
                 # S'assure que le symbole déduit est une chaîne et n'est pas 'UNKNOWN_ASSET' du dataframe lui-même
-                if isinstance(deduced_symbol, str) and deduced_symbol != "UNKNOWN_ASSET":
+                if (
+                    isinstance(deduced_symbol, str)
+                    and deduced_symbol != "UNKNOWN_ASSET"
+                ):
                     current_asset_symbol = deduced_symbol
-                    self.logger.debug(f"Symbole de l'actif déduit du DataFrame pour analyse: {current_asset_symbol}")
-            
+                    self.logger.debug(
+                        f"Symbole de l'actif déduit du DataFrame pour analyse: {current_asset_symbol}"
+                    )
+
             # Si le symbole n'a toujours pas été déduit ou fourni
             if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
-                self.logger.warning("Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité sera globale.")
+                self.logger.warning(
+                    "Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité sera globale."
+                )
                 # Assure qu'il y a une valeur par défaut non-None pour la suite des opérations
-                current_asset_symbol = "UNKNOWN_ASSET_GLOBAL" 
+                current_asset_symbol = "UNKNOWN_ASSET_GLOBAL"
         # --- FIN DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE ---
-
 
         # ... (le code précédent reste inchangé jusqu'à la détection de liquidité) ...
 
@@ -1361,7 +1368,7 @@ class PhaseObserver:
             df_an
         )
 
-       # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE (CORRIGÉE) ---
+        # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE (CORRIGÉE) ---
         # Valeurs par défaut pour le Forex, lues depuis la config
         max_allowed_spread_points = self.config_manager.get(
             "phase_detection_defaults.max_allowed_spread_for_liquid_check", 7
@@ -1375,15 +1382,28 @@ class PhaseObserver:
 
         # Déterminer si l'actif courant est une crypto et ajuster les seuils
         # Utilise 'current_asset_symbol' qui a été déduit ou fourni au début de la fonction.
-        if current_asset_symbol and current_asset_symbol != "UNKNOWN_ASSET_GLOBAL" and current_asset_symbol in crypto_symbols:
-            crypto_liquidity_settings = self.config_manager.get("phase_detection_defaults.crypto_liquidity_check", {})
+        if (
+            current_asset_symbol
+            and current_asset_symbol != "UNKNOWN_ASSET_GLOBAL"
+            and current_asset_symbol in crypto_symbols
+        ):
+            crypto_liquidity_settings = self.config_manager.get(
+                "phase_detection_defaults.crypto_liquidity_check", {}
+            )
             # Utilise les valeurs spécifiques aux cryptos si elles existent dans la config, sinon les valeurs Forex par défaut.
-            max_allowed_spread_points = crypto_liquidity_settings.get("min_allowed_spread_points_crypto", max_allowed_spread_points)
-            min_volume_for_liquid_check = crypto_liquidity_settings.get("min_volume_for_liquid_check_crypto", min_volume_for_liquid_check)
-            self.logger.debug(f"Détection liquidité CRYPTO pour {current_asset_symbol}: Application des seuils spécifiques. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}")
+            max_allowed_spread_points = crypto_liquidity_settings.get(
+                "min_allowed_spread_points_crypto", max_allowed_spread_points
+            )
+            min_volume_for_liquid_check = crypto_liquidity_settings.get(
+                "min_volume_for_liquid_check_crypto", min_volume_for_liquid_check
+            )
+            self.logger.debug(
+                f"Détection liquidité CRYPTO pour {current_asset_symbol}: Application des seuils spécifiques. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}"
+            )
         else:
-            self.logger.debug(f"Détection liquidité FOREX/AUTRE pour {current_asset_symbol}: Application des seuils par défaut. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}")
-
+            self.logger.debug(
+                f"Détection liquidité FOREX/AUTRE pour {current_asset_symbol}: Application des seuils par défaut. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}"
+            )
 
         if "spread" in df_an.columns and "tick_volume" in df_an.columns:
             last_spread = df_an["spread"].iloc[-1]
@@ -1632,7 +1652,7 @@ class PhaseObserver:
         ]
         df_an.drop(columns=columns_to_drop, errors="ignore", inplace=True)
 
-     # Log final : Indiquer la dernière phase SANS la confiance (déjà corrigé)
+        # Log final : Indiquer la dernière phase SANS la confiance (déjà corrigé)
         if not df_an.empty:
             last_row = df_an.iloc[-1]
             last_time = (
@@ -1640,11 +1660,11 @@ class PhaseObserver:
                 if hasattr(last_row.name, "isoformat")
                 else "N/A"
             )
-            self.logger.debug( # MODIFIÉ: Ajout de current_asset_symbol dans le log
+            self.logger.debug(  # MODIFIÉ: Ajout de current_asset_symbol dans le log
                 f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}. Dernière barre ({last_time}): Phase={last_row.get('phase', 'N/A')}. Total barres analysées: {len(df_an)}."
             )
         else:
-            self.logger.debug( # MODIFIÉ: Ajout de current_asset_symbol dans le log
+            self.logger.debug(  # MODIFIÉ: Ajout de current_asset_symbol dans le log
                 f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}, mais le DataFrame analysé est vide."
             )
 
@@ -1781,11 +1801,16 @@ class PhaseObserver:
                 message=f"Actifs négociables: {', '.join(tradeable_assets)}",
             )
         except Exception as e:
-            self.logger.error(f"Erreur de lecture du fichier de configuration {config_filepath}: {e}", exc_info=True)
+            self.logger.error(
+                f"Erreur de lecture du fichier de configuration {config_filepath}: {e}",
+                exc_info=True,
+            )
             return
 
         # --- CORRECTION MAJEURE : Charger le journal d'audit centralisé UNE SEULE FOIS ---
-        audit_trail_path_str = self.config_manager.get("paths.ai_history_log") # Utilise la clé de prod_config.json
+        audit_trail_path_str = self.config_manager.get(
+            "paths.ai_history_log"
+        )  # Utilise la clé de prod_config.json
         all_trades_df = None
         if audit_trail_path_str:
             audit_trail_path = Path(audit_trail_path_str)
@@ -1793,56 +1818,100 @@ class PhaseObserver:
                 try:
                     all_trades_df = self.load_data(audit_trail_path)
                 except Exception as e:
-                    self.logger.error(f"Impossible de charger le journal d'audit depuis {audit_trail_path}: {e}", exc_info=True)
+                    self.logger.error(
+                        f"Impossible de charger le journal d'audit depuis {audit_trail_path}: {e}",
+                        exc_info=True,
+                    )
             else:
-                self.logger.warning(f"Le fichier d'audit '{audit_trail_path}' est introuvable.")
+                self.logger.warning(
+                    f"Le fichier d'audit '{audit_trail_path}' est introuvable."
+                )
         else:
-            self.logger.error("Le chemin vers 'paths.ai_history_log' n'est pas défini dans la configuration.")
+            self.logger.error(
+                "Le chemin vers 'paths.ai_history_log' n'est pas défini dans la configuration."
+            )
 
         if all_trades_df is None or all_trades_df.empty:
-            self.logger.warning("Journal d'audit vide ou non chargé. L'analyse historique des actifs est impossible.")
+            self.logger.warning(
+                "Journal d'audit vide ou non chargé. L'analyse historique des actifs est impossible."
+            )
             return
 
         self.multi_asset_report_data = []  # Réinitialiser pour chaque exécution
 
         # --- CORRECTION : Itérer sur les actifs et filtrer le DataFrame principal ---
-        symbol_column_name = "symbol" # Nom de la colonne contenant les symboles dans le log
+        symbol_column_name = (
+            "symbol"  # Nom de la colonne contenant les symboles dans le log
+        )
 
         for asset in tradeable_assets:
-            self.logger.info(f"Analyse des données pour l'actif '{asset}' depuis le journal d'audit centralisé.")
-            
+            self.logger.info(
+                f"Analyse des données pour l'actif '{asset}' depuis le journal d'audit centralisé."
+            )
+
             if symbol_column_name not in all_trades_df.columns:
-                self.logger.error(f"Colonne '{symbol_column_name}' introuvable dans le journal d'audit. Impossible de filtrer.")
+                self.logger.error(
+                    f"Colonne '{symbol_column_name}' introuvable dans le journal d'audit. Impossible de filtrer."
+                )
                 break
 
-            df_raw_for_asset = all_trades_df[all_trades_df[symbol_column_name] == asset].copy()
+            df_raw_for_asset = all_trades_df[
+                all_trades_df[symbol_column_name] == asset
+            ].copy()
 
             if df_raw_for_asset.empty:
-                self.logger.warning(f"Aucune donnée historique trouvée pour l'actif '{asset}' dans le journal d'audit.")
+                self.logger.warning(
+                    f"Aucune donnée historique trouvée pour l'actif '{asset}' dans le journal d'audit."
+                )
                 continue
 
             annotated_df = self.analyze(df_raw_for_asset)
 
             if annotated_df is not None and not annotated_df.empty:
-                dominant_phase = annotated_df["phase"].mode()[0] if not annotated_df["phase"].empty else "N/A"
-                total_volume = annotated_df["volume"].sum() if "volume" in annotated_df.columns else 0
+                dominant_phase = (
+                    annotated_df["phase"].mode()[0]
+                    if not annotated_df["phase"].empty
+                    else "N/A"
+                )
+                total_volume = (
+                    annotated_df["volume"].sum()
+                    if "volume" in annotated_df.columns
+                    else 0
+                )
 
-                self.multi_asset_report_data.append({
-                    "timestamp": pd.Timestamp.now(UTC).isoformat(),
-                    "asset": asset,
-                    "dominant_phase": dominant_phase,
-                    "total_volume": round(total_volume, 2),
-                    "log_entries": len(annotated_df),
-                    "fvg_detected_count": int(annotated_df["fvg_detected"].sum()),
-                    "liquidity_grab_detected_count": int(annotated_df["liquidity_grab_detected"].sum()),
-                    "bos_mss_detected_count": int(annotated_df["bos_mss_detected"].sum()),
-                    "validated_ob_count": int(annotated_df["validated_ob"].sum()),
-                })
-                self.log_audit_event("ASSET_PROCESSED", f"Analyse de {len(annotated_df)} entrées de log.", asset=asset)
+                self.multi_asset_report_data.append(
+                    {
+                        "timestamp": pd.Timestamp.now(UTC).isoformat(),
+                        "asset": asset,
+                        "dominant_phase": dominant_phase,
+                        "total_volume": round(total_volume, 2),
+                        "log_entries": len(annotated_df),
+                        "fvg_detected_count": int(annotated_df["fvg_detected"].sum()),
+                        "liquidity_grab_detected_count": int(
+                            annotated_df["liquidity_grab_detected"].sum()
+                        ),
+                        "bos_mss_detected_count": int(
+                            annotated_df["bos_mss_detected"].sum()
+                        ),
+                        "validated_ob_count": int(annotated_df["validated_ob"].sum()),
+                    }
+                )
+                self.log_audit_event(
+                    "ASSET_PROCESSED",
+                    f"Analyse de {len(annotated_df)} entrées de log.",
+                    asset=asset,
+                )
             else:
-                self.log_audit_event("PROCESSING_ERROR", "L'analyse du DataFrame a échoué ou a retourné un résultat vide.", asset=asset)
+                self.log_audit_event(
+                    "PROCESSING_ERROR",
+                    "L'analyse du DataFrame a échoué ou a retourné un résultat vide.",
+                    asset=asset,
+                )
 
-        self.log_audit_event("MULTI_ASSET_SCAN_COMPLETE", f"Analyse de {len(tradeable_assets)} actifs terminée.")
+        self.log_audit_event(
+            "MULTI_ASSET_SCAN_COMPLETE",
+            f"Analyse de {len(tradeable_assets)} actifs terminée.",
+        )
 
         # --- CORRECTION : Découverte d'actifs non listés basée sur le journal d'audit ---
         try:
@@ -1855,10 +1924,16 @@ class PhaseObserver:
                     self.logger.warning(
                         f"Actif non listé '{asset}' découvert dans le journal d'audit mais non présent dans la configuration de la stratégie."
                     )
-                    self.log_audit_event("UNLISTED_ASSET_DISCOVERED", f"L'actif '{asset}' existe dans l'historique mais n'est pas dans la stratégie active.", asset=asset)
+                    self.log_audit_event(
+                        "UNLISTED_ASSET_DISCOVERED",
+                        f"L'actif '{asset}' existe dans l'historique mais n'est pas dans la stratégie active.",
+                        asset=asset,
+                    )
         except Exception as e:
-            self.logger.error(f"Erreur lors de la découverte d'actifs non listés : {e}", exc_info=True)
-            
+            self.logger.error(
+                f"Erreur lors de la découverte d'actifs non listés : {e}", exc_info=True
+            )
+
         # TODO: RAPPORT - Intégrer les résultats de cette fonction dans le rapport multi-actifs lui-même.
 
     def generate_multi_asset_report(self, filename: Optional[str] = None):

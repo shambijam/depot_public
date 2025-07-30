@@ -74,7 +74,7 @@
       "order_type": "MARKET",
       "action_logic": {
         "BUY": "scalp_burst_up",
-        "SELL": "scalp_burst_down"
+        "SELL": ""
       }
     },
     {
@@ -95,6 +95,7 @@
       },
       "order_type": "MARKET",
       "action_logic": {
+        "BUY": "",
         "SELL": "scalp_burst_down"
       }
     },
@@ -116,7 +117,8 @@
       },
       "order_type": "MARKET",
       "action_logic": {
-        "BUY": "micro_phase"
+        "BUY": "micro_phase",
+        "SELL": ""
       }
     },
     {
@@ -137,6 +139,7 @@
       },
       "order_type": "MARKET",
       "action_logic": {
+        "BUY": "",
         "SELL": "micro_phase"
       }
     }

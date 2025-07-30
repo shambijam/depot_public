@@ -37,6 +37,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
+
 def load_and_verify_environment(
     config_manager: ConfigManager, mt5_connector: MT5Connector, bot_mode: str
 ) -> dict:
@@ -196,6 +197,7 @@ def _get_merged_config_for_asset(
 
     return merged_config
 
+
 def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
     """Vérifie si le marché pour un actif semble fermé en semaine."""
     closed_market_check_bars = active_config.get("bot_behavior", {}).get(
@@ -352,14 +354,22 @@ def run_single_pipeline_cycle(
 
         # --- ÉTAPE 1 : COLLECTE DES DONNÉES DE MARCHÉ (le travail du PhaseObserver) ---
         base_config = config_manager.get_current_dynamic_config()
-        active_mt5_account_details = config_manager.get_mt5_account_credentials(mode=base_config.get("mode_execution", "DEMO").upper())
-        
+        active_mt5_account_details = config_manager.get_mt5_account_credentials(
+            mode=base_config.get("mode_execution", "DEMO").upper()
+        )
+
         is_weekend = datetime.now(UTC).weekday() >= 5
-        all_symbols = base_config.get("global_safety", {}).get("global_allowed_symbols", [])
+        all_symbols = base_config.get("global_safety", {}).get(
+            "global_allowed_symbols", []
+        )
         crypto_symbols = base_config.get("global_safety", {}).get("crypto_symbols", [])
-        
+
         tradeable_assets = crypto_symbols if is_weekend else all_symbols
-        tradeable_assets = [asset for asset in tradeable_assets if asset in active_mt5_account_details.get("allowed_symbols", [])]
+        tradeable_assets = [
+            asset
+            for asset in tradeable_assets
+            if asset in active_mt5_account_details.get("allowed_symbols", [])
+        ]
 
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
@@ -367,14 +377,20 @@ def run_single_pipeline_cycle(
 
         all_assets_market_data = {}
         all_assets_trading_signals = {}
-        timeframe_str = base_config.get("data_collection", {}).get("default_timeframe", "M1")
-        bars_to_fetch = base_config.get("data_collection", {}).get("default_bars_count", 500)
+        timeframe_str = base_config.get("data_collection", {}).get(
+            "default_timeframe", "M1"
+        )
+        bars_to_fetch = base_config.get("data_collection", {}).get(
+            "default_bars_count", 500
+        )
 
         for asset in tradeable_assets:
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
                 if rates_df is None or rates_df.empty:
-                    logger.warning(f"Aucune donnée historique pour '{asset}'. Actif ignoré.")
+                    logger.warning(
+                        f"Aucune donnée historique pour '{asset}'. Actif ignoré."
+                    )
                     continue
 
                 symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
@@ -382,20 +398,34 @@ def run_single_pipeline_cycle(
                     rates_df["point"] = symbol_info_mt5.point
                     rates_df["spread"] = symbol_info_mt5.spread
                     rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
-                    rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
-                
-                annotated_rates_df = phase_observer.analyze(rates_df.copy())
+                    rates_df["trade_contract_size"] = (
+                        symbol_info_mt5.trade_contract_size
+                    )
+
+                # CORRECTION MAJEURE: Passe asset_symbol=asset pour la détection de liquidité
+                annotated_rates_df = phase_observer.analyze(
+                    rates_df.copy(), asset_symbol=asset
+                )
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     continue
-                
-                latest_signals_row = annotated_rates_df.iloc[-1]
-                logger.info(f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}")
 
-                all_assets_trading_signals[asset] = _build_asset_trading_signals(latest_signals_row, symbol_info_mt5)
-                all_assets_market_data[asset] = _build_asset_market_data(annotated_rates_df, symbol_info_mt5)
+                latest_signals_row = annotated_rates_df.iloc[-1]
+                logger.info(
+                    f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
+                )
+
+                all_assets_trading_signals[asset] = _build_asset_trading_signals(
+                    latest_signals_row, symbol_info_mt5
+                )
+                all_assets_market_data[asset] = _build_asset_market_data(
+                    annotated_rates_df, symbol_info_mt5
+                )
 
             except Exception as e:
-                logger.error(f"Erreur lors de la collecte de données pour l'actif '{asset}': {e}", exc_info=True)
+                logger.error(
+                    f"Erreur lors de la collecte de données pour l'actif '{asset}': {e}",
+                    exc_info=True,
+                )
                 continue
 
         if not all_assets_trading_signals:
@@ -416,48 +446,71 @@ def run_single_pipeline_cycle(
 
         # --- ÉTAPE 3 : PIPELINE DE DÉCISION (MAINTENANT AVEC LES BONNES DONNÉES) ---
         # Cette section est maintenant exécutée APRÈS la collecte de données
-        decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
+        decision_package = decision_pipeline.institutional_decision_pipeline(
+            global_context
+        )
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 
         # --- ÉTAPE 4 : GESTION DES SORTIES (EXIT) ---
         current_open_positions = trade_executor.get_open_positions()
         if current_open_positions:
-            logger.info(f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie.")
+            logger.info(
+                f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie."
+            )
             exit_decisions = decision_pipeline.decide_exit_trades(
                 context=global_context,
                 open_positions=current_open_positions,
                 active_config=active_config,
-                strategy_manager_instance=decision_pipeline.strategy_manager
+                strategy_manager_instance=decision_pipeline.strategy_manager,  # Garde cette injection si nécessaire
             )
             if exit_decisions:
-                trade_executor.execute_exit_orders(exit_decisions, is_dry_run=is_dry_run)
+                trade_executor.execute_exit_orders(
+                    exit_decisions, is_dry_run=is_dry_run
+                )
                 trade_executed_successfully = True
 
         # --- ÉTAPE 5 : GESTION DES ENTRÉES (ENTRY) ---
         if daily_trade_count >= active_config.get("max_trades_per_day", 999):
-             logger.warning("Limite de trades quotidiens atteinte. Aucune nouvelle entrée ne sera évaluée.")
-             return trade_executed_successfully
+            logger.warning(
+                "Limite de trades quotidiens atteinte. Aucune nouvelle entrée ne sera évaluée."
+            )
+            return trade_executed_successfully
 
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL"]:
-            logger.info(f"Le pipeline a décidé une entrée: {trade_decision.get('action')} {trade_decision.get('asset')}")
-            feedback = trade_executor.execute_entry_order(decision_package, is_dry_run=is_dry_run)
-            
-            if feedback and feedback.get("execution_status") == "executed":
+            logger.info(
+                f"Le pipeline a décidé une entrée: {trade_decision.get('action')} {trade_decision.get('asset')}"
+            )
+
+            # CORRECTION: Appel correct de la méthode d'exécution de l'ordre d'entrée
+            feedback = trade_executor.execute_order(
+                decision_package
+            )  # Utilisez execute_order qui prend le decision_package
+
+            if (
+                feedback and feedback.get("status") == "executed"
+            ):  # Vérifiez le 'status' du feedback
                 trade_executed_successfully = True
 
         else:
-            regime = decision_package.get("context", {}).get("current_market_regime", "inconnu")
-            logger.info(f"Aucune opportunité d'entrée trouvée ce cycle. Régime de marché: {regime}.")
+            regime = decision_package.get("context", {}).get(
+                "current_market_regime", "inconnu"
+            )
+            logger.info(
+                f"Aucune opportunité d'entrée trouvée ce cycle. Régime de marché: {regime}."
+            )
 
     except Exception as e:
         mecano.log_exception("Pipeline Cycle", e)
-        config_manager.send_alert(f"CRITIQUE: Erreur dans le cycle du pipeline: {e}", "telegram_critical")
+        config_manager.send_alert(
+            f"CRITIQUE: Erreur dans le cycle du pipeline: {e}", "telegram_critical"
+        )
         trade_executed_successfully = False
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-    
+
+
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
