@@ -35,7 +35,7 @@
         "default_point_value": 0.00001,
         "default_trade_tick_size": 0.00001,
         "default_trade_contract_size": 100000.0,
-        "max_allowed_spread_for_liquid_check": 10,
+        "max_allowed_spread_for_liquid_check": 7,
         "scalp_burst_volatility_multiplier": 1.5,
         "consolidation_volatility_multiplier": 0.8
     },

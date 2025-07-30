@@ -317,7 +317,7 @@
     },
     "trade_executor_settings": {
         "audit_trail_file_name": "trade_audit_trail.log",
-        "max_allowed_spread_points": 4000,
+        "max_allowed_spread_points": 7,
         "mt5_max_retries": 5,
         "mt5_retry_delay_seconds": 3,
         "manual_override_enabled": false,
