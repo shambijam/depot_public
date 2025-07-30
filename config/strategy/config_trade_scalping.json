@@ -1,115 +1,158 @@
 {
-  "strategy_name": "Crypto Institutional",
-  "description": "Stratégie conçue spécifiquement pour les marchés des cryptomonnaies, caractérisés par une forte volatilité. Elle cible les setups institutionnels à haute impulsion et gère le risque de manière adaptée à ces marchés.",
+  "strategy_name": "Scalping Institutional",
+  "description": "Stratégie de scalping ultra-agressive et non restrictive, conçue pour exploiter les micro-mouvements de prix avec des entrées rapides et des sorties agiles. Optimisée pour les marchés très liquides et les phases de micro-tendance.",
   "strategy_tags": [
-    "crypto",
-    "volatile",
-    "breakout",
-    "trend_following",
-    "high_risk_high_reward"
+    "scalping",
+    "high_frequency",
+    "micro_phase",
+    "intraday",
+    "fast_execution",
+    "low_risk_per_trade"
   ],
   "tradeable_assets": [
-    "BTCUSD",
-    "ETHUSD",
-    "LTCUSD"
+    "EURUSD",
+    "GBPUSD",
+    "USDCHF",
+    "XAUUSD"
   ],
-  "magic_number": 40404,
-  "risk_per_trade_percent": 1,
-  "stop_loss_pips": 50,
-  "max_daily_loss_percent": 3.0,
-  "max_drawdown_percent": 7.0,
-  "max_trades_per_day": 50,
-  "max_spread_points": 4000,
-  "halt_on_major_news": false,
+  "magic_number": 10001,
+  "risk_per_trade_percent": 0.1,
+  "stop_loss_pips": 7,
+  "max_daily_loss_percent": 2.0,
+  "max_drawdown_percent": 3.0,
+  "max_trades_per_day": 100,
+  "max_spread_points": 50,
+  "halt_on_major_news": true,
   "phase_detection": {
-    "description": "Paramètres de détection de phase et de signaux SMC adaptés aux caractéristiques uniques (volatilité, échelle de prix) des marchés de cryptomonnaies.",
-    "lookback_window": 10,
-    "volatility_threshold": 1.0,
-    "volume_zscore": 1.5,
-    "eq_level_tolerance": 15.0,
-    "impulse_threshold": 5.0,
+    "description": "Paramètres de détection de phase et de signaux SMC ultra-réactifs pour le scalping, se concentrant sur les micro-phases et les impulsions immédiates.",
+    "lookback_window": 5,
+    "volatility_threshold": 0.0001,
+    "volume_zscore": 0.5,
+    "eq_level_tolerance": 0.00005,
+    "impulse_threshold": 0.0001,
     "detection_toggles": {
       "detect_fvg": true,
       "detect_order_block": true,
       "detect_bos_mss": true,
       "detect_liquidity_grab": true,
-      "detect_volume_anomaly": true,
-      "detect_eqh_eql": true
+      "detect_eqh_eql": true,
+      "detect_volume_anomaly": true
     }
   },
   "smart_targets": {
-    "description": "Configuration pour le calcul dynamique du SL/TP, optimisée pour la haute volatilité des marchés crypto.",
+    "description": "Configuration ultra-précise pour le calcul dynamique du SL/TP, avec des objectifs très courts et des stop loss serrés, essentiels au scalping.",
     "enabled": true,
     "sl": {
-      "method": "SWING",
-      "swing_lookback_period": 15,
-      "swing_buffer_pips": 10,
-      "fixed_pips": 20
+      "method": "PIPS",
+      "swing_lookback_period": 5,
+      "swing_buffer_pips": 1,
+      "fixed_pips": 7
     },
     "tp": {
       "method": "RR",
-      "rr_ratio": 4.0,
-      "fixed_pips": 80
+      "rr_ratio": 1.5,
+      "fixed_pips": 15
     }
   },
   "decision_rules": [
     {
-      "name": "Haute Prob: Retournement Crypto sur Order Block",
-      "description": "Règle d'entrée de haute probabilité ciblant les retournements de tendance autour des Order Blocks validés, compte tenu de la forte impulsion des cryptos.",
+      "name": "Scalp: Micro-Impulsion Haussière (Faible Restriction)",
+      "description": "Entrée rapide sur une micro-impulsion haussière confirmée par des signaux SMC de continuation, avec faible confiance requise.",
       "priority": 1,
       "conditions": {
         "signal_must_contain": [
-          "order_block_detected"
-        ],
-        "phase_must_contain": [
-          "reversal"
-        ],
-        "min_confidence": 0.2
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "reversal_up",
-        "SELL": "reversal_down"
-      }
-    },
-    {
-      "name": "Haute Prob: Prise de Liquidité (Liquidity Grab)",
-      "description": "Règle d'entrée basée sur la prise de liquidité (liquidity grab), souvent un signal de manipulation avant un mouvement directionnel important sur les cryptos.",
-      "priority": 2,
-      "conditions": {
-        "signal_must_contain": [
-          "liquidity_grab_detected"
-        ],
-        "phase_must_contain": [
-          "manipulation"
-        ],
-        "min_confidence": 0.3
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "manipulation_up",
-        "SELL": "manipulation_down"
-      }
-    },
-    {
-      "name": "Moyenne Prob: Continuation sur Expansion Forte",
-      "description": "Règle d'entrée ciblant la continuation de tendance après une phase d'expansion forte, capitalisant sur le momentum directionnel des cryptos.",
-      "priority": 3,
-      "conditions": {
-        "signal_must_contain": [
+          "volume_anomaly_detected",
           "bos_mss_detected"
         ],
         "phase_must_contain": [
-          "expansion"
+          "scalp_burst_up",
+          "trending_bullish",
+          "expansion_up"
         ],
-        "min_confidence": 0.25
+        "min_confidence": 0.05
       },
       "order_type": "MARKET",
       "action_logic": {
-        "BUY": "expansion_up",
-        "SELL": "expansion_down"
+        "BUY": "scalp_burst_up"
+      }
+    },
+    {
+      "name": "Scalp: Micro-Impulsion Baissière (Faible Restriction)",
+      "description": "Entrée rapide sur une micro-impulsion baissière confirmée par des signaux SMC de continuation, avec faible confiance requise.",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "volume_anomaly_detected",
+          "bos_mss_detected"
+        ],
+        "phase_must_contain": [
+          "scalp_burst_down",
+          "trending_bearish",
+          "expansion_down"
+        ],
+        "min_confidence": 0.05
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "SELL": "scalp_burst_down"
+      }
+    },
+    {
+      "name": "Scalp: Rebond sur FVG (Moins Restrictif)",
+      "description": "Cible un rebond rapide après un contact avec un FVG, pour des mouvements courts de correction.",
+      "priority": 2,
+      "conditions": {
+        "signal_must_contain": [
+          "fvg_detected",
+          "entry_confirmation_bullish"
+        ],
+        "phase_must_contain": [
+          "micro_phase",
+          "range",
+          "consolidation"
+        ],
+        "min_confidence": 0.05
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "micro_phase"
+      }
+    },
+    {
+      "name": "Scalp: Rebond sur FVG (Moins Restrictif) - Vente",
+      "description": "Cible un rebond rapide après un contact avec un FVG, pour des mouvements courts de correction.",
+      "priority": 2,
+      "conditions": {
+        "signal_must_contain": [
+          "fvg_detected",
+          "entry_confirmation_bearish"
+        ],
+        "phase_must_contain": [
+          "micro_phase",
+          "range",
+          "consolidation"
+        ],
+        "min_confidence": 0.05
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "SELL": "micro_phase"
       }
     }
   ],
-  "exit_rules": []
+  "exit_rules": [
+    {
+      "name": "Sortie Rapide sur Inversion de Micro-Tendance",
+      "description": "Sortie immédiate si un signe de retournement de micro-tendance est détecté, pour protéger le capital en scalping.",
+      "conditions": {
+        "phase_must_contain": [
+          "reversal_up",
+          "reversal_down",
+          "manipulation_up",
+          "manipulation_down"
+        ],
+        "min_confidence": 0.1
+      }
+    }
+  ]
 }

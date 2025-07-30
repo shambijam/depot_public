@@ -1202,6 +1202,7 @@ class PhaseObserver:
         #       avec un schéma Pydantic ou JSON Schema pour une robustesse maximale.
         pass  # Placeholder pour le code existant qui est déjà de bonne qualité
 
+   
     def analyze(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
         Orchestre le pipeline d'analyse complet de manière vectorielle, performante et configurable.
@@ -1215,6 +1216,34 @@ class PhaseObserver:
         if df is None or df.empty:
             self.logger.error("Le DataFrame fourni à analyze() est vide ou None.")
             return None
+
+        # --- AJOUT / AMÉLIORATION : Récupération du symbole de l'actif ---
+        # Cette information est essentielle pour différencier Forex et Crypto.
+        # Il est préférable que le symbole soit passé en argument à analyze()
+        # si ce DataFrame peut contenir des données pour différents symboles,
+        # ou s'il n'y a pas de colonne 'symbol' fiable.
+        # Pour l'instant, je vais chercher le symbole dans le ConfigManager qui gère le contexte.
+        # Il serait idéal que le symbole soit un argument de cette fonction, comme ceci:
+        # def analyze(self, df: pd.DataFrame, asset_symbol: str) -> Optional[pd.DataFrame]:
+        # Mais pour rester fidèle à la signature que tu m'as donnée, je vais essayer de le déduire.
+
+        # Option 1: Essayer de récupérer le symbole de la dernière ligne du DF si une colonne 'symbol' existe
+        asset_symbol = df.get("symbol", "").iloc[-1] if "symbol" in df.columns and not df.empty else "UNKNOWN_ASSET"
+        # Option 2: Si analyze est toujours appelée dans une boucle par actif, le symbole est implicite dans le cycle.
+        # Le ConfigManager est le meilleur endroit pour connaître le symbole courant.
+        # self.config_manager.get_current_asset_being_processed() # Ceci est une fonction hypothétique à créer si besoin.
+        
+        # Pour l'exemple, nous allons temporairement utiliser un placeholder ou le premier symbole connu.
+        # Dans un environnement réel, assurez-vous que `asset_symbol` est correctement défini ici.
+        if asset_symbol == "UNKNOWN_ASSET":
+            # Tentative de déduire à partir des logs précédents si possible, sinon on alerte.
+            # En production, ce symbole devrait être passé explicitement.
+            self.logger.warning("Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité pourrait être globale.")
+            # Pour une démo, on pourrait prendre le premier symbole du df si l'on est sûr.
+            # Ou, si `analyze` est appelée dans une boucle pour chaque actif, le symbole est géré par l'appelant.
+
+
+        # ... (le code précédent reste inchangé jusqu'à la détection de liquidité) ...
 
         if "spread" not in df.columns:
             df["spread"] = self.config_manager.get(
@@ -1327,12 +1356,30 @@ class PhaseObserver:
             df_an
         )
 
+        # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE ---
         max_allowed_spread_points = self.config_manager.get(
-            "phase_detection_defaults.max_allowed_spread_for_liquid_check", 5
+            "phase_detection_defaults.max_allowed_spread_for_liquid_check", 7 # Valeur par défaut pour le Forex
         )
         min_volume_for_liquid_check = self.config_manager.get(
-            "phase_detection_defaults.min_volume_for_liquid_check", 20
+            "phase_detection_defaults.min_volume_for_liquid_check", 1
         )
+
+        # Récupérer la liste des symboles crypto depuis prod_config.json
+        crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
+
+        # Déterminer si l'actif courant est une crypto et ajuster les seuils
+        # L'asset_symbol doit être disponible ici. Si la colonne 'symbol' est fiable:
+        current_asset_symbol = df.get("symbol", "").iloc[-1] if "symbol" in df.columns and not df.empty else "UNKNOWN_ASSET"
+        
+        if current_asset_symbol != "UNKNOWN_ASSET" and current_asset_symbol in crypto_symbols:
+            crypto_liquidity_settings = self.config_manager.get("phase_detection_defaults.crypto_liquidity_check", {})
+            # Utilise les valeurs spécifiques aux cryptos si elles existent dans la config, sinon les valeurs Forex par défaut.
+            max_allowed_spread_points = crypto_liquidity_settings.get("min_allowed_spread_points_crypto", max_allowed_spread_points)
+            min_volume_for_liquid_check = crypto_liquidity_settings.get("min_volume_for_liquid_check_crypto", min_volume_for_liquid_check)
+            self.logger.debug(f"Détection liquidité CRYPTO pour {current_asset_symbol}: Application des seuils spécifiques. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}")
+        else:
+            self.logger.debug(f"Détection liquidité FOREX/AUTRE pour {current_asset_symbol}: Application des seuils par défaut. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}")
+
 
         if "spread" in df_an.columns and "tick_volume" in df_an.columns:
             last_spread = df_an["spread"].iloc[-1]
@@ -1350,6 +1397,7 @@ class PhaseObserver:
             self.logger.warning(
                 "Colonnes 'spread' ou 'tick_volume' manquantes pour la détection de liquidité dans PhaseObserver. 'is_liquid' par défaut à True."
             )
+        # --- FIN DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE ---
 
         # 2. Détection des signaux de confirmation "chirurgicaux"
         is_bullish_fvg_tapped = (
@@ -1598,68 +1646,68 @@ class PhaseObserver:
 
         return df_an
 
-    def _refine_phase_direction(self, row: pd.Series) -> str:
-        """
-        Affine la phase de marché en ajoutant une direction (up/down) si applicable.
-        Utilisée après la détermination initiale de la phase par np.select.
+        def _refine_phase_direction(self, row: pd.Series) -> str:
+            """
+            Affine la phase de marché en ajoutant une direction (up/down) si applicable.
+            Utilisée après la détermination initiale de la phase par np.select.
 
-        Args:
-            row (pd.Series): Une ligne du DataFrame annoté par PhaseObserver.
+            Args:
+                row (pd.Series): Une ligne du DataFrame annoté par PhaseObserver.
 
-        Returns:
-            str: La phase de marché affinée.
-        """
-        phase = row.get("phase", "unknown")
-        trend = row.get("trend", "neutral")
+            Returns:
+                str: La phase de marché affinée.
+            """
+            phase = row.get("phase", "unknown")
+            trend = row.get("trend", "neutral")
 
-        # Si la phase est "expansion", "consolidation", "range", ou "manipulation",
-        # on peut y ajouter la direction de la tendance pour plus de granularité.
-        if phase in ["expansion", "consolidation", "range", "manipulation"]:
-            if trend == "bullish":
-                return f"{phase}_up"
-            elif trend == "bearish":
-                return f"{phase}_down"
+            # Si la phase est "expansion", "consolidation", "range", ou "manipulation",
+            # on peut y ajouter la direction de la tendance pour plus de granularité.
+            if phase in ["expansion", "consolidation", "range", "manipulation"]:
+                if trend == "bullish":
+                    return f"{phase}_up"
+                elif trend == "bearish":
+                    return f"{phase}_down"
 
-        # Pour les phases déjà directionnelles (trending_bullish/bearish),
-        # ou les phases qui n'ont pas de direction (micro_phase, institutional_setup),
-        # on retourne la phase telle quelle.
-        return phase
+            # Pour les phases déjà directionnelles (trending_bullish/bearish),
+            # ou les phases qui n'ont pas de direction (micro_phase, institutional_setup),
+            # on retourne la phase telle quelle.
+            return phase
 
-    def export_to_csv(self, report_df: pd.DataFrame, filename: str):
-        """
-        Exporte le rapport final ou un DataFrame donné au format CSV.
+        def export_to_csv(self, report_df: pd.DataFrame, filename: str):
+            """
+            Exporte le rapport final ou un DataFrame donné au format CSV.
 
-        Args:
-            report_df (pd.DataFrame): Le DataFrame à exporter.
-            filename (str): Le nom du fichier de sortie (sans extension, l'extension .csv sera ajoutée).
-        """
-        filepath = self.output_path / f"{filename}.csv"
-        try:
-            # Gestion du formatage des nombres pour une précision institutionnelle
-            # Utilise 'float_format' pour contrôler le nombre de décimales (ex: 5 pour les devises)
-            # ou un formatateur personnalisé pour des milliers/séparateurs décimaux
-            report_df.to_csv(
-                filepath, index=False, float_format="%.5f"
-            )  # Exemple: 5 décimales pour le prix
+            Args:
+                report_df (pd.DataFrame): Le DataFrame à exporter.
+                filename (str): Le nom du fichier de sortie (sans extension, l'extension .csv sera ajoutée).
+            """
+            filepath = self.output_path / f"{filename}.csv"
+            try:
+                # Gestion du formatage des nombres pour une précision institutionnelle
+                # Utilise 'float_format' pour contrôler le nombre de décimales (ex: 5 pour les devises)
+                # ou un formatateur personnalisé pour des milliers/séparateurs décimaux
+                report_df.to_csv(
+                    filepath, index=False, float_format="%.5f"
+                )  # Exemple: 5 décimales pour le prix
 
-            self.logger.info(f"Report successfully exported to {filepath}")
-            self.log_audit_event(
-                "REPORT_EXPORTED",
-                f"CSV report exported: {filename}.csv",
-                asset="N/A",
-                timestamp=pd.Timestamp.now(UTC),
-            )
-            # TODO: FORMATAGE - Pour une gestion plus avancée des séparateurs décimaux (virgule vs point),
-            #       il faudrait utiliser la lib 'locale' ou un formateur personnalisé avec df.applymap.
-        except Exception as e:
-            self.logger.error(f"Failed to export to CSV: {e}", exc_info=True)
-            self.log_audit_event(
-                "EXPORT_ERROR",
-                f"Failed to export CSV report: {e}",
-                asset="N/A",
-                timestamp=pd.Timestamp.now(UTC),
-            )
-            # TODO: ERREUR - Envoyer une alerte critique via ConfigManager en cas d'échec d'exportation.
+                self.logger.info(f"Report successfully exported to {filepath}")
+                self.log_audit_event(
+                    "REPORT_EXPORTED",
+                    f"CSV report exported: {filename}.csv",
+                    asset="N/A",
+                    timestamp=pd.Timestamp.now(UTC),
+                )
+                # TODO: FORMATAGE - Pour une gestion plus avancée des séparateurs décimaux (virgule vs point),
+                #       il faudrait utiliser la lib 'locale' ou un formateur personnalisé avec df.applymap.
+            except Exception as e:
+                self.logger.error(f"Failed to export to CSV: {e}", exc_info=True)
+                self.log_audit_event(
+                    "EXPORT_ERROR",
+                    f"Failed to export CSV report: {e}",
+                    asset="N/A",
+                    timestamp=pd.Timestamp.now(UTC),
+                )
+                # TODO: ERREUR - Envoyer une alerte critique via ConfigManager en cas d'échec d'exportation.
 
     def export_to_jsonl(self, report_df: pd.DataFrame, filename: str):
         """
