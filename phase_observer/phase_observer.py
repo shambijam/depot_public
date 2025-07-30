@@ -1646,68 +1646,68 @@ class PhaseObserver:
 
         return df_an
 
-        def _refine_phase_direction(self, row: pd.Series) -> str:
-            """
-            Affine la phase de marché en ajoutant une direction (up/down) si applicable.
-            Utilisée après la détermination initiale de la phase par np.select.
+    def _refine_phase_direction(self, row: pd.Series) -> str:
+        """
+        Affine la phase de marché en ajoutant une direction (up/down) si applicable.
+        Utilisée après la détermination initiale de la phase par np.select.
 
-            Args:
-                row (pd.Series): Une ligne du DataFrame annoté par PhaseObserver.
+        Args:
+            row (pd.Series): Une ligne du DataFrame annoté par PhaseObserver.
 
-            Returns:
-                str: La phase de marché affinée.
-            """
-            phase = row.get("phase", "unknown")
-            trend = row.get("trend", "neutral")
+        Returns:
+            str: La phase de marché affinée.
+        """
+        phase = row.get("phase", "unknown")
+        trend = row.get("trend", "neutral")
 
-            # Si la phase est "expansion", "consolidation", "range", ou "manipulation",
-            # on peut y ajouter la direction de la tendance pour plus de granularité.
-            if phase in ["expansion", "consolidation", "range", "manipulation"]:
-                if trend == "bullish":
-                    return f"{phase}_up"
-                elif trend == "bearish":
-                    return f"{phase}_down"
+        # Si la phase est "expansion", "consolidation", "range", ou "manipulation",
+        # on peut y ajouter la direction de la tendance pour plus de granularité.
+        if phase in ["expansion", "consolidation", "range", "manipulation"]:
+            if trend == "bullish":
+                return f"{phase}_up"
+            elif trend == "bearish":
+                return f"{phase}_down"
 
-            # Pour les phases déjà directionnelles (trending_bullish/bearish),
-            # ou les phases qui n'ont pas de direction (micro_phase, institutional_setup),
-            # on retourne la phase telle quelle.
-            return phase
+        # Pour les phases déjà directionnelles (trending_bullish/bearish),
+        # ou les phases qui n'ont pas de direction (micro_phase, institutional_setup),
+        # on retourne la phase telle quelle.
+        return phase
 
-        def export_to_csv(self, report_df: pd.DataFrame, filename: str):
-            """
-            Exporte le rapport final ou un DataFrame donné au format CSV.
+    def export_to_csv(self, report_df: pd.DataFrame, filename: str):
+        """
+        Exporte le rapport final ou un DataFrame donné au format CSV.
 
-            Args:
-                report_df (pd.DataFrame): Le DataFrame à exporter.
-                filename (str): Le nom du fichier de sortie (sans extension, l'extension .csv sera ajoutée).
-            """
-            filepath = self.output_path / f"{filename}.csv"
-            try:
-                # Gestion du formatage des nombres pour une précision institutionnelle
-                # Utilise 'float_format' pour contrôler le nombre de décimales (ex: 5 pour les devises)
-                # ou un formatateur personnalisé pour des milliers/séparateurs décimaux
-                report_df.to_csv(
-                    filepath, index=False, float_format="%.5f"
-                )  # Exemple: 5 décimales pour le prix
+        Args:
+            report_df (pd.DataFrame): Le DataFrame à exporter.
+            filename (str): Le nom du fichier de sortie (sans extension, l'extension .csv sera ajoutée).
+        """
+        filepath = self.output_path / f"{filename}.csv"
+        try:
+            # Gestion du formatage des nombres pour une précision institutionnelle
+            # Utilise 'float_format' pour contrôler le nombre de décimales (ex: 5 pour les devises)
+            # ou un formatateur personnalisé pour des milliers/séparateurs décimaux
+            report_df.to_csv(
+                filepath, index=False, float_format="%.5f"
+            )  # Exemple: 5 décimales pour le prix
 
-                self.logger.info(f"Report successfully exported to {filepath}")
-                self.log_audit_event(
-                    "REPORT_EXPORTED",
-                    f"CSV report exported: {filename}.csv",
-                    asset="N/A",
-                    timestamp=pd.Timestamp.now(UTC),
-                )
-                # TODO: FORMATAGE - Pour une gestion plus avancée des séparateurs décimaux (virgule vs point),
-                #       il faudrait utiliser la lib 'locale' ou un formateur personnalisé avec df.applymap.
-            except Exception as e:
-                self.logger.error(f"Failed to export to CSV: {e}", exc_info=True)
-                self.log_audit_event(
-                    "EXPORT_ERROR",
-                    f"Failed to export CSV report: {e}",
-                    asset="N/A",
-                    timestamp=pd.Timestamp.now(UTC),
-                )
-                # TODO: ERREUR - Envoyer une alerte critique via ConfigManager en cas d'échec d'exportation.
+            self.logger.info(f"Report successfully exported to {filepath}")
+            self.log_audit_event(
+                "REPORT_EXPORTED",
+                f"CSV report exported: {filename}.csv",
+                asset="N/A",
+                timestamp=pd.Timestamp.now(UTC),
+            )
+            # TODO: FORMATAGE - Pour une gestion plus avancée des séparateurs décimaux (virgule vs point),
+            #       il faudrait utiliser la lib 'locale' ou un formateur personnalisé avec df.applymap.
+        except Exception as e:
+            self.logger.error(f"Failed to export to CSV: {e}", exc_info=True)
+            self.log_audit_event(
+                "EXPORT_ERROR",
+                f"Failed to export CSV report: {e}",
+                asset="N/A",
+                timestamp=pd.Timestamp.now(UTC),
+            )
+            # TODO: ERREUR - Envoyer une alerte critique via ConfigManager en cas d'échec d'exportation.
 
     def export_to_jsonl(self, report_df: pd.DataFrame, filename: str):
         """
