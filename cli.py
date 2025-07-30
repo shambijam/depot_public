@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     start_parser.add_argument(
         "--log-level", 
         type=str, 
-        default="INFO",
+        default="DEBUG",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Définir le niveau de logging pour le bot (priorité sur la configuration)."
     )
