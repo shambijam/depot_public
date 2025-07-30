@@ -1,13 +1,13 @@
 import argparse
 import logging
 import sys
-import os # Nécessaire pour les variables d'environnement si les modules internes les lisent directement
+import os  # Nécessaire pour les variables d'environnement si les modules internes les lisent directement
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Configurer un logger de base pour cli.py avant l'initialisation complète du logging
 # (ceci sera surchargé par setup_production_logging dans main.py)
-#logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Charger les variables d'environnement TÔT pour qu'elles soient disponibles partout
@@ -15,11 +15,12 @@ load_dotenv()
 
 # Importer la fonction main depuis main.py pour lancer le bot
 # La logique principale du bot réside dans main.py
-from main import main as run_main_bot_logic 
+from main import main as run_main_bot_logic
 
 # TODO: Importer d'autres fonctions pour les sous-commandes (ex: backtest, report) depuis leurs modules respectifs
 # from trading_pipeline.backtester import run_backtest_cli_function
 # from reporting.report_generator import generate_report_cli_function
+
 
 def parse_args() -> argparse.Namespace:
     """
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description="Lanceur de bot de trading institutionnel SNIPER_X.",
-        formatter_class=argparse.RawTextHelpFormatter
+        formatter_class=argparse.RawTextHelpFormatter,
     )
 
     # Sous-commandes: permet d'avoir 'cli.py start', 'cli.py backtest', etc.
@@ -41,38 +42,36 @@ def parse_args() -> argparse.Namespace:
 
     # --- Commande 'start': Lancer le bot de trading ---
     start_parser = subparsers.add_parser(
-        "start", 
-        help="Lance le bot de trading en mode opérationnel (LIVE ou DEMO)."
+        "start", help="Lance le bot de trading en mode opérationnel (LIVE ou DEMO)."
     )
     start_parser.add_argument(
-        "--interval", 
-        type=int, 
-        help="Intervalle de temps en secondes entre chaque cycle de trading (priorité sur la configuration)."
+        "--interval",
+        type=int,
+        help="Intervalle de temps en secondes entre chaque cycle de trading (priorité sur la configuration).",
     )
     start_parser.add_argument(
-        "--log-level", 
-        type=str, 
+        "--log-level",
+        type=str,
         default="DEBUG",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Définir le niveau de logging pour le bot (priorité sur la configuration)."
+        help="Définir le niveau de logging pour le bot (priorité sur la configuration).",
     )
     start_parser.add_argument(
-        "--dry-run", 
+        "--dry-run",
         action="store_true",
-        help="Lance le bot en mode simulation (dry run) sans exécuter de trades réels. Applicable aux modes DEMO et LIVE."
+        help="Lance le bot en mode simulation (dry run) sans exécuter de trades réels. Applicable aux modes DEMO et LIVE.",
     )
     start_parser.add_argument(
-        "--mode", 
-        type=str, 
+        "--mode",
+        type=str,
         choices=["DEMO", "LIVE"],
-        help="Mode d'exécution du bot : DEMO (pour le développement/test) ou LIVE (pour le trading réel)."
+        help="Mode d'exécution du bot : DEMO (pour le développement/test) ou LIVE (pour le trading réel).",
     )
     start_parser.add_argument(
         "--config-path",
         type=str,
-        help="Chemin vers le fichier de configuration principal (ex: config/prod_config.json). Priorité sur la configuration par défaut."
+        help="Chemin vers le fichier de configuration principal (ex: config/prod_config.json). Priorité sur la configuration par défaut.",
     )
-
 
     # --- TODO: Ajouter d'autres sous-commandes ici (exemples commentés) ---
 
@@ -98,13 +97,13 @@ def parse_args() -> argparse.Namespace:
     # )
     # check_config_parser.add_argument("--config-path", type=str, help="Chemin vers le fichier de configuration principal à vérifier.")
 
-
     # Si aucune commande n'est fournie, afficher l'aide
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
-    
+
     return parser.parse_args()
+
 
 def main() -> None:
     """
@@ -139,6 +138,7 @@ def main() -> None:
     else:
         logger.error(f"Commande inconnue ou non implémentée : {args.command}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
