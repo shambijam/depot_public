@@ -73,7 +73,8 @@
       },
       "order_type": "MARKET",
       "action_logic": {
-        "BUY": "scalp_burst_up"
+        "BUY": "scalp_burst_up",
+        "SELL": "scalp_burst_down"
       }
     },
     {

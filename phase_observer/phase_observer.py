@@ -1203,7 +1203,7 @@ class PhaseObserver:
         pass  # Placeholder pour le code existant qui est déjà de bonne qualité
 
    
-    def analyze(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    def analyze(self, df: pd.DataFrame, asset_symbol: Optional[str] = None) -> Optional[pd.DataFrame]: # LIGNE MODIFIÉE
         """
         Orchestre le pipeline d'analyse complet de manière vectorielle, performante et configurable.
         Cette méthode lit les "detection_toggles" pour n'exécuter que les analyses activées.
@@ -1227,20 +1227,25 @@ class PhaseObserver:
         # def analyze(self, df: pd.DataFrame, asset_symbol: str) -> Optional[pd.DataFrame]:
         # Mais pour rester fidèle à la signature que tu m'as donnée, je vais essayer de le déduire.
 
-        # Option 1: Essayer de récupérer le symbole de la dernière ligne du DF si une colonne 'symbol' existe
-        asset_symbol = df.get("symbol", "").iloc[-1] if "symbol" in df.columns and not df.empty else "UNKNOWN_ASSET"
-        # Option 2: Si analyze est toujours appelée dans une boucle par actif, le symbole est implicite dans le cycle.
-        # Le ConfigManager est le meilleur endroit pour connaître le symbole courant.
-        # self.config_manager.get_current_asset_being_processed() # Ceci est une fonction hypothétique à créer si besoin.
-        
-        # Pour l'exemple, nous allons temporairement utiliser un placeholder ou le premier symbole connu.
-        # Dans un environnement réel, assurez-vous que `asset_symbol` est correctement défini ici.
-        if asset_symbol == "UNKNOWN_ASSET":
-            # Tentative de déduire à partir des logs précédents si possible, sinon on alerte.
-            # En production, ce symbole devrait être passé explicitement.
-            self.logger.warning("Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité pourrait être globale.")
-            # Pour une démo, on pourrait prendre le premier symbole du df si l'on est sûr.
-            # Ou, si `analyze` est appelée dans une boucle pour chaque actif, le symbole est géré par l'appelant.
+      # --- DÉBUT DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE (AMÉLIORÉE) ---
+        # Utilise le 'asset_symbol' passé en argument en priorité.
+        # S'il est None ou 'UNKNOWN_ASSET', tente de le déduire du DataFrame.
+        current_asset_symbol = asset_symbol # Initialise avec l'argument passé
+        if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
+            # Tente de récupérer le symbole de la dernière ligne du DF si une colonne 'symbol' existe
+            if "symbol" in df.columns and not df.empty:
+                deduced_symbol = df["symbol"].iloc[-1]
+                # S'assure que le symbole déduit est une chaîne et n'est pas 'UNKNOWN_ASSET' du dataframe lui-même
+                if isinstance(deduced_symbol, str) and deduced_symbol != "UNKNOWN_ASSET":
+                    current_asset_symbol = deduced_symbol
+                    self.logger.debug(f"Symbole de l'actif déduit du DataFrame pour analyse: {current_asset_symbol}")
+            
+            # Si le symbole n'a toujours pas été déduit ou fourni
+            if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
+                self.logger.warning("Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité sera globale.")
+                # Assure qu'il y a une valeur par défaut non-None pour la suite des opérations
+                current_asset_symbol = "UNKNOWN_ASSET_GLOBAL" 
+        # --- FIN DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE ---
 
 
         # ... (le code précédent reste inchangé jusqu'à la détection de liquidité) ...
@@ -1356,9 +1361,10 @@ class PhaseObserver:
             df_an
         )
 
-        # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE ---
+       # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE (CORRIGÉE) ---
+        # Valeurs par défaut pour le Forex, lues depuis la config
         max_allowed_spread_points = self.config_manager.get(
-            "phase_detection_defaults.max_allowed_spread_for_liquid_check", 7 # Valeur par défaut pour le Forex
+            "phase_detection_defaults.max_allowed_spread_for_liquid_check", 7
         )
         min_volume_for_liquid_check = self.config_manager.get(
             "phase_detection_defaults.min_volume_for_liquid_check", 1
@@ -1368,10 +1374,8 @@ class PhaseObserver:
         crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
 
         # Déterminer si l'actif courant est une crypto et ajuster les seuils
-        # L'asset_symbol doit être disponible ici. Si la colonne 'symbol' est fiable:
-        current_asset_symbol = df.get("symbol", "").iloc[-1] if "symbol" in df.columns and not df.empty else "UNKNOWN_ASSET"
-        
-        if current_asset_symbol != "UNKNOWN_ASSET" and current_asset_symbol in crypto_symbols:
+        # Utilise 'current_asset_symbol' qui a été déduit ou fourni au début de la fonction.
+        if current_asset_symbol and current_asset_symbol != "UNKNOWN_ASSET_GLOBAL" and current_asset_symbol in crypto_symbols:
             crypto_liquidity_settings = self.config_manager.get("phase_detection_defaults.crypto_liquidity_check", {})
             # Utilise les valeurs spécifiques aux cryptos si elles existent dans la config, sinon les valeurs Forex par défaut.
             max_allowed_spread_points = crypto_liquidity_settings.get("min_allowed_spread_points_crypto", max_allowed_spread_points)
@@ -1628,7 +1632,7 @@ class PhaseObserver:
         ]
         df_an.drop(columns=columns_to_drop, errors="ignore", inplace=True)
 
-        # Log final : Indiquer la dernière phase SANS la confiance (déjà corrigé)
+     # Log final : Indiquer la dernière phase SANS la confiance (déjà corrigé)
         if not df_an.empty:
             last_row = df_an.iloc[-1]
             last_time = (
@@ -1636,12 +1640,12 @@ class PhaseObserver:
                 if hasattr(last_row.name, "isoformat")
                 else "N/A"
             )
-            self.logger.debug(
-                f"PhaseObserver.analyze() a terminé. Dernière barre ({last_time}): Phase={last_row.get('phase', 'N/A')}. Total barres analysées: {len(df_an)}."
+            self.logger.debug( # MODIFIÉ: Ajout de current_asset_symbol dans le log
+                f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}. Dernière barre ({last_time}): Phase={last_row.get('phase', 'N/A')}. Total barres analysées: {len(df_an)}."
             )
         else:
-            self.logger.debug(
-                "PhaseObserver.analyze() a terminé, mais le DataFrame analysé est vide."
+            self.logger.debug( # MODIFIÉ: Ajout de current_asset_symbol dans le log
+                f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}, mais le DataFrame analysé est vide."
             )
 
         return df_an
