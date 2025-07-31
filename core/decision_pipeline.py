@@ -126,11 +126,14 @@ class DecisionPipeline:
         min_ai_signal_confidence = self.config_manager.get("ai.opportunity_filtering.min_signal_confidence", 0.6)
 
         for asset in opportunities_candidates:
+            print(f"🔍 [FILTER] Évaluation de {asset}...")
             if asset in processed_correlated_groups:
+                print(f"❌ [FILTER] {asset} éliminé : corrélation")
                 self.logger.debug(f"Actif {asset} ignoré pour la shortlist AI car déjà couvert par un actif corrélé.")
                 continue
 
             current_asset_signals = context.get("trading_signals", {}).get(asset, {})
+            print(f"🔍 [FILTER] {asset} - Signaux: phase={current_asset_signals.get('phase')}, confidence={current_asset_signals.get('confidence_score')}")  # ← AJOUTEZ
 
             if (not current_asset_signals or not isinstance(current_asset_signals.get("phase"), str) or not isinstance(current_asset_signals.get("confidence_score"), (int, float))):
                 self.logger.debug(f"Actif {asset} écarté : signaux de trading manquants, malformés ou incomplets.")
@@ -140,6 +143,7 @@ class DecisionPipeline:
             current_asset_confidence = current_asset_signals.get("confidence_score", 0.0)
 
             if current_asset_confidence < min_ai_signal_confidence:
+                print(f"❌ [FILTER] {asset} éliminé : confiance {current_asset_confidence:.2f} < seuil {min_ai_signal_confidence:.2f}")  # ← AJOUTEZ
                 self.logger.debug(f"Actif {asset} écarté : confiance du signal ({current_asset_confidence:.2f}) inférieure au seuil min de l'IA ({min_ai_signal_confidence:.2f}).")
                 continue
 
@@ -155,6 +159,7 @@ class DecisionPipeline:
                 is_relevant_for_ai = False
 
             if not current_asset_signals.get("is_liquid", False):
+                print(f"❌ [FILTER] {asset} éliminé : non liquide")  # ← AJOUTEZ
                 self.logger.debug(f"Actif {asset} écarté : non liquide (PhaseObserver).")
                 is_relevant_for_ai = False
 
@@ -165,6 +170,7 @@ class DecisionPipeline:
 
             if is_relevant_for_ai:
                 final_opportunities_for_ai.append(asset)
+                print(f"✅ [FILTER] {asset} accepté pour l'IA")
                 if asset in major_fx_pairs:
                     if asset == "EURUSD": processed_correlated_groups.add("GBPUSD")
                     elif asset == "GBPUSD": processed_correlated_groups.add("EURUSD")
