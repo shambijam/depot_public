@@ -443,7 +443,9 @@ def run_single_pipeline_cycle(
         if not all_assets_trading_signals:
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
-
+        
+        print(f"🎯 [PIPELINE] Signaux collectés pour {len(all_assets_trading_signals)} assets")  # ← AJOUTEZ
+        print(f"🌍 [PIPELINE] Construction du contexte global...")  # ← AJOUTEZ
         # --- ÉTAPE 2 : CONSTRUIRE LE CONTEXTE COMPLET ---
         global_context = _build_global_context(
             mt5_connector,
@@ -455,7 +457,7 @@ def run_single_pipeline_cycle(
             tradeable_assets,
             active_mt5_account_details,
         )
-
+        print(f"🎯 [PIPELINE] Contexte global construit, assets: {list(global_context['market_data'].keys())}")  # ← AJOUTEZ
         # --- ÉTAPE 3 : PIPELINE DE DÉCISION (MAINTENANT AVEC LES BONNES DONNÉES) ---
         # Cette section est maintenant exécutée APRÈS la collecte de données
         print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
