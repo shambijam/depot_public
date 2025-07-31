@@ -336,6 +336,16 @@ def run_single_pipeline_cycle(
 ) -> bool:
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
+    ...
+    """
+    logger = logging.getLogger(__name__)
+    print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")  # ← AJOUTEZ CETTE LIGNE
+    logger.info(
+        f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
+    )
+    # ... le reste du code continue normalement
+    """
+    Exécute un cycle complet du pipeline de trading de SNIPER_X.
     L'ordre des opérations est crucial :
     1. Collecte des données de marché.
     2. Construction du contexte global avec ces données.
@@ -365,6 +375,7 @@ def run_single_pipeline_cycle(
         crypto_symbols = base_config.get("global_safety", {}).get("crypto_symbols", [])
 
         tradeable_assets = crypto_symbols if is_weekend else all_symbols
+        print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
         tradeable_assets = [
             asset
             for asset in tradeable_assets
@@ -385,6 +396,7 @@ def run_single_pipeline_cycle(
         )
 
         for asset in tradeable_assets:
+            print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
                 if rates_df is None or rates_df.empty:
@@ -446,9 +458,11 @@ def run_single_pipeline_cycle(
 
         # --- ÉTAPE 3 : PIPELINE DE DÉCISION (MAINTENANT AVEC LES BONNES DONNÉES) ---
         # Cette section est maintenant exécutée APRÈS la collecte de données
+        print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = decision_pipeline.institutional_decision_pipeline(
             global_context
         )
+        print(f"🤖 [PIPELINE] Decision reçue: {decision_package.get('final_decision', {}).get('action', 'AUCUNE')}")  # ← AJOUTEZ
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 

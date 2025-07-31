@@ -274,8 +274,10 @@ def main(args: argparse.Namespace) -> None:
     try:
         while True:
             cycle_count += 1
+            print(f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")  # ← AJOUTEZ CETTE LIGNE
             cycle_start_time = time.time()
-
+            
+            print(f"📊 Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
