@@ -147,7 +147,7 @@ class DecisionPipeline:
                 self.logger.debug(f"Actif {asset} écarté : confiance du signal ({current_asset_confidence:.2f}) inférieure au seuil min de l'IA ({min_ai_signal_confidence:.2f}).")
                 continue
 
-            asset_specific_config = self.config_manager.load_asset_config(asset)
+            asset_specific_config = self.config_manager.config_loader.load_asset_config(asset)
 
             is_relevant_for_ai = True
 
