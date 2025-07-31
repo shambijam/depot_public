@@ -318,7 +318,7 @@ def _build_global_context(
         "current_time_utc": datetime.now(UTC),
         "cycle_count": cycle,
         "daily_trade_count": trades,
-        "asset_configs": {asset: cfg.load_asset_config(asset) for asset in assets},
+        "asset_configs": {asset: cfg.config_loader.load_asset_config(asset) for asset in assets},
         "active_broker_account": account,
     }
 
