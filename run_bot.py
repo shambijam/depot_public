@@ -336,16 +336,6 @@ def run_single_pipeline_cycle(
 ) -> bool:
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
-    ...
-    """
-    logger = logging.getLogger(__name__)
-    print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")  # ← AJOUTEZ CETTE LIGNE
-    logger.info(
-        f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
-    )
-    # ... le reste du code continue normalement
-    """
-    Exécute un cycle complet du pipeline de trading de SNIPER_X.
     L'ordre des opérations est crucial :
     1. Collecte des données de marché.
     2. Construction du contexte global avec ces données.
@@ -353,6 +343,7 @@ def run_single_pipeline_cycle(
     4. Exécution des ordres (sortie puis entrée).
     """
     logger = logging.getLogger(__name__)
+    print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
     logger.info(
         f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
     )
@@ -443,36 +434,38 @@ def run_single_pipeline_cycle(
         if not all_assets_trading_signals:
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
-        
-        print(f"🎯 [PIPELINE] Signaux collectés pour {len(all_assets_trading_signals)} assets")  # ← AJOUTEZ
-        print(f"🌍 [PIPELINE] Construction du contexte global...")  # ← AJOUTEZ
-        # --- ÉTAPE 2 : CONSTRUIRE LE CONTEXTE COMPLET ---
+
+        print(
+            f"🎯 [PIPELINE] Signaux collectés pour {len(all_assets_trading_signals)} assets"
+        )
         print(f"🌍 [PIPELINE] Construction du contexte global...")
 
-    try:
-        global_context = _build_global_context(
-            mt5_connector,
-            all_assets_market_data,
-            all_assets_trading_signals,
-            cycle_count,
-            daily_trade_count,
-            config_manager,
-            tradeable_assets,
-            active_mt5_account_details,
-        )
-        print(f"🎯 [PIPELINE] Contexte global construit avec succès !")  # ← AJOUTEZ
-    except Exception as e:
-        print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")  # ← AJOUTEZ
-        logger.error(f"Erreur construction contexte: {e}", exc_info=True)
-        return False
-    
+        # --- ÉTAPE 2 : CONSTRUIRE LE CONTEXTE COMPLET ---
+        try:
+            global_context = _build_global_context(
+                mt5_connector,
+                all_assets_market_data,
+                all_assets_trading_signals,
+                cycle_count,
+                daily_trade_count,
+                config_manager,
+                tradeable_assets,
+                active_mt5_account_details,
+            )
+            print(f"🎯 [PIPELINE] Contexte global construit avec succès !")
+        except Exception as e:
+            print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")
+            logger.error(f"Erreur construction contexte: {e}", exc_info=True)
+            return False
+
         # --- ÉTAPE 3 : PIPELINE DE DÉCISION (MAINTENANT AVEC LES BONNES DONNÉES) ---
-        # Cette section est maintenant exécutée APRÈS la collecte de données
         print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = decision_pipeline.institutional_decision_pipeline(
             global_context
         )
-        print(f"🤖 [PIPELINE] Decision reçue: {decision_package.get('final_decision', {}).get('action', 'AUCUNE')}")  # ← AJOUTEZ
+        print(
+            f"🤖 [PIPELINE] Decision reçue: {decision_package.get('final_decision', {}).get('action', 'AUCUNE')}"
+        )
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 
@@ -486,7 +479,7 @@ def run_single_pipeline_cycle(
                 context=global_context,
                 open_positions=current_open_positions,
                 active_config=active_config,
-                strategy_manager_instance=decision_pipeline.strategy_manager,  # Garde cette injection si nécessaire
+                strategy_manager_instance=decision_pipeline.strategy_manager,
             )
             if exit_decisions:
                 trade_executor.execute_exit_orders(
@@ -506,14 +499,9 @@ def run_single_pipeline_cycle(
                 f"Le pipeline a décidé une entrée: {trade_decision.get('action')} {trade_decision.get('asset')}"
             )
 
-            # CORRECTION: Appel correct de la méthode d'exécution de l'ordre d'entrée
-            feedback = trade_executor.execute_order(
-                decision_package
-            )  # Utilisez execute_order qui prend le decision_package
+            feedback = trade_executor.execute_order(decision_package)
 
-            if (
-                feedback and feedback.get("status") == "executed"
-            ):  # Vérifiez le 'status' du feedback
+            if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
 
         else:
