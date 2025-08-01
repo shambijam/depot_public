@@ -149,71 +149,84 @@ class AIInterface:
         ideal_tokens = int(max_tokens * ideal_tokens_ratio)
 
         for asset in opportunities:
-            # Récupérer les données de marché et de signaux annotées par PhaseObserver
-            asset_market_data_full = context.get("market_data", {}).get(asset, {})
-            # Assurez-vous que c'est le DataFrame annoté et non le dictionnaire résumé
-            if isinstance(asset_market_data_full, dict) and "market_data_summary" in context:
-                # Si `market_data` a été résumé par `log_decision`, on utilise le résumé
-                asset_market_data = context["market_data_summary"].get(asset, {})
-            elif isinstance(asset_market_data_full, pd.DataFrame) and not asset_market_data_full.empty:
-                # Si c'est le DataFrame complet, prendre la dernière ligne
-                asset_market_data = asset_market_data_full.iloc[-1].to_dict()
-            else:
-                self.logger.warning(f"Données de marché pour l'actif {asset} non trouvées ou malformées pour le prompt IA.")
-                continue  # Passer cet actif si les données sont invalides
+                    # Récupérer les données de marché et de signaux annotées par PhaseObserver
+                    asset_market_data_full = context.get("market_data", {}).get(asset, {})
+                    
+                    # CORRECTION: Récupérer le DataFrame depuis la clé 'annotated_rates_df'
+                    annotated_df = None
+                    if isinstance(asset_market_data_full, dict):
+                        # D'abord essayer annotated_rates_df, puis les autres clés possibles
+                        annotated_df = (asset_market_data_full.get("annotated_rates_df") or 
+                                    asset_market_data_full.get("ohlcv_data") or 
+                                    asset_market_data_full.get("data"))
+                    
+                    # Obtenir les données pour le prompt
+                    if "market_data_summary" in context:
+                        # Si un résumé existe, l'utiliser en priorité
+                        asset_market_data = context["market_data_summary"].get(asset, {})
+                    elif annotated_df is not None and hasattr(annotated_df, 'iloc') and not annotated_df.empty:
+                        # Si c'est un DataFrame non vide, prendre la dernière ligne
+                        asset_market_data = annotated_df.iloc[-1].to_dict()
+                        self.logger.debug(f"🔍 DEBUG - Utilisation DataFrame pour {asset}: {len(annotated_df)} lignes")
+                    else:
+                        self.logger.warning(f"Données de marché pour l'actif {asset} non trouvées ou malformées pour le prompt IA.")
+                        continue  # Passer cet actif si les données sont invalides
 
-            # V-- LA LOGIQUE DE CRÉATION DU BLOC D'ACTIF POUR LE PROMPT --V
-            asset_info = [f"### Actif: {asset}"]
-            asset_info.append(f"- Prix Actuel: {asset_market_data.get('close', 'N/A'):.5f}")
-            # Suppression de la "Confiance" de la Phase de Marché dans le prompt de l'IA
-            asset_info.append(f"- Phase de Marché: {asset_market_data.get('phase', 'N/A')}")
+                    # V-- LA LOGIQUE DE CRÉATION DU BLOC D'ACTIF POUR LE PROMPT --V
+                    asset_info = [f"### Actif: {asset}"]
+                    asset_info.append(f"- Prix Actuel: {asset_market_data.get('close', 'N/A'):.5f}")
+                    # Suppression de la "Confiance" de la Phase de Marché dans le prompt de l'IA
+                    asset_info.append(f"- Phase de Marché: {asset_market_data.get('phase', 'N/A')}")
 
-            # Signaux de confirmation chirurgicaux (si détectés)
-            if asset_market_data.get("entry_confirmation_bullish"):
-                asset_info.append(f"- Signal Chirurgical: Confirmation d'entrée HAUSSIÈRE.")
-            elif asset_market_data.get("entry_confirmation_bearish"):
-                asset_info.append(f"- Signal Chirurgical: Confirmation d'entrée BAISSIÈRE.")
+                    # Signaux de confirmation chirurgicaux (si détectés)
+                    if asset_market_data.get("entry_confirmation_bullish"):
+                        asset_info.append(f"- Signal Chirurgical: Confirmation d'entrée HAUSSIÈRE.")
+                    elif asset_market_data.get("entry_confirmation_bearish"):
+                        asset_info.append(f"- Signal Chirurgical: Confirmation d'entrée BAISSIÈRE.")
 
-            # Détails des anomalies de volume
-            if asset_market_data.get("volume_anomaly_details"):
-                vol_details = asset_market_data["volume_anomaly_details"]
-                asset_info.append(f"- Anomalie Volume: {vol_details.get('type')} (Z-score: {vol_details.get('z_score', 'N/A'):.2f}, Momentum: {vol_details.get('volume_momentum', 'N/A'):.2f})")
+                    # Détails des anomalies de volume
+                    if asset_market_data.get("volume_anomaly_details"):
+                        vol_details = asset_market_data["volume_anomaly_details"]
+                        asset_info.append(f"- Anomalie Volume: {vol_details.get('type')} (Z-score: {vol_details.get('z_score', 'N/A'):.2f}, Momentum: {vol_details.get('volume_momentum', 'N/A'):.2f})")
 
-            # Proximité de la liquidité
-            if asset_market_data.get("nearest_liquidity_level_details"):
-                liq_details = asset_market_data["nearest_liquidity_level_details"]
-                asset_info.append(f"- Proximité Liquidité: Niveau {liq_details.get('type')} à {liq_details.get('level', 'N/A'):.5f} ({liq_details.get('distance_pips', 'N/A'):.2f} pips).")
+                    # Proximité de la liquidité
+                    if asset_market_data.get("nearest_liquidity_level_details"):
+                        liq_details = asset_market_data["nearest_liquidity_level_details"]
+                        asset_info.append(f"- Proximité Liquidité: Niveau {liq_details.get('type')} à {liq_details.get('level', 'N/A'):.5f} ({liq_details.get('distance_pips', 'N/A'):.2f} pips).")
 
-            # Informations sur les Order Blocks validés
-            if asset_market_data.get("validated_ob"):
-                ob_details = asset_market_data.get("ob_details", {})
-                asset_info.append(f"- Order Block Validé: Type {ob_details.get('type')}, Zone [{ob_details.get('bottom'):.5f}-{ob_details.get('top'):.5f}].")
+                    # Informations sur les Order Blocks validés
+                    if asset_market_data.get("validated_ob"):
+                        ob_details = asset_market_data.get("ob_details", {})
+                        asset_info.append(f"- Order Block Validé: Type {ob_details.get('type')}, Zone [{ob_details.get('bottom'):.5f}-{ob_details.get('top'):.5f}].")
 
-            # Informations sur les FVG
-            if asset_market_data.get("fvg_details"):
-                fvg_details = asset_market_data["fvg_details"]
-                asset_info.append(f"- Fair Value Gap: Type {fvg_details.get('type')}, Zone [{fvg_details.get('bottom'):.5f}-{fvg_details.get('top'):.5f}].")
+                    # Informations sur les FVG
+                    if asset_market_data.get("fvg_details"):
+                        fvg_details = asset_market_data["fvg_details"]
+                        asset_info.append(f"- Fair Value Gap: Type {fvg_details.get('type')}, Zone [{fvg_details.get('bottom'):.5f}-{fvg_details.get('top'):.5f}].")
 
-            # Informations sur les BOS/MSS
-            if asset_market_data.get("bos_mss_details"):
-                bos_details = asset_market_data["bos_mss_details"]
-                asset_info.append(f"- Rupture de Structure: Type {bos_details.get('type')}, Niveau {bos_details.get('level_broken'):.5f}.")
+                    # Informations sur les BOS/MSS
+                    if asset_market_data.get("bos_mss_details"):
+                        bos_details = asset_market_data["bos_mss_details"]
+                        asset_info.append(f"- Rupture de Structure: Type {bos_details.get('type')}, Niveau {bos_details.get('level_broken'):.5f}.")
 
-            # Action de Prix Récente
-            recent_price_data_points = self.config_manager.get("ai.prompt_settings.recent_price_data_points", 10)
-            recent_closes_list = asset_market_data_full.get("close", [])[-recent_price_data_points:]
-            if recent_closes_list:
-                asset_info.append(f"- Action de Prix Récente ({recent_price_data_points}p): {', '.join([f'{p:.5f}' for p in recent_closes_list])}")
+                    # Action de Prix Récente - CORRECTION: utiliser le DataFrame récupéré
+                    recent_price_data_points = self.config_manager.get("ai.prompt_settings.recent_price_data_points", 10)
+                    recent_closes_list = []
+                    if annotated_df is not None and hasattr(annotated_df, 'iloc') and 'close' in annotated_df.columns:
+                        recent_closes_list = annotated_df['close'].tail(recent_price_data_points).tolist()
+                    
+                    if recent_closes_list:
+                        asset_info.append(f"- Action de Prix Récente ({recent_price_data_points}p): {', '.join([f'{p:.5f}' for p in recent_closes_list])}")
 
-            asset_block = "\n".join(asset_info)
-            # A-- FIN DE LA LOGIQUE DE CRÉATION --A
+                    asset_block = "\n".join(asset_info)
+                    # A-- FIN DE LA LOGIQUE DE CRÉATION --A
 
-            # Vérification des tokens avant ajout
-            current_prompt_estimate = self._estimate_tokens("\n".join(prompt_parts) + "\n" + asset_block)
-            if current_prompt_estimate > ideal_tokens:
-                self.logger.warning(f"Limite de tokens atteinte ({current_prompt_estimate}/{ideal_tokens}), l'actif {asset} n'est pas inclus dans le prompt.")
-                break
-            prompt_parts.append(asset_block)
+                    # Vérification des tokens avant ajout
+                    current_prompt_estimate = self._estimate_tokens("\n".join(prompt_parts) + "\n" + asset_block)
+                    if current_prompt_estimate > ideal_tokens:
+                        self.logger.warning(f"Limite de tokens atteinte ({current_prompt_estimate}/{ideal_tokens}), l'actif {asset} n'est pas inclus dans le prompt.")
+                        break
+                    prompt_parts.append(asset_block)
 
         prompt_parts.append(task_def)
         final_prompt = "\n".join(prompt_parts)
