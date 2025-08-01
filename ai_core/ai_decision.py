@@ -566,6 +566,137 @@ class AIDecision:
                 "error": "Erreur inattendue lors du parsing de la réponse",
                 "raw_response": raw_response,
             }
+            # Ajouter cette méthode dans la classe AIDecision (ai_decision.py)
+
+    def get_structured_analysis_from_prompt(self, prompt: str) -> Dict[str, Any]:
+        """
+        Génère une analyse structurée à partir d'un prompt donné.
+        Cette méthode est appelée par AIInterface pour obtenir des analyses IA.
+        
+        Args:
+            prompt (str): Le prompt formaté à envoyer au modèle IA
+            
+        Returns:
+            Dict[str, Any]: Analyse structurée avec les champs attendus par AIInterface
+        """
+        try:
+            self.logger.info("AIDecision: Génération d'analyse structurée depuis prompt...")
+            
+            # Générer la réponse brute du modèle
+            raw_response = self._generate_raw_response(prompt)
+            
+            # Parser la réponse en JSON structuré
+            parsed_response = self.parse_response(raw_response)
+            
+            # Si parsing échoue, créer une structure par défaut
+            if "error" in parsed_response:
+                self.logger.warning(f"Parsing JSON échoué, création d'une structure par défaut")
+                return self._create_fallback_analysis(raw_response)
+            
+            # Valider et enrichir la réponse
+            validated_response = self._validate_and_enrich_analysis(parsed_response)
+            
+            self.logger.info("Analyse structurée générée avec succès")
+            return validated_response
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la génération d'analyse structurée : {e}", exc_info=True)
+            return {
+                "error": f"Échec génération analyse : {e}",
+                "asset_analysis": [],
+                "summary": "Erreur lors de l'analyse IA",
+                "recommendations": [],
+                "analysis_quality_score": 0.0
+            }
+
+    def _create_fallback_analysis(self, raw_response: str) -> Dict[str, Any]:
+        """
+        Crée une analyse par défaut quand le parsing JSON échoue.
+        
+        Args:
+            raw_response (str): La réponse brute du modèle
+            
+        Returns:
+            Dict[str, Any]: Structure d'analyse par défaut
+        """
+        # Essayer d'extraire des informations basiques de la réponse textuelle
+        lines = raw_response.split('\n')
+        summary_line = next((line for line in lines if line.strip()), "Analyse IA disponible")[:200]
+        
+        return {
+            "asset_analysis": [
+                {
+                    "asset": "ANALYSE_GENERALE", 
+                    "pertinence_strategique": "Moyenne",
+                    "diagnostic": summary_line
+                }
+            ],
+            "summary": summary_line,
+            "recommendations": ["Vérifier la configuration des prompts IA"],
+            "analysis_quality_score": 0.3,  # Score faible car c'est un fallback
+            "raw_response": raw_response,
+            "parsing_method": "fallback_text_analysis"
+        }
+
+    def _validate_and_enrich_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Valide et enrichit l'analyse parsée pour s'assurer qu'elle a tous les champs requis.
+        
+        Args:
+            analysis (Dict[str, Any]): L'analyse parsée depuis JSON
+            
+        Returns:
+            Dict[str, Any]: L'analyse validée et enrichie
+        """
+        # Champs obligatoires avec valeurs par défaut
+        required_fields = {
+            "asset_analysis": [],
+            "summary": "Analyse IA",
+            "recommendations": [],
+            "analysis_quality_score": 0.5
+        }
+        
+        # Ajouter les champs manquants
+        for field, default_value in required_fields.items():
+            if field not in analysis:
+                analysis[field] = default_value
+                
+        # Valider asset_analysis
+        if not isinstance(analysis["asset_analysis"], list):
+            analysis["asset_analysis"] = []
+            
+        # S'assurer que chaque actif a les champs requis
+        for asset_entry in analysis["asset_analysis"]:
+            if isinstance(asset_entry, dict):
+                asset_entry.setdefault("asset", "UNKNOWN")
+                asset_entry.setdefault("pertinence_strategique", "Faible")
+                asset_entry.setdefault("diagnostic", "Analyse en cours")
+        
+        # Valider le score de qualité
+        if not isinstance(analysis.get("analysis_quality_score"), (int, float)):
+            analysis["analysis_quality_score"] = 0.5
+        else:
+            # Limiter entre 0 et 1
+            analysis["analysis_quality_score"] = max(0.0, min(1.0, analysis["analysis_quality_score"]))
+        
+        # Ajouter métadonnées
+        analysis["validation_timestamp"] = datetime.now(UTC).isoformat()
+        analysis["model_path"] = self.model_path
+        
+        return analysis
+
+    # BONUS: Méthode alternative pour compatibilité étendue
+    def analyze_prompt(self, prompt: str) -> Dict[str, Any]:
+        """
+        Alias pour get_structured_analysis_from_prompt pour compatibilité.
+        """
+        return self.get_structured_analysis_from_prompt(prompt)
+
+    def get_analysis(self, prompt: str) -> Dict[str, Any]:
+        """
+        Autre alias pour get_structured_analysis_from_prompt pour compatibilité.
+        """
+        return self.get_structured_analysis_from_prompt(prompt)
 
     def chat_mode(self) -> None:
         """
