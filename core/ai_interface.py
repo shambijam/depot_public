@@ -92,6 +92,13 @@ class AIInterface:
             raise e  # Relance l'exception car c'est critique
 
     def build_ia_prompt(self, opportunities: List[str], context: Dict[str, Any]) -> str:
+        # AJOUT DEBUG AU DÉBUT
+        self.logger.info(f"🔍 DEBUG - Opportunities: {opportunities}")
+        self.logger.info(f"🔍 DEBUG - Context keys: {list(context.keys())}")
+        if 'market_data' in context:
+            self.logger.info(f"🔍 DEBUG - Market data assets: {list(context['market_data'].keys())}")
+        
+        # ... reste du code existant
         """
         Génère un prompt pour l'IA en assemblant des templates de la configuration.
         Cette méthode construit un prompt contextuel et token-conscient en utilisant des
@@ -218,6 +225,119 @@ class AIInterface:
 
         self.logger.debug(f"Prompt IA généré (longueur: {len(final_prompt)} caractères).")
         return final_prompt
+    
+    def _construire_bloc_actif(self, asset: str, context: Dict[str, Any]) -> Optional[str]:
+        """
+        Construit le bloc d'information pour un actif avec validation robuste.
+        CORRECTION: Amélioration de la récupération des données
+        """
+        try:
+            # 🆕 DEBUG: Ajouter des logs pour comprendre la structure
+            self.logger.debug(f"🔍 DEBUG - Construction bloc pour {asset}")
+            self.logger.debug(f"🔍 DEBUG - Clés contexte: {list(context.keys())}")
+            
+            if "market_data" in context:
+                self.logger.debug(f"🔍 DEBUG - Assets dans market_data: {list(context['market_data'].keys())}")
+            
+            # Récupération des données avec multiples sources (AMÉLIORÉE)
+            asset_data = self._recuperer_donnees_actif(asset, context)
+            
+            if not asset_data:
+                self.logger.warning(f"❌ Aucune donnée trouvée pour {asset}")
+                # 🆕 AMÉLIORATION: Bloc minimal mais informatif
+                return f"""### Actif: {asset}
+            - Statut: Données de marché indisponibles
+            - Phase: En attente d'analyse
+            - Action: Surveillance passive recommandée"""
+
+            # Construction du bloc avec les données disponibles
+            asset_info = [f"### Actif: {asset}"]
+            
+            # Prix actuel (avec fallbacks multiples)
+            prix = None
+            for prix_key in ['close', 'price', 'current_price', 'last_price']:
+                if prix_key in asset_data and asset_data[prix_key] is not None:
+                    prix = asset_data[prix_key]
+                    break
+            
+            if prix is not None:
+                asset_info.append(f"- Prix Actuel: {float(prix):.5f}")
+            else:
+                asset_info.append(f"- Prix Actuel: Non disponible")
+
+            # Phase de marché (avec fallbacks)
+            phase = None
+            for phase_key in ['phase', 'market_phase', 'trend_phase']:
+                if phase_key in asset_data and asset_data[phase_key]:
+                    phase = asset_data[phase_key]
+                    break
+            
+            asset_info.append(f"- Phase de Marché: {phase or 'Non déterminée'}")
+
+            # 🆕 AJOUT: Informations supplémentaires si disponibles
+            if 'confidence' in asset_data:
+                asset_info.append(f"- Confiance Analyse: {asset_data['confidence']:.2f}")
+            
+            if 'volume' in asset_data:
+                asset_info.append(f"- Volume: {asset_data['volume']}")
+            
+            # Ajout des signaux disponibles
+            self._ajouter_signaux_disponibles(asset_info, asset_data)
+
+            result = "\n".join(asset_info)
+            self.logger.debug(f"✅ Bloc construit pour {asset}: {len(result)} caractères")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"❌ Erreur construction bloc {asset}: {e}")
+            return self._bloc_actif_minimal(asset)
+
+    def _recuperer_donnees_actif(self, asset: str, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Récupère les données d'un actif depuis multiples sources du contexte.
+        CORRECTION: Méthode plus robuste avec debug
+        """
+        self.logger.debug(f"🔍 Récupération données pour {asset}")
+        
+        # Source 1: market_data_summary (prioritaire)
+        if "market_data_summary" in context:
+            self.logger.debug("📊 Vérification market_data_summary...")
+            if asset in context["market_data_summary"]:
+                data = context["market_data_summary"][asset]
+                self.logger.debug(f"✅ Trouvé dans market_data_summary: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                return data
+                
+        # Source 2: market_data (DataFrame ou dict)
+        if "market_data" in context:
+            self.logger.debug("📊 Vérification market_data...")
+            if asset in context["market_data"]:
+                data = context["market_data"][asset]
+                self.logger.debug(f"📊 Type de données pour {asset}: {type(data)}")
+                
+                if isinstance(data, pd.DataFrame) and not data.empty:
+                    result = data.iloc[-1].to_dict()
+                    self.logger.debug(f"✅ DataFrame converti: {list(result.keys())}")
+                    return result
+                elif isinstance(data, dict):
+                    self.logger.debug(f"✅ Dict direct: {list(data.keys())}")
+                    return data
+                    
+        # Source 3: directement dans le contexte (asset comme clé)
+        asset_variants = [asset, asset.lower(), asset.upper()]
+        for variant in asset_variants:
+            if variant in context:
+                data = context[variant]
+                self.logger.debug(f"✅ Trouvé directement: {variant}")
+                return data if isinstance(data, dict) else {"raw_data": data}
+        
+        # Source 4: Chercher dans des sous-structures
+        for key, value in context.items():
+            if isinstance(value, dict) and asset in value:
+                self.logger.debug(f"✅ Trouvé dans {key}.{asset}")
+                return value[asset]
+        
+        self.logger.warning(f"❌ Aucune donnée trouvée pour {asset} dans {list(context.keys())}")
+        return None
 
     def _build_report_prompt(self, aggregated_data: Dict[str, Any], context: Dict[str, Any]) -> str:
         """

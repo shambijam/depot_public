@@ -221,7 +221,7 @@ class AIDecision:
             self.config_manager.send_alert(
                 "CRITIQUE",
                 f"AI Prompts Manquants: {full_prompts_path}",
-                alert_type="telegram_critical",
+                "telegram_critical",
             )
             raise  # Relance l'exception car c'est critique
         except Exception as e:
@@ -234,7 +234,7 @@ class AIDecision:
             self.config_manager.send_alert(
                 "CRITIQUE",
                 f"AI Prompts Erreur Chargement: {e}",
-                alert_type="telegram_critical",
+                "telegram_critical",
             )
             raise  # Relance l'exception car c'est critique
 
@@ -270,7 +270,7 @@ class AIDecision:
             self.config_manager.send_alert(
                 "CRITIQUE",
                 f"AI Historique Chargement Échec: {e}",
-                alert_type="telegram_critical",
+                "telegram_critical",
             )
 
     def _save_suggestion_history(self) -> None:
@@ -400,7 +400,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Modèle Manquant: {self.model_path}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             raise  # Important de relancer l'exception car le bot ne peut pas fonctionner sans modèle AI
         except Exception as e:
@@ -414,7 +414,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Modèle Chargement Échec: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             raise  # Important de relancer l'exception car le bot ne peut pas fonctionner sans modèle AI
 
@@ -477,9 +477,8 @@ class AIDecision:
             # Envoyer une alerte si la génération AI échoue (non critique, car peut être temporaire)
             if self.config_manager:
                 self.config_manager.send_alert(
-                    "ALERTE",
                     f"AI Génération Réponse Échec: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical"
                 )
             return json.dumps({"error": f"Failed to generate response: {e}"})
 
@@ -543,9 +542,8 @@ class AIDecision:
             # Envoyer une alerte si le parsing JSON échoue de manière critique pour une décision
             if self.config_manager:
                 self.config_manager.send_alert(
-                    "ERREUR_AI_PARSE",
-                    f"AI: Échec parsing JSON de la réponse. {e}",
-                    alert_type="telegram_critical",
+                f"AI: Échec parsing JSON de la réponse. {e}",
+                "telegram_critical"
                 )
             return {
                 "error": "Échec du parsing de la réponse AI en JSON",
@@ -557,10 +555,9 @@ class AIDecision:
                 exc_info=True,
             )  # Utilise self.logger
             if self.config_manager:
-                self.config_manager.send_alert(
-                    "ERREUR_AI_PARSE",
+               self.config_manager.send_alert(
                     f"AI: Erreur inattendue parsing réponse: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical"
                 )
             return {
                 "error": "Erreur inattendue lors du parsing de la réponse",
@@ -571,19 +568,17 @@ class AIDecision:
     def get_structured_analysis_from_prompt(self, prompt: str) -> Dict[str, Any]:
         """
         Génère une analyse structurée à partir d'un prompt donné.
-        Cette méthode est appelée par AIInterface pour obtenir des analyses IA.
-        
-        Args:
-            prompt (str): Le prompt formaté à envoyer au modèle IA
-            
-        Returns:
-            Dict[str, Any]: Analyse structurée avec les champs attendus par AIInterface
         """
         try:
             self.logger.info("AIDecision: Génération d'analyse structurée depuis prompt...")
             
             # Générer la réponse brute du modèle
             raw_response = self._generate_raw_response(prompt)
+            
+            # 🆕 AJOUT: Vérifier si la réponse est vide
+            if not raw_response or raw_response.strip() == "":
+                self.logger.warning("Réponse IA vide, création d'une analyse par défaut")
+                return self._create_fallback_analysis("Réponse vide du modèle IA")
             
             # Parser la réponse en JSON structuré
             parsed_response = self.parse_response(raw_response)
@@ -774,7 +769,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Prompt '{prompt_key}' manquant.",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Prompt '{prompt_key}' non configuré."}
 
@@ -875,7 +870,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: audit_trading_performance",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'audit_trading_performance' non configuré."}
 
@@ -1014,7 +1009,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation audit_trading_performance: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1203,7 +1198,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Audit Report Save Fail: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
 
         return report_file_path
@@ -1240,7 +1235,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Prompt Manquant: suggest_trading_improvements",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'suggest_trading_improvements' non configuré."}
 
@@ -1275,7 +1270,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt suggest_trading_improvements: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1336,7 +1331,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: simulate_strategy",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'simulate_strategy' non configuré."}
 
@@ -1374,7 +1369,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt simulate_strategy: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1396,7 +1391,7 @@ class AIDecision:
                     self.config_manager.send_alert(
                         "ERREUR_AI_PARSE",
                         f"AI: Erreur parsing simulate_strategy: {simulation_result['error']}",
-                        alert_type="telegram_critical",
+                        "telegram_critical",
                     )
                 return simulation_result
 
@@ -1429,7 +1424,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Échec traitement simulate_strategy: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {
                 "error": "Échec du traitement de la simulation",
@@ -1463,7 +1458,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: compare_strategies",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'compare_strategies' non configuré."}
 
@@ -1501,7 +1496,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt compare_strategies: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1521,7 +1516,7 @@ class AIDecision:
                     self.config_manager.send_alert(
                         "ERREUR_AI_PARSE",
                         f"AI: Erreur parsing compare_strategies: {comparison_result['error']}",
-                        alert_type="telegram_critical",
+                        "telegram_critical",
                     )
                 return comparison_result
 
@@ -1548,7 +1543,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Échec traitement compare_strategies: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {
                 "error": "Échec du traitement de la comparaison",
@@ -1583,7 +1578,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: review_code",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'review_code' non configuré."}
 
@@ -1608,7 +1603,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt review_code: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1660,7 +1655,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Prompt Manquant: suggest_dev_improvements",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'suggest_dev_improvements' non configuré."}
 
@@ -1705,7 +1700,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt suggest_dev_improvements: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1761,7 +1756,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: analyze_dependencies",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'analyze_dependencies' non configuré."}
 
@@ -1811,7 +1806,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt analyze_dependencies: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1868,7 +1863,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: audit_project",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'audit_project' non configuré."}
 
@@ -1912,7 +1907,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt audit_project: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -1968,7 +1963,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: generate_project_documentation",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'generate_project_documentation' non configuré."}
 
@@ -2006,7 +2001,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt generate_project_documentation: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -2064,7 +2059,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: check_compliance",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'check_compliance' non configuré."}
 
@@ -2102,7 +2097,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt check_compliance: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -2328,7 +2323,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Log Analyse Échec: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
 
     def _add_suggestion_to_history(self, suggestion: Dict[str, Any]) -> None:
@@ -2538,7 +2533,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: audit_trading_performance",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'audit_trading_performance' non configuré."}
 
@@ -2670,7 +2665,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation audit_trading_performance: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -2788,7 +2783,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Feedback Log Échec: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
 
     def adapt_strategy(self, feedback_data: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2817,7 +2812,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Prompt Manquant: adapt_strategy",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'adapt_strategy' non configuré."}
 
@@ -2866,7 +2861,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt adapt_strategy: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             raw_sample_json = "Erreur de sérialisation."
 
@@ -2967,7 +2962,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI Feedback Log Échec: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
 
     def adapt_strategy(self, feedback_data: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2996,7 +2991,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: adapt_strategy",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompt 'adapt_strategy' non configuré."}
 
@@ -3047,7 +3042,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt adapt_strategy: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             raw_sample_json = "Erreur de sérialisation."
 
@@ -3257,7 +3252,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: pair_programming_prompt",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return "Erreur : Le prompt de pair programming n'est pas configuré."
 
@@ -3279,7 +3274,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur formatage prompt pair_programming: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return "Erreur lors du formatage du prompt de pair programming."
         except Exception as e:
@@ -3349,7 +3344,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: train_user",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return "Erreur : Le prompt de formation n'est pas configuré."
 
@@ -3446,7 +3441,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     "AI Prompt Manquant: multi_agent_analysis",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": "Prompts d'analyse non configurés."}
 
@@ -3529,7 +3524,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "CRITIQUE",
                     f"AI: Erreur sérialisation prompt multi_agent_consolidation: {e}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
@@ -3565,7 +3560,7 @@ class AIDecision:
                 self.config_manager.send_alert(
                     "ERREUR_AI_PARSE",
                     f"AI: Échec parsing multi_agent_analysis: {consolidated_recommendation['error']}",
-                    alert_type="telegram_critical",
+                    "telegram_critical",
                 )
         return consolidated_recommendation  # Retourne l'analyse consolidée
 
