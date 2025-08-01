@@ -484,7 +484,7 @@ class AIInterface:
                 self.logger.info(f"  Keys disponibles: {list(asset_data.keys())}")
                 
                 # Chercher les données OHLCV
-                possible_data_keys = ["ohlcv_data", "data", "bars", "candles", "df", "rates"]
+                possible_data_keys = ["annotated_rates_df", "ohlcv_data", "data", "bars", "candles", "df", "rates"]
                 for key in possible_data_keys:
                     if key in asset_data:
                         data = asset_data[key]
