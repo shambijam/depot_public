@@ -292,51 +292,88 @@ class AIInterface:
             self.logger.error(f"❌ Erreur construction bloc {asset}: {e}")
             return self._bloc_actif_minimal(asset)
 
+   # Ajoutez cette méthode de debug dans ai_interface.py
+
     def _recuperer_donnees_actif(self, asset: str, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Récupère les données d'un actif depuis multiples sources du contexte.
-        CORRECTION: Méthode plus robuste avec debug
+        MÉTHODE DE DEBUG APPROFONDI pour comprendre pourquoi EURUSD n'est pas trouvé
         """
-        self.logger.debug(f"🔍 Récupération données pour {asset}")
+        self.logger.info(f"🔍 DEBUG DÉTAILLÉ - Récupération données pour {asset}")
         
-        # Source 1: market_data_summary (prioritaire)
+        # DEBUG: Vérifier toutes les sources possibles
+        self.logger.info(f"📊 Context keys: {list(context.keys())}")
+        
+        # Source 1: market_data_summary
         if "market_data_summary" in context:
-            self.logger.debug("📊 Vérification market_data_summary...")
-            if asset in context["market_data_summary"]:
+            summary_keys = list(context["market_data_summary"].keys()) if isinstance(context["market_data_summary"], dict) else "NOT_DICT"
+            self.logger.info(f"📊 market_data_summary keys: {summary_keys}")
+            
+            if isinstance(context["market_data_summary"], dict) and asset in context["market_data_summary"]:
                 data = context["market_data_summary"][asset]
-                self.logger.debug(f"✅ Trouvé dans market_data_summary: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                self.logger.info(f"✅ TROUVÉ dans market_data_summary!")
+                self.logger.info(f"📄 Type: {type(data)}, Keys: {list(data.keys()) if isinstance(data, dict) else 'NOT_DICT'}")
                 return data
+            else:
+                self.logger.info(f"❌ {asset} pas dans market_data_summary")
                 
         # Source 2: market_data (DataFrame ou dict)
         if "market_data" in context:
-            self.logger.debug("📊 Vérification market_data...")
-            if asset in context["market_data"]:
-                data = context["market_data"][asset]
-                self.logger.debug(f"📊 Type de données pour {asset}: {type(data)}")
+            market_data = context["market_data"]
+            market_keys = list(market_data.keys()) if isinstance(market_data, dict) else "NOT_DICT"
+            self.logger.info(f"📊 market_data keys: {market_keys}")
+            self.logger.info(f"📊 market_data type: {type(market_data)}")
+            
+            if isinstance(market_data, dict) and asset in market_data:
+                data = market_data[asset]
+                self.logger.info(f"✅ TROUVÉ dans market_data!")
+                self.logger.info(f"📄 Type de données: {type(data)}")
                 
-                if isinstance(data, pd.DataFrame) and not data.empty:
-                    result = data.iloc[-1].to_dict()
-                    self.logger.debug(f"✅ DataFrame converti: {list(result.keys())}")
-                    return result
+                if isinstance(data, pd.DataFrame):
+                    self.logger.info(f"📊 DataFrame shape: {data.shape}")
+                    self.logger.info(f"📊 DataFrame columns: {list(data.columns)}")
+                    if not data.empty:
+                        last_row = data.iloc[-1]
+                        result = last_row.to_dict()
+                        self.logger.info(f"📄 Dernière ligne convertie: {list(result.keys())}")
+                        self.logger.info(f"📄 Valeurs échantillon: {dict(list(result.items())[:5])}")
+                        return result
+                    else:
+                        self.logger.warning(f"❌ DataFrame vide pour {asset}")
                 elif isinstance(data, dict):
-                    self.logger.debug(f"✅ Dict direct: {list(data.keys())}")
+                    self.logger.info(f"📄 Dict direct keys: {list(data.keys())}")
                     return data
-                    
-        # Source 3: directement dans le contexte (asset comme clé)
-        asset_variants = [asset, asset.lower(), asset.upper()]
-        for variant in asset_variants:
+                else:
+                    self.logger.warning(f"❌ Type inattendu pour {asset}: {type(data)}")
+            else:
+                self.logger.info(f"❌ {asset} pas dans market_data ou market_data n'est pas un dict")
+        
+        # Source 3: asset directement dans context
+        if asset in context:
+            data = context[asset]
+            self.logger.info(f"✅ TROUVÉ directement dans context!")
+            self.logger.info(f"📄 Type: {type(data)}")
+            return data if isinstance(data, dict) else {"raw_data": data}
+        
+        # Source 4: Variations de casse
+        for variant in [asset.lower(), asset.upper()]:
             if variant in context:
                 data = context[variant]
-                self.logger.debug(f"✅ Trouvé directement: {variant}")
+                self.logger.info(f"✅ TROUVÉ comme {variant}!")
                 return data if isinstance(data, dict) else {"raw_data": data}
         
-        # Source 4: Chercher dans des sous-structures
-        for key, value in context.items():
-            if isinstance(value, dict) and asset in value:
-                self.logger.debug(f"✅ Trouvé dans {key}.{asset}")
-                return value[asset]
+        # Debug final : lister TOUT le contenu pour comprendre
+        self.logger.error(f"❌ ÉCHEC TOTAL pour {asset}")
+        self.logger.error("🔍 ANALYSE COMPLÈTE DU CONTEXTE:")
         
-        self.logger.warning(f"❌ Aucune donnée trouvée pour {asset} dans {list(context.keys())}")
+        for key, value in context.items():
+            if isinstance(value, dict):
+                sub_keys = list(value.keys())[:5]  # Premiers 5 éléments
+                self.logger.error(f"  📁 {key} (dict): {sub_keys}{'...' if len(value) > 5 else ''}")
+            elif isinstance(value, pd.DataFrame):
+                self.logger.error(f"  📊 {key} (DataFrame): shape={value.shape}")
+            else:
+                self.logger.error(f"  📄 {key}: {type(value)}")
+        
         return None
 
     def _build_report_prompt(self, aggregated_data: Dict[str, Any], context: Dict[str, Any]) -> str:
