@@ -201,7 +201,11 @@ class DecisionPipeline:
                 self.logger.debug(f"Actif {asset} écarté : non liquide (PhaseObserver).")
                 is_relevant_for_ai = False
 
-            max_allowed_spread_points_for_asset = asset_specific_config.get("volatility", {}).get("max_allowed_spread_points", self.config_manager.get("trade_executor_settings.max_allowed_spread_points", 4000),)
+            max_allowed_spread_config = asset_specific_config.get("volatility", {}).get("max_allowed_spread_points", {})
+            if isinstance(max_allowed_spread_config, dict):
+                max_allowed_spread_points_for_asset = max_allowed_spread_config.get("value", 4000)
+            else:
+                max_allowed_spread_points_for_asset = max_allowed_spread_config or 4000
             if (current_asset_signals.get("current_spread_points", np.inf) > max_allowed_spread_points_for_asset):
                 self.logger.debug(f"Actif {asset} écarté : spread ({current_asset_signals.get('current_spread_points')}) dépasse le max autorisé par actif ({max_allowed_spread_points_for_asset}).")
                 is_relevant_for_ai = False
