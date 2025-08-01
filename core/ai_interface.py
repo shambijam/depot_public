@@ -471,6 +471,40 @@ class AIInterface:
         """
         self.logger.info(f"Demande de conseil à l'IA pour les opportunités : {opportunities}")
 
+        # AJOUT DEBUG : Examiner la structure du contexte
+        self.logger.info(f"🔍 DEBUG AI - Opportunities à analyser: {opportunities}")
+        
+        market_data = context.get("market_data", {})
+        self.logger.info(f"🔍 DEBUG AI - Assets dans market_data: {list(market_data.keys())}")
+        
+        for asset in opportunities:
+            if asset in market_data:
+                asset_data = market_data[asset]
+                self.logger.info(f"🔍 DEBUG AI - {asset} structure:")
+                self.logger.info(f"  Keys disponibles: {list(asset_data.keys())}")
+                
+                # Chercher les données OHLCV
+                possible_data_keys = ["ohlcv_data", "data", "bars", "candles", "df", "rates"]
+                for key in possible_data_keys:
+                    if key in asset_data:
+                        data = asset_data[key]
+                        if hasattr(data, '__len__'):
+                            self.logger.info(f"  ✅ Trouvé {key}: {len(data)} éléments, type: {type(data)}")
+                            # Si c'est un DataFrame, montrer les colonnes
+                            if hasattr(data, 'columns'):
+                                self.logger.info(f"    Colonnes DataFrame: {list(data.columns)}")
+                        else:
+                            self.logger.info(f"  ✅ Trouvé {key}: type {type(data)}")
+                    else:
+                        self.logger.debug(f"  ❌ Pas de clé {key}")
+            else:
+                self.logger.error(f"🔍 DEBUG AI - {asset} ABSENT du market_data")
+        
+        # Vérifier aussi les trading_signals
+        trading_signals = context.get("trading_signals", {})
+        self.logger.info(f"🔍 DEBUG AI - Assets dans trading_signals: {list(trading_signals.keys())}")
+        # FIN DEBUG
+
         prompt = self.build_ia_prompt(opportunities, context)
         if not prompt:
             self.logger.warning("Prompt IA vide, aucune demande de conseil ne sera envoyée.")
