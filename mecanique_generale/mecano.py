@@ -72,7 +72,7 @@ class Mecano:
             self.logger.warning("Mecano sans AIInterface. Rapports IA désactivés.")
 
         self.logs_dir = Path(self.config_manager.get("paths.logs", "logs/")) if self.config_manager else Path("logs/")
-        self.reports_dir = Path(self.config_manager.get("paths.reports", "output/")) if self.config_manager else Path("output/")
+        self.reports_dir = Path(self.config_manager.get("paths.ai_audit", "config/ai_audit")) if self.config_manager else Path("output/")
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 

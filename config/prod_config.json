@@ -57,7 +57,8 @@
         "ai_history_log": "logs/suggestion_history.jsonl",
         "ai_supervisor_logs_file": "logs/ai_supervisor_logs.jsonl",
         "ai_supervisor_feedback_file": "logs/ai_supervisor_feedback.jsonl",
-        "backup_dir": "output/backups/"
+        "backup_dir": "output/backups/",
+        "ai_audit": "config/ai_audit/"
     },
     "strategies": {
         "default_strategy": "scalping",
@@ -146,6 +147,21 @@
         "cache_settings": {
             "enabled": true,
             "ttl_seconds": 300
+        },
+        "audit_mode": {
+            "enabled": true,
+            "background_analysis": true,
+            "daily_report_enabled": true,
+            "daily_report_time": "23:55",
+            "observations_to_track": [
+                "all_decisions",
+                "rejected_opportunities",
+                "strategy_performance",
+                "signal_accuracy",
+                "market_regime_changes",
+                "confidence_score_distribution",
+                "phase_detection_accuracy"
+            ]
         }
     },
     "scoring_rules": {
@@ -242,7 +258,7 @@
         "high_volatility_percent_threshold": 0.5,
         "low_volatility_percent_threshold": 0.1,
         "default_vix_index": 20,
-        "description": "Param\u00e8tres pour la d\u00e9tection du r\u00e9gime de march\u00e9 global par le ConfigManager, bas\u00e9e sur les agr\u00e9gations du PhaseObserver.",
+        "description": "Paramètres pour la détection du régime de marché global par le ConfigManager, basée sur les agrégations du PhaseObserver.",
         "high_volatility_vix_threshold": 25,
         "low_volatility_vix_threshold": 15
     },
@@ -335,10 +351,13 @@
             "ram_threshold": 85.0
         },
         "config_snapshot_file_prefix": "config_snapshot_",
-        "ia_analysis_log_file_prefix": "ia_analysis_",
-        "weekly_report_file_prefix": "weekly_report_",
+        "ia_analysis_log_file_prefix": "ai_audit_analysis_",
+        "weekly_report_file_prefix": "ai_audit_weekly_",
         "ia_prompt_top_n_slowest_steps": 5,
-        "report_period_days": 7
+        "report_period_days": 7,
+        "performance_log_file_name": "performance.log",
+        "errors_log_file_name": "errors.log",
+        "alert_on_exception_channel": "telegram_critical"
     },
     "mt5_connector_settings": {
         "log_file_name": "mt5_connector.log",
@@ -399,9 +418,9 @@
         }
     },
     "phase_detection_defaults": {
-        "description": "Param\u00e8tres par d\u00e9faut pour l'analyse de march\u00e9 et la d\u00e9tection des Smart Money Concepts (SMC) et des phases par le module PhaseObserver.",
+        "description": "Paramètres par défaut pour l'analyse de marché et la détection des Smart Money Concepts (SMC) et des phases par le module PhaseObserver.",
         "detection_toggles": {
-            "description": "Interrupteurs pour activer ou d\u00e9sactiver des types de d\u00e9tection sp\u00e9cifiques. 'true' pour activer, 'false' pour d\u00e9sactiver.",
+            "description": "Interrupteurs pour activer ou désactiver des types de détection spécifiques. 'true' pour activer, 'false' pour désactiver.",
             "detect_fvg": true,
             "detect_order_block": true,
             "detect_bos_mss": true,
@@ -433,10 +452,34 @@
         "default_spread_points": 0.0,
         "default_point_value": 1e-05,
         "default_trade_tick_size": 1e-05,
-        "default_trade_contract_size": 100000.0
+        "default_trade_contract_size": 100000.0,
+        "confidence_score_calculation": {
+            "description": "Paramètres pour le calcul du score de confiance basé sur la qualité et convergence des signaux détectés",
+            "enabled": true,
+            "base_confidence": 0.1,
+            "signal_weights": {
+                "fvg_detected": 0.15,
+                "ob_detected": 0.20,
+                "bos_mss_detected": 0.15,
+                "liquidity_grab_detected": 0.20,
+                "eqh_eql_detected": 0.10,
+                "volume_anomaly_detected": 0.10,
+                "trend_alignment": 0.10
+            },
+            "convergence_bonus": {
+                "multiple_signals_bonus": 0.2,
+                "min_signals_for_bonus": 2,
+                "max_confidence_cap": 1.0
+            },
+            "quality_factors": {
+                "volume_confirmation_bonus": 0.1,
+                "trend_strength_bonus": 0.1,
+                "spread_quality_bonus": 0.05
+            }
+        }
     },
     "phase_detection_adaptation": {
-        "description": "Param\u00e8tres d'adaptation de la d\u00e9tection de phase en fonction des conditions de volatilit\u00e9 globales (utilis\u00e9s par ConfigManager pour adapter les strat\u00e9gies).",
+        "description": "Paramètres d'adaptation de la détection de phase en fonction des conditions de volatilité globales (utilisés par ConfigManager pour adapter les stratégies).",
         "lookback_window_high_vol": 10,
         "volume_zscore_high_vol": 2.5,
         "lookback_window_low_vol": 30,
@@ -463,17 +506,17 @@
         "summary_interval_minutes": 8,
         "summary_max_queued_messages": 10,
         "templates": {
-            "new_suggestion": "\ud83d\udca1 Nouvelle Suggestion: {type} - {summary} | Priorit\u00e9: {priority:.2f}",
-            "pending_suggestion_reminder": "\u23f0 Rappel: Suggestion en attente - {summary} ({age} jours). Priorit\u00e9: {priority:.2f}",
-            "compliance_alert": "\ud83d\udea8 Alerte Conformit\u00e9: {issue} | Item: {item} | Priorit\u00e9: {priority:.2f} | Action: {action}",
-            "trade_confirmed": "\ud83d\ude80 Trade Confirm\u00e9 (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots | Strat\u00e9gie: {strategy}",
-            "trade_closed": "\ud83d\udcca Trade Cl\u00f4tur\u00e9 (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status}) | Strat\u00e9gie: {strategy}",
-            "manual_override": "\u26a0\ufe0f **INTERVENTION MANUELLE REQUISE** \u26a0\ufe0f\nRaison: {reason}\nTrade: {action} {asset} {volume} lots\nStrat\u00e9gie: {strategy_type} | Confiance IA: {confidence_score:.2f}",
-            "summary_header": "--- **R\u00e9sum\u00e9 P\u00e9riodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
+            "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
+            "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
+            "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
+            "trade_confirmed": "🚀 Trade Confirmé (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots | Stratégie: {strategy}",
+            "trade_closed": "📊 Trade Clôturé (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status}) | Stratégie: {strategy}",
+            "manual_override": "⚠️ **INTERVENTION MANUELLE REQUISE** ⚠️\nRaison: {reason}\nTrade: {action} {asset} {volume} lots\nStratégie: {strategy_type} | Confiance IA: {confidence_score:.2f}",
+            "summary_header": "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
             "trade_execution": {
-                "executed": "\u2705 Ordre ex\u00e9cut\u00e9: {action_str} {volume} {symbol} @ {price}",
-                "failed": "\u274c \u00c9chec ordre: {action_str} {symbol}. Raison: {message}. Code: {retcode}",
-                "pending_manual_approval": "\u270b Ordre en attente: {action_str} {volume} {symbol}. Volume \u00e9lev\u00e9. Approuver manuellement."
+                "executed": "✅ Ordre exécuté: {action_str} {volume} {symbol} @ {price}",
+                "failed": "❌ Échec ordre: {action_str} {symbol}. Raison: {message}. Code: {retcode}",
+                "pending_manual_approval": "✋ Ordre en attente: {action_str} {volume} {symbol}. Volume élevé. Approuver manuellement."
             }
         }
     }

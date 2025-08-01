@@ -61,7 +61,7 @@ class DecisionPipeline:
 
             # 2. Consultation facultative de l'IA
             print(f"🤖 [DECISION] Étape 2: Vérification IA...")
-            if self.config_manager.get("ai.enabled", False):
+            if False:  # IA déplacée vers audit arrière-plan
                 print(f"🤖 [DECISION] IA activée, sélection des assets...")
                 opportunities = self.select_assets_to_trade(analyzed_context)
                 print(f"🤖 [DECISION] Assets sélectionnés: {opportunities}")
