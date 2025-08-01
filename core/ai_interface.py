@@ -155,10 +155,19 @@ class AIInterface:
                     # CORRECTION: Récupérer le DataFrame depuis la clé 'annotated_rates_df'
                     annotated_df = None
                     if isinstance(asset_market_data_full, dict):
-                        # D'abord essayer annotated_rates_df, puis les autres clés possibles
-                        annotated_df = (asset_market_data_full.get("annotated_rates_df") or 
-                                    asset_market_data_full.get("ohlcv_data") or 
-                                    asset_market_data_full.get("data"))
+                        # Essayer chaque clé une par une, sans utiliser 'or' sur les DataFrames
+                        if "annotated_rates_df" in asset_market_data_full:
+                            potential_df = asset_market_data_full["annotated_rates_df"]
+                            if potential_df is not None and hasattr(potential_df, 'iloc'):
+                                annotated_df = potential_df
+                        elif "ohlcv_data" in asset_market_data_full:
+                            potential_df = asset_market_data_full["ohlcv_data"]
+                            if potential_df is not None and hasattr(potential_df, 'iloc'):
+                                annotated_df = potential_df
+                        elif "data" in asset_market_data_full:
+                            potential_df = asset_market_data_full["data"]
+                            if potential_df is not None and hasattr(potential_df, 'iloc'):
+                                annotated_df = potential_df
                     
                     # Obtenir les données pour le prompt
                     if "market_data_summary" in context:
