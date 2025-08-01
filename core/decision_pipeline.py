@@ -247,7 +247,7 @@ class DecisionPipeline:
         risk_thresholds = self.config_manager.get("scoring_rules.risk_appetite_drawdown_thresholds", {})
 
         for path, data in configs.items():
-            config = data["content"]
+            config = data.get("content", data)
             score = self.config_manager.get("scoring_rules.base_score", 0.5)
             strategy_tags = config.get("strategy_tags", [])
             strategy_name = config.get("strategy_name", "").lower()
