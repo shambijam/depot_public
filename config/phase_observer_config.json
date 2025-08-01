@@ -43,6 +43,30 @@
             "min_allowed_spread_points_crypto": 0,
             "max_allowed_spread_points_crypto": 2000,
             "min_volume_for_liquid_check_crypto": 10
+        },
+        "confidence_score_calculation": {
+            "description": "Paramètres pour le calcul du score de confiance basé sur la qualité et convergence des signaux détectés",
+            "enabled": true,
+            "base_confidence": 0.1,
+            "signal_weights": {
+                "fvg_detected": 0.15,
+                "ob_detected": 0.20,
+                "bos_mss_detected": 0.15,
+                "liquidity_grab_detected": 0.20,
+                "eqh_eql_detected": 0.10,
+                "volume_anomaly_detected": 0.10,
+                "trend_alignment": 0.10
+            },
+            "convergence_bonus": {
+                "multiple_signals_bonus": 0.2,
+                "min_signals_for_bonus": 2,
+                "max_confidence_cap": 1.0
+            },
+            "quality_factors": {
+                "volume_confirmation_bonus": 0.1,
+                "trend_strength_bonus": 0.1,
+                "spread_quality_bonus": 0.05
+            }
         }
     },
     "market_regime_detection": {

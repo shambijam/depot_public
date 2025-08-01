@@ -876,6 +876,91 @@ class PhaseObserver:
         # ... (logique originale conservée pour référence)
         return max(0.0, min(1.0, confidence))
 
+    # <<<< AJOUTEZ LA NOUVELLE MÉTHODE ICI >>>>
+    def calculate_confidence_score(self, df_row: pd.Series) -> float:
+        """
+        Calcule un score de confiance basé sur la convergence des signaux SMC détectés.
+        
+        Args:
+            df_row (pd.Series): Une ligne du DataFrame annoté avec tous les signaux détectés
+            
+        Returns:
+            float: Score de confiance entre 0.0 et 1.0
+        """
+        # Configuration des poids depuis la config (avec fallbacks)
+        config_weights = self.config_manager.get("phase_detection_defaults.confidence_score_calculation", {})
+        
+        base_confidence = config_weights.get("base_confidence", 0.1)
+        signal_weights = config_weights.get("signal_weights", {
+            "fvg_detected": 0.15,
+            "ob_detected": 0.20,
+            "bos_mss_detected": 0.15,
+            "liquidity_grab_detected": 0.20,
+            "eqh_eql_detected": 0.10,
+            "volume_anomaly_detected": 0.10,
+            "trend_alignment": 0.10
+        })
+        
+        convergence_bonus = config_weights.get("convergence_bonus", {
+            "multiple_signals_bonus": 0.2,
+            "min_signals_for_bonus": 2,
+            "max_confidence_cap": 1.0
+        })
+        
+        quality_factors = config_weights.get("quality_factors", {
+            "volume_confirmation_bonus": 0.1,
+            "trend_strength_bonus": 0.1,
+            "spread_quality_bonus": 0.05
+        })
+        
+        # Calcul de base
+        confidence = base_confidence
+        detected_signals = []
+        
+        # Poids pour chaque signal détecté
+        for signal_name, weight in signal_weights.items():
+            if signal_name == "trend_alignment":
+                # Vérifier alignement tendance/phase
+                trend = df_row.get("trend", "neutral")
+                phase = df_row.get("phase", "")
+                if ((trend == "bullish" and "bullish" in phase) or 
+                    (trend == "bearish" and "bearish" in phase) or
+                    (trend == "bullish" and phase in ["expansion_up", "trending_bullish"]) or
+                    (trend == "bearish" and phase in ["expansion_down", "trending_bearish"])):
+                    confidence += weight
+                    detected_signals.append("trend_alignment")
+            else:
+                # Signaux booléens standard
+                if df_row.get(signal_name, False):
+                    confidence += weight
+                    detected_signals.append(signal_name)
+        
+        # Bonus pour convergence multiple
+        if len(detected_signals) >= convergence_bonus["min_signals_for_bonus"]:
+            confidence += convergence_bonus["multiple_signals_bonus"]
+        
+        # Facteurs de qualité
+        if df_row.get("volume_momentum", 0) > 0.1:  # Volume momentum significatif
+            confidence += quality_factors["volume_confirmation_bonus"]
+        
+        if df_row.get("is_liquid", True):  # Asset liquide
+            confidence += quality_factors["spread_quality_bonus"]
+        
+        # Bonus pour validations (validated_ob, entry_confirmation, etc.)
+        if df_row.get("validated_ob", False):
+            confidence += 0.1
+        if df_row.get("entry_confirmation_bullish", False) or df_row.get("entry_confirmation_bearish", False):
+            confidence += 0.1
+        
+        # Cap final
+        final_confidence = min(convergence_bonus["max_confidence_cap"], max(0.0, confidence))
+        
+        # Debug log (seulement pour les premières lignes pour éviter le spam)
+        if hasattr(df_row, 'name') and df_row.name in df_row.index[:3]:  # Log seulement les 3 premières
+            self.logger.debug(f"Confidence calculée: {final_confidence:.3f} - Signaux: {detected_signals}")
+        
+        return final_confidence
+
     def log_audit_event(
         self,
         event_type: str,
@@ -1577,8 +1662,16 @@ class PhaseObserver:
         df_an["phase"] = np.select(conditions, outcomes, default="micro_phase")
         df_an["phase"] = df_an.apply(self._refine_phase_direction, axis=1)
 
-        # 5. Suppression du Calcul du Score de Confiance (Déjà fait)
-        # Toutes les lignes liées au calcul et à l'affectation de 'confidence_score' ont été supprimées.
+      # 5. Calcul du Score de Confiance (RÉIMPLÉMENTÉ)
+        self.logger.debug("Calcul des scores de confiance pour chaque barre...")
+        df_an["confidence_score"] = df_an.apply(lambda row: self.calculate_confidence_score(row), axis=1)
+        
+        # Log pour debug
+        if not df_an.empty:
+            avg_confidence = df_an["confidence_score"].mean()
+            max_confidence = df_an["confidence_score"].max()
+            min_confidence = df_an["confidence_score"].min()
+            self.logger.info(f"[{current_asset_symbol}] Confidence scores - Avg: {avg_confidence:.3f}, Min: {min_confidence:.3f}, Max: {max_confidence:.3f}")
 
         # --- NOUVEAU : Validation Pydantic du DataFrame annoté ---
         # Préparer le DataFrame pour la validation Pydantic (lignes sous forme de dictionnaire)
