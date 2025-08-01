@@ -1,5 +1,5 @@
 {
-  "strategy_name": "Dynamic Institutional",
+  "strategy_name": "dynamic",
   "description": "Stratégie dynamique adaptative conçue pour identifier et suivre les mouvements de marché à moyen terme, en s'ajustant aux différentes conditions de volatilité et de régime.",
   "strategy_tags": [
     "dynamic",

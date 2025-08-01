@@ -1,5 +1,5 @@
 {
-  "strategy_name": "Crypto Institutional",
+  "strategy_name": "crypto",
   "description": "Stratégie conçue spécifiquement pour les marchés des cryptomonnaies, caractérisés par une forte volatilité. Elle cible les setups institutionnels à haute impulsion et gère le risque de manière adaptée à ces marchés.",
   "strategy_tags": [
     "crypto",

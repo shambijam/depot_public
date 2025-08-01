@@ -1,5 +1,5 @@
 {
-  "strategy_name": "Scalping Institutional",
+  "strategy_name": "scalping",
   "description": "Stratégie de scalping ultra-agressive et non restrictive, conçue pour exploiter les micro-mouvements de prix avec des entrées rapides et des sorties agiles. Optimisée pour les marchés très liquides et les phases de micro-tendance.",
   "strategy_tags": [
     "scalping",

@@ -1,5 +1,5 @@
 {
-  "strategy_name": "Liquidity Grab Institutional",
+  "strategy_name": "liquidity",
   "description": "Stratégie axée sur l'identification et l'exploitation des 'liquidity grabs' (prises de liquidité) et des déséquilibres SMC pour des entrées chirurgicales et des sorties rapides.",
   "strategy_tags": [
     "liquidity",
