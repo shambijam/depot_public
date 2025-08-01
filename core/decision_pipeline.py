@@ -333,9 +333,14 @@ class DecisionPipeline:
                     try:
                         # Utilise ConfigLoader pour parser
                         default_strategy_content = self.config_manager.config_loader.parse_json_config(str(default_strategy_file_path))
-                        optimal_config_content = default_strategy_content
+                        # Ensure consistent structure
+                        if isinstance(default_strategy_content, dict) and "content" not in default_strategy_content:
+                            optimal_config_content = default_strategy_content
+                        else:
+                            optimal_config_content = default_strategy_content.get("content", default_strategy_content)
                         optimal_score = 0.0
                         self.logger.info(f"Stratégie par défaut '{default_strategy_key}' chargée comme fallback.")
+                        
                     except Exception as e:
                         self.logger.error(f"Échec du chargement de la stratégie par défaut '{default_strategy_key}' depuis {default_strategy_file_path}: {e}", exc_info=True)
                         return {}
@@ -346,7 +351,8 @@ class DecisionPipeline:
                 self.logger.critical("Aucune 'default_strategy' n'est définie et aucune optimale n'a été sélectionnée. Impossible de procéder.")
                 return {}
         else:
-            optimal_config_content = configs[optimal_config_path]["content"]
+            config_data = configs[optimal_config_path]
+            optimal_config_content = config_data.get("content", config_data)
 
         self.logger.info(f"Configuration finale sélectionnée : '{optimal_config_content.get('strategy_name')}' avec un score de {optimal_score:.2f}")
 
