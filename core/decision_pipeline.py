@@ -352,7 +352,7 @@ class DecisionPipeline:
                 return {}
         else:
             config_data = configs[optimal_config_path]
-            optimal_config_content = config_data.get("content", config_data)
+            optimal_config_content = config_data.get("config", config_data)
 
         self.logger.info(f"Configuration finale sélectionnée : '{optimal_config_content.get('strategy_name')}' avec un score de {optimal_score:.2f}")
 
