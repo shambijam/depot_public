@@ -417,6 +417,10 @@ class DecisionPipeline:
             self.logger.debug(f"  Adaptation Risque (Haute Vol) : Risque par trade réduit à {adapted_config['risk_per_trade_percent']:.2f}%."
             )
 
+            # CORRECTION: Initialiser phase_detection si elle n'existe pas
+            if "phase_detection" not in adapted_config:
+                adapted_config["phase_detection"] = {}
+            
             adapted_config["phase_detection"]["lookback_window"] = self.config_manager.get("adaptation_settings.phase_detection.lookback_window_high_vol", config.get("phase_detection", {}).get("lookback_window"),)
             adapted_config["phase_detection"]["volume_zscore"] = self.config_manager.get("adaptation_settings.phase_detection.volume_zscore_high_vol", config.get("phase_detection", {}).get("volume_zscore"),)
             self.logger.debug(f"  Adaptation Phase Detection (Haute Vol) : lookback_window={adapted_config['phase_detection']['lookback_window']}, volume_zscore={adapted_config['phase_detection']['volume_zscore']}."
@@ -431,6 +435,10 @@ class DecisionPipeline:
                 self.logger.debug(f"  Adaptation Scalping (Basse Vol) : SL/TP élargis à {adapted_config.get('stop_loss_pips')}/{adapted_config.get('take_profit_pips')} pips."
                 )
 
+            # CORRECTION: Initialiser phase_detection si elle n'existe pas
+            if "phase_detection" not in adapted_config:
+                adapted_config["phase_detection"] = {}
+                
             adapted_config["phase_detection"]["lookback_window"] = self.config_manager.get("adaptation_settings.phase_detection.lookback_window_low_vol", config.get("phase_detection", {}).get("lookback_window"),)
             adapted_config["phase_detection"]["volume_zscore"] = self.config_manager.get("adaptation_settings.phase_detection.volume_zscore_low_vol", config.get("phase_detection", {}).get("volume_zscore"),)
             self.logger.debug(f"  Adaptation Phase Detection (Basse Vol) : lookback_window={adapted_config['phase_detection']['lookback_window']}, volume_zscore={adapted_config['phase_detection']['volume_zscore']}."
@@ -449,6 +457,11 @@ class DecisionPipeline:
             self.logger.debug(f"Contexte de CONSOLIDATION détecté. Adaptation pour stratégie de range.")
             adapted_config["take_profit_pips"] = self.config_manager.get("adaptation_settings.market_regime_specific.consolidation.take_profit_pips", config.get("take_profit_pips"),)
             adapted_config["stop_loss_pips"] = self.config_manager.get("adaptation_settings.market_regime_specific.consolidation.stop_loss_pips", config.get("stop_loss_pips"),)
+            
+            # CORRECTION: Initialiser strategy_toggles si elle n'existe pas
+            if "strategy_toggles" not in adapted_config:
+                adapted_config["strategy_toggles"] = {}
+                
             adapted_config["strategy_toggles"]["enable_grid_in_range_only"] = self.config_manager.get("adaptation_settings.market_regime_specific.consolidation.enable_grid_in_range_only", adapted_config.get("strategy_toggles", {}).get("enable_grid_in_range_only"),)
 
         elif "trending" in market_regime and "trend_following" in strategy_tags:
