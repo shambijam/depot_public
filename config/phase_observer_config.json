@@ -27,7 +27,6 @@
         "fvg_window_slice_size": 3,
         "trend_sma_fast_ratio": 0.3,
         "trend_sma_slow_ratio": 0.7,
-        "min_allowed_spread_for_liquid_check": 7,
         "min_volume_for_liquid_check": 1,
         "trend_window": 20,
         "swing_point_order": 3,
@@ -35,12 +34,14 @@
         "default_point_value": 0.00001,
         "default_trade_tick_size": 0.00001,
         "default_trade_contract_size": 100000.0,
-        "max_allowed_spread_for_liquid_check": 7,
+        "min_allowed_spread_for_liquid_check": 0,
+        "max_allowed_spread_for_liquid_check": 50,
         "scalp_burst_volatility_multiplier": 1.5,
         "consolidation_volatility_multiplier": 0.8,
         "crypto_liquidity_check": {
             "description": "Seuils de liquidité spécifiques pour les cryptomonnaies, afin de tenir compte de leurs spreads plus élevés.",
-            "min_allowed_spread_points_crypto": 1000,
+            "min_allowed_spread_points_crypto": 0,
+            "max_allowed_spread_points_crypto": 2000,
             "min_volume_for_liquid_check_crypto": 10
         }
     },

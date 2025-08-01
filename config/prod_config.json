@@ -134,7 +134,7 @@
                 "GBPUSD",
                 "USDJPY"
             ],
-            "min_signal_confidence": 0.0
+            "min_signal_confidence": 0.1
         },
         "prompt_settings": {
             "recent_price_data_points": 10,
