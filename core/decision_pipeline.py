@@ -51,59 +51,96 @@ class DecisionPipeline:
             Dict: Un paquet de décision structuré pour l'audit et l'exécution.
         """
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
+        print(f"🤖 [DECISION] Début du pipeline institutionnel")
 
-        # 1. Analyse et enrichissement du contexte
-        analyzed_context = self.config_manager.analyze_context(context)
+        try:
+            # 1. Analyse et enrichissement du contexte
+            print(f"🤖 [DECISION] Étape 1: Analyse du contexte...")
+            analyzed_context = self.config_manager.analyze_context(context)
+            print(f"🤖 [DECISION] Contexte analysé avec succès")
 
-        # 2. Consultation facultative de l'IA
-        if self.config_manager.get("ai.enabled", False):
-            opportunities = self.select_assets_to_trade(analyzed_context)
-            if opportunities:
-                ai_response = self.ai_interface.request_ia_advice(opportunities, analyzed_context)
-                analyzed_context["ai_advice"] = ai_response
-                analyzed_context["ai_recommendation_score"] = ai_response.get("ai_vote_for_configs", {})
-        
-        # 3. Sélection de la stratégie optimale
-        # CORRECTION : Utilise self.strategy_manager.strategy_registry comme source de vérité
-        if not self.strategy_manager:
-            self.logger.critical("ERREUR ARCHITECTURALE: StrategyManager non disponible dans DecisionPipeline.")
-            raise RuntimeError("StrategyManager non initialisé.")
+            # 2. Consultation facultative de l'IA
+            print(f"🤖 [DECISION] Étape 2: Vérification IA...")
+            if self.config_manager.get("ai.enabled", False):
+                print(f"🤖 [DECISION] IA activée, sélection des assets...")
+                opportunities = self.select_assets_to_trade(analyzed_context)
+                print(f"🤖 [DECISION] Assets sélectionnés: {opportunities}")
+                
+                if opportunities:
+                    print(f"🤖 [DECISION] Consultation IA pour {len(opportunities)} assets...")
+                    ai_response = self.ai_interface.request_ia_advice(opportunities, analyzed_context)
+                    analyzed_context["ai_advice"] = ai_response
+                    analyzed_context["ai_recommendation_score"] = ai_response.get("ai_vote_for_configs", {})
+                    print(f"🤖 [DECISION] IA consultée avec succès")
+                else:
+                    print(f"🤖 [DECISION] Aucun asset sélectionné pour l'IA")
+            else:
+                print(f"🤖 [DECISION] IA désactivée")
 
-        config_knowledge_base = self.strategy_manager.strategy_registry
+            # 3. Sélection de la stratégie optimale
+            print(f"🤖 [DECISION] Étape 3: Sélection de stratégie...")
+            # CORRECTION : Utilise self.strategy_manager.strategy_registry comme source de vérité
+            if not self.strategy_manager:
+                self.logger.critical("ERREUR ARCHITECTURALE: StrategyManager non disponible dans DecisionPipeline.")
+                raise RuntimeError("StrategyManager non initialisé.")
 
-        optimal_config = self.select_optimal_config(
-            analyzed_context, config_knowledge_base
-        )
-        if not optimal_config:
-            self.logger.warning("Aucune stratégie optimale sélectionnée pour ce cycle. Pipeline de décision s'arrête.")
+            config_knowledge_base = self.strategy_manager.strategy_registry
+            print(f"🤖 [DECISION] Base de connaissances: {len(config_knowledge_base)} stratégies disponibles")
+
+            optimal_config = self.select_optimal_config(
+                analyzed_context, config_knowledge_base
+            )
+            
+            if not optimal_config:
+                self.logger.warning("Aucune stratégie optimale sélectionnée pour ce cycle. Pipeline de décision s'arrête.")
+                print(f"🤖 [DECISION] ❌ Aucune stratégie optimale trouvée")
+                return {
+                    "context": analyzed_context,
+                    "config_used": self.config_manager.get_current_dynamic_config(),
+                    "final_decision": {},
+                }
+            
+            print(f"🤖 [DECISION] ✅ Stratégie optimale sélectionnée: {optimal_config.get('strategy_name', 'Unknown')}")
+
+            # 4. Adaptation de la configuration pour le cycle actuel
+            print(f"🤖 [DECISION] Étape 4: Adaptation de configuration...")
+            # On fusionne la config de base avec la config de la stratégie choisie
+            config_for_this_cycle = self.config_manager._merge_dicts(
+                self.config_manager.get_current_dynamic_config(),
+                optimal_config
+            )
+            adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context)
+            print(f"🤖 [DECISION] Configuration adaptée avec succès")
+
+            # 5. Décision de trade finale basée sur la stratégie et la configuration adaptées
+            print(f"🤖 [DECISION] Étape 5: Décision de trade finale...")
+            signals = analyzed_context.get("trading_signals", {})
+            print(f"🤖 [DECISION] Signaux disponibles: {list(signals.keys())}")
+            
+            trade_decision = self.decide_trade_to_execute(
+                analyzed_context,
+                adapted_config,  # Utilise la configuration spécifiquement adaptée pour ce cycle
+                signals,
+            )
+            
+            print(f"🤖 [DECISION] Décision finale: {trade_decision.get('action', 'AUCUNE')}")
+
             return {
+                "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
-                "config_used": self.config_manager.get_current_dynamic_config(),
-                "final_decision": {},
+                "config_used": adapted_config,
+                "final_decision": trade_decision,
             }
 
-        # 4. Adaptation de la configuration pour le cycle actuel
-        # On fusionne la config de base avec la config de la stratégie choisie
-        config_for_this_cycle = self.config_manager._merge_dicts(
-            self.config_manager.get_current_dynamic_config(),
-            optimal_config
-        )
-        adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context)
-
-        # 5. Décision de trade finale basée sur la stratégie et la configuration adaptées
-        signals = analyzed_context.get("trading_signals", {})
-        trade_decision = self.decide_trade_to_execute(
-            analyzed_context,
-            adapted_config, # Utilise la configuration spécifiquement adaptée pour ce cycle
-            signals,
-        )
-
-        return {
-            "timestamp_utc": datetime.now(UTC).isoformat(),
-            "context": analyzed_context,
-            "config_used": adapted_config,
-            "final_decision": trade_decision,
-        }
+        except Exception as e:
+            print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
+            self.logger.error(f"Erreur critique dans institutional_decision_pipeline: {e}", exc_info=True)
+            return {
+                "context": context,
+                "config_used": self.config_manager.get_current_dynamic_config(),
+                "final_decision": {},
+                "error": str(e)
+            }
         
     def select_assets_to_trade(self, context: Dict[str, Any]) -> List[str]:
         """
@@ -127,6 +164,7 @@ class DecisionPipeline:
 
         for asset in opportunities_candidates:
             print(f"🔍 [FILTER] Évaluation de {asset}...")
+            
             if asset in processed_correlated_groups:
                 print(f"❌ [FILTER] {asset} éliminé : corrélation")
                 self.logger.debug(f"Actif {asset} ignoré pour la shortlist AI car déjà couvert par un actif corrélé.")
