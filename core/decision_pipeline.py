@@ -355,8 +355,8 @@ class DecisionPipeline:
             
             print(f"🔍 [DEBUG] Full data structure: {str(data)[:200]}...")
             print("=" * 50)
-            if "content" in data:
-                actual_config = data["content"]
+            if "config" in data:
+                actual_config = data["config"] 
             else:
                 actual_config = data
 
