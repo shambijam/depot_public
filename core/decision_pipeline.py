@@ -342,7 +342,19 @@ class DecisionPipeline:
         print(f"🎯 [SCORING] Signaux disponibles: {list(trading_signals.keys())}")
 
         for path, data in configs.items():
-            # Structure config correcte
+            # === DEBUG STRUCTURE DES DONNÉES ===
+            print(f"🔍 [DEBUG] Path: {path}")
+            print(f"🔍 [DEBUG] Data keys: {list(data.keys())}")
+            print(f"🔍 [DEBUG] Data type: {type(data)}")
+            
+            if "content" in data:
+                print(f"🔍 [DEBUG] Content keys: {list(data['content'].keys())}")
+                print(f"🔍 [DEBUG] Content strategy_name: {data['content'].get('strategy_name', 'NOT_IN_CONTENT')}")
+            else:
+                print(f"🔍 [DEBUG] Direct strategy_name: {data.get('strategy_name', 'NOT_IN_DATA')}")
+            
+            print(f"🔍 [DEBUG] Full data structure: {str(data)[:200]}...")
+            print("=" * 50)
             if "content" in data:
                 actual_config = data["content"]
             else:
