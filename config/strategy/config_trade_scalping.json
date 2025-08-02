@@ -23,7 +23,7 @@
   "max_daily_loss_percent": 2.0,
   "max_drawdown_percent": 3.0,
   "max_trades_per_day": 100,
-  "max_spread_points": 50,
+  "max_spread_points": 4000,
   "halt_on_major_news": true,
   "phase_detection": {
     "description": "Paramètres de détection de phase et de signaux SMC ultra-réactifs pour le scalping KATANA, se concentrant sur les micro-phases et les impulsions immédiates avec analyse multi-timeframe.",
