@@ -301,7 +301,6 @@ class DecisionPipeline:
     def score_configs(
         self, context: Dict[str, Any], configs: Dict[str, Any]
     ) -> Dict[str, float]:
-        print(f"🔍 [DEBUG] Strategy name extracted: '{strategy_name}' from config: {config.get('strategy_name', 'NOT_FOUND')}")
         """
         Évalue et note les configurations de stratégies disponibles en fonction du contexte.
 
@@ -343,21 +342,25 @@ class DecisionPipeline:
         print(f"🎯 [SCORING] Signaux disponibles: {list(trading_signals.keys())}")
 
         for path, data in configs.items():
-            config = data.get("content", data)
-            # Debug : vérifier la structure
+            # Structure config correcte
             if "content" in data:
-                actual_config = data["content"] 
+                actual_config = data["content"]
             else:
                 actual_config = data
-            strategy_name = actual_config.get("strategy_name", "").lower()
-            strategy_tags = config.get("strategy_tags", [])
 
-            print(f"\n🔍 [SCORING] Évaluation stratégie: {strategy_name}")
+            strategy_name = actual_config.get("strategy_name", "").lower()
+            strategy_tags = actual_config.get("strategy_tags", [])
+
+            # Debug line APRÈS définition des variables
+            print(
+                f"🔍 [DEBUG] Strategy name extracted: '{strategy_name}' from config: {actual_config.get('strategy_name', 'NOT_FOUND')}"
+            )
+            print(f"🔍 [SCORING] Évaluation stratégie: {strategy_name}")
 
             # === LOGIQUE SCALPING INTELLIGENTE ===
             if strategy_name == "scalping":
                 score = self._calculate_enhanced_scalping_score(
-                    config, context, trading_signals, strategy_weights
+                    actual_config, context, trading_signals, strategy_weights
                 )
                 print(f"🗡️ [SCALPING] Score final: {score:.3f}")
 
@@ -387,7 +390,7 @@ class DecisionPipeline:
 
                 # Risk appetite (logique existante)
                 risk_appetite = context.get("risk_appetite", "medium")
-                max_dd = config.get("max_drawdown_percent", 5.0)
+                max_dd = actual_config.get("max_drawdown_percent", 5.0)
 
                 if risk_appetite == "low" and max_dd < risk_thresholds.get(
                     "low_risk_max_drawdown", 3.0
@@ -404,7 +407,7 @@ class DecisionPipeline:
                         f"  + Score boost pour appétit au risque 'élevé' et DD plus important. Score: {score}"
                     )
 
-                # AI recommendation (logique existante) - VARIABLES ACCESSIBLES ICI
+                # AI recommendation (logique existante)
                 current_config_path = path  # Variable explicite pour Pylance
                 ai_recommendation_for_this_config_score = context.get(
                     "ai_recommendation_score", {}
@@ -417,7 +420,7 @@ class DecisionPipeline:
                     f"  + Score AI de pertinence pour '{strategy_name}': {ai_recommendation_for_this_config_score * ai_weight}. Score: {score}"
                 )
 
-                # Performance historique (logique existante) - data ACCESSIBLE ICI
+                # Performance historique (logique existante)
                 historical_performance = data.get("performance", {})
                 if historical_performance:
                     sharpe_ratio = historical_performance.get("sharpe_ratio", 0.0)
@@ -447,11 +450,11 @@ class DecisionPipeline:
         print(f"\n🏆 [SCORING] RÉSULTATS FINAUX:")
         sorted_scores = sorted(config_scores.items(), key=lambda x: x[1], reverse=True)
         for path, score in sorted_scores:
-            strategy_name = (
+            strategy_name_display = (
                 configs[path].get("content", {}).get("strategy_name", "Unknown")
             )
             print(
-                f"   {strategy_name:>10}: {score:.3f} {'🥇' if score == sorted_scores[0][1] else ''}"
+                f"   {strategy_name_display:>10}: {score:.3f} {'🥇' if score == sorted_scores[0][1] else ''}"
             )
 
         self.logger.info(
