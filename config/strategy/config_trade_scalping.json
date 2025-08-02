@@ -1,13 +1,15 @@
 {
   "strategy_name": "scalping",
-  "description": "Stratégie de scalping ultra-agressive et non restrictive, conçue pour exploiter les micro-mouvements de prix avec des entrées rapides et des sorties agiles. Optimisée pour les marchés très liquides et les phases de micro-tendance.",
+  "description": "Stratégie de scalping KATANA ultra-agressive avec analyse multi-timeframe (M1/M5/M15), conçue pour exploiter les micro-mouvements de prix avec des entrées chirurgicales et des sorties agiles. Optimisée pour les marchés très liquides et la confluence inter-timeframes.",
   "strategy_tags": [
     "scalping",
     "high_frequency",
     "micro_phase",
     "intraday",
     "fast_execution",
-    "low_risk_per_trade"
+    "low_risk_per_trade",
+    "multi_timeframe",
+    "katana_precision"
   ],
   "tradeable_assets": [
     "EURUSD",
@@ -24,7 +26,7 @@
   "max_spread_points": 50,
   "halt_on_major_news": true,
   "phase_detection": {
-    "description": "Paramètres de détection de phase et de signaux SMC ultra-réactifs pour le scalping, se concentrant sur les micro-phases et les impulsions immédiates.",
+    "description": "Paramètres de détection de phase et de signaux SMC ultra-réactifs pour le scalping KATANA, se concentrant sur les micro-phases et les impulsions immédiates avec analyse multi-timeframe.",
     "lookback_window": 5,
     "volatility_threshold": 0.0001,
     "volume_zscore": 0.5,
@@ -37,28 +39,206 @@
       "detect_liquidity_grab": true,
       "detect_eqh_eql": true,
       "detect_volume_anomaly": true
+    },
+    "multi_timeframe": {
+      "enabled": true,
+      "description": "Configuration KATANA multi-timeframe pour scalping chirurgical avec confluence M1/M5/M15",
+      "timeframes": [
+        "M1",
+        "M5",
+        "M15"
+      ],
+      "confluence_weights": {
+        "M1": 0.5,
+        "M5": 0.3,
+        "M15": 0.2
+      },
+      "cache_ttl_seconds": 30,
+      "min_quality_score": 0.7,
+      "performance_monitoring": {
+        "max_execution_time_ms": 100,
+        "min_cache_efficiency_percent": 60,
+        "alert_on_divergence": true
+      },
+      "m1_config": {
+        "lookback_window": 100,
+        "volatility_threshold": 0.0001,
+        "volume_zscore": 0.5,
+        "eq_level_tolerance": 0.00005,
+        "impulse_threshold": 0.0001,
+        "detect_micro_burst": true,
+        "micro_burst_threshold": 0.00015,
+        "priority_weight": 0.5,
+        "detection_toggles": {
+          "detect_fvg": true,
+          "detect_order_block": true,
+          "detect_bos_mss": true,
+          "detect_liquidity_grab": true,
+          "detect_eqh_eql": false,
+          "detect_volume_anomaly": true
+        }
+      },
+      "m5_config": {
+        "lookback_window": 200,
+        "volatility_threshold": 0.0003,
+        "volume_zscore": 1.0,
+        "eq_level_tolerance": 0.00010,
+        "impulse_threshold": 0.0003,
+        "detect_structure_breaks": true,
+        "structure_confirmation_required": true,
+        "priority_weight": 0.3,
+        "detection_toggles": {
+          "detect_fvg": true,
+          "detect_order_block": true,
+          "detect_bos_mss": true,
+          "detect_liquidity_grab": true,
+          "detect_eqh_eql": true,
+          "detect_volume_anomaly": true
+        }
+      },
+      "m15_config": {
+        "lookback_window": 300,
+        "volatility_threshold": 0.0005,
+        "volume_zscore": 1.5,
+        "eq_level_tolerance": 0.00015,
+        "impulse_threshold": 0.0005,
+        "detect_main_trend": true,
+        "trend_strength_required": 0.7,
+        "priority_weight": 0.2,
+        "detection_toggles": {
+          "detect_fvg": false,
+          "detect_order_block": true,
+          "detect_bos_mss": true,
+          "detect_liquidity_grab": true,
+          "detect_eqh_eql": true,
+          "detect_volume_anomaly": false
+        }
+      },
+      "confluence_rules": {
+        "min_timeframes_agreement": 2,
+        "phase_consistency_bonus": 0.3,
+        "directional_conflict_penalty": 0.4,
+        "volume_confirmation_bonus": 0.2,
+        "critical_signals": [
+          "bos_mss_detected",
+          "liquidity_grab_detected",
+          "ob_detected"
+        ],
+        "signal_agreement_threshold": 0.6
+      },
+      "quality_thresholds": {
+        "excellent": 0.85,
+        "good": 0.70,
+        "acceptable": 0.55,
+        "poor": 0.40
+      },
+      "divergence_detection": {
+        "enabled": true,
+        "directional_conflict_severity": "high",
+        "signal_contradiction_tolerance": 0.3,
+        "temporal_misalignment_threshold": 0.4
+      }
     }
   },
   "smart_targets": {
-    "description": "Configuration ultra-précise pour le calcul dynamique du SL/TP, avec des objectifs très courts et des stop loss serrés, essentiels au scalping.",
+    "description": "Configuration ultra-précise pour le calcul dynamique du SL/TP KATANA, avec des objectifs très courts et des stop loss serrés, essentiels au scalping multi-timeframe.",
     "enabled": true,
+    "multi_tf_enhancement": {
+      "enabled": true,
+      "use_confluence_for_targets": true,
+      "m15_trend_influence": 0.2,
+      "m5_structure_influence": 0.3,
+      "m1_timing_influence": 0.5
+    },
     "sl": {
       "method": "PIPS",
       "swing_lookback_period": 5,
       "swing_buffer_pips": 1,
-      "fixed_pips": 7
+      "fixed_pips": 7,
+      "multi_tf_adjustment": {
+        "enabled": true,
+        "m15_trend_aligned_reduction": 0.8,
+        "confluence_tightening": 0.9
+      }
     },
     "tp": {
       "method": "RR",
       "rr_ratio": 1.5,
-      "fixed_pips": 15
+      "fixed_pips": 15,
+      "multi_tf_adjustment": {
+        "enabled": true,
+        "confluence_extension": 1.2,
+        "trend_aligned_extension": 1.3
+      }
     }
   },
   "decision_rules": [
     {
-      "name": "Scalp: Micro-Impulsion Haussière (Faible Restriction)",
-      "description": "Entrée rapide sur une micro-impulsion haussière confirmée par des signaux SMC de continuation, avec faible confiance requise.",
+      "name": "KATANA: Confluence Multi-TF Haussière",
+      "description": "Entrée chirurgicale sur confluence M1/M5/M15 haussière avec confirmation volume et structure",
       "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "multi_tf_enabled",
+          "bos_mss_detected",
+          "volume_anomaly_detected"
+        ],
+        "phase_must_contain": [
+          "scalp_burst_up",
+          "trending_bullish",
+          "expansion_up"
+        ],
+        "min_confidence": 0.70,
+        "multi_tf_requirements": {
+          "tf_consensus": true,
+          "quality_grade": [
+            "A",
+            "B"
+          ],
+          "confluence_score_min": 0.7
+        }
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "scalp_burst_up",
+        "SELL": ""
+      }
+    },
+    {
+      "name": "KATANA: Confluence Multi-TF Baissière",
+      "description": "Entrée chirurgicale sur confluence M1/M5/M15 baissière avec confirmation volume et structure",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "multi_tf_enabled",
+          "bos_mss_detected",
+          "volume_anomaly_detected"
+        ],
+        "phase_must_contain": [
+          "scalp_burst_down",
+          "trending_bearish",
+          "expansion_down"
+        ],
+        "min_confidence": 0.70,
+        "multi_tf_requirements": {
+          "tf_consensus": true,
+          "quality_grade": [
+            "A",
+            "B"
+          ],
+          "confluence_score_min": 0.7
+        }
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "",
+        "SELL": "scalp_burst_down"
+      }
+    },
+    {
+      "name": "Scalp: Micro-Impulsion Haussière (Fallback)",
+      "description": "Entrée rapide fallback sur micro-impulsion haussière si multi-TF indisponible",
+      "priority": 2,
       "conditions": {
         "signal_must_contain": [
           "volume_anomaly_detected",
@@ -69,7 +249,10 @@
           "trending_bullish",
           "expansion_up"
         ],
-        "min_confidence": 0.05
+        "min_confidence": 0.05,
+        "multi_tf_requirements": {
+          "fallback_only": true
+        }
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -78,9 +261,9 @@
       }
     },
     {
-      "name": "Scalp: Micro-Impulsion Baissière (Faible Restriction)",
-      "description": "Entrée rapide sur une micro-impulsion baissière confirmée par des signaux SMC de continuation, avec faible confiance requise.",
-      "priority": 1,
+      "name": "Scalp: Micro-Impulsion Baissière (Fallback)",
+      "description": "Entrée rapide fallback sur micro-impulsion baissière si multi-TF indisponible",
+      "priority": 2,
       "conditions": {
         "signal_must_contain": [
           "volume_anomaly_detected",
@@ -91,7 +274,10 @@
           "trending_bearish",
           "expansion_down"
         ],
-        "min_confidence": 0.05
+        "min_confidence": 0.05,
+        "multi_tf_requirements": {
+          "fallback_only": true
+        }
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -100,9 +286,9 @@
       }
     },
     {
-      "name": "Scalp: Rebond sur FVG (Moins Restrictif)",
-      "description": "Cible un rebond rapide après un contact avec un FVG, pour des mouvements courts de correction.",
-      "priority": 2,
+      "name": "KATANA: Rebond FVG Multi-TF Haussier",
+      "description": "Rebond chirurgical sur FVG avec confirmation multi-timeframe",
+      "priority": 3,
       "conditions": {
         "signal_must_contain": [
           "fvg_detected",
@@ -113,7 +299,11 @@
           "range",
           "consolidation"
         ],
-        "min_confidence": 0.05
+        "min_confidence": 0.60,
+        "multi_tf_requirements": {
+          "m5_structure_support": true,
+          "no_directional_conflict": true
+        }
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -122,9 +312,9 @@
       }
     },
     {
-      "name": "Scalp: Rebond sur FVG (Moins Restrictif) - Vente",
-      "description": "Cible un rebond rapide après un contact avec un FVG, pour des mouvements courts de correction.",
-      "priority": 2,
+      "name": "KATANA: Rebond FVG Multi-TF Baissier",
+      "description": "Rebond chirurgical sur FVG avec confirmation multi-timeframe",
+      "priority": 3,
       "conditions": {
         "signal_must_contain": [
           "fvg_detected",
@@ -135,7 +325,11 @@
           "range",
           "consolidation"
         ],
-        "min_confidence": 0.05
+        "min_confidence": 0.60,
+        "multi_tf_requirements": {
+          "m5_structure_support": true,
+          "no_directional_conflict": true
+        }
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -146,8 +340,42 @@
   ],
   "exit_rules": [
     {
+      "name": "KATANA: Sortie sur Divergence Multi-TF",
+      "description": "Sortie immédiate si divergence critique détectée entre timeframes",
+      "conditions": {
+        "signal_must_contain": [
+          "multi_tf_enabled"
+        ],
+        "multi_tf_requirements": {
+          "divergence_detected": true,
+          "conflict_severity": [
+            "high",
+            "critical"
+          ]
+        },
+        "min_confidence": 0.1
+      }
+    },
+    {
+      "name": "KATANA: Sortie sur Dégradation Qualité",
+      "description": "Sortie si la qualité multi-TF se dégrade sous le seuil acceptable",
+      "conditions": {
+        "signal_must_contain": [
+          "multi_tf_enabled"
+        ],
+        "multi_tf_requirements": {
+          "quality_grade": [
+            "C",
+            "D"
+          ],
+          "quality_degradation": true
+        },
+        "min_confidence": 0.1
+      }
+    },
+    {
       "name": "Sortie Rapide sur Inversion de Micro-Tendance",
-      "description": "Sortie immédiate si un signe de retournement de micro-tendance est détecté, pour protéger le capital en scalping.",
+      "description": "Sortie immédiate si un signe de retournement de micro-tendance est détecté",
       "conditions": {
         "phase_must_contain": [
           "reversal_up",
@@ -158,5 +386,27 @@
         "min_confidence": 0.1
       }
     }
-  ]
+  ],
+  "performance_monitoring": {
+    "multi_tf_metrics": {
+      "track_cache_efficiency": true,
+      "track_execution_time": true,
+      "track_confluence_accuracy": true,
+      "track_divergence_frequency": true
+    },
+    "alerts": {
+      "low_cache_efficiency": {
+        "threshold": 50,
+        "action": "log_warning"
+      },
+      "high_execution_time": {
+        "threshold": 150,
+        "action": "log_critical"
+      },
+      "frequent_divergences": {
+        "threshold": 0.3,
+        "action": "adjust_weights"
+      }
+    }
+  }
 }
