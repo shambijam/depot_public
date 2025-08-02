@@ -346,17 +346,21 @@ class DecisionPipeline:
             print(f"🔍 [DEBUG] Path: {path}")
             print(f"🔍 [DEBUG] Data keys: {list(data.keys())}")
             print(f"🔍 [DEBUG] Data type: {type(data)}")
-            
+
             if "content" in data:
                 print(f"🔍 [DEBUG] Content keys: {list(data['content'].keys())}")
-                print(f"🔍 [DEBUG] Content strategy_name: {data['content'].get('strategy_name', 'NOT_IN_CONTENT')}")
+                print(
+                    f"🔍 [DEBUG] Content strategy_name: {data['content'].get('strategy_name', 'NOT_IN_CONTENT')}"
+                )
             else:
-                print(f"🔍 [DEBUG] Direct strategy_name: {data.get('strategy_name', 'NOT_IN_DATA')}")
-            
+                print(
+                    f"🔍 [DEBUG] Direct strategy_name: {data.get('strategy_name', 'NOT_IN_DATA')}"
+                )
+
             print(f"🔍 [DEBUG] Full data structure: {str(data)[:200]}...")
             print("=" * 50)
             if "config" in data:
-                actual_config = data["config"] 
+                actual_config = data["config"]
             else:
                 actual_config = data
 
@@ -463,7 +467,7 @@ class DecisionPipeline:
         sorted_scores = sorted(config_scores.items(), key=lambda x: x[1], reverse=True)
         for path, score in sorted_scores:
             strategy_name_display = (
-                configs[path].get("content", {}).get("strategy_name", "Unknown")
+                configs[path].get("config", {}).get("strategy_name", "Unknown")
             )
             print(
                 f"   {strategy_name_display:>10}: {score:.3f} {'🥇' if score == sorted_scores[0][1] else ''}"
