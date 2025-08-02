@@ -301,6 +301,7 @@ class DecisionPipeline:
     def score_configs(
         self, context: Dict[str, Any], configs: Dict[str, Any]
     ) -> Dict[str, float]:
+        print(f"🔍 [DEBUG] Strategy name extracted: '{strategy_name}' from config: {config.get('strategy_name', 'NOT_FOUND')}")
         """
         Évalue et note les configurations de stratégies disponibles en fonction du contexte.
 
@@ -343,7 +344,12 @@ class DecisionPipeline:
 
         for path, data in configs.items():
             config = data.get("content", data)
-            strategy_name = config.get("strategy_name", "").lower()
+            # Debug : vérifier la structure
+            if "content" in data:
+                actual_config = data["content"] 
+            else:
+                actual_config = data
+            strategy_name = actual_config.get("strategy_name", "").lower()
             strategy_tags = config.get("strategy_tags", [])
 
             print(f"\n🔍 [SCORING] Évaluation stratégie: {strategy_name}")
