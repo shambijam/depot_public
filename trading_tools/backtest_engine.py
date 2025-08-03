@@ -471,10 +471,10 @@ class BacktestEngine:
             self.max_drawdown = max(self.max_drawdown, drawdown_percent)
 
             # AMÉLIORATION : Utilisation de la configuration effective pour les décisions de sortie
-            exit_decisions = self.config_manager.decide_exit_trades(
+            exit_decisions = self._decide_exit_trades_backtest(
                 context=current_context,
                 open_positions=current_context["open_positions"],
-                active_config=effective_config,
+                effective_config=effective_config,
             )
 
             if exit_decisions:
@@ -588,6 +588,73 @@ class BacktestEngine:
         }
         logger.info("Backtest terminé. Résultats globaux : %s", global_results)
         return global_results
+
+
+    # ===== PARTIE 2: MÉTHODE À AJOUTER À LA FIN DE LA CLASSE BacktestEngine =====
+    # (Ajouter cette méthode complète juste avant "if __name__ == '__main__':")
+
+    def _decide_exit_trades_backtest(
+        self, 
+        context: Dict[str, Any], 
+        open_positions: List[Dict[str, Any]], 
+        effective_config: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Logique de sortie simplifiée pour le backtest.
+        Vérifie SL/TP et conditions de sortie basiques.
+        """
+        exit_decisions = []
+        
+        for position in open_positions:
+            symbol = position["symbol"]
+            entry_price = position["entry_price"]
+            position_type = position["type"]  # 0=BUY, 1=SELL
+            sl_price = position.get("sl", 0.0)
+            tp_price = position.get("tp", 0.0)
+            
+            # Récupérer le prix actuel
+            if symbol not in context["trading_signals"]:
+                continue
+                
+            current_price = context["trading_signals"][symbol].get("current_price")
+            if current_price is None:
+                continue
+            
+            should_exit = False
+            exit_reason = ""
+            
+            # Vérification Stop Loss
+            if sl_price > 0:
+                if position_type == 0:  # BUY position
+                    if current_price <= sl_price:
+                        should_exit = True
+                        exit_reason = "stop_loss"
+                else:  # SELL position
+                    if current_price >= sl_price:
+                        should_exit = True
+                        exit_reason = "stop_loss"
+            
+            # Vérification Take Profit
+            if tp_price > 0 and not should_exit:
+                if position_type == 0:  # BUY position
+                    if current_price >= tp_price:
+                        should_exit = True
+                        exit_reason = "take_profit"
+                else:  # SELL position
+                    if current_price <= tp_price:
+                        should_exit = True
+                        exit_reason = "take_profit"
+            
+            # Ajouter la décision de sortie
+            if should_exit:
+                exit_decisions.append({
+                    "ticket_to_close": position["ticket"],
+                    "close_price": current_price,
+                    "exit_reason": exit_reason,
+                    "symbol": symbol
+                })
+        
+        return exit_decisions
 
     def _simulate_open_trade(self, trade_decision: Dict[str, Any], timestamp: datetime):
         """Simule l'ouverture d'un trade et met à jour l'état interne."""
