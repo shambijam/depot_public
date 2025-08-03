@@ -15,7 +15,7 @@ def check_config_files():
     # Vérifier prod_config.json
     prod_config_path = Path('config/prod_config.json')
     if prod_config_path.exists():
-        with open(prod_config_path, 'r') as f:
+        with open(prod_config_path, 'r', encoding='utf-8') as f:
             prod_config = json.load(f)
             
         print("\n📋 PROD_CONFIG.JSON:")
@@ -53,7 +53,7 @@ def check_config_files():
             print(f"✅ {strategy_file.name}")
             
             # Analyser chaque config de stratégie
-            with open(strategy_file, 'r') as f:
+            with open(strategy_file, 'r', encoding='utf-8') as f:
                 strategy_config = json.load(f)
                 
             strategy_name = strategy_config.get('strategy_name', 'UNKNOWN')
@@ -92,7 +92,7 @@ def check_config_files():
         for asset_file in crypto_assets:
             asset_path = assets_dir / asset_file
             if asset_path.exists():
-                with open(asset_path, 'r') as f:
+                with open(asset_path, 'r', encoding='utf-8') as f:
                     asset_config = json.load(f)
                 
                 symbol = asset_config.get('symbol', 'UNKNOWN')
