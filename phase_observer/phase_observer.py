@@ -51,31 +51,58 @@ class PhaseObserver:
     institutionnel et des signaux Smart Money Concepts (SMC) à haute résolution.
     """
 
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_manager=None):
         """
-        Initialise l'observateur de phases en chargeant dynamiquement tous les
-        paramètres d'analyse depuis le ConfigManager.
-
-        Args:
-            config_manager (ConfigManager): Instance du ConfigManager.
+        Initialise le PhaseObserver avec les paramètres de configuration.
         """
-        self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager
-
-        # Attributs d'état pour le module
-        self.audit_journal: List[Dict] = []
-        self._liquidity_levels_cache: Dict[str, Any] = (
-            {}
-        )  # Cache pour les niveaux de liquidité
-
-        # AMÉLIORATION : La logique de chargement est maintenant dans une méthode dédiée
-        self._load_settings()
-
+        self.logger = logging.getLogger(__name__)
+        
+        # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
+        self.lookback_window = 12
+        self.volatility_threshold = 0.0001
+        self.volume_zscore = 1.2
+        self.impulse_threshold = 0.0002
+        self.min_window_order_block = 4
+        self.min_window_fvg = 3
+        self.swing_point_order = 3
+        self.eq_level_tolerance = 0.0001
+        self.min_allowed_spread_for_liquid_check = 10
+        self.min_volume_for_liquid_check = 5
+        self.base_confidence = 0.25
+        self.signal_weights = {}
+        self.confluence_bonus = {}
+        self.detect_fvg = True
+        self.detect_order_block = True
+        self.detect_bos_mss = True
+        self.detect_liquidity_grab = True
+        self.detect_eqh_eql = True
+        self.detect_volume_anomaly = True
+        
+        # CHARGER LA CONFIG SI DISPONIBLE (écrasera les valeurs par défaut)
+        if self.config_manager:
+            try:
+                # Charger depuis prod_config.json OU phase_observer_config.json
+                self.lookback_window = self.config_manager.get(
+                    "core_parameters.lookback_window", 
+                    self.lookback_window
+                )
+                self.volatility_threshold = self.config_manager.get(
+                    "core_parameters.volatility_threshold", 
+                    self.volatility_threshold
+                )
+                self.volume_zscore = self.config_manager.get(
+                    "core_parameters.volume_zscore", 
+                    self.volume_zscore
+                )
+                # ... etc pour les autres paramètres
+            except Exception as e:
+                self.logger.warning(f"Impossible de charger config: {e}. Utilisation des valeurs par défaut.")
+        
+        # MAINTENANT on peut logger
         self.logger.info(
-            f"PhaseObserver initialisé. Lookback window par défaut: {self.lookback_window}."
+            f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
-        # TODO: Implémenter une validation des paramètres chargés pour s'assurer de leur cohérence
-        #       (ex: `trend_sma_fast_ratio` < `trend_sma_slow_ratio`).
 
     def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
         """
