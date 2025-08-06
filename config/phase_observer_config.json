@@ -1,89 +1,158 @@
 {
     "phase_detection_defaults": {
-        "description": "Paramètres par défaut pour l'analyse de marché et la détection des Smart Money Concepts (SMC) et des phases par le module PhaseObserver.",
+        "description": "Configuration optimisée SNIPER_X - 4 indicateurs core seulement",
         "detection_toggles": {
-            "description": "Interrupteurs pour activer ou désactiver des types de détection spécifiques. 'true' pour activer, 'false' pour désactiver.",
+            "description": "Indicateurs core seulement - Architecture Trading Desk",
             "detect_fvg": true,
             "detect_order_block": true,
             "detect_bos_mss": true,
-            "detect_liquidity_grab": true,
-            "detect_eqh_eql": true,
-            "detect_volume_anomaly": true
+            "detect_regime": true
         },
-        "lookback_window": 15,
-        "volatility_threshold": 0.0005,
-        "volume_zscore": 1.5,
-        "eq_level_tolerance": 0.0001,
-        "impulse_threshold": 0.0005,
-        "min_window_order_block": 5,
-        "min_window_fvg": 3,
-        "min_window_liquidity_grab": 10,
-        "min_window_breaker_block": 10,
-        "bos_mss_structure_window_ratio": 0.3,
-        "min_window_eqh_eql": 10,
-        "min_window_volume_anomaly": 10,
-        "min_std_dev_volume_anomaly": 1e-06,
-        "min_window_fvg_presence": 6,
-        "fvg_window_slice_size": 3,
-        "trend_sma_fast_ratio": 0.3,
-        "trend_sma_slow_ratio": 0.7,
-        "min_volume_for_liquid_check": 1,
-        "trend_window": 20,
-        "swing_point_order": 3,
-        "default_spread_points": 0.0,
-        "default_point_value": 0.00001,
-        "default_trade_tick_size": 0.00001,
-        "default_trade_contract_size": 100000.0,
-        "min_allowed_spread_for_liquid_check": 0,
-        "max_allowed_spread_for_liquid_check": 50,
-        "scalp_burst_volatility_multiplier": 1.5,
-        "consolidation_volatility_multiplier": 0.8,
-        "crypto_liquidity_check": {
-            "description": "Seuils de liquidité spécifiques pour les cryptomonnaies, afin de tenir compte de leurs spreads plus élevés.",
-            "min_allowed_spread_points_crypto": 0,
-            "max_allowed_spread_points_crypto": 2000,
-            "min_volume_for_liquid_check_crypto": 10
+        "core_parameters": {
+            "lookback_window": 15,
+            "volatility_threshold": 0.0005,
+            "impulse_threshold": 0.0005,
+            "min_window_order_block": 5,
+            "min_window_fvg": 3,
+            "swing_point_order": 3,
+            "default_spread_points": 0.0,
+            "default_point_value": 0.00001,
+            "default_trade_tick_size": 0.00001,
+            "default_trade_contract_size": 100000.0
         },
-        "confidence_score_calculation": {
-            "description": "Paramètres pour le calcul du score de confiance basé sur la qualité et convergence des signaux détectés",
+        "fvg_enhanced_settings": {
+            "description": "FVG avec magnitude et tracking de remplissage",
+            "min_gap_magnitude_percent": 0.15,
+            "gap_fill_threshold": 0.8,
+            "enable_gap_tracking": true,
+            "max_gap_age_bars": 50
+        },
+        "order_block_ml_settings": {
+            "description": "Order Blocks avec scoring ML et confluence",
+            "enable_ml_scoring": true,
+            "confluence_requirements": {
+                "min_confluence_score": 0.6,
+                "require_volume_confirmation": true,
+                "require_trend_alignment": true,
+                "require_fvg_presence": false
+            },
+            "impulse_strength_weights": {
+                "price_movement": 0.4,
+                "volume_spike": 0.3,
+                "time_compression": 0.3
+            }
+        },
+        "adaptive_swing_settings": {
+            "description": "Swing Points adaptatifs selon régime de volatilité",
+            "volatility_regimes": {
+                "high_vol": {
+                    "swing_order": 5,
+                    "min_swing_distance": 0.001
+                },
+                "normal_vol": {
+                    "swing_order": 3,
+                    "min_swing_distance": 0.0005
+                },
+                "low_vol": {
+                    "swing_order": 2,
+                    "min_swing_distance": 0.0002
+                }
+            },
+            "volatility_calculation": {
+                "method": "garman_klass",
+                "period": 20,
+                "high_threshold": 75,
+                "low_threshold": 25
+            }
+        },
+        "bos_mss_enhanced_settings": {
+            "description": "BOS/MSS avec confirmation volume et momentum",
+            "volume_confirmation": {
+                "enable": true,
+                "volume_multiplier_threshold": 1.5,
+                "lookback_period": 20
+            },
+            "momentum_confirmation": {
+                "enable": true,
+                "min_momentum_threshold": 0.0003,
+                "price_change_period": 1
+            },
+            "structure_validation": {
+                "min_break_distance": 0.0002,
+                "require_close_beyond": true
+            }
+        },
+        "regime_detection_settings": {
+            "description": "Détection sophistiquée du régime de marché",
+            "adx_settings": {
+                "period": 14,
+                "trending_threshold": 25,
+                "ranging_threshold": 20
+            },
+            "volatility_regimes": {
+                "calculation_period": 20,
+                "high_vol_percentile": 75,
+                "low_vol_percentile": 25
+            },
+            "volume_profile": {
+                "enable_institutional_detection": true,
+                "volume_ma_period": 20,
+                "institutional_threshold": 1.8
+            },
+            "regime_types": [
+                "trending_institutional_bull",
+                "trending_institutional_bear",
+                "range_accumulation",
+                "range_distribution",
+                "high_volatility_chaos",
+                "low_volatility_compression"
+            ]
+        },
+        "confidence_score_optimized": {
+            "description": "Score de confiance recalibré pour 4 indicateurs",
             "enabled": true,
-            "base_confidence": 0.1,
+            "base_confidence": 0.2,
             "signal_weights": {
-                "fvg_detected": 0.15,
-                "ob_detected": 0.20,
-                "bos_mss_detected": 0.15,
-                "liquidity_grab_detected": 0.20,
-                "eqh_eql_detected": 0.10,
-                "volume_anomaly_detected": 0.10,
-                "trend_alignment": 0.10
+                "fvg_detected": 0.25,
+                "ob_detected": 0.35,
+                "bos_mss_detected": 0.25,
+                "regime_alignment": 0.15
             },
-            "convergence_bonus": {
-                "multiple_signals_bonus": 0.2,
-                "min_signals_for_bonus": 2,
-                "max_confidence_cap": 1.0
+            "confluence_bonus": {
+                "fvg_ob_confluence": 0.15,
+                "ob_bos_confluence": 0.10,
+                "full_confluence_bonus": 0.20,
+                "max_confidence_cap": 0.95
             },
-            "quality_factors": {
-                "volume_confirmation_bonus": 0.1,
-                "trend_strength_bonus": 0.1,
-                "spread_quality_bonus": 0.05
+            "quality_multipliers": {
+                "high_volume_confirmation": 1.15,
+                "regime_strength": 1.10,
+                "tight_spread": 1.05
+            }
+        },
+        "liquidity_detection": {
+            "forex_settings": {
+                "max_allowed_spread_points": 7,
+                "min_volume_threshold": 1
+            },
+            "crypto_settings": {
+                "max_allowed_spread_points": 2000,
+                "min_volume_threshold": 10
             }
         }
     },
-    "market_regime_detection": {
-        "description": "Paramètres pour la détection du régime de marché global par le ConfigManager, basée sur les agrégations du PhaseObserver.",
-        "min_data_points": 20,
-        "atr_period": 14,
-        "high_volatility_percent_threshold": 0.3,
-        "low_volatility_percent_threshold": 0.2,
-        "default_vix_index": 20,
-        "high_volatility_vix_threshold": 25,
-        "low_volatility_vix_threshold": 15
-    },
-    "phase_detection_adaptation": {
-        "description": "Paramètres d'adaptation de la détection de phase en fonction des conditions de volatilité globales (utilisés par ConfigManager pour adapter les stratégies).",
-        "lookback_window_high_vol": 10,
-        "volume_zscore_high_vol": 2.0,
-        "lookback_window_low_vol": 30,
-        "volume_zscore_low_vol": 1.5
+    "performance_monitoring": {
+        "description": "Monitoring des performances en temps réel",
+        "enable_performance_tracking": true,
+        "benchmark_metrics": {
+            "target_win_rate": 0.78,
+            "target_sharpe_ratio": 1.8,
+            "max_acceptable_drawdown": 0.05
+        },
+        "alert_thresholds": {
+            "win_rate_below": 0.65,
+            "confidence_score_below": 0.4,
+            "processing_time_above_ms": 50
+        }
     }
 }

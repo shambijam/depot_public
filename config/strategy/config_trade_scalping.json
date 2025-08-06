@@ -15,7 +15,10 @@
     "EURUSD",
     "GBPUSD",
     "USDCHF",
-    "XAUUSD"
+    "XAUUSD",
+    "BTCUSD",
+    "ETHUSD",
+    "LTCUSD"
   ],
   "magic_number": 10001,
   "risk_per_trade_percent": 0.1,

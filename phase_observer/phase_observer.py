@@ -175,632 +175,850 @@ class PhaseObserver:
 
     # --- Fonctions de Détection des Signaux Institutionnels (SMC) ---
 
-    def detect_order_block(
-        self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None
-    ) -> List[Optional[Dict[str, Any]]]:
+    def detect_order_block_ml_enhanced(self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None) -> List[Optional[Dict[str, Any]]]:
         """
-        Détecte les Order Blocks (OB) et fournit les critères de leur détection.
-        Le score de fiabilité est supprimé pour laisser le ConfigManager évaluer la confluence.
+        🎯 Order Blocks ML Enhanced - Scoring sophistiqué avec confluence
+        
+        Features ML:
+        - Impulse strength scoring
+        - Volume confirmation weighting  
+        - Temporal context analysis
+        - Multi-factor confluence scoring
         """
-        self.logger.debug(
-            "Détection des Order Blocks (sans scoring de fiabilité direct)..."
-        )
-
-        # Étape 1: Identifier les OB potentiels
+        self.logger.debug("Détection Order Blocks ML Enhanced...")
+        
+        # Configuration ML
+        ob_config = self.config_manager.get("phase_detection_defaults.order_block_ml_settings", {})
+        enable_ml = ob_config.get("enable_ml_scoring", True)
+        confluence_config = ob_config.get("confluence_requirements", {})
+        impulse_weights = ob_config.get("impulse_strength_weights", {})
+        
+        # Paramètres de base
+        impulse_threshold = self.config_manager.get("phase_detection_defaults.impulse_threshold", 0.0005)
+        
+        # Pré-calcul des features pour ML
         df["candle_move"] = df["close"] - df["open"]
-        impulse_threshold = self.config_manager.get(
-            "phase_detection_defaults.impulse_threshold", 0.0008
-        )
-
-        bullish_ob_mask = (df["candle_move"] > impulse_threshold) & (
-            df["candle_move"].shift(1) < 0
-        )
-        bearish_ob_mask = (df["candle_move"] < -impulse_threshold) & (
-            df["candle_move"].shift(1) > 0
-        )
+        df["candle_size"] = df["high"] - df["low"]
+        df["body_ratio"] = abs(df["candle_move"]) / df["candle_size"].replace(0, np.nan)
+        df["volume_ma"] = df["tick_volume"].rolling(window=20).mean()
+        df["volume_ratio"] = df["tick_volume"] / df["volume_ma"]
+        
+        # Identification des OB potentiels
+        bullish_ob_mask = (df["candle_move"] > impulse_threshold) & (df["candle_move"].shift(1) < 0)
+        bearish_ob_mask = (df["candle_move"] < -impulse_threshold) & (df["candle_move"].shift(1) > 0)
         potential_ob_mask = bullish_ob_mask | bearish_ob_mask
-
+        
+        # Swing points pour confluence
         swing_highs, swing_lows = self._get_swing_points(df)
-
-        # Pré-calculer la tendance du timeframe supérieur UNE SEULE FOIS si les données sont fournies
+        
+        # Trend HTF si disponible
         htf_trend = None
         if df_htf is not None and not df_htf.empty:
             htf_trend = self._get_trend(df_htf).iloc[-1]
-
-        # Étape 2: Détecter les OB et enregistrer les critères (sans calculer de score ici)
+        
         results = [None] * len(df)
-
-        ob_positions = df.index.get_indexer(df.index[potential_ob_mask])
-
-        for pos in ob_positions:
-            if pos == 0:
+        ob_positions = df.index[potential_ob_mask].tolist()
+        
+        for i, ob_timestamp in enumerate(ob_positions):
+            try:
+                pos = df.index.get_loc(ob_timestamp)
+                if pos == 0:
+                    continue
+                    
+                ob_candle_pos = pos - 1
+                if ob_candle_pos < 0 or pos >= len(df):
+                    continue
+                
+                ob_candle = df.iloc[ob_candle_pos]
+                impulse_candle = df.iloc[pos]
+                ob_zone = (ob_candle["low"], ob_candle["high"])
+                
+                # === ML FEATURE EXTRACTION ===
+                
+                # 1. Impulse Strength Score
+                price_movement_strength = abs(impulse_candle["candle_move"]) / impulse_threshold
+                volume_spike_strength = impulse_candle["volume_ratio"] if not np.isnan(impulse_candle["volume_ratio"]) else 1.0
+                body_ratio_strength = impulse_candle["body_ratio"] if not np.isnan(impulse_candle["body_ratio"]) else 0.5
+                
+                # Time compression (vitesse de formation)
+                time_compression = 1.0  # Placeholder - à implémenter selon timeframe
+                
+                # Calcul score impulse pondéré
+                impulse_score = (
+                    price_movement_strength * impulse_weights.get("price_movement", 0.4) +
+                    volume_spike_strength * impulse_weights.get("volume_spike", 0.3) +
+                    time_compression * impulse_weights.get("time_compression", 0.3)
+                )
+                
+                # 2. Confluence Factors Scoring
+                confluence_score = 0.0
+                confluence_details = {}
+                
+                # FVG Confluence
+                fvg_confluence = False
+                if pd.notna(impulse_candle.get("fvg_details")):
+                    fvg_confluence = True
+                    confluence_score += 0.25
+                confluence_details["fvg_confluence"] = fvg_confluence
+                
+                # Market Extreme Confluence (Swing points)
+                extreme_confluence = False
+                if (ob_candle.name in swing_highs.index) or (ob_candle.name in swing_lows.index):
+                    extreme_confluence = True
+                    confluence_score += 0.30
+                confluence_details["extreme_confluence"] = extreme_confluence
+                
+                # Volume Confirmation
+                volume_confirmation = False
+                if confluence_config.get("require_volume_confirmation", True):
+                    if volume_spike_strength > 1.2:  # 20% au-dessus de la moyenne
+                        volume_confirmation = True
+                        confluence_score += 0.20
+                else:
+                    volume_confirmation = True
+                confluence_details["volume_confirmation"] = volume_confirmation
+                
+                # Trend Alignment  
+                trend_alignment = False
+                ob_is_bullish = bullish_ob_mask.iloc[pos]
+                if confluence_config.get("require_trend_alignment", True):
+                    current_trend = df["trend"].iloc[pos] if "trend" in df.columns else "neutral"
+                    if (ob_is_bullish and current_trend == "bullish") or (not ob_is_bullish and current_trend == "bearish"):
+                        trend_alignment = True
+                        confluence_score += 0.15
+                    # HTF alignment bonus
+                    if htf_trend and ((ob_is_bullish and htf_trend == "bullish") or (not ob_is_bullish and htf_trend == "bearish")):
+                        confluence_score += 0.10
+                else:
+                    trend_alignment = True
+                confluence_details["trend_alignment"] = trend_alignment
+                
+                # 3. Mitigation Analysis
+                unmitigated = True
+                future_candles = df.iloc[pos + 1:]
+                if not future_candles.empty:
+                    mitigated = future_candles[
+                        (future_candles["high"] >= ob_zone[0]) & 
+                        (future_candles["low"] <= ob_zone[1])
+                    ]
+                    if not mitigated.empty:
+                        unmitigated = False
+                
+                # 4. ML Score Final
+                if enable_ml:
+                    # Facteurs de qualité
+                    base_ml_score = min(1.0, (impulse_score + confluence_score) / 2)
+                    
+                    # Ajustements qualitatifs
+                    if unmitigated:
+                        base_ml_score *= 1.1
+                    if volume_confirmation and trend_alignment:
+                        base_ml_score *= 1.15
+                        
+                    ml_score = min(0.95, base_ml_score)  # Cap à 95%
+                else:
+                    ml_score = confluence_score
+                
+                # 5. Filtrage par seuil de confluence
+                min_confluence = confluence_config.get("min_confluence_score", 0.6)
+                
+                if ml_score >= min_confluence:
+                    results[pos] = {
+                        "type": "bullish" if ob_is_bullish else "bearish",
+                        "zone": list(ob_zone),
+                        "ml_score": round(ml_score, 3),
+                        "impulse_strength": round(impulse_score, 3),
+                        "confluence_score": round(confluence_score, 3),
+                        "confluence_details": confluence_details,
+                        "unmitigated": unmitigated,
+                        "volume_spike": round(volume_spike_strength, 2),
+                        "formation_quality": "high" if ml_score > 0.8 else "medium" if ml_score > 0.6 else "low"
+                    }
+            
+            except Exception as e:
+                self.logger.warning(f"Erreur processing OB à l'index {pos}: {e}")
                 continue
-
-            ob_candle_pos = pos - 1
-
-            if ob_candle_pos < 0 or pos >= len(df):
-                continue
-
-            ob_candle = df.iloc[ob_candle_pos]
-            impulse_candle = df.iloc[pos]
-            ob_zone = (ob_candle["low"], ob_candle["high"])
-
-            # Les critères sont enregistrés, mais pas utilisés pour un score immédiat ici.
-            # C'est au ConfigManager de juger la confluence de ces critères.
-            criteria_details = {
-                "fvg_confluence": False,
-                "liquidity_confluence": False,
-                "market_extreme_confluence": False,
-                "unmitigated": True,
-                "multi_tf_alignment": False,
-            }
-
-            if pd.notna(impulse_candle.get("fvg_details")):
-                criteria_details["fvg_confluence"] = True
-            if pd.notna(ob_candle.get("liquidity_grab_details")) or pd.notna(
-                impulse_candle.get("liquidity_grab_details")
-            ):
-                criteria_details["liquidity_confluence"] = True
-            if (ob_candle.name in swing_highs.index) or (
-                ob_candle.name in swing_lows.index
-            ):
-                criteria_details["market_extreme_confluence"] = True
-
-            future_candles = df.iloc[pos + 1 :]
-            mitigated = future_candles[
-                (future_candles["high"] >= ob_zone[0])
-                & (future_candles["low"] <= ob_zone[1])
-            ]
-            if not mitigated.empty:
-                criteria_details["unmitigated"] = False
-
-            ob_type_is_bullish = bullish_ob_mask.iloc[pos]
-            if htf_trend:
-                if (ob_type_is_bullish and htf_trend == "bullish") or (
-                    not ob_type_is_bullish and htf_trend == "bearish"
-                ):
-                    criteria_details["multi_tf_alignment"] = True
-
-            # L'OB est détecté s'il y a au moins un critère de confluence.
-            # La décision de la "qualité" ou de la "force" de cet OB revient au ConfigManager
-            # qui évaluera les 'criteria_details' via les règles JSON.
-            if any(
-                criteria_details.values()
-            ):  # Si au moins un critère est vrai, l'OB est "validé" pour l'exportation
-                results[pos] = {
-                    "type": "bullish" if ob_type_is_bullish else "bearish",
-                    "zone": list(ob_zone),
-                    "criteria_details": criteria_details,  # Exporte les détails des critères sans un score aggrégé
-                }
-
+        
+        # Performance logging
+        valid_obs = [r for r in results if r is not None]
+        if valid_obs:
+            avg_ml_score = np.mean([ob["ml_score"] for ob in valid_obs])
+            high_quality = len([ob for ob in valid_obs if ob["formation_quality"] == "high"])
+            self.logger.debug(f"OB ML Enhanced: {len(valid_obs)} OB détectés, score ML moyen: {avg_ml_score:.3f}, haute qualité: {high_quality}")
+        
         return results
 
-    def detect_fvg(self, df: pd.DataFrame) -> List[Optional[Dict[str, float]]]:
+    def detect_fvg_enhanced(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
         """
-        Détecte les Fair Value Gaps (FVG) de manière vectorielle.
-
-        Un FVG est un déséquilibre créé par un pattern de 3 bougies.
-
-        Args:
-            df (pd.DataFrame): DataFrame avec les colonnes OHLC.
-
-        Returns:
-            List[Optional[Dict]]: Une liste de dictionnaires (un par ligne du df),
-                                  contenant les infos du FVG détecté, ou None.
+        🚀 FVG Enhanced - Version Trading Desk avec magnitude et tracking
+        
+        Améliorations:
+        - Filtrage par magnitude minimale
+        - Tracking du remplissage en temps réel
+        - Scoring de qualité du gap
+        - Expiration basée sur l'âge
         """
-        self.logger.debug("Détection des Fair Value Gaps (FVG)...")
-
-        # AMÉLIORATION : Logique vectorielle et techniquement correcte.
-        low_p0 = df["low"]
-        high_p2 = df["high"].shift(2)
-
-        high_p0 = df["high"]
-        low_p2 = df["low"].shift(2)
-
-        # FVG Haussier: le bas de la bougie actuelle est plus haut que le haut de la bougie d'il y a 2 périodes.
-        bullish_fvg_condition = low_p0 > high_p2
-
-        # FVG Baissier: le haut de la bougie actuelle est plus bas que le bas de la bougie d'il y a 2 périodes.
-        bearish_fvg_condition = high_p0 < low_p2
-
+        self.logger.debug("Détection FVG Enhanced avec magnitude et tracking...")
+        
+        # Récupération des paramètres enhanced
+        fvg_config = self.config_manager.get("phase_detection_defaults.fvg_enhanced_settings", {})
+        min_gap_magnitude = fvg_config.get("min_gap_magnitude_percent", 0.15) / 100
+        gap_fill_threshold = fvg_config.get("gap_fill_threshold", 0.8)
+        enable_tracking = fvg_config.get("enable_gap_tracking", True)
+        max_gap_age = fvg_config.get("max_gap_age_bars", 50)
+        
+        # Détection vectorielle de base (optimisée)
+        low_p0 = df["low"].values
+        high_p2 = df["high"].shift(2).values
+        high_p0 = df["high"].values
+        low_p2 = df["low"].shift(2).values
+        
+        # Conditions FVG avec filtrage NaN
+        valid_indices = ~(np.isnan(high_p2) | np.isnan(low_p2))
+        
+        bullish_fvg_condition = np.zeros(len(df), dtype=bool)
+        bearish_fvg_condition = np.zeros(len(df), dtype=bool)
+        
+        bullish_fvg_condition[valid_indices] = low_p0[valid_indices] > high_p2[valid_indices]
+        bearish_fvg_condition[valid_indices] = high_p0[valid_indices] < low_p2[valid_indices]
+        
         results = []
+        active_gaps = []  # Tracking des gaps actifs pour remplissage
+        
         for i in range(len(df)):
             fvg_info = None
-            if bullish_fvg_condition.iloc[i]:
-                fvg_info = {
-                    "type": "bullish",
-                    "top": df["low"].iloc[i],
-                    "bottom": df["high"].iloc[i - 2],
-                }
-            elif bearish_fvg_condition.iloc[i]:
-                fvg_info = {
-                    "type": "bearish",
-                    "top": df["high"].iloc[i - 2],
-                    "bottom": df["low"].iloc[i],
-                }
+            current_price = df["close"].iloc[i]
+            
+            # === DÉTECTION NOUVEAUX FVG ===
+            if bullish_fvg_condition[i]:
+                gap_bottom = df["high"].iloc[i - 2]
+                gap_top = df["low"].iloc[i]
+                gap_size = gap_top - gap_bottom
+                
+                # Filtrage par magnitude (% du prix)
+                magnitude_percent = gap_size / current_price
+                if magnitude_percent >= min_gap_magnitude:
+                    
+                    # Calcul score de qualité
+                    quality_score = min(1.0, magnitude_percent / (min_gap_magnitude * 2))
+                    
+                    fvg_info = {
+                        "type": "bullish",
+                        "top": gap_top,
+                        "bottom": gap_bottom,
+                        "magnitude": gap_size,
+                        "magnitude_percent": magnitude_percent,
+                        "quality_score": quality_score,
+                        "formation_index": i,
+                        "is_filled": False,
+                        "fill_percentage": 0.0
+                    }
+                    
+                    # Ajouter aux gaps actifs pour tracking
+                    if enable_tracking:
+                        active_gaps.append(fvg_info.copy())
+                        
+            elif bearish_fvg_condition[i]:
+                gap_top = df["low"].iloc[i - 2]
+                gap_bottom = df["high"].iloc[i]
+                gap_size = gap_top - gap_bottom
+                
+                # Filtrage par magnitude
+                magnitude_percent = gap_size / current_price
+                if magnitude_percent >= min_gap_magnitude:
+                    
+                    quality_score = min(1.0, magnitude_percent / (min_gap_magnitude * 2))
+                    
+                    fvg_info = {
+                        "type": "bearish",
+                        "top": gap_top,
+                        "bottom": gap_bottom,
+                        "magnitude": gap_size,
+                        "magnitude_percent": magnitude_percent,
+                        "quality_score": quality_score,
+                        "formation_index": i,
+                        "is_filled": False,
+                        "fill_percentage": 0.0
+                    }
+                    
+                    if enable_tracking:
+                        active_gaps.append(fvg_info.copy())
+            
+            # === TRACKING REMPLISSAGE DES GAPS ACTIFS ===
+            if enable_tracking and active_gaps:
+                current_high = df["high"].iloc[i]
+                current_low = df["low"].iloc[i]
+                
+                for gap in active_gaps[:]:  # Copy pour modification pendant iteration
+                    age = i - gap["formation_index"]
+                    
+                    # Expiration par âge
+                    if age > max_gap_age:
+                        active_gaps.remove(gap)
+                        continue
+                    
+                    # Calcul du remplissage
+                    if gap["type"] == "bullish":
+                        if current_low <= gap["top"]:
+                            penetration = gap["top"] - current_low
+                            fill_percent = penetration / gap["magnitude"]
+                            gap["fill_percentage"] = min(1.0, fill_percent)
+                            
+                            if fill_percent >= gap_fill_threshold:
+                                gap["is_filled"] = True
+                                active_gaps.remove(gap)
+                                
+                    elif gap["type"] == "bearish":
+                        if current_high >= gap["bottom"]:
+                            penetration = current_high - gap["bottom"]
+                            fill_percent = penetration / gap["magnitude"]
+                            gap["fill_percentage"] = min(1.0, fill_percent)
+                            
+                            if fill_percent >= gap_fill_threshold:
+                                gap["is_filled"] = True
+                                active_gaps.remove(gap)
+            
             results.append(fvg_info)
-
-        # TODO: Calculer la "magnitude" du FVG (sa taille en pips) pour évaluer son importance.
-        # TODO: Ajouter une logique pour marquer un FVG comme "rempli" une fois que le prix
-        #       a comblé le déséquilibre.
+        
+        # Log de performance
+        valid_gaps = [r for r in results if r is not None]
+        if valid_gaps:
+            avg_quality = np.mean([g["quality_score"] for g in valid_gaps])
+            self.logger.debug(f"FVG Enhanced: {len(valid_gaps)} gaps détectés, qualité moyenne: {avg_quality:.3f}")
+        
         return results
 
-    def _get_swing_points(
-        self, df: pd.DataFrame, order: Optional[int] = None
-    ) -> tuple[pd.Series, pd.Series]:
+    def _get_adaptive_swing_points(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         """
-        Identifie les points de swing (hauts et bas) dans un DataFrame.
-        Le paramètre 'order' peut être passé directement par la fonction appelante
-        ou chargé dynamiquement depuis la configuration si non fourni.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec colonnes 'high' et 'low'.
-            order (Optional[int]): L'ordre des points de swing. Si non fourni, il est lu depuis la configuration.
-
-        Returns:
-            tuple[pd.Series, pd.Series]: Deux Series pandas contenant les prix des swing highs et swing lows.
+        🎯 Adaptive Swing Points - S'adapte au régime de volatilité
+        
+        Intelligence:
+        - Détection automatique du régime de volatilité
+        - Paramètres adaptatifs selon le régime
+        - Filtrage par distance minimale
+        - Méthode Garman-Klass pour volatilité précise
         """
-        # CORRECTION MAJEURE: Le paramètre 'order' est maintenant accepté dans la signature.
-        # Il est utilisé en priorité s'il est fourni (non None).
-        # Sinon, il est lu depuis phase_observer_config.json.
-        if order is None:  # Si 'order' n'a pas été passé en argument
-            order_param_value = self.config_manager.get(
-                "phase_detection_defaults.swing_point_order", 5
-            )
-            self.logger.debug(
-                f"[_get_swing_points] 'order' non fourni, lecture depuis config: {order_param_value}"
-            )
-        else:  # Si 'order' a été passé en argument (comme dans detect_eqh_eql)
-            order_param_value = order
-            self.logger.debug(
-                f"[_get_swing_points] 'order' fourni en argument: {order_param_value}"
-            )
-
-        # Validation pour s'assurer que le paramètre est utilisable
-        if not isinstance(order_param_value, int) or order_param_value < 1:
-            self.logger.warning(
-                f"Paramètre 'order' invalide ({order_param_value}). Utilisation de la valeur par défaut 5."
-            )
-            order_param_value = 5
-
-        # La logique de détection reste la même, elle est robuste et vectorisée.
-        window_size = 2 * order_param_value + 1  # Utilisation de order_param_value
-
-        # S'assurer qu'il y a suffisamment de données pour la fenêtre de calcul
+        self.logger.debug("Calcul des Swing Points adaptatifs...")
+        
+        swing_config = self.config_manager.get("phase_detection_defaults.adaptive_swing_settings", {})
+        volatility_regimes = swing_config.get("volatility_regimes", {})
+        vol_config = swing_config.get("volatility_calculation", {})
+        
+        # === 1. CALCUL RÉGIME DE VOLATILITÉ ===
+        vol_method = vol_config.get("method", "garman_klass")
+        vol_period = vol_config.get("period", 20)
+        high_threshold = vol_config.get("high_threshold", 75)
+        low_threshold = vol_config.get("low_threshold", 25)
+        
+        if vol_method == "garman_klass":
+            # Volatilité Garman-Klass (plus précise que close-to-close)
+            ln_high_low = np.log(df["high"] / df["low"])
+            ln_close_open = np.log(df["close"] / df["open"])
+            
+            gk_vol = 0.5 * ln_high_low**2 - (2*np.log(2) - 1) * ln_close_open**2
+            volatility_series = np.sqrt(gk_vol.rolling(window=vol_period).mean())
+        else:
+            # Fallback: Close-to-close volatility
+            returns = df["close"].pct_change()
+            volatility_series = returns.rolling(window=vol_period).std()
+        
+        # Calcul des percentiles pour classification
+        if len(volatility_series.dropna()) < vol_period:
+            self.logger.warning(f"Données insuffisantes pour calcul volatilité adaptative. Utilisation mode normal.")
+            current_regime = "normal_vol"
+        else:
+            current_vol = volatility_series.iloc[-1]
+            vol_percentile = (volatility_series <= current_vol).mean() * 100
+            
+            if vol_percentile >= high_threshold:
+                current_regime = "high_vol"
+            elif vol_percentile <= low_threshold:
+                current_regime = "low_vol"
+            else:
+                current_regime = "normal_vol"
+        
+        self.logger.debug(f"Régime de volatilité détecté: {current_regime}")
+        
+        # === 2. PARAMÈTRES ADAPTATIFS ===
+        regime_params = volatility_regimes.get(current_regime, {})
+        swing_order = regime_params.get("swing_order", 3)
+        min_swing_distance = regime_params.get("min_swing_distance", 0.0005)
+        
+        # === 3. DÉTECTION SWING POINTS AVEC PARAMÈTRES ADAPTATIFS ===
+        window_size = 2 * swing_order + 1
+        
         if len(df) < window_size:
-            self.logger.warning(
-                f"Insuffisant de barres ({len(df)}) pour calculer les points de swing avec une fenêtre de {window_size}. Retourne des Series vides."
-            )
+            self.logger.warning(f"DataFrame trop petit ({len(df)}) pour fenêtre swing {window_size}")
             return pd.Series([], dtype=float), pd.Series([], dtype=float)
-
-        highs = df["high"][
-            (
-                df["high"]
-                == df["high"]
-                .rolling(window=window_size, center=True, min_periods=window_size)
-                .max()
-            )
-        ]
-        lows = df["low"][
-            (
-                df["low"]
-                == df["low"]
-                .rolling(window=window_size, center=True, min_periods=window_size)
-                .min()
-            )
-        ]
-
-        return highs, lows
-
-    def detect_liquidity_grab(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
-        """
-        Détecte les prises de liquidité (sweeps) de manière vectorielle.
-
-        Un sweep se produit lorsqu'une mèche de bougie dépasse un swing high/low précédent,
-        mais que le corps de la bougie clôture en dessous/au-dessus de ce niveau.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec colonnes OHLC.
-
-        Returns:
-            List[Optional[Dict]]: Une liste de dictionnaires pour chaque bougie,
-                                  décrivant le sweep s'il a eu lieu.
-        """
-        self.logger.debug("Détection des prises de liquidité (Sweeps)...")
-        swing_highs, swing_lows = self._get_swing_points(df)
-
-        # Propage le dernier swing high/low pour la comparaison
-        df["last_swing_high"] = swing_highs.ffill()
-        df["last_swing_low"] = swing_lows.ffill()
-
-        # Conditions vectorielles
-        bullish_sweep = (df["low"] < df["last_swing_low"].shift(1)) & (
-            df["close"] > df["last_swing_low"].shift(1)
+        
+        # Calcul des extrema locaux
+        highs_condition = (
+            df["high"] == df["high"].rolling(window=window_size, center=True, min_periods=window_size).max()
         )
-        bearish_sweep = (df["high"] > df["last_swing_high"].shift(1)) & (
-            df["close"] < df["last_swing_high"].shift(1)
+        lows_condition = (
+            df["low"] == df["low"].rolling(window=window_size, center=True, min_periods=window_size).min()
         )
+        
+        # === 4. FILTRAGE PAR DISTANCE MINIMALE ===
+        
+        def filter_swing_points(condition_series, price_series, min_distance):
+            """Filtre les swing points trop proches"""
+            filtered_indices = []
+            last_price = None
+            
+            for idx in condition_series[condition_series].index:
+                current_price = price_series.loc[idx]
+                
+                if last_price is None:
+                    filtered_indices.append(idx)
+                    last_price = current_price
+                else:
+                    price_distance = abs(current_price - last_price) / last_price
+                    if price_distance >= min_distance:
+                        filtered_indices.append(idx)
+                        last_price = current_price
+        
+            return filtered_indices
+        
+        # Application du filtrage
+        filtered_high_indices = filter_swing_points(highs_condition, df["high"], min_swing_distance)
+        filtered_low_indices = filter_swing_points(lows_condition, df["low"], min_swing_distance)
+        
+        # Création des Series résultantes
+        swing_highs = pd.Series(index=filtered_high_indices, data=df.loc[filtered_high_indices, "high"], dtype=float)
+        swing_lows = pd.Series(index=filtered_low_indices, data=df.loc[filtered_low_indices, "low"], dtype=float)
+        
+        # === 5. LOGGING DE PERFORMANCE ===
+        total_highs = len(swing_highs)
+        total_lows = len(swing_lows)
+        
+        if total_highs > 0 or total_lows > 0:
+            self.logger.debug(f"Swing Points adaptatifs: {total_highs} highs, {total_lows} lows (régime: {current_regime})")
+        
+        return swing_highs, swing_lows
 
-        results = []
+    def _calculate_volatility_regime(self, df: pd.DataFrame) -> str:
+        """
+        Calcule le régime de volatilité actuel pour usage dans d'autres fonctions
+        """
+        swing_config = self.config_manager.get("phase_detection_defaults.adaptive_swing_settings", {})
+        vol_config = swing_config.get("volatility_calculation", {})
+        
+        vol_period = vol_config.get("period", 20)
+        high_threshold = vol_config.get("high_threshold", 75)
+        low_threshold = vol_config.get("low_threshold", 25)
+        
+        # Garman-Klass volatility
+        ln_high_low = np.log(df["high"] / df["low"])
+        ln_close_open = np.log(df["close"] / df["open"])
+        
+        gk_vol = 0.5 * ln_high_low**2 - (2*np.log(2) - 1) * ln_close_open**2
+        volatility_series = np.sqrt(gk_vol.rolling(window=vol_period).mean())
+        
+        if len(volatility_series.dropna()) < vol_period:
+            return "normal_vol"
+        
+        current_vol = volatility_series.iloc[-1]
+        vol_percentile = (volatility_series <= current_vol).mean() * 100
+        
+        if vol_percentile >= high_threshold:
+            return "high_vol"
+        elif vol_percentile <= low_threshold:
+            return "low_vol"
+        else:
+            return "normal_vol"
+        
+    def detect_market_regime(self, df: pd.DataFrame) -> pd.Series:
+        """
+        🏛️ Market Regime Detection - Remplace la détection de tendance basique
+        
+        Régimes détectés:
+        - trending_institutional_bull/bear
+        - range_accumulation/distribution  
+        - high_volatility_chaos
+        - low_volatility_compression
+        
+        Basé sur:
+        - ADX pour force de tendance
+        - Volume Profile pour activité institutionnelle  
+        - Volatilité Garman-Klass
+        - Structure de marché
+        """
+        self.logger.debug("Détection du régime de marché sophistiquée...")
+        
+        regime_config = self.config_manager.get("phase_detection_defaults.regime_detection_settings", {})
+        adx_config = regime_config.get("adx_settings", {})
+        vol_config = regime_config.get("volatility_regimes", {})
+        volume_config = regime_config.get("volume_profile", {})
+        
+        # === 1. CALCUL ADX (AVERAGE DIRECTIONAL INDEX) ===
+        adx_period = adx_config.get("period", 14)
+        trending_threshold = adx_config.get("trending_threshold", 25)
+        ranging_threshold = adx_config.get("ranging_threshold", 20)
+    
+        def calculate_adx(df, period=14):
+            """Calcul ADX pour mesurer la force de la tendance"""
+            high = df['high']
+            low = df['low'] 
+            close = df['close']
+            
+            # True Range (TR)
+            tr1 = high - low
+            tr2 = abs(high - close.shift())
+            tr3 = abs(low - close.shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            
+            # Directional Movement
+            dm_plus = np.where((high - high.shift()) > (low.shift() - low), 
+                            np.maximum(high - high.shift(), 0), 0)
+            dm_minus = np.where((low.shift() - low) > (high - high.shift()), 
+                            np.maximum(low.shift() - low, 0), 0)
+            
+            # Smoothed True Range et DM
+            atr = tr.rolling(window=period).mean()
+            dm_plus_smooth = pd.Series(dm_plus).rolling(window=period).mean()
+            dm_minus_smooth = pd.Series(dm_minus).rolling(window=period).mean()
+            
+            # Directional Indicators
+            di_plus = 100 * dm_plus_smooth / atr
+            di_minus = 100 * dm_minus_smooth / atr
+            
+            # ADX
+            dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+            adx = dx.rolling(window=period).mean()
+            
+            return adx, di_plus, di_minus
+        
+        adx, di_plus, di_minus = calculate_adx(df, adx_period)
+        
+        # === 2. VOLATILITÉ GARMAN-KLASS ===
+        vol_period = vol_config.get("calculation_period", 20)
+        high_vol_percentile = vol_config.get("high_vol_percentile", 75)
+        low_vol_percentile = vol_config.get("low_vol_percentile", 25)
+        
+        ln_high_low = np.log(df["high"] / df["low"])
+        ln_close_open = np.log(df["close"] / df["open"])
+        gk_vol = 0.5 * ln_high_low**2 - (2*np.log(2) - 1) * ln_close_open**2
+        volatility = np.sqrt(gk_vol.rolling(window=vol_period).mean())
+        
+        # Calcul des percentiles de volatilité
+        vol_percentiles = volatility.rolling(window=100).apply(
+            lambda x: (x <= x.iloc[-1]).mean() * 100, raw=False
+        )
+        
+        # === 3. VOLUME PROFILE INSTITUTIONNEL ===
+        enable_institutional = volume_config.get("enable_institutional_detection", True)
+        volume_ma_period = volume_config.get("volume_ma_period", 20)
+        institutional_threshold = volume_config.get("institutional_threshold", 1.8)
+        
+        institutional_activity = pd.Series(False, index=df.index)
+        
+        if enable_institutional and "tick_volume" in df.columns:
+            volume_ma = df["tick_volume"].rolling(window=volume_ma_period).mean()
+            volume_ratio = df["tick_volume"] / volume_ma
+            institutional_activity = volume_ratio > institutional_threshold
+        
+        # === 4. DÉTERMINATION DU RÉGIME ===
+        regimes = pd.Series("unknown", index=df.index)
+        
         for i in range(len(df)):
-            info = None
-            if bullish_sweep.iloc[i]:
-                info = {
-                    "type": "bullish_sweep",
-                    "level_swept": df["last_swing_low"].shift(1).iloc[i],
-                }
-            elif bearish_sweep.iloc[i]:
-                info = {
-                    "type": "bearish_sweep",
-                    "level_swept": df["last_swing_high"].shift(1).iloc[i],
-                }
-            results.append(info)
+            current_adx = adx.iloc[i] if not pd.isna(adx.iloc[i]) else 0
+            current_di_plus = di_plus.iloc[i] if not pd.isna(di_plus.iloc[i]) else 0
+            current_di_minus = di_minus.iloc[i] if not pd.isna(di_minus.iloc[i]) else 0
+            current_vol_percentile = vol_percentiles.iloc[i] if not pd.isna(vol_percentiles.iloc[i]) else 50
+            is_institutional = institutional_activity.iloc[i]
+            
+            # Classification par ADX et direction
+            if current_adx > trending_threshold:
+                # Marché en tendance
+                if current_di_plus > current_di_minus:
+                    # Tendance haussière
+                    if is_institutional:
+                        regimes.iloc[i] = "trending_institutional_bull"
+                    else:
+                        regimes.iloc[i] = "trending_retail_bull"
+                else:
+                    # Tendance baissière  
+                    if is_institutional:
+                        regimes.iloc[i] = "trending_institutional_bear"
+                    else:
+                        regimes.iloc[i] = "trending_retail_bear"
+                        
+            elif current_adx < ranging_threshold:
+                # Marché en range
+                if is_institutional:
+                    # Déterminer si accumulation ou distribution
+                    recent_closes = df["close"].iloc[max(0, i-10):i+1]
+                    if len(recent_closes) > 5:
+                        if recent_closes.iloc[-1] > recent_closes.mean():
+                            regimes.iloc[i] = "range_accumulation"
+                        else:
+                            regimes.iloc[i] = "range_distribution"
+                    else:
+                        regimes.iloc[i] = "range_institutional"
+                else:
+                    regimes.iloc[i] = "range_retail"
+            else:
+                # Zone intermédiaire - analyser volatilité
+                if current_vol_percentile >= high_vol_percentile:
+                    regimes.iloc[i] = "high_volatility_chaos"
+                elif current_vol_percentile <= low_vol_percentile:
+                    regimes.iloc[i] = "low_volatility_compression"
+                else:
+                    regimes.iloc[i] = "transitional"
+        
+        # === 5. CALCUL MÉTRIQUES DE QUALITÉ DU RÉGIME ===
+        def calculate_regime_strength(regime_series, adx_series):
+            """Calcule la force/confiance du régime détecté"""
+            regime_strength = pd.Series(0.5, index=regime_series.index)  # Base 50%
+            
+            for i in range(len(regime_series)):
+                regime = regime_series.iloc[i]
+                adx_val = adx_series.iloc[i] if not pd.isna(adx_series.iloc[i]) else 0
+                
+                if "trending" in regime:
+                    # Force basée sur ADX pour tendances
+                    if adx_val > 40:
+                        regime_strength.iloc[i] = 0.9
+                    elif adx_val > 30:
+                        regime_strength.iloc[i] = 0.8
+                    elif adx_val > 25:
+                        regime_strength.iloc[i] = 0.7
+                    else:
+                        regime_strength.iloc[i] = 0.6
+                elif "range" in regime:
+                    # Force inversée pour ranges (ADX faible = range fort)
+                    if adx_val < 15:
+                        regime_strength.iloc[i] = 0.9
+                    elif adx_val < 20:
+                        regime_strength.iloc[i] = 0.8
+                    else:
+                        regime_strength.iloc[i] = 0.6
+                elif "volatility" in regime:
+                    # Force basée sur la volatilité
+                    regime_strength.iloc[i] = 0.8
+            
+            return regime_strength
+        
+        regime_strength = calculate_regime_strength(regimes, adx)
+        
+        # Ajouter les métriques au DataFrame pour usage ultérieur
+        df["regime"] = regimes
+        df["regime_strength"] = regime_strength
+        df["adx"] = adx
+        df["volatility_percentile"] = vol_percentiles
+        df["institutional_activity"] = institutional_activity
+        
+        # === 6. LOGGING DE PERFORMANCE ===
+        if len(regimes) > 0:
+            regime_counts = regimes.value_counts()
+            dominant_regime = regime_counts.index[0] if len(regime_counts) > 0 else "unknown"
+            avg_strength = regime_strength.mean()
+            
+            self.logger.debug(f"Régime de marché: {dominant_regime} (force moyenne: {avg_strength:.2f})")
+            self.logger.debug(f"Distribution régimes: {dict(regime_counts.head(3))}")
+        
+        return regimes
+    # CORRECTION 3: Mise à jour de _get_swing_points pour la rétrocompatibilité
 
-        # TODO: Calculer la "force" du sweep en mesurant la distance de la mèche au-delà du niveau
-        #       et la force de la clôture dans la direction opposée.
-        return results
-
-    def detect_breaker_block(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
+    def _get_swing_points(self, df: pd.DataFrame, order: Optional[int] = None) -> tuple[pd.Series, pd.Series]:
         """
-        Détecte les Breaker Blocks (BB) de manière conceptuelle. (Implémentation simplifiée)
-
-        Un Breaker est un Order Block qui échoue à retenir le prix, se fait traverser,
-        puis est re-testé comme support/résistance.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec colonnes OHLC.
-
-        Returns:
-            List[Optional[Dict]]: Informations sur le Breaker Block détecté.
+        Méthode de rétrocompatibilité qui appelle la version adaptative
         """
-        self.logger.debug("Détection des Breaker Blocks...")
-        # L'implémentation d'un détecteur de Breaker Block vectoriel est très complexe.
-        # Elle nécessite de suivre l'état des OB, leur mitigation, et les cassures de structure.
-        # TODO: Implémenter la logique complète en chaînant les signaux :
-        # 1. Détecter un Order Block.
-        # 2. Détecter une cassure de cet Order Block (BOS).
-        # 3. Détecter un retour du prix vers la zone de l'ancien OB.
-        # Pour l'instant, nous retournons une liste vide.
-        return [None] * len(df)
-
-    def detect_bos_mss(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
+        # Si on spécifie un ordre particulier, on l'utilise
+        if order is not None:
+            # Version simple avec ordre fixe
+            window_size = 2 * order + 1
+            
+            if len(df) < window_size:
+                return pd.Series([], dtype=float), pd.Series([], dtype=float)
+            
+            highs_condition = (
+                df["high"] == df["high"].rolling(window=window_size, center=True, min_periods=window_size).max()
+            )
+            lows_condition = (
+                df["low"] == df["low"].rolling(window=window_size, center=True, min_periods=window_size).min()
+            )
+            
+            swing_highs = df["high"][highs_condition]
+            swing_lows = df["low"][lows_condition]
+            
+            return swing_highs, swing_lows
+        else:
+            # Version adaptative par défaut
+            return self._get_adaptive_swing_points(df)
+    
+    def detect_bos_mss_enhanced(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
         """
-        Détecte les Breaks of Structure (BOS) et les Market Structure Shifts (MSS)
-        en analysant la tendance de fond au moment de la cassure d'un swing point.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec colonnes OHLC.
-
-        Returns:
-            List[Optional[Dict]]: Informations sur la cassure de structure,
-                                distinguant 'bos' (continuation) de 'mss' (retournement).
+        🎯 BOS/MSS Enhanced - Avec confirmation volume et momentum
+        
+        Améliorations:
+        - Confirmation volume obligatoire
+        - Validation momentum
+        - Distinction BOS vs MSS plus précise
+        - Filtrage des faux breakouts
         """
-        self.logger.debug("Détection intelligente des Breaks of Structure (BOS/MSS)...")
-
-        # S'assurer que la tendance est calculée sur le DataFrame
+        self.logger.debug("Détection BOS/MSS Enhanced avec confirmations...")
+        
+        # Configuration
+        bos_config = self.config_manager.get("phase_detection_defaults.bos_mss_enhanced_settings", {})
+        volume_config = bos_config.get("volume_confirmation", {})
+        momentum_config = bos_config.get("momentum_confirmation", {})
+        structure_config = bos_config.get("structure_validation", {})
+        
+        # Paramètres de confirmation
+        enable_volume_conf = volume_config.get("enable", True)
+        volume_multiplier = volume_config.get("volume_multiplier_threshold", 1.5)
+        volume_lookback = volume_config.get("lookback_period", 20)
+        
+        enable_momentum_conf = momentum_config.get("enable", True)
+        min_momentum = momentum_config.get("min_momentum_threshold", 0.0003)
+        
+        min_break_distance = structure_config.get("min_break_distance", 0.0002)
+        require_close_beyond = structure_config.get("require_close_beyond", True)
+        
+        # S'assurer que la tendance est calculée
         if "trend" not in df.columns:
             df["trend"] = self._get_trend(df)
-
-        swing_highs, swing_lows = self._get_swing_points(df)
-        df["last_swing_high"] = swing_highs.ffill()
-        df["last_swing_low"] = swing_lows.ffill()
-
-        # --- AMÉLIORATION MAJEURE : Distinction BOS vs MSS ---
-        # On regarde la tendance *avant* la cassure pour la contextualiser.
+        
+        # Swing points adaptatifs
+        swing_highs, swing_lows = self._get_adaptive_swing_points(df)
+        df["last_swing_high"] = swing_highs.reindex(df.index).ffill()
+        df["last_swing_low"] = swing_lows.reindex(df.index).ffill()
+        
+        # Calcul des moyennes mobiles de volume
+        df["volume_ma"] = df["tick_volume"].rolling(window=volume_lookback).mean()
+        df["volume_ratio"] = df["tick_volume"] / df["volume_ma"]
+        
+        # === CONDITIONS DE BASE ===
+        # Breakout haussier: clôture au-dessus du dernier swing high
+        bullish_break_basic = df["close"] > df["last_swing_high"].shift(1)
+        # Breakout baissier: clôture en dessous du dernier swing low  
+        bearish_break_basic = df["close"] < df["last_swing_low"].shift(1)
+        
+        # === CONFIRMATIONS VOLUME ===
+        volume_confirmation = pd.Series(True, index=df.index)  # Default True si désactivé
+        
+        if enable_volume_conf:
+            # Volume supérieur à X fois la moyenne
+            volume_confirmation = df["volume_ratio"] > volume_multiplier
+            # Gérer les NaN
+            volume_confirmation = volume_confirmation.fillna(False)
+        
+        # === CONFIRMATIONS MOMENTUM ===
+        momentum_confirmation = pd.Series(True, index=df.index)  # Default True si désactivé
+        
+        if enable_momentum_conf:
+            price_change = df["close"].pct_change().abs()
+            momentum_confirmation = price_change > min_momentum
+            momentum_confirmation = momentum_confirmation.fillna(False)
+        
+        # === FILTRAGE DISTANCE MINIMALE ===
+        
+        def validate_break_distance(row, break_type):
+            """Valide que la cassure est suffisamment significative"""
+            if break_type == "bullish":
+                last_high = row["last_swing_high"]
+                if pd.isna(last_high):
+                    return False
+                distance = (row["close"] - last_high) / last_high
+                return distance >= min_break_distance
+            else:  # bearish
+                last_low = row["last_swing_low"]
+                if pd.isna(last_low):
+                    return False
+                distance = (last_low - row["close"]) / last_low
+                return distance >= min_break_distance
+        
+        # === CLASSIFICATION BOS vs MSS ===
         previous_trend = df["trend"].shift(1)
-
-        # Condition de base : la clôture de la bougie doit être au-delà du dernier swing.
-        is_bullish_break = df["close"] > df["last_swing_high"].shift(1)
-        is_bearish_break = df["close"] < df["last_swing_low"].shift(1)
-
-        # Logique de classification
-        # BOS : Cassure dans le sens de la tendance existante (continuation)
-        bullish_bos = (previous_trend == "bullish") & is_bullish_break
-        bearish_bos = (previous_trend == "bearish") & is_bearish_break
-
-        # MSS : Cassure à l'encontre de la tendance existante (signe de retournement)
-        bullish_mss = (previous_trend == "bearish") & is_bullish_break
-        bearish_mss = (previous_trend == "bullish") & is_bearish_break
-
+        
+        # Conditions finales avec toutes les confirmations
+        bullish_break_confirmed = (
+            bullish_break_basic & 
+            volume_confirmation & 
+            momentum_confirmation &
+            df.apply(lambda row: validate_break_distance(row, "bullish"), axis=1)
+        )
+        
+        bearish_break_confirmed = (
+            bearish_break_basic & 
+            volume_confirmation & 
+            momentum_confirmation &
+            df.apply(lambda row: validate_break_distance(row, "bearish"), axis=1)
+        )
+        
+        # Classification intelligente BOS vs MSS
+        bullish_bos = (previous_trend == "bullish") & bullish_break_confirmed
+        bearish_bos = (previous_trend == "bearish") & bearish_break_confirmed
+        bullish_mss = (previous_trend == "bearish") & bullish_break_confirmed
+        bearish_mss = (previous_trend == "bullish") & bearish_break_confirmed
+        
+        # === CONSTRUCTION DES RÉSULTATS ===
         results = []
+        
         for i in range(len(df)):
             info = None
+            
+            # Récupération des métriques de confirmation pour logging
+            vol_ratio = df["volume_ratio"].iloc[i] if not pd.isna(df["volume_ratio"].iloc[i]) else 0
+            momentum = df["close"].pct_change().iloc[i] if not pd.isna(df["close"].pct_change().iloc[i]) else 0
+            
             if bullish_bos.iloc[i]:
                 info = {
                     "type": "bullish_bos",
                     "level_broken": df["last_swing_high"].shift(1).iloc[i],
+                    "confirmation_score": min(1.0, vol_ratio / volume_multiplier) if enable_volume_conf else 1.0,
+                    "volume_ratio": round(vol_ratio, 2),
+                    "momentum": round(abs(momentum), 4),
+                    "structure_type": "continuation",
+                    "quality": "high" if vol_ratio > volume_multiplier * 1.5 else "medium"
                 }
             elif bearish_bos.iloc[i]:
                 info = {
-                    "type": "bearish_bos",
+                    "type": "bearish_bos", 
                     "level_broken": df["last_swing_low"].shift(1).iloc[i],
+                    "confirmation_score": min(1.0, vol_ratio / volume_multiplier) if enable_volume_conf else 1.0,
+                    "volume_ratio": round(vol_ratio, 2),
+                    "momentum": round(abs(momentum), 4),
+                    "structure_type": "continuation",
+                    "quality": "high" if vol_ratio > volume_multiplier * 1.5 else "medium"
                 }
             elif bullish_mss.iloc[i]:
                 info = {
                     "type": "bullish_mss",
                     "level_broken": df["last_swing_high"].shift(1).iloc[i],
+                    "confirmation_score": min(1.0, vol_ratio / volume_multiplier) if enable_volume_conf else 1.0,
+                    "volume_ratio": round(vol_ratio, 2),
+                    "momentum": round(abs(momentum), 4),
+                    "structure_type": "reversal", 
+                    "quality": "high" if vol_ratio > volume_multiplier * 1.5 else "medium"
                 }
             elif bearish_mss.iloc[i]:
                 info = {
                     "type": "bearish_mss",
                     "level_broken": df["last_swing_low"].shift(1).iloc[i],
+                    "confirmation_score": min(1.0, vol_ratio / volume_multiplier) if enable_volume_conf else 1.0,
+                    "volume_ratio": round(vol_ratio, 2),
+                    "momentum": round(abs(momentum), 4),
+                    "structure_type": "reversal",
+                    "quality": "high" if vol_ratio > volume_multiplier * 1.5 else "medium"
                 }
+            
             results.append(info)
-
+        
+        # Logging de performance
+        valid_breaks = [r for r in results if r is not None]
+        if valid_breaks:
+            bos_count = len([r for r in valid_breaks if "bos" in r["type"]])
+            mss_count = len([r for r in valid_breaks if "mss" in r["type"]])
+            high_quality = len([r for r in valid_breaks if r["quality"] == "high"])
+            
+            self.logger.debug(f"BOS/MSS Enhanced: {len(valid_breaks)} cassures détectées "
+                            f"(BOS: {bos_count}, MSS: {mss_count}, haute qualité: {high_quality})")
+        
         return results
-
-    def detect_eqh_eql(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
-        """
-        Détecte les Equal Highs (EQH) et Equal Lows (EQL) de manière vectorielle.
-        Ces niveaux indiquent des zones où la liquidité pourrait être ciblée par les acteurs institutionnels.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec colonnes OHLC.
-
-        Returns:
-            List[Optional[Dict]]: Informations sur les niveaux d'égalité détectés (type, niveau, indices concernés).
-        """
-        self.logger.debug("Détection des Equal Highs / Equal Lows...")
-
-        # S'assurer que 'min_window_eqh_eql' est chargé via _load_settings.
-        min_window_eqh_eql = getattr(
-            self,
-            "min_window_eqh_eql",
-            self.config_manager.get("phase_detection_defaults.min_window_eqh_eql", 10),
-        )
-
-        if len(df) < min_window_eqh_eql:
-            self.logger.debug(
-                f"EQH/EQL: Fenêtre trop petite ({len(df)} barres), min requis: {min_window_eqh_eql}."
-            )
-            return [None] * len(df)
-
-        # Correction de l'appel à _get_swing_points : Ne PAS passer 'order' en argument,
-        # car _get_swing_points lit déjà 'order' de la configuration.
-        swing_highs_series, swing_lows_series = self._get_swing_points(
-            df
-        )  # <-- CORRECTION ICI
-
-        # Convertir les Series de swing points en listes d'indices et de valeurs pour une manipulation plus facile
-        swing_highs_list = [
-            (idx, val) for idx, val in swing_highs_series.dropna().items()
-        ]
-        swing_lows_list = [
-            (idx, val) for idx, val in swing_lows_series.dropna().items()
-        ]
-
-        results = [None] * len(df)
-
-        # CORRECTION ICI: S'assurer que EQ_LEVEL_TOLERANCE est chargé.
-        # Il devrait être chargé via _load_settings. Sinon, utiliser un fallback configurable.
-        tolerance_abs = getattr(
-            self,
-            "eq_level_tolerance",
-            self.config_manager.get(
-                "phase_detection_defaults.eq_level_tolerance", 0.0001
-            ),
-        )
-
-        # Détection des Equal Highs (EQH)
-        for i in range(len(swing_highs_list)):
-            idx1, val1 = swing_highs_list[i]
-            confluence_indices = [idx1]
-            for j in range(i + 1, len(swing_highs_list)):
-                idx2, val2 = swing_highs_list[j]
-                # Vérifier si les deux highs sont "égaux" selon la tolérance
-                if np.isclose(val1, val2, atol=tolerance_abs):
-                    # Vérifier s'ils sont suffisamment éloignés pour être considérés comme distincts EQH
-                    # et non juste un plateau
-                    if (
-                        abs(df.index.get_loc(idx1) - df.index.get_loc(idx2)) >= 2
-                    ):  # Utiliser les positions numériques pour la distance
-                        confluence_indices.append(idx2)
-
-            if len(confluence_indices) >= 2:
-                # Calculer la moyenne des niveaux des points de confluence pour le niveau EQH
-                eqh_level = np.mean(
-                    [swing_highs_series.loc[k] for k in confluence_indices]
-                )
-                # Marquer toutes les bougies entre le premier et le dernier point de confluence
-                # et les points eux-mêmes comme faisant partie de l'EQH
-                # Utiliser get_loc pour obtenir les positions numériques si l'index est un Timestamp
-                start_marker_idx_loc = df.index.get_loc(min(confluence_indices))
-                end_marker_idx_loc = df.index.get_loc(max(confluence_indices))
-
-                for k_loc in range(start_marker_idx_loc, end_marker_idx_loc + 1):
-                    # Reconvertir l'index numérique en Timestamp pour l'accès aux résultats
-                    k = df.index[k_loc]  # Récupérer le Timestamp de l'index
-                    if results[k_loc] is None or (
-                        results[k_loc]["type"] == "EQH"
-                        and results[k_loc]["confluence_count"] < len(confluence_indices)
-                    ):
-                        results[k_loc] = (
-                            {  # Utiliser k_loc pour l'indexation du tableau de résultats
-                                "type": "EQH",
-                                "level": round(
-                                    float(eqh_level), 5
-                                ),  # Convertir en float pour la sérialisation JSON
-                                "confluence_count": len(confluence_indices),
-                                "indices_involved": sorted(
-                                    [str(x) for x in confluence_indices]
-                                ),  # Stocker les Timestamps comme string ISO format
-                            }
-                        )
-
-        # Détection des Equal Lows (EQL) - Logique similaire
-        for i in range(len(swing_lows_list)):
-            idx1, val1 = swing_lows_list[i]
-            confluence_indices = [idx1]
-            for j in range(i + 1, len(swing_lows_list)):
-                idx2, val2 = swing_lows_list[j]
-                if np.isclose(val1, val2, atol=tolerance_abs):
-                    if (
-                        abs(df.index.get_loc(idx1) - df.index.get_loc(idx2)) >= 2
-                    ):  # Utiliser les positions numériques pour la distance
-                        confluence_indices.append(idx2)
-
-            if len(confluence_indices) >= 2:
-                eql_level = np.mean(
-                    [swing_lows_series.loc[k] for k in confluence_indices]
-                )
-                start_marker_idx_loc = df.index.get_loc(min(confluence_indices))
-                end_marker_idx_loc = df.index.get_loc(max(confluence_indices))
-
-                for k_loc in range(start_marker_idx_loc, end_marker_idx_loc + 1):
-                    k = df.index[k_loc]  # Récupérer le Timestamp de l'index
-                    if results[k_loc] is None or (
-                        results[k_loc]["type"] == "EQL"
-                        and results[k_loc]["confluence_count"] < len(confluence_indices)
-                    ):
-                        results[k_loc] = {
-                            "type": "EQL",
-                            "level": round(float(eql_level), 5),
-                            "confluence_count": len(confluence_indices),
-                            "indices_involved": sorted(
-                                [str(x) for x in confluence_indices]
-                            ),
-                        }
-
-        # TODO: Stocker ces niveaux d'EQH/EQL détectés dans un cache (`self._liquidity_levels_cache`)
-        #       pour référence future et pour calculer `nearest_major_liquidity_level_details` dans `analyze`.
-        #       Le cache devrait gérer la mitigation des niveaux ou leur expiration après un certain temps.
-
-        return results
-
-    def detect_volume_anomaly(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
-        """
-        Détecte les anomalies de volume (pics et creux) et calcule le momentum du volume de manière vectorielle.
-
-        Args:
-            df (pd.DataFrame): Données de marché avec la colonne 'tick_volume'.
-
-        Returns:
-            List[Optional[Dict]]: Une liste d'informations détaillées sur l'anomalie de volume
-                                et le momentum pour chaque bougie.
-        """
-        self.logger.debug("Détection des anomalies de volume et calcul du momentum...")
-
-        # S'assurer que les attributs sont chargés. Ils doivent être chargés via _load_settings.
-        # Si pour une raison quelconque ils ne le sont pas, utiliser des valeurs par défaut configurables.
-        min_window_volume_anomaly = getattr(
-            self,
-            "min_window_volume_anomaly",
-            self.config_manager.get(
-                "phase_detection_defaults.min_window_volume_anomaly", 10
-            ),
-        )
-        min_std_dev_volume_anomaly = getattr(
-            self,
-            "min_std_dev_volume_anomaly",
-            self.config_manager.get(
-                "phase_detection_defaults.min_std_dev_volume_anomaly", 1e-6
-            ),
-        )
-        volume_zscore_threshold = getattr(
-            self,
-            "volume_zscore",
-            self.config_manager.get("phase_detection_defaults.volume_zscore", 2.0),
-        )
-
-        # Vérifications initiales pour assurer la présence des données nécessaires
-        if "tick_volume" not in df.columns or len(df) < min_window_volume_anomaly:
-            self.logger.warning(
-                f"Volume Anomaly: Données insuffisantes ou colonne 'tick_volume' manquante "
-                f"({len(df)} barres, min requis: {min_window_volume_anomaly}). Retourne None."
-            )
-            return [None] * len(df)
-
-        volumes = df["tick_volume"]
-
-        # Calcul du volume moyen et de l'écart-type sur une fenêtre glissante, décalée d'une période
-        # pour éviter la contamination par la bougie actuelle.
-        rolling_mean = (
-            volumes.rolling(window=min_window_volume_anomaly, min_periods=1)
-            .mean()
-            .shift(1)
-        )
-        rolling_std = (
-            volumes.rolling(window=min_window_volume_anomaly, min_periods=1)
-            .std()
-            .shift(1)
-        )
-
-        # Gestion robuste de la division par zéro ou par un écart-type trop faible.
-        # Remplacer les valeurs NaN et zéro par une valeur minimale sûre (min_std_dev_volume_anomaly).
-        rolling_std_safe = rolling_std.fillna(min_std_dev_volume_anomaly)
-        rolling_std_safe[rolling_std_safe < min_std_dev_volume_anomaly] = (
-            min_std_dev_volume_anomaly
-        )
-
-        # Calcul du Z-score
-        z_scores = (volumes - rolling_mean) / rolling_std_safe
-
-        # Détection des pics (spike) et des creux (drought) de volume
-        spike_condition = z_scores > volume_zscore_threshold
-        drought_condition = z_scores < -volume_zscore_threshold
-
-        # Calcul du Momentum du Volume
-        # Le momentum peut être le taux de changement du volume, ou la pente d'une régression
-        # ou simplement la différence par rapport à une moyenne mobile rapide.
-        # Ici, nous utilisons une simple différence par rapport à la moyenne roulante, normalisée.
-        # Un momentum_window pourrait être un nouveau paramètre de configuration.
-        momentum_window = 3  # Par exemple, sur les 3 dernières barres
-        volume_change = volumes.diff(momentum_window).fillna(
-            0
-        )  # Changement de volume sur X périodes
-
-        # Normaliser le momentum du volume entre -1 et 1 (peut être ajusté)
-        # Éviter la division par zéro si le range de volume est nul
-        volume_range = (
-            volumes.rolling(window=momentum_window).max()
-            - volumes.rolling(window=momentum_window).min()
-        )
-
-        # CORRECTION ICI: Utiliser pd.Series pour s'assurer d'avoir la méthode fillna,
-        # ou np.nan_to_num() si le résultat est censé rester un ndarray.
-        # Pour rester cohérent avec Pandas et pouvoir utiliser fillna(), on le convertit.
-        volume_momentum = pd.Series(
-            np.where(volume_range > 0, volume_change / volume_range, 0), index=df.index
-        ).fillna(0)
-
-        results = []
-        for i in range(len(df)):
-            info = None
-            current_z_score = z_scores.iloc[i] if pd.notna(z_scores.iloc[i]) else 0
-            current_volume_momentum = (
-                volume_momentum.iloc[i] if pd.notna(volume_momentum.iloc[i]) else 0
-            )
-
-            if spike_condition.iloc[i]:
-                info = {
-                    "type": "spike",
-                    "z_score": round(current_z_score, 2),
-                    "volume_momentum": round(current_volume_momentum, 2),
-                }
-            elif drought_condition.iloc[i]:
-                info = {
-                    "type": "drought",
-                    "z_score": round(current_z_score, 2),
-                    "volume_momentum": round(current_volume_momentum, 2),
-                }
-            else:
-                # Même sans anomalie, le momentum du volume reste une information précieuse
-                if (
-                    abs(current_volume_momentum) > 0.1
-                ):  # Seuil pour considérer le momentum significatif
-                    info = {
-                        "type": "normal",
-                        "z_score": round(current_z_score, 2),
-                        "volume_momentum": round(current_volume_momentum, 2),
-                    }
-
-            results.append(info)
-
-        # TODO: Implémenter des méthodes de détection d'anomalies plus avancées, comme l'algorithme
-        #       "Isolation Forest" (nécessiterait Scikit-learn), pour identifier des patterns de volume inhabituels plus subtils.
-        #       Cela pourrait être une fonction séparée appelée `detect_advanced_volume_patterns`.
-        return results
-
+    
     def _get_trend(self, df: pd.DataFrame) -> pd.Series:
         """
         Détermine la tendance dominante pour chaque point de données de manière vectorielle.
@@ -877,6 +1095,7 @@ class PhaseObserver:
         return max(0.0, min(1.0, confidence))
 
     # <<<< AJOUTEZ LA NOUVELLE MÉTHODE ICI >>>>
+    
     def calculate_confidence_score(self, df_row: pd.Series) -> float:
         """
         Calcule un score de confiance basé sur la convergence des signaux SMC détectés.
@@ -1641,508 +1860,272 @@ class PhaseObserver:
             if hasattr(self, attr) and value is not None:
                 setattr(self, attr, value)
 
-    def analyze(
-        self, df: pd.DataFrame, asset_symbol: Optional[str] = None
-    ) -> Optional[pd.DataFrame]:  # LIGNE MODIFIÉE
+    def analyze(self, df: pd.DataFrame, asset_symbol: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
-        Orchestre le pipeline d'analyse complet de manière vectorielle, performante et configurable.
-        Cette méthode lit les "detection_toggles" pour n'exécuter que les analyses activées.
-        Elle ne calcule et n'ajoute plus de 'confidence_score' au DataFrame.
-        Intègre désormais une validation Pydantic stricte du DataFrame annoté.
+        🎯 PIPELINE D'ANALYSE OPTIMISÉ - 4 INDICATEURS CORE SEULEMENT
+        
+        Architecture Trading Desk:
+        1. FVG Enhanced (magnitude + tracking)
+        2. Order Blocks ML Enhanced (scoring sophistiqué)  
+        3. Adaptive Swing Points (régime-aware)
+        4. Market Regime Detection (remplace trend basique)
+        
+        Performance target: 78%+ win rate, <50ms processing time
         """
-        self.logger.info(
-            f"Démarrage du pipeline d'analyse vectoriel sur {len(df)} barres."
-        )
+        self.logger.info(f"🚀 SNIPER_X Optimized Pipeline - Processing {len(df)} bars")
+        
         if df is None or df.empty:
-            self.logger.error("Le DataFrame fourni à analyze() est vide ou None.")
+            self.logger.error("DataFrame vide fourni à analyze()")
             return None
-
-        # --- AJOUT / AMÉLIORATION : Récupération du symbole de l'actif ---
-        # Cette information est essentielle pour différencier Forex et Crypto.
-        # Il est préférable que le symbole soit passé en argument à analyze()
-        # si ce DataFrame peut contenir des données pour différents symboles,
-        # ou s'il n'y a pas de colonne 'symbol' fiable.
-        # Pour l'instant, je vais chercher le symbole dans le ConfigManager qui gère le contexte.
-        # Il serait idéal que le symbole soit un argument de cette fonction, comme ceci:
-        # def analyze(self, df: pd.DataFrame, asset_symbol: str) -> Optional[pd.DataFrame]:
-        # Mais pour rester fidèle à la signature que tu m'as donnée, je vais essayer de le déduire.
-
-        # --- DÉBUT DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE (AMÉLIORÉE) ---
-        # Utilise le 'asset_symbol' passé en argument en priorité.
-        # S'il est None ou 'UNKNOWN_ASSET', tente de le déduire du DataFrame.
-        current_asset_symbol = asset_symbol  # Initialise avec l'argument passé
-        if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
-            # Tente de récupérer le symbole de la dernière ligne du DF si une colonne 'symbol' existe
-            if "symbol" in df.columns and not df.empty:
-                deduced_symbol = df["symbol"].iloc[-1]
-                # S'assure que le symbole déduit est une chaîne et n'est pas 'UNKNOWN_ASSET' du dataframe lui-même
-                if (
-                    isinstance(deduced_symbol, str)
-                    and deduced_symbol != "UNKNOWN_ASSET"
-                ):
-                    current_asset_symbol = deduced_symbol
-                    self.logger.debug(
-                        f"Symbole de l'actif déduit du DataFrame pour analyse: {current_asset_symbol}"
-                    )
-
-            # Si le symbole n'a toujours pas été déduit ou fourni
-            if current_asset_symbol is None or current_asset_symbol == "UNKNOWN_ASSET":
-                self.logger.warning(
-                    "Symbole de l'actif non trouvé ou inconnu dans analyze(). La détection de liquidité sera globale."
-                )
-                # Assure qu'il y a une valeur par défaut non-None pour la suite des opérations
-                current_asset_symbol = "UNKNOWN_ASSET_GLOBAL"
-        # --- FIN DE LA SECTION DE RÉCUPÉRATION/DÉDUCTION DU SYMBOLE ---
-
-        # ... (le code précédent reste inchangé jusqu'à la détection de liquidité) ...
-
-        if "spread" not in df.columns:
-            df["spread"] = self.config_manager.get(
-                "phase_detection_defaults.default_spread_points", 0
-            )
-            self.logger.warning(
-                "Colonne 'spread' manquante dans le DataFrame. Initialisée à la valeur par défaut."
-            )
-        if "point" not in df.columns:
-            df["point"] = self.config_manager.get(
-                "phase_detection_defaults.default_point_value", 0.00001
-            )
-            self.logger.warning(
-                "Colonne 'point' manquante dans le DataFrame. Initialisée à la valeur par défaut."
-            )
-
-        df["spread"] = pd.to_numeric(df["spread"], errors="coerce").fillna(0)
-        df["point"] = pd.to_numeric(df["point"], errors="coerce").fillna(0.00001)
-
-        # Assurez-vous que trade_tick_size et trade_contract_size sont également disponibles pour Pydantic
-        # Si elles ne sont pas dans le DataFrame initial, elles doivent être ajoutées avec des valeurs par défaut.
-        if "trade_tick_size" not in df.columns:
-            df["trade_tick_size"] = self.config_manager.get(
-                "phase_detection_defaults.default_trade_tick_size", 0.00001
-            )
-            self.logger.warning(
-                "Colonne 'trade_tick_size' manquante. Initialisée à la valeur par défaut."
-            )
-        if "trade_contract_size" not in df.columns:
-            df["trade_contract_size"] = self.config_manager.get(
-                "phase_detection_defaults.default_trade_contract_size", 100000.0
-            )
-            self.logger.warning(
-                "Colonne 'trade_contract_size' manquante. Initialisée à la valeur par défaut."
-            )
-
-        df["trade_tick_size"] = pd.to_numeric(
-            df["trade_tick_size"], errors="coerce"
-        ).fillna(0.00001)
-        df["trade_contract_size"] = pd.to_numeric(
-            df["trade_contract_size"], errors="coerce"
-        ).fillna(100000.0)
-
+        
+        # === PHASE 1: PRÉPARATION DONNÉES ===
+        current_asset_symbol = asset_symbol or "UNKNOWN_ASSET"
         df_an = self._clean_dataframe(df.copy())
+        
         if df_an is None or df_an.empty:
-            self.logger.error(
-                "Le nettoyage du DataFrame a échoué ou a abouti à un DataFrame vide."
-            )
+            self.logger.error("Échec du nettoyage DataFrame")
             return None
-
-        toggles = self.config_manager.get(
-            "phase_detection_defaults.detection_toggles", {}
-        )
-        self.logger.debug(f"Utilisation des interrupteurs de détection : {toggles}")
-
-        # --- Pipeline d'Analyse Vectoriel (Contrôlé par les Toggles) ---
-
-        # 1. Détection primaire des signaux SMC
+        
+        # Initialisation colonnes requises avec valeurs par défaut
+        required_columns = {
+            "spread": 0,
+            "point": 0.00001,
+            "trade_tick_size": 0.00001,
+            "trade_contract_size": 100000.0
+        }
+        
+        for col, default_val in required_columns.items():
+            if col not in df_an.columns:
+                df_an[col] = default_val
+                self.logger.warning(f"Colonne '{col}' ajoutée avec valeur par défaut")
+            else:
+                df_an[col] = pd.to_numeric(df_an[col], errors="coerce").fillna(default_val)
+        
+        # Récupération des toggles optimisés
+        toggles = self.config_manager.get("phase_detection_defaults.detection_toggles", {})
+        self.logger.debug(f"Toggles optimisés: {toggles}")
+        
+        # === PHASE 2: CORE INDICATORS PIPELINE ===
+        
+        # 1. MARKET REGIME DETECTION (remplace trend basique)
+        if toggles.get("detect_regime", True):
+            df_an["regime"] = self.detect_market_regime(df_an)
+            df_an["regime_detected"] = True
+            self.logger.debug("✅ Market Regime Detection terminé")
+        else:
+            df_an["regime"] = "unknown"
+            df_an["regime_detected"] = False
+            df_an["regime_strength"] = 0.5
+        
+        # 2. FVG ENHANCED 
         if toggles.get("detect_fvg", True):
-            df_an["fvg_details"] = self.detect_fvg(df_an)
+            df_an["fvg_details"] = self.detect_fvg_enhanced(df_an)
+            df_an["fvg_detected"] = df_an["fvg_details"].apply(lambda x: x is not None)
+            self.logger.debug("✅ FVG Enhanced terminé")
         else:
             df_an["fvg_details"] = [None] * len(df_an)
-
+            df_an["fvg_detected"] = False
+        
+        # 3. ORDER BLOCKS ML ENHANCED
         if toggles.get("detect_order_block", True):
-            df_an["ob_details"] = self.detect_order_block(df_an)
+            df_an["ob_details"] = self.detect_order_block_ml_enhanced(df_an)
+            df_an["ob_detected"] = df_an["ob_details"].apply(lambda x: x is not None)
+            self.logger.debug("✅ Order Blocks ML Enhanced terminé")
         else:
             df_an["ob_details"] = [None] * len(df_an)
-
+            df_an["ob_detected"] = False
+        
+        # 4. BOS/MSS ENHANCED
         if toggles.get("detect_bos_mss", True):
-            df_an["bos_mss_details"] = self.detect_bos_mss(df_an)
+            df_an["bos_mss_details"] = self.detect_bos_mss_enhanced(df_an)
+            df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(lambda x: x is not None)
+            self.logger.debug("✅ BOS/MSS Enhanced terminé")
         else:
             df_an["bos_mss_details"] = [None] * len(df_an)
-
-        if toggles.get("detect_liquidity_grab", True):
-            df_an["liquidity_grab_details"] = self.detect_liquidity_grab(df_an)
-        else:
-            df_an["liquidity_grab_details"] = [None] * len(df_an)
-
-        if toggles.get("detect_volume_anomaly", True):
-            df_an["volume_anomaly_details"] = self.detect_volume_anomaly(df_an)
-        else:
-            df_an["volume_anomaly_details"] = [None] * len(df_an)
-
-        if toggles.get("detect_eqh_eql", True):
-            df_an["eqh_eql_details"] = self.detect_eqh_eql(df_an)
-        else:
-            df_an["eqh_eql_details"] = [None] * len(df_an)
-
-        df_an["fvg_detected"] = df_an["fvg_details"].apply(lambda x: x is not None)
-        df_an["ob_detected"] = df_an["ob_details"].apply(lambda x: x is not None)
-        df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
-            lambda x: x is not None
-        )
-        df_an["liquidity_grab_detected"] = df_an["liquidity_grab_details"].apply(
-            lambda x: x is not None
-        )
-        df_an["volume_anomaly_detected"] = df_an["volume_anomaly_details"].apply(
-            lambda x: x is not None
-        )
-        df_an["eqh_eql_detected"] = df_an["eqh_eql_details"].apply(
-            lambda x: x is not None
-        )
-
-        df_an["trend"] = self._get_trend(df_an)
-        df_an["volume_momentum"] = df_an["volume_anomaly_details"].apply(
-            lambda x: x.get("volume_momentum", 0.0) if isinstance(x, dict) else 0.0
-        )
-
-        df_an["nearest_liquidity_level_details"] = self._get_nearest_liquidity_level(
-            df_an
-        )
-
-        # --- DÉBUT DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE (CORRIGÉE) ---
-        # Valeurs par défaut pour le Forex, lues depuis la config
-        max_allowed_spread_points = self.config_manager.get(
-            "phase_detection_defaults.max_allowed_spread_for_liquid_check", 7
-        )
-        min_volume_for_liquid_check = self.config_manager.get(
-            "phase_detection_defaults.min_volume_for_liquid_check", 1
-        )
-
-        # Récupérer la liste des symboles crypto depuis prod_config.json
-        crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
-
-        # Déterminer si l'actif courant est une crypto et ajuster les seuils
-        # Utilise 'current_asset_symbol' qui a été déduit ou fourni au début de la fonction.
-        if (
-            current_asset_symbol
-            and current_asset_symbol != "UNKNOWN_ASSET_GLOBAL"
-            and current_asset_symbol in crypto_symbols
-        ):
-            crypto_liquidity_settings = self.config_manager.get(
-                "phase_detection_defaults.crypto_liquidity_check", {}
-            )
-            # Utilise les valeurs spécifiques aux cryptos si elles existent dans la config, sinon les valeurs Forex par défaut.
-            max_allowed_spread_points = crypto_liquidity_settings.get(
-                "min_allowed_spread_points_crypto", max_allowed_spread_points
-            )
-            min_volume_for_liquid_check = crypto_liquidity_settings.get(
-                "min_volume_for_liquid_check_crypto", min_volume_for_liquid_check
-            )
-            self.logger.debug(
-                f"Détection liquidité CRYPTO pour {current_asset_symbol}: Application des seuils spécifiques. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}"
-            )
-        else:
-            self.logger.debug(
-                f"Détection liquidité FOREX/AUTRE pour {current_asset_symbol}: Application des seuils par défaut. Spread Max={max_allowed_spread_points}, Volume Min={min_volume_for_liquid_check}"
-            )
-
-        if "spread" in df_an.columns and "tick_volume" in df_an.columns:
-            last_spread = df_an["spread"].iloc[-1]
-            last_tick_volume = df_an["tick_volume"].iloc[-1]
-
-            is_liquid_condition = (last_spread <= max_allowed_spread_points) and (
-                last_tick_volume >= min_volume_for_liquid_check
-            )
-            df_an["is_liquid"] = is_liquid_condition
-            self.logger.debug(
-                f"Détection liquidité: Spread={last_spread} (Max:{max_allowed_spread_points}), Volume={last_tick_volume} (Min:{min_volume_for_liquid_check}). Est liquide: {is_liquid_condition}"
-            )
-        else:
-            df_an["is_liquid"] = True
-            self.logger.warning(
-                "Colonnes 'spread' ou 'tick_volume' manquantes pour la détection de liquidité dans PhaseObserver. 'is_liquid' par défaut à True."
-            )
-        # --- FIN DE LA LOGIQUE DE LIQUIDITÉ AMÉLIORÉE ---
-
-        # 2. Détection des signaux de confirmation "chirurgicaux"
-        is_bullish_fvg_tapped = (
-            (
-                df_an["fvg_details"]
-                .shift(1)
-                .apply(lambda x: isinstance(x, dict) and x.get("type") == "bullish")
-            )
-            & (
-                df_an["low"]
-                <= df_an["fvg_details"]
-                .shift(1)
-                .apply(lambda x: x.get("top") if isinstance(x, dict) else np.inf)
-            )
-            & (df_an["fvg_details"].shift(1).notna())
-        )
-        is_bullish_rejection_candle = df_an["close"] > df_an["open"]
-        df_an["entry_confirmation_bullish"] = (
-            is_bullish_fvg_tapped & is_bullish_rejection_candle
-        )
-
-        is_bearish_fvg_tapped = (
-            (
-                df_an["fvg_details"]
-                .shift(1)
-                .apply(lambda x: isinstance(x, dict) and x.get("type") == "bearish")
-            )
-            & (
-                df_an["high"]
-                >= df_an["fvg_details"]
-                .shift(1)
-                .apply(lambda x: x.get("bottom") if isinstance(x, dict) else -np.inf)
-            )
-            & (df_an["fvg_details"].shift(1).notna())
-        )
-        is_bearish_rejection_candle = df_an["close"] < df_an["open"]
-        df_an["entry_confirmation_bearish"] = (
-            is_bearish_fvg_tapped & is_bearish_rejection_candle
-        )
-
-        # 3. Validation des setups (ex: Order Block validé)
-        df_an["breaker_block_details"] = self.detect_breaker_block(df_an)
-
-        is_ob = df_an["ob_detected"].shift(1).astype(bool).fillna(False)
-        ob_is_bullish = (
-            df_an["ob_details"]
-            .shift(1)
-            .apply(
-                lambda x: (
-                    isinstance(x, dict) and x.get("type") == "bullish"
-                    if x is not None
-                    else False
-                )
-            )
-        )
-        fvg_after = df_an["fvg_detected"]
-
-        bos_after = (
-            (df_an["bos_mss_detected"] | df_an["bos_mss_detected"].shift(-1))
-            .astype(bool)
-            .fillna(False)
-        )
-
-        trend_aligned = ((df_an["trend"] == "bullish") & ob_is_bullish) | (
-            (df_an["trend"] == "bearish") & ~ob_is_bullish
-        )
-        not_mitigated = ~df_an["breaker_block_details"].apply(lambda x: x is not None)
-        df_an["validated_ob"] = (
-            is_ob & fvg_after & bos_after & trend_aligned & not_mitigated
-        )
-
-        df_an["validated_ob_fvg"] = is_ob & fvg_after
-        df_an["validated_ob_bos"] = is_ob & bos_after
-        df_an["validated_ob_trend"] = is_ob & trend_aligned
-        df_an["validated_ob_mitigated"] = is_ob & not_mitigated
-
-        # 4. Détermination de la phase de marché
-        volatility_threshold = getattr(
-            self,
-            "volatility_threshold",
-            self.config_manager.get(
-                "phase_detection_defaults.volatility_threshold", 0.0005
-            ),
-        )
-        scalp_burst_volatility_multiplier = getattr(
-            self,
-            "scalp_burst_volatility_multiplier",
-            self.config_manager.get(
-                "phase_detection_defaults.scalp_burst_volatility_multiplier", 0.5
-            ),
-        )
-        consolidation_volatility_multiplier = getattr(
-            self,
-            "consolidation_volatility_multiplier",
-            self.config_manager.get(
-                "phase_detection_defaults.consolidation_volatility_multiplier", 2.0
-            ),
-        )
-
-        conditions = [
-            df_an["liquidity_grab_detected"],
-            df_an["validated_ob"],
-            (df_an["bos_mss_detected"])
-            & (
-                df_an["volume_anomaly_details"].apply(
-                    lambda x: (
-                        isinstance(x, dict) and x.get("type") == "spike"
-                        if x is not None
-                        else False
-                    )
-                )
-            ),
-            (df_an["trend"] == "bullish"),
-            (df_an["trend"] == "bearish"),
-            (
-                (
-                    df_an["close"].diff().abs()
-                    > volatility_threshold * scalp_burst_volatility_multiplier
-                )
-                .rolling(window=2)
-                .min()
-                .fillna(False)
-            ).astype(bool),
-            (
-                (
-                    df_an["high"].rolling(window=self.lookback_window).max()
-                    - df_an["low"].rolling(window=self.lookback_window).min()
-                )
-                < (volatility_threshold * consolidation_volatility_multiplier)
-            )
-            .fillna(False)
-            .astype(bool),
-            (
-                (
-                    df_an["high"].rolling(window=self.lookback_window).max()
-                    - df_an["low"].rolling(window=self.lookback_window).min()
-                )
-                >= (volatility_threshold * consolidation_volatility_multiplier)
-            )
-            .fillna(False)
-            .astype(bool),
-        ]
-        outcomes = [
-            "manipulation",
-            "institutional_setup",
-            "expansion",
-            "trending_bullish",
-            "trending_bearish",
-            "scalp_burst",
-            "consolidation",
-            "range",
-        ]
-        df_an["phase"] = np.select(conditions, outcomes, default="micro_phase")
-        df_an["phase"] = df_an.apply(self._refine_phase_direction, axis=1)
-
-      # 5. Calcul du Score de Confiance (RÉIMPLÉMENTÉ)
-        self.logger.debug("Calcul des scores de confiance pour chaque barre...")
-        df_an["confidence_score"] = df_an.apply(lambda row: self.calculate_confidence_score(row), axis=1)
+            df_an["bos_mss_detected"] = False
         
-        # Log pour debug
-        if not df_an.empty:
-            avg_confidence = df_an["confidence_score"].mean()
-            max_confidence = df_an["confidence_score"].max()
-            min_confidence = df_an["confidence_score"].min()
-            self.logger.info(f"[{current_asset_symbol}] Confidence scores - Avg: {avg_confidence:.3f}, Min: {min_confidence:.3f}, Max: {max_confidence:.3f}")
-
-        # --- NOUVEAU : Validation Pydantic du DataFrame annoté ---
-        # Préparer le DataFrame pour la validation Pydantic (lignes sous forme de dictionnaire)
-        validated_rows_data = []
-        for index, row_series in df_an.iterrows():
-            try:
-                row_dict = row_series.to_dict()
-                # --- CORRECTION ICI : Gérer explicitement les NaN pour les champs Optional[Dict] ---
-                # Pydantic s'attend à None si le dictionnaire est absent, pas à NaN (float).
-                for detail_col in [
-                    "fvg_details",
-                    "ob_details",
-                    "bos_mss_details",
-                    "liquidity_grab_details",
-                    "volume_anomaly_details",
-                    "eqh_eql_details",
-                    "nearest_liquidity_level_details",
-                ]:
-                    if detail_col in row_dict and pd.isna(row_dict[detail_col]):
-                        row_dict[detail_col] = None
-                # --- FIN CORRECTION ---
-
-                # Assurez-vous que 'timestamp' est bien une chaîne ISO pour Pydantic
-                if hasattr(index, "isoformat"):
-                    row_dict["timestamp"] = index.isoformat()
-                else:
-                    # Fallback si l'index n'est pas un Timestamp (improbable après _clean_dataframe)
-                    row_dict["timestamp"] = datetime.now(UTC).isoformat()
-
-                # Valider la ligne avec le modèle Pydantic
-                validated_row = PhaseObserverRowModel(**row_dict)
-                # Si la validation réussit, nous n'avons pas besoin de reconstruire le DF
-                # La liste validated_rows_data n'est pas utilisée après la boucle, c'est juste pour le processus de validation
-                validated_rows_data.append(validated_row.model_dump())
-
-            except ValidationError as e:
-                self.logger.critical(
-                    f"ERREUR CRITIQUE Pydantic: Validation du DataFrame annoté échouée pour la ligne {index}: {e}",
-                    exc_info=True,
-                )
-                # --- CORRECTION ICI : Appel correct à send_alert ---
-                self.config_manager.send_alert(
-                    f"PhaseObserver: Validation données échouée pour {index}. Erreur: {e}",
-                    "telegram_critical",
-                )
-                # --- FIN CORRECTION ---
-                return None  # Bloque le pipeline si une donnée cruciale est invalide.
-            except Exception as e:
-                self.logger.critical(
-                    f"ERREUR CRITIQUE: Erreur inattendue lors de la validation Pydantic de la ligne {index}: {e}",
-                    exc_info=True,
-                )
-                # --- CORRECTION ICI : Appel correct à send_alert ---
-                self.config_manager.send_alert(
-                    f"PhaseObserver: Erreur validation inattendue pour {index}. Erreur: {e}",
-                    "telegram_critical",
-                )
-                # --- FIN CORRECTION ---
-                return None
-        # --- FIN NOUVEAU ---
-
-        self.logger.info(
-            "Pipeline d'analyse terminé avec succès et DataFrame validé par schéma Pydantic."
-        )
-
-        # Suppression des colonnes '_details' sauf 'volume_anomaly_details' si c'est le comportement désiré
-        columns_to_drop = [
-            col
-            for col in df_an.columns
-            if col.endswith("_details") and not col.startswith("volume_anomaly_")
-        ]
-        df_an.drop(columns=columns_to_drop, errors="ignore", inplace=True)
-
-        # Log final : Indiquer la dernière phase SANS la confiance (déjà corrigé)
-        if not df_an.empty:
-            last_row = df_an.iloc[-1]
-            last_time = (
-                last_row.name.isoformat()
-                if hasattr(last_row.name, "isoformat")
-                else "N/A"
+        # === PHASE 3: DÉTECTION DE LIQUIDITÉ OPTIMISÉE ===
+        crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
+        
+        if current_asset_symbol in crypto_symbols:
+            # Seuils crypto
+            max_spread = self.config_manager.get(
+                "phase_detection_defaults.liquidity_detection.crypto_settings.max_allowed_spread_points", 2000
             )
-            self.logger.debug(  # MODIFIÉ: Ajout de current_asset_symbol dans le log
-                f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}. Dernière barre ({last_time}): Phase={last_row.get('phase', 'N/A')}. Total barres analysées: {len(df_an)}."
+            min_volume = self.config_manager.get(
+                "phase_detection_defaults.liquidity_detection.crypto_settings.min_volume_threshold", 10
             )
         else:
-            self.logger.debug(  # MODIFIÉ: Ajout de current_asset_symbol dans le log
-                f"PhaseObserver.analyze() a terminé pour {current_asset_symbol}, mais le DataFrame analysé est vide."
+            # Seuils forex
+            max_spread = self.config_manager.get(
+                "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points", 7
             )
-
+            min_volume = self.config_manager.get(
+                "phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold", 1
+            )
+        
+        last_spread = df_an["spread"].iloc[-1]
+        last_volume = df_an["tick_volume"].iloc[-1]
+        df_an["is_liquid"] = (last_spread <= max_spread) and (last_volume >= min_volume)
+        
+        # === PHASE 4: SIGNAUX DE CONFLUENCE SOPHISTIQUÉS ===
+        
+        # Confluence FVG + OB (signal premium)
+        df_an["fvg_ob_confluence"] = df_an["fvg_detected"] & df_an["ob_detected"]
+        
+        # OB avec scoring ML élevé
+        df_an["high_quality_ob"] = df_an["ob_details"].apply(
+            lambda x: isinstance(x, dict) and x.get("ml_score", 0) > 0.8
+        )
+        
+        # BOS/MSS avec confirmation volume élevée
+        df_an["confirmed_structure_break"] = df_an["bos_mss_details"].apply(
+            lambda x: isinstance(x, dict) and x.get("volume_ratio", 0) > 2.0
+        )
+        
+        # Régime institutional + signaux SMC
+        df_an["institutional_setup"] = (
+            df_an["regime"].str.contains("institutional", na=False) &
+            (df_an["ob_detected"] | df_an["bos_mss_detected"])
+        )
+        
+        # === PHASE 5: DÉTERMINATION DE PHASE OPTIMISÉE ===
+        def determine_optimized_phase(row):
+            """Classification de phase basée sur les 4 indicateurs core"""
+            regime = row.get("regime", "unknown")
+            
+            # Phases basées sur le régime de marché
+            if "trending_institutional" in regime:
+                if row.get("fvg_ob_confluence", False):
+                    return "institutional_setup_premium"
+                elif row.get("ob_detected", False):
+                    return "institutional_setup"
+                elif "bull" in regime:
+                    return "trending_institutional_bull"
+                else:
+                    return "trending_institutional_bear"
+                    
+            elif "range_accumulation" in regime:
+                if row.get("high_quality_ob", False):
+                    return "accumulation_zone"
+                else:
+                    return "range_accumulation"
+                    
+            elif "range_distribution" in regime:
+                if row.get("confirmed_structure_break", False):
+                    return "distribution_breakout"
+                else:
+                    return "range_distribution"
+                    
+            elif "high_volatility" in regime:
+                if row.get("bos_mss_detected", False):
+                    return "volatility_breakout"
+                else:
+                    return "high_volatility_chaos"
+                    
+            elif "low_volatility" in regime:
+                return "low_volatility_compression"
+                
+            else:
+                # Fallback basé sur signaux SMC seulement
+                if row.get("institutional_setup", False):
+                    return "smc_setup"
+                elif row.get("fvg_detected", False):
+                    return "fvg_opportunity"
+                else:
+                    return "no_clear_phase"
+        
+        df_an["phase"] = df_an.apply(determine_optimized_phase, axis=1)
+        
+        # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
+        def calculate_optimized_confidence(row):
+            """Score de confiance basé sur les 4 indicateurs core uniquement"""
+            confidence_config = self.config_manager.get(
+                "phase_detection_defaults.confidence_score_optimized", {}
+            )
+            
+            base_confidence = confidence_config.get("base_confidence", 0.2)
+            signal_weights = confidence_config.get("signal_weights", {})
+            confluence_bonus = confidence_config.get("confluence_bonus", {})
+            quality_multipliers = confidence_config.get("quality_multipliers", {})
+            
+            # Score de base
+            score = base_confidence
+            
+            # Poids des signaux core
+            if row.get("fvg_detected", False):
+                score += signal_weights.get("fvg_detected", 0.25)
+            if row.get("ob_detected", False):
+                score += signal_weights.get("ob_detected", 0.35)
+            if row.get("bos_mss_detected", False):
+                score += signal_weights.get("bos_mss_detected", 0.25)
+            
+            # Bonus régime alignment
+            regime_strength = row.get("regime_strength", 0.5)
+            if regime_strength > 0.7:
+                score += signal_weights.get("regime_alignment", 0.15)
+            
+            # Bonus confluence
+            if row.get("fvg_ob_confluence", False):
+                score += confluence_bonus.get("fvg_ob_confluence", 0.15)
+            if row.get("high_quality_ob", False) and row.get("bos_mss_detected", False):
+                score += confluence_bonus.get("ob_bos_confluence", 0.10)
+            if row.get("institutional_setup", False):
+                score += confluence_bonus.get("full_confluence_bonus", 0.20)
+            
+            # Multiplicateurs qualité
+            if row.get("is_liquid", True):
+                score *= quality_multipliers.get("tight_spread", 1.05)
+            if regime_strength > 0.8:
+                score *= quality_multipliers.get("regime_strength", 1.10)
+            
+            # Volume confirmation pour OB/BOS
+            ob_details = row.get("ob_details")
+            bos_details = row.get("bos_mss_details")
+            
+            if isinstance(ob_details, dict) and ob_details.get("volume_spike", 0) > 1.5:
+                score *= quality_multipliers.get("high_volume_confirmation", 1.15)
+            elif isinstance(bos_details, dict) and bos_details.get("volume_ratio", 0) > 1.5:
+                score *= quality_multipliers.get("high_volume_confirmation", 1.15)
+            
+            # Cap final
+            max_confidence = confluence_bonus.get("max_confidence_cap", 0.95)
+            return min(max_confidence, max(0.0, score))
+        
+        df_an["confidence_score"] = df_an.apply(calculate_optimized_confidence, axis=1)
+        
+        # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
+        processing_end = time.perf_counter() if 'time' in globals() else 0
+        
+        if not df_an.empty:
+            # Statistiques du pipeline
+            total_signals = df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
+            avg_confidence = df_an["confidence_score"].mean()
+            high_confidence_signals = (df_an["confidence_score"] > 0.7).sum()
+            
+            # Log final optimisé
+            last_phase = df_an["phase"].iloc[-1]
+            last_confidence = df_an["confidence_score"].iloc[-1]
+            last_regime = df_an["regime"].iloc[-1]
+            
+            self.logger.info(
+                f"🎯 [{current_asset_symbol}] Pipeline terminé: "
+                f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
+                f"Régime={last_regime}, Signaux totaux={total_signals}"
+            )
+            
+            # Performance monitoring
+            performance_config = self.config_manager.get("performance_monitoring", {})
+            if performance_config.get("enable_performance_tracking", True):
+                target_win_rate = performance_config.get("benchmark_metrics", {}).get("target_win_rate", 0.78)
+                if avg_confidence < 0.4:
+                    self.logger.warning(f"⚠️ Confidence moyenne faible: {avg_confidence:.3f} < 0.4")
+        
+        # Nettoyage final - Supprimer colonnes de détail pour optimiser la mémoire
+        detail_columns = [col for col in df_an.columns if col.endswith("_details")]
+        df_an.drop(columns=detail_columns, errors="ignore", inplace=True)
+        
         return df_an
-
-    def _refine_phase_direction(self, row: pd.Series) -> str:
-        """
-        Affine la phase de marché en ajoutant une direction (up/down) si applicable.
-        Utilisée après la détermination initiale de la phase par np.select.
-
-        Args:
-            row (pd.Series): Une ligne du DataFrame annoté par PhaseObserver.
-
-        Returns:
-            str: La phase de marché affinée.
-        """
-        phase = row.get("phase", "unknown")
-        trend = row.get("trend", "neutral")
-
-        # Si la phase est "expansion", "consolidation", "range", ou "manipulation",
-        # on peut y ajouter la direction de la tendance pour plus de granularité.
-        if phase in ["expansion", "consolidation", "range", "manipulation"]:
-            if trend == "bullish":
-                return f"{phase}_up"
-            elif trend == "bearish":
-                return f"{phase}_down"
-
-        # Pour les phases déjà directionnelles (trending_bullish/bearish),
-        # ou les phases qui n'ont pas de direction (micro_phase, institutional_setup),
-        # on retourne la phase telle quelle.
-        return phase
 
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):
         """
