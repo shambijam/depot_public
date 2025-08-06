@@ -137,7 +137,7 @@
                 "GBPUSD",
                 "USDJPY"
             ],
-            "min_signal_confidence": 0.25
+            "min_signal_confidence": 0.01
         },
         "prompt_settings": {
             "recent_price_data_points": 10,
@@ -167,7 +167,7 @@
         }
     },
     "scoring_rules": {
-        "base_score": 0.4,
+        "base_score": 0.8,
         "weekend_crypto_priority": {
             "enabled": true,
             "strategy_tag": "crypto",
@@ -221,7 +221,7 @@
             "high_risk_score_boost": 0.05
         },
         "ai_recommendation_weight": 0.2,
-        "min_optimal_score_threshold": 0.01
+        "min_optimal_score_threshold": 0.001
     },
     "adaptation_settings": {
         "volatility_thresholds": {
