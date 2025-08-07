@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from datetime import UTC  # Importation correcte de UTC
+from datetime import UTC
 from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
@@ -26,10 +26,8 @@ try:
     from ai_core.ai_decision import AIDecision
     from mt5_connector import MT5Connector
     from utils.logger_setup import setup_production_logging
-    from mecanique_generale.mecano import (
-        Mecano,
-    )  # Garder ici car utilisé par run_single_pipeline_cycle
-    import MetaTrader5 as mt5  # Import pour les constantes mt5.TIMEFRAME_*
+    from mecanique_generale.mecano import Mecano
+    import MetaTrader5 as mt5
 except ImportError as e:
     logging.critical(
         f"ERREUR FATALE: Échec de l'importation d'un module de SNIPER_X. Assurez-vous que l'architecture des dossiers est correcte. Erreur: {e}",
@@ -43,22 +41,8 @@ def load_and_verify_environment(
 ) -> dict:
     """
     Charge la configuration principale et vérifie les composants critiques de l'environnement.
-    Cette fonction est appelée une seule fois au démarrage du bot.
-    Gère la sélection et la vérification du compte broker actif.
-
-    Args:
-        config_manager (ConfigManager): Une instance de ConfigManager avec la configuration chargée.
-        mt5_connector (MT5Connector): Une instance de MT5Connector pour les tests de connexion MT5.
-        bot_mode (str): Le mode d'exécution du bot ('DEMO' ou 'LIVE').
-
-    Returns:
-        dict: La configuration globale chargée et validée.
-
-    Raises:
-        SystemExit: Si des composants critiques sont manquants ou invalides.
-        RuntimeError: Si la connexion MT5 échoue pendant la vérification initiale.
     """
-    logger = logging.getLogger(__name__)  # Utilise le logger local
+    logger = logging.getLogger(__name__)
     logger.info(
         "Chargement et vérification de la configuration et de l'environnement..."
     )
@@ -79,7 +63,6 @@ def load_and_verify_environment(
         )
         sys.exit(1)
 
-    # --- Vérification du Modèle AI (INCHANGÉ) ---
     ai_model_name_from_config = config_manager.get(
         "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
     )
@@ -93,8 +76,6 @@ def load_and_verify_environment(
         sys.exit(1)
     logger.info(f"Modèle IA trouvé : {ai_model_path_from_config}")
 
-    # --- Sélection et Vérification du Compte MT5 Actif (CORRIGÉ) ---
-    # Le but est de vérifier que la connexion est possible et de la laisser active.
     try:
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=bot_mode
@@ -108,13 +89,10 @@ def load_and_verify_environment(
             f"Compte MT5 actif sélectionné pour vérification : '{active_mt5_account_details['account_id']}' (Login: {active_mt5_account_details['login']})."
         )
 
-        # Vérification proactive de la connexion MT5. Si elle échoue, le bot s'arrête.
         if not mt5_connector.connect(active_mt5_account_details):
             raise RuntimeError(
                 f"La connexion initiale à MetaTrader 5 a échoué pour le compte '{active_mt5_account_details['account_id']}'. Vérifiez les identifiants et le statut du terminal."
             )
-
-        # Le message est mis à jour pour indiquer que la connexion est maintenue.
         logger.info("Connexion MT5 vérifiée avec succès. La connexion sera maintenue.")
 
     except (ValueError, RuntimeError) as e:
@@ -123,9 +101,7 @@ def load_and_verify_environment(
             exc_info=True,
         )
         sys.exit(1)
-    # Le bloc 'finally' qui contenait 'mt5_connector.disconnect()' a été SUPPRIMÉ.
 
-    # --- Vérification des identifiants Telegram (INCHANGÉ) ---
     telegram_token = config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
     telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID")
 
@@ -151,50 +127,25 @@ def load_and_verify_environment(
 
 # --- Fonctions d'Aide (Helpers) pour le Cycle de Pipeline ---
 
-
 def _get_merged_config_for_asset(
     active_config: dict, config_manager: ConfigManager, asset: str
 ) -> dict:
-    """
-    Fusionne la configuration globale avec la configuration spécifique à l'actif.
-    Garantit que les paramètres essentiels du ConfigManager (comme le strategy_name)
-    sont toujours propagés.
-    """
-    # CORRECTION : Accéder à load_asset_config via l'instance de ConfigLoader
-    # qui est un attribut du ConfigManager.
+    """Fusionne la configuration globale avec la configuration spécifique à l'actif."""
     asset_specific_config = config_manager.config_loader.load_asset_config(asset)
     merged_config = active_config.copy()
-
-    # S'assurer que le strategy_name de la stratégie active est toujours propagé.
-    # Il est crucial pour le logging du PhaseObserver et potentiellement d'autres modules.
     if "strategy_name" in active_config:
         merged_config["strategy_name"] = active_config["strategy_name"]
-
-    # S'assurer que la section phase_detection de la stratégie active est correctement fusionnée.
-    # Elle doit être présente dans merged_config même si asset_specific_config ne l'a pas.
     if "phase_detection" in active_config:
         merged_config["phase_detection"] = {
             **merged_config.get("phase_detection", {}),
             **asset_specific_config.get("phase_detection", {}),
         }
-
-    # Fusionner les autres sections spécifiques à l'actif.
-    # Cette liste doit correspondre aux sections configurables par actif.
-    for section in [
-        "volatility",
-        "risk_management",
-        "smart_targets",
-        "temporal_context",
-        "institutional_bias",
-        "weighting",
-        "strategy_toggles",
-    ]:
+    for section in ["volatility", "risk_management", "smart_targets", "temporal_context", "institutional_bias", "weighting", "strategy_toggles"]:
         if section in asset_specific_config:
             merged_config[section] = {
                 **merged_config.get(section, {}),
                 **asset_specific_config[section],
             }
-
     return merged_config
 
 
@@ -203,91 +154,50 @@ def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
     closed_market_check_bars = active_config.get("bot_behavior", {}).get(
         "closed_market_check_bars", 15
     )
-    if (
-        len(rates_df) > closed_market_check_bars
-        and rates_df["close"].iloc[-1]
-        == rates_df["close"].iloc[-closed_market_check_bars]
-    ):
+    if (len(rates_df) > closed_market_check_bars and rates_df["close"].iloc[-1] == rates_df["close"].iloc[-closed_market_check_bars]):
         return True
     return False
 
-
+# ------------------- FONCTION CORRIGÉE -------------------
 def _build_asset_trading_signals(
     latest_signals_row: pd.Series, symbol_info_mt5: Any
 ) -> dict:
     """
-    Construit le dictionnaire de signaux pour un actif, en agrégeant les résultats du PhaseObserver
-    et les informations critiques du symbole MT5.
+    CORRIGÉ : Construit le dictionnaire de signaux en convertissant TOUTES les données
+    du PhaseObserver et en ajoutant les informations critiques du symbole MT5.
+    Ceci est le pont parfait qui ne perd aucune donnée.
     """
-    signals = {
-        "confidence_score": latest_signals_row.get("confidence_score", 0.0),
-        "phase": latest_signals_row.get("phase", "unknown"),
-        "volume_momentum": latest_signals_row.get("volume_momentum", 0.0),
-        "nearest_liquidity_level_details": latest_signals_row.get(
-            "nearest_liquidity_level_details"
-        ),
-        "entry_confirmation_bullish": latest_signals_row.get(
-            "entry_confirmation_bullish", False
-        ),
-        "entry_confirmation_bearish": latest_signals_row.get(
-            "entry_confirmation_bearish", False
-        ),
-        "validated_ob": latest_signals_row.get("validated_ob", False),
-        "is_liquid": latest_signals_row.get(
-            "is_liquid", True
-        ),  # Maintenant calculé par PhaseObserver
-        "current_price": latest_signals_row.get("close"),
-        # --- AJOUTS ICI : Informations critiques du symbole MT5 ---
-        "current_spread_points": symbol_info_mt5.spread if symbol_info_mt5 else 0,
-        "symbol_point_value": (
-            symbol_info_mt5.point if symbol_info_mt5 else 0.00001
-        ),  # Valeur d'un point
-        "symbol_trade_tick_size": (
-            symbol_info_mt5.trade_tick_size if symbol_info_mt5 else 0.0
-        ),  # Taille minimale du tick pour le trading
-        "symbol_trade_contract_size": (
-            symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
-        ),  # Taille du contrat pour le calcul de lot
-        # (Vous pouvez ajouter d'autres champs de symbol_info_mt5 si vos stratégies en ont besoin)
-        "last_update_timestamp": (
-            latest_signals_row.get("time").isoformat()
-            if latest_signals_row.get("time")
-            else datetime.now(UTC).isoformat()
-        ),
-    }
+    # Étape 1: Convertir la ligne entière du DataFrame en dictionnaire.
+    # CELA GARANTIT QUE TOUTES LES DONNÉES DU PHASEOBSERVER SONT PRÉSENTES.
+    signals = latest_signals_row.to_dict()
 
-    # AJOUT/CORRECTION : Utiliser 'time' du DataFrame plutôt que 'timestamp' (qui est l'index)
-    # L'index du DataFrame est 'time', et 'timestamp' n'est plus une colonne après set_index.
-    # Latest_signals_row est une série, donc l'accès direct via .name (l'index) ou .get('time') est correct.
-
-    # Assurez-vous que toutes les colonnes '_detected' et '_details' du PhaseObserver sont incluses
-    # Le PhaseObserver les aura ajoutées au DataFrame, et elles seront dans latest_signals_row.
-    # Cette boucle est une bonne pratique pour inclure les détails structurés.
-    for col in latest_signals_row.index:
-        if col.endswith("_detected") or col.endswith("_details"):
-            # Vérifiez que la valeur n'est pas None avant d'assigner (pour éviter les TypeError dans le dictionnaire)
-            val = latest_signals_row.get(col)
-            if val is not None:
-                signals[col] = val
+    # Étape 2: Ajouter les informations essentielles du broker.
+    # On s'assure que les noms de clés sont cohérents avec ce que le DecisionPipeline attend.
+    signals['current_price'] = latest_signals_row.get("close")
+    signals['spread'] = symbol_info_mt5.spread if symbol_info_mt5 else float('inf')
+    signals['symbol_point_value'] = symbol_info_mt5.point if symbol_info_mt5 else 0.00001
+    signals['symbol_trade_contract_size'] = symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
+    
+    # Étape 3: S'assurer que les horodatages sont dans un format standard.
+    # .name contient l'index de la Series, qui est notre 'time'.
+    if hasattr(latest_signals_row.name, 'isoformat'):
+        signals['last_update_timestamp'] = latest_signals_row.name.isoformat()
+    else:
+        signals['last_update_timestamp'] = datetime.now(UTC).isoformat()
+        
     return signals
-
+# ------------------- FIN DE LA CORRECTION -------------------
 
 def _build_asset_market_data(
     annotated_rates_df: pd.DataFrame, symbol_info_mt5: Any
 ) -> dict:
-    """
-    Construit le dictionnaire de données de marché pour un actif, incluant le DataFrame annoté
-    complet du PhaseObserver et les informations détaillées du symbole MT5.
-    """
+    """Construit le dictionnaire de données de marché pour un actif."""
     latest_signals_row = annotated_rates_df.iloc[-1]
     return {
-        "annotated_rates_df": annotated_rates_df,  # Le DataFrame complet est crucial pour l'IA et certaines stratégies
+        "annotated_rates_df": annotated_rates_df,
         "current_price": latest_signals_row.get("close"),
         "current_spread_points": symbol_info_mt5.spread if symbol_info_mt5 else 0,
         "is_liquid": latest_signals_row.get("is_liquid", True),
-        # --- CORRECTION ICI : Utiliser 'time' du DataFrame annoté ---
-        # `latest_signals_row` est une pd.Series dont l'index est l'horodatage ('time').
-        # Il n'y a pas de colonne 'timestamp' après df.set_index('time') dans PhaseObserver.load_data.
         "last_update_timestamp": (
             latest_signals_row.name.isoformat()
             if hasattr(latest_signals_row.name, "isoformat")
@@ -322,10 +232,6 @@ def _build_global_context(
         "active_broker_account": account,
     }
 
-
-# APPROCHE ULTRA-SÛRE : AJOUT MINIMAL SANS RISQUE DE CASSURE
-# Ajoutez SEULEMENT ces lignes dans run_bot.py après l'analyse standard existante
-
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
     phase_observer: PhaseObserver,
@@ -337,9 +243,7 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-    """
-    Exécute un cycle complet du pipeline de trading de SNIPER_X.
-    """
+    """Exécute un cycle complet du pipeline de trading de SNIPER_X."""
     logger = logging.getLogger(__name__)
     print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
     logger.info(f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---")
@@ -349,7 +253,6 @@ def run_single_pipeline_cycle(
         if not mt5_connector.is_connected:
             raise RuntimeError("MT5 a perdu la connexion persistante.")
 
-        # --- ÉTAPE 1 : COLLECTE DES DONNÉES DE MARCHÉ ---
         base_config = config_manager.get_current_dynamic_config()
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=base_config.get("mode_execution", "DEMO").upper()
@@ -375,7 +278,6 @@ def run_single_pipeline_cycle(
         timeframe_str = base_config.get("data_collection", {}).get("default_timeframe", "M1")
         bars_to_fetch = base_config.get("data_collection", {}).get("default_bars_count", 500)
 
-        # COLLECTE DES DONNÉES POUR CHAQUE ASSET
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
@@ -391,7 +293,6 @@ def run_single_pipeline_cycle(
                     rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
                     rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
 
-                # ANALYSE PAR PHASE OBSERVER
                 annotated_rates_df = phase_observer.analyze(rates_df.copy(), asset_symbol=asset)
                 
                 if annotated_rates_df is None or annotated_rates_df.empty:
@@ -400,7 +301,6 @@ def run_single_pipeline_cycle(
                 latest_signals_row = annotated_rates_df.iloc[-1]
                 logger.info(f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}")
 
-                # CONSTRUCTION DES SIGNAUX
                 all_assets_trading_signals[asset] = _build_asset_trading_signals(
                     latest_signals_row, symbol_info_mt5
                 )
@@ -416,7 +316,6 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
         
-        # ✅ TRACE 1 : SIGNAUX COLLECTÉS
         print("\n" + "="*60)
         print("🔍 TRACE COMPLÈTE DU PIPELINE:")
         print(f"1️⃣ SIGNAUX COLLECTÉS: {len(all_assets_trading_signals)} assets")
@@ -424,7 +323,6 @@ def run_single_pipeline_cycle(
             print(f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}")
         print("="*60)
 
-        # --- ÉTAPE 2 : CONSTRUIRE LE CONTEXTE COMPLET ---
         print(f"🌍 [PIPELINE] Construction du contexte global...")
         try:
             global_context = _build_global_context(
@@ -439,7 +337,6 @@ def run_single_pipeline_cycle(
             )
             print(f"✅ [PIPELINE] Contexte global construit avec succès !")
             
-            # ✅ TRACE 2 : CONTEXTE CONSTRUIT
             print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
             print(f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}")
             
@@ -448,11 +345,9 @@ def run_single_pipeline_cycle(
             logger.error(f"Erreur construction contexte: {e}", exc_info=True)
             return False
 
-        # --- ÉTAPE 3 : PIPELINE DE DÉCISION ---
         print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
         
-        # ✅ TRACE 3 : DÉCISION FINALE
         print(f"3️⃣ DÉCISION RETOURNÉE:")
         if decision_package and 'final_decision' in decision_package:
             final = decision_package['final_decision']
@@ -470,7 +365,6 @@ def run_single_pipeline_cycle(
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 
-        # --- ÉTAPE 4 : GESTION DES SORTIES (EXIT) ---
         current_open_positions = trade_executor.get_open_positions()
         if current_open_positions:
             logger.info(f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie.")
@@ -484,7 +378,6 @@ def run_single_pipeline_cycle(
                 trade_executor.execute_exit_orders(exit_decisions, is_dry_run=is_dry_run)
                 trade_executed_successfully = True
 
-        # --- ÉTAPE 5 : GESTION DES ENTRÉES (ENTRY) ---
         if daily_trade_count >= active_config.get("max_trades_per_day", 999):
             logger.warning("Limite de trades quotidiens atteinte.")
             return trade_executed_successfully
@@ -504,7 +397,7 @@ def run_single_pipeline_cycle(
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
+    
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
