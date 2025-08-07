@@ -13,7 +13,7 @@
     "ETHUSD",
     "LTCUSD"
   ],
-  "magic_number": 40404,
+  "magic_number": 2401,
   "risk_per_trade_percent": 3,
   "stop_loss_pips": 50,
   "max_daily_loss_percent": 3.0,
