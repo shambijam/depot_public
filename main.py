@@ -45,6 +45,10 @@ except ImportError as e:
     )
     sys.exit(1)
 
+    # AJOUTEZ CE FLAG GLOBAL
+    FORCE_TRADE_MODE = True  # ← METTRE À True POUR FORCER
+    FORCE_TRADE_COUNTER = 0
+
 
 def verify_environment_and_config(
     config_manager: ConfigManager, mt5_connector: MT5Connector, bot_mode: str
@@ -247,11 +251,19 @@ def main(args: argparse.Namespace) -> None:
         )
         time.sleep(config_manager.get("app.startup_delay_seconds", 3))
 
+        # ✅ CORRECTION 1: Vérification que active_account_details n'est pas None
         active_account_details = config_manager.get_mt5_account_credentials(mode=bot_mode)
-        if not mt5_connector.connect(active_account_details):
-            raise RuntimeError(f"Échec de la connexion MT5 persistante pour '{active_account_details.get('account_id')}'.")
+        if not active_account_details:
+            logger.critical(f"FATAL: Aucun compte MT5 configuré pour le mode {bot_mode}")
+            raise RuntimeError(f"Aucun compte MT5 disponible pour le mode {bot_mode}")
         
-        logger.info(f"Connexion MT5 persistante établie pour '{active_account_details.get('account_id')}'.")
+        # ✅ CORRECTION 2: Vérification sécurisée de l'account_id
+        account_id = active_account_details.get('account_id', 'Unknown') if active_account_details else 'Unknown'
+        
+        if not mt5_connector.connect(active_account_details):
+            raise RuntimeError(f"Échec de la connexion MT5 persistante pour '{account_id}'.")
+        
+        logger.info(f"Connexion MT5 persistante établie pour '{account_id}'.")
         
         trade_executor = TradeExecutor(config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode)
         trade_executor.reconcile_state_with_broker()
@@ -274,14 +286,14 @@ def main(args: argparse.Namespace) -> None:
     try:
         while True:
             cycle_count += 1
-            print(f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")  # ← AJOUTEZ CETTE LIGNE
+            print(f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
             cycle_start_time = time.time()
             
             print(f"📊 Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                decision_pipeline, # <-- CORRECTION : On passe maintenant le decision_pipeline
+                decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
@@ -296,10 +308,28 @@ def main(args: argparse.Namespace) -> None:
             cycle_duration = time.time() - cycle_start_time
             logger.info(f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f} secondes.")
 
-            current_account_info = (mt5_connector.get_account_info()._asdict() if mt5_connector.is_connected and mt5_connector.get_account_info() else {})
+            # ✅ CORRECTION 3: Gestion sécurisée de get_account_info()
+            current_account_info = {}
+            if mt5_connector and mt5_connector.is_connected:
+                account_info_raw = mt5_connector.get_account_info()
+                if account_info_raw is not None:
+                    try:
+                        current_account_info = account_info_raw._asdict()
+                    except AttributeError:
+                        logger.warning("Impossible de convertir account_info en dictionnaire")
+                        current_account_info = {}
 
+            # ✅ CORRECTION 4: Vérification que _open_positions existe
+            open_positions_count = len(getattr(trade_executor, '_open_positions', {}))
+            
             config_manager.process_and_send_summary_alert(
-                context={ "bot_mode": bot_mode, "bot_status": "Running", "account_info": current_account_info, "daily_trade_count": daily_trade_count, "open_positions_count": len(trade_executor._open_positions)}
+                context={
+                    "bot_mode": bot_mode,
+                    "bot_status": "Running",
+                    "account_info": current_account_info,
+                    "daily_trade_count": daily_trade_count,
+                    "open_positions_count": open_positions_count
+                }
             )
 
             sleep_time = max(0, cycle_interval - cycle_duration)
@@ -308,17 +338,25 @@ def main(args: argparse.Namespace) -> None:
 
     except KeyboardInterrupt:
         logger.warning("\nInterruption clavier détectée. Arrêt progressif...")
-        config_manager.send_alert(message="**SNIPER_X Bot Arrêté Manuellement.**", alert_type="telegram_critical")
+        if config_manager:
+            config_manager.send_alert(message="**SNIPER_X Bot Arrêté Manuellement.**", alert_type="telegram_critical")
     except Exception as e:
         logger.critical(f"Une erreur critique non gérée a entraîné la terminaison de la boucle principale : {e}", exc_info=True)
-        config_manager.send_alert(f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}", "telegram_critical")
+        if config_manager:
+            config_manager.send_alert(f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}", "telegram_critical")
     finally:
         if config_manager and config_manager.get("ai.enabled", False) and ai_decision:
             logger.info("Sauvegarde de l'historique des suggestions de l'IA avant l'arrêt...")
-            ai_decision._save_suggestion_history()
+            try:
+                ai_decision._save_suggestion_history()
+            except Exception as e:
+                logger.error(f"Erreur lors de la sauvegarde de l'historique IA: {e}")
         
         if mt5_connector and mt5_connector.is_connected:
-            mt5_connector.disconnect()
+            try:
+                mt5_connector.disconnect()
+            except Exception as e:
+                logger.error(f"Erreur lors de la déconnexion MT5: {e}")
 
         logger.info("SNIPER_X Bot est arrêté.")
         sys.exit(0)
