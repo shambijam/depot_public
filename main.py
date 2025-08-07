@@ -243,7 +243,7 @@ def main(args: argparse.Namespace) -> None:
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode = args.mode.upper() if args.mode else config_manager.get("mode_execution", "DEMO").upper()
         if config_manager.get("mode_execution") != bot_mode:
-             config_manager.update_dynamic_config({"mode_execution": bot_mode}, source="mode_startup_correction")
+                 config_manager.update_dynamic_config({"mode_execution": bot_mode}, source="mode_startup_correction")
         
         is_dry_run = args.dry_run
         logger.critical(
@@ -287,29 +287,6 @@ def main(args: argparse.Namespace) -> None:
         while True:
             cycle_count += 1
             print(f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
-            # FORCER UN TRADE AU CYCLE 10
-            if cycle_count == 10:
-                print("🔥🔥🔥 FORCING TRADE - CYCLE 10 🔥🔥🔥")
-                
-                # Court-circuiter TOUT et appeler directement l'exécuteur
-                if mt5_connector and mt5_connector.is_connected:
-                    tick = mt5_connector.mt5.symbol_info_tick("EURUSD")
-                    if tick:
-                        request = {
-                            "action": mt5_connector.mt5.TRADE_ACTION_DEAL,
-                            "symbol": "EURUSD",
-                            "volume": 0.01,
-                            "type": mt5_connector.mt5.ORDER_TYPE_BUY,
-                            "price": tick.ask,
-                            "deviation": 20,
-                            "magic": 123456,
-                            "comment": "FORCED",
-                        }
-                        result = mt5_connector.mt5.order_send(request)
-                        print(f"🔥 RESULT: {result}")
-                        if result and result.retcode == 10009:
-                            print("✅✅✅ TRADE FORCÉ RÉUSSI!")
-                            daily_trade_count += 1
             cycle_start_time = time.time()
             
             print(f"📊 Lancement du pipeline de décision...")
