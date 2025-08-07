@@ -337,16 +337,12 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-   
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
-    NOUVEAU: Intègre l'analyse multi-timeframe pour améliorer le scalping micro-phase.
     """
     logger = logging.getLogger(__name__)
     print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
-    logger.info(
-        f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
-    )
+    logger.info(f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---")
     trade_executed_successfully = False
 
     try:
@@ -379,6 +375,7 @@ def run_single_pipeline_cycle(
         timeframe_str = base_config.get("data_collection", {}).get("default_timeframe", "M1")
         bars_to_fetch = base_config.get("data_collection", {}).get("default_bars_count", 500)
 
+        # COLLECTE DES DONNÉES POUR CHAQUE ASSET
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
@@ -394,10 +391,8 @@ def run_single_pipeline_cycle(
                     rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
                     rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
 
-                # === ANALYSE STANDARD (INCHANGÉE) ===
-                annotated_rates_df = phase_observer.analyze(
-                    rates_df.copy(), asset_symbol=asset
-                )
+                # ANALYSE PAR PHASE OBSERVER
+                annotated_rates_df = phase_observer.analyze(rates_df.copy(), asset_symbol=asset)
                 
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     continue
@@ -405,52 +400,7 @@ def run_single_pipeline_cycle(
                 latest_signals_row = annotated_rates_df.iloc[-1]
                 logger.info(f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}")
 
-                # === AJOUT MULTI-TIMEFRAME (SEULEMENT POUR MICRO-PHASE) ===
-                current_phase = latest_signals_row.get('phase', 'unknown')
-                
-                # ULTRA-SÛRE: Tentative d'amélioration SANS modifier l'existant
-                if current_phase in ["micro_phase", "scalp_burst"]:
-                    try:
-                        print(f"🎯 [SCALPING] Tentative amélioration multi-TF pour {asset}")
-                        
-                        # Configuration asset (fonction existante)
-                        asset_strategy_config = _get_merged_config_for_asset(
-                            base_config, config_manager, asset
-                        )
-                        
-                        # Check si multi-TF activé (sûr)
-                        multi_tf_enabled = asset_strategy_config.get("phase_detection", {}).get(
-                            "multi_timeframe", {}
-                        ).get("enabled", False)
-                        
-                        if multi_tf_enabled:
-                            # APPEL SÉCURISÉ de la nouvelle méthode
-                            multi_tf_result = phase_observer.analyze_asset_multi_timeframe(
-                                asset, asset_strategy_config
-                            )
-                            
-                            # AMÉLIORATION SÛRE: Seulement le confidence_score
-                            if multi_tf_result.get("multi_tf_enabled", False):
-                                original_confidence = latest_signals_row.get("confidence_score", 0.0)
-                                tf_confluence = multi_tf_result.get("confluence_score", 0.0)
-                                
-                                # Boost conservateur du confidence
-                                if tf_confluence > 0.7:  # Seuil de qualité
-                                    enhanced_confidence = min(1.0, original_confidence + 0.2)
-                                    
-                                    # Modification SÛRE (colonne existe déjà)
-                                    annotated_rates_df.iloc[-1, annotated_rates_df.columns.get_loc("confidence_score")] = enhanced_confidence
-                                    
-                                    print(f"✨ [SCALPING] {asset} confidence amélioré: {original_confidence:.3f} → {enhanced_confidence:.3f}")
-                                    logger.info(f"Multi-TF enhancement applied to {asset}")
-                                
-                    except Exception as e:
-                        # CRUCIAL: Erreur silencieuse, ne JAMAIS planter
-                        logger.warning(f"Tentative multi-TF échouée pour {asset}: {e}")
-                        print(f"⚠️ [SCALPING] Multi-TF échoué pour {asset}, continuation normale")
-                        # CODE EXISTANT CONTINUE NORMALEMENT
-
-                # === CONSTRUCTION SIGNAUX (CODE EXISTANT INCHANGÉ) ===
+                # CONSTRUCTION DES SIGNAUX
                 all_assets_trading_signals[asset] = _build_asset_trading_signals(
                     latest_signals_row, symbol_info_mt5
                 )
@@ -466,41 +416,16 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
         
-        # ✅✅✅ AJOUTEZ LE TRAÇAGE ICI ✅✅✅
+        # ✅ TRACE 1 : SIGNAUX COLLECTÉS
         print("\n" + "="*60)
         print("🔍 TRACE COMPLÈTE DU PIPELINE:")
         print(f"1️⃣ SIGNAUX COLLECTÉS: {len(all_assets_trading_signals)} assets")
         for asset, sig in all_assets_trading_signals.items():
             print(f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}")
         print("="*60)
-        
-        # ... construction du contexte ...
-        global_context = _build_global_context(...)
-        
-        # ✅ TRACE 2 : APRÈS LA CONSTRUCTION DU CONTEXTE
-        print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
-        print(f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}")
-        
-        # ... appel au pipeline ...
-        print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
-        decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
-        
-        # ✅ TRACE 3 : APRÈS LA DÉCISION
-        print(f"3️⃣ DÉCISION RETOURNÉE:")
-        if decision_package and 'final_decision' in decision_package:
-            final = decision_package['final_decision']
-            print(f"   Action: {final.get('action', 'NONE')}")
-            print(f"   Asset: {final.get('asset', 'NONE')}")
-            print(f"   Volume: {final.get('volume', 0)}")
-            print(f"   Confidence: {final.get('confidence', 0)}")
-        else:
-            print("   ❌ AUCUNE DÉCISION (dict vide ou pas de final_decision)")
-        print("="*60 + "\n")
-
-        print(f"🎯 [PIPELINE] Signaux collectés pour {len(all_assets_trading_signals)} assets")
-        print(f"🌍 [PIPELINE] Construction du contexte global...")
 
         # --- ÉTAPE 2 : CONSTRUIRE LE CONTEXTE COMPLET ---
+        print(f"🌍 [PIPELINE] Construction du contexte global...")
         try:
             global_context = _build_global_context(
                 mt5_connector,
@@ -512,7 +437,12 @@ def run_single_pipeline_cycle(
                 tradeable_assets,
                 active_mt5_account_details,
             )
-            print(f"🎯 [PIPELINE] Contexte global construit avec succès !")
+            print(f"✅ [PIPELINE] Contexte global construit avec succès !")
+            
+            # ✅ TRACE 2 : CONTEXTE CONSTRUIT
+            print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
+            print(f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}")
+            
         except Exception as e:
             print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")
             logger.error(f"Erreur construction contexte: {e}", exc_info=True)
@@ -521,7 +451,21 @@ def run_single_pipeline_cycle(
         # --- ÉTAPE 3 : PIPELINE DE DÉCISION ---
         print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
-        print(f"🤖 [PIPELINE] Decision reçue: {decision_package.get('final_decision', {}).get('action', 'AUCUNE')}")
+        
+        # ✅ TRACE 3 : DÉCISION FINALE
+        print(f"3️⃣ DÉCISION RETOURNÉE:")
+        if decision_package and 'final_decision' in decision_package:
+            final = decision_package['final_decision']
+            print(f"   Action: {final.get('action', 'NONE')}")
+            print(f"   Asset: {final.get('asset', 'NONE')}")
+            print(f"   Volume: {final.get('volume', 0)}")
+            if final.get('action') in ['BUY', 'SELL']:
+                print(f"   ✅ TRADE DÉCIDÉ !")
+            else:
+                print(f"   ❌ PAS DE TRADE")
+        else:
+            print("   ❌ AUCUNE DÉCISION (dict vide)")
+        print("="*60 + "\n")
         
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
@@ -542,47 +486,24 @@ def run_single_pipeline_cycle(
 
         # --- ÉTAPE 5 : GESTION DES ENTRÉES (ENTRY) ---
         if daily_trade_count >= active_config.get("max_trades_per_day", 999):
-            logger.warning("Limite de trades quotidiens atteinte. Aucune nouvelle entrée ne sera évaluée.")
+            logger.warning("Limite de trades quotidiens atteinte.")
             return trade_executed_successfully
 
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL"]:
-            logger.info(f"Le pipeline a décidé une entrée: {trade_decision.get('action')} {trade_decision.get('asset')}")
+            logger.info(f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}")
             feedback = trade_executor.execute_order(decision_package)
             if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
         else:
             regime = decision_package.get("context", {}).get("current_market_regime", "inconnu")
-            logger.info(f"Aucune opportunité d'entrée trouvée ce cycle. Régime de marché: {regime}.")
+            logger.info(f"Aucune opportunité. Régime: {regime}.")
 
     except Exception as e:
-        mecano.log_exception("Pipeline Cycle", e)
-        config_manager.send_alert(f"CRITIQUE: Erreur dans le cycle du pipeline: {e}", "telegram_critical")
+        logger.error(f"Erreur pipeline: {e}", exc_info=True)
         trade_executed_successfully = False
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
-
-# ✅ RÉSUMÉ DES CHANGEMENTS ULTRA-SÛRS :
-#
-# AJOUTS SEULEMENT (AUCUNE MODIFICATION DE L'EXISTANT) :
-# 1. Détection si phase = "micro_phase" ou "scalp_burst" 
-# 2. Appel sécurisé de la nouvelle méthode multi-TF
-# 3. Amélioration MINIMALE : boost du confidence_score seulement
-# 4. Try/except complet : aucun crash possible
-# 5. Fallback automatique vers l'analyse standard
-#
-# CE QUI N'EST PAS MODIFIÉ :
-# - Toute la logique existante de run_single_pipeline_cycle
-# - Les fonctions _build_asset_trading_signals et _build_asset_market_data 
-# - Le pipeline de décision
-# - La gestion des trades
-# - Les structures de données existantes
-#
-# RISQUE DE CASSURE : 0% (tout est en try/except avec fallback)
-# IMPACT EN CAS D'ERREUR : Continuation normale sans amélioration
-# DÉPENDANCES NOUVELLES : Aucune
-
 
 def main(args: argparse.Namespace) -> None:
     """
