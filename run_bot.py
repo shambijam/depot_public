@@ -337,6 +337,7 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
+   
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
     NOUVEAU: Intègre l'analyse multi-timeframe pour améliorer le scalping micro-phase.
@@ -464,6 +465,37 @@ def run_single_pipeline_cycle(
         if not all_assets_trading_signals:
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
+        
+        # ✅✅✅ AJOUTEZ LE TRAÇAGE ICI ✅✅✅
+        print("\n" + "="*60)
+        print("🔍 TRACE COMPLÈTE DU PIPELINE:")
+        print(f"1️⃣ SIGNAUX COLLECTÉS: {len(all_assets_trading_signals)} assets")
+        for asset, sig in all_assets_trading_signals.items():
+            print(f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}")
+        print("="*60)
+        
+        # ... construction du contexte ...
+        global_context = _build_global_context(...)
+        
+        # ✅ TRACE 2 : APRÈS LA CONSTRUCTION DU CONTEXTE
+        print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
+        print(f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}")
+        
+        # ... appel au pipeline ...
+        print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
+        decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
+        
+        # ✅ TRACE 3 : APRÈS LA DÉCISION
+        print(f"3️⃣ DÉCISION RETOURNÉE:")
+        if decision_package and 'final_decision' in decision_package:
+            final = decision_package['final_decision']
+            print(f"   Action: {final.get('action', 'NONE')}")
+            print(f"   Asset: {final.get('asset', 'NONE')}")
+            print(f"   Volume: {final.get('volume', 0)}")
+            print(f"   Confidence: {final.get('confidence', 0)}")
+        else:
+            print("   ❌ AUCUNE DÉCISION (dict vide ou pas de final_decision)")
+        print("="*60 + "\n")
 
         print(f"🎯 [PIPELINE] Signaux collectés pour {len(all_assets_trading_signals)} assets")
         print(f"🌍 [PIPELINE] Construction du contexte global...")
