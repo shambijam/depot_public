@@ -15,31 +15,40 @@ class DynamicStrategy(BaseStrategy):
 
     def evaluate_entry(self, context: Dict[str, Any], signals: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Évalue les entrées en appliquant les 'decision_rules' de la configuration.
+        NOUVELLE LOGIQUE : Fait confiance au DecisionPipeline.
+        Identifie le meilleur actif à trader basé sur le score de confiance.
         """
+        best_asset = None
+        min_confidence_threshold = self.strategy_config.get("min_confidence_for_entry", 0.6)
+        highest_confidence = min_confidence_threshold
+        
         tradeable_assets = self.strategy_config.get("tradeable_assets", [])
-        decision_rules = self.strategy_config.get("decision_rules", [])
 
         for asset in tradeable_assets:
             asset_signals = signals.get(asset)
-            if not asset_signals or not asset_signals.get('is_liquid', True):
+            if not asset_signals:
                 continue
+            
+            confidence = asset_signals.get('confidence_score', 0.0)
+            if confidence > highest_confidence:
+                highest_confidence = confidence
+                best_asset = asset
+        
+        if not best_asset:
+            self.logger.info("Aucun signal n'a dépassé le seuil de confiance pour une entrée.")
+            return None
 
-            for rule in sorted(decision_rules, key=lambda r: r.get('priority', 99)):
-                if self._check_rule_conditions(asset_signals, rule.get("conditions", {})):
-                    current_phase = asset_signals.get('phase', '')
-                    action_logic = rule.get("action_logic", {})
-                    action_to_take = None
+        self.logger.info(f"MEILLEUR CANDIDAT DYNAMIC: {best_asset} (Confiance: {highest_confidence:.2f}).")
+        
+        final_signals = signals[best_asset]
+        phase = final_signals.get('phase', '')
+        action_to_take = "BUY" if "bullish" in phase or "up" in phase else "SELL" if "bearish" in phase or "down" in phase else None
 
-                    if "BUY" in action_logic and action_logic["BUY"] in current_phase:
-                        action_to_take = "BUY"
-                    elif "SELL" in action_logic and action_logic["SELL"] in current_phase:
-                        action_to_take = "SELL"
-                    
-                    if action_to_take:
-                        self.logger.info(f"RÈGLE D'ENTRÉE DYNAMIC: '{rule.get('name')}' pour {action_to_take} sur {asset}.")
-                        return self._build_decision_package(action_to_take, asset, rule)
-        return None
+        if not action_to_take:
+            return None
+        
+        mock_rule = {'name': f"Dynamic entry for {best_asset}", "order_type": "MARKET"}
+        return self._build_decision_package(action_to_take, best_asset, mock_rule)
 
     def evaluate_exit(self, context: Dict[str, Any], current_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

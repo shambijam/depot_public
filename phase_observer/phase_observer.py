@@ -2152,6 +2152,8 @@ class PhaseObserver:
         detail_columns = [col for col in df_an.columns if col.endswith("_details")]
         df_an.drop(columns=detail_columns, errors="ignore", inplace=True)
         
+        
+        
         return df_an
 
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):
