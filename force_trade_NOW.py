@@ -17,19 +17,43 @@ def force_trade_direct():
     with open(broker_file, 'r', encoding='utf-8') as f:
         brokers = json.load(f)
     
-    demo_account = brokers["accounts"]["main_demo_broker_A"]
+    print(f"📋 Structure trouvée: {brokers.keys()}")
+    
+    # Trouver le compte demo
+    demo_account = None
+    
+    # Si "accounts" est une liste
+    if isinstance(brokers.get("accounts"), list):
+        for account in brokers["accounts"]:
+            if "demo" in account.get("account_id", "").lower() or account.get("mode") == "DEMO":
+                demo_account = account
+                break
+    # Si "accounts" est un dictionnaire
+    elif isinstance(brokers.get("accounts"), dict):
+        demo_account = brokers["accounts"].get("main_demo_broker_A")
+    
+    if not demo_account:
+        print("❌ Aucun compte DEMO trouvé!")
+        print(f"Comptes disponibles: {json.dumps(brokers, indent=2)[:500]}...")
+        return False
+    
+    print(f"✅ Compte trouvé: {demo_account.get('account_id', 'Unknown')}")
     
     # 2. Connexion directe MT5
     if not mt5.initialize():
         print("❌ Échec initialisation MT5")
         return False
     
-    account = int(demo_account["login"])
-    password = demo_account["password"]
-    server = demo_account["server"]
+    # Extraire les infos de connexion
+    account = int(demo_account.get("login", demo_account.get("account_number", 0)))
+    password = str(demo_account.get("password", ""))
+    server = demo_account.get("server", "")
+    
+    print(f"📡 Connexion: {account} @ {server}")
     
     if not mt5.login(account, password, server):
-        print(f"❌ Échec connexion: {mt5.last_error()}")
+        error = mt5.last_error()
+        print(f"❌ Échec connexion: {error}")
         mt5.shutdown()
         return False
     
@@ -37,9 +61,15 @@ def force_trade_direct():
     
     # 3. Préparer l'ordre
     symbol = "EURUSD"
-    symbol_info = mt5.symbol_info(symbol)
     
-    if not symbol_info or not symbol_info.visible:
+    # Sélectionner le symbole
+    if not mt5.symbol_select(symbol, True):
+        print(f"❌ Impossible de sélectionner {symbol}")
+        mt5.shutdown()
+        return False
+    
+    symbol_info = mt5.symbol_info(symbol)
+    if not symbol_info:
         print(f"❌ {symbol} non disponible")
         mt5.shutdown()
         return False
@@ -51,38 +81,27 @@ def force_trade_direct():
         mt5.shutdown()
         return False
     
-    # 5. ENVOYER L'ORDRE
+    print(f"💰 Prix actuel: Bid={tick.bid:.5f} Ask={tick.ask:.5f}")
+    
+    # 5. Calculer le volume minimum
+    min_volume = symbol_info.volume_min
+    volume = max(0.01, min_volume)  # Au moins 0.01 ou le minimum requis
+    
+    # 6. ENVOYER L'ORDRE
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
-        "volume": 0.01,  # Micro lot
+        "volume": volume,
         "type": mt5.ORDER_TYPE_BUY,
         "price": tick.ask,
-        "sl": tick.ask - 0.0010,  # 10 pips SL
-        "tp": tick.ask + 0.0020,  # 20 pips TP
+        "sl": round(tick.ask - 0.0010, 5),  # 10 pips SL
+        "tp": round(tick.ask + 0.0020, 5),  # 20 pips TP
         "deviation": 20,
         "magic": 999999,
-        "comment": "FORCED_TEST_TRADE",
+        "comment": "FORCED_TEST",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     
-    print(f"📤 Envoi ordre: BUY {symbol} @ {tick.ask:.5f}")
-    result = mt5.order_send(request)
+    print(f"📤 Envoi ordre: BUY {symbol} {volume} lots @ {tick.ask:.5f}")
     
-    if result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"✅✅✅ TRADE EXÉCUTÉ! Ticket: {result.order}")
-        print(f"Volume: {result.volume} | Prix: {result.price}")
-        return True
-    else:
-        print(f"❌ Échec ordre: {result.retcode} - {result.comment}")
-        return False
-    
-    mt5.shutdown()
-
-if __name__ == "__main__":
-    if force_trade_direct():
-        print("\n🎉 SUCCÈS! Un trade a été ouvert!")
-        print("Vérifiez MetaTrader pour voir la position.")
-    else:
-        print("\n😔 Échec du trade forcé.")
