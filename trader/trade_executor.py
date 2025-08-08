@@ -2508,14 +2508,23 @@ def run_trade_execution_pipeline(
     try:
         # 1. Validation du package
         validated_package = trade_executor.load_decision_package(decision_package)
-        trade_decision = validated_package["trade_decision"]
+        
+        # 2. Adapter la structure du package pour les méthodes qui l'attendent
+        # Le decision_package contient déjà tout, on crée juste la structure attendue
+        adapted_package = {
+            "trade_decision": validated_package,
+            "market_context": validated_package, 
+            "active_config": validated_package
+        }
+        
+        trade_decision = validated_package
         order_id = trade_decision.get(
             "order_id", order_id
         )  # Récupérer l'ID de l'ordre dès que possible
 
-        # 2. Préparation de l'ordre (y compris le calcul de risque)
+        # 3. Préparation de l'ordre (y compris le calcul de risque)
         # La fonction prepare_order gère maintenant l'action "CLOSE" aussi
-        mt5_request = trade_executor.prepare_order(validated_package)
+        mt5_request = trade_executor.prepare_order(adapted_package)
 
         # Si c'est une action de clôture, le prepare_order retourne un dict spécifique
         if mt5_request.get("action") == "CLOSE":
@@ -2551,11 +2560,11 @@ def run_trade_execution_pipeline(
                 order_id, status, message, pnl_usd=pnl_usd_closed
             )
 
-        # 3. Vérifications Pré-Trade
-        if not trade_executor.pre_trade_checks(validated_package):
+        # 4. Vérifications Pré-Trade
+        if not trade_executor.pre_trade_checks(adapted_package):
             raise TradeExecutionError("Échec des vérifications pré-trade.")
 
-        # 4. Contrôle Manuel (si nécessaire, de manière non-bloquante)
+        # 5. Contrôle Manuel (si nécessaire, de manière non-bloquante)
         if not trade_executor.manual_override_if_needed(mt5_request):
             return trade_executor.feedback_pipeline(
                 order_id,
@@ -2563,10 +2572,10 @@ def run_trade_execution_pipeline(
                 "En attente d'approbation manuelle.",
             )
 
-        # 5. Exécution de l'Ordre
+        # 6. Exécution de l'Ordre
         execution_status = trade_executor.execute_order(mt5_request)
 
-        # 6. Journalisation, notification et feedback
+        # 7. Journalisation, notification et feedback
         # log_and_notify est déjà dans TradeExecutor et gère le log
         trade_executor.log_and_notify(mt5_request, execution_status)
 
