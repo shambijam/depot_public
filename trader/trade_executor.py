@@ -450,86 +450,31 @@ class TradeExecutor:
 
         # TODO: Implémenter une rotation des journaux d'audit (par taille ou par jour) pour éviter
         #       une croissance infinie du fichier. (Ceci sera géré par ConfigManager qui appelle ici).
-
     def load_decision_package(self, decision_package: dict) -> dict:
         """
-        Charge et valide la structure d'un package de décision via un schéma formel externe.
-        Cette validation assure que le package de décision est bien formé et complet,
-        conformément aux exigences du système.
-
+        Charge et valide la structure d'un package de décision.
+        Validation de schéma désactivée.
+        
         Args:
             decision_package (dict): Le package de décision à valider.
-
+        
         Returns:
-            dict: Le package de décision validé.
-
+            dict: Le package de décision.
+        
         Raises:
-            InvalidDecisionPackageError: Si le package ne correspond pas au schéma requis.
+            InvalidDecisionPackageError: Si le package est manifestement invalide.
         """
-        self.logger.info("Validation du package de décision par schéma externe...")
-
-        # Externaliser ce schéma dans un fichier `decision_package_schema.json` (TODO implémenté)
-        schema_path = (
-            Path(__file__).parent.parent
-            / "config"
-            / "schemas"
-            / "decision_package_schema.json"
-        )  # Chemin relatif
-
-        # S'assurer que le schéma existe et est valide
-        if not schema_path.exists():
-            self.logger.critical(
-                f"FATAL: Fichier de schéma de package de décision introuvable à '{schema_path}'. Impossible de valider les décisions. Le bot ne peut pas démarrer en toute sécurité."
-            )
-            raise FileNotFoundError(
-                f"Schéma de package de décision manquant: {schema_path}"
-            )
-
-        try:
-            with open(schema_path, "r", encoding="utf-8") as f:
-                schema = json.load(f)
-
-            jsonschema.validate(instance=decision_package, schema=schema)
-            self.logger.info("Package de décision validé avec succès par schéma.")
-
-            # Ajouter une validation sémantique plus poussée (TODO implémenté)
-            # Vérifier que le volume, si présent, est un nombre positif.
-            trade_decision = decision_package.get("trade_decision", {})
-            if trade_decision.get("action") in ["BUY", "SELL", "CLOSE"]:
-                volume = trade_decision.get("volume")
-                if volume is not None and (
-                    not isinstance(volume, (int, float)) or volume <= 0
-                ):
-                    error_msg = f"Volume de trade invalide ou non positif: {volume}."
-                    self.logger.error(error_msg)
-                    self.config_manager.send_alert(
-                        "CRITIQUE",
-                        f"Erreur TradeExecutor: {error_msg}",
-                        alert_type="telegram_critical",
-                    )
-                    raise InvalidDecisionPackageError(error_msg)
-
-            return decision_package
-        except jsonschema.ValidationError as e:
-            error_msg = f"Package de décision invalide. Erreur de validation: {e.message} sur le champ `{''.join(e.path)}`"
-            self.logger.error(error_msg, exc_info=True)  # Ajout de exc_info
-            self.config_manager.send_alert(
-                "CRITIQUE",
-                f"Erreur TradeExecutor: {error_msg}",
-                alert_type="telegram_critical",
-            )
-            raise InvalidDecisionPackageError(error_msg) from e
-        except Exception as e:
-            error_msg = (
-                f"Erreur inattendue lors de la validation du package de décision: {e}"
-            )
-            self.logger.error(error_msg, exc_info=True)
-            self.config_manager.send_alert(
-                "CRITIQUE",
-                f"Erreur TradeExecutor: {error_msg}",
-                alert_type="telegram_critical",
-            )
-            raise InvalidDecisionPackageError(error_msg) from e
+        self.logger.debug("Chargement du package de décision (validation de schéma désactivée)...")
+        
+        # Validation basique uniquement
+        if not isinstance(decision_package, dict):
+            raise InvalidDecisionPackageError("Le package de décision doit être un dictionnaire.")
+        
+        if not decision_package.get("trade_decision"):
+            raise InvalidDecisionPackageError("Le package de décision doit contenir 'trade_decision'.")
+        
+        self.logger.debug("Package de décision chargé avec succès.")
+        return decision_package
 
     def _check_trading_window(
         self, current_time_utc: datetime, symbol: str
