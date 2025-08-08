@@ -775,7 +775,7 @@ class MT5Connector:
             Optional[Any]: L'objet `MetaTrader5.TradeResult` (NamedTuple) si l'ordre est envoyé et une réponse est reçue,
                         `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
         """
-        if not self.is_connected():
+        if not self.is_connected:
             self.logger.error(
                 "MT5: Non connecté. Impossible d'envoyer l'ordre."
             )  # Utilise self.logger
