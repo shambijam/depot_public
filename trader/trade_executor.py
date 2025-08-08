@@ -2509,20 +2509,27 @@ def run_trade_execution_pipeline(
         # 1. Validation du package
         validated_package = trade_executor.load_decision_package(decision_package)
         
-        # 2. Adapter la structure du package pour les méthodes qui l'attendent
-        # Le decision_package contient déjà tout, on crée juste la structure attendue
+        # 2. Mapper les clés pour créer la structure attendue
+        # Le decision_package contient "Asset", "Action", "Volume" avec majuscules
+        # Les méthodes attendent "asset", "action", "volume" en minuscules
+        trade_decision = {
+            "asset": validated_package.get("Asset", validated_package.get("asset", "UNKNOWN")),
+            "action": validated_package.get("Action", validated_package.get("action", "UNKNOWN")), 
+            "volume": validated_package.get("Volume", validated_package.get("volume", 0.0)),
+            "order_id": validated_package.get("order_id", "N/A"),
+            "order_type": validated_package.get("order_type", "MARKET")
+        }
+        
+        # 3. Créer la structure complète attendue par les autres méthodes
         adapted_package = {
-            "trade_decision": validated_package,
+            "trade_decision": trade_decision,
             "market_context": validated_package, 
             "active_config": validated_package
         }
         
-        trade_decision = validated_package
-        order_id = trade_decision.get(
-            "order_id", order_id
-        )  # Récupérer l'ID de l'ordre dès que possible
+        order_id = trade_decision.get("order_id", order_id)
 
-        # 3. Préparation de l'ordre (y compris le calcul de risque)
+        # 4. Préparation de l'ordre (y compris le calcul de risque)
         # La fonction prepare_order gère maintenant l'action "CLOSE" aussi
         mt5_request = trade_executor.prepare_order(adapted_package)
 
@@ -2560,11 +2567,11 @@ def run_trade_execution_pipeline(
                 order_id, status, message, pnl_usd=pnl_usd_closed
             )
 
-        # 4. Vérifications Pré-Trade
+        # 5. Vérifications Pré-Trade
         if not trade_executor.pre_trade_checks(adapted_package):
             raise TradeExecutionError("Échec des vérifications pré-trade.")
 
-        # 5. Contrôle Manuel (si nécessaire, de manière non-bloquante)
+        # 6. Contrôle Manuel (si nécessaire, de manière non-bloquante)
         if not trade_executor.manual_override_if_needed(mt5_request):
             return trade_executor.feedback_pipeline(
                 order_id,
@@ -2572,10 +2579,10 @@ def run_trade_execution_pipeline(
                 "En attente d'approbation manuelle.",
             )
 
-        # 6. Exécution de l'Ordre
+        # 7. Exécution de l'Ordre
         execution_status = trade_executor.execute_order(mt5_request)
 
-        # 7. Journalisation, notification et feedback
+        # 8. Journalisation, notification et feedback
         # log_and_notify est déjà dans TradeExecutor et gère le log
         trade_executor.log_and_notify(mt5_request, execution_status)
 
