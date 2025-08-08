@@ -1285,40 +1285,44 @@ class DecisionPipeline:
         CORE construit la décision finale de trade basée sur les signaux.
         """
         phase = signals.get("phase", "")
+        # Utiliser le prix de clôture de la dernière bougie comme prix d'entrée
         current_price = signals.get("close", 0)
         
-        if not current_price:
-            self.logger.error(f"❌ Prix actuel manquant pour {asset}")
+        if not current_price or current_price <= 0:
+            self.logger.error(f"❌ Prix actuel manquant ou invalide pour {asset}")
             return {}
         
-        # Déterminer la direction (logique simplifiée)
+        # Déterminer la direction (logique simplifiée mais robuste)
         action = None
         
-        if any(keyword in phase.lower() for keyword in ["bullish", "up"]) or signals.get("entry_confirmation_bullish", False):
+        # Priorité aux phases claires
+        if any(keyword in phase.lower() for keyword in ["bullish", "up", "accumulation"]):
             action = "BUY"
-        elif any(keyword in phase.lower() for keyword in ["bearish", "down"]) or signals.get("entry_confirmation_bearish", False):
+        elif any(keyword in phase.lower() for keyword in ["bearish", "down", "distribution"]):
             action = "SELL"
         else:
-            # Fallback sur les signaux détectés
-            if signals.get("ob_detected", False) or signals.get("fvg_detected", False):
-                # Analyse simple du momentum pour déterminer la direction
-                volume_momentum = signals.get("volume_momentum", 0)
-                if volume_momentum > 0:
-                    action = "BUY"
-                else:
-                    action = "SELL"
+            # Si la phase est 'no_clear_phase', on se base sur le momentum comme fallback
+            self.logger.warning(f"Phase '{phase}' non conclusive. Tentative de décision basée sur le momentum.")
+            volume_momentum = signals.get("volume_momentum", 0)
+            if volume_momentum > 0.1: # Seuil pour éviter le bruit
+                action = "BUY"
+            elif volume_momentum < -0.1:
+                action = "SELL"
         
         if not action:
-            self.logger.warning(f"❌ Direction indéterminée pour {asset}")
+            self.logger.warning(f"❌ Direction de trade indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})")
             return {}
         
-        # Paramètres SL/TP depuis la configuration
+        # Paramètres SL/TP depuis la configuration de la stratégie active
         sl_pips = config.get("stop_loss_pips", 20)
         tp_pips = config.get("take_profit_pips", 40)
         magic_number = config.get("magic_number", 999999)
         
+        # ======================= LA CORRECTION CLÉ EST ICI =======================
+        # On s'assure que le dictionnaire final contient TOUTES les clés attendues
+        # par le TradeExecutor, notamment "action".
         trade_decision = {
-            "action": action,
+            "action": action,  # <-- LA CLÉ MANQUANTE EST AJOUTÉE ICI !
             "asset": asset,
             "strategy_type": f"core_{config.get('strategy_name', 'decision')}",
             "entry_price": current_price,
@@ -1326,9 +1330,10 @@ class DecisionPipeline:
             "target_tp_pips": tp_pips,
             "rule_name": f"core_decision_{phase}",
             "confidence": signals.get("confidence_score", 0.0),
-            "timestamp": context.get("current_time_utc", ""),
+            "timestamp": context.get("current_time_utc", datetime.now(UTC).isoformat()),
             "magic_number": magic_number,
         }
+        # =======================================================================
         
         self.logger.info(f"✅ CORE construit trade {action} {asset} @ {current_price} (SL: {sl_pips}, TP: {tp_pips})")
         
