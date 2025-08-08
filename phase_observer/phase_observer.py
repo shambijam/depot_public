@@ -1886,6 +1886,88 @@ class PhaseObserver:
         for attr, value in params.items():
             if hasattr(self, attr) and value is not None:
                 setattr(self, attr, value)
+                
+    def determine_optimized_phase(self, row):
+        """Classification de phase basée sur les 4 indicateurs core"""
+        regime = row.get("regime", "unknown")
+        
+        if "trending_institutional" in regime:
+            if row.get("fvg_ob_confluence", False):
+                return "institutional_setup_premium"
+            elif row.get("ob_detected", False):
+                return "institutional_setup"
+            elif "bull" in regime:
+                return "trending_institutional_bull"
+            else:
+                return "trending_institutional_bear"
+        elif "range_accumulation" in regime:
+            if row.get("high_quality_ob", False):
+                return "accumulation_zone"
+            else:
+                return "range_accumulation"
+        elif "range_distribution" in regime:
+            if row.get("confirmed_structure_break", False):
+                return "distribution_breakout"
+            else:
+                return "range_distribution"
+        elif "high_volatility" in regime:
+            if row.get("bos_mss_detected", False):
+                return "volatility_breakout"
+            else:
+                return "high_volatility_chaos"
+        elif "low_volatility" in regime:
+            return "low_volatility_compression"
+        else:
+            if row.get("institutional_setup", False):
+                return "smc_setup"
+            elif row.get("fvg_detected", False):
+                return "fvg_opportunity"
+            else:
+                return "no_clear_phase"
+
+    def calculate_optimized_confidence(self, row):
+        """Score de confiance basé sur les 4 indicateurs core uniquement"""
+        confidence_config = self.config_manager.get("confidence_score_calculation", {})
+        base_confidence = confidence_config.get("base_confidence", 0.2)
+        signal_weights = confidence_config.get("signal_weights", {})
+        confluence_bonus = confidence_config.get("confluence_bonus", {})
+        quality_multipliers = confidence_config.get("quality_factors", {})
+        
+        score = base_confidence
+        
+        if row.get("fvg_detected", False):
+            score += signal_weights.get("fvg_detected", 0.25)
+        if row.get("ob_detected", False):
+            score += signal_weights.get("ob_detected", 0.35)
+        if row.get("bos_mss_detected", False):
+            score += signal_weights.get("bos_mss_detected", 0.25)
+        
+        regime_strength = row.get("regime_strength", 0.5)
+        if regime_strength > 0.7:
+            score += signal_weights.get("regime_alignment", 0.15)
+        
+        if row.get("fvg_ob_confluence", False):
+            score += confluence_bonus.get("fvg_ob_confluence", 0.15)
+        if row.get("high_quality_ob", False) and row.get("bos_mss_detected", False):
+            score += confluence_bonus.get("ob_bos_confluence", 0.10)
+        if row.get("institutional_setup", False):
+            score += confluence_bonus.get("full_confluence_bonus", 0.20)
+        
+        if row.get("is_liquid", True):
+            score *= quality_multipliers.get("tight_spread", 1.05)
+        if regime_strength > 0.8:
+            score *= quality_multipliers.get("regime_strength", 1.10)
+        
+        ob_details = row.get("ob_details")
+        bos_details = row.get("bos_mss_details")
+        
+        if isinstance(ob_details, dict) and ob_details.get("volume_spike", 0) > 1.5:
+            score *= quality_multipliers.get("high_volume_confirmation", 1.15)
+        elif isinstance(bos_details, dict) and bos_details.get("volume_ratio", 0) > 1.5:
+            score *= quality_multipliers.get("high_volume_confirmation", 1.15)
+        
+        max_confidence = confluence_bonus.get("max_confidence_cap", 0.95)
+        return min(max_confidence, max(0.0, score))      
   
 
     def analyze(self, df: pd.DataFrame, asset_symbol: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -2076,99 +2158,7 @@ class PhaseObserver:
             )
         
         return df_an
-      
-        
-        def calculate_optimized_confidence(row):
-            """Score de confiance basé sur les 4 indicateurs core uniquement"""
-            confidence_config = self.config_manager.get(
-                "phase_detection_defaults.confidence_score_optimized", {}
-            )
-            
-            base_confidence = confidence_config.get("base_confidence", 0.2)
-            signal_weights = confidence_config.get("signal_weights", {})
-            confluence_bonus = confidence_config.get("confluence_bonus", {})
-            quality_multipliers = confidence_config.get("quality_multipliers", {})
-            
-            # Score de base
-            score = base_confidence
-            
-            # Poids des signaux core
-            if row.get("fvg_detected", False):
-                score += signal_weights.get("fvg_detected", 0.25)
-            if row.get("ob_detected", False):
-                score += signal_weights.get("ob_detected", 0.35)
-            if row.get("bos_mss_detected", False):
-                score += signal_weights.get("bos_mss_detected", 0.25)
-            
-            # Bonus régime alignment
-            regime_strength = row.get("regime_strength", 0.5)
-            if regime_strength > 0.7:
-                score += signal_weights.get("regime_alignment", 0.15)
-            
-            # Bonus confluence
-            if row.get("fvg_ob_confluence", False):
-                score += confluence_bonus.get("fvg_ob_confluence", 0.15)
-            if row.get("high_quality_ob", False) and row.get("bos_mss_detected", False):
-                score += confluence_bonus.get("ob_bos_confluence", 0.10)
-            if row.get("institutional_setup", False):
-                score += confluence_bonus.get("full_confluence_bonus", 0.20)
-            
-            # Multiplicateurs qualité
-            if row.get("is_liquid", True):
-                score *= quality_multipliers.get("tight_spread", 1.05)
-            if regime_strength > 0.8:
-                score *= quality_multipliers.get("regime_strength", 1.10)
-            
-            # Volume confirmation pour OB/BOS
-            ob_details = row.get("ob_details")
-            bos_details = row.get("bos_mss_details")
-            
-            if isinstance(ob_details, dict) and ob_details.get("volume_spike", 0) > 1.5:
-                score *= quality_multipliers.get("high_volume_confirmation", 1.15)
-            elif isinstance(bos_details, dict) and bos_details.get("volume_ratio", 0) > 1.5:
-                score *= quality_multipliers.get("high_volume_confirmation", 1.15)
-            
-            # Cap final
-            max_confidence = confluence_bonus.get("max_confidence_cap", 0.95)
-            return min(max_confidence, max(0.0, score))
-        
-        df_an["confidence_score"] = df_an.apply(calculate_optimized_confidence, axis=1)
-        
-        # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
-        processing_end = time.perf_counter() if 'time' in globals() else 0
-        
-        if not df_an.empty:
-            # Statistiques du pipeline
-            total_signals = df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
-            avg_confidence = df_an["confidence_score"].mean()
-            high_confidence_signals = (df_an["confidence_score"] > 0.7).sum()
-            
-            # Log final optimisé
-            last_phase = df_an["phase"].iloc[-1]
-            last_confidence = df_an["confidence_score"].iloc[-1]
-            last_regime = df_an["regime"].iloc[-1]
-            
-            self.logger.info(
-                f"🎯 [{current_asset_symbol}] Pipeline terminé: "
-                f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
-                f"Régime={last_regime}, Signaux totaux={total_signals}"
-            )
-            
-            # Performance monitoring
-            performance_config = self.config_manager.get("performance_monitoring", {})
-            if performance_config.get("enable_performance_tracking", True):
-                target_win_rate = performance_config.get("benchmark_metrics", {}).get("target_win_rate", 0.78)
-                if avg_confidence < 0.4:
-                    self.logger.warning(f"⚠️ Confidence moyenne faible: {avg_confidence:.3f} < 0.4")
-        
-        # Nettoyage final - Supprimer colonnes de détail pour optimiser la mémoire
-        detail_columns = [col for col in df_an.columns if col.endswith("_details")]
-        df_an.drop(columns=detail_columns, errors="ignore", inplace=True)
-        
-        
-        
-        return df_an
-
+                  
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):
         """
         Exporte le rapport final ou un DataFrame donné au format CSV.
