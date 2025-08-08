@@ -2035,13 +2035,13 @@ class PhaseObserver:
             volume_mean_z = df_an['tick_volume'].rolling(window=volume_zscore_period).mean()
             volume_std_z = df_an['tick_volume'].rolling(window=volume_zscore_period).std()
             df_an['volume_zscore'] = (df_an['tick_volume'] - volume_mean_z) / volume_std_z.replace(0, np.nan)
-            df_an['volume_zscore'].fillna(0, inplace=True)
+            df_an['volume_zscore'] = df_an['volume_zscore'].fillna(0)
             
             # Calcul du Momentum (différence par rapport à la moyenne mobile, normalisée)
             volume_change = df_an['tick_volume'] - df_an['volume_ma']
             # Normaliser par l'écart-type pour obtenir un momentum comparable entre actifs
             df_an['volume_momentum'] = volume_change / df_an['tick_volume'].rolling(window=volume_ma_period).std().replace(0, np.nan)
-            df_an['volume_momentum'].fillna(0, inplace=True)
+            df_an['volume_momentum'] = df_an['volume_momentum'].fillna(0)
             
             # Log de débogage pour vérifier le calcul
             last_momentum = df_an['volume_momentum'].iloc[-1]
