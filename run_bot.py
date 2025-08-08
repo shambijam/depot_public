@@ -22,6 +22,7 @@ try:
     from phase_observer.phase_observer import PhaseObserver
     from core.config_manager import ConfigManager
     from core.decision_pipeline import DecisionPipeline
+    from trader.trade_executor import run_trade_execution_pipeline
     from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
     from ai_core.ai_decision import AIDecision
     from mt5_connector import MT5Connector
@@ -384,7 +385,7 @@ def run_single_pipeline_cycle(
 
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL"]:
             logger.info(f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}")
-            feedback = trade_executor.execute_order(decision_package)
+            feedback = run_trade_execution_pipeline(trade_executor, decision_package)
             if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
         else:
