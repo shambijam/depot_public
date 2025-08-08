@@ -103,8 +103,8 @@
         "description": "Détection sophistiquée du régime de marché",
         "adx_settings": {
             "period": 14,
-            "trending_threshold": 22,
-            "ranging_threshold": 18
+            "trending_threshold": 25,
+            "ranging_threshold": 20
         },
         "volatility_regimes": {
             "calculation_period": 15,
@@ -114,7 +114,7 @@
         "volume_profile": {
             "enable_institutional_detection": true,
             "volume_ma_period": 15,
-            "institutional_threshold": 1.5
+            "institutional_threshold": 1.3
         },
         "regime_types": [
             "trending_institutional_bull",

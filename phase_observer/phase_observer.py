@@ -1886,6 +1886,7 @@ class PhaseObserver:
         for attr, value in params.items():
             if hasattr(self, attr) and value is not None:
                 setattr(self, attr, value)
+  
 
     def analyze(self, df: pd.DataFrame, asset_symbol: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
@@ -1928,6 +1929,52 @@ class PhaseObserver:
             else:
                 df_an[col] = pd.to_numeric(df_an[col], errors="coerce").fillna(default_val)
         
+        # ==============================================================================
+        # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+        # ✨✨✨                C'EST ICI QUE VOUS AJOUTEZ LE BLOC                  ✨✨✨
+        # ==============================================================================
+        
+        # AJOUT DU CALCUL DU 'volume_momentum'
+        self.logger.debug(f"[{current_asset_symbol}] Calcul du volume momentum...")
+        
+        # Période de la moyenne mobile du volume (configurable)
+        volume_ma_period = self.config_manager.get(
+            "phase_detection_defaults.regime_detection_settings.volume_profile.volume_ma_period", 20
+        )
+        
+        # Z-score pour la détection d'anomalies
+        volume_zscore_period = 50 # Fenêtre plus longue pour un Z-score stable
+        
+        if "tick_volume" in df_an.columns and len(df_an) > volume_zscore_period:
+            # Calcul de la moyenne mobile
+            df_an['volume_ma'] = df_an['tick_volume'].rolling(window=volume_ma_period, min_periods=1).mean()
+            
+            # Calcul du Z-score pour identifier les anomalies
+            volume_mean_z = df_an['tick_volume'].rolling(window=volume_zscore_period).mean()
+            volume_std_z = df_an['tick_volume'].rolling(window=volume_zscore_period).std()
+            df_an['volume_zscore'] = (df_an['tick_volume'] - volume_mean_z) / volume_std_z.replace(0, np.nan)
+            df_an['volume_zscore'].fillna(0, inplace=True)
+            
+            # Calcul du Momentum (différence par rapport à la moyenne mobile, normalisée)
+            volume_change = df_an['tick_volume'] - df_an['volume_ma']
+            # Normaliser par l'écart-type pour obtenir un momentum comparable entre actifs
+            df_an['volume_momentum'] = volume_change / df_an['tick_volume'].rolling(window=volume_ma_period).std().replace(0, np.nan)
+            df_an['volume_momentum'].fillna(0, inplace=True)
+            
+            # Log de débogage pour vérifier le calcul
+            last_momentum = df_an['volume_momentum'].iloc[-1]
+            self.logger.info(f"DEBUG MOMENTUM pour {current_asset_symbol}: Dernière valeur = {last_momentum:.2f}")
+
+        else:
+            # Si les données sont insuffisantes, on initialise les colonnes à zéro
+            self.logger.warning(f"Données de volume insuffisantes pour {current_asset_symbol}, momentum mis à 0.")
+            df_an['volume_zscore'] = 0.0
+            df_an['volume_momentum'] = 0.0
+
+        # ==============================================================================
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        # ==============================================================================
+
         # Récupération des toggles optimisés
         toggles = self.config_manager.get("phase_detection_defaults.detection_toggles", {})
         self.logger.debug(f"Toggles optimisés: {toggles}")
@@ -1936,6 +1983,7 @@ class PhaseObserver:
         
         # 1. MARKET REGIME DETECTION (remplace trend basique)
         if toggles.get("detect_regime", True):
+            # NOTE: Cette fonction peut déjà calculer des métriques de volume. Assurez-vous qu'il n'y a pas de redondance.
             df_an["regime"] = self.detect_market_regime(df_an)
             df_an["regime_detected"] = True
             self.logger.debug("✅ Market Regime Detection terminé")
@@ -1975,7 +2023,6 @@ class PhaseObserver:
         crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
         
         if current_asset_symbol in crypto_symbols:
-            # Seuils crypto
             max_spread = self.config_manager.get(
                 "phase_detection_defaults.liquidity_detection.crypto_settings.max_allowed_spread_points", 2000
             )
@@ -1983,7 +2030,6 @@ class PhaseObserver:
                 "phase_detection_defaults.liquidity_detection.crypto_settings.min_volume_threshold", 10
             )
         else:
-            # Seuils forex
             max_spread = self.config_manager.get(
                 "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points", 7
             )
@@ -1996,75 +2042,42 @@ class PhaseObserver:
         df_an["is_liquid"] = (last_spread <= max_spread) and (last_volume >= min_volume)
         
         # === PHASE 4: SIGNAUX DE CONFLUENCE SOPHISTIQUÉS ===
-        
-        # Confluence FVG + OB (signal premium)
         df_an["fvg_ob_confluence"] = df_an["fvg_detected"] & df_an["ob_detected"]
-        
-        # OB avec scoring ML élevé
         df_an["high_quality_ob"] = df_an["ob_details"].apply(
             lambda x: isinstance(x, dict) and x.get("ml_score", 0) > 0.8
         )
-        
-        # BOS/MSS avec confirmation volume élevée
         df_an["confirmed_structure_break"] = df_an["bos_mss_details"].apply(
             lambda x: isinstance(x, dict) and x.get("volume_ratio", 0) > 2.0
         )
-        
-        # Régime institutional + signaux SMC
         df_an["institutional_setup"] = (
             df_an["regime"].str.contains("institutional", na=False) &
             (df_an["ob_detected"] | df_an["bos_mss_detected"])
         )
         
         # === PHASE 5: DÉTERMINATION DE PHASE OPTIMISÉE ===
-        def determine_optimized_phase(row):
-            """Classification de phase basée sur les 4 indicateurs core"""
-            regime = row.get("regime", "unknown")
-            
-            # Phases basées sur le régime de marché
-            if "trending_institutional" in regime:
-                if row.get("fvg_ob_confluence", False):
-                    return "institutional_setup_premium"
-                elif row.get("ob_detected", False):
-                    return "institutional_setup"
-                elif "bull" in regime:
-                    return "trending_institutional_bull"
-                else:
-                    return "trending_institutional_bear"
-                    
-            elif "range_accumulation" in regime:
-                if row.get("high_quality_ob", False):
-                    return "accumulation_zone"
-                else:
-                    return "range_accumulation"
-                    
-            elif "range_distribution" in regime:
-                if row.get("confirmed_structure_break", False):
-                    return "distribution_breakout"
-                else:
-                    return "range_distribution"
-                    
-            elif "high_volatility" in regime:
-                if row.get("bos_mss_detected", False):
-                    return "volatility_breakout"
-                else:
-                    return "high_volatility_chaos"
-                    
-            elif "low_volatility" in regime:
-                return "low_volatility_compression"
-                
-            else:
-                # Fallback basé sur signaux SMC seulement
-                if row.get("institutional_setup", False):
-                    return "smc_setup"
-                elif row.get("fvg_detected", False):
-                    return "fvg_opportunity"
-                else:
-                    return "no_clear_phase"
-        
-        df_an["phase"] = df_an.apply(determine_optimized_phase, axis=1)
+        df_an["phase"] = df_an.apply(self.determine_optimized_phase, axis=1) # Appel à la nouvelle méthode de classe
         
         # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
+        df_an["confidence_score"] = df_an.apply(self.calculate_optimized_confidence, axis=1) # Appel à la nouvelle méthode de classe
+        
+        # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
+        if not df_an.empty:
+            total_signals = df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
+            avg_confidence = df_an["confidence_score"].mean()
+            
+            last_phase = df_an["phase"].iloc[-1]
+            last_confidence = df_an["confidence_score"].iloc[-1]
+            last_regime = df_an["regime"].iloc[-1]
+            
+            self.logger.info(
+                f"🎯 [{current_asset_symbol}] Pipeline terminé: "
+                f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
+                f"Régime={last_regime}, Signaux totaux={total_signals}"
+            )
+        
+        return df_an
+      
+        
         def calculate_optimized_confidence(row):
             """Score de confiance basé sur les 4 indicateurs core uniquement"""
             confidence_config = self.config_manager.get(
