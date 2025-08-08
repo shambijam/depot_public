@@ -1122,9 +1122,9 @@ class DecisionPipeline:
         strategy_manager_instance=None,
     ) -> Dict[str, Any]:
         """
-        Orchestre la prise de décision en déléguant l'évaluation des règles d'entrée
-        à l'objet de la stratégie active correspondante du package 'strategy/'.
-        Déplacée de ConfigManager.
+        Prend directement la décision de trade en utilisant les paramètres de stratégie
+        mais sans déléguer la décision finale aux instances de stratégie.
+        DecisionPipeline est le SEUL DÉCIDEUR.
 
         Args:
             context (Dict): Le contexte de marché et système enrichi.
@@ -1136,7 +1136,7 @@ class DecisionPipeline:
             Dict: Le dictionnaire de la décision de trade, ou un dictionnaire vide si aucune opportunité n'est trouvée.
         """
         self.logger.info(
-            "Orchestration de la décision de trade via la stratégie active..."
+            "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
         )
 
         self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
@@ -1155,62 +1155,20 @@ class DecisionPipeline:
             )
             return {}
 
-        # 2. Identifier et instancier la classe de la stratégie active
-        strategy_name = current_config.get("strategy_name")
-        self.logger.debug(f"Stratégie active: {strategy_name}")
-        strategy_class = None
+        # 2. Récupérer le nom de stratégie pour les paramètres
+        strategy_name = current_config.get("strategy_name", "unknown")
+        self.logger.info(f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}")
 
-        # CORRECTION MAJEURE : Utiliser l'attribut self.strategy_manager qui a été injecté dans __init__.
-        # Le paramètre strategy_manager_instance de la fonction n'est plus pertinent.
-        if (
-            self.strategy_manager
-        ):  # Vérifie que self.strategy_manager est bien initialisé
-            strategy_class = self.strategy_manager.get_strategy_class(
-                strategy_name
-            )  # Utilise self.strategy_manager
-        else:
-            self.logger.critical(
-                "ERREUR ARCHITECTURALE : L'instance de StrategyManager n'est pas disponible dans DecisionPipeline. Impossible de récupérer la classe de stratégie."
-            )
-            # Ne pas tenter de fallback via config_manager._config_knowledge_base, car c'est une mauvaise pratique.
-            return {}
-
-        if not strategy_class:
-            self.logger.critical(
-                f"ERREUR ARCHITECTURALE : Aucune classe Python de stratégie trouvée pour '{strategy_name}'. Impossible de prendre une décision."
-            )
-            return {}
-
-        # 3. Déléguer l'évaluation de l'entrée à l'instance de la stratégie
-        self.logger.info(
-            f"Délégation de la décision d'entrée à l'instance de : {strategy_class.__name__}"
-        )
-        trade_decision = None
-        try:
-            # Passe l'instance de ConfigManager à la stratégie
-            strategy_instance = strategy_class(
-                config_manager_instance=self.config_manager,
-                strategy_config=current_config,
-            )
-            trade_decision = strategy_instance.evaluate_entry(context, signals)
-            self.logger.debug(
-                f"Résultat de l'évaluation par la stratégie: {trade_decision}"
-            )
-        except Exception as e:
-            self.logger.error(
-                f"Une erreur est survenue lors de l'évaluation de la stratégie '{strategy_name}': {e}",
-                exc_info=True,
-            )
-            trade_decision = None
-
-        # 4. Traiter le résultat retourné par la stratégie
+        # 3. CORE ÉVALUE DIRECTEMENT LES SIGNAUX (PLUS DE DÉLÉGATION)
+        trade_decision = self._core_evaluate_signals(context, current_config, signals, strategy_name)
+        
         if not trade_decision:
             self.logger.info(
-                f"La stratégie '{strategy_name}' n'a trouvé aucune opportunité d'entrée ce cycle."
+                f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
             )
             return {}
 
-        # 5. Vérifications finales et calcul de risque (responsabilité du ConfigManager/DecisionPipeline)
+        # 4. Vérifications finales et calcul de risque (responsabilité du ConfigManager/DecisionPipeline)
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
             "max_open_positions", 999
@@ -1244,8 +1202,136 @@ class DecisionPipeline:
             current_config,
             trade_decision,
             context,
-            f"Décision de la stratégie '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
+            f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
+        return trade_decision
+
+    def _core_evaluate_signals(
+        self, 
+        context: Dict[str, Any], 
+        config: Dict[str, Any], 
+        signals: Dict[str, Any],
+        strategy_name: str
+    ) -> Dict[str, Any]:
+        """
+        CORE évalue directement les signaux et prend la décision finale.
+        Utilise les paramètres de stratégie mais applique une logique décisionnelle centralisée.
+        """
+        self.logger.info(f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}")
+        
+        best_asset = None
+        best_score = 0.0
+        best_signals = None
+        
+        # Seuils de validation CORE (plus flexibles que les stratégies)
+        min_confidence = config.get("min_confidence", 0.65)  # Plus bas que 0.77
+        
+        for asset, asset_signals in signals.items():
+            confidence = asset_signals.get("confidence_score", 0.0)
+            phase = asset_signals.get("phase", "")
+            
+            self.logger.debug(f"🔍 [{asset}] Confiance: {confidence:.3f}, Phase: {phase}")
+            
+            # NOUVELLE LOGIQUE CORE : Plus permissive
+            score = confidence
+            
+            # Bonus selon les signaux détectés
+            if asset_signals.get("ob_detected", False):
+                score += 0.1
+                self.logger.debug(f"    ✅ Order Block détecté -> +0.1")
+            
+            if asset_signals.get("fvg_detected", False):
+                score += 0.1
+                self.logger.debug(f"    ✅ FVG détecté -> +0.1")
+                
+            if asset_signals.get("bos_mss_detected", False):
+                score += 0.15
+                self.logger.debug(f"    ✅ BOS/MSS détecté -> +0.15")
+            
+            # Validation CORE : Accepter si confiance suffisante OU phase conclusive
+            is_valid = False
+            
+            if confidence >= min_confidence:
+                is_valid = True
+                self.logger.info(f"✅ [{asset}] Accepté par CORE - Confiance {confidence:.3f} >= {min_confidence}")
+            elif confidence >= 0.5 and any(keyword in phase.lower() for keyword in ["bullish", "bearish", "trending"]):
+                is_valid = True  
+                self.logger.info(f"✅ [{asset}] Accepté par CORE - Phase conclusive: {phase}")
+            else:
+                self.logger.debug(f"❌ [{asset}] Rejeté - Confiance {confidence:.3f} et phase {phase} insuffisantes")
+            
+            if is_valid and score > best_score:
+                best_score = score
+                best_asset = asset
+                best_signals = asset_signals
+        
+        if not best_asset:
+            self.logger.info("❌ CORE: Aucun asset ne respecte les critères d'entrée")
+            return {}
+        
+        self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
+        
+        # Construire la décision de trade
+        return self._core_build_trade_decision(best_asset, best_signals, config, context)
+
+    def _core_build_trade_decision(
+        self, 
+        asset: str, 
+        signals: Dict[str, Any], 
+        config: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        CORE construit la décision finale de trade basée sur les signaux.
+        """
+        phase = signals.get("phase", "")
+        current_price = signals.get("close", 0)
+        
+        if not current_price:
+            self.logger.error(f"❌ Prix actuel manquant pour {asset}")
+            return {}
+        
+        # Déterminer la direction (logique simplifiée)
+        action = None
+        
+        if any(keyword in phase.lower() for keyword in ["bullish", "up"]) or signals.get("entry_confirmation_bullish", False):
+            action = "BUY"
+        elif any(keyword in phase.lower() for keyword in ["bearish", "down"]) or signals.get("entry_confirmation_bearish", False):
+            action = "SELL"
+        else:
+            # Fallback sur les signaux détectés
+            if signals.get("ob_detected", False) or signals.get("fvg_detected", False):
+                # Analyse simple du momentum pour déterminer la direction
+                volume_momentum = signals.get("volume_momentum", 0)
+                if volume_momentum > 0:
+                    action = "BUY"
+                else:
+                    action = "SELL"
+        
+        if not action:
+            self.logger.warning(f"❌ Direction indéterminée pour {asset}")
+            return {}
+        
+        # Paramètres SL/TP depuis la configuration
+        sl_pips = config.get("stop_loss_pips", 20)
+        tp_pips = config.get("take_profit_pips", 40)
+        magic_number = config.get("magic_number", 999999)
+        
+        trade_decision = {
+            "action": action,
+            "asset": asset,
+            "strategy_type": f"core_{config.get('strategy_name', 'decision')}",
+            "entry_price": current_price,
+            "target_sl_pips": sl_pips,
+            "target_tp_pips": tp_pips,
+            "rule_name": f"core_decision_{phase}",
+            "confidence": signals.get("confidence_score", 0.0),
+            "timestamp": context.get("current_time_utc", ""),
+            "magic_number": magic_number,
+        }
+        
+        self.logger.info(f"✅ CORE construit trade {action} {asset} @ {current_price} (SL: {sl_pips}, TP: {tp_pips})")
+        
         return trade_decision
 
     def _evaluate_rule(
