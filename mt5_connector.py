@@ -769,13 +769,14 @@ class MT5Connector:
 
         Args:
             request (Dict[str, Any]): Le dictionnaire de la requête d'ordre MT5, conforme à la structure
-                                       attendue par `mt5.order_send()`.
+                                    attendue par `mt5.order_send()`.
 
         Returns:
             Optional[Any]: L'objet `MetaTrader5.TradeResult` (NamedTuple) si l'ordre est envoyé et une réponse est reçue,
-                           `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
+                        `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
         """
-        if not self.is_connected():
+        # CORRECTION: is_connected est un attribut booléen, pas une méthode
+        if not self.is_connected:
             self.logger.error(
                 "MT5: Non connecté. Impossible d'envoyer l'ordre."
             )  # Utilise self.logger
@@ -879,8 +880,6 @@ class MT5Connector:
             )
 
         return result
-
-    # Contenu du fichier mt5_connector.py (suite)
 
     def get_trade_history(self) -> pd.DataFrame:
         """
