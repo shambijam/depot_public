@@ -775,14 +775,14 @@ class MT5Connector:
             Optional[Any]: L'objet `MetaTrader5.TradeResult` (NamedTuple) si l'ordre est envoyé et une réponse est reçue,
                         `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
         """
-        # CORRECTION: is_connected est un attribut booléen, pas une méthode
-        if not self.is_connected:
+        if not self.is_connected():
             self.logger.error(
                 "MT5: Non connecté. Impossible d'envoyer l'ordre."
             )  # Utilise self.logger
             self.config_manager.send_alert(
+                "CRITIQUE",
                 "MT5 Non Connecté: Échec Envoi Ordre.",
-                alert_type="telegram_critical"
+                alert_type="telegram_critical",
             )
             return None
 
@@ -802,8 +802,9 @@ class MT5Connector:
                 f"MT5: Requête d'ordre invalide. Clés manquantes: {missing_keys}. Requête: {request}"
             )  # Utilise self.logger
             self.config_manager.send_alert(
+                "ERREUR",
                 f"MT5: Requête ordre invalide. Clés manquantes: {missing_keys}",
-                alert_type="telegram_critical"
+                alert_type="telegram_critical",
             )
             return None
 
@@ -863,19 +864,23 @@ class MT5Connector:
                     f"MT5: Ordre non exécuté. Retcode: {result.retcode} ({retcode_str}), Commentaire: {result.comment}. Erreur système: {self.mt5.last_error()}."
                 )  # Utilise self.logger, self.mt5
                 self.config_manager.send_alert(
+                    "ERREUR_ORDRE",
                     f"MT5: Ordre non exécuté: {result.comment} (Code: {result.retcode})",
-                    alert_type="telegram_critical"
+                    alert_type="telegram_critical",
                 )
         else:
             self.logger.error(
                 f"MT5: La fonction order_send a échoué. Aucune réponse reçue. Erreur système: {self.mt5.last_error()}."
             )  # Utilise self.logger, self.mt5
             self.config_manager.send_alert(
+                "CRITIQUE",
                 f"MT5: Échec envoi ordre: Aucune réponse. {self.mt5.last_error()}",
-                alert_type="telegram_critical"
+                alert_type="telegram_critical",
             )
 
         return result
+
+        # Contenu du fichier mt5_connector.py (suite)
 
     def get_trade_history(self) -> pd.DataFrame:
         """
