@@ -452,28 +452,11 @@ class TradeExecutor:
         #       une croissance infinie du fichier. (Ceci sera géré par ConfigManager qui appelle ici).
     def load_decision_package(self, decision_package: dict) -> dict:
         """
-        Charge et valide la structure d'un package de décision.
-        Validation de schéma désactivée.
-        
-        Args:
-            decision_package (dict): Le package de décision à valider.
-        
-        Returns:
-            dict: Le package de décision.
-        
-        Raises:
-            InvalidDecisionPackageError: Si le package est manifestement invalide.
+        Charge le package de décision sans validation.
         """
-        self.logger.debug("Chargement du package de décision (validation de schéma désactivée)...")
+        self.logger.debug("Chargement du package de décision (aucune validation)...")
         
-        # Validation basique uniquement
-        if not isinstance(decision_package, dict):
-            raise InvalidDecisionPackageError("Le package de décision doit être un dictionnaire.")
-        
-        if not decision_package.get("trade_decision"):
-            raise InvalidDecisionPackageError("Le package de décision doit contenir 'trade_decision'.")
-        
-        self.logger.debug("Package de décision chargé avec succès.")
+        # Aucune validation, on retourne direct le package
         return decision_package
 
     def _check_trading_window(
