@@ -8,9 +8,12 @@
     "intraday"
   ],
   "tradeable_assets": [
-    "EURUSD",
-    "GBPUSD",
-    "USDCHF"
+     "EURUSD",
+     "GBPUSD",
+     "USDCHF",
+     "XAUUSD",
+     "US30",
+     "NAS100"
   ],
   "magic_number": 2307,
   "risk_per_trade_percent": 1,

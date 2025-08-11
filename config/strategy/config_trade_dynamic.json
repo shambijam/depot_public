@@ -8,9 +8,12 @@
     "medium_frequency"
   ],
   "tradeable_assets": [
-    "EURUSD",
-    "GBPUSD",
-    "XAUUSD"
+     "EURUSD",
+     "GBPUSD",
+     "USDCHF",
+     "XAUUSD",
+     "US30",
+     "NAS100"
   ],
   "magic_number": 1108,
   "risk_per_trade_percent": 1,

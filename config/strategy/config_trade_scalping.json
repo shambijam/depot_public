@@ -18,7 +18,9 @@
     "XAUUSD",
     "BTCUSD",
     "ETHUSD",
-    "LTCUSD"
+    "LTCUSD",
+    "US30",
+    "NAS100"
   ],
   "magic_number": 10001,
   "risk_per_trade_percent": 0.1,
