@@ -128,6 +128,7 @@ def load_and_verify_environment(
 
 # --- Fonctions d'Aide (Helpers) pour le Cycle de Pipeline ---
 
+
 def _get_merged_config_for_asset(
     active_config: dict, config_manager: ConfigManager, asset: str
 ) -> dict:
@@ -141,7 +142,15 @@ def _get_merged_config_for_asset(
             **merged_config.get("phase_detection", {}),
             **asset_specific_config.get("phase_detection", {}),
         }
-    for section in ["volatility", "risk_management", "smart_targets", "temporal_context", "institutional_bias", "weighting", "strategy_toggles"]:
+    for section in [
+        "volatility",
+        "risk_management",
+        "smart_targets",
+        "temporal_context",
+        "institutional_bias",
+        "weighting",
+        "strategy_toggles",
+    ]:
         if section in asset_specific_config:
             merged_config[section] = {
                 **merged_config.get(section, {}),
@@ -155,9 +164,14 @@ def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
     closed_market_check_bars = active_config.get("bot_behavior", {}).get(
         "closed_market_check_bars", 15
     )
-    if (len(rates_df) > closed_market_check_bars and rates_df["close"].iloc[-1] == rates_df["close"].iloc[-closed_market_check_bars]):
+    if (
+        len(rates_df) > closed_market_check_bars
+        and rates_df["close"].iloc[-1]
+        == rates_df["close"].iloc[-closed_market_check_bars]
+    ):
         return True
     return False
+
 
 # ------------------- FONCTION CORRIGÉE -------------------
 def _build_asset_trading_signals(
@@ -174,20 +188,27 @@ def _build_asset_trading_signals(
 
     # Étape 2: Ajouter les informations essentielles du broker.
     # On s'assure que les noms de clés sont cohérents avec ce que le DecisionPipeline attend.
-    signals['current_price'] = latest_signals_row.get("close")
-    signals['spread'] = symbol_info_mt5.spread if symbol_info_mt5 else float('inf')
-    signals['symbol_point_value'] = symbol_info_mt5.point if symbol_info_mt5 else 0.00001
-    signals['symbol_trade_contract_size'] = symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
-    
+    signals["current_price"] = latest_signals_row.get("close")
+    signals["spread"] = symbol_info_mt5.spread if symbol_info_mt5 else float("inf")
+    signals["symbol_point_value"] = (
+        symbol_info_mt5.point if symbol_info_mt5 else 0.00001
+    )
+    signals["symbol_trade_contract_size"] = (
+        symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
+    )
+
     # Étape 3: S'assurer que les horodatages sont dans un format standard.
     # .name contient l'index de la Series, qui est notre 'time'.
-    if hasattr(latest_signals_row.name, 'isoformat'):
-        signals['last_update_timestamp'] = latest_signals_row.name.isoformat()
+    if hasattr(latest_signals_row.name, "isoformat"):
+        signals["last_update_timestamp"] = latest_signals_row.name.isoformat()
     else:
-        signals['last_update_timestamp'] = datetime.now(UTC).isoformat()
-        
+        signals["last_update_timestamp"] = datetime.now(UTC).isoformat()
+
     return signals
+
+
 # ------------------- FIN DE LA CORRECTION -------------------
+
 
 def _build_asset_market_data(
     annotated_rates_df: pd.DataFrame, symbol_info_mt5: Any
@@ -229,9 +250,12 @@ def _build_global_context(
         "current_time_utc": datetime.now(UTC),
         "cycle_count": cycle,
         "daily_trade_count": trades,
-        "asset_configs": {asset: cfg.config_loader.load_asset_config(asset) for asset in assets},
+        "asset_configs": {
+            asset: cfg.config_loader.load_asset_config(asset) for asset in assets
+        },
         "active_broker_account": account,
     }
+
 
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
@@ -244,10 +268,12 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-    """Exécute un cycle complet du pipeline de trading de SNIPER_X."""
+    """Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto)."""
     logger = logging.getLogger(__name__)
     print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
-    logger.info(f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---")
+    logger.info(
+        f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
+    )
     trade_executed_successfully = False
 
     try:
@@ -259,16 +285,50 @@ def run_single_pipeline_cycle(
             mode=base_config.get("mode_execution", "DEMO").upper()
         )
 
-        is_weekend = datetime.now(UTC).weekday() >= 5
-        all_symbols = base_config.get("global_safety", {}).get("global_allowed_symbols", [])
-        crypto_symbols = base_config.get("global_safety", {}).get("crypto_symbols", [])
+        # === Construction de la liste des actifs tradables (anti-crypto + intersection compte) ===
+        global_safety = base_config.get("global_safety", {}) or {}
+        all_symbols = list(global_safety.get("global_allowed_symbols", []))
 
-        tradeable_assets = crypto_symbols if is_weekend else all_symbols
+        def _is_crypto_symbol(sym: str) -> bool:
+            if not isinstance(sym, str):
+                return False
+            s = sym.upper()
+            if s in {"BTCUSD", "ETHUSD", "LTCUSD"}:
+                return True
+            # motifs communs de tickers crypto
+            return any(
+                k in s
+                for k in (
+                    "BTC",
+                    "ETH",
+                    "LTC",
+                    "DOGE",
+                    "XRP",
+                    "SOL",
+                    "ADA",
+                    "BNB",
+                    "DOT",
+                    "MATIC",
+                )
+            )
+
+        before = list(all_symbols)
+        all_symbols = [s for s in all_symbols if not _is_crypto_symbol(s)]
+        removed = [s for s in before if s not in all_symbols]
+        if removed:
+            logger.debug(
+                f"[PIPELINE] Actifs crypto retirés de la liste globale: {removed}"
+            )
+
+        account_allowed = set(active_mt5_account_details.get("allowed_symbols", []))
+        if account_allowed:
+            tradeable_assets = [a for a in all_symbols if a in account_allowed]
+        else:
+            tradeable_assets = (
+                all_symbols  # fallback si la liste du compte est vide/non fournie
+            )
+
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
-        tradeable_assets = [
-            asset for asset in tradeable_assets
-            if asset in active_mt5_account_details.get("allowed_symbols", [])
-        ]
 
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
@@ -276,31 +336,46 @@ def run_single_pipeline_cycle(
 
         all_assets_market_data = {}
         all_assets_trading_signals = {}
-        timeframe_str = base_config.get("data_collection", {}).get("default_timeframe", "M1")
-        bars_to_fetch = base_config.get("data_collection", {}).get("default_bars_count", 500)
+        timeframe_str = base_config.get("data_collection", {}).get(
+            "default_timeframe", "M1"
+        )
+        bars_to_fetch = base_config.get("data_collection", {}).get(
+            "default_bars_count", 500
+        )
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
                 if rates_df is None or rates_df.empty:
-                    logger.warning(f"Aucune donnée historique pour '{asset}'. Actif ignoré.")
+                    logger.warning(
+                        f"Aucune donnée historique pour '{asset}'. Actif ignoré."
+                    )
                     continue
 
                 symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
                 if symbol_info_mt5:
-                    rates_df["point"] = symbol_info_mt5.point
-                    rates_df["spread"] = symbol_info_mt5.spread
-                    rates_df["trade_tick_size"] = symbol_info_mt5.trade_tick_size
-                    rates_df["trade_contract_size"] = symbol_info_mt5.trade_contract_size
+                    # getattr pour robustesse si certains champs n'existent pas selon le broker
+                    rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
+                    rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
+                    rates_df["trade_tick_size"] = getattr(
+                        symbol_info_mt5, "trade_tick_size", 0.0
+                    )
+                    rates_df["trade_contract_size"] = getattr(
+                        symbol_info_mt5, "trade_contract_size", 0.0
+                    )
 
-                annotated_rates_df = phase_observer.analyze(rates_df.copy(), asset_symbol=asset)
-                
+                annotated_rates_df = phase_observer.analyze(
+                    rates_df.copy(), asset_symbol=asset
+                )
+
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     continue
 
                 latest_signals_row = annotated_rates_df.iloc[-1]
-                logger.info(f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}")
+                logger.info(
+                    f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
+                )
 
                 all_assets_trading_signals[asset] = _build_asset_trading_signals(
                     latest_signals_row, symbol_info_mt5
@@ -310,19 +385,24 @@ def run_single_pipeline_cycle(
                 )
 
             except Exception as e:
-                logger.error(f"Erreur lors de la collecte de données pour l'actif '{asset}': {e}", exc_info=True)
+                logger.error(
+                    f"Erreur lors de la collecte de données pour l'actif '{asset}': {e}",
+                    exc_info=True,
+                )
                 continue
 
         if not all_assets_trading_signals:
             logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
             return False
-        
-        print("\n" + "="*60)
+
+        print("\n" + "=" * 60)
         print("🔍 TRACE COMPLÈTE DU PIPELINE:")
         print(f"1️⃣ SIGNAUX COLLECTÉS: {len(all_assets_trading_signals)} assets")
         for asset, sig in all_assets_trading_signals.items():
-            print(f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}")
-        print("="*60)
+            print(
+                f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
+            )
+        print("=" * 60)
 
         print(f"🌍 [PIPELINE] Construction du contexte global...")
         try:
@@ -337,38 +417,44 @@ def run_single_pipeline_cycle(
                 active_mt5_account_details,
             )
             print(f"✅ [PIPELINE] Contexte global construit avec succès !")
-            
+
             print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
-            print(f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}")
-            
+            print(
+                f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}"
+            )
+
         except Exception as e:
             print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")
             logger.error(f"Erreur construction contexte: {e}", exc_info=True)
             return False
 
         print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
-        decision_package = decision_pipeline.institutional_decision_pipeline(global_context)
-        
+        decision_package = decision_pipeline.institutional_decision_pipeline(
+            global_context
+        )
+
         print(f"3️⃣ DÉCISION RETOURNÉE:")
-        if decision_package and 'final_decision' in decision_package:
-            final = decision_package['final_decision']
+        if decision_package and "final_decision" in decision_package:
+            final = decision_package["final_decision"]
             print(f"   Action: {final.get('action', 'NONE')}")
             print(f"   Asset: {final.get('asset', 'NONE')}")
             print(f"   Volume: {final.get('volume', 0)}")
-            if final.get('action') in ['BUY', 'SELL']:
+            if final.get("action") in ["BUY", "SELL"]:
                 print(f"   ✅ TRADE DÉCIDÉ !")
             else:
                 print(f"   ❌ PAS DE TRADE")
         else:
             print("   ❌ AUCUNE DÉCISION (dict vide)")
-        print("="*60 + "\n")
-        
+        print("=" * 60 + "\n")
+
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 
         current_open_positions = trade_executor.get_open_positions()
         if current_open_positions:
-            logger.info(f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie.")
+            logger.info(
+                f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie."
+            )
             exit_decisions = decision_pipeline.decide_exit_trades(
                 context=global_context,
                 open_positions=current_open_positions,
@@ -376,7 +462,9 @@ def run_single_pipeline_cycle(
                 strategy_manager_instance=decision_pipeline.strategy_manager,
             )
             if exit_decisions:
-                trade_executor.execute_exit_orders(exit_decisions, is_dry_run=is_dry_run)
+                trade_executor.execute_exit_orders(
+                    exit_decisions, is_dry_run=is_dry_run
+                )
                 trade_executed_successfully = True
 
         if daily_trade_count >= active_config.get("max_trades_per_day", 999):
@@ -384,12 +472,16 @@ def run_single_pipeline_cycle(
             return trade_executed_successfully
 
         if trade_decision and trade_decision.get("action") in ["BUY", "SELL"]:
-            logger.info(f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}")
+            logger.info(
+                f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}"
+            )
             feedback = run_trade_execution_pipeline(trade_executor, decision_package)
             if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
         else:
-            regime = decision_package.get("context", {}).get("current_market_regime", "inconnu")
+            regime = decision_package.get("context", {}).get(
+                "current_market_regime", "inconnu"
+            )
             logger.info(f"Aucune opportunité. Régime: {regime}.")
 
     except Exception as e:
@@ -398,7 +490,8 @@ def run_single_pipeline_cycle(
     finally:
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-    
+
+
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,

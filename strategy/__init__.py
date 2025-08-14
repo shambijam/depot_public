@@ -1,19 +1,17 @@
 # strategy/__init__.py
+"""
+Ce package expose les classes de stratégies actives.
+CryptoStrategy a été retirée du projet.
+"""
 
-# Ce fichier marque le répertoire 'strategy' comme un paquet Python.
-# Il est utilisé pour exposer les classes de stratégie principales pour une importation facile.
-
-# Exposer les classes de stratégie actives pour une importation facile
 from .base_strategy import BaseStrategy
 from .scalping import ScalpingStrategy
-from .crypto import CryptoStrategy
-from .liquidity import LiquidityStrategy # <-- Ajout de l'importation manquante
-from .dynamic import DynamicStrategy     # <-- Ajout de l'importation manquante
+from .liquidity import LiquidityStrategy
+from .dynamic import DynamicStrategy
 
 __all__ = [
     "BaseStrategy",
     "ScalpingStrategy",
-    "CryptoStrategy",
-    "LiquidityStrategy", # <-- Ajout à la liste __all__
-    "DynamicStrategy"    # <-- Ajout à la liste __all__
+    "LiquidityStrategy",
+    "DynamicStrategy",
 ]

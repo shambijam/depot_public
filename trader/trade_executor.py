@@ -450,12 +450,13 @@ class TradeExecutor:
 
         # TODO: Implémenter une rotation des journaux d'audit (par taille ou par jour) pour éviter
         #       une croissance infinie du fichier. (Ceci sera géré par ConfigManager qui appelle ici).
+
     def load_decision_package(self, decision_package: dict) -> dict:
         """
         Charge le package de décision sans validation.
         """
         self.logger.debug("Chargement du package de décision (aucune validation)...")
-        
+
         # Aucune validation, on retourne direct le package
         return decision_package
 
@@ -464,23 +465,8 @@ class TradeExecutor:
     ) -> tuple[bool, str]:
         """
         Vérifie si le trading est autorisé pour l'actif donné à l'heure actuelle.
-        Gère les sessions de nuit (passant par minuit) et le trading de crypto le week-end.
-
-        Args:
-            current_time_utc (datetime): L'objet datetime UTC actuel.
-            symbol (str): Le symbole de l'actif concerné par le trade.
-
-        Returns:
-            tuple[bool, str]: True si dans la fenêtre de trading, False sinon, avec une raison.
+        Gère correctement les sessions de nuit (passant par minuit).
         """
-        # --- AMÉLIORATION 1: Autorisation du trading de crypto le week-end ---
-        crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
-        is_weekend = current_time_utc.weekday() >= 5  # Samedi (5) ou Dimanche (6)
-
-        if symbol in crypto_symbols and is_weekend:
-            return True, f"Trading de crypto ({symbol}) autorisé le week-end."
-
-        # --- AMÉLIORATION 2: Gestion correcte des sessions de nuit ---
         start_hour = self.config_manager.get(
             "trade_executor_settings.trading_start_hour_utc", 7
         )
@@ -497,14 +483,14 @@ class TradeExecutor:
                 f"Hors des jours de trading autorisés (Jour: {current_time_utc.weekday()}).",
             )
 
-        # Logique pour une session normale (ex: 07:00 -> 20:00)
+        # Session normale (ex: 07:00 -> 20:00)
         if start_hour <= end_hour:
             if not (start_hour <= current_time_utc.hour < end_hour):
                 return (
                     False,
                     f"Hors de la fenêtre de trading (Heure UTC: {current_time_utc.hour}).",
                 )
-        # Logique pour une session de nuit qui passe par minuit (ex: 22:00 -> 07:00)
+        # Session de nuit (ex: 22:00 -> 07:00)
         else:
             if not (
                 current_time_utc.hour >= start_hour or current_time_utc.hour < end_hour
@@ -637,77 +623,77 @@ class TradeExecutor:
         )
         return True, "Exposition du portefeuille acceptable."
 
-        def pre_trade_checks(self, decision_package: dict) -> bool:
-            """
-            Orchestre une série de validations pré-trade de manière robuste.
-            Cette fonction est la dernière ligne de défense avant l'envoi d'un ordre au broker.
+    def pre_trade_checks(self, decision_package: dict) -> bool:
+        """
+        Orchestre une série de validations pré-trade de manière robuste.
+        Cette fonction est la dernière ligne de défense avant l'envoi d'un ordre au broker.
 
-            Args:
-                decision_package (dict): Le package de décision validé.
+        Args:
+            decision_package (dict): Le package de décision validé.
 
-            Returns:
-                bool: True si toutes les vérifications passent, False sinon.
-            """
-            self.logger.info("Exécution des vérifications de sécurité pré-trade...")
-            context = decision_package["market_context"]
-            config = decision_package["active_config"]
-            trade_decision = decision_package["trade_decision"]
-            symbol = trade_decision["asset"]
+        Returns:
+            bool: True si toutes les vérifications passent, False sinon.
+        """
+        self.logger.info("Exécution des vérifications de sécurité pré-trade...")
+        context = decision_package["market_context"]
+        config = decision_package["active_config"]
+        trade_decision = decision_package["trade_decision"]
+        symbol = trade_decision["asset"]
 
-            # Liste des barrières de sécurité à vérifier séquentiellement
-            checks_to_run = [
-                # Le marché est-il ouvert ?
-                (self._check_trading_window, {"current_time_utc": datetime.now(UTC)}),
-                # Le spread est-il acceptable ?
-                (self._check_spread, {"symbol": symbol, "active_config": config}),
-                # Le risque global du portefeuille est-il sous contrôle ?
+        # Liste des barrières de sécurité à vérifier séquentiellement
+        checks_to_run = [
+            # Le marché est-il ouvert ?
+            (self._check_trading_window, {"current_time_utc": datetime.now(UTC)}),
+            # Le spread est-il acceptable ?
+            (self._check_spread, {"symbol": symbol, "active_config": config}),
+            # Le risque global du portefeuille est-il sous contrôle ?
+            (
+                self._check_portfolio_exposure,
+                {"active_config": config, "current_context": context},
+            ),
+        ]
+
+        # Ajout de la vérification "anti-grosse erreur" (fat-finger) si activée
+        if self.config_manager.get(
+            "trade_executor_settings.fat_finger_check.enabled", True
+        ):
+            checks_to_run.append(
                 (
-                    self._check_portfolio_exposure,
-                    {"active_config": config, "current_context": context},
-                ),
-            ]
-
-            # Ajout de la vérification "anti-grosse erreur" (fat-finger) si activée
-            if self.config_manager.get(
-                "trade_executor_settings.fat_finger_check.enabled", True
-            ):
-                checks_to_run.append(
-                    (
-                        self._check_fat_finger_volume,
-                        {"trade_decision": trade_decision, "market_context": context},
-                    )
+                    self._check_fat_finger_volume,
+                    {"trade_decision": trade_decision, "market_context": context},
                 )
+            )
 
-            for check_func, kwargs in checks_to_run:
-                try:
-                    is_valid, reason = check_func(**kwargs)
-                    if not is_valid:
-                        self.logger.warning(
-                            f"TRADE BLOQUÉ. Raison: {reason} (Actif: {symbol})"
-                        )
-                        self.config_manager.send_alert(
-                            f"TRADE BLOQUÉ: {reason}", alert_type="telegram_critical"
-                        )
-                        return False
-                except Exception as e:
-                    # --- AMÉLIORATION MAJEURE : SÉCURITÉ ANTI-CRASH ---
-                    # Si une fonction de vérification a un bug, on ne fait pas planter le bot.
-                    # On considère que la vérification a échoué et on bloque le trade.
-                    check_name = check_func.__name__
-                    self.logger.critical(
-                        f"TRADE BLOQUÉ. Une erreur critique est survenue dans la fonction de sécurité '{check_name}'. Erreur: {e}",
-                        exc_info=True,
+        for check_func, kwargs in checks_to_run:
+            try:
+                is_valid, reason = check_func(**kwargs)
+                if not is_valid:
+                    self.logger.warning(
+                        f"TRADE BLOQUÉ. Raison: {reason} (Actif: {symbol})"
                     )
                     self.config_manager.send_alert(
-                        f"ERREUR CRITIQUE dans une sécurité pré-trade ({check_name}). Trade bloqué.",
-                        alert_type="telegram_critical",
+                        f"TRADE BLOQUÉ: {reason}", alert_type="telegram_critical"
                     )
                     return False
+            except Exception as e:
+                # --- AMÉLIORATION MAJEURE : SÉCURITÉ ANTI-CRASH ---
+                # Si une fonction de vérification a un bug, on ne fait pas planter le bot.
+                # On considère que la vérification a échoué et on bloque le trade.
+                check_name = check_func.__name__
+                self.logger.critical(
+                    f"TRADE BLOQUÉ. Une erreur critique est survenue dans la fonction de sécurité '{check_name}'. Erreur: {e}",
+                    exc_info=True,
+                )
+                self.config_manager.send_alert(
+                    f"ERREUR CRITIQUE dans une sécurité pré-trade ({check_name}). Trade bloqué.",
+                    alert_type="telegram_critical",
+                )
+                return False
 
-            self.logger.info(
-                "Toutes les vérifications de sécurité pré-trade sont passées avec succès."
-            )
-            return True
+        self.logger.info(
+            "Toutes les vérifications de sécurité pré-trade sont passées avec succès."
+        )
+        return True
 
     def _check_fat_finger_volume(
         self, trade_decision: dict, market_context: dict
@@ -2508,25 +2494,31 @@ def run_trade_execution_pipeline(
     try:
         # 1. Validation du package
         validated_package = trade_executor.load_decision_package(decision_package)
-        
+
         # 2. Mapper les clés pour créer la structure attendue
         # Le decision_package contient "Asset", "Action", "Volume" avec majuscules
         # Les méthodes attendent "asset", "action", "volume" en minuscules
         trade_decision = {
-            "asset": validated_package.get("Asset", validated_package.get("asset", "UNKNOWN")),
-            "action": validated_package.get("Action", validated_package.get("action", "UNKNOWN")), 
-            "volume": validated_package.get("Volume", validated_package.get("volume", 0.0)),
+            "asset": validated_package.get(
+                "Asset", validated_package.get("asset", "UNKNOWN")
+            ),
+            "action": validated_package.get(
+                "Action", validated_package.get("action", "UNKNOWN")
+            ),
+            "volume": validated_package.get(
+                "Volume", validated_package.get("volume", 0.0)
+            ),
             "order_id": validated_package.get("order_id", "N/A"),
-            "order_type": validated_package.get("order_type", "MARKET")
+            "order_type": validated_package.get("order_type", "MARKET"),
         }
-        
+
         # 3. Créer la structure complète attendue par les autres méthodes
         adapted_package = {
             "trade_decision": trade_decision,
-            "market_context": validated_package, 
-            "active_config": validated_package
+            "market_context": validated_package,
+            "active_config": validated_package,
         }
-        
+
         order_id = trade_decision.get("order_id", order_id)
 
         # 4. Préparation de l'ordre (y compris le calcul de risque)

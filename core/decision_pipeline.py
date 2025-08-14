@@ -44,7 +44,9 @@ class DecisionPipeline:
         self.ai_interface = ai_interface_instance
         self.strategy_manager = strategy_manager_instance  # Sera injecté plus tard
         self.logger = logging.getLogger(__name__)
-
+        self.phase_observer.debug_confidence_logging = (
+            True  # <— active les logs de poids
+        )
         self.logger.info("DecisionPipeline initialisé.")
 
     def institutional_decision_pipeline(
@@ -175,9 +177,11 @@ class DecisionPipeline:
         """
         Évalue, score et sélectionne dynamiquement les meilleurs actifs à trader pour le cycle actuel.
         Déplacée de ConfigManager.
+        (Version purgée : exclusion définitive des actifs crypto)
         """
         self.logger.info("Sélection dynamique et scoring des actifs éligibles...")
 
+        # Candidats initiaux depuis les signaux du contexte
         opportunities_candidates = list(context.get("trading_signals", {}).keys())
 
         if not opportunities_candidates:
@@ -186,14 +190,54 @@ class DecisionPipeline:
             )
             return []
 
-        final_opportunities_for_ai = []
+        # --- 0) Filtre anti-crypto robuste ---
+        def _is_crypto_symbol(sym: str) -> bool:
+            if not isinstance(sym, str):
+                return False
+            s = sym.upper()
+            # Denylist explicite + motifs communs
+            if s in {"BTCUSD", "ETHUSD", "LTCUSD"}:
+                return True
+            return any(
+                k in s
+                for k in (
+                    "BTC",
+                    "ETH",
+                    "LTC",
+                    "DOGE",
+                    "XRP",
+                    "SOL",
+                    "ADA",
+                    "BNB",
+                    "DOT",
+                    "MATIC",
+                )
+            )
 
+        before = list(opportunities_candidates)
+        opportunities_candidates = [
+            a for a in opportunities_candidates if not _is_crypto_symbol(a)
+        ]
+        removed = [a for a in before if a not in opportunities_candidates]
+        if removed:
+            self.logger.debug(
+                f"[FILTER] Actifs crypto retirés de la sélection: {removed}"
+            )
+
+        if not opportunities_candidates:
+            self.logger.info("Aucun actif non-crypto à considérer après filtrage.")
+            return []
+
+        final_opportunities_for_ai: List[str] = []
+
+        # Groupes corrélés (majors FX)
         major_fx_pairs = self.config_manager.get(
             "ai.opportunity_filtering.major_fx_pairs_for_correlation",
             ["EURUSD", "GBPUSD", "USDJPY"],
         )
-        processed_correlated_groups = set()
+        processed_correlated_groups: set = set()
 
+        # Seuil minimum de confiance du signal pour l'IA
         min_ai_signal_confidence = self.config_manager.get(
             "ai.opportunity_filtering.min_signal_confidence", 0.6
         )
@@ -210,9 +254,11 @@ class DecisionPipeline:
 
             current_asset_signals = context.get("trading_signals", {}).get(asset, {})
             print(
-                f"🔍 [FILTER] {asset} - Signaux: phase={current_asset_signals.get('phase')}, confidence={current_asset_signals.get('confidence_score')}"
-            )  # ← AJOUTEZ
+                f"🔍 [FILTER] {asset} - Signaux: phase={current_asset_signals.get('phase')}, "
+                f"confidence={current_asset_signals.get('confidence_score')}"
+            )
 
+            # Validation des signaux
             if (
                 not current_asset_signals
                 or not isinstance(current_asset_signals.get("phase"), str)
@@ -226,67 +272,85 @@ class DecisionPipeline:
                 continue
 
             current_asset_phase = current_asset_signals.get("phase", "")
-            current_asset_confidence = current_asset_signals.get(
-                "confidence_score", 0.0
+            current_asset_confidence = float(
+                current_asset_signals.get("confidence_score", 0.0)
             )
 
-            if current_asset_confidence < min_ai_signal_confidence:
+            # Filtre par confiance
+            if current_asset_confidence < float(min_ai_signal_confidence):
                 print(
-                    f"❌ [FILTER] {asset} éliminé : confiance {current_asset_confidence:.2f} < seuil {min_ai_signal_confidence:.2f}"
-                )  # ← AJOUTEZ
+                    f"❌ [FILTER] {asset} éliminé : confiance {current_asset_confidence:.2f} "
+                    f"< seuil {float(min_ai_signal_confidence):.2f}"
+                )
                 self.logger.debug(
-                    f"Actif {asset} écarté : confiance du signal ({current_asset_confidence:.2f}) inférieure au seuil min de l'IA ({min_ai_signal_confidence:.2f})."
+                    f"Actif {asset} écarté : confiance du signal ({current_asset_confidence:.2f}) "
+                    f"inférieure au seuil min de l'IA ({float(min_ai_signal_confidence):.2f})."
                 )
                 continue
 
-            asset_specific_config = self.config_manager.config_loader.load_asset_config(
-                asset
-            )
+            # Charger la config spécifique de l'actif (sécurisé)
+            try:
+                asset_specific_config = (
+                    self.config_manager.config_loader.load_asset_config(asset)
+                )
+            except Exception as e:
+                self.logger.debug(
+                    f"[FILTER] Échec chargement config asset '{asset}' ({e}). Fallback configuration vide."
+                )
+                asset_specific_config = {}
 
             is_relevant_for_ai = True
 
+            # Vérifier la phase d'intérêt (si définie dans la config)
             phases_of_interest_for_asset = asset_specific_config.get(
                 "phases_of_interest", {}
             )
             phase_type = current_asset_phase.split("_")[0]
-
             if (
                 phases_of_interest_for_asset
                 and phase_type not in phases_of_interest_for_asset
             ):
                 self.logger.debug(
-                    f"Actif {asset} écarté : phase '{current_asset_phase}' non explicitement listée comme d'intérêt dans la config de l'actif."
+                    f"Actif {asset} écarté : phase '{current_asset_phase}' non listée comme d'intérêt dans la config de l'actif."
                 )
                 is_relevant_for_ai = False
 
+            # Liquidité (selon PhaseObserver)
             if not current_asset_signals.get("is_liquid", False):
-                print(f"❌ [FILTER] {asset} éliminé : non liquide")  # ← AJOUTEZ
+                print(f"❌ [FILTER] {asset} éliminé : non liquide")
                 self.logger.debug(
                     f"Actif {asset} écarté : non liquide (PhaseObserver)."
                 )
                 is_relevant_for_ai = False
 
+            # Spread max autorisé par actif
             max_allowed_spread_config = asset_specific_config.get("volatility", {}).get(
                 "max_allowed_spread_points", {}
             )
             if isinstance(max_allowed_spread_config, dict):
-                max_allowed_spread_points_for_asset = max_allowed_spread_config.get(
-                    "value", 4000
+                max_allowed_spread_points_for_asset = float(
+                    max_allowed_spread_config.get("value", 4000)
                 )
             else:
-                max_allowed_spread_points_for_asset = max_allowed_spread_config or 4000
-            if (
+                max_allowed_spread_points_for_asset = float(
+                    max_allowed_spread_config or 4000
+                )
+
+            current_spread_points = float(
                 current_asset_signals.get("current_spread_points", np.inf)
-                > max_allowed_spread_points_for_asset
-            ):
+            )
+            if current_spread_points > max_allowed_spread_points_for_asset:
                 self.logger.debug(
-                    f"Actif {asset} écarté : spread ({current_asset_signals.get('current_spread_points')}) dépasse le max autorisé par actif ({max_allowed_spread_points_for_asset})."
+                    f"Actif {asset} écarté : spread ({current_spread_points}) dépasse "
+                    f"le max autorisé par actif ({max_allowed_spread_points_for_asset})."
                 )
                 is_relevant_for_ai = False
 
             if is_relevant_for_ai:
                 final_opportunities_for_ai.append(asset)
                 print(f"✅ [FILTER] {asset} accepté pour l'IA")
+
+                # Gestion de corrélation simple entre EURUSD/GBPUSD
                 if asset in major_fx_pairs:
                     if asset == "EURUSD":
                         processed_correlated_groups.add("GBPUSD")
@@ -297,186 +361,6 @@ class DecisionPipeline:
             f"Shortlist d'opportunités pour l'IA après filtrage : {final_opportunities_for_ai}"
         )
         return final_opportunities_for_ai
-
-    def score_configs(
-        self, context: Dict[str, Any], configs: Dict[str, Any]
-    ) -> Dict[str, float]:
-        """
-        Évalue et note les configurations de stratégies disponibles en fonction du contexte.
-
-        🔥 AMÉLIORÉ : Logique intelligente pour scalping multi-timeframe KATANA
-        """
-        self.logger.info("Évaluation des configurations de stratégies disponibles...")
-
-        market_regime = context.get("current_market_regime", "unknown_regime_fallback")
-        self.logger.debug(f"Régime de marché actuel pour le scoring: {market_regime}")
-
-        # Gestion week-end crypto (logique existante conservée)
-        is_weekend = datetime.now(UTC).weekday() >= 5
-        weekend_crypto_priority_enabled = self.config_manager.get(
-            "scoring_rules.weekend_crypto_priority.enabled", False
-        )
-        if is_weekend and weekend_crypto_priority_enabled:
-            self.logger.info("Mode week-end : Priorité aux stratégies crypto.")
-            crypto_tag = self.config_manager.get(
-                "scoring_rules.weekend_crypto_priority.strategy_tag", "crypto"
-            )
-            return {
-                path: (
-                    1.0
-                    if crypto_tag in data["content"].get("strategy_tags", [])
-                    else 0.0
-                )
-                for path, data in configs.items()
-            }
-
-        # Préparation des données pour scoring intelligent
-        trading_signals = context.get("trading_signals", {})
-        config_scores = {}
-        strategy_weights = self.config_manager.get("scoring_rules.strategy_weights", {})
-        risk_thresholds = self.config_manager.get(
-            "scoring_rules.risk_appetite_drawdown_thresholds", {}
-        )
-
-        print(f"🎯 [SCORING] Début évaluation {len(configs)} stratégies")
-        print(f"🎯 [SCORING] Signaux disponibles: {list(trading_signals.keys())}")
-
-        for path, data in configs.items():
-            # === DEBUG STRUCTURE DES DONNÉES ===
-            print(f"🔍 [DEBUG] Path: {path}")
-            print(f"🔍 [DEBUG] Data keys: {list(data.keys())}")
-            print(f"🔍 [DEBUG] Data type: {type(data)}")
-
-            if "content" in data:
-                print(f"🔍 [DEBUG] Content keys: {list(data['content'].keys())}")
-                print(
-                    f"🔍 [DEBUG] Content strategy_name: {data['content'].get('strategy_name', 'NOT_IN_CONTENT')}"
-                )
-            else:
-                print(
-                    f"🔍 [DEBUG] Direct strategy_name: {data.get('strategy_name', 'NOT_IN_DATA')}"
-                )
-
-            print(f"🔍 [DEBUG] Full data structure: {str(data)[:200]}...")
-            print("=" * 50)
-            if "config" in data:
-                actual_config = data["config"]
-            else:
-                actual_config = data
-
-            strategy_name = actual_config.get("strategy_name", "").lower()
-            strategy_tags = actual_config.get("strategy_tags", [])
-
-            # Debug line APRÈS définition des variables
-            print(
-                f"🔍 [DEBUG] Strategy name extracted: '{strategy_name}' from config: {actual_config.get('strategy_name', 'NOT_FOUND')}"
-            )
-            print(f"🔍 [SCORING] Évaluation stratégie: {strategy_name}")
-
-            # === LOGIQUE SCALPING INTELLIGENTE ===
-            if strategy_name == "scalping":
-                score = self._calculate_enhanced_scalping_score(
-                    actual_config, context, trading_signals, strategy_weights
-                )
-                print(f"🗡️ [SCALPING] Score final: {score:.3f}")
-
-            # === LOGIQUE STANDARD POUR AUTRES STRATÉGIES ===
-            else:
-                score = self.config_manager.get("scoring_rules.base_score", 0.5)
-                self.logger.debug(
-                    f"Scoring stratégie '{strategy_name}' (Tags: {strategy_tags})"
-                )
-
-                # Logique existante conservée intégralement
-                for tag, weight in strategy_weights.items():
-                    if tag in strategy_tags and tag in market_regime:
-                        score += weight
-                        self.logger.debug(
-                            f"  + Score pour tag '{tag}' correspondant au régime. Score: {score}"
-                        )
-                    elif (
-                        tag in strategy_tags
-                        and strategy_name.startswith(tag)
-                        and tag in market_regime.split("_")
-                    ):
-                        score += weight
-                        self.logger.debug(
-                            f"  + Score pour compatibilité ancienne de tag/régime. Score: {score}"
-                        )
-
-                # Risk appetite (logique existante)
-                risk_appetite = context.get("risk_appetite", "medium")
-                max_dd = actual_config.get("max_drawdown_percent", 5.0)
-
-                if risk_appetite == "low" and max_dd < risk_thresholds.get(
-                    "low_risk_max_drawdown", 3.0
-                ):
-                    score += risk_thresholds.get("low_risk_score_boost", 0.1)
-                    self.logger.debug(
-                        f"  + Score boost pour appétit au risque 'bas' et faible DD. Score: {score}"
-                    )
-                elif risk_appetite == "high" and max_dd > risk_thresholds.get(
-                    "high_risk_min_drawdown", 7.0
-                ):
-                    score += risk_thresholds.get("high_risk_score_boost", 0.05)
-                    self.logger.debug(
-                        f"  + Score boost pour appétit au risque 'élevé' et DD plus important. Score: {score}"
-                    )
-
-                # AI recommendation (logique existante)
-                current_config_path = path  # Variable explicite pour Pylance
-                ai_recommendation_for_this_config_score = context.get(
-                    "ai_recommendation_score", {}
-                ).get(Path(current_config_path).name, 0.0)
-                ai_weight = self.config_manager.get(
-                    "scoring_rules.ai_recommendation_weight", 0.2
-                )
-                score += ai_recommendation_for_this_config_score * ai_weight
-                self.logger.debug(
-                    f"  + Score AI de pertinence pour '{strategy_name}': {ai_recommendation_for_this_config_score * ai_weight}. Score: {score}"
-                )
-
-                # Performance historique (logique existante)
-                historical_performance = data.get("performance", {})
-                if historical_performance:
-                    sharpe_ratio = historical_performance.get("sharpe_ratio", 0.0)
-                    if sharpe_ratio > self.config_manager.get(
-                        "scoring_rules.performance_thresholds.good_sharpe", 1.0
-                    ):
-                        score += self.config_manager.get(
-                            "scoring_rules.performance_thresholds.good_sharpe_boost",
-                            0.1,
-                        )
-                    elif sharpe_ratio < self.config_manager.get(
-                        "scoring_rules.performance_thresholds.poor_sharpe", 0.5
-                    ):
-                        score -= self.config_manager.get(
-                            "scoring_rules.performance_thresholds.poor_sharpe_penalty",
-                            0.1,
-                        )
-                    self.logger.debug(
-                        f"  + Score performance historique (Sharpe: {sharpe_ratio}). Score: {score}"
-                    )
-
-                print(f"📊 [STANDARD] {strategy_name} score: {score:.3f}")
-
-            config_scores[path] = max(0.0, min(1.0, score))
-
-        # Log final des scores
-        print(f"\n🏆 [SCORING] RÉSULTATS FINAUX:")
-        sorted_scores = sorted(config_scores.items(), key=lambda x: x[1], reverse=True)
-        for path, score in sorted_scores:
-            strategy_name_display = (
-                configs[path].get("config", {}).get("strategy_name", "Unknown")
-            )
-            print(
-                f"   {strategy_name_display:>10}: {score:.3f} {'🥇' if score == sorted_scores[0][1] else ''}"
-            )
-
-        self.logger.info(
-            f"Évaluation des configurations terminée. Scores : {config_scores}"
-        )
-        return config_scores
 
     def _calculate_enhanced_scalping_score(
         self, config: Dict, context: Dict, trading_signals: Dict, strategy_weights: Dict
@@ -532,16 +416,16 @@ class DecisionPipeline:
         if penalty > 0:
             print(f"⚠️ [SCALPING] Pénalités appliquées: -{penalty:.3f}")
 
-        return score
+            return score
 
     def _evaluate_scalping_asset_conditions(
         self, asset: str, signals: Dict, config: Dict
     ) -> float:
         """
-        🎯 ÉVALUATION CONDITIONS SCALPING PAR ASSET
-
-        Analyse les signaux selon votre config_trade_scalping.json et
-        les détections PhaseObserver sophistiquées
+        🎯 ÉVALUATION CONDITIONS SCALPING PAR ASSET (version corrigée)
+        - Volatilité lue en priorité depuis volatility_pct / volatility_percentage
+        - Fallback sur 'volatility' avec détection d'unité (décimal vs pourcentage)
+        - Seuils MTF 100% configurables via prod_config.json
         """
         if not signals or not isinstance(signals, dict):
             return 0.0
@@ -549,7 +433,7 @@ class DecisionPipeline:
         condition_score = 0.0
         print(f"  🔍 [{asset}] Analyse conditions scalping...")
 
-        # === 1. SIGNAUX KATANA PRIORITAIRES (vos decision_rules priorité 1) ===
+        # === 1. SIGNAUX KATANA PRIORITAIRES (identique) ===
         katana_signals = {
             "bos_mss_detected": 0.25,
             "volume_anomaly_detected": 0.25,
@@ -560,7 +444,6 @@ class DecisionPipeline:
 
         katana_score = 0.0
         detected_katana = []
-
         for signal, weight in katana_signals.items():
             if signals.get(signal, False):
                 katana_score += weight
@@ -570,50 +453,91 @@ class DecisionPipeline:
         if detected_katana:
             print(f"    🗡️ Signaux KATANA: {detected_katana} -> +{katana_score:.3f}")
 
-        # === 2. CONDITIONS MTF (vos seuils config_trade_scalping.json) ===
-        volatility = signals.get("volatility", 0)
-        spread = signals.get("spread", float("inf"))
-        volume_zscore = signals.get("volume_zscore", 0)
+        # === 2. CONDITIONS MTF (corrigées: unités & seuils dynamiques) ===
+        # 2.1 Volatilité (% cohérente)
+        # Priorité aux champs déjà en pourcentage
+        vol_pct = None
+        if isinstance(signals.get("volatility_pct"), (int, float)):
+            vol_pct = float(signals.get("volatility_pct"))
+        elif isinstance(signals.get("volatility_percentage"), (int, float)):
+            vol_pct = float(signals.get("volatility_percentage"))
+        else:
+            # Fallback : essayer "volatility" et déduire l'unité
+            vol_raw = signals.get("volatility")
+            if isinstance(vol_raw, (int, float)):
+                vol_raw = float(vol_raw)
+                # Heuristique: si <= 1, on assume décimal (0.0008 => 0.08%)
+                vol_pct = vol_raw * 100.0 if vol_raw <= 1.0 else vol_raw
+            else:
+                vol_pct = 0.0
 
-        # Vos seuils exacts de la config
-        volatility_threshold = 0.0001  # Votre volatility_threshold
-        max_spread_points = 50  # Votre max_spread_points
-        min_volume_zscore = 0.5  # Votre volume_zscore
+        # 2.2 Spread (points)
+        spread_points = signals.get("current_spread_points")
+        if not isinstance(spread_points, (int, float)):
+            spread_points = signals.get("spread", float("inf"))
+        try:
+            spread_points = float(spread_points)
+        except Exception:
+            spread_points = float("inf")
+
+        # 2.3 Volume z-score
+        volume_zscore = signals.get("volume_zscore", 0.0)
+        try:
+            volume_zscore = float(volume_zscore)
+        except Exception:
+            volume_zscore = 0.0
+
+        # 2.4 Seuils MTF dynamiques (prod_config.json)
+        #   scoring_rules.scalping.mtf.min_volatility_pct  (ex: 0.01 pour 0,01%)
+        #   scoring_rules.scalping.mtf.max_spread_points   (ex: 50)
+        #   scoring_rules.scalping.mtf.min_volume_zscore   (ex: 0.5)
+        volatility_threshold_pct = self.config_manager.get(
+            "scoring_rules.scalping.mtf.min_volatility_pct", 0.01
+        )
+        max_spread_points = self.config_manager.get(
+            "scoring_rules.scalping.mtf.max_spread_points", 50
+        )
+        min_volume_zscore = self.config_manager.get(
+            "scoring_rules.scalping.mtf.min_volume_zscore", 0.5
+        )
 
         mtf_conditions_met = 0
         mtf_total_conditions = 3
 
-        if volatility >= volatility_threshold:
+        # Volatilité en % : log clair
+        if vol_pct >= volatility_threshold_pct:
             mtf_conditions_met += 1
-            print(f"    ✅ Volatilité OK: {volatility:.6f} >= {volatility_threshold}")
+            print(
+                f"    ✅ Volatilité OK: {vol_pct:.3f}% >= {volatility_threshold_pct:.3f}%"
+            )
         else:
             print(
-                f"    ❌ Volatilité faible: {volatility:.6f} < {volatility_threshold}"
+                f"    ❌ Volatilité faible: {vol_pct:.3f}% < {volatility_threshold_pct:.3f}%"
             )
 
-        if spread <= max_spread_points:
+        # Spread en points
+        if spread_points <= max_spread_points:
             mtf_conditions_met += 1
-            print(f"    ✅ Spread OK: {spread} <= {max_spread_points}")
+            print(f"    ✅ Spread OK: {spread_points:.0f} <= {max_spread_points}")
         else:
-            print(f"    ❌ Spread élevé: {spread} > {max_spread_points}")
+            print(f"    ❌ Spread élevé: {spread_points:.0f} > {max_spread_points}")
 
+        # Volume z-score
         if volume_zscore >= min_volume_zscore:
             mtf_conditions_met += 1
             print(f"    ✅ Volume OK: {volume_zscore:.2f} >= {min_volume_zscore}")
         else:
             print(f"    ❌ Volume faible: {volume_zscore:.2f} < {min_volume_zscore}")
 
-        # Bonus MTF proportionnel
+        # Bonus MTF proportionnel (inchangé)
         mtf_score = (mtf_conditions_met / mtf_total_conditions) * 0.3
         condition_score += mtf_score
         print(
             f"    🔄 Conditions MTF: {mtf_conditions_met}/{mtf_total_conditions} -> +{mtf_score:.3f}"
         )
 
-        # === 3. PHASES SCALPING SPÉCIFIQUES ===
+        # === 3. PHASES SCALPING SPÉCIFIQUES (identique) ===
         current_phase = signals.get("phase", "")
-
-        # Vos phases KATANA prioritaires
         scalping_phases = {
             "scalp_burst_up": 1.0,
             "scalp_burst_down": 1.0,
@@ -623,21 +547,18 @@ class DecisionPipeline:
             "trending_bullish": 0.6,
             "trending_bearish": 0.6,
         }
-
         phase_score = 0.0
         for phase_pattern, weight in scalping_phases.items():
             if phase_pattern in current_phase:
                 phase_score = weight * 0.25  # 25% du score pour la phase
                 print(f"    ⚡ Phase scalping: {current_phase} -> +{phase_score:.3f}")
                 break
-
         condition_score += phase_score
 
-        # === 4. QUALITÉ ET CONFIANCE ===
-        confidence = signals.get("confidence_score", 0)
+        # === 4. QUALITÉ ET CONFIANCE (identique) ===
+        confidence = signals.get("confidence_score", 0.0)
         is_liquid = signals.get("is_liquid", False)
 
-        # Bonus confiance élevée
         if confidence > 0.7:
             confidence_bonus = 0.15
             condition_score += confidence_bonus
@@ -649,15 +570,14 @@ class DecisionPipeline:
             condition_score += confidence_bonus
             print(f"    📊 Confiance OK: {confidence:.3f} -> +{confidence_bonus:.3f}")
 
-        # Bonus liquidité
         if is_liquid:
             liquidity_bonus = 0.1
             condition_score += liquidity_bonus
             print(f"    💧 Asset liquide -> +{liquidity_bonus:.3f}")
 
-        # === 5. CONFLUENCE MULTI-TIMEFRAME (si disponible) ===
+        # === 5. CONFLUENCE MTF (identique) ===
         multi_tf_enabled = signals.get("multi_tf_enabled", False)
-        confluence_score = signals.get("confluence_score", 0)
+        confluence_score = signals.get("confluence_score", 0.0)
 
         if multi_tf_enabled and confluence_score > 0.7:
             mtf_bonus = 0.2
@@ -674,7 +594,6 @@ class DecisionPipeline:
 
         final_score = min(1.0, condition_score)
         print(f"  🎯 [{asset}] Score final: {final_score:.3f}")
-
         return final_score
 
     def _calculate_scalping_penalties(self, context: Dict) -> float:
@@ -1157,11 +1076,15 @@ class DecisionPipeline:
 
         # 2. Récupérer le nom de stratégie pour les paramètres
         strategy_name = current_config.get("strategy_name", "unknown")
-        self.logger.info(f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}")
+        self.logger.info(
+            f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
+        )
 
         # 3. CORE ÉVALUE DIRECTEMENT LES SIGNAUX (PLUS DE DÉLÉGATION)
-        trade_decision = self._core_evaluate_signals(context, current_config, signals, strategy_name)
-        
+        trade_decision = self._core_evaluate_signals(
+            context, current_config, signals, strategy_name
+        )
+
         if not trade_decision:
             self.logger.info(
                 f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
@@ -1207,79 +1130,94 @@ class DecisionPipeline:
         return trade_decision
 
     def _core_evaluate_signals(
-        self, 
-        context: Dict[str, Any], 
-        config: Dict[str, Any], 
+        self,
+        context: Dict[str, Any],
+        config: Dict[str, Any],
         signals: Dict[str, Any],
-        strategy_name: str
+        strategy_name: str,
     ) -> Dict[str, Any]:
         """
         CORE évalue directement les signaux et prend la décision finale.
         Utilise les paramètres de stratégie mais applique une logique décisionnelle centralisée.
         """
-        self.logger.info(f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}")
-        
+        self.logger.info(
+            f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}"
+        )
+
         best_asset = None
         best_score = 0.0
         best_signals = None
-        
+
         # Seuils de validation CORE (plus flexibles que les stratégies)
         min_confidence = config.get("min_confidence", 0.65)  # Plus bas que 0.77
-        
+
         for asset, asset_signals in signals.items():
             confidence = asset_signals.get("confidence_score", 0.0)
             phase = asset_signals.get("phase", "")
-            
-            self.logger.debug(f"🔍 [{asset}] Confiance: {confidence:.3f}, Phase: {phase}")
-            
+
+            self.logger.debug(
+                f"🔍 [{asset}] Confiance: {confidence:.3f}, Phase: {phase}"
+            )
+
             # NOUVELLE LOGIQUE CORE : Plus permissive
             score = confidence
-            
+
             # Bonus selon les signaux détectés
             if asset_signals.get("ob_detected", False):
                 score += 0.1
                 self.logger.debug(f"    ✅ Order Block détecté -> +0.1")
-            
+
             if asset_signals.get("fvg_detected", False):
                 score += 0.1
                 self.logger.debug(f"    ✅ FVG détecté -> +0.1")
-                
+
             if asset_signals.get("bos_mss_detected", False):
                 score += 0.15
                 self.logger.debug(f"    ✅ BOS/MSS détecté -> +0.15")
-            
+
             # Validation CORE : Accepter si confiance suffisante OU phase conclusive
             is_valid = False
-            
+
             if confidence >= min_confidence:
                 is_valid = True
-                self.logger.info(f"✅ [{asset}] Accepté par CORE - Confiance {confidence:.3f} >= {min_confidence}")
-            elif confidence >= 0.5 and any(keyword in phase.lower() for keyword in ["bullish", "bearish", "trending"]):
-                is_valid = True  
-                self.logger.info(f"✅ [{asset}] Accepté par CORE - Phase conclusive: {phase}")
+                self.logger.info(
+                    f"✅ [{asset}] Accepté par CORE - Confiance {confidence:.3f} >= {min_confidence}"
+                )
+            elif confidence >= 0.5 and any(
+                keyword in phase.lower()
+                for keyword in ["bullish", "bearish", "trending"]
+            ):
+                is_valid = True
+                self.logger.info(
+                    f"✅ [{asset}] Accepté par CORE - Phase conclusive: {phase}"
+                )
             else:
-                self.logger.debug(f"❌ [{asset}] Rejeté - Confiance {confidence:.3f} et phase {phase} insuffisantes")
-            
+                self.logger.debug(
+                    f"❌ [{asset}] Rejeté - Confiance {confidence:.3f} et phase {phase} insuffisantes"
+                )
+
             if is_valid and score > best_score:
                 best_score = score
                 best_asset = asset
                 best_signals = asset_signals
-        
+
         if not best_asset:
             self.logger.info("❌ CORE: Aucun asset ne respecte les critères d'entrée")
             return {}
-        
+
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-        
+
         # Construire la décision de trade
-        return self._core_build_trade_decision(best_asset, best_signals, config, context)
+        return self._core_build_trade_decision(
+            best_asset, best_signals, config, context
+        )
 
     def _core_build_trade_decision(
-        self, 
-        asset: str, 
-        signals: Dict[str, Any], 
+        self,
+        asset: str,
+        signals: Dict[str, Any],
         config: Dict[str, Any],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         CORE construit la décision finale de trade basée sur les signaux.
@@ -1287,37 +1225,45 @@ class DecisionPipeline:
         phase = signals.get("phase", "")
         # Utiliser le prix de clôture de la dernière bougie comme prix d'entrée
         current_price = signals.get("close", 0)
-        
+
         if not current_price or current_price <= 0:
             self.logger.error(f"❌ Prix actuel manquant ou invalide pour {asset}")
             return {}
-        
+
         # Déterminer la direction (logique simplifiée mais robuste)
         action = None
-        
+
         # Priorité aux phases claires
-        if any(keyword in phase.lower() for keyword in ["bullish", "up", "accumulation"]):
+        if any(
+            keyword in phase.lower() for keyword in ["bullish", "up", "accumulation"]
+        ):
             action = "BUY"
-        elif any(keyword in phase.lower() for keyword in ["bearish", "down", "distribution"]):
+        elif any(
+            keyword in phase.lower() for keyword in ["bearish", "down", "distribution"]
+        ):
             action = "SELL"
         else:
             # Si la phase est 'no_clear_phase', on se base sur le momentum comme fallback
-            self.logger.warning(f"Phase '{phase}' non conclusive. Tentative de décision basée sur le momentum.")
+            self.logger.warning(
+                f"Phase '{phase}' non conclusive. Tentative de décision basée sur le momentum."
+            )
             volume_momentum = signals.get("volume_momentum", 0)
-            if volume_momentum > 0.1: # Seuil pour éviter le bruit
+            if volume_momentum > 0.1:  # Seuil pour éviter le bruit
                 action = "BUY"
             elif volume_momentum < -0.1:
                 action = "SELL"
-        
+
         if not action:
-            self.logger.warning(f"❌ Direction de trade indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})")
+            self.logger.warning(
+                f"❌ Direction de trade indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})"
+            )
             return {}
-        
+
         # Paramètres SL/TP depuis la configuration de la stratégie active
         sl_pips = config.get("stop_loss_pips", 20)
         tp_pips = config.get("take_profit_pips", 40)
         magic_number = config.get("magic_number", 999999)
-        
+
         # ======================= LA CORRECTION CLÉ EST ICI =======================
         # On s'assure que le dictionnaire final contient TOUTES les clés attendues
         # par le TradeExecutor, notamment "action".
@@ -1334,9 +1280,11 @@ class DecisionPipeline:
             "magic_number": magic_number,
         }
         # =======================================================================
-        
-        self.logger.info(f"✅ CORE construit trade {action} {asset} @ {current_price} (SL: {sl_pips}, TP: {tp_pips})")
-        
+
+        self.logger.info(
+            f"✅ CORE construit trade {action} {asset} @ {current_price} (SL: {sl_pips}, TP: {tp_pips})"
+        )
+
         return trade_decision
 
     def _evaluate_rule(

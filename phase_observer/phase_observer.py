@@ -2346,12 +2346,10 @@ class PhaseObserver:
                 )
 
         # === Volatilité en % (robuste, non nulle) ===
-        # Retours relatifs invariants d'échelle, lissage EMA pour éviter 0 dur et bruit.
         try:
             if "close" in df_an.columns:
                 ret = df_an["close"].pct_change().fillna(0.0)
                 vol_pct = ret.abs().ewm(span=20, adjust=False).mean() * 100.0  # en %
-                # Guard: jamais 0 dur, ni inf/NaN
                 vol_pct = (
                     vol_pct.replace([np.inf, -np.inf], 0.0).fillna(0.0).clip(lower=1e-6)
                 )
@@ -2365,7 +2363,7 @@ class PhaseObserver:
             df_an["volatility_pct"] = 0.0
 
         # ==============================================================================
-        # ▼▼▼ Bloc existant: volume momentum — conservé, rendu plus robuste uniquement ▼▼▼
+        # ▼▼▼ Bloc volume momentum (conservé, rendu plus robuste) ▼▼▼
         # ==============================================================================
         self.logger.debug(f"[{current_asset_symbol}] Calcul du volume momentum...")
         volume_ma_period = self.config_manager.get(
@@ -2383,6 +2381,7 @@ class PhaseObserver:
                 .rolling(window=volume_ma_period, min_periods=1)
                 .mean()
             )
+
             volume_mean_z = (
                 df_an["tick_volume"]
                 .rolling(window=volume_zscore_period, min_periods=1)
@@ -2399,6 +2398,7 @@ class PhaseObserver:
                 .replace([np.inf, -np.inf], 0.0)
                 .fillna(0.0)
             )
+
             vol_std_ma = (
                 df_an["tick_volume"]
                 .rolling(window=volume_ma_period, min_periods=1)
@@ -2410,6 +2410,7 @@ class PhaseObserver:
                 .replace([np.inf, -np.inf], 0.0)
                 .fillna(0.0)
             )
+
             last_momentum = float(df_an["volume_momentum"].iloc[-1])
             self.logger.info(
                 f"DEBUG MOMENTUM pour {current_asset_symbol}: Dernière valeur = {last_momentum:.2f}"
@@ -2467,28 +2468,42 @@ class PhaseObserver:
             df_an["bos_mss_details"] = [None] * len(df_an)
             df_an["bos_mss_detected"] = False
 
-        # === PHASE 3: DÉTECTION DE LIQUIDITÉ OPTIMISÉE ===
-        crypto_symbols = self.config_manager.get("global_safety.crypto_symbols", [])
-        if current_asset_symbol in crypto_symbols:
-            max_spread = self.config_manager.get(
-                "phase_detection_defaults.liquidity_detection.crypto_settings.max_allowed_spread_points",
-                2000,
+        # === PHASE 3: DÉTECTION DE LIQUIDITÉ OPTIMISÉE (sans crypto) ===
+        indices_symbols = set(
+            self.config_manager.get("global_safety.indices_symbols", ["US30", "NAS100"])
+        )
+        if current_asset_symbol in indices_symbols:
+            max_spread = float(
+                self.config_manager.get(
+                    "phase_detection_defaults.liquidity_detection.indices_settings.max_allowed_spread_points",
+                    50,
+                )
             )
-            min_volume = self.config_manager.get(
-                "phase_detection_defaults.liquidity_detection.crypto_settings.min_volume_threshold",
-                10,
+            min_volume = float(
+                self.config_manager.get(
+                    "phase_detection_defaults.liquidity_detection.indices_settings.min_volume_threshold",
+                    10,
+                )
             )
         else:
-            max_spread = self.config_manager.get(
-                "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points",
-                7,
+            # défaut: forex
+            max_spread = float(
+                self.config_manager.get(
+                    "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points",
+                    10,
+                )
             )
-            min_volume = self.config_manager.get(
-                "phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold",
-                1,
+            min_volume = float(
+                self.config_manager.get(
+                    "phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold",
+                    1,
+                )
             )
+
         last_spread = (
-            float(df_an["spread"].iloc[-1]) if "spread" in df_an.columns else np.inf
+            float(df_an["spread"].iloc[-1])
+            if "spread" in df_an.columns
+            else float("inf")
         )
         last_volume = (
             float(df_an["tick_volume"].iloc[-1])
@@ -2510,10 +2525,10 @@ class PhaseObserver:
         ) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
 
         # === PHASE 5: DÉTERMINATION DE PHASE OPTIMISÉE (avec fallback doux) ===
-        # 5.1 Phase primaire (ta logique existante)
+        # 5.1 Phase primaire
         df_an["phase_primary"] = df_an.apply(self.determine_optimized_phase, axis=1)
 
-        # 5.2 Fallback basé sur la volatilité si la phase primaire est "no_clear_phase"
+        # 5.2 Fallback basé sur volatilité si primaire = "no_clear_phase"
         low_th = float(
             self.config_manager.get(
                 "phase_detection_defaults.regime_detection_settings.volatility.thresholds.low_pct",
@@ -2526,6 +2541,65 @@ class PhaseObserver:
                 0.15,
             )
         )  # en %
+
+        df_an["phase"] = df_an["phase_primary"]
+        df_an["phase_rule"] = "primary"
+
+        last_idx = df_an.index[-1]
+        last_vol = (
+            float(df_an["volatility_pct"].iloc[-1])
+            if "volatility_pct" in df_an.columns
+            else 0.0
+        )
+        last_rule = "primary"
+
+        if str(df_an.at[last_idx, "phase"]).lower() == "no_clear_phase":
+            if last_vol <= low_th:
+                df_an.at[last_idx, "phase"] = "range_retail"
+                last_rule = "fallback_low"
+            elif last_vol <= high_th:
+                # On ne force rien, mais on indique que le fallback mid a été considéré
+                last_rule = "fallback_mid"
+
+        df_an.at[last_idx, "phase_rule"] = last_rule
+
+        # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
+        df_an["confidence_score"] = df_an.apply(
+            self.calculate_optimized_confidence, axis=1
+        )
+
+        # === PHASE 7: MÉTRIQUES DE PERFORMANCE + LOG FINAL ===
+        if not df_an.empty:
+            total_signals = (
+                df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
+            )
+            avg_confidence = (
+                float(df_an["confidence_score"].mean())
+                if "confidence_score" in df_an.columns
+                else 0.0
+            )
+
+            last_phase = str(df_an["phase"].iloc[-1])
+            last_confidence = float(df_an["confidence_score"].iloc[-1])
+            last_regime = (
+                str(df_an["regime"].iloc[-1])
+                if "regime" in df_an.columns
+                else "unknown"
+            )
+            last_rule = (
+                str(df_an["phase_rule"].iloc[-1])
+                if "phase_rule" in df_an.columns
+                else "primary"
+            )
+
+            self.logger.info(
+                f"🎯 [{current_asset_symbol}] Pipeline terminé: "
+                f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
+                f"Régime={last_regime}, Signaux totaux={int(total_signals)}, "
+                f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
+            )
+
+        return df_an
 
         def _apply_phase_fallback(row):
             p = row.get("phase_primary", "no_clear_phase")

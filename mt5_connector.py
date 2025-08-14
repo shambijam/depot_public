@@ -8,7 +8,6 @@ import logging  # Garder l'import de logging
 import json
 import csv
 import sys
-from datetime import datetime
 import re
 import MetaTrader5 as mt5
 from collections import namedtuple
@@ -483,7 +482,7 @@ class MT5Connector:
             Optional[List[Any]]: Une liste d'objets `MetaTrader5.TradeOrder` (NamedTuple),
                                  ou une liste vide si aucun ordre trouvé, `None` si la récupération échoue.
         """
-        if not self.is_connected():
+        if not self.is_connected:
             self.logger.warning(
                 f"MT5: Non connecté. Impossible de récupérer les ordres en attente pour '{symbol}'."
             )  # Utilise self.logger
@@ -512,73 +511,6 @@ class MT5Connector:
             )  # Utilise self.logger
             return []
 
-    def _setup_logger(self) -> None:
-        """
-        Configure le logger spécifique à MT5Connector pour écrire dans un fichier dédié.
-        Cette méthode est appelée pendant l'initialisation.
-
-        Elle s'assure que le logger pour ce module écrit dans le fichier spécifié
-        par la configuration dynamique et évite les duplications de handlers.
-        Le niveau de logging et l'activation du StreamHandler sont configurables.
-        """
-        mt5_logger = logging.getLogger(__name__)  # Récupérer le logger de ce module
-
-        # Récupérer le niveau de log et l'activation du console handler depuis la config
-        # Les paramètres sont tirés de "mt5_connector_settings.log_level" et "mt5_connector_settings.enable_console_logging"
-        log_level_str = self.config_manager.get(
-            "mt5_connector_settings.log_level", "INFO"
-        ).upper()
-        enable_console_logging = self.config_manager.get(
-            "mt5_connector_settings.enable_console_logging", False
-        )
-
-        # Définir le niveau de log du logger
-        mt5_logger.setLevel(
-            getattr(logging, log_level_str, logging.INFO)
-        )  # Fallback à INFO si le niveau est invalide
-
-        # Supprimer les handlers existants pour éviter les duplications
-        if mt5_logger.hasHandlers():
-            mt5_logger.handlers.clear()
-
-        # Chemin complet du fichier de log MT5 (lu dynamiquement via ConfigManager)
-        log_file_path = (
-            Path(self.config_manager.get("paths.logs", "logs/")) / self.log_file_name
-        )
-
-        # File handler pour écrire dans le fichier de log
-        file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
-        file_formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        file_handler.setFormatter(file_formatter)
-        file_handler.setLevel(
-            getattr(logging, log_level_str, logging.INFO)
-        )  # Définir correctement le niveau du FileHandler
-        mt5_logger.addHandler(file_handler)
-
-        # Ajouter un Console handler si les logs de MT5Connector doivent aussi apparaître sur la console.
-        if enable_console_logging:
-            console_handler = logging.StreamHandler(sys.stdout)
-            # Utilise un formatateur plus concis pour la console
-            console_formatter = logging.Formatter(
-                "%(asctime)s - %(levelname)s - [MT5C] - %(message)s"
-            )  # [MT5C] pour identification
-            console_handler.setFormatter(console_formatter)
-            console_handler.setLevel(
-                getattr(logging, log_level_str, logging.INFO)
-            )  # Définir correctement le niveau du ConsoleHandler
-            mt5_logger.addHandler(console_handler)
-
-        # Désactiver la propagation pour éviter le double logging avec le logger racine
-        mt5_logger.propagate = False
-        self.logger = mt5_logger
-
-        # Utilise self.logger qui est déjà l'instance `mt5_logger` configurée
-        self.logger.info(
-            f"Logger MT5Connector configuré pour écrire dans: {log_file_path} (Niveau: {log_level_str}). Console logging: {enable_console_logging}"
-        )
-
     def get_current_price(self, symbol: str, action: str) -> Optional[float]:
         """
         Récupère le prix actuel (Ask pour BUY, Bid pour SELL) pour un symbole donné.
@@ -590,7 +522,7 @@ class MT5Connector:
         Returns:
             Optional[float]: Le prix actuel (float), ou None si la récupération échoue.
         """
-        if not self.is_connected():
+        if not self.is_connected:
             self.logger.warning(
                 f"MT5: Non connecté. Impossible de récupérer le prix actuel pour '{symbol}'."
             )  # Utilise self.logger
@@ -775,14 +707,12 @@ class MT5Connector:
             Optional[Any]: L'objet `MetaTrader5.TradeResult` (NamedTuple) si l'ordre est envoyé et une réponse est reçue,
                         `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
         """
+        # Vérifier la connexion
         if not self.is_connected:
-            self.logger.error(
-                "MT5: Non connecté. Impossible d'envoyer l'ordre."
-            )  # Utilise self.logger
+            self.logger.error("MT5: Non connecté. Impossible d'envoyer l'ordre.")
+            # Alerte harmonisée: 2 arguments (message, alert_type)
             self.config_manager.send_alert(
-                "CRITIQUE",
-                "MT5 Non Connecté: Échec Envoi Ordre.",
-                alert_type="telegram_critical",
+                "MT5 Non Connecté: Échec Envoi Ordre.", "telegram_critical"
             )
             return None
 
@@ -797,19 +727,17 @@ class MT5Connector:
             "comment",
         ]
         if not all(key in request for key in required_keys):
-            missing_keys = set(required_keys) - set(request.keys())
+            missing_keys = sorted(set(required_keys) - set(request.keys()))
             self.logger.error(
                 f"MT5: Requête d'ordre invalide. Clés manquantes: {missing_keys}. Requête: {request}"
-            )  # Utilise self.logger
+            )
             self.config_manager.send_alert(
-                "ERREUR",
-                f"MT5: Requête ordre invalide. Clés manquantes: {missing_keys}",
-                alert_type="telegram_critical",
+                f"MT5: Requête d'ordre invalide. Clés manquantes: {missing_keys}.",
+                "telegram_critical",
             )
             return None
 
         # Déterminer la chaîne d'action pour le log en utilisant les constantes mappées
-        # Utilise self.ORDER_TYPE_BUY/SELL et les mappings de TRADE_ACTIONS
         action_type_numeric = request.get("type")
         if action_type_numeric == self.ORDER_TYPE_BUY:
             action_str = "ACHAT"
@@ -820,6 +748,7 @@ class MT5Connector:
             self.mt5_mappings.get("order_types", {}).get(
                 "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"
             ),
+            None,
         ):
             action_str = "BUY_LIMIT"
         elif action_type_numeric == getattr(
@@ -827,60 +756,70 @@ class MT5Connector:
             self.mt5_mappings.get("order_types", {}).get(
                 "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
             ),
+            None,
         ):
             action_str = "SELL_LIMIT"
-        # Ajoutez d'autres types d'ordres si nécessaire
         else:
             action_str = f"TypeOrdre_{action_type_numeric}"
 
         self.logger.info(
-            f"MT5: Envoi de l'ordre: {action_str} {request.get('volume')} {request.get('symbol')} @ {request.get('price')} (ID Interne: {request.get('order_id', 'N/A')})..."
-        )  # Utilise self.logger, ajoute ID interne
+            f"MT5: Envoi de l'ordre: {action_str} {request.get('volume')} {request.get('symbol')} "
+            f"@ {request.get('price')} (ID Interne: {request.get('order_id', 'N/A')})..."
+        )
 
         # Envoyer l'ordre à l'API MT5
-        result = self.mt5.order_send(request)  # Utilise self.mt5
+        try:
+            result = self.mt5.order_send(request)
+        except Exception as ex:
+            self.logger.exception(f"MT5: Exception lors de order_send(): {ex}")
+            self.config_manager.send_alert(
+                f"MT5: Exception order_send(): {ex}", "telegram_critical"
+            )
+            return None
 
         # Gérer la réponse de l'API
-        if result:
+        if result is not None:
             self.logger.info(
-                f"MT5: Réponse de l'API reçue. Retcode: {result.retcode}, Commentaire: {result.comment}. Deal: {result.deal}, Ordre: {result.order}"
-            )  # Utilise self.logger
-            if (
-                result.retcode == self.TRADE_RETCODE_DONE
-            ):  # Utilise self.TRADE_RETCODE_DONE
+                f"MT5: Réponse de l'API reçue. Retcode: {getattr(result, 'retcode', 'N/A')}, "
+                f"Commentaire: {getattr(result, 'comment', 'N/A')}. "
+                f"Deal: {getattr(result, 'deal', 'N/A')}, Ordre: {getattr(result, 'order', 'N/A')}"
+            )
+
+            # Succès ?
+            if getattr(result, "retcode", None) == self.TRADE_RETCODE_DONE:
                 self.logger.info(
-                    f"MT5: Ordre exécuté avec succès ! Deal #{result.deal}, Ordre #{result.order} pour {request.get('symbol')}."
-                )  # Utilise self.logger
-                # TODO: Enregistrer le résultat dans un journal d'exécution de trades ici ou via TradeExecutor
+                    f"MT5: Ordre exécuté avec succès ! Deal #{getattr(result, 'deal', 'N/A')}, "
+                    f"Ordre #{getattr(result, 'order', 'N/A')} pour {request.get('symbol')}."
+                )
             else:
-                # Utilise les retcodes mappés pour une meilleure interprétation
+                # Traduire le retcode via le mapping pour un log plus lisible
+                retcode_val = getattr(result, "retcode", None)
                 retcode_str = ""
                 for k, v in self.mt5_mappings.get("trade_retcodes", {}).items():
-                    if getattr(mt5, v, None) == result.retcode:
+                    if getattr(mt5, v, None) == retcode_val:
                         retcode_str = k
                         break
 
                 self.logger.warning(
-                    f"MT5: Ordre non exécuté. Retcode: {result.retcode} ({retcode_str}), Commentaire: {result.comment}. Erreur système: {self.mt5.last_error()}."
-                )  # Utilise self.logger, self.mt5
-                self.config_manager.send_alert(
-                    "ERREUR_ORDRE",
-                    f"MT5: Ordre non exécuté: {result.comment} (Code: {result.retcode})",
-                    alert_type="telegram_critical",
+                    f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str}), "
+                    f"Commentaire: {getattr(result, 'comment', 'N/A')}. Erreur système: {self.mt5.last_error()}."
                 )
-        else:
-            self.logger.error(
-                f"MT5: La fonction order_send a échoué. Aucune réponse reçue. Erreur système: {self.mt5.last_error()}."
-            )  # Utilise self.logger, self.mt5
-            self.config_manager.send_alert(
-                "CRITIQUE",
-                f"MT5: Échec envoi ordre: Aucune réponse. {self.mt5.last_error()}",
-                alert_type="telegram_critical",
-            )
+                self.config_manager.send_alert(
+                    f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). "
+                    f"Commentaire: {getattr(result, 'comment', 'N/A')}",
+                    "telegram_critical",
+                )
+            return result
 
-        return result
-
-        # Contenu du fichier mt5_connector.py (suite)
+        # Aucun résultat renvoyé par l'API
+        self.logger.error(
+            f"MT5: La fonction order_send a échoué. Aucune réponse reçue. Erreur système: {self.mt5.last_error()}."
+        )
+        self.config_manager.send_alert(
+            f"MT5: Échec envoi ordre: Aucune réponse. {self.mt5.last_error()}",
+            "telegram_critical",
+        )
+        return None
 
     def get_trade_history(self) -> pd.DataFrame:
         """
@@ -891,7 +830,7 @@ class MT5Connector:
             pd.DataFrame: Un DataFrame Pandas des deals historiques,
                         ou un DataFrame vide si la récupération échoue ou aucun deal trouvé.
         """
-        if not self.is_connected():
+        if not self.is_connected:
             self.logger.error(
                 "MT5: Non connecté. Impossible de récupérer l'historique des trades."
             )  # Utilise self.logger

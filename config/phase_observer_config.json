@@ -163,10 +163,6 @@
             "max_allowed_spread_points": 10,
             "min_volume_threshold": 1
         },
-        "crypto_settings": {
-            "max_allowed_spread_points": 2500,
-            "min_volume_threshold": 5
-        },
         "indices_settings": {
             "max_allowed_spread_points": 50,
             "min_volume_threshold": 10
