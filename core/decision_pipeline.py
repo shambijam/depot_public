@@ -27,27 +27,61 @@ class DecisionPipeline:
 
     def __init__(
         self,
-        config_manager_instance: "ConfigManager",
-        ai_interface_instance: AIInterface,
+        config_manager_instance,
+        ai_interface_instance=None,
         strategy_manager_instance=None,
-    ):  # 'ConfigManager' entre guillemets
+        phase_observer_instance=None,  # <-- optionnel
+    ):
         """
-        Initialise le pipeline de décision.
+        Initialise le DecisionPipeline sans présumer de la présence d'un PhaseObserver.
+        - Ne touche PAS à self.phase_observer si None
+        - Lit le flag de debug depuis la config, et l'applique uniquement si un PhaseObserver est fourni
+        """
+        import logging
 
-        Args:
-            config_manager_instance (ConfigManager): L'instance du ConfigManager pour accéder
-                                                    à la configuration globale et aux services partagés (logging, alertes).
-            ai_interface_instance (AIInterface): L'instance de l'interface AI pour obtenir les conseils de l'IA.
-            strategy_manager_instance: L'instance du StrategyManager pour gérer les stratégies (sera injecté plus tard).
-        """
+        self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
-        self.strategy_manager = strategy_manager_instance  # Sera injecté plus tard
-        self.logger = logging.getLogger(__name__)
-        self.phase_observer.debug_confidence_logging = (
-            True  # <— active les logs de poids
+        self.strategy_manager = strategy_manager_instance
+
+        # PhaseObserver optionnel (peut être attaché plus tard via attach_phase_observer)
+        self.phase_observer = phase_observer_instance
+
+        # Flag de debug (on ne force rien si pas de phase_observer)
+        # On essaie plusieurs chemins possibles, valeur par défaut False
+        debug_flag = (
+            self.config_manager.get(
+                "debug_settings.phase_observer.debug_confidence_logging", None
+            )
+            or self.config_manager.get("phase_observer.debug_confidence_logging", None)
+            or self.config_manager.get(
+                "phase_detection_defaults.debug_confidence_logging", None
+            )
         )
-        self.logger.info("DecisionPipeline initialisé.")
+        debug_flag = bool(debug_flag) if isinstance(debug_flag, bool) else False
+
+        # Si un PhaseObserver est fourni et expose l’attribut, on applique
+        if self.phase_observer is not None and hasattr(
+            self.phase_observer, "debug_confidence_logging"
+        ):
+            self.phase_observer.debug_confidence_logging = debug_flag
+
+        # Conserver le flag aussi côté pipeline pour logs internes éventuels
+        self.debug_confidence_logging = debug_flag
+
+        self.logger.info(
+            f"DecisionPipeline initialisé (phase_observer={'present' if self.phase_observer else 'absent'}) "
+            f"| debug_confidence_logging={self.debug_confidence_logging}"
+        )
+
+    def attach_phase_observer(self, phase_observer):
+        """Attache/met à jour le PhaseObserver après coup, en appliquant le flag de debug s'il existe."""
+        self.phase_observer = phase_observer
+        if hasattr(self.phase_observer, "debug_confidence_logging"):
+            self.phase_observer.debug_confidence_logging = bool(
+                getattr(self, "debug_confidence_logging", False)
+            )
+        self.logger.info("PhaseObserver attaché au DecisionPipeline.")
 
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
