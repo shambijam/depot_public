@@ -207,6 +207,182 @@ class DecisionPipeline:
                 "error": str(e),
             }
 
+    def score_configs(
+        self, context: Dict[str, Any], configs: Dict[str, Any]
+    ) -> Dict[str, float]:
+        """
+        Évalue et note les configurations de stratégies disponibles en fonction du contexte.
+        Version purgée : aucune logique spécifique à une stratégie hors whitelist.
+        """
+        self.logger.info("Évaluation des configurations de stratégies disponibles...")
+
+        market_regime = context.get("current_market_regime", "unknown_regime_fallback")
+        self.logger.debug(f"Régime de marché actuel pour le scoring: {market_regime}")
+
+        # === 0) Filtrage par liste blanche de stratégies autorisées ===
+        allowed_strategies = {"scalping", "dynamic", "liquidity"}
+        eligible_configs: Dict[str, Any] = {}
+        for path, data in configs.items():
+            actual_config = data["config"] if "config" in data else data
+            strategy_name = str(actual_config.get("strategy_name", "")).lower()
+            if strategy_name not in allowed_strategies:
+                self.logger.debug(
+                    f"[SCORING] Stratégie ignorée (non autorisée): '{strategy_name}' depuis '{Path(path).name}'"
+                )
+                continue
+            eligible_configs[path] = data
+
+        if not eligible_configs:
+            self.logger.warning(
+                "[SCORING] Aucune stratégie éligible après filtrage whitelist."
+            )
+            return {}
+
+        # Préparation des données pour scoring
+        trading_signals = context.get("trading_signals", {})
+        config_scores: Dict[str, float] = {}
+        strategy_weights = self.config_manager.get("scoring_rules.strategy_weights", {})
+        risk_thresholds = self.config_manager.get(
+            "scoring_rules.risk_appetite_drawdown_thresholds", {}
+        )
+
+        print(f"🎯 [SCORING] Début évaluation {len(eligible_configs)} stratégies")
+        print(f"🎯 [SCORING] Signaux disponibles: {list(trading_signals.keys())}")
+
+        for path, data in eligible_configs.items():
+            # === DEBUG STRUCTURE DES DONNÉES ===
+            print(f"🔍 [DEBUG] Path: {path}")
+            print(f"🔍 [DEBUG] Data keys: {list(data.keys())}")
+            print(f"🔍 [DEBUG] Data type: {type(data)}")
+
+            if "content" in data:
+                print(f"🔍 [DEBUG] Content keys: {list(data['content'].keys())}")
+                print(
+                    f"🔍 [DEBUG] Content strategy_name: {data['content'].get('strategy_name', 'NOT_IN_CONTENT')}"
+                )
+            else:
+                print(
+                    f"🔍 [DEBUG] Direct strategy_name: {data.get('strategy_name', 'NOT_IN_DATA')}"
+                )
+
+            print(f"🔍 [DEBUG] Full data structure: {str(data)[:200]}...")
+            print("=" * 50)
+
+            actual_config = data["config"] if "config" in data else data
+            strategy_name = str(actual_config.get("strategy_name", "")).lower()
+            strategy_tags = actual_config.get("strategy_tags", [])
+
+            # Debug line APRÈS définition des variables
+            print(
+                f"🔍 [DEBUG] Strategy name extracted: '{strategy_name}' from config: {actual_config.get('strategy_name', 'NOT_FOUND')}"
+            )
+            print(f"🔍 [SCORING] Évaluation stratégie: {strategy_name}")
+
+            # === LOGIQUE SCALPING INTELLIGENTE ===
+            if strategy_name == "scalping":
+                score = self._calculate_enhanced_scalping_score(
+                    actual_config, context, trading_signals, strategy_weights
+                )
+                print(f"🗡️ [SCALPING] Score final: {score:.3f}")
+
+            # === LOGIQUE STANDARD POUR AUTRES STRATÉGIES ===
+            else:
+                score = self.config_manager.get("scoring_rules.base_score", 0.5)
+                self.logger.debug(
+                    f"Scoring stratégie '{strategy_name}' (Tags: {strategy_tags})"
+                )
+
+                # Compatibilité tags / régime
+                for tag, weight in strategy_weights.items():
+                    if tag in strategy_tags and tag in market_regime:
+                        score += weight
+                        self.logger.debug(
+                            f"  + Score pour tag '{tag}' correspondant au régime. Score: {score}"
+                        )
+                    elif (
+                        tag in strategy_tags
+                        and strategy_name.startswith(tag)
+                        and tag in market_regime.split("_")
+                    ):
+                        score += weight
+                        self.logger.debug(
+                            f"  + Score pour compatibilité ancienne de tag/régime. Score: {score}"
+                        )
+
+                # Appétit au risque vs drawdown
+                risk_appetite = context.get("risk_appetite", "medium")
+                max_dd = actual_config.get("max_drawdown_percent", 5.0)
+
+                if risk_appetite == "low" and max_dd < risk_thresholds.get(
+                    "low_risk_max_drawdown", 3.0
+                ):
+                    score += risk_thresholds.get("low_risk_score_boost", 0.1)
+                    self.logger.debug(
+                        f"  + Score boost pour appétit au risque 'bas' et faible DD. Score: {score}"
+                    )
+                elif risk_appetite == "high" and max_dd > risk_thresholds.get(
+                    "high_risk_min_drawdown", 7.0
+                ):
+                    score += risk_thresholds.get("high_risk_score_boost", 0.05)
+                    self.logger.debug(
+                        f"  + Score boost pour appétit au risque 'élevé' et DD plus important. Score: {score}"
+                    )
+
+                # Reco IA
+                current_config_path = path
+                ai_recommendation_for_this_config_score = context.get(
+                    "ai_recommendation_score", {}
+                ).get(Path(current_config_path).name, 0.0)
+                ai_weight = self.config_manager.get(
+                    "scoring_rules.ai_recommendation_weight", 0.2
+                )
+                score += ai_recommendation_for_this_config_score * ai_weight
+                self.logger.debug(
+                    f"  + Score IA pour '{strategy_name}': {ai_recommendation_for_this_config_score * ai_weight}. Score: {score}"
+                )
+
+                # Performance historique
+                historical_performance = data.get("performance", {})
+                if historical_performance:
+                    sharpe_ratio = historical_performance.get("sharpe_ratio", 0.0)
+                    if sharpe_ratio > self.config_manager.get(
+                        "scoring_rules.performance_thresholds.good_sharpe", 1.0
+                    ):
+                        score += self.config_manager.get(
+                            "scoring_rules.performance_thresholds.good_sharpe_boost",
+                            0.1,
+                        )
+                    elif sharpe_ratio < self.config_manager.get(
+                        "scoring_rules.performance_thresholds.poor_sharpe", 0.5
+                    ):
+                        score -= self.config_manager.get(
+                            "scoring_rules.performance_thresholds.poor_sharpe_penalty",
+                            0.1,
+                        )
+                    self.logger.debug(
+                        f"  + Score performance historique (Sharpe: {sharpe_ratio}). Score: {score}"
+                    )
+
+                print(f"📊 [STANDARD] {strategy_name} score: {score:.3f}")
+
+            config_scores[path] = max(0.0, min(1.0, score))
+
+        # Log final des scores
+        print(f"\n🏆 [SCORING] RÉSULTATS FINAUX:")
+        sorted_scores = sorted(config_scores.items(), key=lambda x: x[1], reverse=True)
+        for path, score in sorted_scores:
+            strategy_name_display = (
+                eligible_configs[path].get("config", {}).get("strategy_name", "Unknown")
+            )
+            print(
+                f"   {strategy_name_display:>10}: {score:.3f} {'🥇' if score == sorted_scores[0][1] else ''}"
+            )
+
+        self.logger.info(
+            f"Évaluation des configurations terminée. Scores : {config_scores}"
+        )
+        return config_scores
+
     def select_assets_to_trade(self, context: Dict[str, Any]) -> List[str]:
         """
         Évalue, score et sélectionne dynamiquement les meilleurs actifs à trader pour le cycle actuel.
