@@ -12,9 +12,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCHF",
                 "XAUUSD",
-                "US30",
                 "NAS100"
             ],
             "account_type": "STANDARD",
@@ -36,9 +34,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCHF",
                 "XAUUSD",
-                "US30",
                 "NAS100"
             ],
             "account_type": "STANDARD",
@@ -60,9 +56,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCHF",
                 "XAUUSD",
-                "US30",
                 "NAS100"
             ],
             "account_type": "RAW_SPREAD"

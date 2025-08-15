@@ -75,9 +75,7 @@
     "global_allowed_symbols": [
       "EURUSD",
       "GBPUSD",
-      "USDCHF",
       "XAUUSD",
-      "US30",
       "NAS100"
     ],
     "max_allowed_lot_size": 50.0
