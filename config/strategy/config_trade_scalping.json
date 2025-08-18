@@ -14,7 +14,11 @@
       "min_lookback_bars": 500
     }
   },
-  "decision_rules": {
+  "magic_number": 51001,
+  "risk_per_trade_percent": 0.5,
+  "stop_loss_pips": 20,
+  "take_profit_pips": 30,
+  "decision_engine": {
     "thresholds": {
       "min_volatility": 0.010,
       "max_spread_points": 50,
@@ -54,6 +58,28 @@
       "max_parallel_positions": 1
     }
   },
+  "decision_rules": [
+    {
+      "name": "baseline_scalping",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "fvg_ob_confluence"
+        ],
+        "phase_must_contain": [
+          "trend",
+          "range_retail",
+          "range_accumulation"
+        ],
+        "min_confidence": 0.30
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter if bullish confluence and spread <= max_spread_points",
+        "SELL": "enter if bearish confluence and spread <= max_spread_points"
+      }
+    }
+  ],
   "smart_targets": {
     "take_profit": {
       "type": "atr",

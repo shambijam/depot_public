@@ -15,7 +15,11 @@
       "min_lookback_bars": 500
     }
   },
-  "decision_rules": {
+  "magic_number": 51002,
+  "risk_per_trade_percent": 0.4,
+  "stop_loss_pips": 25,
+  "take_profit_pips": 40,
+  "decision_engine": {
     "thresholds": {
       "min_volatility": 0.004,
       "max_spread_points": 80,
@@ -66,6 +70,29 @@
       "fallback_to_market_if_missed": true
     }
   },
+  "decision_rules": [
+    {
+      "name": "baseline_liquidity",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "liquidity_sweep",
+          "fvg_detected"
+        ],
+        "phase_must_contain": [
+          "range_retail",
+          "range_accumulation",
+          "trend"
+        ],
+        "min_confidence": 0.35
+      },
+      "order_type": "LIMIT",
+      "action_logic": {
+        "BUY": "place limit at mitigation zone if bullish sweep confirmed",
+        "SELL": "place limit at mitigation zone if bearish sweep confirmed"
+      }
+    }
+  ],
   "smart_targets": {
     "take_profit": {
       "type": "atr",

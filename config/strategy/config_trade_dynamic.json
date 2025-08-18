@@ -15,7 +15,11 @@
       "min_lookback_bars": 500
     }
   },
-  "decision_rules": {
+  "magic_number": 51003,
+  "risk_per_trade_percent": 0.6,
+  "stop_loss_pips": 22,
+  "take_profit_pips": 35,
+  "decision_engine": {
     "thresholds": {
       "min_volatility": 0.006,
       "max_spread_points": 60,
@@ -101,6 +105,29 @@
       "fallback_to_limit_on_pullback": true
     }
   },
+  "decision_rules": [
+    {
+      "name": "baseline_dynamic",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "fvg_detected",
+          "ob_detected"
+        ],
+        "phase_must_contain": [
+          "trend",
+          "range_accumulation",
+          "range_retail"
+        ],
+        "min_confidence": 0.33
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter on bullish confluence w/ regime alignment",
+        "SELL": "enter on bearish confluence w/ regime alignment"
+      }
+    }
+  ],
   "smart_targets": {
     "take_profit": {
       "type": "atr",
