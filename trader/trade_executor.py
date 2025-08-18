@@ -819,11 +819,11 @@ class TradeExecutor:
     def prepare_order(self, decision_package: dict) -> dict:
         """
         Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
-        - Normalise l'action (LONG/SHORT -> BUY/SELL), refuse toute autre valeur.
-        - Mappe le symbole vers le symbole broker via _map_symbol_for_broker (jamais 'UNKNOWN').
-        - Récupère symbol_info et le prix d'entrée via MT5Connector.
-        - Calcule SL/TP et le volume basé sur le risque.
-        - Construit la requête MT5 via _build_mt5_request.
+        Stratégie de robustesse:
+        - Normalise l'action (LONG/SHORT -> BUY/SELL).
+        - Si action manquante/UNKNOWN, essaie des champs de secours (core_action, selected_action, final_action, side, direction).
+        - Mappe le symbole broker via _map_symbol_for_broker.
+        - Calcule SL/TP et volume, puis construit la requête MT5.
         """
 
         self.logger.info("Préparation de l'ordre MT5...")
@@ -832,29 +832,70 @@ class TradeExecutor:
         active_config = decision_package["active_config"]
         market_context = decision_package["market_context"]
 
-        # --- Normalisation / Validation de l'action ---
-        action_raw = str(trade_decision.get("action", "")).upper()
-        if action_raw == "LONG":
-            action = "BUY"
-        elif action_raw == "SHORT":
-            action = "SELL"
-        else:
-            action = action_raw
+        # ---------- Normalisation / Récupération de l'action ----------
+        def _norm_action(val: str) -> str:
+            if not val:
+                return ""
+            v = str(val).upper()
+            if v == "LONG":
+                return "BUY"
+            if v == "SHORT":
+                return "SELL"
+            return v
 
+        # 1) action principale
+        action = _norm_action(trade_decision.get("action", ""))
+
+        # 2) champs de secours si vide/UNKNOWN
+        if action in {"", "UNKNOWN", None}:
+            fallbacks = [
+                trade_decision.get("core_action"),
+                trade_decision.get("selected_action"),
+                trade_decision.get("final_action"),
+                trade_decision.get("side"),
+                trade_decision.get("direction"),
+                decision_package.get("final_action"),
+            ]
+            for fb in fallbacks:
+                a = _norm_action(fb)
+                if a in {"BUY", "SELL", "CLOSE"}:
+                    action = a
+                    self.logger.warning(
+                        f"[prepare_order] Action primaire invalide/UNKNOWN. Utilisation du fallback='{fb}' -> '{action}'."
+                    )
+                    break
+
+        # Validation finale
         if action not in {"BUY", "SELL", "CLOSE"}:
+            # Journaliser un extrait sûr de la décision pour debug (éviter énormes dumps)
+            safe_preview = {
+                k: trade_decision.get(k)
+                for k in (
+                    "action",
+                    "core_action",
+                    "selected_action",
+                    "final_action",
+                    "side",
+                    "direction",
+                    "asset",
+                    "order_type",
+                )
+            }
+            self.logger.error(
+                f"Action de trade invalide après fallback. Aperçu décision: {safe_preview}"
+            )
             raise TradeExecutionError(
-                f"Action de trade invalide: '{trade_decision.get('action')}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)"
+                f"Action de trade invalide: '{trade_decision.get('action')}' "
+                f"(attendu: BUY/SELL/CLOSE/LONG/SHORT)."
             )
 
-        # --- Symbole d'origine + mapping broker ---
+        # ---------- Mapping symbole broker ----------
         raw_symbol = trade_decision["asset"]
         broker_symbol = self._map_symbol_for_broker(raw_symbol, market_context)
 
-        # --- Cas de clôture de position (pas besoin du reste du pipeline) ---
+        # ---------- Cas de clôture ----------
         if action == "CLOSE":
-            self.logger.info(
-                "Action de clôture détectée. La fermeture réelle sera gérée par close_position."
-            )
+            self.logger.info("Action de clôture détectée (handled by close_position).")
             return {
                 "action": "CLOSE",
                 "symbol": broker_symbol,
@@ -863,14 +904,15 @@ class TradeExecutor:
             }
 
         try:
-            # --- Récupération des informations du symbole ---
+            # ---------- Infos symbole ----------
             symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
             if not symbol_info or not hasattr(symbol_info, "name"):
                 raise TradeExecutionError(
-                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie le nom exact dans le Market Watch MT5."
+                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). "
+                    f"Vérifie le nom exact dans le Market Watch MT5."
                 )
 
-            # --- Récupération du prix d'entrée (Ask/Bid selon action) ---
+            # ---------- Prix d'entrée ----------
             entry_price_market = self.mt5_connector.get_current_price(
                 broker_symbol, action
             )
@@ -879,10 +921,9 @@ class TradeExecutor:
                     f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
                 )
 
-            # --- Prix de déclenchement pour ordres différés (si fourni) ---
             trigger_price = trade_decision.get("trigger_price", entry_price_market)
 
-            # --- Calcul SL/TP ---
+            # ---------- Calcul SL / TP ----------
             sl_price, tp_price = self._calculate_sl_tp_prices(
                 trade_decision,
                 active_config,
@@ -891,7 +932,7 @@ class TradeExecutor:
                 market_context,
             )
 
-            # --- Volume basé sur le risque ---
+            # ---------- Volume (risk-based) ----------
             account_trade_settings = market_context.get(
                 "active_broker_account", {}
             ).get("trade_settings", {})
@@ -904,16 +945,15 @@ class TradeExecutor:
                 sl_price,
                 account_trade_settings,
             )
-
             if not isinstance(volume, (int, float)) or volume <= 0:
                 raise TradeExecutionError(
                     f"Volume calculé invalide ({volume}) pour {broker_symbol}."
                 )
 
-            # --- Type d'ordre (Market/Limit/Stop) ---
+            # ---------- Type d'ordre ----------
             order_type_str = str(trade_decision.get("order_type", "MARKET")).upper()
 
-            # --- Construction finale de la requête ---
+            # ---------- Construction requête MT5 ----------
             return self._build_mt5_request(
                 {"action": action, "asset": broker_symbol},
                 active_config,
@@ -928,12 +968,10 @@ class TradeExecutor:
 
         except TradeExecutionError as tee:
             self.logger.error(f"Échec préparation ordre {broker_symbol}: {tee}")
-            # Appel sécurisé (évite 'multiple values for alert_type')
             self._send_alert_safe(
                 "CRITIQUE", f"Préparation Ordre Échec: {tee}", "telegram_critical"
             )
             raise
-
         except Exception as e:
             self.logger.error(
                 f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
