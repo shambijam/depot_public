@@ -10,7 +10,7 @@
   "phase_detection": {
     "use_phase_observer": true,
     "lookback_window": 200,
-    "volatility_threshold": 0.004,
+    "volatility_threshold": 0.003,
     "volume_zscore": 0.0,
     "overrides": {
       "require_range_detection": true,
@@ -23,15 +23,15 @@
   "take_profit_pips": 30,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.004,
-      "max_spread_points": 90,
-      "min_volume_score": -0.25,
+      "min_volatility": 0.003,
+      "max_spread_points": 100,
+      "min_volume_score": -0.5,
       "per_symbol_overrides": {
         "NAS100": {
-          "max_spread_points": 100
+          "max_spread_points": 120
         },
         "XAUUSD": {
-          "min_volatility": 0.008
+          "min_volatility": 0.006
         }
       }
     },
@@ -60,14 +60,14 @@
       "allow_only_whitelist_assets": true
     },
     "risk": {
-      "max_trades_per_day": 6,
+      "max_trades_per_day": 8,
       "cooldown_seconds_after_trade": 60,
-      "skip_asset_if_spread_over_points": 100
+      "skip_asset_if_spread_over_points": 120
     },
     "execution": {
       "order_type": "market",
       "slippage_points": 3,
-      "max_parallel_positions": 1,
+      "max_parallel_positions": 2,
       "entry_on_close_only": false,
       "confirm_spread_at_entry": true,
       "cooldown_bars_after_miss": 2
@@ -78,7 +78,7 @@
       "ob_entry_requires": {
         "spread_ok": true,
         "mtf_alignment_min": 1,
-        "rr_min": 1.5
+        "rr_min": 1.2
       }
     }
   },
