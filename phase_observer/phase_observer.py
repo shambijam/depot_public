@@ -2288,54 +2288,6 @@ class PhaseObserver:
 
         return min(max_confidence, max(0.0, score))
 
-    def _apply_phase_fallback(row):
-        p = row.get("phase_primary", "no_clear_phase")
-        if p != "no_clear_phase":
-            return p, "primary"
-
-        v = float(row.get("volatility_pct", 0.0))
-        if v < low_th:
-            return "range_retail", "fallback_low"
-        if v >= high_th:
-            return "range_distribution", "fallback_high"
-
-        return "no_clear_phase", "fallback_mid"
-
-    # === Dans ta fonction/méthode d’analyse principale ===
-    phase_fallback_vals = df_an.apply(_apply_phase_fallback, axis=1)
-    df_an["phase"] = [p for p, _r in phase_fallback_vals]
-    df_an["phase_rule"] = [_r for _p, _r in phase_fallback_vals]  # utile pour debug
-
-    # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
-    df_an["confidence_score"] = df_an.apply(self.calculate_optimized_confidence, axis=1)
-
-    # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
-    if not df_an.empty:
-        total_signals = (
-            df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
-        )
-        avg_confidence = df_an["confidence_score"].mean()
-        last_phase = df_an["phase"].iloc[-1]
-        last_confidence = float(df_an["confidence_score"].iloc[-1])
-        last_regime = (
-            df_an["regime"].iloc[-1] if "regime" in df_an.columns else "unknown"
-        )
-        last_vol = (
-            float(df_an["volatility_pct"].iloc[-1])
-            if "volatility_pct" in df_an.columns
-            else 0.0
-        )
-        last_rule = (
-            df_an["phase_rule"].iloc[-1] if "phase_rule" in df_an.columns else "primary"
-        )
-
-        self.logger.info(
-            f"🎯 [{current_asset_symbol}] Pipeline terminé: "
-            f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
-            f"Régime={last_regime}, Signaux totaux={int(total_signals)}, "
-            f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
-        )
-
     def analyze(
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None
     ) -> Optional[pd.DataFrame]:
@@ -2350,6 +2302,7 @@ class PhaseObserver:
 
         Performance target: 78%+ win rate, <50ms processing time
         """
+
         self.logger.info(f"🚀 SNIPER_X Optimized Pipeline - Processing {len(df)} bars")
 
         if df is None or df.empty:
@@ -2363,7 +2316,7 @@ class PhaseObserver:
             self.logger.error("Échec du nettoyage DataFrame")
             return None
 
-        # Force colonnes prix en numérique, robustesse NaN/Inf
+        # Force colonnes prix en numérique
         for _col in ("close", "high", "low", "open"):
             if _col in df_an.columns:
                 df_an[_col] = pd.to_numeric(df_an[_col], errors="coerce")
@@ -2377,7 +2330,7 @@ class PhaseObserver:
             self.logger.error("Trop peu de barres après nettoyage pour analyze()")
             return None
 
-        # Initialisation colonnes requises avec valeurs par défaut
+        # Initialisation colonnes requises
         required_columns = {
             "spread": 0,
             "point": 0.00001,
@@ -2393,11 +2346,11 @@ class PhaseObserver:
                     default_val
                 )
 
-        # === Volatilité en % (robuste, non nulle) ===
+        # === Volatilité en % ===
         try:
             if "close" in df_an.columns:
                 ret = df_an["close"].pct_change().fillna(0.0)
-                vol_pct = ret.abs().ewm(span=20, adjust=False).mean() * 100.0  # en %
+                vol_pct = ret.abs().ewm(span=20, adjust=False).mean() * 100.0
                 vol_pct = (
                     vol_pct.replace([np.inf, -np.inf], 0.0).fillna(0.0).clip(lower=1e-6)
                 )
@@ -2410,16 +2363,12 @@ class PhaseObserver:
             )
             df_an["volatility_pct"] = 0.0
 
-        # ==============================================================================
-        # ▼▼▼ Bloc volume momentum (conservé, rendu plus robuste) ▼▼▼
-        # ==============================================================================
-        self.logger.debug(f"[{current_asset_symbol}] Calcul du volume momentum...")
+        # === Bloc volume momentum ===
         volume_ma_period = self.config_manager.get(
             "phase_detection_defaults.regime_detection_settings.volume_profile.volume_ma_period",
             20,
         )
-        volume_zscore_period = 50  # fenêtre plus longue pour un Z-score stable
-
+        volume_zscore_period = 50
         if "tick_volume" in df_an.columns and len(df_an) > volume_zscore_period:
             df_an["tick_volume"] = pd.to_numeric(
                 df_an["tick_volume"], errors="coerce"
@@ -2429,7 +2378,6 @@ class PhaseObserver:
                 .rolling(window=volume_ma_period, min_periods=1)
                 .mean()
             )
-
             volume_mean_z = (
                 df_an["tick_volume"]
                 .rolling(window=volume_zscore_period, min_periods=1)
@@ -2446,7 +2394,6 @@ class PhaseObserver:
                 .replace([np.inf, -np.inf], 0.0)
                 .fillna(0.0)
             )
-
             vol_std_ma = (
                 df_an["tick_volume"]
                 .rolling(window=volume_ma_period, min_periods=1)
@@ -2458,65 +2405,50 @@ class PhaseObserver:
                 .replace([np.inf, -np.inf], 0.0)
                 .fillna(0.0)
             )
-
-            last_momentum = float(df_an["volume_momentum"].iloc[-1])
-            self.logger.info(
-                f"DEBUG MOMENTUM pour {current_asset_symbol}: Dernière valeur = {last_momentum:.2f}"
-            )
         else:
             self.logger.warning(
-                f"Données de volume insuffisantes pour {current_asset_symbol}, momentum mis à 0."
+                f"Données volume insuffisantes pour {current_asset_symbol}"
             )
             df_an["volume_zscore"] = 0.0
             df_an["volume_momentum"] = 0.0
 
-        # Récupération des toggles optimisés
+        # === PHASE 2: CORE INDICATORS ===
         toggles = self.config_manager.get(
             "phase_detection_defaults.detection_toggles", {}
         )
-        self.logger.debug(f"Toggles optimisés: {toggles}")
 
-        # === PHASE 2: CORE INDICATORS PIPELINE ===
-        # 1. MARKET REGIME DETECTION (remplace trend basique)
         if toggles.get("detect_regime", True):
             df_an["regime"] = self.detect_market_regime(df_an)
             df_an["regime_detected"] = True
-            self.logger.debug("✅ Market Regime Detection terminé")
         else:
             df_an["regime"] = "unknown"
             df_an["regime_detected"] = False
             df_an["regime_strength"] = 0.5
 
-        # 2. FVG ENHANCED
         if toggles.get("detect_fvg", True):
             df_an["fvg_details"] = self.detect_fvg_enhanced(df_an)
             df_an["fvg_detected"] = df_an["fvg_details"].apply(lambda x: x is not None)
-            self.logger.debug("✅ FVG Enhanced terminé")
         else:
             df_an["fvg_details"] = [None] * len(df_an)
             df_an["fvg_detected"] = False
 
-        # 3. ORDER BLOCKS ML ENHANCED
         if toggles.get("detect_order_block", True):
             df_an["ob_details"] = self.detect_order_block_ml_enhanced(df_an)
             df_an["ob_detected"] = df_an["ob_details"].apply(lambda x: x is not None)
-            self.logger.debug("✅ Order Blocks ML Enhanced terminé")
         else:
             df_an["ob_details"] = [None] * len(df_an)
             df_an["ob_detected"] = False
 
-        # 4. BOS/MSS ENHANCED
         if toggles.get("detect_bos_mss", True):
             df_an["bos_mss_details"] = self.detect_bos_mss_enhanced(df_an)
             df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
                 lambda x: x is not None
             )
-            self.logger.debug("✅ BOS/MSS Enhanced terminé")
         else:
             df_an["bos_mss_details"] = [None] * len(df_an)
             df_an["bos_mss_detected"] = False
 
-        # === PHASE 3: DÉTECTION DE LIQUIDITÉ OPTIMISÉE (sans crypto) ===
+        # === PHASE 3: DÉTECTION LIQUIDITÉ ===
         indices_symbols = set(
             self.config_manager.get("global_safety.indices_symbols", ["US30", "NAS100"])
         )
@@ -2534,7 +2466,6 @@ class PhaseObserver:
                 )
             )
         else:
-            # défaut: forex
             max_spread = float(
                 self.config_manager.get(
                     "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points",
@@ -2560,7 +2491,7 @@ class PhaseObserver:
         )
         df_an["is_liquid"] = (last_spread <= max_spread) and (last_volume >= min_volume)
 
-        # === PHASE 4: SIGNAUX DE CONFLUENCE SOPHISTIQUÉS ===
+        # === PHASE 4: SIGNAUX DE CONFLUENCE ===
         df_an["fvg_ob_confluence"] = df_an["fvg_detected"] & df_an["ob_detected"]
         df_an["high_quality_ob"] = df_an["ob_details"].apply(
             lambda x: isinstance(x, dict) and x.get("ml_score", 0) > 0.8
@@ -2572,51 +2503,46 @@ class PhaseObserver:
             "institutional", na=False
         ) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
 
-        # === PHASE 5: DÉTERMINATION DE PHASE OPTIMISÉE (avec fallback doux) ===
-        # 5.1 Phase primaire
+        # === PHASE 5: PHASE OPTIMISÉE + FALLBACK ===
         df_an["phase_primary"] = df_an.apply(self.determine_optimized_phase, axis=1)
-
-        # 5.2 Fallback basé sur volatilité si primaire = "no_clear_phase"
         low_th = float(
             self.config_manager.get(
                 "phase_detection_defaults.regime_detection_settings.volatility.thresholds.low_pct",
                 0.03,
             )
-        )  # en %
+        )
         high_th = float(
             self.config_manager.get(
                 "phase_detection_defaults.regime_detection_settings.volatility.thresholds.high_pct",
                 0.15,
             )
-        )  # en %
-
+        )
         df_an["phase"] = df_an["phase_primary"]
         df_an["phase_rule"] = "primary"
 
-        last_idx = df_an.index[-1]
-        last_vol = (
-            float(df_an["volatility_pct"].iloc[-1])
-            if "volatility_pct" in df_an.columns
-            else 0.0
-        )
-        last_rule = "primary"
+        # --- sous-fonction imbriquée ---
+        def _apply_phase_fallback(row):
+            p = row.get("phase_primary", "no_clear_phase")
+            if p != "no_clear_phase":
+                return p, "primary"
+            v = float(row.get("volatility_pct", 0.0))
+            if v < low_th:
+                return "range_retail", "fallback_low"
+            if v >= high_th:
+                return "range_distribution", "fallback_high"
+            return "no_clear_phase", "fallback_mid"
 
-        if str(df_an.at[last_idx, "phase"]).lower() == "no_clear_phase":
-            if last_vol <= low_th:
-                df_an.at[last_idx, "phase"] = "range_retail"
-                last_rule = "fallback_low"
-            elif last_vol <= high_th:
-                # On ne force rien, mais on indique que le fallback mid a été considéré
-                last_rule = "fallback_mid"
+        # appliquer le fallback
+        phase_fallback_vals = df_an.apply(_apply_phase_fallback, axis=1)
+        df_an["phase"] = [p for p, _r in phase_fallback_vals]
+        df_an["phase_rule"] = [_r for _p, _r in phase_fallback_vals]
 
-        df_an.at[last_idx, "phase_rule"] = last_rule
-
-        # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
+        # === PHASE 6: SCORE DE CONFIANCE ===
         df_an["confidence_score"] = df_an.apply(
             self.calculate_optimized_confidence, axis=1
         )
 
-        # === PHASE 7: MÉTRIQUES DE PERFORMANCE + LOG FINAL ===
+        # === PHASE 7: MÉTRIQUES + LOG FINAL ===
         if not df_an.empty:
             total_signals = (
                 df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
@@ -2626,13 +2552,17 @@ class PhaseObserver:
                 if "confidence_score" in df_an.columns
                 else 0.0
             )
-
             last_phase = str(df_an["phase"].iloc[-1])
             last_confidence = float(df_an["confidence_score"].iloc[-1])
             last_regime = (
                 str(df_an["regime"].iloc[-1])
                 if "regime" in df_an.columns
                 else "unknown"
+            )
+            last_vol = (
+                float(df_an["volatility_pct"].iloc[-1])
+                if "volatility_pct" in df_an.columns
+                else 0.0
             )
             last_rule = (
                 str(df_an["phase_rule"].iloc[-1])
