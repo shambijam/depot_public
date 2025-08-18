@@ -9,6 +9,9 @@
   ],
   "phase_detection": {
     "use_phase_observer": true,
+    "lookback_window": 200,
+    "volatility_threshold": 0.006,
+    "volume_zscore": 0.5,
     "overrides": {
       "require_range_detection": true,
       "min_lookback_bars": 500

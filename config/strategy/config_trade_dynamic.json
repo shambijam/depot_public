@@ -9,6 +9,9 @@
   ],
   "phase_detection": {
     "use_phase_observer": true,
+    "lookback_window": 400,
+    "volatility_threshold": 0.006,
+    "volume_zscore": 0.35,
     "overrides": {
       "require_trend_detection": true,
       "prefer_trend_over_range": true,
