@@ -1255,14 +1255,8 @@ class DecisionPipeline:
         mais sans déléguer la décision finale aux instances de stratégie.
         DecisionPipeline est le SEUL DÉCIDEUR.
 
-        Args:
-            context (Dict): Le contexte de marché et système enrichi.
-            current_config (Dict): La configuration de la stratégie active à utiliser pour ce cycle.
-            signals (Dict): Les signaux de trading générés pour les actifs (provenant de PhaseObserver).
-            strategy_manager_instance: L'instance du StrategyManager. # Ce paramètre est maintenant redondant
-
         Returns:
-            Dict: Le dictionnaire de la décision de trade, ou un dictionnaire vide si aucune opportunité n'est trouvée.
+            Dict: La décision de trade (dict) ou {} si aucune opportunité valide.
         """
         self.logger.info(
             "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
@@ -1270,7 +1264,7 @@ class DecisionPipeline:
 
         self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
 
-        # 1. Filtres pré-décision critiques (sécurité globale)
+        # 1) Filtres pré-décision critiques (sécurité globale)
         if current_config.get(
             "halt_on_major_news", True
         ) and self.config_manager.check_news_schedule(
@@ -1279,18 +1273,18 @@ class DecisionPipeline:
             self.logger.warning(
                 "Trade suspendu en raison d'un événement d'actualité majeur."
             )
-            self.config_manager.log_decision(  # Log via ConfigManager
+            self.config_manager.log_decision(
                 current_config, {}, context, "Trade bloqué: Actualité majeure."
             )
             return {}
 
-        # 2. Récupérer le nom de stratégie pour les paramètres
+        # 2) Récupérer le nom de stratégie
         strategy_name = current_config.get("strategy_name", "unknown")
         self.logger.info(
             f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
         )
 
-        # 3. CORE ÉVALUE DIRECTEMENT LES SIGNAUX (PLUS DE DÉLÉGATION)
+        # 3) CORE évalue directement les signaux (sans délégation)
         trade_decision = self._core_evaluate_signals(
             context, current_config, signals, strategy_name
         )
@@ -1301,7 +1295,71 @@ class DecisionPipeline:
             )
             return {}
 
-        # 4. Vérifications finales et calcul de risque (responsabilité du ConfigManager/DecisionPipeline)
+        # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
+        # Normalise l'action
+        action_raw = str(trade_decision.get("action", "")).upper()
+        action_map = {
+            "LONG": "BUY",
+            "SHORT": "SELL",
+            "BUY": "BUY",
+            "SELL": "SELL",
+            "CLOSE": "CLOSE",
+        }
+        normalized_action = action_map.get(action_raw)
+
+        if not normalized_action:
+            self.logger.warning(
+                f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement."
+            )
+            self.config_manager.log_decision(
+                current_config,
+                {},
+                context,
+                f"Décision ignorée (action inconnue: {action_raw})",
+            )
+            return {}
+
+        # Normalise/Sécurise l’asset
+        asset_raw = str(trade_decision.get("asset", "")).upper().strip()
+        if not asset_raw:
+            self.logger.warning("Décision reçue sans 'asset' -> décision ignorée.")
+            self.config_manager.log_decision(
+                current_config, {}, context, "Décision ignorée (asset vide)."
+            )
+            return {}
+
+        allowed_assets = set(map(str.upper, current_config.get("tradeable_assets", [])))
+        if allowed_assets and asset_raw not in allowed_assets:
+            self.logger.warning(
+                f"Asset '{asset_raw}' non autorisé pour la stratégie '{strategy_name}'. Whitelist: {sorted(allowed_assets)}"
+            )
+            self.config_manager.log_decision(
+                current_config,
+                {},
+                context,
+                f"Décision ignorée (asset non autorisé: {asset_raw})",
+            )
+            return {}
+
+        # Pose un order_type par défaut si absent
+        order_type = str(trade_decision.get("order_type", "MARKET")).upper()
+        if order_type not in {
+            "MARKET",
+            "BUY_LIMIT",
+            "SELL_LIMIT",
+            "BUY_STOP",
+            "SELL_STOP",
+        }:
+            # On force MARKET si valeur exotique, pour éviter de bloquer ici (les validations fines se font plus tard)
+            self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
+            order_type = "MARKET"
+
+        # Réinjecte les valeurs normalisées dans la décision
+        trade_decision["action"] = normalized_action
+        trade_decision["asset"] = asset_raw
+        trade_decision["order_type"] = order_type
+
+        # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
             "max_open_positions", 999
@@ -1323,6 +1381,7 @@ class DecisionPipeline:
             context, current_config, trade_decision
         )
         self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
+
         if not risk_params.get("volume", 0.0) > 0:
             self.logger.warning(
                 "Calcul de risque invalide ou volume nul. Trade annulé."
@@ -1331,7 +1390,8 @@ class DecisionPipeline:
 
         trade_decision.update(risk_params)
 
-        self.config_manager.log_decision(  # Log via ConfigManager
+        # Log final
+        self.config_manager.log_decision(
             current_config,
             trade_decision,
             context,
