@@ -623,77 +623,142 @@ class TradeExecutor:
         )
         return True, "Exposition du portefeuille acceptable."
 
-    def pre_trade_checks(self, decision_package: dict) -> bool:
+    def pre_trade_checks(
+        self,
+        trade_decision: dict,
+        active_config: dict,
+        market_context: dict,
+    ) -> tuple[bool, str]:
         """
-        Orchestre une série de validations pré-trade de manière robuste.
-        Cette fonction est la dernière ligne de défense avant l'envoi d'un ordre au broker.
+        Vérifications pré-trade rapides avant toute construction/émission d'ordre.
+        Doit renvoyer (True, "") si tout est OK, sinon (False, "raison").
 
-        Args:
-            decision_package (dict): Le package de décision validé.
-
-        Returns:
-            bool: True si toutes les vérifications passent, False sinon.
+        Arguments:
+            trade_decision: dict venant du pipeline (action, asset, order_type, ...)
+            active_config:  config de stratégie sélectionnée pour ce cycle
+            market_context: contexte global (positions ouvertes, compte, etc.)
         """
-        self.logger.info("Exécution des vérifications de sécurité pré-trade...")
-        context = decision_package["market_context"]
-        config = decision_package["active_config"]
-        trade_decision = decision_package["trade_decision"]
-        symbol = trade_decision["asset"]
 
-        # Liste des barrières de sécurité à vérifier séquentiellement
-        checks_to_run = [
-            # Le marché est-il ouvert ?
-            (self._check_trading_window, {"current_time_utc": datetime.now(UTC)}),
-            # Le spread est-il acceptable ?
-            (self._check_spread, {"symbol": symbol, "active_config": config}),
-            # Le risque global du portefeuille est-il sous contrôle ?
-            (
-                self._check_portfolio_exposure,
-                {"active_config": config, "current_context": context},
-            ),
-        ]
+        # --- Helpers locaux ---
+        def _first_non_empty(*vals):
+            for v in vals:
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
 
-        # Ajout de la vérification "anti-grosse erreur" (fat-finger) si activée
-        if self.config_manager.get(
-            "trade_executor_settings.fat_finger_check.enabled", True
-        ):
-            checks_to_run.append(
-                (
-                    self._check_fat_finger_volume,
-                    {"trade_decision": trade_decision, "market_context": context},
-                )
+        def _normalize_action(a: str) -> str:
+            a = (a or "").strip().upper()
+            mapping = {
+                "BUY": "BUY",
+                "SELL": "SELL",
+                "LONG": "BUY",
+                "SHORT": "SELL",
+                "CLOSE": "CLOSE",
+            }
+            return mapping.get(a, "")
+
+        # 1) Normalisation action + asset
+        action_raw = _first_non_empty(
+            trade_decision.get("final_action"),
+            trade_decision.get("selected_action"),
+            trade_decision.get("core_action"),
+            trade_decision.get("action"),
+            trade_decision.get("side"),
+            trade_decision.get("direction"),
+        )
+        action = _normalize_action(action_raw)
+        if not action:
+            return (
+                False,
+                f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT).",
             )
 
-        for check_func, kwargs in checks_to_run:
-            try:
-                is_valid, reason = check_func(**kwargs)
-                if not is_valid:
-                    self.logger.warning(
-                        f"TRADE BLOQUÉ. Raison: {reason} (Actif: {symbol})"
-                    )
-                    self.config_manager.send_alert(
-                        f"TRADE BLOQUÉ: {reason}", alert_type="telegram_critical"
-                    )
-                    return False
-            except Exception as e:
-                # --- AMÉLIORATION MAJEURE : SÉCURITÉ ANTI-CRASH ---
-                # Si une fonction de vérification a un bug, on ne fait pas planter le bot.
-                # On considère que la vérification a échoué et on bloque le trade.
-                check_name = check_func.__name__
-                self.logger.critical(
-                    f"TRADE BLOQUÉ. Une erreur critique est survenue dans la fonction de sécurité '{check_name}'. Erreur: {e}",
-                    exc_info=True,
-                )
-                self.config_manager.send_alert(
-                    f"ERREUR CRITIQUE dans une sécurité pré-trade ({check_name}). Trade bloqué.",
-                    alert_type="telegram_critical",
-                )
-                return False
-
-        self.logger.info(
-            "Toutes les vérifications de sécurité pré-trade sont passées avec succès."
+        raw_symbol = _first_non_empty(
+            trade_decision.get("asset"),
+            trade_decision.get("symbol"),
+            trade_decision.get("instrument"),
         )
-        return True
+        if not raw_symbol or raw_symbol.strip().upper() == "UNKNOWN":
+            return False, "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
+
+        raw_symbol = raw_symbol.strip().upper()
+
+        # 2) Whitelist stratégie (si fournie)
+        allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
+        if allowed and raw_symbol not in allowed:
+            return (
+                False,
+                f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist active).",
+            )
+
+        # 3) Mapping broker
+        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
+            raw_symbol, raw_symbol
+        )
+        if not broker_symbol or str(broker_symbol).strip().upper() == "UNKNOWN":
+            return False, f"Mapping broker invalide pour l'asset '{raw_symbol}'."
+
+        broker_symbol = str(broker_symbol).strip().upper()
+
+        # 4) Connexion MT5 active ?
+        if not self.mt5_connector.is_connected():
+            # Essayer une reconnexion douce si dispo
+            try:
+                self.mt5_connector.reconnect_if_needed()
+            except Exception:
+                return False, "Connexion MT5 indisponible."
+
+            if not self.mt5_connector.is_connected():
+                return False, "Connexion MT5 indisponible."
+
+        # 5) Symbole MT5 existant ?
+        symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
+        if not symbol_info or not getattr(symbol_info, "name", None):
+            return False, f"Symbole MT5 invalide ou introuvable ({broker_symbol})."
+
+        # 6) Positions max du compte
+        active_acc = market_context.get("active_broker_account", {})
+        max_pos = active_acc.get("trade_settings", {}).get("max_open_positions", 999)
+        current_positions = market_context.get("open_positions", [])
+        if (
+            isinstance(current_positions, (list, tuple))
+            and len(current_positions) >= max_pos
+        ):
+            return False, f"Max positions atteint ({len(current_positions)}/{max_pos})."
+
+        # 7) Spread / contraintes symbol (si la stratégie en définit)
+        #    On lit quelques garde-fous optionnels dans la config.
+        exec_policy = (
+            active_config.get("execution_policy", {})
+            if isinstance(active_config, dict)
+            else {}
+        )
+        max_spread_points = exec_policy.get("max_spread_points")  # ex: 50 points etc.
+        tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
+        if tick and hasattr(symbol_info, "point") and hasattr(symbol_info, "spread"):
+            # NB: spread renvoyé par MT5 (en points "de tick" selon le broker)
+            if (
+                isinstance(max_spread_points, (int, float))
+                and symbol_info.spread
+                and max_spread_points > 0
+            ):
+                if symbol_info.spread > max_spread_points:
+                    return (
+                        False,
+                        f"Spread trop élevé: {symbol_info.spread} > {max_spread_points} points.",
+                    )
+
+        # 8) Si action == CLOSE, pas d'autres checks de prix nécessaires ici
+        if action == "CLOSE":
+            return True, ""
+
+        # 9) Prix courant doit être disponible et > 0
+        price = self.mt5_connector.get_current_price(broker_symbol, action)
+        if not price or price <= 0:
+            return False, f"Prix de marché indisponible pour {broker_symbol}."
+
+        # Tout est OK
+        return True, ""
 
     def _check_fat_finger_volume(
         self, trade_decision: dict, market_context: dict
