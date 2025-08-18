@@ -758,36 +758,39 @@ class TradeExecutor:
     def prepare_order(self, decision_package: dict) -> dict:
         """
         Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
-        Cette fonction orchestre la récupération des informations de marché, le calcul
-        du Stop Loss et du Take Profit, et le calcul dynamique du volume basé sur le risque.
-        Elle gère également les ordres différés (LIMIT/STOP).
-
-        Args:
-            decision_package (dict): Le package de décision validé.
-
-        Returns:
-            dict: La requête d'ordre MT5 prête à être exécutée.
-
-        Raises:
-            TradeExecutionError: Si une erreur critique empêche la préparation de l'ordre.
+        Gère BUY/SELL, normalise l'action, calcule SL/TP et le volume en fonction du risque.
         """
+
         self.logger.info("Préparation de l'ordre MT5...")
         trade_decision = decision_package["trade_decision"]
         active_config = decision_package["active_config"]
         market_context = decision_package["market_context"]
 
         symbol = trade_decision["asset"]
-        action = trade_decision["action"]
+
+        # 🔧 Normalisation de l'action (corrige les 'UNKNOWN', 'short', 'long', etc.)
+        raw_action = str(trade_decision.get("action", "")).upper()
+        if raw_action in ["BUY", "SELL"]:
+            action = raw_action
+        elif raw_action in ["LONG"]:
+            action = "BUY"
+        elif raw_action in ["SHORT"]:
+            action = "SELL"
+        else:
+            self.logger.warning(
+                f"Action inconnue '{trade_decision.get('action')}', fallback sur 'SELL'."
+            )
+            action = "SELL"  # ⚠️ tu peux choisir "BUY" si tu préfères
+
         order_type_str = trade_decision.get(
             "order_type", "MARKET"
         )  # Vient du moteur de règles
 
-        # Cas de clôture de position (si l'action est "CLOSE")
+        # Cas de clôture de position
         if action == "CLOSE":
             self.logger.info(
                 "Action de clôture détectée. Laisser `TradeExecutor.close_position` gérer la clôture réelle."
             )
-            # Le package de décision de clôture n'a pas besoin de tous les détails d'un ordre d'ouverture
             return {
                 "action": "CLOSE",
                 "symbol": symbol,
@@ -795,29 +798,25 @@ class TradeExecutor:
                 "ticket_to_close": trade_decision.get("ticket_to_close"),
             }
 
-        if action not in ["BUY", "SELL"]:
-            raise TradeExecutionError(f"Action de trade non supportée : '{action}'.")
-
         try:
-            # Récupérer les informations du symbole via le MT5Connector
+            # Infos du symbole via MT5Connector
             symbol_info = self.mt5_connector.get_symbol_info(symbol)
-            if symbol_info is None:  # get_symbol_info peut retourner None
+            if symbol_info is None:
                 raise TradeExecutionError(
                     f"Impossible de récupérer les informations du symbole pour {symbol}. Ordre annulé."
                 )
 
-            # Récupérer le prix d'entrée (peut être le prix actuel ou un prix de déclenchement pour les ordres différés)
+            # Prix d'entrée
             entry_price_market = self.mt5_connector.get_current_price(symbol, action)
             if not entry_price_market or entry_price_market <= 0:
                 raise TradeExecutionError(
                     f"Impossible de récupérer un prix de marché valide pour {symbol}. Ordre annulé."
                 )
 
-            # Pour les ordres différés, le prix de déclenchement vient de la décision
+            # Trigger price (ordres différés)
             trigger_price = trade_decision.get("trigger_price", entry_price_market)
 
-            # Calcul des prix SL/TP (basé sur la structure du marché ou des pips fixes)
-            # La fonction _calculate_sl_tp_prices a besoin de market_context pour les données historiques
+            # Calcul SL/TP
             sl_price, tp_price = self._calculate_sl_tp_prices(
                 trade_decision,
                 active_config,
@@ -826,8 +825,7 @@ class TradeExecutor:
                 market_context,
             )
 
-            # Calcul du volume basé sur le risque et les spécifications du broker
-            # Utilise les infos du compte broker actif du context
+            # Volume basé sur le risque
             account_trade_settings = market_context.get(
                 "active_broker_account", {}
             ).get("trade_settings", {})
@@ -841,15 +839,14 @@ class TradeExecutor:
                 account_trade_settings,
             )
 
-            # S'assurer que le volume calculé est valide avant de construire la requête
             if not isinstance(volume, (int, float)) or volume <= 0:
                 raise TradeExecutionError(
                     f"Volume calculé invalide ou nul ({volume}) pour {symbol}. Ordre annulé."
                 )
 
-            # Construction finale de la requête MT5
+            # Construction de la requête MT5 finale
             return self._build_mt5_request(
-                trade_decision,
+                {**trade_decision, "action": action},  # ⚡ on force l'action corrigée
                 active_config,
                 volume,
                 entry_price_market,
@@ -857,7 +854,7 @@ class TradeExecutor:
                 tp_price,
                 symbol_info,
                 trigger_price,
-                order_type_str,  # Passer le trigger_price et order_type_str
+                order_type_str,
             )
 
         except TradeExecutionError as tee:
@@ -869,7 +866,7 @@ class TradeExecutor:
                 f"Préparation Ordre Échec: {tee}",
                 alert_type="telegram_critical",
             )
-            raise  # Relaisser l'exception pour que le pipeline l'intercepte
+            raise
         except Exception as e:
             self.logger.error(
                 f"Échec inattendu lors de la préparation de l'ordre pour {symbol}: {e}",
@@ -883,9 +880,6 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de la préparation de l'ordre pour {symbol}: {e}"
             ) from e
-
-        # TODO: Implémenter la logique pour préparer des ordres différés (LIMIT/STOP) en se basant
-        #       sur le `order_type` fourni par le moteur de règles. (Ce TODO est maintenant implémenté ci-dessus)
 
     def _calculate_sl_tp_prices(
         self,
