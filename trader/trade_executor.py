@@ -631,12 +631,7 @@ class TradeExecutor:
     ) -> tuple[bool, str]:
         """
         Vérifications pré-trade rapides avant toute construction/émission d'ordre.
-        Doit renvoyer (True, "") si tout est OK, sinon (False, "raison").
-
-        Arguments:
-            trade_decision: dict venant du pipeline (action, asset, order_type, ...)
-            active_config:  config de stratégie sélectionnée pour ce cycle
-            market_context: contexte global (positions ouvertes, compte, etc.)
+        Renvoie (True, "") si OK, sinon (False, "raison").
         """
 
         # --- Helpers locaux ---
@@ -656,6 +651,24 @@ class TradeExecutor:
                 "CLOSE": "CLOSE",
             }
             return mapping.get(a, "")
+
+        def _mt5_is_connected() -> bool:
+            # is_connected peut être un bool OU une méthode selon l’implémentation du connector
+            attr = getattr(self.mt5_connector, "is_connected", None)
+            try:
+                if callable(attr):
+                    return bool(attr())
+                return bool(attr)
+            except Exception:
+                return False
+
+        def _mt5_reconnect_if_needed():
+            recon = getattr(self.mt5_connector, "reconnect_if_needed", None)
+            if callable(recon):
+                try:
+                    recon()
+                except Exception:
+                    pass
 
         # 1) Normalisation action + asset
         action_raw = _first_non_empty(
@@ -680,7 +693,6 @@ class TradeExecutor:
         )
         if not raw_symbol or raw_symbol.strip().upper() == "UNKNOWN":
             return False, "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
-
         raw_symbol = raw_symbol.strip().upper()
 
         # 2) Whitelist stratégie (si fournie)
@@ -697,18 +709,12 @@ class TradeExecutor:
         )
         if not broker_symbol or str(broker_symbol).strip().upper() == "UNKNOWN":
             return False, f"Mapping broker invalide pour l'asset '{raw_symbol}'."
-
         broker_symbol = str(broker_symbol).strip().upper()
 
         # 4) Connexion MT5 active ?
-        if not self.mt5_connector.is_connected():
-            # Essayer une reconnexion douce si dispo
-            try:
-                self.mt5_connector.reconnect_if_needed()
-            except Exception:
-                return False, "Connexion MT5 indisponible."
-
-            if not self.mt5_connector.is_connected():
+        if not _mt5_is_connected():
+            _mt5_reconnect_if_needed()
+            if not _mt5_is_connected():
                 return False, "Connexion MT5 indisponible."
 
         # 5) Symbole MT5 existant ?
@@ -726,17 +732,15 @@ class TradeExecutor:
         ):
             return False, f"Max positions atteint ({len(current_positions)}/{max_pos})."
 
-        # 7) Spread / contraintes symbol (si la stratégie en définit)
-        #    On lit quelques garde-fous optionnels dans la config.
+        # 7) Spread / contraintes symbol (optionnel via config)
         exec_policy = (
             active_config.get("execution_policy", {})
             if isinstance(active_config, dict)
             else {}
         )
-        max_spread_points = exec_policy.get("max_spread_points")  # ex: 50 points etc.
+        max_spread_points = exec_policy.get("max_spread_points")
         tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
         if tick and hasattr(symbol_info, "point") and hasattr(symbol_info, "spread"):
-            # NB: spread renvoyé par MT5 (en points "de tick" selon le broker)
             if (
                 isinstance(max_spread_points, (int, float))
                 and symbol_info.spread
@@ -748,7 +752,7 @@ class TradeExecutor:
                         f"Spread trop élevé: {symbol_info.spread} > {max_spread_points} points.",
                     )
 
-        # 8) Si action == CLOSE, pas d'autres checks de prix nécessaires ici
+        # 8) Si action == CLOSE, pas d’autres checks de prix
         if action == "CLOSE":
             return True, ""
 
@@ -757,7 +761,6 @@ class TradeExecutor:
         if not price or price <= 0:
             return False, f"Prix de marché indisponible pour {broker_symbol}."
 
-        # Tout est OK
         return True, ""
 
     def _check_fat_finger_volume(
