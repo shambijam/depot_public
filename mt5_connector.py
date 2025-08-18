@@ -691,6 +691,23 @@ class MT5Connector:
             )
             return None
 
+    def get_symbol_info_tick(self, symbol: str):
+        """
+        Retourne le dernier tick du symbole depuis MetaTrader 5.
+        """
+        try:
+            import MetaTrader5 as mt5
+
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                self.logger.error(
+                    f"[MT5C] Impossible de récupérer le tick pour {symbol}."
+                )
+            return tick
+        except Exception as e:
+            self.logger.error(f"[MT5C] Erreur get_symbol_info_tick pour {symbol}: {e}")
+            return None
+
     def send_order(
         self, request: Dict[str, Any]
     ) -> Optional[Any]:  # Retourne un objet MetaTrader5.TradeResult NamedTuple
