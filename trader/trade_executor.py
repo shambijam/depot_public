@@ -755,36 +755,106 @@ class TradeExecutor:
 
         return True, "Volume de trade acceptable (fat-finger check)."
 
+    # --- Helpers robustes ---
+
+    def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
+        """
+        Retourne le symbole broker à partir d'un mapping éventuel.
+        Ne renvoie JAMAIS 'UNKNOWN' : si pas de mapping, garde raw_symbol.
+        """
+        symbol_map = (
+            market_context.get("active_broker_account", {}).get("symbol_map", {}) or {}
+        )
+        broker_symbol = symbol_map.get(
+            raw_symbol, raw_symbol
+        )  # ✅ fallback = symbole d'origine
+        if broker_symbol != raw_symbol:
+            self.logger.info(f"[SYMBOL MAP] {raw_symbol} -> {broker_symbol}")
+        else:
+            self.logger.warning(
+                f"[SYMBOL MAP] Pas de mapping pour {raw_symbol}, utilisation telle quelle."
+            )
+        return broker_symbol
+
+    def _send_alert_safe(self, level: str, message: str, alert_type: str | None = None):
+        """
+        Envoie une alerte en s'adaptant à la signature de ConfigManager.send_alert.
+        Évite les erreurs 'multiple values' et 'too many positional arguments'.
+        """
+        try:
+            if alert_type is None:
+                return self.config_manager.send_alert(level, message)
+            # d'abord en mot-clé (si supporté)
+            return self.config_manager.send_alert(level, message, alert_type=alert_type)
+        except TypeError:
+            self.logger.warning(
+                "[ALERT] send_alert ne supporte pas 'alert_type'; envoi sans ce paramètre."
+            )
+            return self.config_manager.send_alert(level, message)
+
+    def _feedback_safe(self, feedback):
+        """
+        Tente d'envoyer le feedback à l'IA en couvrant plusieurs signatures possibles.
+        Évite 'feedback_on_result() missing 1 required positional argument: result'.
+        """
+        ai = getattr(self.config_manager, "ai_decision_instance", None)
+        if not ai:
+            return
+        try:
+            # 1) Essai mot-clé le plus probable
+            return ai.feedback_on_result(result=feedback)
+        except TypeError:
+            try:
+                # 2) Essai simple (result seul, pos.)
+                return ai.feedback_on_result(feedback)
+            except TypeError:
+                try:
+                    # 3) Essai (decision=None, result=...)
+                    return ai.feedback_on_result(None, feedback)
+                except TypeError as e:
+                    self.logger.warning(
+                        f"[AI FEEDBACK] Impossible d'appeler feedback_on_result correctement: {e}"
+                    )
+
     def prepare_order(self, decision_package: dict) -> dict:
         """
         Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
+        - Normalise l'action (LONG/SHORT -> BUY/SELL), refuse toute autre valeur.
+        - Mappe le symbole vers le symbole broker via _map_symbol_for_broker (jamais 'UNKNOWN').
+        - Récupère symbol_info et le prix d'entrée via MT5Connector.
+        - Calcule SL/TP et le volume basé sur le risque.
+        - Construit la requête MT5 via _build_mt5_request.
         """
 
         self.logger.info("Préparation de l'ordre MT5...")
+
         trade_decision = decision_package["trade_decision"]
         active_config = decision_package["active_config"]
         market_context = decision_package["market_context"]
 
-        # Normalisation de l'action
-        action = str(trade_decision.get("action", "")).upper()
-        if action in ["LONG"]:
+        # --- Normalisation / Validation de l'action ---
+        action_raw = str(trade_decision.get("action", "")).upper()
+        if action_raw == "LONG":
             action = "BUY"
-        elif action in ["SHORT"]:
+        elif action_raw == "SHORT":
             action = "SELL"
-        elif action not in ["BUY", "SELL", "CLOSE"]:
-            self.logger.warning(
-                f"Action inconnue '{trade_decision.get('action')}', fallback sur 'SELL'."
+        else:
+            action = action_raw
+
+        if action not in {"BUY", "SELL", "CLOSE"}:
+            raise TradeExecutionError(
+                f"Action de trade invalide: '{trade_decision.get('action')}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)"
             )
-            action = "SELL"
 
-        # Mapping des symboles broker (ex: XAUUSD -> XAUUSD.a)
+        # --- Symbole d'origine + mapping broker ---
         raw_symbol = trade_decision["asset"]
-        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
-            raw_symbol, raw_symbol
-        )
+        broker_symbol = self._map_symbol_for_broker(raw_symbol, market_context)
 
-        # Cas de clôture de position
+        # --- Cas de clôture de position (pas besoin du reste du pipeline) ---
         if action == "CLOSE":
+            self.logger.info(
+                "Action de clôture détectée. La fermeture réelle sera gérée par close_position."
+            )
             return {
                 "action": "CLOSE",
                 "symbol": broker_symbol,
@@ -793,29 +863,26 @@ class TradeExecutor:
             }
 
         try:
-            # Récupérer les informations du symbole via le MT5Connector
+            # --- Récupération des informations du symbole ---
             symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
-            if (
-                not symbol_info
-                or not hasattr(symbol_info, "name")
-                or symbol_info.name == "UNKNOWN"
-            ):
+            if not symbol_info or not hasattr(symbol_info, "name"):
                 raise TradeExecutionError(
-                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie la correspondance broker."
+                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie le nom exact dans le Market Watch MT5."
                 )
 
-            # Récupérer le prix d'entrée
+            # --- Récupération du prix d'entrée (Ask/Bid selon action) ---
             entry_price_market = self.mt5_connector.get_current_price(
                 broker_symbol, action
             )
             if not entry_price_market or entry_price_market <= 0:
                 raise TradeExecutionError(
-                    f"Impossible de récupérer un prix valide pour {broker_symbol}."
+                    f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
                 )
 
+            # --- Prix de déclenchement pour ordres différés (si fourni) ---
             trigger_price = trade_decision.get("trigger_price", entry_price_market)
 
-            # SL/TP
+            # --- Calcul SL/TP ---
             sl_price, tp_price = self._calculate_sl_tp_prices(
                 trade_decision,
                 active_config,
@@ -824,7 +891,7 @@ class TradeExecutor:
                 market_context,
             )
 
-            # Volume basé sur le risque
+            # --- Volume basé sur le risque ---
             account_trade_settings = market_context.get(
                 "active_broker_account", {}
             ).get("trade_settings", {})
@@ -843,31 +910,36 @@ class TradeExecutor:
                     f"Volume calculé invalide ({volume}) pour {broker_symbol}."
                 )
 
-            # Construction finale
+            # --- Type d'ordre (Market/Limit/Stop) ---
+            order_type_str = str(trade_decision.get("order_type", "MARKET")).upper()
+
+            # --- Construction finale de la requête ---
             return self._build_mt5_request(
                 {"action": action, "asset": broker_symbol},
                 active_config,
-                volume,
-                entry_price_market,
-                sl_price,
-                tp_price,
+                float(volume),
+                float(entry_price_market),
+                float(sl_price),
+                float(tp_price),
                 symbol_info,
-                trigger_price,
-                trade_decision.get("order_type", "MARKET"),
+                float(trigger_price) if trigger_price is not None else None,
+                order_type_str,
             )
 
         except TradeExecutionError as tee:
             self.logger.error(f"Échec préparation ordre {broker_symbol}: {tee}")
-            self.config_manager.send_alert(
+            # Appel sécurisé (évite 'multiple values for alert_type')
+            self._send_alert_safe(
                 "CRITIQUE", f"Préparation Ordre Échec: {tee}", "telegram_critical"
             )
             raise
+
         except Exception as e:
             self.logger.error(
                 f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
                 exc_info=True,
             )
-            self.config_manager.send_alert(
+            self._send_alert_safe(
                 "CRITIQUE", f"Préparation Ordre Exception: {e}", "telegram_critical"
             )
             raise TradeExecutionError(
