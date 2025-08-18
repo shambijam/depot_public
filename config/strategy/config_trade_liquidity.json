@@ -1,111 +1,114 @@
 {
   "strategy_name": "liquidity",
-  "description": "Stratégie axée sur l'identification et l'exploitation des 'liquidity grabs' (prises de liquidité) et des déséquilibres SMC pour des entrées chirurgicales et des sorties rapides.",
-  "strategy_tags": [
-    "liquidity",
-    "smc",
-    "mean_reversion",
-    "intraday"
-  ],
+  "version": "2.0-compat",
   "tradeable_assets": [
-     "EURUSD",
-     "GBPUSD",
-     "USDCHF",
-     "XAUUSD",
-     "US30",
-     "NAS100"
+    "EURUSD",
+    "GBPUSD",
+    "XAUUSD",
+    "NAS100"
   ],
-  "magic_number": 2307,
-  "risk_per_trade_percent": 1,
-  "stop_loss_pips": 30,
-  "max_daily_loss_percent": 1.8,
-  "max_drawdown_percent": 5.0,
-  "max_trades_per_day": 5,
-  "max_spread_pips": 1.7,
-  "halt_on_major_news": true,
   "phase_detection": {
-    "description": "Paramètres spécifiques pour la détection des phases de marché et des signaux SMC par PhaseObserver, optimisés pour cette stratégie de liquidité.",
-    "lookback_window": 20,
-    "volatility_threshold": 0.0007,
-    "volume_zscore": 2.2,
-    "eq_level_tolerance": 0.0002,
-    "impulse_threshold": 0.0012,
-    "detection_toggles": {
-      "detect_fvg": true,
-      "detect_order_block": true,
-      "detect_bos_mss": true,
-      "detect_liquidity_grab": true,
-      "detect_volume_anomaly": true,
-      "detect_eqh_eql": true
+    "use_phase_observer": true,
+    "overrides": {
+      "require_range_detection": false,
+      "prefer_accumulation_distribution": true,
+      "min_lookback_bars": 500
+    }
+  },
+  "decision_rules": {
+    "thresholds": {
+      "min_volatility": 0.004,
+      "max_spread_points": 80,
+      "min_volume_score": 0.30
+    },
+    "mtf": {
+      "timeframes": [
+        "M5",
+        "M15",
+        "H1"
+      ],
+      "required_agreements": 2
+    },
+    "liquidity_signals": {
+      "require_sweep_context": true,
+      "min_sweep_strength": 0.60,
+      "min_displacement_factor": 1.10,
+      "min_fvg_size_points": 5,
+      "allow_mitigation_entries": true,
+      "mitigation_offset_points": 2,
+      "invalidate_on_structure_break_against": true
+    },
+    "scoring": {
+      "base_score": 0.80,
+      "liquidity_edge_bonus": 0.15,
+      "fvg_confluence_bonus": 0.10,
+      "mtf_bonus_per_hit": 0.10,
+      "best_opportunity_bonus": 0.10,
+      "global_low_vol_penalty": -0.10,
+      "high_spread_penalty": -0.20
+    },
+    "filters": {
+      "avoid_major_news": true,
+      "disable_on_weekends": true,
+      "min_account_equity": 0,
+      "allow_only_whitelist_assets": true
+    },
+    "risk": {
+      "max_trades_per_day": 4,
+      "cooldown_seconds_after_trade": 90,
+      "skip_asset_if_spread_over_points": 80
+    },
+    "execution": {
+      "order_type": "limit",
+      "limit_use_mitigation": true,
+      "slippage_points": 4,
+      "max_parallel_positions": 1,
+      "fallback_to_market_if_missed": true
     }
   },
   "smart_targets": {
-    "description": "Configuration pour le calcul dynamique du SL/TP, optimisée pour les stratégies ciblant la liquidité.",
-    "enabled": true,
-    "sl": {
-      "method": "SWING",
-      "swing_lookback_period": 15,
-      "swing_buffer_pips": 3,
-      "fixed_pips": 9
+    "take_profit": {
+      "type": "atr",
+      "atr_period": 14,
+      "atr_multiplier": 2.0,
+      "fallback_rr": 1.5
     },
-    "tp": {
-      "method": "LIQUIDITY_LEVEL",
-      "target_liquidity_types": [
-        "EQH",
-        "EQL",
-        "OB_unmitigated"
-      ],
-      "rr_ratio": 2.2,
-      "fixed_pips": 20
+    "stop_loss": {
+      "type": "atr",
+      "atr_period": 14,
+      "atr_multiplier": 1.2,
+      "hard_min_points": 35
+    },
+    "breakeven": {
+      "enabled": true,
+      "trigger_rr": 1.0,
+      "lock_points": 3
+    },
+    "partial_take_profit": {
+      "enabled": true,
+      "at_rr": 1.0,
+      "close_percent": 50
+    },
+    "trailing": {
+      "enabled": false,
+      "type": "chandelier",
+      "atr_period": 14,
+      "atr_multiplier": 2.5
     }
   },
-  "decision_rules": [
-    {
-      "name": "TEST LIQUIDITY: Entrée sur Manipulation",
-      "description": "Règle d'entrée de test ciblant les phases de manipulation du marché pour des mouvements rapides.",
-      "priority": 2,
-      "conditions": {
-        "phase_must_contain": [
-          "manipulation_detected"
-        ],
-        "min_confidence": 0.30
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "manipulation_up",
-        "SELL": "manipulation_down"
-      }
+  "exit_rules": {
+    "time_based": {
+      "enabled": true,
+      "max_trade_minutes": 240
     },
-    {
-      "name": "Liquidity: Prise de Liquidité (Sweep) confirmée",
-      "description": "Règle d'entrée de haute probabilité après une prise de liquidité (sweep) suivie d'une confirmation de signal.",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "liquidity_grab_detected",
-          "entry_confirmation"
-        ],
-        "phase_must_contain": [
-          "manipulation_detected"
-        ],
-        "min_confidence": 0.40
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "manipulation_up",
-        "SELL": "manipulation_down"
-      }
+    "invalidated_setup": {
+      "enabled": true,
+      "close_on_break_even_if_reenter": true
+    },
+    "news_exit": {
+      "enabled": true,
+      "minutes_before": 2,
+      "minutes_after": 2
     }
-  ],
-  "exit_rules": [
-    {
-      "name": "Sortie sur Changement de Structure Opposé (MSS)",
-      "description": "Règle de sortie déclenchée par une rupture de structure de marché (MSS) dans la direction opposée, indiquant un potentiel retournement.",
-      "conditions": {
-        "signal_must_contain": [
-          "bos_mss_detected"
-        ]
-      }
-    }
-  ]
+  }
 }

@@ -1,109 +1,149 @@
 {
   "strategy_name": "dynamic",
-  "description": "Stratégie dynamique adaptative conçue pour identifier et suivre les mouvements de marché à moyen terme, en s'ajustant aux différentes conditions de volatilité et de régime.",
-  "strategy_tags": [
-    "dynamic",
-    "swing",
-    "adaptive",
-    "medium_frequency"
-  ],
+  "version": "2.0-compat",
   "tradeable_assets": [
-     "EURUSD",
-     "GBPUSD",
-     "USDCHF",
-     "XAUUSD",
-     "US30",
-     "NAS100"
+    "EURUSD",
+    "GBPUSD",
+    "XAUUSD",
+    "NAS100"
   ],
-  "magic_number": 1108,
-  "risk_per_trade_percent": 1,
-  "stop_loss_pips": 20,
-  "max_daily_loss_percent": 1.5,
-  "max_drawdown_percent": 4.0,
-  "max_trades_per_day": 8,
-  "max_spread_pips": 1.6,
-  "halt_on_major_news": true,
   "phase_detection": {
-    "description": "Paramètres spécifiques pour la détection des phases de marché et des signaux SMC par PhaseObserver pour cette stratégie dynamique.",
-    "lookback_window": 15,
-    "volatility_threshold": 0.0004,
-    "volume_zscore": 1.5,
-    "eq_level_tolerance": 0.00015,
-    "impulse_threshold": 0.0007,
-    "detection_toggles": {
-      "detect_fvg": true,
-      "detect_order_block": true,
-      "detect_bos_mss": true,
-      "detect_liquidity_grab": true,
-      "detect_volume_anomaly": true,
-      "detect_eqh_eql": true
+    "use_phase_observer": true,
+    "overrides": {
+      "require_trend_detection": true,
+      "prefer_trend_over_range": true,
+      "min_lookback_bars": 500
+    }
+  },
+  "decision_rules": {
+    "thresholds": {
+      "min_volatility": 0.006,
+      "max_spread_points": 60,
+      "min_volume_score": 0.35
+    },
+    "mtf": {
+      "timeframes": [
+        "M15",
+        "H1",
+        "H4"
+      ],
+      "required_agreements": 2
+    },
+    "trend_engine": {
+      "ema_periods": [
+        20,
+        50,
+        200
+      ],
+      "adx_min": 16,
+      "rsi": {
+        "overbought": 65,
+        "oversold": 35
+      },
+      "confirm_breakout_ratio": 1.02,
+      "pullback_depth_min": 0.382,
+      "pullback_depth_max": 0.618
+    },
+    "range_engine": {
+      "rsi_range": [
+        40,
+        60
+      ],
+      "max_atr_percent_of_price": 0.015,
+      "mean_reversion": {
+        "use": true,
+        "entry_zscore": 1.0,
+        "exit_zscore": 0.3
+      }
+    },
+    "regime_overrides": {
+      "trend": {
+        "min_volatility": 0.006,
+        "adx_min": 18,
+        "confirmation_candles": 1
+      },
+      "range": {
+        "min_volatility": 0.004,
+        "use_mean_reversion": true,
+        "confirmation_candles": 2
+      },
+      "range_accumulation": {
+        "min_volatility": 0.004,
+        "prefer_breakout_setups": true,
+        "confirm_breakout_ratio": 1.03
+      }
+    },
+    "scoring": {
+      "base_score": 0.80,
+      "trend_alignment_bonus": 0.15,
+      "range_alignment_bonus": 0.10,
+      "mtf_bonus_per_hit": 0.10,
+      "best_opportunity_bonus": 0.10,
+      "global_low_vol_penalty": -0.10,
+      "high_spread_penalty": -0.20
+    },
+    "filters": {
+      "avoid_major_news": true,
+      "disable_on_weekends": true,
+      "min_account_equity": 0,
+      "allow_only_whitelist_assets": true
+    },
+    "risk": {
+      "max_trades_per_day": 3,
+      "cooldown_seconds_after_trade": 120,
+      "skip_asset_if_spread_over_points": 60
+    },
+    "execution": {
+      "order_type": "market",
+      "confirmation_candles": 1,
+      "slippage_points": 6,
+      "max_parallel_positions": 1,
+      "fallback_to_limit_on_pullback": true
     }
   },
   "smart_targets": {
-    "description": "Configuration pour le calcul dynamique du Stop Loss et Take Profit, adaptée aux stratégies de swing et de suivi de tendance.",
-    "enabled": true,
-    "sl": {
-      "method": "SWING",
-      "swing_lookback_period": 20,
-      "swing_buffer_pips": 5,
-      "fixed_pips": 15
+    "take_profit": {
+      "type": "atr",
+      "atr_period": 14,
+      "atr_multiplier": 2.5,
+      "fallback_rr": 1.8
     },
-    "tp": {
-      "method": "RR",
-      "rr_ratio": 3.0,
-      "fixed_pips": 45
+    "stop_loss": {
+      "type": "atr",
+      "atr_period": 14,
+      "atr_multiplier": 1.5,
+      "hard_min_points": 40
+    },
+    "breakeven": {
+      "enabled": true,
+      "trigger_rr": 1.2,
+      "lock_points": 4
+    },
+    "partial_take_profit": {
+      "enabled": true,
+      "at_rr": 1.5,
+      "close_percent": 40
+    },
+    "trailing": {
+      "enabled": true,
+      "type": "chandelier",
+      "atr_period": 14,
+      "atr_multiplier": 2.5
     }
   },
-  "decision_rules": [
-    {
-      "name": "TEST DYNAMIC: Entrée de Tendance Simplifiée",
-      "description": "Règle d'entrée de base pour capter des mouvements de tendance simplifiés dans des phases directionnelles.",
-      "priority": 2,
-      "conditions": {
-        "phase_must_contain": [
-          "trending",
-          "expansion",
-          "scalp_burst"
-        ],
-        "min_confidence": 0.05
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "trending_bullish",
-        "SELL": "trending_bearish"
-      }
+  "exit_rules": {
+    "time_based": {
+      "enabled": true,
+      "max_trade_minutes": 720
     },
-    {
-      "name": "Dynamic: Continuation de tendance sur BOS",
-      "description": "Règle d'entrée pour la continuation de tendance après une rupture de structure (BOS), indiquant une force directionnelle.",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "bos_mss_detected"
-        ],
-        "phase_must_contain": [
-          "trending",
-          "expansion",
-          "scalp_burst"
-        ],
-        "min_confidence": 0.05
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "trending_bullish",
-        "SELL": "trending_bearish"
-      }
+    "invalidated_setup": {
+      "enabled": true,
+      "close_on_break_even_if_reenter": true
+    },
+    "news_exit": {
+      "enabled": true,
+      "minutes_before": 2,
+      "minutes_after": 2
     }
-  ],
-  "exit_rules": [
-    {
-      "name": "Sortie sur Inversion de Tendance",
-      "description": "Règle de sortie déclenchée par un signal d'inversion de tendance, protégeant les profits ou limitant les pertes.",
-      "conditions": {
-        "phase_must_contain": [
-          "reversal"
-        ]
-      }
-    }
-  ]
+  }
 }
