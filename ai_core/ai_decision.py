@@ -477,8 +477,7 @@ class AIDecision:
             # Envoyer une alerte si la génération AI échoue (non critique, car peut être temporaire)
             if self.config_manager:
                 self.config_manager.send_alert(
-                    f"AI Génération Réponse Échec: {e}",
-                    "telegram_critical"
+                    f"AI Génération Réponse Échec: {e}", "telegram_critical"
                 )
             return json.dumps({"error": f"Failed to generate response: {e}"})
 
@@ -542,8 +541,7 @@ class AIDecision:
             # Envoyer une alerte si le parsing JSON échoue de manière critique pour une décision
             if self.config_manager:
                 self.config_manager.send_alert(
-                f"AI: Échec parsing JSON de la réponse. {e}",
-                "telegram_critical"
+                    f"AI: Échec parsing JSON de la réponse. {e}", "telegram_critical"
                 )
             return {
                 "error": "Échec du parsing de la réponse AI en JSON",
@@ -555,9 +553,8 @@ class AIDecision:
                 exc_info=True,
             )  # Utilise self.logger
             if self.config_manager:
-               self.config_manager.send_alert(
-                    f"AI: Erreur inattendue parsing réponse: {e}",
-                    "telegram_critical"
+                self.config_manager.send_alert(
+                    f"AI: Erreur inattendue parsing réponse: {e}", "telegram_critical"
                 )
             return {
                 "error": "Erreur inattendue lors du parsing de la réponse",
@@ -570,76 +567,87 @@ class AIDecision:
         Génère une analyse structurée à partir d'un prompt donné.
         """
         try:
-            self.logger.info("AIDecision: Génération d'analyse structurée depuis prompt...")
-            
+            self.logger.info(
+                "AIDecision: Génération d'analyse structurée depuis prompt..."
+            )
+
             # Générer la réponse brute du modèle
             raw_response = self._generate_raw_response(prompt)
-            
+
             # 🆕 AJOUT: Vérifier si la réponse est vide
             if not raw_response or raw_response.strip() == "":
-                self.logger.warning("Réponse IA vide, création d'une analyse par défaut")
+                self.logger.warning(
+                    "Réponse IA vide, création d'une analyse par défaut"
+                )
                 return self._create_fallback_analysis("Réponse vide du modèle IA")
-            
+
             # Parser la réponse en JSON structuré
             parsed_response = self.parse_response(raw_response)
-            
+
             # Si parsing échoue, créer une structure par défaut
             if "error" in parsed_response:
-                self.logger.warning(f"Parsing JSON échoué, création d'une structure par défaut")
+                self.logger.warning(
+                    f"Parsing JSON échoué, création d'une structure par défaut"
+                )
                 return self._create_fallback_analysis(raw_response)
-            
+
             # Valider et enrichir la réponse
             validated_response = self._validate_and_enrich_analysis(parsed_response)
-            
+
             self.logger.info("Analyse structurée générée avec succès")
             return validated_response
-            
+
         except Exception as e:
-            self.logger.error(f"Erreur lors de la génération d'analyse structurée : {e}", exc_info=True)
+            self.logger.error(
+                f"Erreur lors de la génération d'analyse structurée : {e}",
+                exc_info=True,
+            )
             return {
                 "error": f"Échec génération analyse : {e}",
                 "asset_analysis": [],
                 "summary": "Erreur lors de l'analyse IA",
                 "recommendations": [],
-                "analysis_quality_score": 0.0
+                "analysis_quality_score": 0.0,
             }
 
     def _create_fallback_analysis(self, raw_response: str) -> Dict[str, Any]:
         """
         Crée une analyse par défaut quand le parsing JSON échoue.
-        
+
         Args:
             raw_response (str): La réponse brute du modèle
-            
+
         Returns:
             Dict[str, Any]: Structure d'analyse par défaut
         """
         # Essayer d'extraire des informations basiques de la réponse textuelle
-        lines = raw_response.split('\n')
-        summary_line = next((line for line in lines if line.strip()), "Analyse IA disponible")[:200]
-        
+        lines = raw_response.split("\n")
+        summary_line = next(
+            (line for line in lines if line.strip()), "Analyse IA disponible"
+        )[:200]
+
         return {
             "asset_analysis": [
                 {
-                    "asset": "ANALYSE_GENERALE", 
+                    "asset": "ANALYSE_GENERALE",
                     "pertinence_strategique": "Moyenne",
-                    "diagnostic": summary_line
+                    "diagnostic": summary_line,
                 }
             ],
             "summary": summary_line,
             "recommendations": ["Vérifier la configuration des prompts IA"],
             "analysis_quality_score": 0.3,  # Score faible car c'est un fallback
             "raw_response": raw_response,
-            "parsing_method": "fallback_text_analysis"
+            "parsing_method": "fallback_text_analysis",
         }
 
     def _validate_and_enrich_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """
         Valide et enrichit l'analyse parsée pour s'assurer qu'elle a tous les champs requis.
-        
+
         Args:
             analysis (Dict[str, Any]): L'analyse parsée depuis JSON
-            
+
         Returns:
             Dict[str, Any]: L'analyse validée et enrichie
         """
@@ -648,36 +656,38 @@ class AIDecision:
             "asset_analysis": [],
             "summary": "Analyse IA",
             "recommendations": [],
-            "analysis_quality_score": 0.5
+            "analysis_quality_score": 0.5,
         }
-        
+
         # Ajouter les champs manquants
         for field, default_value in required_fields.items():
             if field not in analysis:
                 analysis[field] = default_value
-                
+
         # Valider asset_analysis
         if not isinstance(analysis["asset_analysis"], list):
             analysis["asset_analysis"] = []
-            
+
         # S'assurer que chaque actif a les champs requis
         for asset_entry in analysis["asset_analysis"]:
             if isinstance(asset_entry, dict):
                 asset_entry.setdefault("asset", "UNKNOWN")
                 asset_entry.setdefault("pertinence_strategique", "Faible")
                 asset_entry.setdefault("diagnostic", "Analyse en cours")
-        
+
         # Valider le score de qualité
         if not isinstance(analysis.get("analysis_quality_score"), (int, float)):
             analysis["analysis_quality_score"] = 0.5
         else:
             # Limiter entre 0 et 1
-            analysis["analysis_quality_score"] = max(0.0, min(1.0, analysis["analysis_quality_score"]))
-        
+            analysis["analysis_quality_score"] = max(
+                0.0, min(1.0, analysis["analysis_quality_score"])
+            )
+
         # Ajouter métadonnées
         analysis["validation_timestamp"] = datetime.now(UTC).isoformat()
         analysis["model_path"] = self.model_path
-        
+
         return analysis
 
     # BONUS: Méthode alternative pour compatibilité étendue
@@ -2710,81 +2720,18 @@ class AIDecision:
 
         return audit_results
 
-    def feedback_on_result(
-        self, suggestion: Dict[str, Any], result: Dict[str, Any]
-    ) -> None:
+    def _feedback_safe(self, suggestion: dict, result: dict):
         """
-        Incorpore le résultat d'une suggestion AI (feedback) pour la traçabilité
-        et l'apprentissage futur du superviseur AI. Met à jour l'historique des suggestions
-        et journalise le feedback de manière sécurisée.
-        L'IA ne calcule AUCUN score de confiance.
-
-        Args:
-            suggestion (Dict[str, Any]): La suggestion AI originale.
-            result (Dict[str, Any]): Le résultat de cette suggestion (ex: statut d'exécution du trade, P&L).
+        Envoie le feedback à l'IA avec la signature correcte :
+        feedback_on_result(suggestion, result).
         """
-        suggestion_summary = suggestion.get(
-            "summary", suggestion.get("suggestion_type", "N/A")
-        )  # Utilise suggestion_type pour le résumé
-        result_status = result.get("status", "N/A")
-        self.logger.info(
-            f"AIDecision: Feedback reçu pour: '{suggestion_summary}' avec le résultat: '{result_status}'."
-        )
-
-        # Mettre à jour le statut dans l'historique des suggestions si l'ID est présent
-        suggestion_id = suggestion.get("id")
-        if suggestion_id:
-            found_suggestion = False
-            for entry in self.suggestion_history:
-                if entry.get("id") == suggestion_id:
-                    entry["status"] = result.get("execution_status", "unknown").lower()
-                    entry["feedback_result"] = result
-                    self.logger.info(
-                        f"AIDecision: Statut de la suggestion '{suggestion_id}' mis à jour à '{entry['status']}'."
-                    )
-                    found_suggestion = True
-                    break
-            if not found_suggestion:
-                self.logger.warning(
-                    f"AIDecision: Suggestion avec ID '{suggestion_id}' non trouvée dans l'historique pour le feedback. Historique pourrait être désynchronisé."
-                )
-
-        # Préparer l'entrée de log pour le journal d'audit de feedback AI
-        feedback_data = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "event_type": "ai_feedback",
-            "original_suggestion": suggestion,  # Renommé pour clarté
-            "outcome": result,
-            "model_info": {"name": self.model_path, "mode": "local_llama"},
-        }
-
-        # Écrire dans le fichier de log de feedback de manière sécurisée (JSONL)
+        ai = getattr(self.config_manager, "ai_decision_instance", None)
+        if not ai:
+            return
         try:
-            log_dir = Path(self.log_dir)
-            log_file_name = self.ai_supervisor_feedback_file
-
-            full_log_path = log_dir / log_file_name
-            os.makedirs(log_dir, exist_ok=True)
-
-            with open(full_log_path, "a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(feedback_data, cls=self.config_manager.CustomJSONEncoder)
-                    + "\n"
-                )
-            self.logger.debug(
-                f"AIDecision: Log de feedback pour '{suggestion_summary}' sauvegardé vers '{full_log_path}'."
-            )
+            return ai.feedback_on_result(suggestion, result)
         except Exception as e:
-            self.logger.error(
-                f"AIDecision: Échec de l'écriture du log de feedback vers '{full_log_path}': {e}",
-                exc_info=True,
-            )
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    f"AI Feedback Log Échec: {e}",
-                    "telegram_critical",
-                )
+            self.logger.warning(f"[AI FEEDBACK] Impossible d'envoyer le feedback: {e}")
 
     def adapt_strategy(self, feedback_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

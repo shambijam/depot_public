@@ -860,29 +860,20 @@ class TradeExecutor:
             )
             return self.config_manager.send_alert(level, message)
 
-    def _feedback_safe(self, feedback):
+    def _feedback_safe(self, suggestion: dict, feedback: dict):
         """
-        Tente d'envoyer le feedback à l'IA en couvrant plusieurs signatures possibles.
-        Évite 'feedback_on_result() missing 1 required positional argument: result'.
+        Tente d'envoyer le feedback à l'IA en respectant la signature réelle:
+            feedback_on_result(suggestion, result)
         """
         ai = getattr(self.config_manager, "ai_decision_instance", None)
         if not ai:
             return
         try:
-            # 1) Essai mot-clé le plus probable
-            return ai.feedback_on_result(result=feedback)
-        except TypeError:
-            try:
-                # 2) Essai simple (result seul, pos.)
-                return ai.feedback_on_result(feedback)
-            except TypeError:
-                try:
-                    # 3) Essai (decision=None, result=...)
-                    return ai.feedback_on_result(None, feedback)
-                except TypeError as e:
-                    self.logger.warning(
-                        f"[AI FEEDBACK] Impossible d'appeler feedback_on_result correctement: {e}"
-                    )
+            return ai.feedback_on_result(suggestion, feedback)
+        except Exception as e:
+            self.logger.warning(
+                f"[AI FEEDBACK] Impossible d'appeler feedback_on_result: {e}"
+            )
 
     def prepare_order(self, decision_package: dict) -> dict:
         """
@@ -1075,77 +1066,47 @@ class TradeExecutor:
     ) -> tuple[float, float]:
         """
         Calcule les prix SL/TP en utilisant des logiques institutionnelles :
-        - SL: Basé sur les derniers points de swing (plus haut/plus bas) OU des niveaux de liquidité.
-        - TP: Basé sur un ratio Risque/Rendement (Risk/Reward) OU des niveaux de liquidité.
-        La méthode fallback sur un nombre de pips fixe si la configuration le demande.
-
-        Args:
-            trade_decision (dict): La décision de trade (pour l'action BUY/SELL).
-            config (dict): La configuration active de la stratégie.
-            symbol_info (Any): Les informations du symbole de MT5 (MetaTrader5.SymbolInfo NamedTuple).
-            entry_price (float): Le prix d'entrée actuel.
-            market_context (dict): Le contexte de marché contenant les données historiques et les signaux enrichis.
-
-        Returns:
-            tuple[float, float]: Un tuple contenant le prix du Stop Loss et du Take Profit.
-
-        Raises:
-            TradeExecutionError: Si les données de marché sont insuffisantes pour le calcul ou si SL/TP sont invalides.
+        - SL basé sur swing/structure ou fallback en pips
+        - TP basé sur Risk/Reward ou niveaux de liquidité
+        - Validation stricte avec le stops_level du broker
         """
-        self.logger.info(
-            "Calcul du 'Smart SL/TP' basé sur la structure du marché, le R/R et la liquidité..."
-        )
-        action = trade_decision["action"]
-        point = symbol_info.point  # Valeur du point pour le symbole (ex: 0.00001)
+        self.logger.info("Calcul du SL/TP institutionnel...")
 
-        # Récupération de la tolérance minimale du broker (stops_level)
-        min_stop_distance_points = (
-            symbol_info.stops_level
-        )  # Distance minimale pour SL/TP en points MT5
+        action = trade_decision["action"]
+        point = symbol_info.point
+
+        # --- Récupération stops_level robuste ---
+        min_stop_distance_points = getattr(symbol_info, "trade_stops_level", 0) or 0
         min_stop_distance_price = min_stop_distance_points * point
 
-        # --- Chargement des paramètres de la nouvelle logique "Smart" ---
         settings = config.get("smart_sl_tp_settings", {})
         sl_method = settings.get("sl_placement_method", "PIPS")
         tp_method = settings.get("tp_placement_method", "PIPS")
 
-        # --- Calcul du Stop Loss (SL) ---
+        # ---------------- SL ----------------
         stop_loss_price = 0.0
         if sl_method == "SWING":
             lookback = settings.get("sl_swing_lookback_period", 10)
             buffer_pips = settings.get("sl_buffer_pips", 2)
 
-            # Récupération des données historiques enrichies depuis le contexte
             symbol = trade_decision["asset"]
-            # Assurez-vous que market_data[symbol] contient le DataFrame annoté par PhaseObserver
-            rates_df = market_context.get("market_data", {}).get(
-                symbol
-            )  # C'est le DataFrame annoté
+            rates_df = market_context.get("market_data", {}).get(symbol)
 
             if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
                 self.logger.warning(
-                    f"Données historiques insuffisantes ({len(rates_df) if isinstance(rates_df, pd.DataFrame) else 0}) pour le calcul du SL 'SWING' (période: {lookback}). Fallback aux PIPS."
+                    f"Pas assez de données ({len(rates_df) if isinstance(rates_df, pd.DataFrame) else 0}) pour SL SWING. Fallback PIPS."
                 )
-                sl_method = "PIPS"  # Force le fallback aux pips
-
+                sl_method = "PIPS"
             else:
                 recent_candles = rates_df.tail(lookback)
                 buffer_price = buffer_pips * point
+                if action == "BUY":
+                    stop_loss_price = recent_candles["low"].min() - buffer_price
+                else:
+                    stop_loss_price = recent_candles["high"].max() + buffer_price
+                self.logger.debug(f"SL SWING calculé à {stop_loss_price:.5f}")
 
-                if (
-                    action == "BUY"
-                ):  # SL pour un achat = en dessous du plus bas (swing low)
-                    swing_low = recent_candles["low"].min()
-                    stop_loss_price = swing_low - buffer_price
-                else:  # SELL = SL pour une vente = au-dessus du plus haut (swing high)
-                    swing_high = recent_candles["high"].max()
-                    stop_loss_price = swing_high + buffer_price
-
-                self.logger.debug(
-                    f"SL 'SWING' calculé à {stop_loss_price:.5f} (période: {lookback}, buffer: {buffer_pips} pips)."
-                )
-
-        if sl_method == "PIPS":  # Fallback ou méthode "PIPS" explicite
+        if sl_method == "PIPS":
             sl_pips = config.get("stop_loss_pips", 10)
             sl_distance = sl_pips * point
             stop_loss_price = (
@@ -1153,85 +1114,47 @@ class TradeExecutor:
                 if action == "BUY"
                 else entry_price + sl_distance
             )
-            self.logger.debug(
-                f"SL 'PIPS' calculé à {stop_loss_price:.5f} ({sl_pips} pips)."
-            )
+            self.logger.debug(f"SL PIPS calculé à {stop_loss_price:.5f}")
 
-        # --- Calcul du Take Profit (TP) ---
+        # ---------------- TP ----------------
         take_profit_price = 0.0
         if tp_method == "RR":
             rr_ratio = settings.get("tp_rr_ratio", 1.5)
-            # Distance du risque en prix (abs(entrée - SL))
             risk_distance_price = abs(entry_price - stop_loss_price)
             tp_distance_price = risk_distance_price * rr_ratio
-
             take_profit_price = (
                 entry_price + tp_distance_price
                 if action == "BUY"
                 else entry_price - tp_distance_price
             )
             self.logger.debug(
-                f"TP 'Risk/Reward' calculé à {take_profit_price:.5f} (Ratio: 1:{rr_ratio})."
+                f"TP RR calculé à {take_profit_price:.5f} (ratio {rr_ratio})"
             )
 
-        # Implémenter une logique de TP basée sur des niveaux de liquidité externes (TODO implémenté)
         elif tp_method == "LIQUIDITY_LEVEL":
             symbol = trade_decision["asset"]
-            # Accéder aux détails de liquidité enrichis par PhaseObserver
-            # Ces détails devraient être dans market_context.get("market_data",{}).get(symbol).get("nearest_liquidity_level_details")
             nearest_liquidity_details = (
                 market_context.get("market_data", {})
                 .get(symbol, {})
                 .get("nearest_liquidity_level_details")
             )
 
-            if nearest_liquidity_details and nearest_liquidity_details.get("type") in [
-                "EQH",
-                "EQL",
-                "OB_unmitigated",
-            ]:  # Exemple de types
+            if nearest_liquidity_details and nearest_liquidity_details.get("level"):
                 target_level = nearest_liquidity_details.get("level")
+                buffer_tp_price = settings.get("tp_liquidity_buffer_pips", 0.5) * point
 
-                if target_level:
-                    # Vérifier si le niveau de liquidité est "dans la bonne direction" et au-delà du SL
-                    if (
-                        action == "BUY"
-                        and target_level > entry_price
-                        and target_level > stop_loss_price
-                    ) or (
-                        action == "SELL"
-                        and target_level < entry_price
-                        and target_level < stop_loss_price
-                    ):
-                        # Ajouter un petit buffer pour s'assurer que le TP est ATTEINT
-                        buffer_tp_price = (
-                            settings.get("tp_liquidity_buffer_pips", 0.5) * point
-                        )
-                        take_profit_price = (
-                            target_level - buffer_tp_price
-                            if action == "BUY"
-                            else target_level + buffer_tp_price
-                        )
-                        self.logger.debug(
-                            f"TP 'Liquidité' calculé à {take_profit_price:.5f} (Niveau: {nearest_liquidity_details.get('type')} @ {target_level:.5f})."
-                        )
-                    else:
-                        self.logger.warning(
-                            f"Niveau de liquidité {nearest_liquidity_details.get('type')} @ {target_level} n'est pas une cible TP valide ou est trop proche du SL. Fallback aux PIPS."
-                        )
-                        tp_method = "PIPS"  # Fallback si le niveau n'est pas bon
+                if action == "BUY" and target_level > entry_price:
+                    take_profit_price = target_level - buffer_tp_price
+                elif action == "SELL" and target_level < entry_price:
+                    take_profit_price = target_level + buffer_tp_price
                 else:
-                    self.logger.warning(
-                        "Détails du niveau de liquidité incomplets pour le TP 'LIQUIDITY_LEVEL'. Fallback aux PIPS."
-                    )
+                    self.logger.warning("Niveau liquidité invalide, fallback PIPS.")
                     tp_method = "PIPS"
             else:
-                self.logger.warning(
-                    "Aucun niveau de liquidité pertinent pour le TP 'LIQUIDITY_LEVEL'. Fallback aux PIPS."
-                )
+                self.logger.warning("Pas de niveau liquidité, fallback PIPS.")
                 tp_method = "PIPS"
 
-        if tp_method == "PIPS":  # Fallback ou méthode "PIPS" explicite
+        if tp_method == "PIPS":
             tp_pips = config.get("take_profit_pips", 20)
             tp_distance = tp_pips * point
             take_profit_price = (
@@ -1239,66 +1162,47 @@ class TradeExecutor:
                 if action == "BUY"
                 else entry_price - tp_distance
             )
-            self.logger.debug(
-                f"TP 'PIPS' calculé à {take_profit_price:.5f} ({tp_pips} pips)."
-            )
+            self.logger.debug(f"TP PIPS calculé à {take_profit_price:.5f}")
 
-        # --- Validation Finale pour s'assurer que SL/TP sont valides et respectent les règles du broker ---
-        # Ajouter une validation pour s'assurer que le SL et le TP ne sont pas trop proches du prix
-        # d'entrée, en respectant le `stops_level` de `symbol_info`. (TODO implémenté)
-
-        # Vérification du prix d'entrée vs prix actuel (surtout pour les ordres MARKET)
-        # S'assurer que le prix d'entrée n'est pas 0 ou négatif
+        # ---------------- Validation broker ----------------
         if entry_price <= 0:
-            raise TradeExecutionError(
-                "Prix d'entrée invalide ou non positif. Impossible de définir SL/TP."
-            )
+            raise TradeExecutionError("Prix d'entrée invalide")
 
-        # S'assurer que SL est différent de TP et de entry_price
         if (
-            stop_loss_price == take_profit_price
-            or stop_loss_price == entry_price
+            stop_loss_price in [take_profit_price, entry_price]
             or take_profit_price == entry_price
         ):
-            raise TradeExecutionError(
-                f"SL ({stop_loss_price}) et/ou TP ({take_profit_price}) sont identiques au prix d'entrée ({entry_price}). Invalide."
-            )
+            raise TradeExecutionError("SL/TP identiques à entry_price")
 
-        # Vérification des distances minimales requises par le broker (stops_level)
         if action == "BUY":
             sl_distance_from_entry = entry_price - stop_loss_price
             tp_distance_from_entry = take_profit_price - entry_price
-        else:  # SELL
+        else:
             sl_distance_from_entry = stop_loss_price - entry_price
             tp_distance_from_entry = entry_price - take_profit_price
 
         if sl_distance_from_entry < min_stop_distance_price:
-            # ajuster le SL pour respecter la distance minimale
-            if action == "BUY":
-                stop_loss_price = entry_price - min_stop_distance_price
-            else:  # SELL
-                stop_loss_price = entry_price + min_stop_distance_price
+            stop_loss_price = (
+                entry_price - min_stop_distance_price
+                if action == "BUY"
+                else entry_price + min_stop_distance_price
+            )
             self.logger.warning(
-                f"SL ({stop_loss_price:.5f}) ajusté pour respecter le stops_level du broker ({min_stop_distance_points} points)."
+                f"SL ajusté pour respecter stops_level: {stop_loss_price:.5f}"
             )
 
         if tp_distance_from_entry < min_stop_distance_price:
-            # ajuster le TP pour respecter la distance minimale
-            if action == "BUY":
-                take_profit_price = entry_price + min_stop_distance_price
-            else:  # SELL
-                take_profit_price = entry_price - min_stop_distance_price
+            take_profit_price = (
+                entry_price + min_stop_distance_price
+                if action == "BUY"
+                else entry_price - min_stop_distance_price
+            )
             self.logger.warning(
-                f"TP ({take_profit_price:.5f}) ajusté pour respecter le stops_level du broker ({min_stop_distance_points} points)."
+                f"TP ajusté pour respecter stops_level: {take_profit_price:.5f}"
             )
 
-        # Assurer que SL et TP sont différents après ajustement
-        if (
-            abs(stop_loss_price - take_profit_price) < point * 2
-        ):  # Une tolérance de 2 points
-            raise TradeExecutionError(
-                "SL et TP sont trop proches ou identiques après ajustement pour le stops_level. Ordre invalide."
-            )
+        if abs(stop_loss_price - take_profit_price) < point * 2:
+            raise TradeExecutionError("SL et TP trop proches après ajustement")
 
         return stop_loss_price, take_profit_price
 
@@ -2724,7 +2628,7 @@ def run_trade_execution_pipeline(
             status="failed",
             reason=reason,
         )
-        trade_executor._feedback_safe(feedback)  # couvre les signatures différentes
+        trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": reason}
 
     # ----------- 6) Préparer la requête MT5 -----------
@@ -2741,7 +2645,7 @@ def run_trade_execution_pipeline(
             status="failed",
             reason=str(e),
         )
-        trade_executor._feedback_safe(feedback)
+        trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
 
     # ----------- 7) Human-in-the-loop / dry-run -----------
@@ -2751,7 +2655,7 @@ def run_trade_execution_pipeline(
             status="pending_manual_approval",
             reason="Manual override requested.",
         )
-        trade_executor._feedback_safe(feedback)
+        trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "pending_manual_approval"}
 
     if is_dry_run:
