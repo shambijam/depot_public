@@ -3,19 +3,19 @@
         "description": "Paramètres de base optimisés pour détection de signaux",
         "lookback_window": 12,
         "volatility_threshold": 0.0001,
-        "volume_zscore": 1.2,
-        "impulse_threshold": 0.0002,
-        "min_window_order_block": 4,
-        "min_window_fvg": 3,
-        "min_window_liquidity_grab": 8,
-        "min_window_breaker_block": 8,
+        "volume_zscore": 0.0,
+        "impulse_threshold": 0.00015,
+        "min_window_order_block": 3,
+        "min_window_fvg": 2,
+        "min_window_liquidity_grab": 6,
+        "min_window_breaker_block": 6,
         "bos_mss_structure_window_ratio": 0.25,
-        "min_window_eqh_eql": 8,
-        "min_window_volume_anomaly": 8,
+        "min_window_eqh_eql": 6,
+        "min_window_volume_anomaly": 5,
         "min_std_dev_volume_anomaly": 0.000001,
-        "min_window_fvg_presence": 5,
-        "fvg_window_slice_size": 3,
-        "swing_point_order": 3,
+        "min_window_fvg_presence": 3,
+        "fvg_window_slice_size": 2,
+        "swing_point_order": 2,
         "trend_sma_fast_ratio": 0.25,
         "trend_sma_slow_ratio": 0.75,
         "trend_window": 15,
@@ -39,17 +39,17 @@
     },
     "fvg_enhanced_settings": {
         "description": "FVG avec magnitude et tracking de remplissage",
-        "min_gap_magnitude_percent": 0.10,
-        "gap_fill_threshold": 0.7,
+        "min_gap_magnitude_percent": 0.08,
+        "gap_fill_threshold": 0.6,
         "enable_gap_tracking": true,
-        "max_gap_age_bars": 40
+        "max_gap_age_bars": 50
     },
     "order_block_ml_settings": {
         "description": "Order Blocks avec scoring ML et confluence",
         "enable_ml_scoring": true,
         "confluence_requirements": {
-            "min_confluence_score": 0.5,
-            "require_volume_confirmation": true,
+            "min_confluence_score": 0.4,
+            "require_volume_confirmation": false,
             "require_trend_alignment": false,
             "require_fvg_presence": false
         },
@@ -86,12 +86,12 @@
         "description": "BOS/MSS avec confirmation volume et momentum",
         "volume_confirmation": {
             "enable": true,
-            "volume_multiplier_threshold": 1.3,
-            "lookback_period": 15
+            "volume_multiplier_threshold": 1.2,
+            "lookback_period": 10
         },
         "momentum_confirmation": {
             "enable": true,
-            "min_momentum_threshold": 0.0002,
+            "min_momentum_threshold": 0.00015,
             "price_change_period": 1
         },
         "structure_validation": {
@@ -121,11 +121,25 @@
             "trending_institutional_bear",
             "range_accumulation",
             "range_distribution",
+            "range_retail",
+            "range_low_volatility",
             "high_volatility_chaos",
             "low_volatility_compression",
             "scalp_burst_up",
             "scalp_burst_down"
-        ]
+        ],
+        "range_overrides": {
+            "range_low_volatility": {
+                "vol_threshold_low": 0.00004,
+                "range_width_min_atr": 0.8,
+                "mean_reversion_bias": 0.2
+            },
+            "range_retail": {
+                "vol_threshold_low": 0.00006,
+                "range_width_min_atr": 1.0,
+                "mean_reversion_bias": 0.1
+            }
+        }
     },
     "confidence_score_calculation": {
         "description": "Score de confiance optimisé pour trading actif",
@@ -133,11 +147,11 @@
         "base_confidence": 0.25,
         "signal_weights": {
             "fvg_detected": 0.20,
-            "ob_detected": 0.25,
+            "ob_detected": 0.30,
             "bos_mss_detected": 0.20,
             "liquidity_grab_detected": 0.15,
             "eqh_eql_detected": 0.10,
-            "volume_anomaly_detected": 0.10,
+            "volume_anomaly_detected": 0.05,
             "trend_alignment": 0.05,
             "regime_alignment": 0.05
         },
@@ -147,50 +161,50 @@
             "fvg_ob_confluence": 0.10,
             "ob_bos_confluence": 0.08,
             "full_confluence_bonus": 0.15,
-            "max_confidence_cap": 0.90
+            "max_confidence_cap": 0.95
         },
         "quality_factors": {
-            "volume_confirmation_bonus": 0.08,
-            "trend_strength_bonus": 0.08,
-            "spread_quality_bonus": 0.04,
+            "volume_confirmation_bonus": 0.05,
+            "trend_strength_bonus": 0.05,
+            "spread_quality_bonus": 0.05,
             "high_volume_confirmation": 1.10,
-            "regime_strength": 1.08,
+            "regime_strength": 1.05,
             "tight_spread": 1.05
         }
     },
     "liquidity_detection": {
         "forex_settings": {
-            "max_allowed_spread_points": 10,
+            "max_allowed_spread_points": 15,
             "min_volume_threshold": 1
         },
         "indices_settings": {
-            "max_allowed_spread_points": 50,
-            "min_volume_threshold": 10
+            "max_allowed_spread_points": 100,
+            "min_volume_threshold": 5
         }
     },
     "performance_monitoring": {
         "description": "Monitoring des performances en temps réel",
         "enable_performance_tracking": true,
         "benchmark_metrics": {
-            "target_win_rate": 0.68,
-            "target_sharpe_ratio": 1.5,
-            "max_acceptable_drawdown": 0.08
+            "target_win_rate": 0.65,
+            "target_sharpe_ratio": 1.4,
+            "max_acceptable_drawdown": 0.10
         },
         "alert_thresholds": {
             "win_rate_below": 0.55,
-            "confidence_score_below": 0.30,
-            "processing_time_above_ms": 100
+            "confidence_score_below": 0.25,
+            "processing_time_above_ms": 120
         }
     },
     "multi_timeframe_settings": {
         "description": "Configuration multi-timeframe pour confluence",
-        "enabled": false,
+        "enabled": true,
         "timeframes": [
             "M1",
             "M5",
             "M15"
         ],
-        "confluence_required": 2,
+        "confluence_required": 1,
         "weight_distribution": {
             "M1": 0.5,
             "M5": 0.3,

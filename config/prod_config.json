@@ -66,6 +66,20 @@
       "dynamic": "config_trade_dynamic.json",
       "liquidity": "config_trade_liquidity.json",
       "scalping": "config_trade_scalping.json"
+    },
+    "selection_policy": {
+      "winner_takes_all": false,
+      "blend_in_range": {
+        "enabled": true,
+        "market_regimes": [
+          "range_low_volatility",
+          "range_retail"
+        ],
+        "primary": "scalping",
+        "secondary": "liquidity",
+        "weight_primary": 0.7,
+        "weight_secondary": 0.3
+      }
     }
   },
   "global_safety": {
@@ -158,9 +172,9 @@
   "scoring_rules": {
     "base_score": 0.8,
     "strategy_weights": {
-      "liquidity": 0.2,
-      "scalping": 0.3,
-      "dynamic": 0.3,
+      "liquidity": 0.25,
+      "scalping": 0.35,
+      "dynamic": 0.25,
       "trending": 0.8,
       "reversal": 0.7,
       "manipulation": 0.6,
@@ -169,9 +183,10 @@
     },
     "strategy_selection": {
       "regime_weights": {
-        "ranging_normal_volatility": 0.4,
+        "ranging_normal_volatility": 0.5,
+        "range_low_volatility": 0.5,
         "trending_high_volatility": 0.8,
-        "consolidation_low_volatility": 0.2,
+        "consolidation_low_volatility": 0.3,
         "expansion_high_volatility": 0.6,
         "reversal_normal_volatility": 0.7,
         "manipulation_any_volatility": 0.9,

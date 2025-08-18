@@ -10,22 +10,30 @@
   "phase_detection": {
     "use_phase_observer": true,
     "lookback_window": 200,
-    "volatility_threshold": 0.006,
-    "volume_zscore": 0.2,
+    "volatility_threshold": 0.004,
+    "volume_zscore": -0.25,
     "overrides": {
       "require_range_detection": true,
       "min_lookback_bars": 500
     }
   },
   "magic_number": 51001,
-  "risk_per_trade_percent": 0.5,
+  "risk_per_trade_percent": 0.35,
   "stop_loss_pips": 20,
   "take_profit_pips": 30,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.006,
-      "max_spread_points": 60,
-      "min_volume_score": 0.20
+      "min_volatility": 0.004,
+      "max_spread_points": 90,
+      "min_volume_score": -0.25,
+      "per_symbol_overrides": {
+        "NAS100": {
+          "max_spread_points": 100
+        },
+        "XAUUSD": {
+          "min_volatility": 0.008
+        }
+      }
     },
     "mtf": {
       "timeframes": [
@@ -33,7 +41,7 @@
         "M5",
         "M15"
       ],
-      "required_agreements": 2
+      "required_agreements": 1
     },
     "scoring": {
       "base_score": 0.80,
@@ -42,7 +50,8 @@
       "mtf_bonus_per_hit": 0.10,
       "best_opportunity_bonus": 0.15,
       "global_low_vol_penalty": -0.20,
-      "high_spread_penalty": -0.30
+      "high_spread_penalty": -0.30,
+      "ob_conf_bonus": 0.25
     },
     "filters": {
       "avoid_major_news": true,
@@ -53,12 +62,24 @@
     "risk": {
       "max_trades_per_day": 6,
       "cooldown_seconds_after_trade": 60,
-      "skip_asset_if_spread_over_points": 50
+      "skip_asset_if_spread_over_points": 100
     },
     "execution": {
       "order_type": "market",
       "slippage_points": 3,
-      "max_parallel_positions": 1
+      "max_parallel_positions": 1,
+      "entry_on_close_only": false,
+      "confirm_spread_at_entry": true,
+      "cooldown_bars_after_miss": 2
+    },
+    "katana": {
+      "use_order_blocks": true,
+      "ob_entry_override_enabled": true,
+      "ob_entry_requires": {
+        "spread_ok": true,
+        "mtf_alignment_min": 1,
+        "rr_min": 1.5
+      }
     }
   },
   "decision_rules": [
@@ -67,14 +88,15 @@
       "priority": 1,
       "conditions": {
         "signal_must_contain": [
-          "fvg_detected"
+          "fvg_detected",
+          "ob_detected"
         ],
         "phase_must_contain": [
           "trend",
           "range_retail",
           "range_accumulation"
         ],
-        "min_confidence": 0.25
+        "min_confidence": 0.20
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -87,13 +109,13 @@
     "take_profit": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 1.5,
-      "fallback_rr": 1.2
+      "atr_multiplier": 2.2,
+      "fallback_rr": 1.6
     },
     "stop_loss": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 1.0,
+      "atr_multiplier": 1.4,
       "hard_min_points": 30
     },
     "breakeven": {
