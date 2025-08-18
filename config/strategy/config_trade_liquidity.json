@@ -37,10 +37,10 @@
       "required_agreements": 2
     },
     "liquidity_signals": {
-      "require_sweep_context": true,
-      "min_sweep_strength": 0.60,
-      "min_displacement_factor": 1.10,
-      "min_fvg_size_points": 5,
+      "require_sweep_context": false,
+      "min_sweep_strength": 0.50,
+      "min_displacement_factor": 1.05,
+      "min_fvg_size_points": 3,
       "allow_mitigation_entries": true,
       "mitigation_offset_points": 2,
       "invalidate_on_structure_break_against": true
@@ -79,7 +79,6 @@
       "priority": 1,
       "conditions": {
         "signal_must_contain": [
-          "liquidity_sweep",
           "fvg_detected"
         ],
         "phase_must_contain": [
@@ -87,7 +86,7 @@
           "range_accumulation",
           "trend"
         ],
-        "min_confidence": 0.35
+        "min_confidence": 0.30
       },
       "order_type": "LIMIT",
       "action_logic": {

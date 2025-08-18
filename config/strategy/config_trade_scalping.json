@@ -11,7 +11,7 @@
     "use_phase_observer": true,
     "lookback_window": 200,
     "volatility_threshold": 0.006,
-    "volume_zscore": 0.5,
+    "volume_zscore": 0.2,
     "overrides": {
       "require_range_detection": true,
       "min_lookback_bars": 500
@@ -23,9 +23,9 @@
   "take_profit_pips": 30,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.010,
-      "max_spread_points": 50,
-      "min_volume_score": 0.50
+      "min_volatility": 0.006,
+      "max_spread_points": 60,
+      "min_volume_score": 0.20
     },
     "mtf": {
       "timeframes": [
@@ -67,14 +67,14 @@
       "priority": 1,
       "conditions": {
         "signal_must_contain": [
-          "fvg_ob_confluence"
+          "fvg_detected"
         ],
         "phase_must_contain": [
           "trend",
           "range_retail",
           "range_accumulation"
         ],
-        "min_confidence": 0.30
+        "min_confidence": 0.25
       },
       "order_type": "MARKET",
       "action_logic": {
