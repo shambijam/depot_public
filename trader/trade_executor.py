@@ -758,7 +758,6 @@ class TradeExecutor:
     def prepare_order(self, decision_package: dict) -> dict:
         """
         Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
-        Gère BUY/SELL, normalise l'action, calcule SL/TP et le volume en fonction du risque.
         """
 
         self.logger.info("Préparation de l'ordre MT5...")
@@ -766,57 +765,57 @@ class TradeExecutor:
         active_config = decision_package["active_config"]
         market_context = decision_package["market_context"]
 
-        symbol = trade_decision["asset"]
-
-        # 🔧 Normalisation de l'action (corrige les 'UNKNOWN', 'short', 'long', etc.)
-        raw_action = str(trade_decision.get("action", "")).upper()
-        if raw_action in ["BUY", "SELL"]:
-            action = raw_action
-        elif raw_action in ["LONG"]:
+        # Normalisation de l'action
+        action = str(trade_decision.get("action", "")).upper()
+        if action in ["LONG"]:
             action = "BUY"
-        elif raw_action in ["SHORT"]:
+        elif action in ["SHORT"]:
             action = "SELL"
-        else:
+        elif action not in ["BUY", "SELL", "CLOSE"]:
             self.logger.warning(
                 f"Action inconnue '{trade_decision.get('action')}', fallback sur 'SELL'."
             )
-            action = "SELL"  # ⚠️ tu peux choisir "BUY" si tu préfères
+            action = "SELL"
 
-        order_type_str = trade_decision.get(
-            "order_type", "MARKET"
-        )  # Vient du moteur de règles
+        # Mapping des symboles broker (ex: XAUUSD -> XAUUSD.a)
+        raw_symbol = trade_decision["asset"]
+        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
+            raw_symbol, raw_symbol
+        )
 
         # Cas de clôture de position
         if action == "CLOSE":
-            self.logger.info(
-                "Action de clôture détectée. Laisser `TradeExecutor.close_position` gérer la clôture réelle."
-            )
             return {
                 "action": "CLOSE",
-                "symbol": symbol,
+                "symbol": broker_symbol,
                 "order_id": trade_decision.get("order_id", str(uuid.uuid4())),
                 "ticket_to_close": trade_decision.get("ticket_to_close"),
             }
 
         try:
-            # Infos du symbole via MT5Connector
-            symbol_info = self.mt5_connector.get_symbol_info(symbol)
-            if symbol_info is None:
+            # Récupérer les informations du symbole via le MT5Connector
+            symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
+            if (
+                not symbol_info
+                or not hasattr(symbol_info, "name")
+                or symbol_info.name == "UNKNOWN"
+            ):
                 raise TradeExecutionError(
-                    f"Impossible de récupérer les informations du symbole pour {symbol}. Ordre annulé."
+                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie la correspondance broker."
                 )
 
-            # Prix d'entrée
-            entry_price_market = self.mt5_connector.get_current_price(symbol, action)
+            # Récupérer le prix d'entrée
+            entry_price_market = self.mt5_connector.get_current_price(
+                broker_symbol, action
+            )
             if not entry_price_market or entry_price_market <= 0:
                 raise TradeExecutionError(
-                    f"Impossible de récupérer un prix de marché valide pour {symbol}. Ordre annulé."
+                    f"Impossible de récupérer un prix valide pour {broker_symbol}."
                 )
 
-            # Trigger price (ordres différés)
             trigger_price = trade_decision.get("trigger_price", entry_price_market)
 
-            # Calcul SL/TP
+            # SL/TP
             sl_price, tp_price = self._calculate_sl_tp_prices(
                 trade_decision,
                 active_config,
@@ -841,12 +840,12 @@ class TradeExecutor:
 
             if not isinstance(volume, (int, float)) or volume <= 0:
                 raise TradeExecutionError(
-                    f"Volume calculé invalide ou nul ({volume}) pour {symbol}. Ordre annulé."
+                    f"Volume calculé invalide ({volume}) pour {broker_symbol}."
                 )
 
-            # Construction de la requête MT5 finale
+            # Construction finale
             return self._build_mt5_request(
-                {**trade_decision, "action": action},  # ⚡ on force l'action corrigée
+                {"action": action, "asset": broker_symbol},
                 active_config,
                 volume,
                 entry_price_market,
@@ -854,31 +853,25 @@ class TradeExecutor:
                 tp_price,
                 symbol_info,
                 trigger_price,
-                order_type_str,
+                trade_decision.get("order_type", "MARKET"),
             )
 
         except TradeExecutionError as tee:
-            self.logger.error(
-                f"Échec critique lors de la préparation de l'ordre pour {symbol}: {tee}"
-            )
+            self.logger.error(f"Échec préparation ordre {broker_symbol}: {tee}")
             self.config_manager.send_alert(
-                "CRITIQUE",
-                f"Préparation Ordre Échec: {tee}",
-                alert_type="telegram_critical",
+                "CRITIQUE", f"Préparation Ordre Échec: {tee}", "telegram_critical"
             )
             raise
         except Exception as e:
             self.logger.error(
-                f"Échec inattendu lors de la préparation de l'ordre pour {symbol}: {e}",
+                f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
                 exc_info=True,
             )
             self.config_manager.send_alert(
-                "CRITIQUE",
-                f"Préparation Ordre Exception: {e}",
-                alert_type="telegram_critical",
+                "CRITIQUE", f"Préparation Ordre Exception: {e}", "telegram_critical"
             )
             raise TradeExecutionError(
-                f"Échec inattendu de la préparation de l'ordre pour {symbol}: {e}"
+                f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
 
     def _calculate_sl_tp_prices(
@@ -1353,38 +1346,30 @@ class TradeExecutor:
         Construit et valide la requête finale pour l'API MetaTrader 5, en supportant
         tous les types d'ordres (Market, Limit, Stop).
         Utilise les constantes MT5 mappées du ConfigManager.
-
-        Args:
-            trade_decision (dict): La décision de trade.
-            config (dict): La configuration active.
-            volume (float): Volume calculé pour l'ordre.
-            entry_price_market (float): Le prix de marché actuel (Ask/Bid).
-            sl_price (float): Le prix du Stop Loss.
-            tp_price (float): Le prix du Take Profit.
-            symbol_info (Any): Les informations du symbole de MT5 (MetaTrader5.SymbolInfo NamedTuple).
-            trigger_price (float, optional): Prix de déclenchement pour les ordres différés.
-                                            Si None, utilise entry_price_market pour les ordres marché.
-            order_type_str (str): Type d'ordre sous forme de chaîne (ex: "MARKET", "BUY_LIMIT").
-
-        Returns:
-            dict: La requête d'ordre MT5, prête et validée pour l'envoi.
-
-        Raises:
-            TradeExecutionError: Si la requête est invalide ou ne respecte pas les contraintes du broker.
         """
+
         self.logger.info("Construction de la requête MT5 finale...")
         action_str = trade_decision["action"]  # BUY, SELL, CLOSE
+        expected_symbol = trade_decision.get("asset", "N/A")
+
+        # --- Validation stricte du symbole ---
+        if (
+            not symbol_info
+            or not hasattr(symbol_info, "name")
+            or symbol_info.name in [None, "", "UNKNOWN"]
+        ):
+            raise TradeExecutionError(
+                f"Symbole MT5 invalide ou non résolu dans _build_mt5_request "
+                f"(asset={expected_symbol}, symbol_info={getattr(symbol_info, 'name', 'None')})."
+            )
 
         # Récupérer les constantes MT5 via les mappings
-        mt5_action_deal = self.TRADE_ACTION_DEAL  # Utilise self.TRADE_ACTION_DEAL
-        mt5_action_pending = (
-            self.TRADE_ACTION_PENDING
-        )  # Utilise self.TRADE_ACTION_PENDING
-        mt5_order_time_gtc = self.ORDER_TIME_GTC  # Utilise self.ORDER_TIME_GTC
+        mt5_action_deal = self.TRADE_ACTION_DEAL
+        mt5_action_pending = self.TRADE_ACTION_PENDING
+        mt5_order_time_gtc = self.ORDER_TIME_GTC
 
         # Default filling policy
         filling_policy_str = config.get("execution_policy.type_filling", "FOK")
-        # Utilise self.mt5 pour accéder aux constantes, et les mappings via getattr
         mt5_filling_policy = getattr(
             self.mt5,
             self.mt5_mappings.get("order_filling_policies", {}).get(
@@ -1394,104 +1379,75 @@ class TradeExecutor:
 
         # --- Dictionnaire de base commun à tous les ordres ---
         request = {
-            "action": mt5_action_deal,  # Action par défaut pour DEAL, sera modifiée pour PENDING
+            "action": mt5_action_deal,
             "symbol": symbol_info.name,
             "volume": volume,
             "magic": config.get("magic_number"),
-            "sl": round(
-                sl_price, symbol_info.digits
-            ),  # Arrondir au nombre de décimales du symbole
-            "tp": round(
-                tp_price, symbol_info.digits
-            ),  # Arrondir au nombre de décimales du symbole
+            "sl": round(sl_price, symbol_info.digits),
+            "tp": round(tp_price, symbol_info.digits),
             "type_time": mt5_order_time_gtc,
-            "comment": "",  # Initialiser pour le formatage
-            "deviation": config.get(
-                "execution_policy.max_deviation_points", 20
-            ),  # Tolérance de slippage en points
+            "comment": "",
+            "deviation": config.get("execution_policy.max_deviation_points", 20),
         }
 
         # --- Logique spécifique par type d'ordre ---
         if order_type_str == "MARKET":
             request["type"] = (
                 self.ORDER_TYPE_BUY if action_str == "BUY" else self.ORDER_TYPE_SELL
-            )  # Utilise self.ORDER_TYPE_BUY/SELL
-            request["price"] = (
-                entry_price_market  # Pour un ordre marché, c'est le prix actuel (Ask/Bid)
             )
+            request["price"] = entry_price_market
             request["type_filling"] = mt5_filling_policy
 
         elif "LIMIT" in order_type_str or "STOP" in order_type_str:
-            request["action"] = mt5_action_pending  # Action pour ordre différé
+            request["action"] = mt5_action_pending
             request["price"] = (
                 trigger_price if trigger_price is not None else entry_price_market
-            )  # Prix de déclenchement
+            )
 
-            # Récupération dynamique du type d'ordre MT5 (ex: "BUY_LIMIT" -> self.mt5.ORDER_TYPE_BUY_LIMIT)
             mapped_order_type_value = self.mt5_mappings.get("order_types", {}).get(
                 order_type_str
             )
             if mapped_order_type_value is None:
                 raise TradeExecutionError(
-                    f"Type d'ordre différé non supporté ou invalide : '{order_type_str}'. Vérifiez les mappings MT5."
+                    f"Type d'ordre différé non supporté : '{order_type_str}'"
                 )
-            request["type"] = getattr(
-                self.mt5, mapped_order_type_value
-            )  # Utilise self.mt5 pour accéder à la constante
 
-            # Vérifications spécifiques aux ordres différés
-            # La règle du broker "stops_level" s'applique aussi au prix de déclenchement
-            # (distance minimale entre le prix actuel et le prix de l'ordre différé)
+            request["type"] = getattr(self.mt5, mapped_order_type_value)
+
             current_prices = self.mt5_connector.get_symbol_info_tick(symbol_info.name)
             if current_prices is None:
                 raise TradeExecutionError(
                     f"Impossible d'obtenir les prix de tick pour {symbol_info.name} pour valider l'ordre différé."
                 )
 
-            # Vérification de la distance minimale entre prix du marché et prix de l'ordre différé
-            min_distance_from_market_price = (
-                symbol_info.trade_stops_level * symbol_info.point
-            )  # stops_level en prix
+            min_distance = symbol_info.trade_stops_level * symbol_info.point
 
             if (
-                order_type_str == "BUY_LIMIT"
-                and request["price"]
-                >= current_prices.ask - min_distance_from_market_price
-            ):
-                raise TradeExecutionError(
-                    f"BUY_LIMIT ({request['price']}) trop proche du prix Ask ({current_prices.ask}). Distance min: {min_distance_from_market_price:.5f}."
+                (
+                    order_type_str == "BUY_LIMIT"
+                    and request["price"] >= current_prices.ask - min_distance
                 )
-            elif (
-                order_type_str == "SELL_LIMIT"
-                and request["price"]
-                <= current_prices.bid + min_distance_from_market_price
-            ):
-                raise TradeExecutionError(
-                    f"SELL_LIMIT ({request['price']}) trop proche du prix Bid ({current_prices.bid}). Distance min: {min_distance_from_market_price:.5f}."
+                or (
+                    order_type_str == "SELL_LIMIT"
+                    and request["price"] <= current_prices.bid + min_distance
                 )
-            elif (
-                order_type_str == "BUY_STOP"
-                and request["price"]
-                <= current_prices.ask + min_distance_from_market_price
-            ):
-                raise TradeExecutionError(
-                    f"BUY_STOP ({request['price']}) trop proche du prix Ask ({current_prices.ask}). Distance min: {min_distance_from_market_price:.5f}."
+                or (
+                    order_type_str == "BUY_STOP"
+                    and request["price"] <= current_prices.ask + min_distance
                 )
-            elif (
-                order_type_str == "SELL_STOP"
-                and request["price"]
-                >= current_prices.bid - min_distance_from_market_price
+                or (
+                    order_type_str == "SELL_STOP"
+                    and request["price"] >= current_prices.bid - min_distance
+                )
             ):
                 raise TradeExecutionError(
-                    f"SELL_STOP ({request['price']}) trop proche du prix Bid ({current_prices.bid}). Distance min: {min_distance_from_market_price:.5f}."
+                    f"{order_type_str} ({request['price']}) trop proche du marché "
+                    f"(Ask={current_prices.ask}, Bid={current_prices.bid}). Min dist: {min_distance:.5f}"
                 )
 
-            # Gestion de la date d'expiration pour les ordres différés (TODO implémenté)
-            # La date d'expiration peut être définie dans la configuration de la stratégie
             expiration_policy = config.get("order_expiration_policy", {}).get(
                 "type", "GTC"
-            )  # GTC, DAY, SPECIFIED
-
+            )
             if expiration_policy == "DAY":
                 request["type_time"] = getattr(
                     self.mt5,
@@ -1506,64 +1462,45 @@ class TradeExecutor:
                         "SPECIFIED", "ORDER_TIME_SPECIFIED"
                     ),
                 )
-                # La date/heure spécifique doit venir de la décision ou de la config
                 expiration_datetime_str = config.get("order_expiration_policy", {}).get(
                     "datetime", (datetime.now(UTC) + timedelta(days=1)).isoformat()
                 )
                 try:
                     request["expiration"] = datetime.fromisoformat(
                         expiration_datetime_str
-                    ).timestamp()  # Timestamp Unix
+                    ).timestamp()
                 except ValueError:
                     self.logger.error(
-                        f"Format de date d'expiration invalide: {expiration_datetime_str}. Utilisation de GTC."
+                        f"Format expiration invalide: {expiration_datetime_str}. Fallback GTC."
                     )
-                    request["type_time"] = mt5_order_time_gtc  # Fallback GTC
+                    request["type_time"] = mt5_order_time_gtc
 
         else:
             raise TradeExecutionError(
                 f"Type d'ordre non géré dans _build_mt5_request: '{order_type_str}'"
             )
 
-        # --- Validation Finale "Anti-Rejet" contre les contraintes du Broker ---
-        # Vérifications pour SL/TP par rapport au prix de l'ordre
-        # Note: stops_level de symbol_info est la distance MINIMALE en points pour SL/TP
-        # par rapport au PRIX DE L'ORDRE.
-        # current_prices = self.mt5_connector.get_symbol_info_tick(symbol_info.name) # Déjà récupéré ou peut être re-appelé si besoin
-
-        # Pour les ordres au marché, les prix ask/bid peuvent changer.
-        # Il est préférable d'utiliser le prix de l'ordre (request["price"]) comme base.
-
-        # Distance minimale SL/TP en prix par rapport au prix de l'ordre
-        min_sl_tp_distance_from_order_price = (
-            symbol_info.trade_stops_level * symbol_info.point
-        )
-
-        # Validation pour SL (trop proche du prix d'entrée)
+        # --- Validation SL/TP ---
+        min_sl_tp_distance = symbol_info.trade_stops_level * symbol_info.point
         if (
-            action_str == "BUY"
-            and (request["price"] - sl_price) < min_sl_tp_distance_from_order_price
+            action_str == "BUY" and (request["price"] - sl_price) < min_sl_tp_distance
         ) or (
-            action_str == "SELL"
-            and (sl_price - request["price"]) < min_sl_tp_distance_from_order_price
+            action_str == "SELL" and (sl_price - request["price"]) < min_sl_tp_distance
         ):
             raise TradeExecutionError(
-                f"Stop Loss ({sl_price:.5f}) trop proche du prix d'entrée de l'ordre ({request['price']:.5f}). Distance min: {min_sl_tp_distance_from_order_price:.5f}."
+                f"Stop Loss ({sl_price:.5f}) trop proche du prix ({request['price']:.5f}). Min dist: {min_sl_tp_distance:.5f}"
             )
 
-        # Validation pour TP (trop proche du prix d'entrée)
         if (
-            action_str == "BUY"
-            and (tp_price - request["price"]) < min_sl_tp_distance_from_order_price
+            action_str == "BUY" and (tp_price - request["price"]) < min_sl_tp_distance
         ) or (
-            action_str == "SELL"
-            and (request["price"] - tp_price) < min_sl_tp_distance_from_order_price
+            action_str == "SELL" and (request["price"] - tp_price) < min_sl_tp_distance
         ):
             raise TradeExecutionError(
-                f"Take Profit ({tp_price:.5f}) trop proche du prix d'entrée de l'ordre ({request['price']:.5f}). Distance min: {min_sl_tp_distance_from_order_price:.5f}."
+                f"Take Profit ({tp_price:.5f}) trop proche du prix ({request['price']:.5f}). Min dist: {min_sl_tp_distance:.5f}"
             )
 
-        # --- Ajout du Commentaire (déjà existant) ---
+        # --- Commentaire ---
         comment_template = self.config_manager.get(
             "trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}"
         )
@@ -1573,9 +1510,6 @@ class TradeExecutor:
         )[:max_len]
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
-
-        # TODO: Ajouter la gestion de la date d'expiration (`expiration`) pour les ordres différés,
-        #       en la rendant configurable (ex: fin de la journée, fin de la semaine). (Implémenté ci-dessus)
         return request
 
     def _update_internal_position_state(
