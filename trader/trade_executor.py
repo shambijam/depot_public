@@ -2526,141 +2526,170 @@ class TradeExecutor:
 
 
 def run_trade_execution_pipeline(
-    trade_executor: "TradeExecutor", decision_package: dict
-) -> dict:  # Utiliser une forward reference pour TradeExecutor
+    trade_executor, decision_package: dict, is_dry_run: bool = False
+) -> dict:
     """
-    Orchestre le pipeline complet d'exécution d'un trade, de la validation à la notification.
-    Cette fonction est une interface de haut niveau pour l'exécution des trades.
-
-    Args:
-        trade_executor (TradeExecutor): L'instance du TradeExecutor.
-        decision_package (dict): Le package de décision contenant le contexte et le trade à exécuter.
-
-    Returns:
-        dict: Un dictionnaire de feedback standardisé sur le résultat de l'exécution.
+    Pont unique entre la décision (DecisionPipeline) et l'exécution (TradeExecutor).
+    Corrigé: on lit dans decision_package['final_decision'] au lieu des clés racine.
+    Zéro tolérance aux champs manquants: on normalise et on valide avant d'appeler prepare_order.
     """
-    # Utilise le logger de l'instance trade_executor pour la cohérence
-    logger_instance = trade_executor.logger
-    order_id = "N/A"  # Default value for order_id
+    import logging
 
+    logger = logging.getLogger(__name__)
+
+    # ----------- Helpers locaux -----------
+    def _first_non_empty(*vals):
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    def _normalize_action(a: str) -> str:
+        a = (a or "").strip().upper()
+        mapping = {
+            "BUY": "BUY",
+            "SELL": "SELL",
+            "LONG": "BUY",
+            "SHORT": "SELL",
+            "CLOSE": "CLOSE",
+        }
+        return mapping.get(a, "")
+
+    # ----------- 0) Validation structure paquet -----------
+    if not isinstance(decision_package, dict):
+        reason = "Paquet de décision invalide (type non-dict)."
+        logger.error(reason)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
+        )
+        raise TradeExecutionError(reason)
+
+    final_decision = (
+        decision_package.get("final_decision")
+        or decision_package.get("trade_decision")
+        or {}
+    )
+    market_context = (
+        decision_package.get("context") or decision_package.get("market_context") or {}
+    )
+    active_config = (
+        decision_package.get("config_used")
+        or decision_package.get("active_config")
+        or {}
+    )
+
+    if not final_decision:
+        reason = "Paquet de décision incomplet: 'final_decision' manquant."
+        logger.error(reason)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
+        )
+        raise TradeExecutionError(reason)
+
+    # ----------- 1) Action (multi-champs + normalisation) -----------
+    action_raw = _first_non_empty(
+        final_decision.get("final_action"),
+        final_decision.get("selected_action"),
+        final_decision.get("core_action"),
+        final_decision.get("action"),
+        final_decision.get("side"),
+        final_decision.get("direction"),
+    )
+    action = _normalize_action(action_raw)
+    if not action:
+        reason = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)."
+        logger.error(reason)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
+        )
+        raise TradeExecutionError(reason)
+
+    # ----------- 2) Asset -----------
+    raw_asset = _first_non_empty(
+        final_decision.get("asset"),
+        final_decision.get("symbol"),
+        final_decision.get("instrument"),
+    )
+    if not raw_asset or raw_asset.upper() == "UNKNOWN":
+        reason = "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
+        logger.error(reason)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
+        )
+        raise TradeExecutionError(reason)
+
+    asset = raw_asset.upper()
+
+    # ----------- 3) order_type propre -----------
+    order_type = str(final_decision.get("order_type", "MARKET")).upper()
+    allowed_order_types = {"MARKET", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
+    if order_type not in allowed_order_types:
+        logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
+        order_type = "MARKET"
+
+    # ----------- 4) Construire le trade_decision standardisé -----------
+    trade_decision = {
+        "action": action,
+        "asset": asset,
+        "volume": final_decision.get("volume"),
+        "order_type": order_type,
+        "trigger_price": final_decision.get("trigger_price"),
+        "target_sl_pips": final_decision.get("target_sl_pips"),
+        "target_tp_pips": final_decision.get("target_tp_pips"),
+        "rule_name": final_decision.get("rule_name"),
+    }
+
+    adapted_package = {
+        "trade_decision": trade_decision,
+        "market_context": market_context,
+        "active_config": active_config,
+    }
+
+    # ----------- 5) Pre-trade checks -----------
+    ok, reason = trade_executor.pre_trade_checks(
+        trade_decision, active_config, market_context
+    )
+    if not ok:
+        logger.warning(f"Pipeline de trade AVORTÉ (Erreur contrôlée): {reason}")
+        feedback = trade_executor.feedback_pipeline(
+            order_id=final_decision.get("order_id", "N/A"),
+            status="failed",
+            reason=reason,
+        )
+        trade_executor._feedback_safe(feedback)  # couvre les signatures différentes
+        return {"status": "failed", "reason": reason}
+
+    # ----------- 6) Préparer la requête MT5 -----------
     try:
-        # 1. Validation du package
-        validated_package = trade_executor.load_decision_package(decision_package)
-
-        # 2. Mapper les clés pour créer la structure attendue
-        # Le decision_package contient "Asset", "Action", "Volume" avec majuscules
-        # Les méthodes attendent "asset", "action", "volume" en minuscules
-        trade_decision = {
-            "asset": validated_package.get(
-                "Asset", validated_package.get("asset", "UNKNOWN")
-            ),
-            "action": validated_package.get(
-                "Action", validated_package.get("action", "UNKNOWN")
-            ),
-            "volume": validated_package.get(
-                "Volume", validated_package.get("volume", 0.0)
-            ),
-            "order_id": validated_package.get("order_id", "N/A"),
-            "order_type": validated_package.get("order_type", "MARKET"),
-        }
-
-        # 3. Créer la structure complète attendue par les autres méthodes
-        adapted_package = {
-            "trade_decision": trade_decision,
-            "market_context": validated_package,
-            "active_config": validated_package,
-        }
-
-        order_id = trade_decision.get("order_id", order_id)
-
-        # 4. Préparation de l'ordre (y compris le calcul de risque)
-        # La fonction prepare_order gère maintenant l'action "CLOSE" aussi
         mt5_request = trade_executor.prepare_order(adapted_package)
-
-        # Si c'est une action de clôture, le prepare_order retourne un dict spécifique
-        if mt5_request.get("action") == "CLOSE":
-            # Appeler la méthode close_position pour gérer la clôture réelle
-            close_result = trade_executor.close_position(
-                symbol=mt5_request.get("symbol"),
-                ticket=mt5_request.get("ticket_to_close"),
-            )
-            # Simuler un mt5_result pour la notification si la clôture est gérée ici
-            status = "executed" if close_result.get("success") else "failed"
-            message = close_result.get("message")
-            # Pour la clôture, le P&L est dans le résultat de close_position
-            pnl_usd_closed = close_result.get("pnl_usd", 0.0)
-
-            # Journalisation et notification
-            # `log_and_notify` est conçu pour des requêtes MT5, adaptons un peu le mt5_request pour le log de clôture
-            temp_mt5_req_for_log = {
-                "order_id": order_id,
-                "symbol": mt5_request.get("symbol"),
-                "action": "CLOSE",
-                "volume": mt5_request.get("volume", "N/A"),
-            }
-            temp_exec_status_for_log = {
-                "status": status,
-                "message": message,
-                "pnl_usd": pnl_usd_closed,
-            }
-            trade_executor.log_and_notify(
-                temp_mt5_req_for_log, temp_exec_status_for_log
-            )
-
-            return trade_executor.feedback_pipeline(
-                order_id, status, message, pnl_usd=pnl_usd_closed
-            )
-
-        # 5. Vérifications Pré-Trade
-        if not trade_executor.pre_trade_checks(adapted_package):
-            raise TradeExecutionError("Échec des vérifications pré-trade.")
-
-        # 6. Contrôle Manuel (si nécessaire, de manière non-bloquante)
-        if not trade_executor.manual_override_if_needed(mt5_request):
-            return trade_executor.feedback_pipeline(
-                order_id,
-                "pending_manual_approval",
-                "En attente d'approbation manuelle.",
-            )
-
-        # 7. Exécution de l'Ordre
-        execution_status = trade_executor.execute_order(mt5_request)
-
-        # 8. Journalisation, notification et feedback
-        # log_and_notify est déjà dans TradeExecutor et gère le log
-        trade_executor.log_and_notify(mt5_request, execution_status)
-
-        status = (
-            "executed"
-            if execution_status["status"] == "executed"
-            else execution_status["status"]
-        )
-        # Pour les ordres d'ouverture, le P&L est généralement 0 au moment de l'exécution
-        return trade_executor.feedback_pipeline(
-            order_id, status, execution_status["message"], pnl_usd=0.0
-        )
-
-    except (InvalidDecisionPackageError, TradeExecutionError) as e:
-        logger_instance.error(
-            f"Pipeline de trade AVORTÉ (Erreur contrôlée) pour l'ordre {order_id} : {e}"
-        )
-        trade_executor.config_manager.send_alert(
-            f"CRITIQUE: Pipeline de Trade Avorté: {e} (Ordre: {order_id})",
-            "telegram_critical",
-        )
-        return trade_executor.feedback_pipeline(order_id, "failed", str(e))
     except Exception as e:
-        logger_instance.critical(
-            f"EXCEPTION NON GÉRÉE dans le pipeline d'exécution de trade pour l'ordre {order_id}: {e}",
-            exc_info=True,
+        reason = f"Préparation d'ordre échouée: {e}"
+        logger.error(reason, exc_info=True)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
         )
-        trade_executor.config_manager.send_alert(
-            f"CRITIQUE: ERREUR NON GÉRÉE (Ordre {order_id}): {type(e).__name__}",
-            "telegram_critical",
+        feedback = trade_executor.feedback_pipeline(
+            order_id=final_decision.get("order_id", "N/A"),
+            status="failed",
+            reason=str(e),
         )
-        return trade_executor.feedback_pipeline(
-            order_id, "error", f"Exception non gérée: {type(e).__name__}"
-        )
+        trade_executor._feedback_safe(feedback)
+        return {"status": "failed", "reason": str(e)}
 
-    # TODO: Ajouter des "hooks" (points d'ancrage) entre les étapes pour permettre à des
-    #       plugins d'ajouter des validations ou des logs personnalisés. (TODO maintenu)
+    # ----------- 7) Human-in-the-loop / dry-run -----------
+    if not trade_executor.manual_override_if_needed(mt5_request):
+        feedback = trade_executor.feedback_pipeline(
+            order_id=final_decision.get("order_id", "N/A"),
+            status="pending_manual_approval",
+            reason="Manual override requested.",
+        )
+        trade_executor._feedback_safe(feedback)
+        return {"status": "pending_manual_approval"}
+
+    if is_dry_run:
+        logger.info("[DRY RUN] Requête MT5 prête mais non envoyée.")
+        return {"status": "ready", "mt5_request": mt5_request}
+
+    # ----------- 8) Exécution -----------
+    execution_result = trade_executor.execute_order(mt5_request)
+    return execution_result
