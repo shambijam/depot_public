@@ -2288,6 +2288,54 @@ class PhaseObserver:
 
         return min(max_confidence, max(0.0, score))
 
+    def _apply_phase_fallback(row):
+        p = row.get("phase_primary", "no_clear_phase")
+        if p != "no_clear_phase":
+            return p, "primary"
+
+        v = float(row.get("volatility_pct", 0.0))
+        if v < low_th:
+            return "range_retail", "fallback_low"
+        if v >= high_th:
+            return "range_distribution", "fallback_high"
+
+        return "no_clear_phase", "fallback_mid"
+
+    # === Dans ta fonction/méthode d’analyse principale ===
+    phase_fallback_vals = df_an.apply(_apply_phase_fallback, axis=1)
+    df_an["phase"] = [p for p, _r in phase_fallback_vals]
+    df_an["phase_rule"] = [_r for _p, _r in phase_fallback_vals]  # utile pour debug
+
+    # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
+    df_an["confidence_score"] = df_an.apply(self.calculate_optimized_confidence, axis=1)
+
+    # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
+    if not df_an.empty:
+        total_signals = (
+            df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
+        )
+        avg_confidence = df_an["confidence_score"].mean()
+        last_phase = df_an["phase"].iloc[-1]
+        last_confidence = float(df_an["confidence_score"].iloc[-1])
+        last_regime = (
+            df_an["regime"].iloc[-1] if "regime" in df_an.columns else "unknown"
+        )
+        last_vol = (
+            float(df_an["volatility_pct"].iloc[-1])
+            if "volatility_pct" in df_an.columns
+            else 0.0
+        )
+        last_rule = (
+            df_an["phase_rule"].iloc[-1] if "phase_rule" in df_an.columns else "primary"
+        )
+
+        self.logger.info(
+            f"🎯 [{current_asset_symbol}] Pipeline terminé: "
+            f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
+            f"Régime={last_regime}, Signaux totaux={int(total_signals)}, "
+            f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
+        )
+
     def analyze(
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None
     ) -> Optional[pd.DataFrame]:
@@ -2600,55 +2648,6 @@ class PhaseObserver:
             )
 
         return df_an
-
-    def _apply_phase_fallback(row):
-        p = row.get("phase_primary", "no_clear_phase")
-        if p != "no_clear_phase":
-            return p, "primary"
-        v = float(row.get("volatility_pct", 0.0))
-        if v < low_th:
-            return "range_retail", "fallback_low"
-        if v >= high_th:
-            return "range_distribution", "fallback_high"
-        return "no_clear_phase", "fallback_mid"
-
-    phase_fallback_vals = df_an.apply(_apply_phase_fallback, axis=1)
-    df_an["phase"] = [p for p, _r in phase_fallback_vals]
-    df_an["phase_rule"] = [
-        _r for _p, _r in phase_fallback_vals
-    ]  # utile pour debug, transparent si non utilisé ailleurs
-
-    # === PHASE 6: CONFIDENCE SCORE OPTIMISÉ ===
-    df_an["confidence_score"] = df_an.apply(self.calculate_optimized_confidence, axis=1)
-
-    # === PHASE 7: MÉTRIQUES DE PERFORMANCE ===
-    if not df_an.empty:
-        total_signals = (
-            df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
-        )
-        avg_confidence = df_an["confidence_score"].mean()
-        last_phase = df_an["phase"].iloc[-1]
-        last_confidence = float(df_an["confidence_score"].iloc[-1])
-        last_regime = (
-            df_an["regime"].iloc[-1] if "regime" in df_an.columns else "unknown"
-        )
-        last_vol = (
-            float(df_an["volatility_pct"].iloc[-1])
-            if "volatility_pct" in df_an.columns
-            else 0.0
-        )
-        last_rule = (
-            df_an["phase_rule"].iloc[-1] if "phase_rule" in df_an.columns else "primary"
-        )
-
-        self.logger.info(
-            f"🎯 [{current_asset_symbol}] Pipeline terminé: "
-            f"Phase={last_phase}, Confidence={last_confidence:.3f}, "
-            f"Régime={last_regime}, Signaux totaux={int(total_signals)}, "
-            f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
-        )
-
-    return df_an
 
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):
         """
