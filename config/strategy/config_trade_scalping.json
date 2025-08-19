@@ -19,8 +19,8 @@
   },
   "magic_number": 51001,
   "risk_per_trade_percent": 0.35,
-  "stop_loss_pips": 0,
-  "take_profit_pips": 0,
+  "stop_loss_pips": 30,
+  "take_profit_pips": 60,
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.003,
@@ -63,7 +63,8 @@
     "risk": {
       "max_trades_per_day": 6,
       "cooldown_seconds_after_trade": 240,
-      "skip_asset_if_spread_over_points": 80
+      "skip_asset_if_spread_over_points": 80,
+      "max_lot_size": 0.2
     },
     "execution": {
       "order_type": "market",
