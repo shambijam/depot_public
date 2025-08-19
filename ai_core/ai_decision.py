@@ -68,59 +68,79 @@ class AIDecision:
         config_manager_instance: Optional[ConfigManager] = None,
     ):
         """
-        Initialise le module AIDecision, charge le modèle Llama, les prompts et l'historique des suggestions.
+        Initialise AIDecision: modèle, prompts, chemins de logs, et historique.
 
-        Les chemins des fichiers prompts et historiques, ainsi que le chemin du modèle AI,
-        sont lus depuis la configuration dynamique via ConfigManager.
-
-        Args:
-            model_path (str, optional): Chemin explicite vers le fichier du modèle Llama (GGUF).
-                                        Si `None`, le chemin est lu depuis ConfigManager.
-                                        Priorité sur la configuration.
-            config_manager_instance (Optional[ConfigManager]): Instance du ConfigManager pour accéder
-                                                               aux paramètres dynamiques et aux services partagés.
+        - Respecte la priorité du paramètre `model_path` sur la config.
+        - Normalise les chemins pour éviter 'logs/logs/...' (on garde uniquement le nom de fichier
+        pour les fichiers de log et on crée le dossier de logs si nécessaire).
+        - Tolérant à l'absence de ConfigManager (fallbacks sûrs).
+        - Singleton-friendly: protège la double initialisation.
         """
-        # S'assurer que l'initialisation n'est exécutée qu'une seule fois pour le singleton
-        if not self._initialized_instance:
+        from pathlib import Path
+
+        # Empêche l'accès à un attribut possiblement absent
+        if not getattr(self, "_initialized_instance", False):
             self._initialized_instance = True
 
-            self.logger = logging.getLogger(__name__)  # Utilise le logger d'instance
+            self.logger = logging.getLogger(__name__)
             self.config_manager = config_manager_instance
 
-            # Initialisation du cache pour les réponses AI (utilisé par request_ia_advice)
-            # Tuple[Dict[str, Any], datetime] stocke la réponse et son timestamp d'ajout au cache
+            # Petit helper local pour ne garder que le nom de fichier (évite logs/logs/*.jsonl)
+            def _filename_only(p: str, default_name: str) -> str:
+                try:
+                    name = Path(str(p)).name
+                    return name if name else default_name
+                except Exception:
+                    return default_name
+
+            # Cache de conseils IA (clé -> (payload, timestamp))
             self._ai_advice_cache: Dict[str, Tuple[Dict[str, Any], datetime]] = {}
 
-            # Fallback vers des valeurs par défaut "hard-codées" si ConfigManager n'est pas fourni.
-            # Cela permet à AIDecision d'être testé isolément, mais n'est pas recommandé en production.
+            # ====== Fallback complet si pas de ConfigManager ======
             if self.config_manager is None:
                 self.logger.warning(
-                    "AIDecision initialisé sans ConfigManager. Les paramètres AI (chemins, seuils) pourraient ne pas être dynamiques. Utilisation des fallbacks."
+                    "AIDecision initialisé sans ConfigManager. Fallbacks statiques activés."
                 )
+
+                # Modèle
                 self.model_path = (
                     model_path
                     if model_path is not None
                     else "./models/llama-2-7b-chat.Q4_K_M.gguf"
                 )
+
+                # Prompts / historique
                 self.prompts_base_dir = "config/prompts/"
                 self.prompts_file_name = "prompts.yaml"
                 self.history_path = "logs/suggestion_history.jsonl"
+
+                # Paramètres superviseur IA / rappels
                 self.default_initial_suggestion_status = "pending"
                 self.min_priority_reminder = 0.7
                 self.remind_after_hours = 24
                 self.reminder_multiplier = 0.5
+
+                # Logs IA (normalisés)
                 self.log_dir = "logs"
-                self.ai_supervisor_logs_file = "ai_supervisor_logs.jsonl"
-                self.ai_supervisor_feedback_file = "ai_supervisor_feedback.jsonl"
-                self.message_templates = {  # Les templates de messages sont ici pour le fallback
+                self.ai_supervisor_logs_file = _filename_only(
+                    "ai_supervisor_logs.jsonl", "ai_supervisor_logs.jsonl"
+                )
+                self.ai_supervisor_feedback_file = _filename_only(
+                    "ai_supervisor_feedback.jsonl", "ai_supervisor_feedback.jsonl"
+                )
+
+                # Templates de message par défaut
+                self.message_templates = {
                     "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
                     "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
                     "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
-                    "trade_confirmed": "🚀 Trade Confirmé (IA): {symbol} {action} {volume} lots | Stratégie: {strategy}",  # Exemple
-                    "trade_closed": "📊 Trade Clôturé (IA): {symbol} P&L: {pnl:.2f} ({status}) | Stratégie: {strategy}",  # Exemple
+                    "trade_confirmed": "🚀 Trade Confirmé (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots",
+                    "trade_closed": "📊 Trade Clôturé (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status})",
                 }
+
+            # ====== Chemin via ConfigManager ======
             else:
-                # Récupérer le chemin du modèle AI depuis ConfigManager
+                # Modèle
                 base_models_dir = self.config_manager.get("paths.models", "models/")
                 configured_model_name = self.config_manager.get(
                     "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
@@ -131,18 +151,20 @@ class AIDecision:
                     else str(Path(base_models_dir) / configured_model_name)
                 )
 
-                # Récupérer les chemins des prompts et de l'historique des suggestions
+                # Prompts / historique
                 self.prompts_base_dir = self.config_manager.get(
                     "paths.prompts", "config/prompts/"
                 )
                 self.prompts_file_name = self.config_manager.get(
                     "ai.prompt_settings.prompts_file_name", "prompts.yaml"
                 )
+
+                # (On laisse history_path tel quel: peut être chemin complet configuré)
                 self.history_path = self.config_manager.get(
                     "paths.ai_history_log", "logs/suggestion_history.jsonl"
                 )
 
-                # Récupérer les paramètres pour les rappels de suggestions et autres
+                # Paramètres superviseur IA / rappels
                 self.default_initial_suggestion_status = self.config_manager.get(
                     "ai.suggestion_settings.default_initial_status", "pending"
                 )
@@ -156,45 +178,53 @@ class AIDecision:
                     "ai.supervisor_settings.reminder_multiplier", 0.5
                 )
 
-                # Récupérer les chemins et noms de fichiers de log spécifiques à l'IA
+                # Logs IA (normalisés)
                 self.log_dir = self.config_manager.get("paths.logs", "logs/")
-                self.ai_supervisor_logs_file = self.config_manager.get(
-                    "paths.ai_supervisor_logs_file", "ai_supervisor_logs.jsonl"
+                # Si la config fournit déjà "logs/xxx.jsonl", on garde seulement le nom pour éviter "logs/logs/xxx"
+                self.ai_supervisor_logs_file = _filename_only(
+                    self.config_manager.get(
+                        "paths.ai_supervisor_logs_file", "ai_supervisor_logs.jsonl"
+                    ),
+                    "ai_supervisor_logs.jsonl",
                 )
-                self.ai_supervisor_feedback_file = self.config_manager.get(
-                    "paths.ai_supervisor_feedback_file", "ai_supervisor_feedback.jsonl"
+                self.ai_supervisor_feedback_file = _filename_only(
+                    self.config_manager.get(
+                        "paths.ai_supervisor_feedback_file",
+                        "ai_supervisor_feedback.jsonl",
+                    ),
+                    "ai_supervisor_feedback.jsonl",
                 )
 
-                # TODO: Externaliser ces templates de messages vers un fichier de configuration si des traductions/variations sont nécessaires. (TODO implémenté via ConfigManager)
-                # Charger les templates de messages directement depuis ConfigManager (supposé les lire d'une section `telegram.templates`)
+                # Templates de messages (fallback si vide)
                 self.message_templates = self.config_manager.get(
                     "telegram.templates", {}
+                ) or {
+                    "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
+                    "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
+                    "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
+                    "trade_confirmed": "🚀 Trade Confirmé (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots",
+                    "trade_closed": "📊 Trade Clôturé (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status})",
+                }
+
+            # Crée le dossier de logs (et sous-dossiers si besoin)
+            try:
+                Path(self.log_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self.logger.warning(
+                    f"Impossible de créer le dossier de logs '{self.log_dir}': {e}"
                 )
-                if not self.message_templates:
-                    self.logger.warning(
-                        "Aucun template de message Telegram trouvé dans la configuration. Les notifications AI pourraient être génériques."
-                    )
-                    # Fallback sur des templates par défaut si non configurés
-                    self.message_templates = {
-                        "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
-                        "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
-                        "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
-                        "trade_confirmed": "🚀 Trade Confirmé (IA): Symbole: {symbol} | Action: {action} | Volume: {volume} lots",
-                        "trade_closed": "📊 Trade Clôturé (IA): Symbole: {symbol} | P&L: ${pnl:.2f} ({status})",
-                    }
 
-            # Assigner l'instance du modèle à la classe pour un accès partagé (Singleton)
-            AIDecision._model = None  # Le modèle sera chargé dans self.load_model()
-            self.prompts = {}  # Contient les prompts chargés
-            self.suggestion_history = []  # Historique des suggestions de l'IA
+            # Éléments d'état
+            AIDecision._model = getattr(AIDecision, "_model", None)  # class-level store
+            self.prompts: Dict[str, Any] = {}
+            self.suggestion_history: List[Dict[str, Any]] = []
 
-            self.load_model()  # Tente de charger le modèle Llama
-            self._load_prompts()  # Charge les prompts depuis le fichier YAML
-            self._load_suggestion_history()  # Charge l'historique des suggestions
+            # Chargements initiaux (protégés par try/except à l'intérieur de ces méthodes idéalement)
+            self.load_model()
+            self._load_prompts()
+            self._load_suggestion_history()
 
-            self.logger.info(
-                f"AIDecision initialisé avec le modèle Llama depuis '{self.model_path}'."
-            )  # Utilise self.logger
+            self.logger.info(f"AIDecision initialisé. Modèle: '{self.model_path}'.")
 
     def _load_prompts(self) -> None:
         """
