@@ -19,19 +19,20 @@
   },
   "magic_number": 51001,
   "risk_per_trade_percent": 0.35,
-  "stop_loss_pips": 20,
-  "take_profit_pips": 30,
+  "stop_loss_pips": 0,
+  "take_profit_pips": 0,
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.003,
-      "max_spread_points": 100,
+      "max_spread_points": 80,
       "min_volume_score": -0.5,
       "per_symbol_overrides": {
         "NAS100": {
-          "max_spread_points": 120
+          "max_spread_points": 90
         },
         "XAUUSD": {
-          "min_volatility": 0.006
+          "min_volatility": 0.006,
+          "max_spread_points": 80
         }
       }
     },
@@ -41,7 +42,7 @@
         "M5",
         "M15"
       ],
-      "required_agreements": 1
+      "required_agreements": 2
     },
     "scoring": {
       "base_score": 0.80,
@@ -60,25 +61,25 @@
       "allow_only_whitelist_assets": true
     },
     "risk": {
-      "max_trades_per_day": 8,
-      "cooldown_seconds_after_trade": 60,
-      "skip_asset_if_spread_over_points": 120
+      "max_trades_per_day": 6,
+      "cooldown_seconds_after_trade": 240,
+      "skip_asset_if_spread_over_points": 80
     },
     "execution": {
       "order_type": "market",
       "slippage_points": 3,
-      "max_parallel_positions": 2,
-      "entry_on_close_only": false,
+      "max_parallel_positions": 1,
+      "entry_on_close_only": true,
       "confirm_spread_at_entry": true,
-      "cooldown_bars_after_miss": 2
+      "cooldown_bars_after_miss": 3
     },
     "katana": {
       "use_order_blocks": true,
       "ob_entry_override_enabled": true,
       "ob_entry_requires": {
         "spread_ok": true,
-        "mtf_alignment_min": 1,
-        "rr_min": 1.2
+        "mtf_alignment_min": 2,
+        "rr_min": 1.4
       }
     }
   },
@@ -93,10 +94,9 @@
         ],
         "phase_must_contain": [
           "trend",
-          "range_retail",
           "range_accumulation"
         ],
-        "min_confidence": 0.20
+        "min_confidence": 0.5
       },
       "order_type": "MARKET",
       "action_logic": {

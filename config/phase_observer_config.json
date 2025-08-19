@@ -45,13 +45,13 @@
         "max_gap_age_bars": 50
     },
     "order_block_ml_settings": {
-        "description": "Order Blocks avec scoring ML et confluence",
+        "description": "Order Blocks avec scoring ML et confluence (resserré)",
         "enable_ml_scoring": true,
         "confluence_requirements": {
-            "min_confluence_score": 0.4,
-            "require_volume_confirmation": false,
-            "require_trend_alignment": false,
-            "require_fvg_presence": false
+            "min_confluence_score": 0.5,
+            "require_volume_confirmation": true,
+            "require_trend_alignment": true,
+            "require_fvg_presence": true
         },
         "impulse_strength_weights": {
             "price_movement": 0.4,
@@ -142,7 +142,7 @@
         }
     },
     "confidence_score_calculation": {
-        "description": "Score de confiance optimisé pour trading actif",
+        "description": "Score de confiance optimisé pour trading actif (bonus confluence plus exigeant)",
         "enabled": true,
         "base_confidence": 0.25,
         "signal_weights": {
@@ -157,7 +157,7 @@
         },
         "confluence_bonus": {
             "multiple_signals_bonus": 0.15,
-            "min_signals_for_bonus": 2,
+            "min_signals_for_bonus": 3,
             "fvg_ob_confluence": 0.10,
             "ob_bos_confluence": 0.08,
             "full_confluence_bonus": 0.15,
@@ -178,7 +178,7 @@
             "min_volume_threshold": 1
         },
         "indices_settings": {
-            "max_allowed_spread_points": 100,
+            "max_allowed_spread_points": 90,
             "min_volume_threshold": 5
         }
     },
@@ -197,17 +197,17 @@
         }
     },
     "multi_timeframe_settings": {
-        "description": "Configuration multi-timeframe pour confluence",
+        "description": "Configuration multi-timeframe pour confluence (resserrée)",
         "enabled": true,
         "timeframes": [
             "M1",
             "M5",
             "M15"
         ],
-        "confluence_required": 1,
+        "confluence_required": 2,
         "weight_distribution": {
-            "M1": 0.5,
-            "M5": 0.3,
+            "M1": 0.4,
+            "M5": 0.4,
             "M15": 0.2
         }
     },
@@ -220,15 +220,15 @@
             "M5": 300,
             "M15": 200
         },
-        "warmup_bars_multiplier": 4,
+        "warmup_bars_multiplier": 6,
         "min_non_nan_ratio": 0.98,
         "require_all_timeframes": true,
         "reject_asset_if_any_tf_below_min": true
     },
     "readiness_gate": {
-        "description": "Garde-fou de démarrage pour éviter les trades sans historique suffisant",
+        "description": "Garde-fou de démarrage pour éviter les trades sans historique suffisant (durci)",
         "enabled": true,
-        "block_signals_first_n_cycles": 3,
+        "block_signals_first_n_cycles": 12,
         "max_allowed_data_age_seconds": 90
     }
 }
