@@ -8,6 +8,7 @@ import argparse
 import logging
 import os
 import sys
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -37,12 +38,11 @@ except ImportError as e:
     sys.exit(1)
 
 
-def verify_environment_and_config(
+def load_and_verify_environment(
     config_manager: ConfigManager, mt5_connector: MT5Connector, bot_mode: str
 ) -> dict:
     """
     Charge la configuration principale et vérifie les composants critiques de l'environnement.
-    (Nom aligné avec main.py)
     """
     logger = logging.getLogger(__name__)
     logger.info(
@@ -127,6 +127,10 @@ def verify_environment_and_config(
     return config
 
 
+def verify_environment_and_config(config_manager, mt5_connector, bot_mode):
+    return load_and_verify_environment(config_manager, mt5_connector, bot_mode)
+
+
 # --- Fonctions d'Aide (Helpers) pour le Cycle de Pipeline ---
 
 
@@ -183,7 +187,12 @@ def _build_asset_trading_signals(
     du PhaseObserver et en ajoutant les informations critiques du symbole MT5.
     Ceci est le pont parfait qui ne perd aucune donnée.
     """
+    # Étape 1: Convertir la ligne entière du DataFrame en dictionnaire.
+    # CELA GARANTIT QUE TOUTES LES DONNÉES DU PHASEOBSERVER SONT PRÉSENTES.
     signals = latest_signals_row.to_dict()
+
+    # Étape 2: Ajouter les informations essentielles du broker.
+    # On s'assure que les noms de clés sont cohérents avec ce que le DecisionPipeline attend.
     signals["current_price"] = latest_signals_row.get("close")
     signals["spread"] = symbol_info_mt5.spread if symbol_info_mt5 else float("inf")
     signals["symbol_point_value"] = (
@@ -192,10 +201,14 @@ def _build_asset_trading_signals(
     signals["symbol_trade_contract_size"] = (
         symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
     )
+
+    # Étape 3: S'assurer que les horodatages sont dans un format standard.
+    # .name contient l'index de la Series, qui est notre 'time'.
     if hasattr(latest_signals_row.name, "isoformat"):
         signals["last_update_timestamp"] = latest_signals_row.name.isoformat()
     else:
         signals["last_update_timestamp"] = datetime.now(UTC).isoformat()
+
     return signals
 
 
@@ -249,41 +262,59 @@ def _build_global_context(
     }
 
 
+def _load_po_config_safe(config_manager):
+    """
+    Lecture directe et tolérante de config/phase_observer_config.json.
+    Si quelque chose foire, on renvoie {} pour NE PAS BLOQUER le pipeline.
+    """
+    try:
+        cfg_dir = Path(config_manager.get("paths.configs", "config"))
+        po_path = cfg_dir / "phase_observer_config.json"
+        with open(po_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def _mtf_readiness_gate(
-    mt5_connector: MT5Connector,
-    phase_observer: PhaseObserver,
-    config_manager: ConfigManager,
-    tradeable_assets: list,
-    cycle_count: int,
+    mt5_connector, phase_observer, config_manager, tradeable_assets, cycle_count
 ) -> bool:
     """
-    Gate MTF BLOQUANT : retourne True si on peut continuer, False si on bloque le cycle.
+    Gate MTF BLOQUANT… mais *gracieux* :
+    - Si 'readiness_gate.enabled' est False (ou absent) -> ON LAISSE PASSER.
+    - Si une erreur survient (lecture config, etc.) -> ON LAISSE PASSER.
+    - Sinon on vérifie:
+        * N premiers cycles bloqués,
+        * historique minimum par TF,
+        * confluence MTF via PhaseObserver si dispo.
     """
     logger = logging.getLogger(__name__)
     try:
-        po_cfg = config_manager.config_loader.load_json_config(
-            "phase_observer_config.json"
-        )
-        mtf_cfg = po_cfg.get("multi_timeframe_settings", {})
-        data_req = po_cfg.get("data_requirements", {})
-        gate_cfg = po_cfg.get("readiness_gate", {})
+        po_cfg = _load_po_config_safe(config_manager)
+
+        gate_cfg = po_cfg.get("readiness_gate") or {}
+        if not gate_cfg.get("enabled", False):
+            # Gate explicitement désactivé (ou non défini) -> on laisse passer
+            return True
+
+        mtf_cfg = po_cfg.get("multi_timeframe_settings") or {}
+        data_req = po_cfg.get("data_requirements") or {}
 
         required_tfs = mtf_cfg.get("timeframes", ["M1", "M5", "M15"])
         confluence_required = int(mtf_cfg.get("confluence_required", 2))
         min_bars_by_tf = data_req.get(
             "min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}
         )
-        require_all = bool(data_req.get("require_all_timeframes", True))
         block_first_cycles = int(gate_cfg.get("block_signals_first_n_cycles", 12))
 
-        # 1) Gate de démarrage (cycles)
+        # 1) Gate de démarrage
         if cycle_count <= block_first_cycles:
             logger.info(
                 f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})"
             )
             return False
 
-        # 2) Historique par TF sur les actifs
+        # 2) Historique minimum par TF / actif
         for asset in tradeable_assets:
             for tf in required_tfs:
                 df = mt5_connector.get_rates(asset, tf, min_bars_by_tf.get(tf, 200))
@@ -295,7 +326,7 @@ def _mtf_readiness_gate(
                     )
                     return False
 
-        # 3) Confluence via PhaseObserver si dispo
+        # 3) Confluence via PhaseObserver (si dispo)
         if hasattr(phase_observer, "ready_and_confluence_ok"):
             ok, reason = phase_observer.ready_and_confluence_ok(
                 confluence_required=confluence_required
@@ -307,8 +338,9 @@ def _mtf_readiness_gate(
         return True
 
     except Exception as e:
-        logging.getLogger(__name__).warning(f"[READINESS] check failed, safe-skip: {e}")
-        return False
+        # Surtout ne jamais bloquer si une erreur inattendue se produit
+        logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
+        return True
 
 
 def run_single_pipeline_cycle(
@@ -347,22 +379,14 @@ def run_single_pipeline_cycle(
         if account_allowed:
             tradeable_assets = [a for a in all_symbols if a in account_allowed]
         else:
-            tradeable_assets = all_symbols
+            tradeable_assets = (
+                all_symbols  # fallback si la liste du compte est vide/non fournie
+            )
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
 
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
-            return False
-
-        # 🔒 Gate MTF BLOQUANT — avant TOUTE collecte/signaux/scoring
-        if not _mtf_readiness_gate(
-            mt5_connector=mt5_connector,
-            phase_observer=phase_observer,
-            config_manager=config_manager,
-            tradeable_assets=tradeable_assets,
-            cycle_count=cycle_count,
-        ):
             return False
 
         all_assets_market_data = {}
@@ -374,8 +398,8 @@ def run_single_pipeline_cycle(
             "default_bars_count", 500
         )
 
-        # Garde-fou local minimal (au‑delà du gate MTF)
-        min_required_bars = 50
+        # 🔑 Correction : vérifier qu’on a bien l’historique suffisant avant de trader
+        min_required_bars = 50  # nombre minimum de bougies avant d’autoriser un trade
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
@@ -396,6 +420,7 @@ def run_single_pipeline_cycle(
 
                 symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
                 if symbol_info_mt5:
+                    # getattr pour robustesse si certains champs n'existent pas selon le broker
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
                     rates_df["trade_tick_size"] = getattr(
@@ -535,36 +560,44 @@ def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
     et lancer la boucle de trading infinie.
+
+    Args:
+        args (argparse.Namespace): Les arguments parsés de la ligne de commande.
     """
+    # 1. Configuration du Logging de Production (Appelé en premier)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
 
+    # 2. Initialisation du ConfigManager
     from core.config_manager import ConfigManager
 
     config_manager = ConfigManager.get_instance()
 
+    # 3. Définir le mode d'exécution du bot (CLI > Config > Défaut)
     bot_mode = (
         args.mode if args.mode else config_manager.get("mode_execution", "DEMO").upper()
     )
     is_dry_run = args.dry_run
 
+    # Message de démarrage critique pour alerter l'opérateur
     logger.critical(
-        f"Le bot démarre en mode {'DRY RUN' if is_dry_run else bot_mode}. {'LES TRADES RÉELS SERONT EXÉCUTÉS. SOYEZ EXTRÊMEMENT PRUDENT !' if bot_mode == 'LIVE' and not is_dry_run else 'Aucun trade réel : Mode DÉMO ou DRY RUN.'}"
+        f"Le bot démarre en mode {'DRY RUN' if is_dry_run else bot_mode}. "
+        f"{'LES TRADES RÉELS SERONT EXÉCUTÉS. SOYEZ EXTRÊMEMENT PRUDENT !' if bot_mode == 'LIVE' and not is_dry_run else 'Aucun trade réel : Mode DÉMO ou DRY RUN.'}"
     )
 
     startup_delay_seconds = config_manager.get("app.startup_delay_seconds", 3)
     time.sleep(startup_delay_seconds)
 
+    # 5. Instanciation des Modules Fondamentaux
     try:
         config_dir_path = Path(config_manager.get("paths.configs", "config/"))
         main_config_file_name = config_manager.get(
             "paths.main_config_file_name", "prod_config.json"
         )
         config_file_path = config_dir_path / main_config_file_name
-
         config_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         strategy_configs_path = config_manager.get(
@@ -577,9 +610,18 @@ def main(args: argparse.Namespace) -> None:
             config_dir=strategy_configs_path,
         )
 
+        # Instancier MT5Connector
         mt5_connector = MT5Connector()
+
+        # Instancier PhaseObserver
         phase_observer = PhaseObserver(config_manager=config_manager)
 
+        # Sécurité supplémentaire : vérifier que PhaseObserver est initialisé
+        if not phase_observer or not hasattr(phase_observer, "lookback_window"):
+            logger.critical("PhaseObserver non initialisé correctement -> arrêt.")
+            sys.exit(1)
+
+        # Instancier AI Decision
         models_dir = config_manager.get("paths.models", "models/")
         ai_model_name_for_init = config_manager.get(
             "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
@@ -590,10 +632,12 @@ def main(args: argparse.Namespace) -> None:
             config_manager_instance=config_manager,
         )
 
+        # Instancier TradeExecutor
         trade_executor = TradeExecutor(
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
 
+        # Instancier Mecano
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
 
@@ -604,13 +648,16 @@ def main(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # 6. Vérification Finale de l'Environnement et des Modules
     try:
-        from run_bot import (
-            verify_environment_and_config,
-            run_single_pipeline_cycle,
-        )
+        from run_bot import verify_environment_and_config, run_single_pipeline_cycle
 
         verify_environment_and_config(config_manager, mt5_connector, bot_mode)
+
+        # 🔒 Gate MTF : s’assurer qu’on a l’historique avant de lancer le premier cycle
+        if not _mtf_readiness_gate(config_manager, mt5_connector, logger):
+            logger.critical("Readiness MTF non validé -> arrêt du bot.")
+            sys.exit(1)
 
         default_cycle_interval_from_config = config_manager.get(
             "bot_behavior.cycle_interval_seconds", 23
@@ -621,6 +668,19 @@ def main(args: argparse.Namespace) -> None:
             else default_cycle_interval_from_config
         )
 
+        if args.interval is not None:
+            logger.info(
+                f"Utilisation de l'intervalle de cycle spécifié par la CLI ({args.interval}s)."
+            )
+        elif cycle_interval != default_cycle_interval_from_config:
+            logger.info(
+                f"Utilisation de l'intervalle de cycle configuré ({cycle_interval}s) depuis la config."
+            )
+        else:
+            logger.info(
+                f"Utilisation de l'intervalle de cycle par défaut ({default_cycle_interval_from_config}s)."
+            )
+
         config_manager.send_alert(
             message=f"**SNIPER_X Bot Démarré!**\nMode: {'DRY RUN' if is_dry_run else bot_mode}\nIntervalle de Cycle: {cycle_interval}s",
             alert_type="telegram_critical",
@@ -628,20 +688,20 @@ def main(args: argparse.Namespace) -> None:
 
     except SystemExit:
         logger.critical(
-            "Le démarrage du bot a été avorté en raison de problèmes critiques de configuration/environnement."
+            "Le démarrage du bot a été avorté en raison de problèmes critiques."
         )
         config_manager.send_alert(
-            f"**SNIPER_X BOT N'A PAS DÉMARRÉ !**\nProblème critique lors de la vérification de l'environnement.",
+            "**SNIPER_X BOT N'A PAS DÉMARRÉ !**\nProblème critique configuration/environnement.",
             "telegram_critical",
         )
         sys.exit(1)
     except Exception as e:
         logger.critical(
-            f"FATAL: Erreur non gérée lors du chargement de la configuration ou de la vérification de l'environnement: {e}",
+            f"FATAL: Erreur non gérée lors du chargement de la configuration: {e}",
             exc_info=True,
         )
         config_manager.send_alert(
-            f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH AU DÉMARRAGE) !**\nErreur: {type(e).__name__}",
+            f"**SNIPER_X BOT CRASH AU DÉMARRAGE !**\nErreur: {type(e).__name__}",
             "telegram_critical",
         )
         sys.exit(1)
@@ -650,28 +710,37 @@ def main(args: argparse.Namespace) -> None:
     cycle_count = 0
     daily_trade_count = 0
 
+    # Réconciliation initiale TradeExecutor
+    try:
+        account_details_for_reconciliation = config_manager.get_mt5_account_credentials(
+            mode=bot_mode
+        )
+        if account_details_for_reconciliation:
+            if mt5_connector.connect(account_details_for_reconciliation):
+                trade_executor.reconcile_state_with_broker()
+                logger.info("Réconciliation TradeExecutor OK.")
+                mt5_connector.disconnect()
+            else:
+                logger.warning("MT5 non connecté pour la réconciliation. Ignorée.")
+        else:
+            logger.warning("Aucun compte MT5 dispo pour la réconciliation.")
+    except Exception as e:
+        logger.error(f"Échec réconciliation TradeExecutor: {e}", exc_info=True)
+        config_manager.send_alert(
+            f"ALERTE: Réconciliation TradeExecutor échouée: {e}",
+            "telegram_critical",
+        )
+
+    # 9. Boucle Principale
     try:
         while True:
             cycle_count += 1
             cycle_start_time = time.time()
 
-            # ⚠️ Appel corrigé: passer le DecisionPipeline (pas ai_decision)
-            # Ici on crée une instance légère si nécessaire
-            decision_pipeline = DecisionPipeline(
-                config_manager_instance=config_manager,
-                ai_interface_instance=None,
-                strategy_manager_instance=None,
-            )
-            # Branchement (si setter indisponible, on assigne)
-            if hasattr(decision_pipeline, "set_phase_observer"):
-                decision_pipeline.set_phase_observer(phase_observer)
-            else:
-                decision_pipeline.phase_observer = phase_observer
-
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                decision_pipeline,
+                ai_decision,
                 trade_executor,
                 config_manager,
                 mecano,
@@ -685,7 +754,7 @@ def main(args: argparse.Namespace) -> None:
 
             cycle_duration = time.time() - cycle_start_time
             logger.info(
-                f"[PERF] Cycle de Pipeline #{cycle_count} exécuté en {cycle_duration:.2f} secondes."
+                f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f}s."
             )
 
             config_manager.process_and_send_summary_alert(
@@ -708,31 +777,27 @@ def main(args: argparse.Namespace) -> None:
 
             sleep_time = max(0, cycle_interval - cycle_duration)
             if sleep_time > 0:
-                logger.info(f"Prochain cycle dans {sleep_time:.2f} secondes...")
+                logger.info(f"Prochain cycle dans {sleep_time:.2f}s...")
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        logger.warning(
-            "\nInterruption clavier détectée (Ctrl+C). Démarrage de l'arrêt progressif..."
-        )
+        logger.warning("Interruption manuelle détectée (Ctrl+C).")
         config_manager.send_alert(
             message="**SNIPER_X Bot Arrêté Manuellement.**",
             alert_type="telegram_critical",
         )
     except Exception as e:
         logger.critical(
-            f"Une erreur critique non gérée a entraîné la terminaison de la boucle principale : {e}",
+            f"Crash dans la boucle principale : {e}",
             exc_info=True,
         )
         config_manager.send_alert(
-            f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__}",
+            f"**SNIPER_X BOT CRASH EN COURS D'EXÉCUTION !**\nErreur: {type(e).__name__}",
             "telegram_critical",
         )
     finally:
         if "ai_decision" in locals() and ai_decision:
-            logger.info(
-                "Sauvegarde de l'historique des suggestions de l'IA avant l'arrêt..."
-            )
+            logger.info("Sauvegarde historique IA avant arrêt...")
             ai_decision._save_suggestion_history()
 
         if "mt5_connector" in locals() and mt5_connector.is_connected():

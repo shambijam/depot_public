@@ -41,7 +41,14 @@ try:
     from core.strategy_manager import StrategyManager
     from core.ai_interface import AIInterface
     from core.decision_pipeline import DecisionPipeline
+    from run_bot import (
+        _mtf_readiness_gate,
+        verify_environment_and_config,
+        run_single_pipeline_cycle,
+    )
+
     import MetaTrader5 as mt5
+
 
 except ImportError as e:
     logging.critical(
@@ -57,13 +64,23 @@ def verify_environment_and_config(
     """
     Vérifie les composants critiques de l'environnement (modèle AI, identifiants MT5, Telegram)
     et s'assure que la configuration est valide.
+
+    Args:
+        config_manager (ConfigManager): Une instance de ConfigManager avec la configuration chargée.
+        mt5_connector (MT5Connector): Une instance de MT5Connector pour les tests de connexion MT5.
+        bot_mode (str): Le mode d'exécution du bot ('DEMO' ou 'LIVE').
+
+    Raises:
+        SystemExit: Si des composants critiques sont manquants ou invalides.
+        RuntimeError: Si la connexion MT5 échoue pendant la vérification initiale.
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)  # Utilise le logger local
     logger.info(
         "Vérification de l'environnement de production et de la configuration chargée..."
     )
 
     try:
+        # Accéder à la configuration dynamique déjà chargée
         current_config = config_manager.get_current_dynamic_config()
         if not current_config:
             logger.critical(
@@ -78,6 +95,7 @@ def verify_environment_and_config(
         )
         sys.exit(1)
 
+    # Vérifier la présence du modèle AI (chemin et nom lus dynamiquement)
     models_dir = config_manager.get("paths.models", "models/")
     ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
 
@@ -89,6 +107,7 @@ def verify_environment_and_config(
         sys.exit(1)
     logger.info(f"Modèle IA trouvé : {model_path}")
 
+    # Vérification des identifiants MT5 via ConfigManager (qui les a chargés depuis .env)
     active_mt5_account_details = None
     try:
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
@@ -104,6 +123,7 @@ def verify_environment_and_config(
             f"Compte MT5 actif sélectionné pour vérification : '{active_mt5_account_details['account_id']}' (Login: {active_mt5_account_details['login']})."
         )
 
+        # Vérification proactive de la connexion MT5 avec le compte sélectionné
         if not mt5_connector.connect(active_mt5_account_details):
             raise RuntimeError(
                 f"La connexion initiale à MetaTrader 5 a échoué pour le compte '{active_mt5_account_details['account_id']}'. Veuillez vérifier les identifiants et le statut du terminal."
@@ -127,6 +147,7 @@ def verify_environment_and_config(
                     f"Erreur lors de la déconnexion de MetaTrader 5 après vérification: {e}"
                 )
 
+    # Vérifier les identifiants Telegram (crucial pour le monitoring en production si activé)
     telegram_token = config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
     telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID")
 
@@ -217,15 +238,6 @@ def main(args: argparse.Namespace) -> None:
             strategy_manager_instance=strategy_manager,
         )
         phase_observer = PhaseObserver(config_manager=config_manager)
-        # ✅ BRANCHER le PhaseObserver dans le DecisionPipeline
-        if hasattr(decision_pipeline, "set_phase_observer"):
-            decision_pipeline.set_phase_observer(phase_observer)
-        else:
-            decision_pipeline.phase_observer = phase_observer
-            logging.getLogger(__name__).info(
-                "[WIRING] phase_observer attaché au DecisionPipeline"
-            )
-
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
 
@@ -249,10 +261,10 @@ def main(args: argparse.Namespace) -> None:
         )
         time.sleep(config_manager.get("app.startup_delay_seconds", 3))
 
-        # ✅ Vérification centralisée de l'environnement
+        # ✅ Vérification centralisée
         verify_environment_and_config(config_manager, mt5_connector, bot_mode)
 
-        # ✅ Connexion MT5 persistante (post‑vérification)
+        # ✅ Connexion MT5 persistante (post-vérification)
         active_account_details = config_manager.get_mt5_account_credentials(
             mode=bot_mode
         )
@@ -267,32 +279,20 @@ def main(args: argparse.Namespace) -> None:
             raise RuntimeError(
                 f"Échec de la connexion MT5 persistante pour '{account_id}'."
             )
-        logger.info(f"Connexion MT5 persistante établie pour '{account_id}'.")
 
-        # ✅ Pré‑chargement d’historique (évite 0 barre / fallback pips)
-        try:
-            po_cfg = config_manager.config_loader.load_json_config(
-                "phase_observer_config.json"
-            )
-            tfs = po_cfg.get("multi_timeframe_settings", {}).get(
-                "timeframes", ["M1", "M5", "M15"]
-            )
-            symbols = config_manager.get(
-                "global_safety.global_allowed_symbols",
-                ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"],
-            )
-            for s in symbols:
-                for tf in tfs:
-                    _ = mt5_connector.get_rates(s, tf, 4000)
-                    time.sleep(0.15)
-            logger.info("[WARMUP] Preload historique MT5 terminé.")
-        except Exception as e:
-            logger.warning(f"[WARMUP] Preload historique MT5 échoué: {e}")
+        logger.info(f"Connexion MT5 persistante établie pour '{account_id}'.")
 
         trade_executor = TradeExecutor(
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
         trade_executor.reconcile_state_with_broker()
+
+        # 🔒 Gate readiness MTF avant la boucle (sécurise qu’on a l’historique/confluence)
+        if not _mtf_readiness_gate(
+            mt5_connector, phase_observer, config_manager, [], 0
+        ):
+            logger.critical("Readiness MTF non validé (pas assez d’historique). Arrêt.")
+            sys.exit(1)
 
     except (SystemExit, RuntimeError, Exception) as e:
         logger.critical(
@@ -331,7 +331,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                decision_pipeline,  # ✅ on passe bien le DecisionPipeline branché
+                decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
