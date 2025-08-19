@@ -210,5 +210,25 @@
             "M5": 0.3,
             "M15": 0.2
         }
+    },
+    "data_requirements": {
+        "description": "Exigences minimales d'historique/qualité pour produire des signaux",
+        "enabled": true,
+        "min_bars_total": 500,
+        "min_bars_by_timeframe": {
+            "M1": 500,
+            "M5": 300,
+            "M15": 200
+        },
+        "warmup_bars_multiplier": 4,
+        "min_non_nan_ratio": 0.98,
+        "require_all_timeframes": true,
+        "reject_asset_if_any_tf_below_min": true
+    },
+    "readiness_gate": {
+        "description": "Garde-fou de démarrage pour éviter les trades sans historique suffisant",
+        "enabled": true,
+        "block_signals_first_n_cycles": 3,
+        "max_allowed_data_age_seconds": 90
     }
 }

@@ -268,7 +268,7 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-    """Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto)."""
+    """Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique)."""
     logger = logging.getLogger(__name__)
     print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
     logger.info(
@@ -285,40 +285,9 @@ def run_single_pipeline_cycle(
             mode=base_config.get("mode_execution", "DEMO").upper()
         )
 
-        # === Construction de la liste des actifs tradables (anti-crypto + intersection compte) ===
+        # === Construction de la liste des actifs tradables (crypto retiré) ===
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
-
-        def _is_crypto_symbol(sym: str) -> bool:
-            if not isinstance(sym, str):
-                return False
-            s = sym.upper()
-            if s in {"BTCUSD", "ETHUSD", "LTCUSD"}:
-                return True
-            # motifs communs de tickers crypto
-            return any(
-                k in s
-                for k in (
-                    "BTC",
-                    "ETH",
-                    "LTC",
-                    "DOGE",
-                    "XRP",
-                    "SOL",
-                    "ADA",
-                    "BNB",
-                    "DOT",
-                    "MATIC",
-                )
-            )
-
-        before = list(all_symbols)
-        all_symbols = [s for s in all_symbols if not _is_crypto_symbol(s)]
-        removed = [s for s in before if s not in all_symbols]
-        if removed:
-            logger.debug(
-                f"[PIPELINE] Actifs crypto retirés de la liste globale: {removed}"
-            )
 
         account_allowed = set(active_mt5_account_details.get("allowed_symbols", []))
         if account_allowed:
@@ -343,6 +312,9 @@ def run_single_pipeline_cycle(
             "default_bars_count", 500
         )
 
+        # 🔑 Correction : vérifier qu’on a bien l’historique suffisant avant de trader
+        min_required_bars = 50  # nombre minimum de bougies avant d’autoriser un trade
+
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
@@ -350,6 +322,13 @@ def run_single_pipeline_cycle(
                 if rates_df is None or rates_df.empty:
                     logger.warning(
                         f"Aucune donnée historique pour '{asset}'. Actif ignoré."
+                    )
+                    continue
+
+                if len(rates_df) < min_required_bars:
+                    logger.warning(
+                        f"Historique insuffisant pour {asset} ({len(rates_df)} barres < {min_required_bars}). "
+                        f"Trade bloqué pour cet actif."
                     )
                     continue
 
@@ -368,7 +347,6 @@ def run_single_pipeline_cycle(
                 annotated_rates_df = phase_observer.analyze(
                     rates_df.copy(), asset_symbol=asset
                 )
-
                 if annotated_rates_df is None or annotated_rates_df.empty:
                     continue
 
