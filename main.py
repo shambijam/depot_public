@@ -287,12 +287,7 @@ def main(args: argparse.Namespace) -> None:
         )
         trade_executor.reconcile_state_with_broker()
 
-        # 🔒 Gate readiness MTF avant la boucle (sécurise qu’on a l’historique/confluence)
-        if not _mtf_readiness_gate(
-            mt5_connector, phase_observer, config_manager, [], 0
-        ):
-            logger.critical("Readiness MTF non validé (pas assez d’historique). Arrêt.")
-            sys.exit(1)
+        logger.info("🔒 Gate readiness MTF activé : il sera vérifié à chaque cycle.")
 
     except (SystemExit, RuntimeError, Exception) as e:
         logger.critical(
@@ -326,6 +321,20 @@ def main(args: argparse.Namespace) -> None:
                 f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}"
             )
             cycle_start_time = time.time()
+
+            # 🔒 Gate readiness MTF vérifié à chaque cycle
+            if not _mtf_readiness_gate(
+                mt5_connector,
+                phase_observer,
+                config_manager,
+                ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"],
+                cycle_count,
+            ):
+                logger.info(
+                    f"Cycle #{cycle_count}: readiness non validé, pas de trade ce tour."
+                )
+                time.sleep(cycle_interval)
+                continue
 
             print(f"📊 Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
