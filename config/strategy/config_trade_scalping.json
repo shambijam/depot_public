@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "version": "2.0-compat",
+  "version": "2.1-tight",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
@@ -11,28 +11,36 @@
     "use_phase_observer": true,
     "lookback_window": 200,
     "volatility_threshold": 0.003,
-    "volume_zscore": 0.0,
+    "volume_zscore": 0.001,
     "overrides": {
       "require_range_detection": true,
       "min_lookback_bars": 500
     }
   },
   "magic_number": 51001,
-  "risk_per_trade_percent": 0.35,
+  "risk_per_trade_percent": 0.30,
   "stop_loss_pips": 30,
   "take_profit_pips": 60,
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.003,
       "max_spread_points": 80,
-      "min_volume_score": -0.5,
+      "min_volume_score": 0.01,
       "per_symbol_overrides": {
         "NAS100": {
-          "max_spread_points": 90
+          "max_spread_points": 90,
+          "max_lot_size": 0.05
         },
         "XAUUSD": {
-          "min_volatility": 0.006,
-          "max_spread_points": 80
+          "min_volatility": 0.008,
+          "max_spread_points": 80,
+          "max_lot_size": 0.1
+        },
+        "EURUSD": {
+          "max_lot_size": 0.2
+        },
+        "GBPUSD": {
+          "max_lot_size": 0.2
         }
       }
     },
@@ -42,7 +50,7 @@
         "M5",
         "M15"
       ],
-      "required_agreements": 2
+      "required_agreements": 3
     },
     "scoring": {
       "base_score": 0.80,
@@ -58,11 +66,12 @@
       "avoid_major_news": true,
       "disable_on_weekends": true,
       "min_account_equity": 0,
-      "allow_only_whitelist_assets": true
+      "allow_only_whitelist_assets": true,
+      "allow_momentum_fallback": false
     },
     "risk": {
       "max_trades_per_day": 6,
-      "cooldown_seconds_after_trade": 240,
+      "cooldown_seconds_after_trade": 600,
       "skip_asset_if_spread_over_points": 80,
       "max_lot_size": 0.2
     },
@@ -97,7 +106,7 @@
           "trend",
           "range_accumulation"
         ],
-        "min_confidence": 0.5
+        "min_confidence": 0.72
       },
       "order_type": "MARKET",
       "action_logic": {
