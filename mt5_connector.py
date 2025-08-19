@@ -708,9 +708,7 @@ class MT5Connector:
             self.logger.error(f"[MT5C] Erreur get_symbol_info_tick pour {symbol}: {e}")
             return None
 
-    def send_order(
-        self, request: Dict[str, Any]
-    ) -> Optional[Any]:  # Retourne un objet MetaTrader5.TradeResult NamedTuple
+    def order_send(self, request: Dict[str, Any]) -> Optional[Any]:
         """
         Envoie un ordre de trading (achat, vente, modification, clôture) au terminal MetaTrader 5.
         Utilise les constantes MT5 mappées du ConfigManager et assure une journalisation détaillée
@@ -727,13 +725,12 @@ class MT5Connector:
         # Vérifier la connexion
         if not self.is_connected:
             self.logger.error("MT5: Non connecté. Impossible d'envoyer l'ordre.")
-            # Alerte harmonisée: 2 arguments (message, alert_type)
             self.config_manager.send_alert(
                 "MT5 Non Connecté: Échec Envoi Ordre.", "telegram_critical"
             )
             return None
 
-        # Vérification des clés essentielles dans la requête pour la robustesse
+        # Vérification des clés essentielles dans la requête
         required_keys = [
             "action",
             "symbol",
@@ -754,14 +751,14 @@ class MT5Connector:
             )
             return None
 
-        # Déterminer la chaîne d'action pour le log en utilisant les constantes mappées
+        # Déterminer l'action pour le log
         action_type_numeric = request.get("type")
         if action_type_numeric == self.ORDER_TYPE_BUY:
             action_str = "ACHAT"
         elif action_type_numeric == self.ORDER_TYPE_SELL:
             action_str = "VENTE"
         elif action_type_numeric == getattr(
-            mt5,
+            self.mt5,
             self.mt5_mappings.get("order_types", {}).get(
                 "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"
             ),
@@ -769,7 +766,7 @@ class MT5Connector:
         ):
             action_str = "BUY_LIMIT"
         elif action_type_numeric == getattr(
-            mt5,
+            self.mt5,
             self.mt5_mappings.get("order_types", {}).get(
                 "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
             ),
@@ -784,7 +781,7 @@ class MT5Connector:
             f"@ {request.get('price')} (ID Interne: {request.get('order_id', 'N/A')})..."
         )
 
-        # Envoyer l'ordre à l'API MT5
+        # Envoyer l'ordre
         try:
             result = self.mt5.order_send(request)
         except Exception as ex:
@@ -797,29 +794,28 @@ class MT5Connector:
         # Gérer la réponse de l'API
         if result is not None:
             self.logger.info(
-                f"MT5: Réponse de l'API reçue. Retcode: {getattr(result, 'retcode', 'N/A')}, "
-                f"Commentaire: {getattr(result, 'comment', 'N/A')}. "
+                f"MT5: Réponse API. Retcode: {getattr(result, 'retcode', 'N/A')}, "
+                f"Commentaire: {getattr(result, 'comment', 'N/A')}, "
                 f"Deal: {getattr(result, 'deal', 'N/A')}, Ordre: {getattr(result, 'order', 'N/A')}"
             )
 
-            # Succès ?
             if getattr(result, "retcode", None) == self.TRADE_RETCODE_DONE:
                 self.logger.info(
-                    f"MT5: Ordre exécuté avec succès ! Deal #{getattr(result, 'deal', 'N/A')}, "
+                    f"MT5: Ordre exécuté avec succès ! "
+                    f"Deal #{getattr(result, 'deal', 'N/A')}, "
                     f"Ordre #{getattr(result, 'order', 'N/A')} pour {request.get('symbol')}."
                 )
             else:
-                # Traduire le retcode via le mapping pour un log plus lisible
                 retcode_val = getattr(result, "retcode", None)
                 retcode_str = ""
                 for k, v in self.mt5_mappings.get("trade_retcodes", {}).items():
-                    if getattr(mt5, v, None) == retcode_val:
+                    if getattr(self.mt5, v, None) == retcode_val:
                         retcode_str = k
                         break
-
                 self.logger.warning(
                     f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str}), "
-                    f"Commentaire: {getattr(result, 'comment', 'N/A')}. Erreur système: {self.mt5.last_error()}."
+                    f"Commentaire: {getattr(result, 'comment', 'N/A')}. "
+                    f"Erreur système: {self.mt5.last_error()}."
                 )
                 self.config_manager.send_alert(
                     f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). "
@@ -828,9 +824,9 @@ class MT5Connector:
                 )
             return result
 
-        # Aucun résultat renvoyé par l'API
+        # Aucun résultat
         self.logger.error(
-            f"MT5: La fonction order_send a échoué. Aucune réponse reçue. Erreur système: {self.mt5.last_error()}."
+            f"MT5: order_send a échoué. Aucune réponse. Erreur système: {self.mt5.last_error()}."
         )
         self.config_manager.send_alert(
             f"MT5: Échec envoi ordre: Aucune réponse. {self.mt5.last_error()}",
