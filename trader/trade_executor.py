@@ -1681,107 +1681,126 @@ class TradeExecutor:
             f"État interne mis à jour pour la nouvelle position #{mt5_result.deal}."
         )
 
-    def execute_order(self, mt5_request: dict) -> dict:
+    def execute_order(self, request: dict) -> dict:
         """
-        Exécute un ordre en appliquant une logique de retry intelligente et en enrichissant
-        la gestion de l'état interne avec le risque initial du trade.
+        Envoie une requête d'ordre MT5 via MT5Connector et retourne
+        un résumé unifié de l'exécution.
+        - Ne lit PAS sl/tp depuis OrderSendResult (non exposés par MT5 Python)
+        -> on reprend sl/tp du 'request' ou on les réconcilie ensuite.
+        - Tolère les variations de champs dans OrderSendResult.
+        - Normalise les retcodes et sécurise les accès attributaires.
         """
-        order_id = mt5_request.get("order_id", str(uuid.uuid4()))
-        symbol = mt5_request.get("symbol", "N/A")
-        self.logger.info(
-            f"Tentative d'exécution de l'ordre {order_id} pour {symbol}..."
+        # --- Sécurité connexion ---
+        try:
+            # is_connected peut être un bool (propriété) dans ton MT5Connector
+            connected = getattr(self.mt5_connector, "is_connected", False)
+            if callable(connected):
+                connected = connected()
+            if not connected and hasattr(self.mt5_connector, "connect"):
+                self.mt5_connector.connect()
+        except Exception:
+            # On ne bloque pas ici, l'envoi lèvera si non connecté
+            pass
+
+        symbol = request.get("symbol")
+        if not symbol:
+            raise TradeExecutionError("Requête MT5 invalide: 'symbol' manquant.")
+        if request.get("volume", 0) <= 0:
+            raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
+
+        # --- Envoi via le connecteur ---
+        result = self.mt5_connector.order_send(request)
+
+        # --- Récupération sûre des champs renvoyés ---
+        retcode = getattr(result, "retcode", None)
+        comment = getattr(result, "comment", "")
+        order_id = getattr(result, "order", None)
+        deal_id = getattr(result, "deal", None)
+        result_price = getattr(result, "price", None)
+        result_volume = getattr(result, "volume", None)
+        request_id = getattr(result, "request_id", None)
+
+        # --- Normalisation retcode / succès ---
+        # Constantes: 10009=DONE (exécuté), 10008=PLACED (ordre différé placé).
+        # On accepte les deux comme "succès".
+        ok_codes = {
+            getattr(self, "TRADE_RETCODE_DONE", 10009),
+            getattr(self, "TRADE_RETCODE_PLACED", 10008),
+        }
+        retcode_str = self.mt5_mappings.get("trade_retcodes", {}).get(
+            str(retcode), str(retcode)
         )
 
-        if not self.mt5_connector.is_connected:
-            self.logger.error(f"MT5 non connecté. Ordre {order_id} ignoré.")
-            return {
-                "status": "skipped",
-                "message": "MT5 non connecté.",
-                "mt5_result": None,
-            }
-
-        retcode_actions = self.config_manager.get(
-            "mt5_mappings.trade_retcode_actions", {}
-        )
-
-        for attempt in range(self.mt5_max_retries):
-            self.logger.debug(
-                f"Ordre {order_id} - Tentative d'envoi {attempt + 1}/{self.mt5_max_retries}..."
+        if retcode not in ok_codes:
+            # Échec -> lever avec détails
+            raise TradeExecutionError(
+                f"Envoi MT5 échoué (retcode={retcode} - {retcode_str}) | "
+                f"order={order_id} deal={deal_id} | comment='{comment}'"
             )
-            result = self.mt5_connector.send_order(mt5_request)
 
-            if not result:
-                self.logger.error(
-                    f"Tentative {attempt + 1}: Aucune réponse de MT5 pour l'ordre {order_id}."
-                )
-                time.sleep(self.mt5_retry_delay_seconds * (attempt + 1))
-                continue
+        # --- Construction du résumé d'exécution ---
+        # ATTENTION: sl/tp non présents dans OrderSendResult -> on reprend ceux envoyés.
+        # 'action' est déduite du type d'ordre (BUY/SELL/BUY_LIMIT/...)
+        order_type = request.get("type")
+        action = "BUY"
+        if order_type in (
+            getattr(self, "ORDER_TYPE_SELL", -1),
+            getattr(self, "ORDER_TYPE_SELL_LIMIT", -2),
+            getattr(self, "ORDER_TYPE_SELL_STOP", -3),
+        ):
+            action = "SELL"
 
-            action = retcode_actions.get(str(result.retcode), "FAIL")
+        execution_summary = {
+            "status": (
+                "filled"
+                if retcode == getattr(self, "TRADE_RETCODE_DONE", 10009)
+                else "placed"
+            ),
+            "retcode": retcode,
+            "retcode_str": retcode_str,
+            "order": order_id,
+            "deal": deal_id,
+            "symbol": symbol,
+            "action": action,
+            "price": result_price if result_price else request.get("price"),
+            "volume": result_volume if result_volume else request.get("volume"),
+            "sl": request.get("sl"),
+            "tp": request.get("tp"),
+            "comment": comment,
+            "request_id": request_id,
+            "request_echo": {
+                # utile pour audit / traçabilité
+                "type": order_type,
+                "type_time": request.get("type_time"),
+                "type_filling": request.get("type_filling"),
+                "deviation": request.get("deviation"),
+                "magic": request.get("magic"),
+            },
+        }
 
-            if action == "SUCCESS":
-                self.logger.info(
-                    f"SUCCÈS: Ordre #{result.order}, Deal #{result.deal} exécuté pour {symbol}."
-                )
+        # (Optionnel) réconciliation post-trade: relire la position pour confirmer SL/TP réellement enregistrés
+        try:
+            positions = (
+                self.mt5.positions_get(symbol=symbol) if hasattr(self, "mt5") else None
+            )
+            if not positions and hasattr(self.mt5_connector, "mt5"):
+                positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
+            if positions:
+                # Dernière position mise à jour pour ce symbole
+                try:
+                    pos = sorted(positions, key=lambda p: getattr(p, "time_update", 0))[
+                        -1
+                    ]
+                except Exception:
+                    pos = positions[-1]
+                execution_summary["sl"] = getattr(pos, "sl", execution_summary["sl"])
+                execution_summary["tp"] = getattr(pos, "tp", execution_summary["tp"])
+        except Exception:
+            # discrète, purement informative
+            pass
 
-                _ret, loss_value = self.mt5_connector.mt5.order_calc_profit(
-                    mt5_request["type"],
-                    symbol,
-                    mt5_request["volume"],
-                    result.price,
-                    result.sl,
-                )
-                initial_risk_usd = (
-                    abs(loss_value)
-                    if _ret == self.TRADE_RETCODE_DONE and loss_value is not None
-                    else 0.0
-                )
-
-                # AMÉLIORATION : Appel à la fonction centralisée pour mettre à jour l'état
-                self._update_internal_position_state(result, initial_risk_usd)
-
-                self._log_trade_audit(
-                    {
-                        "event_type": "TRADE_OPEN",
-                        "timestamp": datetime.now(UTC).isoformat(),
-                        "order_id": order_id,
-                        "symbol": symbol,
-                        "status": "SUCCESS",
-                        "details": result._asdict(),
-                        "position_snapshot": self._open_positions.get(result.deal),
-                    }
-                )
-                return {
-                    "status": "executed",
-                    "message": "Ordre exécuté avec succès.",
-                    "mt5_result": result._asdict(),
-                }
-
-            elif action == "RETRY":
-                self.logger.warning(
-                    f"Tentative {attempt + 1}: Rejet temporaire (Code: {result.retcode}, Raison: {result.comment}). Nouvelle tentative..."
-                )
-                time.sleep(self.mt5_retry_delay_seconds)
-
-            else:  # action == "FAIL"
-                msg = f"Rejet définitif (Code: {result.retcode}): {result.comment}"
-                self.logger.error(msg)
-                self.config_manager.blacklist_asset_on_bad_conditions(
-                    symbol, f"Erreur MT5: {result.comment}"
-                )
-                return {
-                    "status": "failed",
-                    "message": msg,
-                    "mt5_result": result._asdict(),
-                }
-
-        final_msg = f"Échec de l'exécution de l'ordre {order_id} après {self.mt5_max_retries} tentatives."
-        self.logger.error(final_msg)
-        self.config_manager.send_alert(
-            f"CRITIQUE: {final_msg} (Symbole: {symbol})", "telegram_critical"
-        )
-
-        return {"status": "failed", "message": final_msg, "mt5_result": None}
+        self.logger.info(f"Exécution OK: {execution_summary}")
+        return execution_summary
 
     def _send_close_order_with_retries(self, request: dict) -> Optional[Any]:
         """
