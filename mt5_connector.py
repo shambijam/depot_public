@@ -220,6 +220,55 @@ class MT5Connector:
                 "MT5Connector initialisé avec succès, constantes MT5 chargées via ConfigManager."
             )
 
+    def _resolve_timeframe(self, timeframe_str: str):
+        """
+        Résout un timeframe ('M5', '5', '5M'...) en priorité via prod_config.json -> timeframe_mapping[TF].mt5_name,
+        sinon fallback sur les constantes MT5 (TIMEFRAME_M5...). Renvoie (mt5_timeframe_obj, tf_key_str).
+        """
+        key_raw = str(timeframe_str).strip().upper()
+        alias = {
+            "1": "M1",
+            "1M": "M1",
+            "5": "M5",
+            "5M": "M5",
+            "15": "M15",
+            "15M": "M15",
+            "30": "M30",
+            "30M": "M30",
+            "60": "H1",
+        }
+        tf_key = alias.get(key_raw, key_raw)
+
+        mt5_timeframe = None
+
+        # 1) PROD CONFIG EN PREMIER : timeframe_mapping -> mt5_name
+        try:
+            cfg_map = {}
+            if hasattr(self, "config_manager") and self.config_manager:
+                cfg_map = self.config_manager.get("timeframe_mapping", {}) or {}
+            if tf_key in cfg_map:
+                mt5_name = str(cfg_map[tf_key].get("mt5_name", "")).strip()
+                if mt5_name:
+                    mt5_timeframe = getattr(self.mt5, mt5_name, None)
+        except Exception:
+            mt5_timeframe = None
+
+        # 2) Fallback direct sur la lib MT5 (TIMEFRAME_<TF>)
+        if mt5_timeframe is None:
+            attr_name = f"TIMEFRAME_{tf_key}"
+            mt5_timeframe = getattr(self.mt5, attr_name, None)
+
+        # 3) Fallback final M1
+        if mt5_timeframe is None:
+            self.logger.error(
+                f"Timeframe '{timeframe_str}' non valide (résolu '{tf_key}'). Utilisation de M1 par défaut."
+            )
+            mt5_timeframe = getattr(self, "TIMEFRAME_M1", None) or getattr(
+                self.mt5, "TIMEFRAME_M1"
+            )
+
+        return mt5_timeframe, tf_key
+
     def _setup_logger(self) -> None:
         """
         Configure le logger spécifique à MT5Connector pour écrire dans un fichier dédié.
@@ -580,59 +629,52 @@ class MT5Connector:
         self, symbol: str, timeframe_str: str, num_bars: int
     ) -> Optional[pd.DataFrame]:
         """
-        Récupère les données de barres (OHLCV) pour un symbole et un timeframe donnés.
+        Récupère les barres OHLCV pour un symbole/TF.
+        Priorité de résolution TF : prod_config.timeframe_mapping -> MT5 -> M1.
         """
-        if (
-            not self.is_connected
-        ):  # Utilisation de la propriété is_connected sans parenthèses
+        if not self.is_connected:
             self.logger.warning(
                 f"MT5: Non connecté. Impossible de récupérer les données pour '{symbol}'."
             )
             return None
 
-        mt5_timeframe = self.TIMEFRAMES.get(timeframe_str.upper())
-        if mt5_timeframe is None:
-            self.logger.error(
-                f"Timeframe '{timeframe_str}' non valide. Utilisation de M1 par défaut."
-            )
-            mt5_timeframe = self.TIMEFRAME_M1
+        # ✅ PROD_CONFIG EN PREMIER via _resolve_timeframe
+        mt5_timeframe, tf_key = self._resolve_timeframe(timeframe_str)
 
         self.logger.debug(
-            f"MT5: Tentative de récupération de {num_bars} barres pour '{symbol}' ({timeframe_str})..."
-        )  # Nouveau log DEBUG avant l'appel API
+            f"MT5: Tentative de récupération de {num_bars} barres pour '{symbol}' "
+            f"(demandé='{timeframe_str}', résolu='{tf_key}')..."
+        )
         try:
-            rates = self.mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, num_bars)
+            rates = self.mt5.copy_rates_from_pos(
+                symbol, mt5_timeframe, 0, int(max(1, num_bars))
+            )
 
-            # --- BLOC DE DIAGNOSTIC AMÉLIORÉ ---
-            if rates is None:  # mt5.copy_rates_from_pos retourne None en cas d'erreur
+            if rates is None:
                 last_mt5_error = self.mt5.last_error()
                 self.logger.error(
-                    f"[{symbol}] ÉCHEC DE LA COLLECTE DE DONNÉES. MT5 n'a retourné AUCUNE donnée (rates est None). Erreur du broker: {last_mt5_error}"
+                    f"[{symbol}] ÉCHEC DE LA COLLECTE. MT5 a retourné None. Erreur: {last_mt5_error}"
                 )
-                # NOUVEAU LOG DEBUG : Plus de contexte sur l'échec
                 self.logger.debug(
-                    f"[{symbol}] copy_rates_from_pos('{symbol}', {timeframe_str}, 0, {num_bars}) a retourné None. Erreur: {last_mt5_error}."
+                    f"[{symbol}] copy_rates_from_pos('{symbol}', {tf_key}, 0, {num_bars}) → None."
                 )
                 return None
 
-            if len(rates) == 0:  # rates est un tableau vide (array())
+            if len(rates) == 0:
                 self.logger.warning(
-                    f"[{symbol}] COLLECTE DE DONNÉES : MT5 a retourné un tableau vide pour {num_bars} barres. Il n'y a pas de données disponibles."
+                    f"[{symbol}] Tableau vide pour {num_bars} barres (TF='{tf_key}')."
                 )
-                # NOUVEAU LOG DEBUG : Plus de contexte sur le tableau vide
                 self.logger.debug(
-                    f"[{symbol}] copy_rates_from_pos a retourné un tableau vide. Cela peut indiquer des données insuffisantes ou un symbole non tradable pour ce timeframe."
+                    f"[{symbol}] Données insuffisantes ou symbole non tradable pour ce TF."
                 )
-                return pd.DataFrame()  # Retourne un DataFrame vide pour la cohérence
-            # --- FIN DU BLOC DE DIAGNOSTIC ---
+                return pd.DataFrame()
 
             rates_frame = pd.DataFrame(rates)
             rates_frame["time"] = pd.to_datetime(
                 rates_frame["time"], unit="s", utc=True
             )
-
             self.logger.debug(
-                f"[{symbol}] {len(rates_frame)} barres de données récupérées avec succès."
+                f"[{symbol}] {len(rates_frame)} barres récupérées (TF='{tf_key}')."
             )
             return rates_frame
 
@@ -640,54 +682,108 @@ class MT5Connector:
             self.logger.error(
                 f"Exception in get_rates for {symbol}: {e}. Last MT5 error: {self.mt5.last_error()}.",
                 exc_info=True,
-            )  # Ajout de la dernière erreur MT5
-            # NOUVEAU LOG DEBUG : Plus de contexte sur l'exception
+            )
             self.logger.debug(
-                f"[{symbol}] Une exception a interrompu la récupération des rates. Cela peut indiquer un problème avec le symbole ou l'environnement MT5."
+                f"[{symbol}] Exception pendant la récupération des rates (TF='{tf_key}')."
             )
             return None
 
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """
-        Récupère les informations complètes d'un symbole (y compris spread, volume, etc.).
-        Assure une journalisation cohérente.
+        Récupère les informations d'un symbole (spread, point, visibilité, etc.)
+        avec sélection automatique dans la Market Watch et logs détaillés.
 
         Args:
-            symbol (str): Le symbole de l'instrument.
+            symbol (str): Le symbole MT5 (ex: "EURUSD", "XAUUSD").
 
         Returns:
-            Optional[Any]: L'objet `MetaTrader5.SymbolInfo` (NamedTuple) si réussi, `None` sinon.
+            Optional[Any]: MetaTrader5.SymbolInfo (NamedTuple) si OK, sinon None.
         """
-        if (
-            not self.is_connected
-        ):  # Utilisation de la propriété is_connected sans parenthèses
+        if not self.is_connected:
             self.logger.error(
                 f"MT5: Non connecté. Impossible de récupérer les informations du symbole '{symbol}'."
             )
             return None
 
+        symbol_norm = str(symbol).strip().upper()
         self.logger.debug(
-            f"MT5: Tentative de récupération des informations pour le symbole '{symbol}'..."
-        )  # Nouveau log DEBUG avant l'appel API
-        info = self.mt5.symbol_info(symbol)
+            f"MT5: Tentative de récupération des informations pour le symbole '{symbol_norm}'..."
+        )
 
-        if info:
+        try:
+            # S'assurer que le symbole est visible/actif dans la Market Watch
+            try:
+                selected_ok = self.mt5.symbol_select(symbol_norm, True)
+                if not selected_ok:
+                    self.logger.debug(
+                        f"MT5: symbol_select('{symbol_norm}', True) a retourné False (le symbole est peut-être déjà visible ou non disponible)."
+                    )
+            except Exception as sel_e:
+                self.logger.debug(
+                    f"MT5: Exception lors de symbol_select('{symbol_norm}'): {sel_e}"
+                )
+
+            info = self.mt5.symbol_info(symbol_norm)
+
+            if info is None:
+                last_mt5_error = self.mt5.last_error()
+                self.logger.error(
+                    f"MT5: Échec de la récupération des informations du symbole '{symbol_norm}'. "
+                    f"Dernière erreur MT5: {last_mt5_error}."
+                )
+                self.logger.debug(
+                    f"MT5: symbol_info('{symbol_norm}') a retourné None. "
+                    f"Vérifiez la visibilité dans la Market Watch et que le symbole existe chez le broker."
+                )
+                return None
+
+            # Si récupéré mais marqué non visible, retente une sélection
+            if getattr(info, "visible", True) is False:
+                if self.mt5.symbol_select(symbol_norm, True):
+                    # Rafraîchir l'info après sélection
+                    info_refreshed = self.mt5.symbol_info(symbol_norm)
+                    if info_refreshed is not None:
+                        info = info_refreshed
+
+            # Calcule un point "fallback" pour le log si MT5 renvoie point=0
+            computed_point = None
+            try:
+                if (getattr(info, "point", None) in (None, 0)) and hasattr(
+                    info, "digits"
+                ):
+                    computed_point = 10 ** (-int(info.digits))
+            except Exception:
+                computed_point = None
+
+            # Logs lisibles + debug complet
+            point_for_log = (
+                computed_point
+                if computed_point is not None
+                else getattr(info, "point", "N/A")
+            )
             self.logger.info(
-                f"MT5: Informations du symbole '{symbol}' récupérées. Spread: {info.spread}, Point: {info.point}."
+                f"MT5: Informations du symbole '{symbol_norm}' récupérées. "
+                f"Spread: {getattr(info, 'spread', 'N/A')}, Point: {point_for_log}."
             )
-            # NOUVEAU LOG DEBUG : Afficher plus de détails si le niveau est DEBUG
-            self.logger.debug(
-                f"MT5: Détails complets du symbole '{symbol}': {info._asdict()}"
-            )
+            try:
+                self.logger.debug(
+                    f"MT5: Détails complets du symbole '{symbol_norm}': {info._asdict()}"
+                )
+            except Exception:
+                # Certains environnements peuvent ne pas supporter _asdict()
+                pass
+
             return info
-        else:
-            last_mt5_error = self.mt5.last_error()  # Capturer la dernière erreur de MT5
+
+        except Exception as e:
             self.logger.error(
-                f"MT5: Échec de la récupération des informations du symbole '{symbol}'. Erreur: {last_mt5_error}."
+                f"Exception dans get_symbol_info pour '{symbol_norm}': {e}. "
+                f"Dernière erreur MT5: {self.mt5.last_error()}.",
+                exc_info=True,
             )
-            # NOUVEAU LOG DEBUG : Plus de contexte sur l'échec
             self.logger.debug(
-                f"MT5: symbol_info('{symbol}') a retourné None. Vérifiez si le symbole est visible/actif dans la 'Market Watch' de votre terminal MT5."
+                f"MT5: Une exception a interrompu la récupération des infos symbole pour '{symbol_norm}'. "
+                f"Vérifiez le terminal MT5 et la disponibilité du symbole."
             )
             return None
 

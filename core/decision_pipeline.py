@@ -632,18 +632,21 @@ class DecisionPipeline:
         self, asset: str, signals: Dict, config: Dict
     ) -> float:
         """
-        🎯 ÉVALUATION CONDITIONS SCALPING PAR ASSET (version corrigée)
-        - Volatilité lue en priorité depuis volatility_pct / volatility_percentage
-        - Fallback sur 'volatility' avec détection d'unité (décimal vs pourcentage)
-        - Seuils MTF 100% configurables via prod_config.json
+        🎯 ÉVALUATION CONDITIONS SCALPING PAR ASSET (version améliorée)
+        - Volatilité : lecture en % avec fallback (décimal -> %)
+        - Spread : fallback robuste via MT5Connector si 'spread' ou 'current_spread_points' sont absents/0
+        - Volume : adaptation auto en basse volatilité globale
+        - MTF : possibilité d'exiger l'alignement M5/M15 (EMA20 vs EMA50) si la clé 'mtf_ema_align' est fournie
         """
+        import math
+
         if not signals or not isinstance(signals, dict):
             return 0.0
 
         condition_score = 0.0
         print(f"  🔍 [{asset}] Analyse conditions scalping...")
 
-        # === 1. SIGNAUX KATANA PRIORITAIRES (identique) ===
+        # === 1) KATANA (inchangé) ===
         katana_signals = {
             "bos_mss_detected": 0.25,
             "volume_anomaly_detected": 0.25,
@@ -651,70 +654,111 @@ class DecisionPipeline:
             "liquidity_grab_detected": 0.20,
             "ob_detected": 0.20,
         }
-
         katana_score = 0.0
         detected_katana = []
         for signal, weight in katana_signals.items():
             if signals.get(signal, False):
                 katana_score += weight
                 detected_katana.append(signal)
-
         condition_score += katana_score
         if detected_katana:
             print(f"    🗡️ Signaux KATANA: {detected_katana} -> +{katana_score:.3f}")
 
-        # === 2. CONDITIONS MTF (corrigées: unités & seuils dynamiques) ===
-        # 2.1 Volatilité (% cohérente)
-        # Priorité aux champs déjà en pourcentage
+        # === 2) CONDITIONS MTF ===
+        # 2.1 Volatilité (%)
         vol_pct = None
         if isinstance(signals.get("volatility_pct"), (int, float)):
-            vol_pct = float(signals.get("volatility_pct"))
+            vol_pct = float(signals["volatility_pct"])
         elif isinstance(signals.get("volatility_percentage"), (int, float)):
-            vol_pct = float(signals.get("volatility_percentage"))
+            vol_pct = float(signals["volatility_percentage"])
         else:
-            # Fallback : essayer "volatility" et déduire l'unité
             vol_raw = signals.get("volatility")
             if isinstance(vol_raw, (int, float)):
                 vol_raw = float(vol_raw)
-                # Heuristique: si <= 1, on assume décimal (0.0008 => 0.08%)
                 vol_pct = vol_raw * 100.0 if vol_raw <= 1.0 else vol_raw
             else:
                 vol_pct = 0.0
 
-        # 2.2 Spread (points)
-        spread_points = signals.get("current_spread_points")
-        if not isinstance(spread_points, (int, float)):
-            spread_points = signals.get("spread", float("inf"))
+        # 2.2 Spread (points) — avec fallback robuste (ask-bid)/point via MT5Connector
+        spread_points = signals.get(
+            "current_spread_points", signals.get("spread", None)
+        )
         try:
             spread_points = float(spread_points)
         except Exception:
-            spread_points = float("inf")
+            spread_points = None
+
+        if (
+            spread_points is None
+            or not math.isfinite(spread_points)
+            or spread_points <= 0.0
+        ):
+            mt5c = getattr(self.config_manager, "mt5_connector", None)
+            if mt5c:
+                try:
+                    spread_points = float(mt5c.get_symbol_spread_points(asset))
+                    print(
+                        f"    ℹ️ Spread (fallback MT5Connector): {spread_points:.0f} points"
+                    )
+                except Exception:
+                    spread_points = float("inf")
+            else:
+                spread_points = float("inf")
 
         # 2.3 Volume z-score
-        volume_zscore = signals.get("volume_zscore", 0.0)
         try:
-            volume_zscore = float(volume_zscore)
+            volume_zscore = float(signals.get("volume_zscore", 0.0))
         except Exception:
             volume_zscore = 0.0
 
-        # 2.4 Seuils MTF dynamiques (prod_config.json)
-        #   scoring_rules.scalping.mtf.min_volatility_pct  (ex: 0.01 pour 0,01%)
-        #   scoring_rules.scalping.mtf.max_spread_points   (ex: 50)
-        #   scoring_rules.scalping.mtf.min_volume_zscore   (ex: 0.5)
-        volatility_threshold_pct = self.config_manager.get(
-            "scoring_rules.scalping.mtf.min_volatility_pct", 0.01
+        # 2.4 Seuils MTF depuis la conf (prod_config en priorité)
+        volatility_threshold_pct = float(
+            self.config_manager.get(
+                "scoring_rules.scalping.mtf.min_volatility_pct", 0.01
+            )
         )
-        max_spread_points = self.config_manager.get(
-            "scoring_rules.scalping.mtf.max_spread_points", 50
+        max_spread_points = float(
+            self.config_manager.get("scoring_rules.scalping.mtf.max_spread_points", 50)
         )
-        min_volume_zscore = self.config_manager.get(
-            "scoring_rules.scalping.mtf.min_volume_zscore", 0.5
+        min_volume_zscore = float(
+            self.config_manager.get("scoring_rules.scalping.mtf.min_volume_zscore", 0.5)
         )
+
+        # Adaptation auto du seuil volume en basse volatilité
+        global_vol_pct = signals.get("global_volatility_pct")
+        if not isinstance(global_vol_pct, (int, float)):
+            global_vol_pct = float(
+                self.config_manager.get("last_computed_global_volatility_pct", 0.0)
+                or 0.0
+            )
+        low_vol_th = float(
+            self.config_manager.get(
+                "adaptation_settings.volatility_thresholds.low", 0.05
+            )
+        )
+        if global_vol_pct < low_vol_th:
+            min_volume_zscore = float(
+                self.config_manager.get(
+                    "adaptation_settings.scalping.min_volume_zscore_low_vol",
+                    min_volume_zscore,
+                )
+            )
+            print(
+                f"    🪶 Basse volatilité globale ({global_vol_pct:.2f}% < {low_vol_th:.2f}%) → seuil volume={min_volume_zscore}"
+            )
+
+        # 2.5 Alignement directionnel MTF (optionnel, si fourni par les signaux)
+        require_align = bool(
+            self.config_manager.get(
+                "scoring_rules.scalping.mtf.require_directional_alignment", True
+            )
+        )
+        mtf_align_val = signals.get("mtf_ema_align", None)  # attendu bool si présent
 
         mtf_conditions_met = 0
-        mtf_total_conditions = 3
+        mtf_total_conditions = 3  # vol, spread, volume
 
-        # Volatilité en % : log clair
+        # Volatilité
         if vol_pct >= volatility_threshold_pct:
             mtf_conditions_met += 1
             print(
@@ -725,28 +769,43 @@ class DecisionPipeline:
                 f"    ❌ Volatilité faible: {vol_pct:.3f}% < {volatility_threshold_pct:.3f}%"
             )
 
-        # Spread en points
+        # Spread
         if spread_points <= max_spread_points:
             mtf_conditions_met += 1
-            print(f"    ✅ Spread OK: {spread_points:.0f} <= {max_spread_points}")
+            print(f"    ✅ Spread OK: {spread_points:.0f} <= {max_spread_points:.0f}")
         else:
-            print(f"    ❌ Spread élevé: {spread_points:.0f} > {max_spread_points}")
+            print(f"    ❌ Spread élevé: {spread_points:.0f} > {max_spread_points:.0f}")
 
-        # Volume z-score
+        # Volume
         if volume_zscore >= min_volume_zscore:
             mtf_conditions_met += 1
-            print(f"    ✅ Volume OK: {volume_zscore:.2f} >= {min_volume_zscore}")
+            print(f"    ✅ Volume OK: {volume_zscore:.2f} >= {min_volume_zscore:.2f}")
         else:
-            print(f"    ❌ Volume faible: {volume_zscore:.2f} < {min_volume_zscore}")
+            print(
+                f"    ❌ Volume faible: {volume_zscore:.2f} < {min_volume_zscore:.2f}"
+            )
 
-        # Bonus MTF proportionnel (inchangé)
+        # Alignement MTF (ne compte que si la clé est présente)
+        if require_align and isinstance(mtf_align_val, bool):
+            mtf_total_conditions += 1
+            if mtf_align_val:
+                mtf_conditions_met += 1
+                print("    ✅ MTF aligné (M5 & M15)")
+            else:
+                print("    ❌ MTF non aligné (M5 & M15)")
+        elif require_align and mtf_align_val is None:
+            print(
+                "    🟡 Alignement MTF non fourni dans 'signals' → ignoré (pas de pénalité)"
+            )
+
+        # Bonus proportionnel MTF
         mtf_score = (mtf_conditions_met / mtf_total_conditions) * 0.3
         condition_score += mtf_score
         print(
             f"    🔄 Conditions MTF: {mtf_conditions_met}/{mtf_total_conditions} -> +{mtf_score:.3f}"
         )
 
-        # === 3. PHASES SCALPING SPÉCIFIQUES (identique) ===
+        # === 3) PHASES SCALPING (inchangé) ===
         current_phase = signals.get("phase", "")
         scalping_phases = {
             "scalp_burst_up": 1.0,
@@ -760,47 +819,36 @@ class DecisionPipeline:
         phase_score = 0.0
         for phase_pattern, weight in scalping_phases.items():
             if phase_pattern in current_phase:
-                phase_score = weight * 0.25  # 25% du score pour la phase
+                phase_score = weight * 0.25  # 25% du score
                 print(f"    ⚡ Phase scalping: {current_phase} -> +{phase_score:.3f}")
                 break
         condition_score += phase_score
 
-        # === 4. QUALITÉ ET CONFIANCE (identique) ===
+        # === 4) QUALITÉ & CONFIANCE (inchangé) ===
         confidence = signals.get("confidence_score", 0.0)
         is_liquid = signals.get("is_liquid", False)
 
         if confidence > 0.7:
-            confidence_bonus = 0.15
-            condition_score += confidence_bonus
-            print(
-                f"    📈 Haute confiance: {confidence:.3f} -> +{confidence_bonus:.3f}"
-            )
+            condition_score += 0.15
+            print(f"    📈 Haute confiance: {confidence:.3f} -> +0.150")
         elif confidence > 0.5:
-            confidence_bonus = 0.05
-            condition_score += confidence_bonus
-            print(f"    📊 Confiance OK: {confidence:.3f} -> +{confidence_bonus:.3f}")
+            condition_score += 0.05
+            print(f"    📊 Confiance OK: {confidence:.3f} -> +0.050")
 
         if is_liquid:
-            liquidity_bonus = 0.1
-            condition_score += liquidity_bonus
-            print(f"    💧 Asset liquide -> +{liquidity_bonus:.3f}")
+            condition_score += 0.10
+            print(f"    💧 Asset liquide -> +0.100")
 
-        # === 5. CONFLUENCE MTF (identique) ===
+        # === 5) CONFLUENCE MTF (inchangé) ===
         multi_tf_enabled = signals.get("multi_tf_enabled", False)
         confluence_score = signals.get("confluence_score", 0.0)
 
         if multi_tf_enabled and confluence_score > 0.7:
-            mtf_bonus = 0.2
-            condition_score += mtf_bonus
-            print(
-                f"    🔥 MTF Confluence élevée: {confluence_score:.3f} -> +{mtf_bonus:.3f}"
-            )
+            condition_score += 0.20
+            print(f"    🔥 MTF Confluence élevée: {confluence_score:.3f} -> +0.200")
         elif multi_tf_enabled and confluence_score > 0.5:
-            mtf_bonus = 0.1
-            condition_score += mtf_bonus
-            print(
-                f"    🔄 MTF Confluence OK: {confluence_score:.3f} -> +{mtf_bonus:.3f}"
-            )
+            condition_score += 0.10
+            print(f"    🔄 MTF Confluence OK: {confluence_score:.3f} -> +0.100")
 
         final_score = min(1.0, condition_score)
         print(f"  🎯 [{asset}] Score final: {final_score:.3f}")
@@ -1408,76 +1456,168 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         CORE évalue directement les signaux et prend la décision finale.
-        Utilise les paramètres de stratégie mais applique une logique décisionnelle centralisée.
+        Version améliorée pour SCALPING :
+        - Gate d'entrée MTF (alignement M5/M15 optionnel)
+        - Micro-timing M1 (break HH/LL selon direction)
+        - Contrôle de spread et d'écart EMA M1
+        Pour les autres stratégies : comportement inchangé (plus permissif).
         """
         self.logger.info(
             f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}"
         )
 
-        best_asset = None
-        best_score = 0.0
-        best_signals = None
+        is_scalping = str(strategy_name).lower() == "scalping"
 
-        # Seuils de validation CORE (plus flexibles que les stratégies)
-        min_confidence = config.get("min_confidence", 0.65)  # Plus bas que 0.77
+        # Seuils généraux (fallbacks)
+        min_confidence_default = float(config.get("min_confidence", 0.65))
+
+        # Seuils spécifiques SCALPING (lis dans prod_config.json si dispo)
+        require_align = bool(
+            self.config_manager.get("entry_rules.scalping.require_mtf_align", True)
+        )
+        require_m1_break = bool(
+            self.config_manager.get("entry_rules.scalping.require_m1_break", True)
+        )
+        max_spread_pts = float(
+            self.config_manager.get("entry_rules.scalping.max_spread_points", 50)
+        )
+        min_m1_ema_spread = float(
+            self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0)
+        )
+        min_confidence_scalp = float(
+            self.config_manager.get(
+                "entry_rules.scalping.min_confidence", min_confidence_default
+            )
+        )
+
+        best_asset, best_score, best_signals = None, -1.0, None
 
         for asset, asset_signals in signals.items():
-            confidence = asset_signals.get("confidence_score", 0.0)
-            phase = asset_signals.get("phase", "")
+            confidence = float(asset_signals.get("confidence_score", 0.0))
+            phase = str(asset_signals.get("phase", ""))
 
-            self.logger.debug(
-                f"🔍 [{asset}] Confiance: {confidence:.3f}, Phase: {phase}"
-            )
-
-            # NOUVELLE LOGIQUE CORE : Plus permissive
+            # Score “permissif” de base (comme avant, pour classer les actifs)
             score = confidence
-
-            # Bonus selon les signaux détectés
             if asset_signals.get("ob_detected", False):
-                score += 0.1
-                self.logger.debug(f"    ✅ Order Block détecté -> +0.1")
-
+                score += 0.10
             if asset_signals.get("fvg_detected", False):
-                score += 0.1
-                self.logger.debug(f"    ✅ FVG détecté -> +0.1")
-
+                score += 0.10
             if asset_signals.get("bos_mss_detected", False):
                 score += 0.15
-                self.logger.debug(f"    ✅ BOS/MSS détecté -> +0.15")
 
-            # Validation CORE : Accepter si confiance suffisante OU phase conclusive
-            is_valid = False
+            # === Logique non-scalping : identique (permissive) ===
+            if not is_scalping:
+                is_valid = False
+                if confidence >= min_confidence_default:
+                    is_valid = True
+                    self.logger.info(
+                        f"✅ [{asset}] Accepté par CORE (non-scalping) - Confiance {confidence:.3f} >= {min_confidence_default}"
+                    )
+                elif confidence >= 0.5 and any(
+                    k in phase.lower() for k in ["bullish", "bearish", "trending"]
+                ):
+                    is_valid = True
+                    self.logger.info(
+                        f"✅ [{asset}] Accepté par CORE (non-scalping) - Phase conclusive: {phase}"
+                    )
 
-            if confidence >= min_confidence:
-                is_valid = True
-                self.logger.info(
-                    f"✅ [{asset}] Accepté par CORE - Confiance {confidence:.3f} >= {min_confidence}"
-                )
-            elif confidence >= 0.5 and any(
-                keyword in phase.lower()
-                for keyword in ["bullish", "bearish", "trending"]
-            ):
-                is_valid = True
-                self.logger.info(
-                    f"✅ [{asset}] Accepté par CORE - Phase conclusive: {phase}"
-                )
-            else:
-                self.logger.debug(
-                    f"❌ [{asset}] Rejeté - Confiance {confidence:.3f} et phase {phase} insuffisantes"
-                )
+                if is_valid and score > best_score:
+                    best_asset, best_score, best_signals = asset, score, asset_signals
+                continue
 
-            if is_valid and score > best_score:
-                best_score = score
-                best_asset = asset
-                best_signals = asset_signals
+            # === Gate d'entrée SCALPING (strict mais paramétrable) ===
+            mtf_align_val = asset_signals.get(
+                "mtf_ema_align", None
+            )  # bool attendu si présent
+            mtf_direction = str(asset_signals.get("mtf_direction", "none")).lower()
+            spread_points = asset_signals.get(
+                "current_spread_points", asset_signals.get("spread", float("inf"))
+            )
+            try:
+                spread_points = float(spread_points)
+            except Exception:
+                spread_points = float("inf")
+
+            m1_ema_spread = float(asset_signals.get("m1_ema_spread", 0.0))
+            m1_hh_break = bool(asset_signals.get("m1_last_hh_break", False))
+            m1_ll_break = bool(asset_signals.get("m1_last_ll_break", False))
+
+            # Conditions
+            confidence_ok = confidence >= min_confidence_scalp
+            spread_ok = spread_points <= max_spread_pts
+            ema_spread_ok = m1_ema_spread >= min_m1_ema_spread
+
+            # Alignement MTF (si exigé)
+            align_ok = True
+            if require_align:
+                if isinstance(mtf_align_val, bool):
+                    align_ok = mtf_align_val is True
+                else:
+                    # si non fourni et requis → on refuse
+                    align_ok = False
+
+            # Micro-timing M1 : si direction haussière → break du dernier HH ; baissière → break LL
+            m1_break_ok = True
+            if require_m1_break:
+                if mtf_direction == "up":
+                    m1_break_ok = m1_hh_break
+                elif mtf_direction == "down":
+                    m1_break_ok = m1_ll_break
+                else:
+                    m1_break_ok = False  # pas de direction claire → pas d'entrée scalping si on l'exige
+
+            # Journalisation claire
+            self.logger.debug(
+                f"[SCALPING-GATE] {asset} | conf={confidence:.3f}/{min_confidence_scalp} | "
+                f"spread={spread_points:.1f}/{max_spread_pts} | m1_ema_spread={m1_ema_spread:.5f}/{min_m1_ema_spread:.5f} | "
+                f"align={mtf_align_val} (req={require_align}) | dir={mtf_direction} | "
+                f"m1_break_ok={m1_break_ok} (req={require_m1_break})"
+            )
+
+            is_valid = (
+                confidence_ok
+                and spread_ok
+                and ema_spread_ok
+                and align_ok
+                and m1_break_ok
+            )
+
+            if not is_valid:
+                # Logs pédagogiques
+                if not confidence_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp}"
+                    )
+                if not spread_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}"
+                    )
+                if not ema_spread_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}"
+                    )
+                if require_align and not align_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)"
+                    )
+                if require_m1_break and not m1_break_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction})"
+                    )
+                continue
+
+            # Candidat accepté → on compare les scores
+            self.logger.info(
+                f"✅ [{asset}] Accepté par CORE (scalping) : conditions MTF/M1 respectées"
+            )
+            if score > best_score:
+                best_asset, best_score, best_signals = asset, score, asset_signals
 
         if not best_asset:
             self.logger.info("❌ CORE: Aucun asset ne respecte les critères d'entrée")
             return {}
 
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-
-        # Construire la décision de trade
         return self._core_build_trade_decision(
             best_asset, best_signals, config, context
         )

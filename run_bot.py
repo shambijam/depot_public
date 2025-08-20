@@ -180,39 +180,130 @@ def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
 
 # ------------------- FONCTION CORRIGÉE -------------------
 def _build_asset_trading_signals(
-    latest_signals_row: pd.Series, symbol_info_mt5: Any
+    latest_signals_row: pd.Series,
+    symbol_info_mt5: Any,
+    asset: str = None,
+    mt5_connector: Any = None,
 ) -> dict:
     """
-    CORRIGÉ : Construit le dictionnaire de signaux en convertissant TOUTES les données
-    du PhaseObserver et en ajoutant les informations critiques du symbole MT5.
-    Ceci est le pont parfait qui ne perd aucune donnée.
+    Construit le dictionnaire de signaux pour un actif donné en conservant
+    TOUTES les colonnes du PhaseObserver et en ajoutant:
+      - Spread robuste en points (fallback via (ask-bid)/point)
+      - Features MTF utiles au scalping: alignement M5/M15, direction, ATR M5
+      - Micro-timing M1: break HH/LL & écart EMA20/EMA50
     """
-    # Étape 1: Convertir la ligne entière du DataFrame en dictionnaire.
-    # CELA GARANTIT QUE TOUTES LES DONNÉES DU PHASEOBSERVER SONT PRÉSENTES.
+    # 1) Tout le contenu PhaseObserver
     signals = latest_signals_row.to_dict()
 
-    # Étape 2: Ajouter les informations essentielles du broker.
-    # On s'assure que les noms de clés sont cohérents avec ce que le DecisionPipeline attend.
+    # 2) Infos broker de base (compatibilité avec le code existant)
     signals["current_price"] = latest_signals_row.get("close")
-    signals["spread"] = symbol_info_mt5.spread if symbol_info_mt5 else float("inf")
+    signals["spread"] = (
+        getattr(symbol_info_mt5, "spread", float("inf"))
+        if symbol_info_mt5
+        else float("inf")
+    )
     signals["symbol_point_value"] = (
-        symbol_info_mt5.point if symbol_info_mt5 else 0.00001
+        getattr(symbol_info_mt5, "point", 0.00001) if symbol_info_mt5 else 0.00001
     )
     signals["symbol_trade_contract_size"] = (
-        symbol_info_mt5.trade_contract_size if symbol_info_mt5 else 100000
+        getattr(symbol_info_mt5, "trade_contract_size", 100000.0)
+        if symbol_info_mt5
+        else 100000.0
     )
 
-    # Étape 3: S'assurer que les horodatages sont dans un format standard.
-    # .name contient l'index de la Series, qui est notre 'time'.
-    if hasattr(latest_signals_row.name, "isoformat"):
+    # 3) Timestamp propre
+    if hasattr(latest_signals_row, "name") and hasattr(
+        latest_signals_row.name, "isoformat"
+    ):
         signals["last_update_timestamp"] = latest_signals_row.name.isoformat()
     else:
+        from datetime import datetime, UTC
+
         signals["last_update_timestamp"] = datetime.now(UTC).isoformat()
 
+    # 4) Spread robuste (en points)
+    #    - si 'spread' vaut 0 / None, on calcule via MT5Connector (ask-bid)/point
+    current_spread_points = None
+    try:
+        if (
+            isinstance(signals.get("spread"), (int, float))
+            and float(signals["spread"]) > 0
+        ):
+            current_spread_points = float(signals["spread"])
+        elif mt5_connector and asset:
+            current_spread_points = float(mt5_connector.get_symbol_spread_points(asset))
+    except Exception:
+        current_spread_points = None
+    signals["current_spread_points"] = (
+        current_spread_points if current_spread_points is not None else float("inf")
+    )
+
+    # 5) Features MTF (si on a le connector et l'asset)
+    if mt5_connector and asset:
+        import numpy as np
+        import pandas as pd
+
+        def _ema(x: np.ndarray, n: int) -> np.ndarray:
+            k = 2 / (n + 1.0)
+            ema = np.empty_like(x, dtype=float)
+            ema[0] = x[0]
+            for i in range(1, len(x)):
+                ema[i] = k * x[i] + (1 - k) * ema[i - 1]
+            return ema
+
+        def _atr(df: pd.DataFrame, n: int = 14) -> float:
+            h = df["high"].to_numpy()
+            l = df["low"].to_numpy()
+            c = df["close"].to_numpy()
+            prev = np.r_[c[0], c[:-1]]
+            tr = np.maximum.reduce([h - l, np.abs(h - prev), np.abs(l - prev)])
+            atr = np.empty_like(tr)
+            atr[0] = tr[0]
+            for i in range(1, len(tr)):
+                atr[i] = (atr[i - 1] * (n - 1) + tr[i]) / n
+            return float(atr[-1])
+
+        # M5 / M15 : sens et alignement
+        try:
+            m5 = mt5_connector.get_rates(asset, "M5", 200)
+            m15 = mt5_connector.get_rates(asset, "M15", 200)
+            if m5 is not None and not m5.empty and m15 is not None and not m15.empty:
+                e20_5 = _ema(m5["close"].to_numpy(), 20)[-1]
+                e50_5 = _ema(m5["close"].to_numpy(), 50)[-1]
+                e20_15 = _ema(m15["close"].to_numpy(), 20)[-1]
+                e50_15 = _ema(m15["close"].to_numpy(), 50)[-1]
+                up = (e20_5 > e50_5) and (e20_15 > e50_15)
+                down = (e20_5 < e50_5) and (e20_15 < e50_15)
+                signals["mtf_ema_align"] = bool(up or down)
+                signals["mtf_direction"] = "up" if up else ("down" if down else "none")
+                signals["atr_m5"] = _atr(m5, 14)
+        except Exception:
+            # En cas de souci data, on n'écrase rien
+            pass
+
+        # M1 : micro-structure & écart EMA
+        try:
+            m1 = mt5_connector.get_rates(asset, "M1", 200)
+            if m1 is not None and not m1.empty:
+                e20_1 = _ema(m1["close"].to_numpy(), 20)[-1]
+                e50_1 = _ema(m1["close"].to_numpy(), 50)[-1]
+                signals["m1_ema_spread"] = abs(float(e20_1 - e50_1))
+                # Break du plus haut/bas des 10 dernières barres (micro timing)
+                hh = m1["high"].rolling(10).max()
+                ll = m1["low"].rolling(10).min()
+                signals["m1_last_hh_break"] = bool(m1["close"].iloc[-1] > hh.iloc[-2])
+                signals["m1_last_ll_break"] = bool(m1["close"].iloc[-1] < ll.iloc[-2])
+                # Optionnel: ratio volume tick récent vs moyenne
+                if "tick_volume" in m1.columns and len(m1) >= 21:
+                    tv = m1["tick_volume"].to_numpy()
+                    signals.setdefault(
+                        "volume_zscore",
+                        float((tv[-1] - tv[-21:-1].mean()) / (tv[-21:-1].std() + 1e-9)),
+                    )
+        except Exception:
+            pass
+
     return signals
-
-
-# ------------------- FIN DE LA CORRECTION -------------------
 
 
 def _build_asset_market_data(
@@ -285,7 +376,8 @@ def _mtf_readiness_gate(
     - Si une erreur survient (lecture config, etc.) -> ON LAISSE PASSER.
     - Sinon on vérifie:
         * N premiers cycles bloqués,
-        * historique minimum par TF,
+        * historique minimum par TF (incluant le plancher 'bars_min' de prod_config.timeframe_mapping),
+        * fraîcheur des données (max_allowed_data_age_seconds) si défini,
         * confluence MTF via PhaseObserver si dispo.
     """
     logger = logging.getLogger(__name__)
@@ -294,39 +386,85 @@ def _mtf_readiness_gate(
 
         gate_cfg = po_cfg.get("readiness_gate") or {}
         if not gate_cfg.get("enabled", False):
-            # Gate explicitement désactivé (ou non défini) -> on laisse passer
-            return True
+            return True  # gate désactivé
 
         mtf_cfg = po_cfg.get("multi_timeframe_settings") or {}
         data_req = po_cfg.get("data_requirements") or {}
 
-        required_tfs = mtf_cfg.get("timeframes", ["M1", "M5", "M15"])
+        required_tfs = [
+            str(tf).upper() for tf in mtf_cfg.get("timeframes", ["M1", "M5", "M15"])
+        ]
         confluence_required = int(mtf_cfg.get("confluence_required", 2))
-        min_bars_by_tf = data_req.get(
-            "min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}
-        )
         block_first_cycles = int(gate_cfg.get("block_signals_first_n_cycles", 12))
+        max_age_sec = int(
+            gate_cfg.get("max_allowed_data_age_seconds", 0) or 0
+        )  # 0 = pas de check fraîcheur
 
-        # 1) Gate de démarrage
+        # (1) Gate de démarrage
         if cycle_count <= block_first_cycles:
             logger.info(
                 f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})"
             )
             return False
 
-        # 2) Historique minimum par TF / actif
+        # (2) Construire le min bars par TF en combinant config PhaseObserver + prod_config.timeframe_mapping.bars_min
+        min_bars_by_tf = {
+            k.upper(): int(v)
+            for k, v in (
+                data_req.get(
+                    "min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}
+                ).items()
+            )
+        }
+        try:
+            tf_map = config_manager.get("timeframe_mapping", {}) or {}
+            for tfk, obj in tf_map.items():
+                tfu = str(tfk).upper()
+                bars_min = int((obj or {}).get("bars_min", 0) or 0)
+                if bars_min > 0:
+                    min_bars_by_tf[tfu] = max(min_bars_by_tf.get(tfu, 0), bars_min)
+        except Exception:
+            pass  # on ignore si non présent
+
+        # (3) Historique minimum + fraîcheur par TF / actif
+        from datetime import datetime, timezone
+
         for asset in tradeable_assets:
             for tf in required_tfs:
-                df = mt5_connector.get_rates(asset, tf, min_bars_by_tf.get(tf, 200))
+                need = int(min_bars_by_tf.get(tf, 200))
+                df = mt5_connector.get_rates(asset, tf, need)
                 have = len(df) if df is not None else 0
-                need = min_bars_by_tf.get(tf, 0)
                 if have < need:
                     logger.info(
                         f"[READINESS] skip -> {asset} {tf}={have}/{need} (historique insuffisant)"
                     )
                     return False
 
-        # 3) Confluence via PhaseObserver (si dispo)
+                # Fraîcheur des données (optionnelle)
+                if (
+                    max_age_sec > 0
+                    and df is not None
+                    and not df.empty
+                    and "time" in df.columns
+                ):
+                    try:
+                        last_ts = df["time"].iloc[-1]
+                        if not getattr(last_ts, "tzinfo", None):
+                            # sécurité: on force UTC si la colonne n’est pas timezone-aware
+                            last_ts = last_ts.tz_localize("UTC")
+                        age = (
+                            datetime.now(timezone.utc) - last_ts.to_pydatetime()
+                        ).total_seconds()
+                        if age > max_age_sec:
+                            logger.info(
+                                f"[READINESS] skip -> {asset} {tf} data too old ({int(age)}s > {max_age_sec}s)"
+                            )
+                            return False
+                    except Exception:
+                        # on reste permissif si le parse de temps pose souci
+                        pass
+
+        # (4) Confluence via PhaseObserver (si dispo)
         if hasattr(phase_observer, "ready_and_confluence_ok"):
             ok, reason = phase_observer.ready_and_confluence_ok(
                 confluence_required=confluence_required
@@ -338,7 +476,7 @@ def _mtf_readiness_gate(
         return True
 
     except Exception as e:
-        # Surtout ne jamais bloquer si une erreur inattendue se produit
+        # Ne jamais bloquer si une erreur inattendue survient
         logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
         return True
 
@@ -441,9 +579,14 @@ def run_single_pipeline_cycle(
                     f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
                 )
 
+                # ✅ Correction: appel sans parenthèse superflue, et avec asset/connector
                 all_assets_trading_signals[asset] = _build_asset_trading_signals(
-                    latest_signals_row, symbol_info_mt5
+                    latest_signals_row,
+                    symbol_info_mt5,
+                    asset=asset,
+                    mt5_connector=mt5_connector,
                 )
+
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
                 )
@@ -511,6 +654,8 @@ def run_single_pipeline_cycle(
             print("   ❌ AUCUNE DÉCISION (dict vide)")
         print("=" * 60 + "\n")
 
+        # ✅ Correction: sécuriser l'accès même si decision_package == None
+        decision_package = decision_package or {}
         active_config = decision_package.get("config_used", base_config)
         trade_decision = decision_package.get("final_decision", {})
 

@@ -60,6 +60,10 @@
     "backup_dir": "output/backups/",
     "ai_audit": "config/ai_audit/"
   },
+  "data_collection": {
+    "default_timeframe": "M1",
+    "default_bars_count": 500
+  },
   "timeframe_mapping": {
     "M1": {
       "mt5_name": "TIMEFRAME_M1",
@@ -243,6 +247,13 @@
         "poor_sharpe_penalty": 0.1
       }
     },
+    "scalping": {
+      "mtf": {
+        "min_volatility_pct": 0.01,
+        "max_spread_points": 50,
+        "min_volume_zscore": 0.5
+      }
+    },
     "risk_appetite_drawdown_thresholds": {
       "low_risk_max_drawdown": 3.0,
       "high_risk_min_drawdown": 7.0,
@@ -252,17 +263,27 @@
     "ai_recommendation_weight": 0.2,
     "min_optimal_score_threshold": 0.001
   },
+  "entry_rules": {
+    "scalping": {
+      "require_mtf_align": true,
+      "require_m1_break": true,
+      "max_spread_points": 50,
+      "min_m1_ema_spread": 0.0,
+      "min_confidence": 0.55
+    }
+  },
   "adaptation_settings": {
     "volatility_thresholds": {
-      "high": 25,
-      "low": 15
+      "high": 0.5,
+      "low": 0.05
     },
     "scalping": {
       "take_profit_pips_high_vol": 10,
       "stop_loss_pips_high_vol": 5,
       "max_spread_pips_high_vol": 2.0,
       "take_profit_pips_low_vol": 15,
-      "stop_loss_pips_low_vol": 7
+      "stop_loss_pips_low_vol": 7,
+      "min_volume_zscore_low_vol": -0.25
     },
     "risk_adjustment": {
       "risk_reduction_multiplier_high_vol": 0.8,
