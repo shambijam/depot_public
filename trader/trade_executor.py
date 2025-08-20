@@ -932,8 +932,6 @@ class TradeExecutor:
         Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
         avant toute requête MT5.
         """
-        import uuid
-
         self.logger.info("Préparation de l'ordre MT5...")
 
         # --- Raccourcis locaux ---
@@ -1045,6 +1043,14 @@ class TradeExecutor:
                     f"Vérifie la correspondance broker."
                 )
 
+            # Spread robuste en points (sera utile pour SL/TP)
+            try:
+                spread_points = float(
+                    self.mt5_connector.get_symbol_spread_points(broker_symbol)
+                )
+            except Exception:
+                spread_points = 0.0
+
             # ---------- 7) Prix d'entrée ----------
             entry_price_market = self.mt5_connector.get_current_price(
                 broker_symbol, action
@@ -1054,16 +1060,52 @@ class TradeExecutor:
                     f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
                 )
 
-            trigger_price = trade_decision.get("trigger_price", entry_price_market)
+            # Si limit/stop et qu'un entry_price est proposé par la décision → utiliser comme trigger par défaut
+            entry_price_hint = trade_decision.get("entry_price")
+            trigger_price = trade_decision.get("trigger_price")
+            if trigger_price is None:
+                if (
+                    order_type != "MARKET"
+                    and isinstance(entry_price_hint, (int, float))
+                    and entry_price_hint > 0
+                ):
+                    trigger_price = entry_price_hint
+                else:
+                    trigger_price = entry_price_market
 
-            # ---------- 8) SL/TP ----------
+            # ---------- 8) SL/TP (avec overrides en pips) ----------
+            sl_pips_override = trade_decision.get("target_sl_pips")
+            tp_pips_override = trade_decision.get("target_tp_pips")
+
+            order_ctx = {
+                "action": action,
+                "asset": broker_symbol,
+                "order_type": order_type,
+                # ✅ overrides transmis au calcul SL/TP
+                "target_sl_pips": sl_pips_override,
+                "target_tp_pips": tp_pips_override,
+                # infos complémentaires utiles au calcul
+                "spread_points": spread_points,
+                "entry_price_ref": entry_price_hint,  # prix de référence proposé par le CORE si utile
+            }
+
             sl_price, tp_price = self._calculate_sl_tp_prices(
-                {"action": action, "asset": broker_symbol, "order_type": order_type},
+                order_ctx,
                 active_config,
                 symbol_info,
                 entry_price_market,
                 market_context,
             )
+
+            # Validations SL/TP
+            if not isinstance(sl_price, (int, float)) or sl_price <= 0:
+                raise TradeExecutionError(
+                    f"SL calculé invalide ({sl_price}) pour {broker_symbol}."
+                )
+            if not isinstance(tp_price, (int, float)) or tp_price <= 0:
+                raise TradeExecutionError(
+                    f"TP calculé invalide ({tp_price}) pour {broker_symbol}."
+                )
 
             # ---------- 9) Volume ----------
             account_trade_settings = market_context.get(
@@ -1117,9 +1159,11 @@ class TradeExecutor:
     ) -> tuple[float, float]:
         """
         SL/TP institutionnel avec 3 méthodes de SL (SWING / ATR / PIPS) et 3 TP (RR / ATR_MULTIPLE / PIPS).
+        - Priorité aux overrides en PIPS: trade_decision['target_sl_pips'] / ['target_tp_pips']
         - Respecte trade_stops_level du broker
+        - Conversion PIPS → prix corrigée (1 pip = 10 points pour FX/Gold)
         - Arrondit aux 'digits' du symbole
-        - Tombe en PIPS si les données manquent
+        - Fallback robuste si données manquantes
         """
         import pandas as pd
         import numpy as np
@@ -1132,17 +1176,30 @@ class TradeExecutor:
         if action not in ("BUY", "SELL"):
             raise TradeExecutionError(f"Action invalide pour SL/TP: '{action_raw}'")
 
+        # --- Paramètres symbole / broker ---
         point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         if point <= 0:
             raise TradeExecutionError("symbol_info.point invalide (<=0).")
 
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
         min_stop_distance_points = int(
             getattr(symbol_info, "trade_stops_level", 0) or 0
         )
         min_stop_distance_price = min_stop_distance_points * point
-        digits = int(getattr(symbol_info, "digits", 0) or 0)
 
-        # --- Paramètres ---
+        # --- Heuristique pip-size: 1 pip = 10 points (FX majeurs, JPY, XAUUSD) ---
+        points_per_pip = 10.0
+        pip_size = point * points_per_pip  # valeur d'1 pip en prix absolu
+
+        # --- Overrides en PIPS (prioritaires si fournis) ---
+        sl_pips_override = trade_decision.get("target_sl_pips", None)
+        tp_pips_override = trade_decision.get("target_tp_pips", None)
+        spread_points = float(trade_decision.get("spread_points", 0.0) or 0.0)
+        spread_pips = (
+            max(0.0, spread_points / points_per_pip) if points_per_pip > 0 else 0.0
+        )
+
+        # --- Paramètres de placement (config) ---
         settings = config.get("smart_sl_tp_settings", {}) or {}
         sl_method = str(
             settings.get("sl_placement_method", "PIPS")
@@ -1150,6 +1207,7 @@ class TradeExecutor:
         tp_method = str(
             settings.get("tp_placement_method", "RR")
         ).upper()  # RR|ATR_MULTIPLE|PIPS
+        rr_ratio = float(settings.get("tp_rr_ratio", 1.5) or 1.5)
 
         # --- Récup du DF pour SWING/ATR (si dispo) ---
         symbol = str(trade_decision.get("asset", "")).upper()
@@ -1177,99 +1235,133 @@ class TradeExecutor:
         # ========================= SL =========================
         stop_loss_price = 0.0
 
-        if sl_method == "SWING":
-            lookback = int(settings.get("sl_swing_lookback_period", 10) or 10)
-            buffer_pips = float(settings.get("sl_buffer_pips", 2) or 2.0)
-            if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
-                self.logger.warning(
-                    f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
-                )
-                sl_method = "ATR"  # on tente ATR avant PIPS
-
-        if sl_method == "ATR":
-            atr_period = int(settings.get("sl_atr_period", 14) or 14)
-            atr_mult = float(settings.get("sl_atr_multiplier", 1.2) or 1.2)
-            atr = _compute_atr(rates_df, atr_period)
-            if not (atr == atr and atr > 0):  # NaN safe
-                self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
-                sl_method = "PIPS"
-            else:
-                sl_distance = atr_mult * atr
-                if action == "BUY":
-                    stop_loss_price = entry_price - sl_distance
+        # 0) PRIORITÉ override en pips
+        if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
+            sl_distance = float(sl_pips_override) * pip_size
+            stop_loss_price = (
+                entry_price - sl_distance
+                if action == "BUY"
+                else entry_price + sl_distance
+            )
+            self.logger.debug(
+                f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}"
+            )
+        else:
+            # 1) SWING (si données suffisantes), sinon ATR, sinon PIPS
+            if sl_method == "SWING":
+                lookback = int(settings.get("sl_swing_lookback_period", 10) or 10)
+                buffer_pips = float(settings.get("sl_buffer_pips", 2) or 2.0)
+                if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
+                    self.logger.warning(
+                        f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
+                    )
+                    sl_method = "ATR"  # tentative ATR avant PIPS
                 else:
-                    stop_loss_price = entry_price + sl_distance
+                    recent = rates_df.tail(lookback)
+                    buffer_price = buffer_pips * pip_size
+                    if action == "BUY":
+                        swing_low = float(recent["low"].min())
+                        stop_loss_price = swing_low - buffer_price
+                    else:
+                        swing_high = float(recent["high"].max())
+                        stop_loss_price = swing_high + buffer_price
 
-        if sl_method == "SWING" and stop_loss_price == 0.0:
-            recent = rates_df.tail(lookback)
-            buffer_price = buffer_pips * point
-            if action == "BUY":
-                swing_low = float(recent["low"].min())
-                stop_loss_price = swing_low - buffer_price
-            else:
-                swing_high = float(recent["high"].max())
-                stop_loss_price = swing_high + buffer_price
+            if sl_method == "ATR" and stop_loss_price == 0.0:
+                atr_period = int(settings.get("sl_atr_period", 14) or 14)
+                atr_mult = float(settings.get("sl_atr_multiplier", 1.2) or 1.2)
+                atr = _compute_atr(rates_df, atr_period)
+                if not (atr == atr and atr > 0):  # NaN safe
+                    self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
+                    sl_method = "PIPS"
+                else:
+                    sl_distance = atr_mult * atr
+                    stop_loss_price = (
+                        entry_price - sl_distance
+                        if action == "BUY"
+                        else entry_price + sl_distance
+                    )
 
-        if sl_method == "PIPS" and stop_loss_price == 0.0:
-            sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
-            sl_distance = sl_pips * point
-            if action == "BUY":
-                stop_loss_price = entry_price - sl_distance
-            else:
-                stop_loss_price = entry_price + sl_distance
+            if sl_method == "PIPS" and stop_loss_price == 0.0:
+                sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
+                sl_distance = sl_pips * pip_size
+                stop_loss_price = (
+                    entry_price - sl_distance
+                    if action == "BUY"
+                    else entry_price + sl_distance
+                )
 
         # ========================= TP =========================
         take_profit_price = 0.0
 
-        if tp_method == "RR":
-            rr_ratio = float(settings.get("tp_rr_ratio", 1.5) or 1.5)
-            risk_distance_price = abs(entry_price - stop_loss_price)
-            if risk_distance_price <= 0:
-                raise TradeExecutionError("Distance de risque nulle pour TP RR.")
-            tp_distance_price = risk_distance_price * rr_ratio
+        # 0) PRIORITÉ override en pips
+        if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
+            tp_distance = float(tp_pips_override) * pip_size
             take_profit_price = (
-                entry_price + tp_distance_price
+                entry_price + tp_distance
                 if action == "BUY"
-                else entry_price - tp_distance_price
+                else entry_price - tp_distance
             )
+            self.logger.debug(
+                f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}"
+            )
+        else:
+            # 1) RR : basé sur SL calculé (si valide)
+            if tp_method == "RR":
+                risk_distance_price = abs(entry_price - stop_loss_price)
+                if risk_distance_price <= 0:
+                    self.logger.warning(
+                        "Distance de risque nulle pour TP RR. Fallback PIPS."
+                    )
+                    tp_method = "PIPS"
+                else:
+                    tp_distance = risk_distance_price * rr_ratio
+                    take_profit_price = (
+                        entry_price + tp_distance
+                        if action == "BUY"
+                        else entry_price - tp_distance
+                    )
 
-        elif tp_method == "ATR_MULTIPLE":
-            atr_period = int(
-                settings.get("tp_atr_period", settings.get("sl_atr_period", 14)) or 14
-            )
-            atr_mult = float(settings.get("tp_atr_multiplier", 2.0) or 2.0)
-            atr = _compute_atr(rates_df, atr_period)
-            if not (atr == atr and atr > 0):
-                self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
-                tp_method = "PIPS"
-            else:
-                tp_distance = atr_mult * atr
+            # 2) ATR_MULTIPLE
+            if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
+                atr_period = int(
+                    settings.get("tp_atr_period", settings.get("sl_atr_period", 14))
+                    or 14
+                )
+                atr_mult = float(settings.get("tp_atr_multiplier", 2.0) or 2.0)
+                atr = _compute_atr(rates_df, atr_period)
+                if not (atr == atr and atr > 0):
+                    self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
+                    tp_method = "PIPS"
+                else:
+                    tp_distance = atr_mult * atr
+                    take_profit_price = (
+                        entry_price + tp_distance
+                        if action == "BUY"
+                        else entry_price - tp_distance
+                    )
+
+            # 3) PIPS
+            if tp_method == "PIPS" and take_profit_price == 0.0:
+                tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
+                tp_distance = tp_pips * pip_size
                 take_profit_price = (
                     entry_price + tp_distance
                     if action == "BUY"
                     else entry_price - tp_distance
                 )
 
-        if tp_method == "PIPS" and take_profit_price == 0.0:
-            tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
-            tp_distance = tp_pips * point
-            take_profit_price = (
-                entry_price + tp_distance
-                if action == "BUY"
-                else entry_price - tp_distance
-            )
-
-        # ========================= Validations broker =========================
+        # ========================= Ajustements broker & validations =========================
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
         if (
-            stop_loss_price == take_profit_price
-            or stop_loss_price == entry_price
-            or take_profit_price == entry_price
+            (stop_loss_price == take_profit_price)
+            or (stop_loss_price == entry_price)
+            or (take_profit_price == entry_price)
         ):
             raise TradeExecutionError("SL/TP identiques au prix d'entrée ou entre eux.")
 
+        # distances signées
         if action == "BUY":
             sl_dist = entry_price - stop_loss_price
             tp_dist = take_profit_price - entry_price
@@ -1277,6 +1369,7 @@ class TradeExecutor:
             sl_dist = stop_loss_price - entry_price
             tp_dist = entry_price - take_profit_price
 
+        # Respect du stops_level minimal
         if min_stop_distance_price > 0:
             if sl_dist < min_stop_distance_price:
                 stop_loss_price = (
@@ -1285,8 +1378,9 @@ class TradeExecutor:
                     else entry_price + min_stop_distance_price
                 )
                 self.logger.warning(
-                    f"SL ajusté (stops_level {min_stop_distance_points} pts) -> {stop_loss_price:.5f}"
+                    f"SL ajusté (stops_level {min_stop_distance_points} pts) -> {stop_loss_price:.10f}"
                 )
+                sl_dist = min_stop_distance_price
             if tp_dist < min_stop_distance_price:
                 take_profit_price = (
                     entry_price + min_stop_distance_price
@@ -1294,9 +1388,11 @@ class TradeExecutor:
                     else entry_price - min_stop_distance_price
                 )
                 self.logger.warning(
-                    f"TP ajusté (stops_level {min_stop_distance_points} pts) -> {take_profit_price:.5f}"
+                    f"TP ajusté (stops_level {min_stop_distance_points} pts) -> {take_profit_price:.10f}"
                 )
+                tp_dist = min_stop_distance_price
 
+        # Dernière sécurité : SL/TP pas trop proches
         if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
             raise TradeExecutionError(
                 "SL et TP trop proches après ajustement stops_level."

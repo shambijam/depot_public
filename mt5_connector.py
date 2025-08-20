@@ -804,6 +804,48 @@ class MT5Connector:
             self.logger.error(f"[MT5C] Erreur get_symbol_info_tick pour {symbol}: {e}")
             return None
 
+    def get_symbol_spread_points(self, symbol: str) -> float:
+        """
+        Retourne le spread courant en *points* pour `symbol`.
+        Stratégie:
+        1) si symbol_info.spread > 0, on l'utilise (c'est déjà en points chez MT5)
+        2) sinon fallback: (ask - bid) / point via symbol_info_tick
+        """
+        try:
+            sym = str(symbol).strip().upper()
+            info = self.mt5.symbol_info(sym)
+
+            # S'assurer que le symbole est visible si besoin
+            if info is None or getattr(info, "visible", True) is False:
+                try:
+                    self.mt5.symbol_select(sym, True)
+                    info = self.mt5.symbol_info(sym)
+                except Exception:
+                    pass
+
+            # 1) Spread natif MT5 (déjà en points)
+            if info and getattr(info, "spread", 0) and float(info.spread) > 0:
+                return float(info.spread)
+
+            # 2) Fallback: calcul ask-bid / point
+            tick = self.mt5.symbol_info_tick(sym)
+            if info and tick:
+                point = getattr(info, "point", 0.0)
+                if not point:
+                    # fallback point par digits
+                    digits = int(getattr(info, "digits", 5) or 5)
+                    point = 10 ** (-digits)
+                bid = getattr(tick, "bid", None)
+                ask = getattr(tick, "ask", None)
+                if bid is not None and ask is not None and point > 0:
+                    return float(round(abs(ask - bid) / point, 0))
+        except Exception as e:
+            self.logger.debug(
+                f"[get_symbol_spread_points] fallback failed for {symbol}: {e}"
+            )
+
+        return 0.0
+
     def order_send(self, request: Dict[str, Any]) -> Optional[Any]:
         """
         Envoie un ordre de trading (achat, vente, modification, clôture) au terminal MetaTrader 5.

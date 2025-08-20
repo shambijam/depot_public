@@ -1631,68 +1631,178 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         CORE construit la décision finale de trade basée sur les signaux.
+
+        Améliorations clés :
+        - Direction priorisant les signaux scalping (mtf_direction) si dispo
+        - SL/TP dynamiques avec ATR M5 et adaptation à la volatilité (prod_config.adaptation_settings)
+        - Ajustements par le spread réel (en pips) pour éviter TP trop court et risquer un R:R trompeur
+        - Champs obligatoires attendus par le TradeExecutor
         """
-        phase = signals.get("phase", "")
-        # Utiliser le prix de clôture de la dernière bougie comme prix d'entrée
-        current_price = signals.get("close", 0)
+        from datetime import datetime, timezone
+
+        phase = str(signals.get("phase", "") or "")
+        current_price = float(signals.get("close", 0) or 0)
 
         if not current_price or current_price <= 0:
             self.logger.error(f"❌ Prix actuel manquant ou invalide pour {asset}")
             return {}
 
-        # Déterminer la direction (logique simplifiée mais robuste)
-        action = None
+        # ---------- 1) Déterminer la direction ----------
+        strategy_name = str(config.get("strategy_name", "")).lower()
+        action: Optional[str] = None
 
-        # Priorité aux phases claires
-        if any(
-            keyword in phase.lower() for keyword in ["bullish", "up", "accumulation"]
-        ):
-            action = "BUY"
-        elif any(
-            keyword in phase.lower() for keyword in ["bearish", "down", "distribution"]
-        ):
-            action = "SELL"
-        else:
-            # Si la phase est 'no_clear_phase', on se base sur le momentum comme fallback
-            self.logger.warning(
-                f"Phase '{phase}' non conclusive. Tentative de décision basée sur le momentum."
-            )
-            volume_momentum = signals.get("volume_momentum", 0)
-            if volume_momentum > 0.1:  # Seuil pour éviter le bruit
+        # a) Si scalping, on privilégie la direction MTF calculée en amont
+        if strategy_name == "scalping":
+            mtf_dir = str(signals.get("mtf_direction", "none")).lower()
+            if mtf_dir == "up":
                 action = "BUY"
-            elif volume_momentum < -0.1:
+            elif mtf_dir == "down":
                 action = "SELL"
+
+        # b) Fallback par phase si pas de direction MTF exploitable
+        if action is None:
+            if any(k in phase.lower() for k in ["bullish", "up", "accumulation"]):
+                action = "BUY"
+            elif any(k in phase.lower() for k in ["bearish", "down", "distribution"]):
+                action = "SELL"
+            else:
+                # c) Dernier fallback: momentum (éviter de bloquer totalement)
+                volume_momentum = float(signals.get("volume_momentum", 0) or 0)
+                if volume_momentum > 0.1:
+                    action = "BUY"
+                elif volume_momentum < -0.1:
+                    action = "SELL"
 
         if not action:
             self.logger.warning(
-                f"❌ Direction de trade indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})"
+                f"❌ Direction indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})"
             )
             return {}
 
-        # Paramètres SL/TP depuis la configuration de la stratégie active
-        sl_pips = config.get("stop_loss_pips", 20)
-        tp_pips = config.get("take_profit_pips", 40)
-        magic_number = config.get("magic_number", 999999)
+        # ---------- 2) Paramètres de base / fallbacks ----------
+        # SL/TP définis dans la config de stratégie (fallbacks raisonnables)
+        base_sl_pips = float(config.get("stop_loss_pips", 20) or 20)
+        base_tp_pips = float(config.get("take_profit_pips", 40) or 40)
+        magic_number = int(config.get("magic_number", 999_999))
 
-        # ======================= LA CORRECTION CLÉ EST ICI =======================
-        # On s'assure que le dictionnaire final contient TOUTES les clés attendues
-        # par le TradeExecutor, notamment "action".
+        # Point (taille du "point" MT5) et conversion pips
+        point = float(signals.get("symbol_point_value", 0.0) or 0.0)
+        if point <= 0:
+            # fallback depuis prod_config (nom historique un peu confus mais utile ici)
+            point = float(
+                self.config_manager.get(
+                    "risk_management_settings.default_points_in_pip", 0.0001
+                )
+                or 0.0001
+            )
+
+        # Sur la majorité FX/Gold, 1 pip = 10 points (EURUSD: point=1e-5 → pip=1e-4 ; XAUUSD: point=0.01 → pip=0.1)
+        points_per_pip = 10.0
+        pip_size = point * points_per_pip  # valeur de 1 pip en prix absolu
+
+        # Spread réel en points → conversion en pips
+        spread_points = float(
+            signals.get("current_spread_points", signals.get("spread", 0)) or 0.0
+        )
+        try:
+            spread_points = float(spread_points)
+        except Exception:
+            spread_points = 0.0
+        spread_pips = max(0.0, spread_points / points_per_pip)
+
+        # ATR M5 (si disponible) pour calibrer SL minimal
+        atr_m5 = float(signals.get("atr_m5", 0.0) or 0.0)
+        atr_m5_pips = (atr_m5 / pip_size) if pip_size > 0 else 0.0
+
+        # Volatilité (%) pour choisir des presets adaptés depuis adaptation_settings
+        vol_pct = 0.0
+        if isinstance(signals.get("volatility_pct"), (int, float)):
+            vol_pct = float(signals["volatility_pct"])
+        elif isinstance(signals.get("volatility_percentage"), (int, float)):
+            vol_pct = float(signals["volatility_percentage"])
+        else:
+            vraw = signals.get("volatility")
+            if isinstance(vraw, (int, float)):
+                vraw = float(vraw)
+                vol_pct = vraw * 100.0 if vraw <= 1.0 else vraw
+
+        # ---------- 3) Adaptation SL/TP par régime de volatilité ----------
+        adapt = self.config_manager.get("adaptation_settings", {}) or {}
+        vol_th = adapt.get("volatility_thresholds") or {}
+        low_vol_th = float(vol_th.get("low", 0.05) or 0.05)
+        high_vol_th = float(vol_th.get("high", 0.5) or 0.5)
+
+        scalping_adapt = adapt.get("scalping") or {}
+        # Presets
+        sl_high = float(scalping_adapt.get("stop_loss_pips_high_vol", base_sl_pips))
+        tp_high = float(scalping_adapt.get("take_profit_pips_high_vol", base_tp_pips))
+        sl_low = float(scalping_adapt.get("stop_loss_pips_low_vol", base_sl_pips))
+        tp_low = float(scalping_adapt.get("take_profit_pips_low_vol", base_tp_pips))
+
+        if vol_pct >= high_vol_th:
+            sl_pips = max(sl_high, atr_m5_pips * 0.8)  # SL au moins proportionnel à ATR
+            tp_pips = tp_high
+            regime_tag = "high_vol"
+        elif vol_pct <= low_vol_th:
+            sl_pips = max(sl_low, atr_m5_pips * 0.6)
+            tp_pips = tp_low
+            regime_tag = "low_vol"
+        else:
+            sl_pips = max(base_sl_pips, atr_m5_pips * 0.7)
+            tp_pips = base_tp_pips
+            regime_tag = "normal_vol"
+
+        # ---------- 4) Ajustements par le spread ----------
+        # - Réduire légèrement le TP car le coût d'entrée sortant ronge le R:R
+        # - Ajouter un petit buffer au SL pour éviter des sorties immédiates
+        tp_pips = max(1.0, tp_pips - spread_pips)  # protège le R:R effectif
+        sl_pips = max(
+            1.0, sl_pips + spread_pips * 0.5
+        )  # évite SL tapé par le spread seul
+
+        # Optionnel : contrainte min de l'écart EMA M1 pour éviter les consolidations trop serrées
+        min_m1_ema_spread = float(
+            self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0)
+            or 0.0
+        )
+        m1_ema_spread = float(signals.get("m1_ema_spread", 0.0) or 0.0)
+        if strategy_name == "scalping" and m1_ema_spread > 0 and min_m1_ema_spread > 0:
+            # Si l'écart est très faible, on peut allonger un peu le SL (micro-bruit) ou réduire le TP (prise plus modeste)
+            if m1_ema_spread < min_m1_ema_spread * 1.2:
+                sl_pips = max(sl_pips, base_sl_pips * 1.1)
+
+        # ---------- 5) Construction de la décision ----------
+        timestamp = (
+            context.get("current_time_utc") or datetime.now(timezone.utc).isoformat()
+        )
         trade_decision = {
-            "action": action,  # <-- LA CLÉ MANQUANTE EST AJOUTÉE ICI !
+            "action": action,
             "asset": asset,
             "strategy_type": f"core_{config.get('strategy_name', 'decision')}",
             "entry_price": current_price,
-            "target_sl_pips": sl_pips,
-            "target_tp_pips": tp_pips,
-            "rule_name": f"core_decision_{phase}",
-            "confidence": signals.get("confidence_score", 0.0),
-            "timestamp": context.get("current_time_utc", datetime.now(UTC).isoformat()),
+            "target_sl_pips": float(round(sl_pips, 3)),
+            "target_tp_pips": float(round(tp_pips, 3)),
+            "rule_name": f"core_decision_{phase}_{regime_tag}",
+            "confidence": float(signals.get("confidence_score", 0.0) or 0.0),
+            "timestamp": timestamp,
             "magic_number": magic_number,
+            # Infos additionnelles utiles au TradeExecutor / logs
+            "meta": {
+                "point": point,
+                "points_per_pip": points_per_pip,
+                "spread_points": spread_points,
+                "spread_pips": spread_pips,
+                "atr_m5": atr_m5,
+                "atr_m5_pips": atr_m5_pips,
+                "volatility_pct": vol_pct,
+                "regime_tag": regime_tag,
+            },
         }
-        # =======================================================================
 
         self.logger.info(
-            f"✅ CORE construit trade {action} {asset} @ {current_price} (SL: {sl_pips}, TP: {tp_pips})"
+            f"✅ CORE construit trade {action} {asset} @ {current_price} | "
+            f"SL={trade_decision['target_sl_pips']} pips, TP={trade_decision['target_tp_pips']} pips "
+            f"(regime={regime_tag}, spread={spread_pips:.1f} pips, ATR_M5={atr_m5_pips:.1f} pips)"
         )
 
         return trade_decision
