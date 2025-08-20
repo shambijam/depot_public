@@ -5,7 +5,7 @@
     "EURUSD",
     "GBPUSD",
     "XAUUSD",
-    "NAS100"
+    "AUDUSD"
   ],
   "phase_detection": {
     "use_phase_observer": true,

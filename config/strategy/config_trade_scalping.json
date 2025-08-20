@@ -1,16 +1,16 @@
 {
   "strategy_name": "scalping",
-  "version": "2.1-tight",
+  "version": "2.1-tight-safe",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
     "XAUUSD",
-    "NAS100"
+    "AUDUSD"
   ],
   "phase_detection": {
     "use_phase_observer": true,
     "lookback_window": 200,
-    "volatility_threshold": 0.003,
+    "volatility_threshold": 0.006,
     "volume_zscore": 0.001,
     "overrides": {
       "require_range_detection": true,
@@ -18,29 +18,29 @@
     }
   },
   "magic_number": 51001,
-  "risk_per_trade_percent": 0.30,
+  "risk_per_trade_percent": 0.20,
   "stop_loss_pips": 30,
   "take_profit_pips": 60,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.003,
-      "max_spread_points": 80,
+      "min_volatility": 0.006,
+      "max_spread_points": 50,
       "min_volume_score": 0.01,
       "per_symbol_overrides": {
         "NAS100": {
-          "max_spread_points": 90,
-          "max_lot_size": 0.05
+          "max_spread_points": 70,
+          "max_lot_size": 0.04
         },
         "XAUUSD": {
-          "min_volatility": 0.008,
-          "max_spread_points": 80,
-          "max_lot_size": 0.1
+          "min_volatility": 0.010,
+          "max_spread_points": 45,
+          "max_lot_size": 0.08
         },
         "EURUSD": {
-          "max_lot_size": 0.2
+          "max_lot_size": 0.15
         },
         "GBPUSD": {
-          "max_lot_size": 0.2
+          "max_lot_size": 0.15
         }
       }
     },
@@ -70,10 +70,10 @@
       "allow_momentum_fallback": false
     },
     "risk": {
-      "max_trades_per_day": 6,
-      "cooldown_seconds_after_trade": 600,
-      "skip_asset_if_spread_over_points": 80,
-      "max_lot_size": 0.2
+      "max_trades_per_day": 3,
+      "cooldown_seconds_after_trade": 1200,
+      "skip_asset_if_spread_over_points": 50,
+      "max_lot_size": 0.15
     },
     "execution": {
       "order_type": "market",
@@ -89,7 +89,7 @@
       "ob_entry_requires": {
         "spread_ok": true,
         "mtf_alignment_min": 2,
-        "rr_min": 1.4
+        "rr_min": 1.5
       }
     }
   },
@@ -103,10 +103,9 @@
           "ob_detected"
         ],
         "phase_must_contain": [
-          "trend",
-          "range_accumulation"
+          "trend"
         ],
-        "min_confidence": 0.72
+        "min_confidence": 0.80
       },
       "order_type": "MARKET",
       "action_logic": {

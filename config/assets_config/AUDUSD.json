@@ -1,0 +1,198 @@
+{
+    "description": "Configuration optimisée AUDUSD avec profil de corrélation matières premières",
+    "symbol": "AUDUSD",
+    "type": "forex",
+    "profile": "institutionnel",
+    "last_updated": "2025-07-30",
+    "volatility": {
+        "expected_daily_range_percent": {
+            "value": 0.9,
+            "adaptive_range": {
+                "min": 0.7,
+                "max": 1.5,
+                "adjustment_period_days": 7
+            }
+        },
+        "max_allowed_spread_points": {
+            "base": 7,
+            "session_multipliers": {
+                "london_ny": 1.0,
+                "asian": 1.2,
+                "weekend": 2.5
+            },
+            "news_spike_tolerance": 20,
+            "volatility_adjustment": true
+        },
+        "min_tradable_range_points": {
+            "value": 12,
+            "dynamic_adjustment": true
+        }
+    },
+    "risk_management": {
+        "base_lot_size": 1.0,
+        "max_risk_per_trade_percent": {
+            "base": 0.9,
+            "scalping_mode": 0.6,
+            "high_conviction_setups": 1.4,
+            "adaptive_based_on_performance": true
+        },
+        "daily_loss_limit_percent": {
+            "base": 2.5,
+            "aggressive_mode": 3.0,
+            "conservative_mode": 2.0,
+            "dynamic_adjustment": true
+        },
+        "weekly_loss_limit_percent": {
+            "base": 6.0,
+            "max_escalation": 7.5
+        },
+        "performance_based_adjustments": {
+            "winning_streak_bonus": 0.3,
+            "losing_streak_reduction": 0.4,
+            "streak_threshold": 3
+        }
+    },
+    "strategy_toggles": {
+        "enable_scalping_mode": {
+            "value": true,
+            "time_conditions": [
+                "09:00-11:00",
+                "15:00-17:00"
+            ],
+            "volatility_threshold": 0.7
+        },
+        "enable_trailing_stop": {
+            "value": true,
+            "minimum_profit_threshold": 0.4
+        },
+        "enable_grid_in_range_only": true,
+        "auto_blacklist_high_spread_assets": {
+            "value": true,
+            "threshold_multiplier": 2.0,
+            "blacklist_duration_minutes": 15
+        },
+        "adaptive_lot_sizing": {
+            "enabled": true,
+            "based_on_volatility": true,
+            "based_on_account_performance": true
+        }
+    },
+    "smart_targets": {
+        "take_profit_multiplier": {
+            "base": 1.5,
+            "range_market": 1.2,
+            "trending_market": 2.0,
+            "high_volatility": 2.2
+        },
+        "stop_loss_multiplier": 1.0,
+        "trailing_stop_start_after_percent": {
+            "base": 0.5,
+            "adaptive": true,
+            "high_volatility": 0.7
+        },
+        "trailing_step_points": {
+            "base": 7,
+            "adaptive_to_atr": true,
+            "minimum": 4,
+            "maximum": 15
+        }
+    },
+    "temporal_context": {
+        "avoid_trading_hours": {
+            "list": [],
+            "dynamic_detection": {
+                "low_liquidity_threshold": 0.4,
+                "high_spread_multiplier": 2.5
+            }
+        },
+        "monitor_hours": {
+            "list": [
+                "09:00",
+                "15:00",
+                "18:00"
+            ],
+            "priority_levels": {
+                "09:00": "high",
+                "15:00": "high",
+                "18:00": "medium"
+            }
+        },
+        "session_preferences": {
+            "london": {
+                "priority": "high",
+                "risk_multiplier": 1.1
+            },
+            "new_york": {
+                "priority": "high",
+                "risk_multiplier": 1.1
+            },
+            "asian": {
+                "priority": "low",
+                "risk_multiplier": 0.6
+            }
+        }
+    },
+    "institutional_bias": {
+        "favor_fake_breakouts": {
+            "value": true,
+            "confidence_threshold": 0.65
+        },
+        "watch_liquidity_zones": {
+            "value": true,
+            "priority_weight": 1.3
+        },
+        "aggressive_entry_in_expansion": {
+            "value": false,
+            "override_conditions": {
+                "high_volume_confirmation": true,
+                "multi_timeframe_alignment": true
+            }
+        },
+        "conservative_entry_in_compression": {
+            "value": true,
+            "patience_multiplier": 1.4
+        }
+    },
+    "adaptive_features": {
+        "market_regime_detection": {
+            "enabled": true,
+            "regimes": [
+                "trending",
+                "ranging",
+                "volatile",
+                "quiet"
+            ],
+            "lookback_periods": [
+                20,
+                50,
+                200
+            ]
+        },
+        "performance_feedback_loop": {
+            "enabled": true,
+            "adjustment_frequency": "weekly",
+            "parameters_to_adjust": [
+                "risk_per_trade",
+                "take_profit_multiplier",
+                "trailing_parameters"
+            ]
+        }
+    },
+    "weighting": {
+        "base_weights": {
+            "breaker_block": 0.6,
+            "liquidity_zone": 0.85,
+            "fvg_zone": 0.5,
+            "micro_phase_signal": 0.55,
+            "market_structure_shift": 0.9,
+            "volume_spike": 0.8,
+            "smart_spread_indicator": 0.35
+        },
+        "adaptive_weighting": {
+            "enabled": true,
+            "based_on_performance": true,
+            "learning_rate": 0.05,
+            "minimum_sample_size": 50
+        }
+    }
+}

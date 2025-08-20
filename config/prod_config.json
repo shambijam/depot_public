@@ -90,7 +90,7 @@
       "EURUSD",
       "GBPUSD",
       "XAUUSD",
-      "NAS100"
+      "AUDUSD"
     ],
     "max_allowed_lot_size": 50.0
   },

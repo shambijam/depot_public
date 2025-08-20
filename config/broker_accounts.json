@@ -13,7 +13,7 @@
                 "EURUSD",
                 "GBPUSD",
                 "XAUUSD",
-                "NAS100"
+                "AUDUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
@@ -35,7 +35,7 @@
                 "EURUSD",
                 "GBPUSD",
                 "XAUUSD",
-                "NAS100"
+                "AUDUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
@@ -57,7 +57,7 @@
                 "EURUSD",
                 "GBPUSD",
                 "XAUUSD",
-                "NAS100"
+                "AUDUSD"
             ],
             "account_type": "RAW_SPREAD"
         }
