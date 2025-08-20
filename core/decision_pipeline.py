@@ -1982,7 +1982,8 @@ class DecisionPipeline:
             return actual_value == expected_value
         return False
 
-  def calculate_risk_parameters(
+
+def calculate_risk_parameters(
     self,
     context: Dict[str, Any],
     config: Dict[str, Any],
@@ -2089,10 +2090,12 @@ class DecisionPipeline:
 
     # --- [C5] Estimation du risque par lot : tick_value/tick_size si dispo, sinon contract_size ---
     tick_size = float(
-        asset_mt5_info.get("trade_tick_size", asset_mt5_info.get("tick_size", 0.0)) or 0.0
+        asset_mt5_info.get("trade_tick_size", asset_mt5_info.get("tick_size", 0.0))
+        or 0.0
     )
     tick_value = float(
-        asset_mt5_info.get("trade_tick_value", asset_mt5_info.get("tick_value", 0.0)) or 0.0
+        asset_mt5_info.get("trade_tick_value", asset_mt5_info.get("tick_value", 0.0))
+        or 0.0
     )
 
     calc_method = "contract"
@@ -2116,9 +2119,7 @@ class DecisionPipeline:
 
     min_lot_size = account_trade_settings.get(
         "min_lot",
-        self.config_manager.get(
-            "risk_management_settings.min_lot_size_fallback", 0.01
-        ),
+        self.config_manager.get("risk_management_settings.min_lot_size_fallback", 0.01),
     )
     max_lot_size = account_trade_settings.get(
         "max_lot",
