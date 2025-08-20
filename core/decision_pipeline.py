@@ -1678,6 +1678,11 @@ class DecisionPipeline:
                 f"❌ Direction indéterminée pour {asset} (Phase: {phase}, Momentum: {signals.get('volume_momentum', 0):.2f})"
             )
             return {}
+        # --- Validation finale de la direction (correction #3) ---
+        action = str(action).upper()
+        if action not in ("BUY", "SELL"):
+            self.logger.warning(f"❌ Action invalide déterminée: {action}")
+            return {}
 
         # ---------- 2) Paramètres de base / fallbacks ----------
         # SL/TP définis dans la config de stratégie (fallbacks raisonnables)
@@ -1977,130 +1982,182 @@ class DecisionPipeline:
             return actual_value == expected_value
         return False
 
-    def calculate_risk_parameters(
-        self,
-        context: Dict[str, Any],
-        config: Dict[str, Any],
-        trade_decision: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Calcule les paramètres de risque dynamiques (taille de lot, etc.) pour un trade.
-        Déplacée de ConfigManager.
-        """
-        self.logger.info(
-            f"Calcul des paramètres de risque pour {trade_decision.get('asset')}..."
+  def calculate_risk_parameters(
+    self,
+    context: Dict[str, Any],
+    config: Dict[str, Any],
+    trade_decision: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Calcule les paramètres de risque dynamiques (taille de lot, etc.) pour un trade.
+    Déplacée de ConfigManager.
+    """
+    self.logger.info(
+        f"Calcul des paramètres de risque pour {trade_decision.get('asset')}..."
+    )
+
+    equity = context.get("account_info", {}).get(
+        "equity",
+        self.config_manager.get(
+            "risk_management_settings.default_account_equity", 10000.0
+        ),
+    )
+    if equity <= 0:
+        self.logger.error(
+            f"Équité du compte ({equity}) non positive. Impossible de calculer le risque."
         )
+        return {}
 
-        equity = context.get("account_info", {}).get(
-            "equity",
-            self.config_manager.get(
-                "risk_management_settings.default_account_equity", 10000.0
-            ),
+    risk_per_trade_percent = config.get("risk_per_trade_percent", 1.0)
+    if not (0 < risk_per_trade_percent <= 100):
+        self.logger.error(
+            f"Pourcentage de risque par trade invalide ({risk_per_trade_percent}%)."
         )
-        if equity <= 0:
-            self.logger.error(
-                f"Équité du compte ({equity}) non positive. Impossible de calculer le risque."
-            )
-            return {}
+        return {}
+    max_dollar_risk = equity * (risk_per_trade_percent / 100)
 
-        risk_per_trade_percent = config.get("risk_per_trade_percent", 1.0)
-        if not (0 < risk_per_trade_percent <= 100):
-            self.logger.error(
-                f"Pourcentage de risque par trade invalide ({risk_per_trade_percent}%)."
-            )
-            return {}
-        max_dollar_risk = equity * (risk_per_trade_percent / 100)
+    asset = trade_decision.get("asset", "UNKNOWN_ASSET")
 
-        asset = trade_decision.get("asset", "UNKNOWN_ASSET")
+    active_broker_account = context.get("active_broker_account", {})
+    account_trade_settings = active_broker_account.get("trade_settings", {})
 
-        active_broker_account = context.get("active_broker_account", {})
-        account_trade_settings = active_broker_account.get("trade_settings", {})
+    asset_mt5_info = (
+        context.get("market_data", {}).get(asset, {}).get("symbol_info", {})
+    )
 
-        asset_mt5_info = (
-            context.get("market_data", {}).get(asset, {}).get("symbol_info", {})
-        )
-
-        point = asset_mt5_info.get(
+    # --- [C4] PIP → PRIX robuste (utilise meta.points_per_pip si présent) ---
+    meta = trade_decision.get("meta", {}) or {}
+    # point du symbole (taille du "point" MT5)
+    point = float(
+        asset_mt5_info.get(
             "point",
-            self.config_manager.get(
-                "risk_management_settings.default_points_in_pip", 0.00001
+            meta.get(
+                "point",
+                self.config_manager.get(
+                    "risk_management_settings.default_points_in_pip", 0.00001
+                ),
             ),
         )
-        contract_size = asset_mt5_info.get(
+        or 0.0
+    )
+    # nombre de points MT5 par pip (FX/Gold: souvent 10)
+    points_per_pip = float(
+        meta.get(
+            "points_per_pip",
+            self.config_manager.get(
+                "risk_management_settings.points_per_pip_default", 10.0
+            ),
+        )
+        or 10.0
+    )
+    pip_size = point * points_per_pip if point > 0 else 0.0
+
+    contract_size = float(
+        asset_mt5_info.get(
             "trade_contract_size",
             self.config_manager.get(
                 "risk_management_settings.default_contract_size", 100000
             ),
         )
+        or 0.0
+    )
 
-        if point <= 0 or contract_size <= 0:
-            self.logger.error(
-                f"Informations cruciales du symbole manquantes ou invalides (point={point}, contract_size={contract_size}) pour {asset}. Impossible de calculer le risque."
-            )
-            return {}
+    if point <= 0 or contract_size <= 0:
+        self.logger.error(
+            f"Informations cruciales du symbole manquantes ou invalides (point={point}, contract_size={contract_size}) pour {asset}. Impossible de calculer le risque."
+        )
+        return {}
 
-        target_sl_pips = trade_decision.get("target_sl_pips")
-        if target_sl_pips is None or target_sl_pips <= 0:
-            self.logger.error(
-                f"Stop loss invalide ou nul ({target_sl_pips} pips) pour {asset}. Impossible de calculer le volume. Ordre bloqué pour sécurité."
-            )
-            return {
-                "volume": 0.0,
-                "max_dollar_risk": 0.0,
-            }
+    target_sl_pips = trade_decision.get("target_sl_pips")
+    if target_sl_pips is None or target_sl_pips <= 0:
+        self.logger.error(
+            f"Stop loss invalide ou nul ({target_sl_pips} pips) pour {asset}. Impossible de calculer le volume. Ordre bloqué pour sécurité."
+        )
+        return {
+            "volume": 0.0,
+            "max_dollar_risk": 0.0,
+        }
 
-        sl_distance_in_price = target_sl_pips * point
+    # distance SL en prix -> UTILISE pip_size (et pas 'point')  [C4]
+    if pip_size <= 0:
+        # filet de sécurité : on dégrade proprement sur point (moins juste mais évite le crash)
+        self.logger.warning(
+            f"pip_size <= 0 détecté pour {asset}. Fallback sur 'point' (approx)."
+        )
+        pip_size = point
+    sl_distance_in_price = float(target_sl_pips) * float(pip_size)
+
+    # --- [C5] Estimation du risque par lot : tick_value/tick_size si dispo, sinon contract_size ---
+    tick_size = float(
+        asset_mt5_info.get("trade_tick_size", asset_mt5_info.get("tick_size", 0.0)) or 0.0
+    )
+    tick_value = float(
+        asset_mt5_info.get("trade_tick_value", asset_mt5_info.get("tick_value", 0.0)) or 0.0
+    )
+
+    calc_method = "contract"
+    if tick_size > 0 and tick_value > 0:
+        # plus universel (indices, métaux, CFD, etc.)
+        dollar_risk_per_lot_estimated = (sl_distance_in_price / tick_size) * tick_value
+        calc_method = "tick"
+    else:
+        # Forex classique (approx) : Δprix * contract_size
         dollar_risk_per_lot_estimated = sl_distance_in_price * contract_size
 
-        if dollar_risk_per_lot_estimated <= 0:
-            self.logger.warning(
-                f"Le risque par lot estimé est nul ou négatif pour {asset}. Utilisation du volume minimum pour cette estimation."
-            )
-            dollar_risk_per_lot_estimated = self.config_manager.get(
-                "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
-            )
-
-        calculated_lot_size = max_dollar_risk / dollar_risk_per_lot_estimated
-
-        min_lot_size = account_trade_settings.get(
-            "min_lot",
-            self.config_manager.get(
-                "risk_management_settings.min_lot_size_fallback", 0.01
-            ),
+    if dollar_risk_per_lot_estimated <= 0:
+        self.logger.warning(
+            f"Risque par lot estimé nul/négatif pour {asset} (méthode={calc_method}). Fallback min."
         )
-        max_lot_size = account_trade_settings.get(
-            "max_lot",
-            self.config_manager.get("global_safety.max_allowed_lot_size", 50.0),
-        )
-        lot_step = account_trade_settings.get(
-            "lot_step",
-            self.config_manager.get(
-                "risk_management_settings.default_lot_step_fallback", 0.01
-            ),
+        dollar_risk_per_lot_estimated = self.config_manager.get(
+            "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
         )
 
-        if lot_step <= 0:
-            self.logger.error(
-                f"Lot step invalide ou nul ({lot_step}) pour {asset}. Utilisation du fallback 0.01."
-            )
-            lot_step = 0.01
+    calculated_lot_size = max_dollar_risk / dollar_risk_per_lot_estimated
 
-        volume = max(min_lot_size, calculated_lot_size)
-        volume = min(max_lot_size, volume)
+    min_lot_size = account_trade_settings.get(
+        "min_lot",
+        self.config_manager.get(
+            "risk_management_settings.min_lot_size_fallback", 0.01
+        ),
+    )
+    max_lot_size = account_trade_settings.get(
+        "max_lot",
+        self.config_manager.get("global_safety.max_allowed_lot_size", 50.0),
+    )
+    lot_step = account_trade_settings.get(
+        "lot_step",
+        self.config_manager.get(
+            "risk_management_settings.default_lot_step_fallback", 0.01
+        ),
+    )
 
-        volume = round(volume / lot_step) * lot_step
-
-        lot_size_precision = (
-            len(str(lot_step).split(".")[-1]) if "." in str(lot_step) else 0
+    if lot_step <= 0:
+        self.logger.error(
+            f"Lot step invalide ou nul ({lot_step}) pour {asset}. Utilisation du fallback 0.01."
         )
-        final_volume = round(volume, lot_size_precision)
+        lot_step = 0.01
 
-        self.logger.info(
-            f"Calcul de risque pour {asset}: Equity=${equity:.2f}, Risque={risk_per_trade_percent}%, Max Dollar Risque=${max_dollar_risk:.2f}, Volume Final={final_volume:.{lot_size_precision}f} (Risque Estimé par Lot=${dollar_risk_per_lot_estimated:.2f})."
-        )
+    # bornage avant arrondi
+    volume = max(min_lot_size, min(max_lot_size, calculated_lot_size))
+    # arrondi au pas
+    volume = round(volume / lot_step) * lot_step
+    # re-borne APRÈS arrondi pour éviter de tomber sous min_lot
+    volume = max(min_lot_size, min(max_lot_size, volume))
 
-        return {
-            "volume": final_volume,
-            "max_dollar_risk": max_dollar_risk,
-            "risk_per_trade_percent": risk_per_trade_percent,
-        }
+    lot_size_precision = (
+        len(str(lot_step).split(".")[-1]) if "." in str(lot_step) else 0
+    )
+    final_volume = round(volume, lot_size_precision)
+
+    self.logger.info(
+        f"Calcul de risque pour {asset}: Equity=${equity:.2f}, Risque={risk_per_trade_percent}%, "
+        f"MaxRisk=${max_dollar_risk:.2f}, Méthode={calc_method}, "
+        f"pip_size={pip_size:.10f}, SLΔ={sl_distance_in_price:.10f}, "
+        f"Risk/lot=${dollar_risk_per_lot_estimated:.2f}, Volume={final_volume:.{lot_size_precision}f}."
+    )
+
+    return {
+        "volume": final_volume,
+        "max_dollar_risk": max_dollar_risk,
+        "risk_per_trade_percent": risk_per_trade_percent,
+    }

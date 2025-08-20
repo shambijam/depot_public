@@ -219,6 +219,135 @@ class MT5Connector:
             self.logger.info(
                 "MT5Connector initialisé avec succès, constantes MT5 chargées via ConfigManager."
             )
+            self._init_position_mappings()  # NEW
+
+            # --- AJOUT 1: mapping inverse & clôture marché ------------------------------
+
+    def _init_position_mappings(self):
+        """Appelé à la fin de __init__ pour sécuriser les constantes position."""
+        # si tu as des mappings 'position_types' dans la conf, on les prend, sinon fallback MT5
+        pos_map = self.mt5_mappings.get("position_types", {})
+        self.POSITION_TYPE_BUY = getattr(mt5, pos_map.get("BUY", "POSITION_TYPE_BUY"))
+        self.POSITION_TYPE_SELL = getattr(
+            mt5, pos_map.get("SELL", "POSITION_TYPE_SELL")
+        )
+
+        # inverse pour fermer: BUY -> SELL, SELL -> BUY
+        self.ORDER_TYPE_FROM_POSITION = {
+            self.POSITION_TYPE_BUY: self.ORDER_TYPE_SELL,
+            self.POSITION_TYPE_SELL: self.ORDER_TYPE_BUY,
+        }
+
+    def close_position_market(self, position) -> bool:
+        """
+        Ferme une position au marché en utilisant le type inverse:
+        - position BUY -> ordre SELL au Bid
+        - position SELL -> ordre BUY à l'Ask
+        """
+        try:
+            order_type = self.ORDER_TYPE_FROM_POSITION.get(position.type)
+            if order_type is None:
+                self.logger.error(
+                    "Mapping inverse manquant (position.type=%s). "
+                    "Vérifie mt5_mappings.position_types.",
+                    position.type,
+                )
+                return False
+
+            # tick & prix
+            tick = mt5.symbol_info_tick(position.symbol)
+            if not tick:
+                self.logger.error("Tick introuvable pour %s.", position.symbol)
+                return False
+            price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
+
+            req = {
+                "action": self.TRADE_ACTION_DEAL,
+                "symbol": position.symbol,
+                "type": order_type,
+                "position": position.ticket,  # très important pour clôture
+                "volume": position.volume,
+                "price": price,
+                "deviation": 50,
+                "magic": getattr(self, "magic", 0),
+                "comment": "SNIPER_X close market",
+                "type_filling": self.ORDER_FILLING_RETURN,
+                "type_time": self.ORDER_TIME_GTC,
+            }
+            res = mt5.order_send(req)
+            if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
+                self.logger.info(
+                    "Position #%s fermée (deal=%s).",
+                    position.ticket,
+                    getattr(res, "deal", "N/A"),
+                )
+                return True
+
+            self.logger.error(
+                "Échec fermeture #%s retcode=%s comment=%s",
+                position.ticket,
+                getattr(res, "retcode", "?"),
+                getattr(res, "comment", "?"),
+            )
+            return False
+        except Exception as e:
+            self.logger.exception("close_position_market: %s", e)
+            return False
+
+    # --- AJOUT 2: spread en pips robuste (jamais 'inf') -------------------------
+
+    def get_spread_pips(self, symbol: str) -> float:
+        """
+        Retourne le spread en *pips*:
+        - utilise symbol_info.spread si dispo (>0)
+        - sinon calcule (ask-bid)
+        - jamais 'inf' (retourne un grand nombre si indisponible)
+        """
+        info = mt5.symbol_info(symbol)
+        if not info:
+            return 1e9
+        # pip_size standard selon digits
+        digits = info.digits or 5
+        point = info.point or 1e-5
+        pip_size = (
+            0.0001
+            if digits in (4, 5)
+            else (0.01 if digits in (2, 3) else (point or 1e-5))
+        )
+
+        # 1) tenter via info.spread
+        if (info.spread or 0) > 0:
+            spread_price = info.spread * point
+            return spread_price / pip_size
+
+        # 2) fallback tick
+        tick = mt5.symbol_info_tick(symbol)
+        if tick and (tick.ask or 0) > 0 and (tick.bid or 0) > 0:
+            spread_price = abs(tick.ask - tick.bid)
+            if spread_price > 0:
+                return spread_price / pip_size
+
+        # 3) dernier recours: gros nombre pour forcer un "skip" propre
+        return 1e9
+
+    # --- AJOUT 3: wrapper order_calc_profit sans "unpack" -----------------------
+
+    def safe_order_calc_profit(
+        self, order_type, symbol, volume, price_open, price_close
+    ):
+        """
+        Retourne un float (ou None) au lieu de tenter de déballer un tuple.
+        Évite l'erreur 'cannot unpack non-iterable float object'.
+        """
+        try:
+            return mt5.order_calc_profit(
+                order_type, symbol, volume, price_open, price_close
+            )
+        except Exception as e:
+            self.logger.warning(
+                "order_calc_profit indisponible: %s. Fallback interne.", str(e)
+            )
+            return None
 
     def _resolve_timeframe(self, timeframe_str: str):
         """
