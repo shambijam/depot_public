@@ -269,7 +269,7 @@
       "require_m1_break": true,
       "max_spread_points": 50,
       "min_m1_ema_spread": 0.0,
-      "min_confidence": 0.55
+      "min_confidence": 0.35
     }
   },
   "adaptation_settings": {

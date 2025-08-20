@@ -527,17 +527,20 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
             return False
 
-        all_assets_market_data = {}
-        all_assets_trading_signals = {}
-        timeframe_str = base_config.get("data_collection", {}).get(
+        all_assets_market_data: Dict[str, pd.DataFrame] = {}
+        all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
+
+        timeframe_str = (base_config.get("data_collection", {}) or {}).get(
             "default_timeframe", "M1"
         )
-        bars_to_fetch = base_config.get("data_collection", {}).get(
-            "default_bars_count", 500
+        bars_to_fetch = int(
+            (base_config.get("data_collection", {}) or {}).get(
+                "default_bars_count", 500
+            )
         )
 
-        # 🔑 Correction : vérifier qu’on a bien l’historique suffisant avant de trader
-        min_required_bars = 50  # nombre minimum de bougies avant d’autoriser un trade
+        # 🔑 Vérifier un historique minimum avant d'autoriser l'actif
+        min_required_bars = 50  # nombre minimum de bougies
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
@@ -572,6 +575,7 @@ def run_single_pipeline_cycle(
                     rates_df.copy(), asset_symbol=asset
                 )
                 if annotated_rates_df is None or annotated_rates_df.empty:
+                    logger.warning(f"[{asset}] Annotated DF vide. Actif ignoré.")
                     continue
 
                 latest_signals_row = annotated_rates_df.iloc[-1]
@@ -579,14 +583,68 @@ def run_single_pipeline_cycle(
                     f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
                 )
 
-                # ✅ Correction: appel sans parenthèse superflue, et avec asset/connector
-                all_assets_trading_signals[asset] = _build_asset_trading_signals(
-                    latest_signals_row,
-                    symbol_info_mt5,
-                    asset=asset,
-                    mt5_connector=mt5_connector,
+                # Builder des signaux de l'actif (fonction utilitaire locale au run_bot)
+                signals = (
+                    _build_asset_trading_signals(
+                        latest_signals_row,
+                        symbol_info_mt5,
+                        asset=asset,
+                        mt5_connector=mt5_connector,
+                    )
+                    or {}
                 )
 
+                # -- Injection d'un close fiable si manquant/<=0
+                try:
+                    close_val = signals.get("close", 0.0)
+                    if not isinstance(close_val, (int, float)) or close_val <= 0:
+                        signals["close"] = float(annotated_rates_df["close"].iloc[-1])
+                except Exception:
+                    # Worst-case: ne bloque pas le cycle
+                    pass
+
+                # -- Injection d'un spread en points ROBUSTE (évite les "inf")
+                try:
+                    spread_pts = None
+                    if hasattr(mt5_connector, "get_symbol_spread_points"):
+                        spread_pts = mt5_connector.get_symbol_spread_points(asset)
+
+                    if not isinstance(spread_pts, (int, float)) or spread_pts <= 0:
+                        # fallback 1: attribut spread du symbole s'il est >0
+                        sp_attr = (
+                            float(getattr(symbol_info_mt5, "spread", 0) or 0.0)
+                            if symbol_info_mt5
+                            else 0.0
+                        )
+                        if sp_attr > 0:
+                            spread_pts = sp_attr
+                        else:
+                            # fallback 2: recalcul via ask/bid / point
+                            point = (
+                                float(getattr(symbol_info_mt5, "point", 0.0) or 0.0)
+                                if symbol_info_mt5
+                                else 0.0
+                            )
+                            if point > 0 and hasattr(
+                                mt5_connector, "get_current_price"
+                            ):
+                                ask = mt5_connector.get_current_price(asset, "BUY")
+                                bid = mt5_connector.get_current_price(asset, "SELL")
+                                if (
+                                    isinstance(ask, (int, float))
+                                    and isinstance(bid, (int, float))
+                                    and ask > bid > 0
+                                ):
+                                    spread_pts = (ask - bid) / point
+
+                    if not isinstance(spread_pts, (int, float)) or spread_pts <= 0:
+                        spread_pts = float("inf")
+
+                    signals["current_spread_points"] = float(spread_pts)
+                except Exception:
+                    signals["current_spread_points"] = float("inf")
+
+                all_assets_trading_signals[asset] = signals
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
                 )
@@ -629,7 +687,6 @@ def run_single_pipeline_cycle(
             print(
                 f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}"
             )
-
         except Exception as e:
             print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")
             logger.error(f"Erreur construction contexte: {e}", exc_info=True)
@@ -654,11 +711,12 @@ def run_single_pipeline_cycle(
             print("   ❌ AUCUNE DÉCISION (dict vide)")
         print("=" * 60 + "\n")
 
-        # ✅ Correction: sécuriser l'accès même si decision_package == None
+        # ✅ Sécuriser l'accès même si decision_package == None
         decision_package = decision_package or {}
-        active_config = decision_package.get("config_used", base_config)
-        trade_decision = decision_package.get("final_decision", {})
+        active_config = decision_package.get("config_used", base_config) or base_config
+        trade_decision = decision_package.get("final_decision", {}) or {}
 
+        # Sorties partielles si positions ouvertes
         current_open_positions = trade_executor.get_open_positions()
         if current_open_positions:
             logger.info(
@@ -676,11 +734,18 @@ def run_single_pipeline_cycle(
                 )
                 trade_executed_successfully = True
 
-        if daily_trade_count >= active_config.get("max_trades_per_day", 999):
+        # Limite journalière
+        if daily_trade_count >= int(
+            (active_config or {}).get("max_trades_per_day", 999)
+        ):
             logger.warning("Limite de trades quotidiens atteinte.")
             return trade_executed_successfully
 
-        if trade_decision and trade_decision.get("action") in ["BUY", "SELL"]:
+        # Exécution d'entrée
+        if trade_decision and str(trade_decision.get("action", "")).upper() in [
+            "BUY",
+            "SELL",
+        ]:
             logger.info(
                 f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}"
             )
@@ -688,7 +753,7 @@ def run_single_pipeline_cycle(
             if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
         else:
-            regime = decision_package.get("context", {}).get(
+            regime = (decision_package.get("context", {}) or {}).get(
                 "current_market_regime", "inconnu"
             )
             logger.info(f"Aucune opportunité. Régime: {regime}.")
@@ -885,7 +950,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                ai_decision,
+                decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
