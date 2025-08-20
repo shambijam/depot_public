@@ -22,11 +22,13 @@ import uuid
 import json
 import numpy as np
 import pandas as pd
+import MetaTrader5 as mt5
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 from datetime import datetime, timedelta, UTC
 from pydantic import ValidationError
 from data_models.phase_observer_models import PhaseObserverRowModel
+
 
 try:
     from core.config_manager import ConfigManager
