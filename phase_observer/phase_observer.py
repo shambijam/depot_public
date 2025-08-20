@@ -1869,38 +1869,44 @@ class PhaseObserver:
         Acquisition données MT5 optimisée avec gestion d'erreurs robuste
         """
         try:
-            # Mapping timeframes MT5
+            # ✅ Mapping correct des timeframes MT5 avec constantes officielles
+            import MetaTrader5 as mt5
+
             tf_mapping = {
-                "M1": 1,
-                "M5": 5,
-                "M15": 15,
-                "M30": 30,
-                "H1": 60,
-                "H4": 240,
-                "D1": 1440,
+                "M1": mt5.TIMEFRAME_M1,
+                "M5": mt5.TIMEFRAME_M5,
+                "M15": mt5.TIMEFRAME_M15,
+                "M30": mt5.TIMEFRAME_M30,
+                "H1": mt5.TIMEFRAME_H1,
+                "H4": mt5.TIMEFRAME_H4,
+                "D1": mt5.TIMEFRAME_D1,
             }
 
-            mt5_timeframe = tf_mapping.get(timeframe)
+            mt5_timeframe = tf_mapping.get(timeframe.upper())
             if not mt5_timeframe:
                 raise ValueError(f"Timeframe {timeframe} non supporté")
 
-            # Paramètres acquisition
+            # Paramètres acquisition (lookback)
             lookback_bars = config.get(f"{timeframe.lower()}_config", {}).get(
                 "lookback_window", 500
             )
 
-            # Appel MT5Connector (en supposant qu'il existe dans votre architecture)
+            # Appel MT5Connector
             if hasattr(self.config_manager, "mt5_connector"):
                 mt5_data = self.config_manager.mt5_connector.get_rates(
-                    asset, mt5_timeframe, lookback_bars
+                    asset, timeframe, lookback_bars
                 )
 
                 if mt5_data is not None and not mt5_data.empty:
-                    # Nettoyage données
+                    # Nettoyage des données
                     cleaned_data = self._clean_dataframe(mt5_data)
                     return cleaned_data
+                else:
+                    self.logger.warning(
+                        f"[{asset}] Données vides ou None pour TF={timeframe}, lookback={lookback_bars}"
+                    )
 
-            # Fallback simulation pour développement
+            # ⚠️ Fallback simulation (utile en DEV uniquement)
             self.logger.warning(f"MT5Connector indisponible, simulation {timeframe}")
             return self._generate_simulation_data(asset, timeframe, lookback_bars)
 
