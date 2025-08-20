@@ -32,7 +32,7 @@
           "max_lot_size": 0.04
         },
         "XAUUSD": {
-          "min_volatility": 0.010,
+          "min_volatility": 0.004,
           "max_spread_points": 45,
           "max_lot_size": 0.08
         },
