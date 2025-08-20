@@ -281,59 +281,13 @@
     "min_dollar_risk_per_lot_fallback": 1.0,
     "default_lot_step_fallback": 0.01
   },
-  "news_settings": {
-    "detection_window": {
-      "before_event_minutes": 15,
-      "after_event_minutes": 60,
-      "cooldown_after_event_minutes": 120
-    },
-    "impact_levels": {
-      "low": 1,
-      "medium": 2,
-      "high": 3
-    },
-    "impact_duration_minutes": 30,
-    "min_impact_for_cooldown": 3
-  },
-  "alert_settings": {
-    "global_blacklist_channel": "telegram_critical"
-  },
-  "backtest_simulation": {
-    "num_trades_divisor": 100,
-    "strategy_metrics": {
-      "scalping": {
-        "profit_multiplier": 10,
-        "drawdown_multiplier": 0.1,
-        "sharpe_ratio": 1.2
-      },
-      "swing": {
-        "profit_multiplier": 5,
-        "drawdown_multiplier": 0.2,
-        "sharpe_ratio": 0.8
-      },
-      "default": {
-        "profit_multiplier": 2,
-        "drawdown_multiplier": 0.15,
-        "sharpe_ratio": 0.5
-      }
-    },
-    "ma_short": 10,
-    "ma_long": 20,
-    "annualization_factor": 252
-  },
-  "backtest_evaluation": {
-    "sharpe_thresholds": {
-      "poor_performance": 0.5,
-      "suboptimal_ai_intervention": 0.7
-    },
-    "thresholds": {
-      "high_drawdown": 10.0
-    },
-    "risk_reduction_factor": 0.9
-  },
-  "data_collection": {
-    "default_timeframe": "M1",
-    "default_bars_count": 500
+  "smart_sl_tp_settings": {
+    "sl_placement_method": "SWING",
+    "tp_placement_method": "RR",
+    "sl_swing_lookback_period": 10,
+    "sl_buffer_pips": 2,
+    "tp_rr_ratio": 1.5,
+    "tp_liquidity_buffer_pips": 0.5
   },
   "trade_executor_settings": {
     "audit_trail_file_name": "trade_audit_trail.log",
@@ -376,6 +330,23 @@
     "report_title_template": "# Rapport Quotidien des Trades - {date}",
     "default_slippage": 20
   },
+  "news_settings": {
+    "detection_window": {
+      "before_event_minutes": 15,
+      "after_event_minutes": 60,
+      "cooldown_after_event_minutes": 120
+    },
+    "impact_levels": {
+      "low": 1,
+      "medium": 2,
+      "high": 3
+    },
+    "impact_duration_minutes": 30,
+    "min_impact_for_cooldown": 3
+  },
+  "alert_settings": {
+    "global_blacklist_channel": "telegram_critical"
+  },
   "mecano_settings": {
     "mock_ai_delay_seconds": 1.5,
     "ai_prompt_settings": {
@@ -405,69 +376,8 @@
       "\t"
     ]
   },
-  "mt5_mappings": {
-    "order_types": {
-      "BUY": "ORDER_TYPE_BUY",
-      "SELL": "ORDER_TYPE_SELL",
-      "BUY_LIMIT": "ORDER_TYPE_BUY_LIMIT",
-      "SELL_LIMIT": "ORDER_TYPE_SELL_LIMIT",
-      "BUY_STOP": "ORDER_TYPE_BUY_STOP",
-      "SELL_STOP": "ORDER_TYPE_SELL_STOP"
-    },
-    "position_types": {
-      "BUY": "POSITION_TYPE_BUY",
-      "SELL": "POSITION_TYPE_SELL"
-    },
-    "trade_actions": {
-      "DEAL": "TRADE_ACTION_DEAL",
-      "PENDING": "TRADE_ACTION_PENDING",
-      "SLTP": "TRADE_ACTION_SLTP",
-      "MODIFY": "TRADE_ACTION_MODIFY",
-      "REMOVE": "TRADE_ACTION_REMOVE",
-      "CLOSE_BY": "TRADE_ACTION_CLOSE_BY"
-    },
-    "order_filling_policies": {
-      "FOK": "ORDER_FILLING_FOK",
-      "IOC": "ORDER_FILLING_IOC",
-      "RETURN": "ORDER_FILLING_RETURN"
-    },
-    "order_time_flags": {
-      "GTC": "ORDER_TIME_GTC",
-      "DAY": "ORDER_TIME_DAY",
-      "SPECIFIED": "ORDER_TIME_SPECIFIED"
-    },
-    "trade_retcodes": {
-      "RETCODE_DONE": "TRADE_RETCODE_DONE",
-      "RETCODE_REJECT": "TRADE_RETCODE_REJECT",
-      "RETCODE_REQUOTE": "TRADE_RETCODE_REQUOTE",
-      "RETCODE_TIMEOUT": "TRADE_RETCODE_TIMEOUT"
-    },
-    "trade_retcode_actions": {
-      "10009": "SUCCESS",
-      "10004": "RETRY",
-      "10006": "FAIL",
-      "10007": "FAIL",
-      "10010": "RETRY",
-      "10011": "RETRY",
-      "10012": "RETRY",
-      "10013": "FAIL",
-      "10014": "FAIL",
-      "10015": "FAIL",
-      "10016": "FAIL",
-      "10017": "FAIL",
-      "10018": "FAIL",
-      "10019": "FAIL",
-      "10020": "RETRY",
-      "10021": "RETRY"
-    },
-    "timeframes": {
-      "M1": "TIMEFRAME_M1",
-      "M5": "TIMEFRAME_M5",
-      "M15": "TIMEFRAME_M15",
-      "H1": "TIMEFRAME_H1",
-      "H4": "TIMEFRAME_H4",
-      "D1": "TIMEFRAME_D1"
-    }
+  "account_settings": {
+    "currency": "USD"
   },
   "telegram": {
     "enabled": false,
@@ -482,69 +392,6 @@
       "telegram_summary": false,
       "telegram_error": false,
       "telegram_info": false
-    },
-    "immediate_alert_types": [
-      "telegram_critical",
-      "telegram_manual_override"
-    ],
-    "trade_channels": {
-      "executed": "telegram_trade_confirmed",
-      "failed": "telegram_error",
-      "pending_manual_approval": "telegram_manual_override"
-    },
-    "parse_mode": "Markdown",
-    "request_timeout_seconds": 15,
-    "summary_interval_minutes": 8,
-    "summary_max_queued_messages": 10,
-    "templates": {
-      "new_suggestion": "💡 Nouvelle Suggestion: {type} - {summary} | Priorité: {priority:.2f}",
-      "pending_suggestion_reminder": "⏰ Rappel: Suggestion en attente - {summary} ({age} jours). Priorité: {priority:.2f}",
-      "compliance_alert": "🚨 Alerte Conformité: {issue} | Item: {item} | Priorité: {priority:.2f} | Action: {action}",
-      "trade_confirmed": "🚀 Trade Confirmé: Symbole: {symbol} | Action: {action} | Volume: {volume} lots | Stratégie: {strategy}",
-      "trade_closed": "📊 Trade Clôturé: Symbole: {symbol} | P&L: ${pnl:.2f} ({status}) | Stratégie: {strategy}",
-      "manual_override": "⚠️ **INTERVENTION MANUELLE REQUISE** ⚠️\nRaison: {reason}\nTrade: {action} {asset} {volume} lots\nStratégie: {strategy_type} | Confiance: {confidence_score:.2f}",
-      "summary_header": "--- **Résumé Périodique SNIPER_X** ---\n`{time}` | Compte: `{account_id}` ({broker})",
-      "trade_execution": {
-        "executed": "✅ Ordre exécuté: {action_str} {volume} {symbol} @ {price}",
-        "failed": "❌ Échec ordre: {action_str} {symbol}. Raison: {message}. Code: {retcode}",
-        "pending_manual_approval": "✋ Ordre en attente: {action_str} {volume} {symbol}. Volume élevé. Approuver manuellement."
-      }
     }
-  },
-  "account_settings": {
-    "currency": "USD"
-  },
-  "config_import_settings": {
-    "url_timeout_seconds": 10
-  },
-  "ManualAction": {
-    "TRADE_APPROVED": "TRADE_APPROVED",
-    "TRADE_REJECTED": "TRADE_REJECTED"
-  },
-  "trading": {
-    "order_comment_template": "SNIPER_X|{strategy}|{order_type}",
-    "comment_max_length": 31,
-    "asset_universe": [],
-    "assets": []
-  },
-  "execution_policy": {
-    "type_filling": "FOK",
-    "max_deviation_points": 20
-  },
-  "order_expiration_policy": {
-    "type": "GTC"
-  },
-  "smart_sl_tp_settings": {
-    "sl_placement_method": "SWING",
-    "tp_placement_method": "RR",
-    "sl_swing_lookback_period": 10,
-    "sl_buffer_pips": 2,
-    "tp_rr_ratio": 1.5,
-    "tp_liquidity_buffer_pips": 0.5
-  },
-  "assets": {
-    "asset_universe": [],
-    "universe": []
-  },
-  "enabled_assets": []
+  }
 }

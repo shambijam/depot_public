@@ -631,11 +631,11 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[bool, str]:
         """
-        Vérifications pré-trade rapides avant toute construction/émission d'ordre.
-        Renvoie (True, "") si OK, sinon (False, "raison").
+        Pré‑checks d’exécution + FILTRES DE QUALITÉ paramétrables.
+        Ici on peut *désactiver le fallback momentum* côté exécution et refuser les phases risquées.
         """
 
-        # --- Helpers locaux ---
+        # --- Helpers ---
         def _first_non_empty(*vals):
             for v in vals:
                 if isinstance(v, str) and v.strip():
@@ -654,7 +654,6 @@ class TradeExecutor:
             return mapping.get(a, "")
 
         def _mt5_is_connected() -> bool:
-            # is_connected peut être un bool OU une méthode selon l’implémentation du connector
             attr = getattr(self.mt5_connector, "is_connected", None)
             try:
                 if callable(attr):
@@ -671,7 +670,7 @@ class TradeExecutor:
                 except Exception:
                     pass
 
-        # 1) Normalisation action + asset
+        # 1) Action & symbole
         action_raw = _first_non_empty(
             trade_decision.get("final_action"),
             trade_decision.get("selected_action"),
@@ -682,10 +681,7 @@ class TradeExecutor:
         )
         action = _normalize_action(action_raw)
         if not action:
-            return (
-                False,
-                f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT).",
-            )
+            return False, f"Action invalide: '{action_raw}' (BUY/SELL/CLOSE)."
 
         raw_symbol = _first_non_empty(
             trade_decision.get("asset"),
@@ -693,37 +689,34 @@ class TradeExecutor:
             trade_decision.get("instrument"),
         )
         if not raw_symbol or raw_symbol.strip().upper() == "UNKNOWN":
-            return False, "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
+            return False, "Asset manquant ou UNKNOWN."
         raw_symbol = raw_symbol.strip().upper()
 
-        # 2) Whitelist stratégie (si fournie)
+        # 2) Whitelist
         allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
         if allowed and raw_symbol not in allowed:
-            return (
-                False,
-                f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist active).",
-            )
+            return False, f"Asset '{raw_symbol}' non autorisé par la stratégie."
 
         # 3) Mapping broker
         broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
             raw_symbol, raw_symbol
         )
         if not broker_symbol or str(broker_symbol).strip().upper() == "UNKNOWN":
-            return False, f"Mapping broker invalide pour l'asset '{raw_symbol}'."
+            return False, f"Mapping broker invalide pour '{raw_symbol}'."
         broker_symbol = str(broker_symbol).strip().upper()
 
-        # 4) Connexion MT5 active ?
+        # 4) Connexion MT5
         if not _mt5_is_connected():
             _mt5_reconnect_if_needed()
             if not _mt5_is_connected():
                 return False, "Connexion MT5 indisponible."
 
-        # 5) Symbole MT5 existant ?
+        # 5) Symbole existant
         symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
         if not symbol_info or not getattr(symbol_info, "name", None):
-            return False, f"Symbole MT5 invalide ou introuvable ({broker_symbol})."
+            return False, f"Symbole MT5 invalide ({broker_symbol})."
 
-        # 6) Positions max du compte
+        # 6) Positions max
         active_acc = market_context.get("active_broker_account", {})
         max_pos = active_acc.get("trade_settings", {}).get("max_open_positions", 999)
         current_positions = market_context.get("open_positions", [])
@@ -733,7 +726,7 @@ class TradeExecutor:
         ):
             return False, f"Max positions atteint ({len(current_positions)}/{max_pos})."
 
-        # 7) Spread / contraintes symbol (optionnel via config)
+        # 7) Spread limite (absolue)
         exec_policy = (
             active_config.get("execution_policy", {})
             if isinstance(active_config, dict)
@@ -741,7 +734,7 @@ class TradeExecutor:
         )
         max_spread_points = exec_policy.get("max_spread_points")
         tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
-        if tick and hasattr(symbol_info, "point") and hasattr(symbol_info, "spread"):
+        if tick and hasattr(symbol_info, "spread") and hasattr(symbol_info, "point"):
             if (
                 isinstance(max_spread_points, (int, float))
                 and symbol_info.spread
@@ -750,14 +743,71 @@ class TradeExecutor:
                 if symbol_info.spread > max_spread_points:
                     return (
                         False,
-                        f"Spread trop élevé: {symbol_info.spread} > {max_spread_points} points.",
+                        f"Spread trop élevé: {symbol_info.spread} > {max_spread_points}.",
                     )
 
-        # 8) Si action == CLOSE, pas d’autres checks de prix
-        if action == "CLOSE":
-            return True, ""
+        # 8) Qualité d'exécution (filtres paramétrables)
+        q = self.config_manager.get("execution_quality_filters", {})
+        # 8.1 Bloquer certaines phases de marché
+        blocked_phases = set(map(str, q.get("blocked_phases", [])))
+        current_phase = str(
+            market_context.get("phase", "")
+            or market_context.get("market_phase", "")
+            or ""
+        ).lower()
+        if blocked_phases and current_phase in {p.lower() for p in blocked_phases}:
+            return False, f"Phase '{current_phase}' bloquée par la politique."
 
-        # 9) Prix courant doit être disponible et > 0
+        # 8.2 Désactiver explicitement le fallback momentum en range
+        disable_momentum_fallback = bool(
+            q.get("disable_momentum_fallback_in_range", True)
+        )
+        used_rule = str(trade_decision.get("rule_name", "")).lower()
+        if (
+            disable_momentum_fallback
+            and ("range" in current_phase)
+            and ("momentum" in used_rule)
+        ):
+            return False, "Fallback momentum désactivé en phase range."
+
+        # 8.3 Volatilité/ATR min-max (si le DF est présent)
+        import pandas as pd, numpy as np
+
+        def _get_atr(df, period: int):
+            if df is None or len(df) < period + 2:
+                return float("nan")
+            high, low, close = (
+                df["high"].astype(float),
+                df["low"].astype(float),
+                df["close"].astype(float),
+            )
+            prev_close = close.shift(1)
+            tr = np.maximum.reduce(
+                [
+                    (high - low).abs(),
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs(),
+                ]
+            )
+            return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
+
+        vol_rule = q.get("atr_volatility_filter", {})
+        if vol_rule.get("enabled", False):
+            df = (market_context.get("market_data") or {}).get(broker_symbol) or (
+                market_context.get("market_data") or {}
+            ).get(raw_symbol)
+            df = df if isinstance(df, pd.DataFrame) else None
+            period = int(vol_rule.get("period", 14))
+            min_atr = float(vol_rule.get("min_atr", 0.0))
+            max_atr = float(vol_rule.get("max_atr", 1e9))
+            atr_val = _get_atr(df, period)
+            if atr_val == atr_val:  # not NaN
+                if atr_val < min_atr:
+                    return False, f"ATR trop faible ({atr_val:.5f} < {min_atr})."
+                if atr_val > max_atr:
+                    return False, f"ATR trop élevé ({atr_val:.5f} > {max_atr})."
+
+        # 9) Prix dispo
         price = self.mt5_connector.get_current_price(broker_symbol, action)
         if not price or price <= 0:
             return False, f"Prix de marché indisponible pour {broker_symbol}."
@@ -1066,15 +1116,15 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[float, float]:
         """
-        Calcule les prix SL/TP en utilisant des logiques institutionnelles :
-        - SL basé sur swing/structure ou fallback en pips
-        - TP basé sur Risk/Reward ou niveaux de liquidité
-        - Validation stricte avec le stops_level du broker
-        - Arrondi final aux décimales du symbole
+        SL/TP institutionnel avec 3 méthodes de SL (SWING / ATR / PIPS) et 3 TP (RR / ATR_MULTIPLE / PIPS).
+        - Respecte trade_stops_level du broker
+        - Arrondit aux 'digits' du symbole
+        - Tombe en PIPS si les données manquent
         """
         import pandas as pd
+        import numpy as np
 
-        self.logger.info("Calcul du SL/TP institutionnel...")
+        self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
 
         # --- Normalisation action ---
         action_raw = str(trade_decision.get("action", "")).strip().upper()
@@ -1086,55 +1136,87 @@ class TradeExecutor:
         if point <= 0:
             raise TradeExecutionError("symbol_info.point invalide (<=0).")
 
-        # --- Récupération stops_level robuste (en points) ---
-        # MetaTrader5 expose souvent 'trade_stops_level'. On tolère 0 (broker sans contrainte).
         min_stop_distance_points = int(
             getattr(symbol_info, "trade_stops_level", 0) or 0
         )
         min_stop_distance_price = min_stop_distance_points * point
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
 
         # --- Paramètres ---
         settings = config.get("smart_sl_tp_settings", {}) or {}
-        sl_method = str(settings.get("sl_placement_method", "PIPS")).upper()
-        tp_method = str(settings.get("tp_placement_method", "PIPS")).upper()
+        sl_method = str(
+            settings.get("sl_placement_method", "PIPS")
+        ).upper()  # PIPS|SWING|ATR
+        tp_method = str(
+            settings.get("tp_placement_method", "RR")
+        ).upper()  # RR|ATR_MULTIPLE|PIPS
+
+        # --- Récup du DF pour SWING/ATR (si dispo) ---
+        symbol = str(trade_decision.get("asset", "")).upper()
+        md = (market_context.get("market_data") or {}).get(symbol)
+        rates_df = md if isinstance(md, pd.DataFrame) else None
+
+        # --- Helper ATR ---
+        def _compute_atr(df: pd.DataFrame, period: int) -> float:
+            if df is None or len(df) < period + 2:
+                return float("nan")
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            close = df["close"].astype(float)
+            prev_close = close.shift(1)
+            tr = np.maximum.reduce(
+                [
+                    (high - low).abs(),
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs(),
+                ]
+            )
+            atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
+            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
         # ========================= SL =========================
         stop_loss_price = 0.0
+
         if sl_method == "SWING":
             lookback = int(settings.get("sl_swing_lookback_period", 10) or 10)
             buffer_pips = float(settings.get("sl_buffer_pips", 2) or 2.0)
-
-            symbol = str(trade_decision.get("asset", "")).upper()
-            md = (market_context.get("market_data") or {}).get(symbol)
-
-            # md peut être un DataFrame (PhaseObserver), ou parfois un dict enrichi.
-            rates_df = md if isinstance(md, pd.DataFrame) else None
-
             if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
                 self.logger.warning(
-                    f"Pas assez de données ({len(rates_df) if isinstance(rates_df, pd.DataFrame) else 0}) "
-                    f"pour SL SWING (période={lookback}). Fallback PIPS."
+                    f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
                 )
+                sl_method = "ATR"  # on tente ATR avant PIPS
+
+        if sl_method == "ATR":
+            atr_period = int(settings.get("sl_atr_period", 14) or 14)
+            atr_mult = float(settings.get("sl_atr_multiplier", 1.2) or 1.2)
+            atr = _compute_atr(rates_df, atr_period)
+            if not (atr == atr and atr > 0):  # NaN safe
+                self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
                 sl_method = "PIPS"
             else:
-                recent = rates_df.tail(lookback)
-                buffer_price = buffer_pips * point
+                sl_distance = atr_mult * atr
                 if action == "BUY":
-                    swing_low = float(recent["low"].min())
-                    stop_loss_price = swing_low - buffer_price
+                    stop_loss_price = entry_price - sl_distance
                 else:
-                    swing_high = float(recent["high"].max())
-                    stop_loss_price = swing_high + buffer_price
-                self.logger.debug(f"SL SWING calculé à {stop_loss_price:.5f}")
+                    stop_loss_price = entry_price + sl_distance
 
-        if sl_method == "PIPS":
+        if sl_method == "SWING" and stop_loss_price == 0.0:
+            recent = rates_df.tail(lookback)
+            buffer_price = buffer_pips * point
+            if action == "BUY":
+                swing_low = float(recent["low"].min())
+                stop_loss_price = swing_low - buffer_price
+            else:
+                swing_high = float(recent["high"].max())
+                stop_loss_price = swing_high + buffer_price
+
+        if sl_method == "PIPS" and stop_loss_price == 0.0:
             sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
             sl_distance = sl_pips * point
             if action == "BUY":
                 stop_loss_price = entry_price - sl_distance
             else:
                 stop_loss_price = entry_price + sl_distance
-            self.logger.debug(f"SL PIPS calculé à {stop_loss_price:.5f}")
 
         # ========================= TP =========================
         take_profit_price = 0.0
@@ -1150,48 +1232,25 @@ class TradeExecutor:
                 if action == "BUY"
                 else entry_price - tp_distance_price
             )
-            self.logger.debug(
-                f"TP RR calculé à {take_profit_price:.5f} (ratio {rr_ratio})"
+
+        elif tp_method == "ATR_MULTIPLE":
+            atr_period = int(
+                settings.get("tp_atr_period", settings.get("sl_atr_period", 14)) or 14
             )
-
-        elif tp_method == "LIQUIDITY_LEVEL":
-            symbol = str(trade_decision.get("asset", "")).upper()
-            md = (market_context.get("market_data") or {}).get(symbol)
-
-            # Si md est un dict enrichi (et pas un DataFrame), chercher la clé attendue
-            nearest_liquidity_details = None
-            if isinstance(md, dict):
-                nearest_liquidity_details = md.get("nearest_liquidity_level_details")
-            # Si md est un DataFrame, on n’a pas de structure 'nearest_liquidity_level_details'
-            # -> fallback PIPS
-            if not nearest_liquidity_details:
-                self.logger.warning(
-                    "Pas de niveau liquidité disponible, fallback PIPS."
-                )
+            atr_mult = float(settings.get("tp_atr_multiplier", 2.0) or 2.0)
+            atr = _compute_atr(rates_df, atr_period)
+            if not (atr == atr and atr > 0):
+                self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
                 tp_method = "PIPS"
             else:
-                level = nearest_liquidity_details.get("level")
-                if level is None:
-                    self.logger.warning(
-                        "Niveau liquidité incomplet (level manquant), fallback PIPS."
-                    )
-                    tp_method = "PIPS"
-                else:
-                    buffer_tp_price = (
-                        float(settings.get("tp_liquidity_buffer_pips", 0.5) or 0.5)
-                        * point
-                    )
-                    if action == "BUY" and level > entry_price:
-                        take_profit_price = float(level) - buffer_tp_price
-                    elif action == "SELL" and level < entry_price:
-                        take_profit_price = float(level) + buffer_tp_price
-                    else:
-                        self.logger.warning(
-                            "Niveau liquidité non pertinent, fallback PIPS."
-                        )
-                        tp_method = "PIPS"
+                tp_distance = atr_mult * atr
+                take_profit_price = (
+                    entry_price + tp_distance
+                    if action == "BUY"
+                    else entry_price - tp_distance
+                )
 
-        if tp_method == "PIPS":
+        if tp_method == "PIPS" and take_profit_price == 0.0:
             tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
             tp_distance = tp_pips * point
             take_profit_price = (
@@ -1199,13 +1258,11 @@ class TradeExecutor:
                 if action == "BUY"
                 else entry_price - tp_distance
             )
-            self.logger.debug(f"TP PIPS calculé à {take_profit_price:.5f}")
 
         # ========================= Validations broker =========================
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
-        # SL/TP doivent être distincts de entry_price et l’un de l’autre
         if (
             stop_loss_price == take_profit_price
             or stop_loss_price == entry_price
@@ -1213,47 +1270,40 @@ class TradeExecutor:
         ):
             raise TradeExecutionError("SL/TP identiques au prix d'entrée ou entre eux.")
 
-        # Distances par rapport à l'entrée (sens BUY/SELL)
         if action == "BUY":
-            sl_distance_from_entry = entry_price - stop_loss_price
-            tp_distance_from_entry = take_profit_price - entry_price
+            sl_dist = entry_price - stop_loss_price
+            tp_dist = take_profit_price - entry_price
         else:
-            sl_distance_from_entry = stop_loss_price - entry_price
-            tp_distance_from_entry = entry_price - take_profit_price
+            sl_dist = stop_loss_price - entry_price
+            tp_dist = entry_price - take_profit_price
 
-        # Respect du stops_level (si > 0)
         if min_stop_distance_price > 0:
-            if sl_distance_from_entry < min_stop_distance_price:
+            if sl_dist < min_stop_distance_price:
                 stop_loss_price = (
                     entry_price - min_stop_distance_price
                     if action == "BUY"
                     else entry_price + min_stop_distance_price
                 )
                 self.logger.warning(
-                    f"SL ajusté pour respecter stops_level ({min_stop_distance_points} pts) -> {stop_loss_price:.5f}"
+                    f"SL ajusté (stops_level {min_stop_distance_points} pts) -> {stop_loss_price:.5f}"
                 )
-            if tp_distance_from_entry < min_stop_distance_price:
+            if tp_dist < min_stop_distance_price:
                 take_profit_price = (
                     entry_price + min_stop_distance_price
                     if action == "BUY"
                     else entry_price - min_stop_distance_price
                 )
                 self.logger.warning(
-                    f"TP ajusté pour respecter stops_level ({min_stop_distance_points} pts) -> {take_profit_price:.5f}"
+                    f"TP ajusté (stops_level {min_stop_distance_points} pts) -> {take_profit_price:.5f}"
                 )
 
-        # Après ajustements, vérifier qu’ils ne sont pas quasi-identiques
         if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
             raise TradeExecutionError(
                 "SL et TP trop proches après ajustement stops_level."
             )
 
-        # ========================= Arrondi final =========================
-        digits = int(getattr(symbol_info, "digits", 0) or 0)
-        if digits >= 0:
-            stop_loss_price = round(float(stop_loss_price), digits)
-            take_profit_price = round(float(take_profit_price), digits)
-
+        stop_loss_price = round(float(stop_loss_price), digits)
+        take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
 
     def _calculate_loss_per_lot_fallback(
@@ -1330,22 +1380,22 @@ class TradeExecutor:
         account_trade_settings: Dict[str, Any],
     ) -> float:
         """
-        Calcule le volume à partir d'un risque en $, en tentant d'abord MT5.order_calc_profit,
-        puis en fallback interne. Contraint le volume par volume_min/step/max du symbole
-        (on n'utilise PAS digits_volume).
+        Sizing par risque $:
+        - essaie mt5.order_calc_profit (précis)
+        - sinon tick_value/tick_size, sinon heuristique
+        - clamp par min/max/step et par garde-fous
+        - contrôle marge (order_calc_margin si dispo) pour éviter 10019 'No money'
         """
         import math
 
-        # --- Normalisation action ---
         action = str(trade_decision.get("action", "")).upper()
         if action == "LONG":
             action = "BUY"
-        elif action == "SHORT":
+        if action == "SHORT":
             action = "SELL"
         if action not in ("BUY", "SELL"):
             raise TradeExecutionError(f"Action invalide pour sizing: '{action}'")
 
-        # --- Equity & risque ---
         equity = context.get("account_info", {}).get("equity")
         if not isinstance(equity, (int, float)) or equity <= 0:
             raise TradeExecutionError("Équité du compte non positive ou manquante.")
@@ -1359,22 +1409,24 @@ class TradeExecutor:
             risk_pct = float(risk_pct)
         except Exception:
             risk_pct = 0.35
+
         max_dollar_risk = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk <= 0:
             raise TradeExecutionError("Risque en $ nul/invalide pour le sizing.")
 
-        # --- Estimation perte par 1 lot ---
+        # Estimation perte par 1 lot
         per_lot_loss_usd = None
-        mt5 = getattr(self, "mt5", None) or getattr(self.mt5_connector, "mt5", None)
-        if mt5:
+        mt5_mod = getattr(self, "mt5", None) or getattr(self.mt5_connector, "mt5", None)
+        if mt5_mod:
             try:
-                order_type_buy = getattr(mt5, "ORDER_TYPE_BUY", 0)
-                order_type_sell = getattr(mt5, "ORDER_TYPE_SELL", 1)
-                order_type = order_type_buy if action == "BUY" else order_type_sell
-                _ret, profit = mt5.order_calc_profit(
+                order_type = (
+                    getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
+                    if action == "BUY"
+                    else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
+                )
+                _ret, profit = mt5_mod.order_calc_profit(
                     order_type, symbol_info.name, 1.0, entry_price, sl_price
                 )
-                # _ret peut être un bool ou un code; on ne se fie qu’au profit
                 per_lot_loss_usd = abs(float(profit))
             except Exception as e:
                 self.logger.warning(
@@ -1383,7 +1435,6 @@ class TradeExecutor:
                 per_lot_loss_usd = None
 
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
-            # Fallback interne via tick_size/tick_value ou point
             point = float(getattr(symbol_info, "point", 0.0) or 0.0)
             tick_value = float(getattr(symbol_info, "tick_value", 0.0) or 0.0)
             tick_size = float(getattr(symbol_info, "tick_size", 0.0) or 0.0)
@@ -1398,7 +1449,6 @@ class TradeExecutor:
                 nb_points = price_diff / point
                 per_lot_loss_usd = nb_points * tick_value
             else:
-                # Dernier recours heuristique
                 _ts = tick_size if tick_size else (point if point else 0.01)
                 _tv = tick_value if tick_value else 1.0
                 per_lot_loss_usd = (price_diff / _ts) * _tv
@@ -1411,7 +1461,7 @@ class TradeExecutor:
 
         raw_volume = max_dollar_risk / per_lot_loss_usd
 
-        # --- Contraintes de volume symbole & compte ---
+        # Contraintes symbole/compte
         vol_min_sym = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
         vol_max_sym = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
         vol_step_sym = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
@@ -1426,7 +1476,7 @@ class TradeExecutor:
             account_trade_settings.get("lot_step", vol_step_sym) or vol_step_sym
         )
 
-        # Sécurité absolue
+        # Garde-fou absolu
         max_volume_safety = float(
             self.config_manager.get(
                 "trade_executor_settings.max_absolute_volume_safety", 50.0
@@ -1438,22 +1488,49 @@ class TradeExecutor:
             )
             raw_volume = max_volume_safety
 
-        # Clamp puis arrondi au plus grand step
+        # Clamp & arrondi
         volume = max(min_lot_account, vol_min_sym, raw_volume)
         volume = min(max_lot_account, vol_max_sym, volume)
-        effective_step = max(lot_step_account, vol_step_sym)
-        if effective_step <= 0:
-            effective_step = vol_step_sym if vol_step_sym > 0 else 0.01
+        effective_step = max(lot_step_account, vol_step_sym) or 0.01
         steps = math.floor(volume / effective_step)
         volume = round(steps * effective_step, 8)
-
-        # Safeguards finaux
-        if volume < max(min_lot_account, vol_min_sym):
-            volume = max(min_lot_account, vol_min_sym)
-        if volume > min(max_lot_account, vol_max_sym):
-            volume = min(max_lot_account, vol_max_sym)
+        volume = max(min_lot_account, volume)
+        volume = min(max_lot_account, volume)
         if volume <= 0:
             raise TradeExecutionError(f"Volume calculé invalide ({volume}).")
+
+        # Contrôle de marge pour éviter 10019 (si l'API est dispo)
+        try:
+            if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
+                order_type = (
+                    getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
+                    if action == "BUY"
+                    else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
+                )
+                _ret, margin_required = mt5_mod.order_calc_margin(
+                    order_type, symbol_info.name, volume, entry_price
+                )
+                free_margin = context.get("account_info", {}).get("margin_free")
+                if _ret and free_margin is not None and margin_required is not None:
+                    # Si pas assez de marge, réduire au plus proche volume autorisé
+                    if margin_required > free_margin:
+                        ratio = max(free_margin / margin_required, 0.0)
+                        reduced = max(min_lot_account, vol_min_sym, ratio * volume)
+                        steps = math.floor(reduced / effective_step)
+                        reduced = round(steps * effective_step, 8)
+                        if reduced < min_lot_account:
+                            raise TradeExecutionError(
+                                "Marge libre insuffisante pour le volume minimum."
+                            )
+                        self.logger.warning(
+                            f"Marge insuffisante: besoin ~{margin_required:.2f}, libre {free_margin:.2f}. "
+                            f"Volume réduit {volume:.4f} -> {reduced:.4f}"
+                        )
+                        volume = reduced
+        except Exception as e:
+            self.logger.warning(
+                f"Contrôle marge non appliqué (non supporté / erreur): {e}"
+            )
 
         actual_risk_dollars = volume * per_lot_loss_usd
         tol = float(
