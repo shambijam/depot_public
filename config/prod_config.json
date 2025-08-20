@@ -60,6 +60,38 @@
     "backup_dir": "output/backups/",
     "ai_audit": "config/ai_audit/"
   },
+  "timeframe_mapping": {
+    "M1": {
+      "mt5_name": "TIMEFRAME_M1",
+      "minutes": 1,
+      "bars_min": 600,
+      "order": 1
+    },
+    "M5": {
+      "mt5_name": "TIMEFRAME_M5",
+      "minutes": 5,
+      "bars_min": 360,
+      "order": 2
+    },
+    "M15": {
+      "mt5_name": "TIMEFRAME_M15",
+      "minutes": 15,
+      "bars_min": 240,
+      "order": 3
+    },
+    "M30": {
+      "mt5_name": "TIMEFRAME_M30",
+      "minutes": 30,
+      "bars_min": 200,
+      "order": 4
+    },
+    "H1": {
+      "mt5_name": "TIMEFRAME_H1",
+      "minutes": 60,
+      "bars_min": 200,
+      "order": 5
+    }
+  },
   "strategies": {
     "default_strategy": "scalping",
     "config_mapping": {

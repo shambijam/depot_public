@@ -1868,49 +1868,81 @@ class PhaseObserver:
         self, asset: str, timeframe: str, config: Dict
     ) -> Optional[pd.DataFrame]:
         """
-        Acquisition données MT5 optimisée avec gestion d'erreurs robuste
+        Acquisition données MT5 optimisée avec gestion d'erreurs robuste.
+
+        ⚙️ Utilise d'abord le mapping dynamique défini dans prod_config.json -> "timeframe_mapping",
+        sinon fallback sur le mapping interne (mt5.TIMEFRAME_*).
+        Garantit un lookback minimum via "bars_min" du mapping JSON (s'il existe), en plus du
+        lookback paramétré par TF (ex: m1_config.lookback_window).
         """
         try:
-            # ✅ Mapping correct des timeframes MT5 avec constantes officielles
-            import MetaTrader5 as mt5
+            tf_key = str(timeframe).upper()
 
-            tf_mapping = {
-                "M1": mt5.TIMEFRAME_M1,
-                "M5": mt5.TIMEFRAME_M5,
-                "M15": mt5.TIMEFRAME_M15,
-                "M30": mt5.TIMEFRAME_M30,
-                "H1": mt5.TIMEFRAME_H1,
-                "H4": mt5.TIMEFRAME_H4,
-                "D1": mt5.TIMEFRAME_D1,
-            }
+            # 1) Mapping dynamique depuis la config (prod_config.json)
+            cfg_map = {}
+            try:
+                if hasattr(self, "config_manager") and self.config_manager:
+                    cfg_map = self.config_manager.get("timeframe_mapping", {}) or {}
+            except Exception:
+                cfg_map = {}
 
-            mt5_timeframe = tf_mapping.get(timeframe.upper())
+            mt5_timeframe = None
+            bars_min = 0
+
+            if tf_key in cfg_map:
+                mt5_name = str(cfg_map[tf_key].get("mt5_name", "")).strip()
+                bars_min = int(cfg_map[tf_key].get("bars_min", 0) or 0)
+                if mt5_name:
+                    mt5_timeframe = getattr(mt5, mt5_name, None)
+
+            # 2) Fallback mapping interne si le JSON n'est pas utilisable
+            if mt5_timeframe is None:
+                fallback_tf_mapping = {
+                    "M1": mt5.TIMEFRAME_M1,
+                    "M5": mt5.TIMEFRAME_M5,
+                    "M15": mt5.TIMEFRAME_M15,
+                    "M30": mt5.TIMEFRAME_M30,
+                    "H1": mt5.TIMEFRAME_H1,
+                    "H4": mt5.TIMEFRAME_H4,
+                    "D1": mt5.TIMEFRAME_D1,
+                }
+                mt5_timeframe = fallback_tf_mapping.get(tf_key)
+
             if not mt5_timeframe:
                 raise ValueError(f"Timeframe {timeframe} non supporté")
 
-            # Paramètres acquisition (lookback)
-            lookback_bars = config.get(f"{timeframe.lower()}_config", {}).get(
-                "lookback_window", 500
-            )
+            # 3) Détermination du lookback
+            lookback_key = f"{tf_key.lower()}_config"
+            tf_cfg = config.get(lookback_key, {}) if isinstance(config, dict) else {}
+            lookback_bars = int(tf_cfg.get("lookback_window", 500) or 500)
 
-            # Appel MT5Connector
-            if hasattr(self.config_manager, "mt5_connector"):
+            # Respecte un plancher "bars_min" venant du JSON
+            if bars_min and bars_min > 0:
+                lookback_bars = max(lookback_bars, bars_min)
+
+            # 4) Appel MT5Connector
+            if (
+                hasattr(self.config_manager, "mt5_connector")
+                and self.config_manager.mt5_connector
+            ):
                 mt5_data = self.config_manager.mt5_connector.get_rates(
-                    asset, timeframe, lookback_bars
+                    asset, tf_key, lookback_bars
                 )
-
                 if mt5_data is not None and not mt5_data.empty:
-                    # Nettoyage des données
                     cleaned_data = self._clean_dataframe(mt5_data)
+                    # (facultatif) log debug pour vérifier la source utilisée
+                    self.logger.debug(
+                        f"[TFMAP] {asset} {tf_key} -> lookback={lookback_bars} | source={'JSON' if tf_key in cfg_map else 'fallback'}"
+                    )
                     return cleaned_data
                 else:
                     self.logger.warning(
-                        f"[{asset}] Données vides ou None pour TF={timeframe}, lookback={lookback_bars}"
+                        f"[{asset}] Données vides ou None pour TF={tf_key}, lookback={lookback_bars}"
                     )
 
-            # ⚠️ Fallback simulation (utile en DEV uniquement)
-            self.logger.warning(f"MT5Connector indisponible, simulation {timeframe}")
-            return self._generate_simulation_data(asset, timeframe, lookback_bars)
+            # 5) Fallback simulation (utile DEV)
+            self.logger.warning(f"MT5Connector indisponible, simulation {tf_key}")
+            return self._generate_simulation_data(asset, tf_key, lookback_bars)
 
         except Exception as e:
             self.logger.error(f"Erreur acquisition {asset} {timeframe}: {e}")
