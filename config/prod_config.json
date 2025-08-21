@@ -125,8 +125,8 @@
     "global_allowed_symbols": [
       "EURUSD",
       "GBPUSD",
-      "XAUUSD",
-      "AUDUSD"
+      "USDJPY",
+      "USDCHF"
     ],
     "max_allowed_lot_size": 50.0
   },
@@ -369,9 +369,9 @@
     "fat_finger_check": {
       "enabled": true,
       "max_absolute_volume_for_asset": {
-        "EURUSD": 5.0,
-        "GBPUSD": 5.0,
-        "XAUUSD": 2.0
+        "EURUSD": 3.0,
+        "GBPUSD": 3.0,
+        "USDJPY": 3.0
       },
       "enable_dynamic_check": true,
       "avg_volume_lookback": 20,

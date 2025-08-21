@@ -8,6 +8,7 @@ import logging  # Garder l'import de logging
 import json
 import csv
 import sys
+import math
 import re
 import MetaTrader5 as mt5
 from collections import namedtuple
@@ -237,6 +238,40 @@ class MT5Connector:
             self.POSITION_TYPE_BUY: self.ORDER_TYPE_SELL,
             self.POSITION_TYPE_SELL: self.ORDER_TYPE_BUY,
         }
+
+    def _pip_size(self, symbol: str) -> float:
+        s = (symbol or "").upper()
+        if s.endswith("JPY"):
+            return 0.01
+        # Métaux / indices courants en décimales "centimes"
+        if s.startswith(("XAU", "XAG", "XPT", "XPD")):
+            return 0.01
+        return 0.0001  # majors FX
+
+    def get_spread_pips(self, symbol: str) -> float:
+        """Retourne le spread en pips avec garde-fous."""
+        info = self.mt5.symbol_info(symbol)
+        tick = self.mt5.symbol_info_tick(symbol)
+
+        point = (getattr(info, "point", 0.0) or 0.0) if info else 0.0
+        bid = getattr(tick, "bid", 0.0) or 0.0
+        ask = getattr(tick, "ask", 0.0) or 0.0
+
+        # 1) calcul direct depuis le tick si possible
+        if ask > 0.0 and bid > 0.0 and ask >= bid:
+            spread_price = ask - bid
+        else:
+            # 2) fallback: spread en "points" du symbole
+            raw_points = getattr(info, "spread", 0) or 0
+            spread_price = raw_points * point
+
+        pip = self._pip_size(symbol)
+        sp = (spread_price / pip) if pip > 0 else float("inf")
+
+        if not math.isfinite(sp) or sp < 0:
+            sp = 1e9  # sentinelle très haute si data foireuse
+
+        return sp
 
     def close_position_market(self, position) -> bool:
         """

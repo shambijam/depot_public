@@ -83,6 +83,11 @@ class DecisionPipeline:
             )
         self.logger.info("PhaseObserver attaché au DecisionPipeline.")
 
+    def get_max_spread_pips(cfg_scalping: dict, symbol: str) -> float:
+        v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
+        # Autorise un dict par symbole, sinon valeur unique
+        return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
+
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
     ) -> Dict[str, Any]:

@@ -4,8 +4,8 @@
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
-    "XAUUSD",
-    "AUDUSD"
+    "USDJPY",
+    "USDCHF"
   ],
   "phase_detection": {
     "use_phase_observer": true,
@@ -27,7 +27,7 @@
       "max_spread_points": 50,
       "min_volume_score": 0.01,
       "per_symbol_overrides": {
-        "XAUUSD": {
+        "EURJPY": {
           "min_volatility": 0.010,
           "max_spread_points": 50,
           "max_lot_size": 0.08
@@ -42,7 +42,7 @@
           "min_volatility": 0.0045,
           "max_spread_points": 45
         },
-        "AUDUSD": {
+        "USDCHF": {
           "max_lot_size": 0.15,
           "min_volatility": 0.0035,
           "max_spread_points": 40
