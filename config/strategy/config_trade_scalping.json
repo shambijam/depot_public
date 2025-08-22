@@ -23,29 +23,29 @@
   "take_profit_pips": 14,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.006,
-      "max_spread_points": 15,
+      "min_volatility": 0.0005,
+      "max_spread_points": 10,
       "min_volume_score": 0.01,
       "per_symbol_overrides": {
-        "EURJPY": {
-          "min_volatility": 0.01,
-          "max_spread_points": 18,
+        "USDJPY": {
+          "min_volatility": 0.0007,
+          "max_spread_points": 10,
           "max_lot_size": 0.08
         },
         "EURUSD": {
           "max_lot_size": 0.15,
-          "min_volatility": 0.004,
-          "max_spread_points": 15
+          "min_volatility": 0.0004,
+          "max_spread_points": 10
         },
         "GBPUSD": {
           "max_lot_size": 0.15,
-          "min_volatility": 0.0045,
-          "max_spread_points": 18
+          "min_volatility": 0.00045,
+          "max_spread_points": 10
         },
         "USDCHF": {
           "max_lot_size": 0.15,
-          "min_volatility": 0.0035,
-          "max_spread_points": 15
+          "min_volatility": 0.00035,
+          "max_spread_points": 10
         }
       }
     },
@@ -78,11 +78,11 @@
     "risk": {
       "max_trades_per_day": 3,
       "cooldown_seconds_after_trade": 180,
-      "skip_asset_if_spread_over_points": 15,
+      "skip_asset_if_spread_over_points": 10,
       "max_lot_size": 0.15
     },
     "execution": {
-      "order_type": "market",
+      "order_type": "MARKET",
       "slippage_points": 3,
       "max_parallel_positions": 1,
       "entry_on_close_only": true,
@@ -117,6 +117,26 @@
       "action_logic": {
         "BUY": "enter if bullish confluence and spread <= max_spread_points",
         "SELL": "enter if bearish confluence and spread <= max_spread_points"
+      }
+    },
+    {
+      "name": "range_scalping_microbreak",
+      "priority": 2,
+      "conditions": {
+        "signal_must_contain": [
+          "ob_detected"
+        ],
+        "phase_must_contain": [
+          "range",
+          "range_retail",
+          "range_low_volatility"
+        ],
+        "min_confidence": 0.3
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter on bullish micro-break with OB confluence and spread <= max_spread_points",
+        "SELL": "enter on bearish micro-break with OB confluence and spread <= max_spread_points"
       }
     }
   ],

@@ -1,9 +1,20 @@
 {
-    "description": "Configuration optimisée USDJPY avec profil de valeur refuge",
+    "description": "Configuration USDJPY — corrigée et optimisée pour scalping et range à faible volatilité",
     "symbol": "USDJPY",
     "type": "forex",
     "profile": "institutionnel",
-    "last_updated": "2025-07-30",
+    "schema_version": "2.2",
+    "compatible_with": [
+        "SNIPER_X >=2.0"
+    ],
+    "last_updated": "2025-08-22",
+    "market_specs": {
+        "digits": 3,
+        "point": 0.001,
+        "pip": 0.01,
+        "pip_in_points": 10,
+        "units_per_lot": 100000
+    },
     "volatility": {
         "expected_daily_range_percent": {
             "value": 0.7,
@@ -11,20 +22,21 @@
                 "min": 0.5,
                 "max": 1.0,
                 "adjustment_period_days": 7
-            }
+            },
+            "source": "ATR14"
         },
         "max_allowed_spread_points": {
-            "base": 6,
-            "session_multipliers": {
-                "london_ny": 1.0,
-                "asian": 1.8,
-                "weekend": 2.2
+            "base": 10,
+            "session_caps": {
+                "london_ny": 10,
+                "asian": 12,
+                "weekend": 15
             },
             "news_spike_tolerance": 18,
             "volatility_adjustment": true
         },
         "min_tradable_range_points": {
-            "value": 8,
+            "value": 10,
             "dynamic_adjustment": true
         }
     },
@@ -77,7 +89,25 @@
             "based_on_account_performance": true
         }
     },
+    "entry_rules": {
+        "scalping": {
+            "require_mtf_alignment": [
+                "M5",
+                "M15"
+            ],
+            "min_confidence": 0.45,
+            "min_atr_points": 8,
+            "break_condition": "m1_break_in_trend_direction",
+            "max_spread_points": {
+                "base": 10,
+                "asian": 12,
+                "when_katana_signal": 12
+            }
+        }
+    },
     "smart_targets": {
+        "tp_sl_basis": "atr14",
+        "atr_period": 14,
         "take_profit_multiplier": {
             "base": 1.2,
             "range_market": 0.9,
@@ -99,7 +129,10 @@
     },
     "temporal_context": {
         "avoid_trading_hours": {
-            "list": [],
+            "list": [
+                "21:58-22:05",
+                "00:00-00:10"
+            ],
             "dynamic_detection": {
                 "low_liquidity_threshold": 0.25,
                 "high_spread_multiplier": 1.8
@@ -109,12 +142,14 @@
             "list": [
                 "08:30",
                 "14:00",
-                "22:00"
+                "22:00",
+                "23:00"
             ],
             "priority_levels": {
                 "08:30": "high",
                 "14:00": "high",
-                "22:00": "low"
+                "22:00": "low",
+                "23:00": "medium"
             }
         },
         "session_preferences": {
@@ -131,6 +166,22 @@
                 "risk_multiplier": 0.8
             }
         }
+    },
+    "economic_news_filter": {
+        "enabled": true,
+        "block_on": [
+            "high"
+        ],
+        "currencies": [
+            "USD",
+            "JPY"
+        ],
+        "lookahead_minutes": 30,
+        "cooldown_minutes": 20,
+        "whitelist_events": [
+            "FOMC Statement",
+            "BoJ Policy Rate"
+        ]
     },
     "institutional_bias": {
         "favor_fake_breakouts": {
@@ -178,15 +229,29 @@
             ]
         }
     },
+    "strategy_overrides": {
+        "scalping": {
+            "allow_if_special_signals": [
+                "ob_detected"
+            ],
+            "max_spread_points": 12,
+            "min_confidence": 0.45,
+            "require_mtf_alignment": [
+                "M5",
+                "M15"
+            ],
+            "min_tradable_range_points": 10
+        }
+    },
     "weighting": {
         "base_weights": {
             "breaker_block": 0.7,
             "liquidity_zone": 0.95,
             "fvg_zone": 0.6,
             "micro_phase_signal": 0.65,
-            "market_structure_shift": 1.1,
+            "market_structure_shift": 1.2,
             "volume_spike": 0.75,
-            "smart_spread_indicator": 0.45
+            "smart_spread_indicator": 0.55
         },
         "adaptive_weighting": {
             "enabled": true,
