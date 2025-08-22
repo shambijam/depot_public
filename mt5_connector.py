@@ -956,8 +956,7 @@ class MT5Connector:
         Retourne le dernier tick du symbole depuis MetaTrader 5.
         """
         try:
-            import MetaTrader5 as mt5
-
+            
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
                 self.logger.error(

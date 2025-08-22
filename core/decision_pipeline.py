@@ -1501,74 +1501,56 @@ class DecisionPipeline:
         Returns:
             Dict: La décision de trade (dict) ou {} si aucune opportunité valide.
         """
-        self.logger.info(
-            "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
-        )
+        # DIAG local
+        try:
+            from core.diagnostics import get_tracker_from_context
+        except Exception:
+            get_tracker_from_context = None
 
+        def _diag_size(asset_sym: str, reason: str, extra: dict | None = None):
+            if not get_tracker_from_context:
+                return
+            try:
+                get_tracker_from_context(context).note(asset_sym, "sizing", reason, extra or {})
+            except Exception:
+                pass
+
+        self.logger.info("CORE DECISION ENGINE - Prise de décision directe sans délégation...")
         self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
 
         # 1) Filtres pré-décision critiques (sécurité globale)
-        if current_config.get(
-            "halt_on_major_news", True
-        ) and self.config_manager.check_news_schedule(
+        if current_config.get("halt_on_major_news", True) and self.config_manager.check_news_schedule(
             context, context.get("economic_calendar", [])
         ):
-            self.logger.warning(
-                "Trade suspendu en raison d'un événement d'actualité majeur."
-            )
-            self.config_manager.log_decision(
-                current_config, {}, context, "Trade bloqué: Actualité majeure."
-            )
+            self.logger.warning("Trade suspendu en raison d'un événement d'actualité majeur.")
+            self.config_manager.log_decision(current_config, {}, context, "Trade bloqué: Actualité majeure.")
             return {}
 
         # 2) Récupérer le nom de stratégie
         strategy_name = current_config.get("strategy_name", "unknown")
-        self.logger.info(
-            f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
-        )
+        self.logger.info(f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}")
 
         # 3) CORE évalue directement les signaux (sans délégation)
-        trade_decision = self._core_evaluate_signals(
-            context, current_config, signals, strategy_name
-        )
+        trade_decision = self._core_evaluate_signals(context, current_config, signals, strategy_name)
 
         if not trade_decision:
-            self.logger.info(
-                f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
-            )
+            self.logger.info(f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'.")
             return {}
 
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
-        # Normalise l'action
         action_raw = str(trade_decision.get("action", "")).upper()
-        action_map = {
-            "LONG": "BUY",
-            "SHORT": "SELL",
-            "BUY": "BUY",
-            "SELL": "SELL",
-            "CLOSE": "CLOSE",
-        }
+        action_map = {"LONG": "BUY", "SHORT": "SELL", "BUY": "BUY", "SELL": "SELL", "CLOSE": "CLOSE"}
         normalized_action = action_map.get(action_raw)
 
         if not normalized_action:
-            self.logger.warning(
-                f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement."
-            )
-            self.config_manager.log_decision(
-                current_config,
-                {},
-                context,
-                f"Décision ignorée (action inconnue: {action_raw})",
-            )
+            self.logger.warning(f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement.")
+            self.config_manager.log_decision(current_config, {}, context, f"Décision ignorée (action inconnue: {action_raw})")
             return {}
 
-        # Normalise/Sécurise l’asset
         asset_raw = str(trade_decision.get("asset", "")).upper().strip()
         if not asset_raw:
             self.logger.warning("Décision reçue sans 'asset' -> décision ignorée.")
-            self.config_manager.log_decision(
-                current_config, {}, context, "Décision ignorée (asset vide)."
-            )
+            self.config_manager.log_decision(current_config, {}, context, "Décision ignorée (asset vide).")
             return {}
 
         allowed_assets = set(map(str.upper, current_config.get("tradeable_assets", [])))
@@ -1576,42 +1558,24 @@ class DecisionPipeline:
             self.logger.warning(
                 f"Asset '{asset_raw}' non autorisé pour la stratégie '{strategy_name}'. Whitelist: {sorted(allowed_assets)}"
             )
-            self.config_manager.log_decision(
-                current_config,
-                {},
-                context,
-                f"Décision ignorée (asset non autorisé: {asset_raw})",
-            )
+            self.config_manager.log_decision(current_config, {}, context, f"Décision ignorée (asset non autorisé: {asset_raw})")
             return {}
 
-        # Pose un order_type par défaut si absent
         order_type = str(trade_decision.get("order_type", "MARKET")).upper()
-        if order_type not in {
-            "MARKET",
-            "BUY_LIMIT",
-            "SELL_LIMIT",
-            "BUY_STOP",
-            "SELL_STOP",
-        }:
-            # On force MARKET si valeur exotique, pour éviter de bloquer ici (les validations fines se font plus tard)
+        if order_type not in {"MARKET", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}:
             self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
             order_type = "MARKET"
 
-        # Réinjecte les valeurs normalisées dans la décision
         trade_decision["action"] = normalized_action
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
 
         # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
         active_broker_account = context.get("active_broker_account", {})
-        max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
-            "max_open_positions", 999
-        )
+        max_positions_for_account = active_broker_account.get("trade_settings", {}).get("max_open_positions", 999)
         current_open_positions = context.get("open_positions", [])
 
-        self.logger.debug(
-            f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}"
-        )
+        self.logger.debug(f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}")
 
         if len(current_open_positions) >= max_positions_for_account:
             self.logger.warning(
@@ -1619,16 +1583,20 @@ class DecisionPipeline:
             )
             return {}
 
-        # calculate_risk_parameters est une méthode de DecisionPipeline
-        risk_params = self.calculate_risk_parameters(
-            context, current_config, trade_decision
-        )
+        # 5) Sizing au risque — instrumenté DIAG
+        risk_params = self.calculate_risk_parameters(context, current_config, trade_decision)
         self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
 
-        if not risk_params.get("volume", 0.0) > 0:
-            self.logger.warning(
-                "Calcul de risque invalide ou volume nul. Trade annulé."
-            )
+        if not risk_params or not bool(risk_params.get("ok", False)):
+            reason = (risk_params or {}).get("reason", "risk_calc_failed")
+            extras = {k: risk_params.get(k) for k in ("sl_pips", "tp_pips", "spread_pips", "rr_effective", "stops_level_pips", "level_mode") if isinstance(risk_params, dict) and k in risk_params}
+            _diag_size(asset_raw, reason, extras)
+            self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
+            return {}
+
+        if not (risk_params.get("volume", 0.0) > 0):
+            _diag_size(asset_raw, "sizing_volume_zero_or_missing", {"ok": True, "volume": risk_params.get("volume")})
+            self.logger.warning("Calcul de risque valide mais volume nul/invalide. Trade annulé.")
             return {}
 
         trade_decision.update(risk_params)
@@ -1641,6 +1609,7 @@ class DecisionPipeline:
             f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
         return trade_decision
+
 
     def _core_evaluate_signals(
         self,
@@ -1838,12 +1807,31 @@ class DecisionPipeline:
         - decision_trace + gates cohérents avec pre_trade_checks
         """
         from datetime import datetime, timezone
+        # DIAG local pour tracer les refus/acceptations côté CORE
+        try:
+            from core.diagnostics import get_tracker_from_context
+            def _diag(reason: str, extra: dict | None = None):
+                try:
+                    get_tracker_from_context(context).note(asset, "core_gate", reason, extra or {})
+                except Exception:
+                    pass
+            def _diag_selected(rule: str, conf: float | None):
+                try:
+                    get_tracker_from_context(context).set_selected(asset, rule, conf)
+                except Exception:
+                    pass
+        except Exception:
+            def _diag(*a, **k):  # neutral fallback
+                pass
+            def _diag_selected(*a, **k):
+                pass
 
         # ---------- 0) Données de base ----------
         phase = str(signals.get("phase", "") or "").lower()
         current_price = float(signals.get("close", 0) or 0)
         if current_price <= 0:
             self.logger.error(f"❌ Prix actuel manquant ou invalide pour {asset}")
+            _diag("invalid_price_or_close", {"close": signals.get("close")})
             return {}
 
         strategy_name = str(config.get("strategy_name", "")).lower() or "scalping"
@@ -1896,10 +1884,12 @@ class DecisionPipeline:
 
         if action is None:
             self.logger.info(f"⛔ {asset}: pas de direction claire (phase={phase or 'empty'}, mtf={mtf_dir}).")
+            _diag("no_direction", {"phase": phase, "mtf": mtf_dir})
             return {}
         action = action.upper()
         if action not in ("BUY", "SELL"):
             self.logger.warning(f"❌ Action invalide déterminée: {action}")
+            _diag("invalid_action_determined", {"action": action})
             return {}
 
         # ---------- 4) Gating micro-phase (non-bloquant mais strictement défini) ----------
@@ -1946,6 +1936,10 @@ class DecisionPipeline:
                 f"(break={m1_break}, retest={m1_retest}, bos={bos_confirmed}, "
                 f"fvg_dist={fvg_dist_pips:.2f}, ob_dist={ob_dist_pips:.2f})"
             )
+            _diag(f"gate_{gating_mode}_failed", {
+                "break": m1_break, "retest": m1_retest,
+                "bos": bos_confirmed, "fvg_dist_pips": fvg_dist_pips, "ob_dist_pips": ob_dist_pips
+            })
             return {}
 
         # ---------- 5) Alignement MTF souple ----------
@@ -1954,6 +1948,7 @@ class DecisionPipeline:
             if expected != action:
                 if not mtf_soft_override:
                     self.logger.info(f"⛔ {asset}: MTF mismatch (mtf={mtf_dir}, action={action})")
+                    _diag("mtf_mismatch", {"mtf": mtf_dir, "action": action})
                     return {}
                 else:
                     self.logger.info(f"⚠️ {asset}: MTF mismatch toléré (override micro activé).")
@@ -1963,11 +1958,13 @@ class DecisionPipeline:
         atr_min = float(self.config_manager.get("entry_rules.scalping.min_atr_m1_pips", 0.0) or 0.0)
         if atr_min > 0 and atr_m1_pips < atr_min:
             self.logger.info(f"⛔ {asset}: ATR M1 trop faible ({atr_m1_pips:.2f} < {atr_min}).")
+            _diag("atr_m1_too_low", {"atr_m1_pips": atr_m1_pips, "min": atr_min})
             return {}
 
         # 6.b Spread maximum (pips)
         if spread_pips > max_spread_pips_allowed:
             self.logger.info(f"⛔ {asset}: spread {spread_pips:.2f}p > {max_spread_pips_allowed:.2f}p autorisé.")
+            _diag("spread_too_high", {"spread_pips": spread_pips, "max_allowed": max_spread_pips_allowed})
             return {}
 
         # ---------- 7) SL/TP dynamiques (ATR/vol/spread) ----------
@@ -2024,6 +2021,7 @@ class DecisionPipeline:
         if sl_cap > 0 and sl_pips > sl_cap:
             if reject_if_over_cap:
                 self.logger.info(f"⛔ {asset}: SL calculé {sl_pips:.2f}p > cap {sl_cap:.2f}p.")
+                _diag("sl_over_cap", {"sl_pips": sl_pips, "cap": sl_cap})
                 return {}
             sl_pips = sl_cap
 
@@ -2067,7 +2065,7 @@ class DecisionPipeline:
             "rule_name": f"core_phase_scalp_{gating_mode}",
             "confidence": float(signals.get("confidence_score", 0.0) or 0.0),
             "timestamp": timestamp,
-            "magic_number": magic_number,
+            "magic_number": int(config.get("magic_number", 999_999)),
             "decision_trace": decision_trace,
             "gates": gates,
             "meta": {
@@ -2088,6 +2086,7 @@ class DecisionPipeline:
             f"SL={trade_decision['target_sl_pips']}p, TP={trade_decision['target_tp_pips']}p "
             f"(gate={gating_mode}, spread={spread_pips:.2f}p≤{max_spread_pips_allowed:.2f}p, ATR_M5={atr_m5_pips:.2f}p)"
         )
+        _diag_selected(trade_decision.get("rule_name"), trade_decision.get("confidence"))
         return trade_decision
 
     def _evaluate_rule(
@@ -2263,8 +2262,8 @@ class DecisionPipeline:
 
     def calculate_risk_parameters(self, context: dict, current_config: dict, trade_decision: dict) -> dict:
         """
-        Sizing au risque — version stricte "zéro hasard" pour scalping:
-        - ❌ Refus si SL/TP manquants (plus de fallback volume fixe)
+        Sizing au risque — compatible PRIX **ou** PIPS, version stricte "zéro hasard" pour scalping:
+        - ❌ Refus si aucun niveau exploitable (ni prix sl/tp ni pips target_sl/target_tp)
         - ✅ Cohérence des niveaux (BUY: tp>entry>sl | SELL: tp<entry<sl)
         - ✅ SL borné par ATR (min/max multiples)
         - ✅ RR effectif (corrigé du spread) >= min_rr
@@ -2286,20 +2285,12 @@ class DecisionPipeline:
         df = md.get("annotated_rates_df")
 
         entry = trade_decision.get("entry_price", md.get("current_price"))
-        sl    = trade_decision.get("sl_price")
-        tp    = trade_decision.get("tp_price")
         try:
             if entry is None:
                 return {"ok": False, "reason": "missing_entry_price"}
             entry = float(entry)
-            sl = None if sl is None else float(sl)
-            tp = None if tp is None else float(tp)
         except (TypeError, ValueError):
-            return {"ok": False, "reason": "invalid_level_types"}
-
-        # ⛔ Zéro hasard: niveaux obligatoires
-        if sl is None or tp is None or sl == entry or tp == entry:
-            return {"ok": False, "reason": "missing_sl_or_tp_levels"}
+            return {"ok": False, "reason": "invalid_entry_price"}
 
         # --- 2) Broker/symbole (unités et contraintes) ---
         contract   = float(symbol_info.get("trade_contract_size", 100000.0)) or 100000.0
@@ -2319,12 +2310,11 @@ class DecisionPipeline:
 
         # --- 3) Risque (config) & adaptation ---
         rm_cfg   = (current_config or {}).get("risk_management", {}) or {}
-        # nommage conservé: 'risk_per_trade_pct' (cohérent avec ton code)
         risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))
         min_rr   = float(rm_cfg.get("min_rr", 1.8))
         max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
 
-        # Adaptation high_vol (si meta/regime_tag fourni par la décision + config)
+        # Adaptation high_vol (si meta/regime_tag fourni)
         meta = trade_decision.get("meta", {}) or {}
         regime_tag = str(meta.get("regime_tag", "")).lower()
         adapt = (current_config or {}).get("adaptation_settings", {}).get("risk_adjustment", {}) or {}
@@ -2342,19 +2332,56 @@ class DecisionPipeline:
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
-        # --- 4) Cohérence des niveaux par direction ---
-        if action == "BUY" and not (tp > entry > sl):
-            return {"ok": False, "reason": "levels_incoherent_for_buy"}
-        if action == "SELL" and not (tp < entry < sl):
-            return {"ok": False, "reason": "levels_incoherent_for_sell"}
+        # --- 4) Niveaux: PRIX vs PIPS ---
+        sl_price = trade_decision.get("sl_price")
+        tp_price = trade_decision.get("tp_price")
+        sl_pips_in  = trade_decision.get("target_sl_pips")
+        tp_pips_in  = trade_decision.get("target_tp_pips")
 
-        sl_dist = abs(entry - sl)
-        tp_dist = abs(tp - entry)
-        if sl_dist <= 0 or tp_dist <= 0:
-            return {"ok": False, "reason": "invalid_distances"}
+        have_price_levels = (sl_price is not None) and (tp_price is not None)
+        have_pip_levels   = (sl_pips_in is not None) and (tp_pips_in is not None)
 
-        sl_pips = sl_dist / pip_size
-        tp_pips = tp_dist / pip_size
+        if not have_price_levels and not have_pip_levels:
+            return {"ok": False, "reason": "missing_sl_or_tp_levels"}
+
+        if have_price_levels:
+            try:
+                sl_price = float(sl_price); tp_price = float(tp_price)
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "invalid_level_types"}
+            sl_dist_price = abs(entry - sl_price)
+            tp_dist_price = abs(tp_price - entry)
+            if sl_dist_price <= 0 or tp_dist_price <= 0:
+                return {"ok": False, "reason": "invalid_distances_price"}
+            sl_pips_val = sl_dist_price / pip_size
+            tp_pips_val = tp_dist_price / pip_size
+
+            # Cohérence directionnelle (PRIX)
+            if action == "BUY" and not (tp_price > entry > sl_price):
+                return {"ok": False, "reason": "levels_incoherent_for_buy"}
+            if action == "SELL" and not (tp_price < entry < sl_price):
+                return {"ok": False, "reason": "levels_incoherent_for_sell"}
+
+            level_mode = "price"
+        else:
+            # Mode PIPS: construire des prix cohérents autour de entry
+            try:
+                sl_pips_val = float(sl_pips_in); tp_pips_val = float(tp_pips_in)
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "invalid_pip_types"}
+            if sl_pips_val <= 0 or tp_pips_val <= 0:
+                return {"ok": False, "reason": "invalid_distances_pips"}
+
+            sl_dist_price = sl_pips_val * pip_size
+            tp_dist_price = tp_pips_val * pip_size
+            if action == "BUY":
+                sl_price = entry - sl_dist_price
+                tp_price = entry + tp_dist_price
+            else:  # SELL
+                sl_price = entry + sl_dist_price
+                tp_price = entry - tp_dist_price
+
+            level_mode = "pips"
 
         # --- 5) Bornes via ATR (si DF dispo) ---
         atr_settings = (rm_cfg.get("atr_settings") or {})
@@ -2371,39 +2398,40 @@ class DecisionPipeline:
             if atr_price and atr_price > 0:
                 sl_min = min_k * atr_price
                 sl_max = max_k * atr_price
-                if sl_dist < sl_min:
-                    return {"ok": False, "reason": f"sl_too_tight_vs_atr_{sl_dist:.6f}<{sl_min:.6f}"}
-                if sl_dist > sl_max:
-                    return {"ok": False, "reason": f"sl_too_wide_vs_atr_{sl_dist:.6f}>{sl_max:.6f}"}
+                if sl_dist_price < sl_min:
+                    return {"ok": False, "reason": f"sl_too_tight_vs_atr_{sl_dist_price:.6f}<{sl_min:.6f}"}
+                if sl_dist_price > sl_max:
+                    return {"ok": False, "reason": f"sl_too_wide_vs_atr_{sl_dist_price:.6f}>{sl_max:.6f}"}
 
-        # --- 6) Stops level broker: on refuse si SL/TP en-dessous des distances mini ---
+        # --- 6) Stops level broker: refuser si SL/TP sous distance mini ---
         min_stop_price_dist = stops_lvl_points * point  # en unités de prix
         if min_stop_price_dist > 0:
-            if sl_dist < min_stop_price_dist:
-                return {"ok": False, "reason": f"sl_below_broker_min_{sl_pips:.2f}p<{stops_level_pips:.2f}p"}
-            if tp_dist < min_stop_price_dist:
-                return {"ok": False, "reason": f"tp_below_broker_min_{tp_pips:.2f}p<{stops_level_pips:.2f}p"}
+            if sl_dist_price < min_stop_price_dist:
+                return {"ok": False, "reason": f"sl_below_broker_min_{sl_pips_val:.2f}p<{stops_level_pips:.2f}p"}
+            if tp_dist_price < min_stop_price_dist:
+                return {"ok": False, "reason": f"tp_below_broker_min_{tp_pips_val:.2f}p<{stops_level_pips:.2f}p"}
 
         # --- 7) Spread & RR effectif ---
         if spread_pips > max_spread_pips_cfg:
             return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
 
-        # RR "brut"
-        rr = tp_dist / sl_dist if sl_dist > 0 else 0.0
+        rr = tp_dist_price / sl_dist_price if sl_dist_price > 0 else 0.0
 
-        # RR "effectif" (on soustrait le spread du gain potentiel)
-        spread_price = spread_pts * point
-        effective_tp_dist = max(0.0, tp_dist - spread_price)
-        rr_effective = effective_tp_dist / sl_dist if sl_dist > 0 else 0.0
+        # RR effectif (soustraire le spread du gain potentiel)
+        if level_mode == "price":
+            effective_tp_dist = max(0.0, tp_dist_price - spread_pts * point)
+            rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
+        else:
+            effective_tp_pips = max(0.0, tp_pips_val - spread_pips)
+            rr_effective = (effective_tp_pips / sl_pips_val) if sl_pips_val > 0 else 0.0
 
         if rr_effective < min_rr:
-            rr_fmt = f"{rr_effective:.2f}"; min_rr_fmt = f"{min_rr:.2f}"
-            return {"ok": False, "reason": f"rr_effective_below_min_{rr_fmt}_<{min_rr_fmt}"}
+            return {"ok": False, "reason": f"rr_effective_below_min_{rr_effective:.2f}_<{min_rr:.2f}"}
 
         # --- 8) Sizing au risque ---
         risk_amount = equity * (risk_pct / 100.0)
         try:
-            raw_volume = risk_amount / (sl_dist * contract)  # lots = $risk / (Δprix × contract)
+            raw_volume = risk_amount / (sl_dist_price * contract)  # lots = $risk / (Δprix × contract)
         except ZeroDivisionError:
             return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
 
@@ -2418,14 +2446,16 @@ class DecisionPipeline:
             "rr_effective": rr_effective,
             "risk_amount": risk_amount,
             "entry_price": entry,
-            "sl_price": sl,
-            "tp_price": tp,
-            "sl_pips": sl_pips,
-            "tp_pips": tp_pips,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "sl_pips": sl_pips_val,
+            "tp_pips": tp_pips_val,
             "spread_pips": spread_pips,
             "stops_level_pips": stops_level_pips,
             "notes": notes,
+            "level_mode": level_mode,
         }
+
         
     def _compute_atr_from_df(self, df, period: int = 14) -> float:
         """

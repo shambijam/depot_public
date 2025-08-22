@@ -17,6 +17,8 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
+from core.diagnostics import DiagnosticTracker, get_tracker_from_context
+
 
 
 load_dotenv()
@@ -538,6 +540,7 @@ def run_single_pipeline_cycle(
         f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
     )
     trade_executed_successfully = False
+    global_context = {}  # pour éviter NameError dans le finally si erreur avant construction
 
     try:
         if not mt5_connector.is_connected:
@@ -720,6 +723,8 @@ def run_single_pipeline_cycle(
                 tradeable_assets,
                 active_mt5_account_details,
             )
+            # DIAG: attache un tracker au contexte du cycle
+            global_context["diag_tracker"] = DiagnosticTracker(cycle_count)
             print(f"✅ [PIPELINE] Contexte global construit avec succès !")
 
             print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
@@ -801,8 +806,15 @@ def run_single_pipeline_cycle(
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
         trade_executed_successfully = False
     finally:
+        # DIAG: imprime le résumé des blocages / sélections AVANT le log de fin de cycle
+        try:
+            get_tracker_from_context(global_context).emit_summary(logging.getLogger(__name__))
+        except Exception:
+            pass
+
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
+
 
 
 def main(args: argparse.Namespace) -> None:
