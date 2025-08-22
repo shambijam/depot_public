@@ -631,8 +631,12 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[bool, str]:
         """
-        Pré‑checks d’exécution + FILTRES DE QUALITÉ paramétrables.
-        Ici on peut *désactiver le fallback momentum* côté exécution et refuser les phases risquées.
+        Pré-checks d’exécution + FILTRES DE QUALITÉ (scalping "au couteau", zéro hasard).
+        - Phase directionnelle obligatoire (pas de range/compression/uncertain)
+        - Gate micro-phase: break M1 dans le sens + retest confirmé
+        - Fallback momentum désactivé (même hors range)
+        - Cohérence MTF (si fournie)
+        - ATR M1 mini / spread max / stops_level broker vs SL scalp
         """
 
         # --- Helpers ---
@@ -726,7 +730,7 @@ class TradeExecutor:
         ):
             return False, f"Max positions atteint ({len(current_positions)}/{max_pos})."
 
-        # 7) Spread limite (absolue)
+        # 7) Spread limite (absolue en points)
         exec_policy = (
             active_config.get("execution_policy", {})
             if isinstance(active_config, dict)
@@ -746,32 +750,78 @@ class TradeExecutor:
                         f"Spread trop élevé: {symbol_info.spread} > {max_spread_points}.",
                     )
 
+        # 7.bis) Gate micro-phase & phase directionnelle (zéro hasard)
+        dt = trade_decision.get("decision_trace") or {}
+        gates = trade_decision.get("gates") or {}
+
+        # Gate micro-phase : break M1 dans le sens + retest confirmé
+        m1_break = bool(gates.get("m1_break") or dt.get("m1_break_in_direction"))
+        m1_retest = bool(gates.get("m1_retest") or dt.get("m1_retest_confirmation"))
+        if not (m1_break and m1_retest):
+            return False, "gate_micro_phase_not_passed"
+
+        # Phase directionnelle obligatoire (pas de range/compression/uncertain)
+        phase_from_decision = str(gates.get("phase") or dt.get("phase") or "").lower()
+        if phase_from_decision:
+            current_phase = phase_from_decision  # surchargera la détection plus bas
+        else:
+            current_phase = ""
+
         # 8) Qualité d'exécution (filtres paramétrables)
         q = self.config_manager.get("execution_quality_filters", {})
-        # 8.1 Bloquer certaines phases de marché
+
+        # 8.1 Bloquer certaines phases (inclure non-directionnelles par défaut)
         blocked_phases = set(map(str, q.get("blocked_phases", [])))
         current_phase = str(
-            market_context.get("phase", "")
+            current_phase
+            or market_context.get("phase", "")
             or market_context.get("market_phase", "")
             or ""
         ).lower()
-        if blocked_phases and current_phase in {p.lower() for p in blocked_phases}:
-            return False, f"Phase '{current_phase}' bloquée par la politique."
+        non_directionals = {
+            "range",
+            "range_accumulation",
+            "range_distribution",
+            "compression",
+            "low_volatility_compression",
+            "uncertain",
+            "no_clear_phase",
+        }
+        if blocked_phases:
+            blocked = {p.lower() for p in blocked_phases} | non_directionals
+        else:
+            blocked = non_directionals
+        if current_phase in blocked or any(k in current_phase for k in ["range", "compression", "uncertain"]):
+            return False, f"phase_not_directional({current_phase})"
 
-        # 8.2 Désactiver explicitement le fallback momentum en range
-        disable_momentum_fallback = bool(
-            q.get("disable_momentum_fallback_in_range", True)
-        )
+        # 8.2 Momentum fallback strictement désactivé (même hors range)
         used_rule = str(trade_decision.get("rule_name", "")).lower()
-        if (
-            disable_momentum_fallback
-            and ("range" in current_phase)
-            and ("momentum" in used_rule)
-        ):
-            return False, "Fallback momentum désactivé en phase range."
+        if ("momentum" in used_rule) or bool((dt.get("used_momentum_fallback"))):
+            return False, "momentum_fallback_disabled"
 
-        # 8.3 Volatilité/ATR min-max (si le DF est présent)
+        # 8.3 Cohérence MTF : si la décision fournit une direction MTF, elle doit matcher l'action
+        mtf_dir = str((dt.get("mtf_direction") or trade_decision.get("mtf_direction", "")).lower())
+        if mtf_dir in ("up", "down"):
+            if (mtf_dir == "up" and action != "BUY") or (mtf_dir == "down" and action != "SELL"):
+                return False, f"mtf_direction_mismatch({mtf_dir} vs {action})"
+
+        # 8.4 ATR M1 minimal (optionnel via config, depuis decision_trace)
+        atr_m1_min = float(self.config_manager.get("entry_rules.scalping.min_atr_m1_pips", 0.0) or 0.0)
+        atr_m1_pips_from_trace = float(dt.get("atr_m1_pips") or 0.0)
+        if atr_m1_min > 0 and atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < atr_m1_min:
+            return False, f"atr_m1_too_low({atr_m1_pips_from_trace:.2f} < {atr_m1_min:.2f})"
+
+        # 8.5 (Complément) Volatilité/ATR min-max via DF si dispo
         import pandas as pd, numpy as np
+
+        def _extract_latest_df_from_context(mkt_ctx: dict, sym: str, alt: str):
+            md = (mkt_ctx.get("market_data") or {}).get(sym) or (mkt_ctx.get("market_data") or {}).get(alt)
+            if isinstance(md, pd.DataFrame):
+                return md
+            if isinstance(md, dict):
+                df = md.get("annotated_rates_df")
+                return df if isinstance(df, pd.DataFrame) else None
+            return None
 
         def _get_atr(df, period: int):
             if df is None or len(df) < period + 2:
@@ -793,10 +843,7 @@ class TradeExecutor:
 
         vol_rule = q.get("atr_volatility_filter", {})
         if vol_rule.get("enabled", False):
-            df = (market_context.get("market_data") or {}).get(broker_symbol) or (
-                market_context.get("market_data") or {}
-            ).get(raw_symbol)
-            df = df if isinstance(df, pd.DataFrame) else None
+            df = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
             period = int(vol_rule.get("period", 14))
             min_atr = float(vol_rule.get("min_atr", 0.0))
             max_atr = float(vol_rule.get("max_atr", 1e9))
@@ -812,7 +859,31 @@ class TradeExecutor:
         if not price or price <= 0:
             return False, f"Prix de marché indisponible pour {broker_symbol}."
 
+        # 10) Stops level broker vs SL scalp (on REFUSE d'élargir pour un scalp)
+        target_sl_pips = float(trade_decision.get("target_sl_pips", 0) or 0.0)
+        is_scalping = "scalping" in str(trade_decision.get("strategy_type", "")).lower()
+        sl_cap = float(self.config_manager.get("entry_rules.scalping.max_stop_pips_scalp", 0.0) or 0.0)
+        reject_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
+
+        # Refus si SL > cap (optionnel)
+        if is_scalping and sl_cap > 0 and target_sl_pips > sl_cap and reject_over_cap:
+            return False, f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})"
+
+        # Refus si le broker impose une distance mini > SL scalp
+        # MT5 renvoie stops_level en "points", ~10 points = 1 pip sur la plupart des FX.
+        stops_level_points = getattr(symbol_info, "stops_level", 0) or 0
+        try:
+            points_per_pip = 10.0
+            stops_level_pips = float(stops_level_points) / points_per_pip
+        except Exception:
+            stops_level_pips = 0.0
+
+        if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
+            return False, f"stops_level_too_high_for_scalp({stops_level_pips:.2f}p > SL {target_sl_pips:.2f}p)"
+
+        # OK
         return True, ""
+
 
     def _check_fat_finger_volume(
         self, trade_decision: dict, market_context: dict

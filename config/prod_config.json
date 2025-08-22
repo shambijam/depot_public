@@ -267,9 +267,13 @@
     "scalping": {
       "require_mtf_align": true,
       "require_m1_break": true,
-      "max_spread_points": 70.0,
+      "max_spread_points": 10.0,
       "min_m1_ema_spread": 0.0,
-      "min_confidence": 0.30
+      "min_confidence": 0.30,
+      "min_atr_m1_pips": 1.2,
+      "max_spread_pips": 1.0,
+      "max_stop_pips_scalp": 5.0,
+      "reject_if_sl_over_cap": true
     }
   },
   "adaptation_settings": {
@@ -281,8 +285,8 @@
       "take_profit_pips_high_vol": 10,
       "stop_loss_pips_high_vol": 5,
       "max_spread_pips_high_vol": 2.0,
-      "take_profit_pips_low_vol": 15,
-      "stop_loss_pips_low_vol": 7,
+      "take_profit_pips_low_vol": 8,
+      "stop_loss_pips_low_vol": 4,
       "min_volume_zscore_low_vol": -0.25
     },
     "risk_adjustment": {
@@ -323,6 +327,23 @@
       "high": 0.7,
       "medium": 0.5,
       "low": 0.3
+    }
+  },
+  "execution_policy": {
+    "max_spread_points": 10
+  },
+  "execution_quality_filters": {
+    "blocked_phases": [
+      "range_accumulation",
+      "range_distribution",
+      "low_volatility_compression"
+    ],
+    "disable_momentum_fallback_in_range": true,
+    "atr_volatility_filter": {
+      "enabled": false,
+      "period": 14,
+      "min_atr": 0.0,
+      "max_atr": 1000000.0
     }
   },
   "risk_management_settings": {
