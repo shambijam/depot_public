@@ -633,20 +633,20 @@ class TradeExecutor:
         """
         Pré-checks d’exécution + FILTRES DE QUALITÉ (scalping "au couteau", zéro hasard mais non-bloquant).
         - Phase directionnelle obligatoire (pas de range/compression/uncertain)
-        - Gating micro-phase suivant un 'gating_mode' (strict/normal/aggressive)
+        - Gating micro-phase selon 'gating_mode' (strict/normal/aggressive)
             * strict    : break M1 + retest obligatoires
-            * normal    : break M1 + (retest OU (BOS confirmé + proximité FVG) OU (OB validé proche))
+            * normal    : strict OU (BOS confirmé + FVG proche) OU (OB validé proche)
             * aggressive: normal OU (break seul + spread & ATR ok)
-        - Momentum fallback désactivé (même hors range)
+        - Momentum fallback désactivé
         - Cohérence MTF (si fournie)
         - ATR M1 mini / spread max
         - Stops_level broker vs SL scalp
         """
-        # --- import DIAG (local, pour ne dépendre d'aucun import global) ---
+        # --- import DIAG (local, neutre si absent) ---
         try:
             from core.diagnostics import get_tracker_from_context
         except Exception:
-            get_tracker_from_context = None  # neutre si indisponible
+            get_tracker_from_context = None
 
         # --- Helpers ---
         def _first_non_empty(*vals):
@@ -657,8 +657,7 @@ class TradeExecutor:
 
         def _normalize_action(a: str) -> str:
             a = (a or "").strip().upper()
-            mapping = {"BUY": "BUY", "SELL": "SELL", "LONG": "BUY", "SHORT": "SELL", "CLOSE": "CLOSE"}
-            return mapping.get(a, "")
+            return {"BUY": "BUY", "SELL": "SELL", "LONG": "BUY", "SHORT": "SELL", "CLOSE": "CLOSE"}.get(a, "")
 
         def _mt5_is_connected() -> bool:
             attr = getattr(self.mt5_connector, "is_connected", None)
@@ -677,14 +676,16 @@ class TradeExecutor:
                 except Exception:
                     pass
 
-        def _reject(reason: str, extra: dict | None = None, sym: str | None = None) -> tuple[bool, str]:
-            """Centralise le rejet + note DIAG."""
+        def _diag_note(reason: str, extra: dict | None = None, sym: str | None = None):
             try:
                 if get_tracker_from_context:
                     s = sym or trade_decision.get("asset") or "UNKNOWN"
                     get_tracker_from_context(market_context).note(s, "pre_trade", reason, extra or {})
             except Exception:
                 pass
+
+        def _reject(reason: str, extra: dict | None = None, sym: str | None = None) -> tuple[bool, str]:
+            _diag_note(reason, extra, sym)
             return False, reason
 
         # 1) Action & symbole
@@ -738,95 +739,88 @@ class TradeExecutor:
         if isinstance(current_positions, (list, tuple)) and len(current_positions) >= max_pos:
             return _reject(f"max_positions_reached:{len(current_positions)}/{max_pos}", sym=raw_symbol)
 
-        # 7) Spread limite (absolue en points)
+        # 7) Spread limite (absolu en points, côté exécution)
         exec_policy = (active_config.get("execution_policy", {}) if isinstance(active_config, dict) else {})
         max_spread_points = exec_policy.get("max_spread_points")
         tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
         if tick and hasattr(symbol_info, "spread") and hasattr(symbol_info, "point"):
             if isinstance(max_spread_points, (int, float)) and symbol_info.spread and max_spread_points > 0:
                 if symbol_info.spread > max_spread_points:
-                    return _reject(
-                        "spread_too_high_points",
-                        {"spread": symbol_info.spread, "limit": max_spread_points},
-                        sym=raw_symbol,
-                    )
+                    return _reject("spread_too_high_points",
+                                {"spread": float(symbol_info.spread), "limit": float(max_spread_points)},
+                                sym=raw_symbol)
 
-        # ---------- Gating Micro-phase avec profils de sévérité ----------
+        # ---------- Gating micro-phase ----------
         dt = trade_decision.get("decision_trace") or {}
         gates = trade_decision.get("gates") or {}
 
-        # Données micro-structure
-        m1_break = bool(gates.get("m1_break") or dt.get("m1_break_in_direction"))
+        # Micro-structure
+        m1_break  = bool(gates.get("m1_break")  or dt.get("m1_break_in_direction"))
         m1_retest = bool(gates.get("m1_retest") or dt.get("m1_retest_confirmation"))
 
         bos = dt.get("bos_mss_details") or {}
         fvg = dt.get("fvg_details") or {}
-        ob = dt.get("ob_details") or {}
+        ob  = dt.get("ob_details")  or {}
 
         # Phases & métriques utiles
         phase_from_decision = str(gates.get("phase") or dt.get("phase") or "").lower()
         spread_pips_from_trace = float(dt.get("spread_pips") or 0.0)
         atr_m1_pips_from_trace = float(dt.get("atr_m1_pips") or 0.0)
 
-        # Lecture des règles scalping
+        # Règles scalping
         sr = self.config_manager.get("entry_rules.scalping", {}) or {}
-        gating_mode = str(sr.get("gating_mode", "normal")).lower()  # 'strict'/'normal'/'aggressive'
-        max_spread_pips = float(sr.get("max_spread_pips", 1.0) or 1.0)
-        min_atr_m1_pips = float(sr.get("min_atr_m1_pips", 0.8) or 0.0)
-        fvg_max_distance = float(sr.get("fvg_max_distance_pips", 2.0) or 2.0)
-        ob_max_distance = float(sr.get("ob_max_distance_pips", 2.0) or 2.0)
+        gating_mode       = str(sr.get("gating_mode", "normal")).lower()  # strict|normal|aggressive
+        max_spread_pips   = float(sr.get("max_spread_pips", 1.0) or 1.0)
+        min_atr_m1_pips   = float(sr.get("min_atr_m1_pips", 0.8) or 0.0)
+        fvg_max_distance  = float(sr.get("fvg_max_distance_pips", 2.0) or 2.0)
+        ob_max_distance   = float(sr.get("ob_max_distance_pips", 2.0) or 2.0)
 
-        # Conditions alternatives (sans momentum)
+        # Alternatives (sans momentum)
         bos_confirmed = bool(bos.get("confirmed") or bos.get("is_confirmed"))
-        fvg_dist_ok = float(fvg.get("distance_pips") or 1e9) <= fvg_max_distance
-        ob_valid_ok = bool(ob.get("validated") or ob.get("valid"))
-        ob_dist_ok = float(ob.get("distance_pips") or 1e9) <= ob_max_distance
+        fvg_dist_ok   = float(fvg.get("distance_pips") or 1e9) <= fvg_max_distance
+        ob_valid_ok   = bool(ob.get("validated") or ob.get("valid"))
+        ob_dist_ok    = float(ob.get("distance_pips") or 1e9) <= ob_max_distance
 
-        cond_strict = m1_break and m1_retest
-        cond_bos_fvg = bos_confirmed and fvg_dist_ok  # BOS confirmé + FVG proche
-        cond_ob_near = ob_valid_ok and ob_dist_ok     # OB validé proche
-        cond_aggr = (
-            m1_break
-            and (spread_pips_from_trace <= max_spread_pips)
-            and (atr_m1_pips_from_trace >= max(0.0, 0.8 * min_atr_m1_pips))
-        )
+        cond_strict  = m1_break and m1_retest
+        cond_bos_fvg = bos_confirmed and fvg_dist_ok
+        cond_ob_near = ob_valid_ok and ob_dist_ok
+        cond_aggr    = (m1_break and (spread_pips_from_trace <= max_spread_pips)
+                        and (atr_m1_pips_from_trace >= max(0.0, 0.8 * min_atr_m1_pips)))
 
-        if gating_mode == "strict":
+        if   gating_mode == "strict":
             if not cond_strict:
-                return _reject("gate_strict_failed(m1_break+retest_required)", {"break": m1_break, "retest": m1_retest}, raw_symbol)
+                return _reject("gate_strict_failed(m1_break+retest_required)",
+                            {"break": m1_break, "retest": m1_retest}, raw_symbol)
         elif gating_mode == "normal":
             if not (cond_strict or cond_bos_fvg or cond_ob_near):
-                return _reject(
-                    "gate_normal_failed(no_retest_but_no_bos_fvg_or_ob_near)",
-                    {"break": m1_break, "retest": m1_retest, "bos_confirmed": bos_confirmed, "fvg_ok": fvg_dist_ok, "ob_ok": ob_dist_ok},
-                    raw_symbol,
-                )
+                return _reject("gate_normal_failed(no_retest_but_no_bos_fvg_or_ob_near)",
+                            {"break": m1_break, "retest": m1_retest,
+                                "bos_confirmed": bos_confirmed, "fvg_ok": fvg_dist_ok, "ob_ok": ob_dist_ok},
+                            raw_symbol)
         else:  # aggressive
             if not (cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr):
-                return _reject("gate_aggressive_failed", {"break": m1_break, "retest": m1_retest, "aggr_ok": cond_aggr}, raw_symbol)
+                return _reject("gate_aggressive_failed",
+                            {"break": m1_break, "retest": m1_retest, "aggr_ok": cond_aggr},
+                            raw_symbol)
 
-        # ---------- Phase directionnelle et autres filtres ----------
+        # ---------- Phase directionnelle ----------
         current_phase = phase_from_decision or str(
             market_context.get("phase", "") or market_context.get("market_phase", "") or ""
         ).lower()
         non_directionals = {
-            "range",
-            "range_accumulation",
-            "range_distribution",
-            "compression",
-            "low_volatility_compression",
-            "uncertain",
-            "no_clear_phase",
+            "range", "range_accumulation", "range_distribution",
+            "compression", "low_volatility_compression",
+            "uncertain", "no_clear_phase",
         }
         if current_phase in non_directionals or any(k in current_phase for k in ["range", "compression", "uncertain"]):
             return _reject(f"phase_not_directional({current_phase})", sym=raw_symbol)
 
-        # Momentum fallback strictement désactivé
+        # Momentum fallback désactivé
         used_rule = str(trade_decision.get("rule_name", "")).lower()
         if ("momentum" in used_rule) or bool(dt.get("used_momentum_fallback")):
             return _reject("momentum_fallback_disabled", sym=raw_symbol)
 
-        # Cohérence MTF: si présent, la direction doit matcher l'action
+        # Cohérence MTF
         mtf_dir = str((dt.get("mtf_direction") or trade_decision.get("mtf_direction", "")).lower())
         if mtf_dir in ("up", "down"):
             if (mtf_dir == "up" and action != "BUY") or (mtf_dir == "down" and action != "SELL"):
@@ -836,7 +830,7 @@ class TradeExecutor:
         if min_atr_m1_pips > 0 and atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < min_atr_m1_pips:
             return _reject(f"atr_m1_too_low({atr_m1_pips_from_trace:.2f} < {min_atr_m1_pips:.2f})", sym=raw_symbol)
 
-        # (Complément) Volatilité/ATR via DF si dispo
+        # (Complément) ATR sur DF du contexte si règle activée
         import pandas as pd, numpy as np
 
         def _extract_latest_df_from_context(mkt_ctx: dict, sym: str, alt: str):
@@ -858,7 +852,8 @@ class TradeExecutor:
             tr = np.maximum.reduce([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()])
             return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
 
-        vol_rule = self.config_manager.get("execution_quality_filters.atr_volatility_filter", {}) or {}
+        q = self.config_manager.get("execution_quality_filters", {}) or {}
+        vol_rule = q.get("atr_volatility_filter", {}) or {}
         if bool(vol_rule.get("enabled", False)):
             df_ctx = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
             period = int(vol_rule.get("period", 14))
@@ -883,89 +878,23 @@ class TradeExecutor:
         reject_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
 
         if is_scalping and sl_cap > 0 and target_sl_pips > sl_cap and reject_over_cap:
-            return _reject(f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})", {"sl_pips": target_sl_pips, "cap": sl_cap}, raw_symbol)
+            return _reject(f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})",
+                        {"sl_pips": target_sl_pips, "cap": sl_cap}, raw_symbol)
 
-        # MT5 renvoie stops_level en points (~10 points = 1 pip pour FX à 3/5 digits)
-        stops_level_points = float(getattr(symbol_info, "stops_level", 0) or 0)
+        # MT5 stops_level en points → conversion pips
         try:
-            # On tente de deviner le points_per_pip : 10 par défaut (FX) sinon 1
             digits = int(getattr(symbol_info, "digits", 5) or 5)
             points_per_pip = 10.0 if digits in (3, 5) else 1.0
-            stops_level_pips = stops_level_points / points_per_pip
         except Exception:
             points_per_pip = 10.0
-            stops_level_pips = stops_level_points / points_per_pip
+        stops_level_points = float(getattr(symbol_info, "stops_level", 0) or 0)
+        stops_level_pips = stops_level_points / points_per_pip if points_per_pip > 0 else 0.0
 
         if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
-            return _reject(
-                "stops_level_too_high_for_scalp",
-                {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips},
-                raw_symbol,
-            )
+            return _reject("stops_level_too_high_for_scalp",
+                        {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips}, raw_symbol)
 
-        # OK
-        return True, ""
-
-
-        def _get_atr(df, period: int):
-            if df is None or len(df) < period + 2:
-                return float("nan")
-            high, low, close = (
-                df["high"].astype(float),
-                df["low"].astype(float),
-                df["close"].astype(float),
-            )
-            prev_close = close.shift(1)
-            tr = np.maximum.reduce(
-                [
-                    (high - low).abs(),
-                    (high - prev_close).abs(),
-                    (low - prev_close).abs(),
-                ]
-            )
-            return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
-
-        q = self.config_manager.get("execution_quality_filters", {})
-        vol_rule = q.get("atr_volatility_filter", {})
-        if vol_rule.get("enabled", False):
-            df_ctx = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
-            period = int(vol_rule.get("period", 14))
-            min_atr = float(vol_rule.get("min_atr", 0.0))
-            max_atr = float(vol_rule.get("max_atr", 1e9))
-            atr_val = _get_atr(df_ctx, period)
-            if atr_val == atr_val:  # not NaN
-                if atr_val < min_atr:
-                    return False, f"ATR trop faible ({atr_val:.5f} < {min_atr})."
-                if atr_val > max_atr:
-                    return False, f"ATR trop élevé ({atr_val:.5f} > {max_atr})."
-
-        # 9) Prix dispo
-        price = self.mt5_connector.get_current_price(broker_symbol, action)
-        if not price or price <= 0:
-            return False, f"Prix de marché indisponible pour {broker_symbol}."
-
-        # 10) Stops level broker vs SL scalp (on REFUSE d'élargir pour un scalp)
-        target_sl_pips = float(trade_decision.get("target_sl_pips", 0) or 0.0)
-        is_scalping = "scalping" in str(trade_decision.get("strategy_type", "")).lower()
-        sl_cap = float(self.config_manager.get("entry_rules.scalping.max_stop_pips_scalp", 0.0) or 0.0)
-        reject_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
-
-        # Refus si SL > cap (optionnel)
-        if is_scalping and sl_cap > 0 and target_sl_pips > sl_cap and reject_over_cap:
-            return False, f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})"
-
-        # Refus si le broker impose une distance mini > SL scalp
-        stops_level_points = getattr(symbol_info, "stops_level", 0) or 0
-        try:
-            points_per_pip = 10.0  # FX standard
-            stops_level_pips = float(stops_level_points) / points_per_pip
-        except Exception:
-            stops_level_pips = 0.0
-
-        if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
-            return False, f"stops_level_too_high_for_scalp({stops_level_pips:.2f}p > SL {target_sl_pips:.2f}p)"
-
-        # OK
+        # ✅ OK
         return True, ""
 
 
