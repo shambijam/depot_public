@@ -631,16 +631,22 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[bool, str]:
         """
-        Mode démo permissif pour relancer le flux de trades.
-        - Laisse passer si:
-            * demo_pretrade_bypass = True, ou
-            * entry_rules.scalping.gating_mode in {"off","ultra","free"}, ou
-            * CORE a sélectionné l'actif (score >= min_confidence).
-        - Ne bloque QUE sur: action invalide, symbole inconnu/invalid, MT5 non connecté, prix indisponible.
-        - Toutes les autres gardes (phase, gating micro-structure, MTF, ATR, spread, stops_level) sont ignorées en bypass.
-        - En mode non-bypass, les conditions restent très assouplies.
-        """
+        Pré-checks d’exécution (scalping micro-phase).
 
+        Modes:
+        - strict     : break M1 + retest obligatoires (+ filtres durs)
+        - normal     : strict OU (BOS+FVG proche) OU (OB validé proche)
+        - balanced   : 2/4 signaux (break, BOS, FVG proche, OB proche) dont ≥1 directionnel
+        - aggressive : normal OU (break seul + spread & ATR ok)
+        - katana     : micro-phase permissif :
+                        * au moins 1 directionnel (break M1 ou BOS)
+                        * ET qualité minimale (ATR & spread en pips)
+                        * OU 2/4 signaux ; ultra-proximité FVG/OB acceptée
+                        * MTF et phase = soft (on ne bloque pas si un directionnel existe)
+        - lenient/off: très permissifs (debug)
+
+        Garde-fous toujours actifs: MT5 ok, symbole, max positions, prix dispo, stops_level vs SL.
+        """
         # --- import DIAG (neutre si absent) ---
         try:
             from core.diagnostics import get_tracker_from_context
@@ -687,7 +693,7 @@ class TradeExecutor:
             _diag_note(reason, extra, sym)
             return False, reason
 
-        # 1) Action & symbole (vital)
+        # 1) Action & symbole
         action_raw = _first_non_empty(
             trade_decision.get("final_action"),
             trade_decision.get("selected_action"),
@@ -709,8 +715,8 @@ class TradeExecutor:
             return _reject("asset_missing_or_unknown")
         raw_symbol = raw_symbol.strip().upper()
 
-        # 2) Whitelist (si fournie)
-        allowed = set(map(str.upper, (active_config or {}).get("tradeable_assets", [])))
+        # 2) Whitelist
+        allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
         if allowed and raw_symbol not in allowed:
             return _reject(f"asset_not_allowed:{raw_symbol}", sym=raw_symbol)
 
@@ -720,76 +726,43 @@ class TradeExecutor:
             return _reject(f"invalid_broker_mapping:{raw_symbol}", sym=raw_symbol)
         broker_symbol = str(broker_symbol).strip().upper()
 
-        # 4) Connexion MT5 (vital)
+        # 4) Connexion MT5
         if not _mt5_is_connected():
             _mt5_reconnect_if_needed()
             if not _mt5_is_connected():
                 return _reject("mt5_not_connected", sym=raw_symbol)
 
-        # 5) Symbole existant (vital)
+        # 5) Symbole existant
         symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
         if not symbol_info or not getattr(symbol_info, "name", None):
             return _reject(f"invalid_mt5_symbol:{broker_symbol}", sym=raw_symbol)
 
-        # 6) Positions max (relâché: ne bloque pas si bypass explicite)
-        active_acc = (market_context or {}).get("active_broker_account", {}) or {}
+        # 6) Positions max
+        active_acc = market_context.get("active_broker_account", {})
         max_pos = active_acc.get("trade_settings", {}).get("max_open_positions", 999)
-        current_positions = (market_context or {}).get("open_positions", []) or []
-        allow_overflow = bool(self.config_manager.get("demo.allow_overflow_positions", True))
-        if not allow_overflow and isinstance(current_positions, (list, tuple)) and len(current_positions) >= max_pos:
+        current_positions = market_context.get("open_positions", [])
+        if isinstance(current_positions, (list, tuple)) and len(current_positions) >= max_pos:
             return _reject(f"max_positions_reached:{len(current_positions)}/{max_pos}", sym=raw_symbol)
 
-        # --- Détection des switches de BYPASS ---
-        sr = self.config_manager.get("entry_rules.scalping", {}) or {}
-        gating_mode = str(sr.get("gating_mode", "aggressive")).lower()
-        min_conf_cfg = float(sr.get("min_confidence", 0.30) or 0.30)
-        demo_pretrade_bypass = bool(self.config_manager.get("demo.pretrade_bypass", False)
-                                    or (active_config or {}).get("demo_pretrade_bypass", False)
-                                    or gating_mode in {"off", "ultra", "free"})
-
-        dt = trade_decision.get("decision_trace") or {}
-        gates = trade_decision.get("gates") or {}
-        score = float(trade_decision.get("score") or dt.get("score") or 0.0)
-        core_selected = bool(
-            trade_decision.get("core_selected")
-            or trade_decision.get("selected_by_core")
-            or gates.get("core_selected")
-            or dt.get("core_selected")
-        )
-        force_on_core = bool(self.config_manager.get("demo.force_trade_on_core_select", True))
-
-        bypass_active = bool(
-            demo_pretrade_bypass
-            or (force_on_core and core_selected and score >= min_conf_cfg)
-        )
-
-        # 7) Spread limite (désactivable; ignoré si bypass)
-        if not bypass_active:
-            exec_policy = (active_config.get("execution_policy", {}) if isinstance(active_config, dict) else {})
-            max_spread_points = exec_policy.get("max_spread_points", 0)
-            skip_spread_check = bool(exec_policy.get("skip_spread_check", False))
-            tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
-            if (not skip_spread_check) and tick and hasattr(symbol_info, "spread") and hasattr(symbol_info, "point"):
+        # 7) Spread limite (points broker) — non bloquant en balanced/lenient/katana/off
+        exec_policy = (active_config.get("execution_policy", {}) if isinstance(active_config, dict) else {})
+        sr_global = self.config_manager.get("entry_rules.scalping", {}) or {}
+        gating_mode_global = str(sr_global.get("gating_mode", "katana")).lower()
+        max_spread_points = exec_policy.get("max_spread_points")
+        tick = self.mt5_connector.get_symbol_info_tick(broker_symbol)
+        if tick and hasattr(symbol_info, "spread") and hasattr(symbol_info, "point"):
+            if gating_mode_global in ("strict", "normal", "aggressive"):
                 if isinstance(max_spread_points, (int, float)) and symbol_info.spread and max_spread_points > 0:
                     if symbol_info.spread > max_spread_points:
-                        return _reject(
-                            "spread_too_high_points",
-                            {"spread": float(symbol_info.spread), "limit": float(max_spread_points)},
-                            sym=raw_symbol
-                        )
+                        return _reject("spread_too_high_points",
+                                    {"spread": float(symbol_info.spread), "limit": float(max_spread_points)},
+                                    sym=raw_symbol)
 
-        # ---------- BYPASS: tout laisser passer sauf cas vitaux ----------
-        if bypass_active:
-            _diag_note("demo_pretrade_bypass_active", {"score": score, "mode": gating_mode}, raw_symbol)
-            # 9) Prix dispo (vital)
-            price = self.mt5_connector.get_current_price(broker_symbol, action)
-            if not price or price <= 0:
-                return _reject("price_unavailable", sym=raw_symbol)
-            # ✅ OK (aucun autre blocage)
-            return True, ""
+        # ---------- Gating micro-phase ----------
+        dt = trade_decision.get("decision_trace") or {}
+        gates = trade_decision.get("gates") or {}
 
-        # ---------- Mode non-bypass: conditions TRÈS assouplies ----------
-        # Micro-structure (inputs — on ne bloque pas si absents)
+        # Micro-structure
         m1_break  = bool(gates.get("m1_break")  or dt.get("m1_break_in_direction"))
         m1_retest = bool(gates.get("m1_retest") or dt.get("m1_retest_confirmation"))
 
@@ -797,138 +770,217 @@ class TradeExecutor:
         fvg = dt.get("fvg_details") or {}
         ob  = dt.get("ob_details")  or {}
 
-        max_spread_pips   = float(sr.get("max_spread_pips", 6.0) or 6.0)
-        min_atr_m1_pips   = float(sr.get("min_atr_m1_pips", 0.4) or 0.0)
-        fvg_max_distance  = float(sr.get("fvg_max_distance_pips", 8.0) or 8.0)
-        ob_max_distance   = float(sr.get("ob_max_distance_pips", 6.0) or 6.0)
+        # Phases & métriques
+        phase_from_decision     = str(gates.get("phase") or dt.get("phase") or "").lower()
+        spread_pips_from_trace  = float(dt.get("spread_pips") or 0.0)
+        atr_m1_pips_from_trace  = float(dt.get("atr_m1_pips") or 0.0)
 
-        spread_pips_from_trace = float(dt.get("spread_pips") or 0.0)
-        atr_m1_pips_from_trace = float(dt.get("atr_m1_pips") or 0.0)
+        # Règles scalping (local)
+        sr = self.config_manager.get("entry_rules.scalping", {}) or {}
+        gating_mode = str(sr.get("gating_mode", gating_mode_global)).lower()  # strict|normal|balanced|aggressive|katana|lenient|off
+        max_spread_pips   = float(sr.get("max_spread_pips",  2.0) or 2.0)          # soft
+        min_atr_m1_pips   = float(sr.get("min_atr_m1_pips",  0.6) or 0.0)          # soft
+        fvg_max_distance  = float(sr.get("fvg_max_distance_pips", 2.0) or 2.0)
+        ob_max_distance   = float(sr.get("ob_max_distance_pips",  2.0) or 2.0)
+        hard_min_atr_m1   = float(sr.get("hard_min_atr_m1_pips", 0.12) or 0.0)     # dur (katana/balanced+)
+        hard_max_spread   = float(sr.get("hard_max_spread_pips", 3.5) or 1e9)      # dur (katana/balanced+)
+        ultra_near_pips   = float(sr.get("ultra_near_pips", 0.6) or 0.6)           # ultra proximité OB/FVG
 
+        # Distances & états
         fvg_distance = float(fvg.get("distance_pips") or 1e9)
         ob_distance  = float(ob.get("distance_pips")  or 1e9)
 
         bos_confirmed = bool(bos.get("confirmed") or bos.get("is_confirmed"))
-        fvg_dist_ok   = fvg_distance <= fvg_max_distance
-        ob_valid_ok   = bool(ob.get("validated") or ob.get("valid"))
-        ob_dist_ok    = ob_distance  <= ob_max_distance
+        fvg_close     = (fvg_distance <= fvg_max_distance)
+        ob_valid      = bool(ob.get("validated") or ob.get("valid"))
+        ob_close      = (ob_distance  <= ob_max_distance)
 
+        # Conditions de base
         cond_strict   = m1_break and m1_retest
-        cond_bos_fvg  = bos_confirmed and fvg_dist_ok
-        cond_ob_near  = ob_dist_ok and (ob_valid_ok or True)  # on tolère non-validé si proche
+        cond_ob_near  = ob_valid and ob_close
+        cond_bos_fvg  = bos_confirmed and fvg_close
+        cond_aggr     = (m1_break and (spread_pips_from_trace <= max_spread_pips)
+                        and (atr_m1_pips_from_trace >= max(0.0, 0.8 * min_atr_m1_pips)))
 
-        soft_ob_near  = ob_distance  <= max(1.5, 0.5 * ob_max_distance)
-        soft_fvg_near = (fvg_distance <= max(1.0, 0.75 * fvg_max_distance)) and m1_break
-        two_of_three  = (int(bool(m1_break))
-                        + int(bool(bos_confirmed))
-                        + int(bool(fvg_dist_ok or ob_dist_ok))) >= 2
+        # Déclencheurs / comptage
+        count_signals = int(bool(m1_break)) + int(bool(bos_confirmed)) + int(bool(fvg_close)) + int(bool(ob_close))
+        directional_ok = (m1_break or bos_confirmed)
+        any_trigger   = (count_signals > 0)
 
-        cond_aggr = (
-            m1_break
-            or cond_bos_fvg
-            or cond_ob_near
-            or soft_ob_near
-            or soft_fvg_near
-            or two_of_three
-            or (core_selected and score >= min_conf_cfg)
-        )
-
-        # Gating selon mode (mais ultra-relax)
-        if gating_mode == "strict":
-            if not cond_strict:
-                return _reject("gate_strict_failed(m1_break+retest_required)",
-                            {"break": m1_break, "retest": m1_retest}, raw_symbol)
-        elif gating_mode == "normal":
-            cond_normal = cond_strict or cond_aggr
-            if not cond_normal:
-                return _reject("gate_normal_failed", {"break": m1_break, "bos": bos_confirmed, "proximities": (fvg_dist_ok, ob_dist_ok)}, raw_symbol)
-        else:  # aggressive (par défaut ici)
-            if not cond_aggr:
-                return _reject("gate_aggressive_failed", {"core_selected": core_selected, "score": score}, raw_symbol)
-
-        # Phase / MTF / Momentum / ATR : NE BLOQUENT PLUS (diagnostic seulement)
-        # Phase
-        phase_from_decision = str(gates.get("phase") or dt.get("phase") or "").lower()
-        if phase_from_decision:
-            _diag_note("phase_info", {"phase": phase_from_decision}, raw_symbol)
-
-        # Momentum fallback (on ne bloque pas)
-        used_rule = str(trade_decision.get("rule_name", "")).lower()
-        if ("momentum" in used_rule) or bool(dt.get("used_momentum_fallback")):
-            _diag_note("momentum_fallback_present(but_allowed)", {"rule": used_rule}, raw_symbol)
-
-        # Cohérence MTF (diagnostic)
-        mtf_dir = str((dt.get("mtf_direction") or trade_decision.get("mtf_direction", "")).lower())
-        if mtf_dir in ("up", "down"):
-            _diag_note("mtf_direction_info", {"mtf_direction": mtf_dir, "action": action}, raw_symbol)
-
-        # ATR filter (désactivé par défaut — ne bloque que si explicitement activé ailleurs)
-        try:
-            q = self.config_manager.get("execution_quality_filters", {}) or {}
-            vol_rule = q.get("atr_volatility_filter", {}) or {}
-            if bool(vol_rule.get("enabled", False)):
-                import pandas as pd, numpy as np
-                def _extract_latest_df_from_context(mkt_ctx: dict, sym: str, alt: str):
-                    md2 = (mkt_ctx.get("market_data") or {}).get(sym) or (mkt_ctx.get("market_data") or {}).get(alt)
-                    if isinstance(md2, pd.DataFrame):
-                        return md2
-                    if isinstance(md2, dict):
-                        df2 = md2.get("annotated_rates_df")
-                        return df2 if isinstance(df2, pd.DataFrame) else None
-                    return None
-
-                def _get_atr(df, period: int):
-                    if df is None or len(df) < period + 2:
-                        return float("nan")
-                    high = df["high"].astype(float)
-                    low = df["low"].astype(float)
-                    close = df["close"].astype(float)
-                    prev_close = close.shift(1)
-                    tr = np.maximum.reduce([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()])
-                    return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
-
-                df_ctx = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
-                period = int(vol_rule.get("period", 14))
-                min_atr = float(vol_rule.get("min_atr", 0.0))
-                max_atr = float(vol_rule.get("max_atr", 1e9))
-                atr_val = _get_atr(df_ctx, period)
-                if atr_val == atr_val:  # not NaN
-                    if atr_val < min_atr:
-                        _diag_note("atr_too_low_IGNORED", {"atr": atr_val, "min": min_atr}, raw_symbol)
-                    elif atr_val > max_atr:
-                        _diag_note("atr_too_high_IGNORED", {"atr": atr_val, "max": max_atr}, raw_symbol)
-        except Exception:
+        # --- Gating par mode ---
+        if gating_mode in ("off", "disabled"):
             pass
 
-        # 9) Prix dispo (vital)
+        elif gating_mode in ("lenient", "light", "soft"):
+            if not any_trigger:
+                return _reject("gate_lenient_failed(no_basic_trigger)",
+                            {"break": m1_break, "bos": bos_confirmed, "fvg_close": fvg_close, "ob_close": ob_close},
+                            raw_symbol)
+
+        elif gating_mode == "katana":
+            # Qualité minimale dure (éviter marché mort / spread absurde)
+            if (atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < hard_min_atr_m1):
+                return _reject(f"katana_atr_floor({atr_m1_pips_from_trace:.2f} < {hard_min_atr_m1:.2f})", sym=raw_symbol)
+            if (spread_pips_from_trace > 0 and spread_pips_from_trace > hard_max_spread):
+                return _reject(f"katana_spread_cap({spread_pips_from_trace:.2f} > {hard_max_spread:.2f})", sym=raw_symbol)
+
+            ultra_proximity = (fvg_distance <= ultra_near_pips) or (ob_distance <= ultra_near_pips)
+
+            katana_ok = (
+                cond_strict
+                or cond_bos_fvg
+                or cond_ob_near
+                or (directional_ok and (  # directionnel + qualité mini
+                    (spread_pips_from_trace <= hard_max_spread if spread_pips_from_trace > 0 else True) and
+                    (atr_m1_pips_from_trace >= hard_min_atr_m1 if atr_m1_pips_from_trace > 0 else True)
+                ))
+                or (count_signals >= 2 and directional_ok)        # 2/4 dont ≥1 directionnel
+                or (directional_ok and ultra_proximity)           # directionnel + ultra proximité
+            )
+
+            if not katana_ok:
+                return _reject("gate_katana_failed",
+                            {"signals": count_signals, "directional_ok": directional_ok,
+                                "break": m1_break, "retest": m1_retest,
+                                "bos": bos_confirmed, "fvg_close": fvg_close, "ob_close": ob_close,
+                                "fvg_dist": fvg_distance, "ob_dist": ob_distance,
+                                "atr": atr_m1_pips_from_trace, "spread": spread_pips_from_trace},
+                            raw_symbol)
+
+        elif gating_mode == "balanced":
+            if (atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < hard_min_atr_m1):
+                return _reject(f"atr_floor_failed({atr_m1_pips_from_trace:.2f} < {hard_min_atr_m1:.2f})", sym=raw_symbol)
+            if (spread_pips_from_trace > 0 and spread_pips_from_trace > hard_max_spread):
+                return _reject(f"spread_floor_failed({spread_pips_from_trace:.2f} > {hard_max_spread:.2f})", sym=raw_symbol)
+            cond_balanced = (
+                cond_strict
+                or (count_signals >= 2 and directional_ok)
+                or (m1_break and (fvg_close or ob_close))
+            )
+            if not cond_balanced:
+                return _reject("gate_balanced_failed",
+                            {"signals": count_signals, "directional_ok": directional_ok}, raw_symbol)
+
+        elif gating_mode == "normal":
+            cond_normal = cond_strict or cond_ob_near or cond_bos_fvg or any_trigger
+            if not cond_normal:
+                return _reject("gate_normal_failed",
+                            {"break": m1_break, "retest": m1_retest,
+                                "bos": bos_confirmed, "fvg_close": fvg_close,
+                                "ob_valid_close": ob_valid and ob_close},
+                            raw_symbol)
+        else:  # aggressive
+            cond_ok = (cond_strict or cond_ob_near or cond_bos_fvg or any_trigger or cond_aggr)
+            if not cond_ok:
+                return _reject("gate_aggressive_failed",
+                            {"break": m1_break, "retest": m1_retest,
+                                "aggr_ok": cond_aggr, "any_trigger": any_trigger},
+                            raw_symbol)
+
+        # ---------- Phase directionnelle ----------
+        current_phase = (phase_from_decision or str(
+            market_context.get("phase", "") or market_context.get("market_phase", "") or ""
+        )).lower()
+        non_directionals = {
+            "range", "range_accumulation", "range_distribution",
+            "compression", "low_volatility_compression",
+            "uncertain", "no_clear_phase",
+        }
+        if gating_mode_global in ("strict", "normal", "aggressive"):
+            if current_phase in non_directionals or any(k in current_phase for k in ["range", "compression", "uncertain"]):
+                return _reject(f"phase_not_directional({current_phase})", sym=raw_symbol)
+        else:
+            # katana/balanced/lenient/off : on n'empêche pas si un signal directionnel existe
+            if (current_phase in non_directionals or any(k in current_phase for k in ["range", "compression", "uncertain"])) and not (m1_break or bos_confirmed):
+                return _reject(f"phase_soft_block({current_phase})_no_directional", sym=raw_symbol)
+
+        # Momentum fallback désactivé
+        used_rule = str(trade_decision.get("rule_name", "")).lower()
+        if ("momentum" in used_rule) or bool(dt.get("used_momentum_fallback")):
+            return _reject("momentum_fallback_disabled", sym=raw_symbol)
+
+        # Cohérence MTF — SOFT en katana/balanced/lenient/off
+        mtf_dir = str((dt.get("mtf_direction") or trade_decision.get("mtf_direction", "")).lower())
+        if gating_mode_global in ("strict", "normal", "aggressive"):
+            if mtf_dir in ("up", "down"):
+                if (mtf_dir == "up" and action != "BUY") or (mtf_dir == "down" and action != "SELL"):
+                    return _reject(f"mtf_direction_mismatch({mtf_dir} vs {action})", sym=raw_symbol)
+        else:
+            if mtf_dir in ("up", "down"):
+                if (mtf_dir == "up" and action != "BUY") or (mtf_dir == "down" and action != "SELL"):
+                    _diag_note("mtf_soft_mismatch_ignored", {"mtf_dir": mtf_dir, "action": action}, raw_symbol)
+
+        # ATR M1 (trace) — seuil soft pour strict/normal/aggressive uniquement
+        if gating_mode_global in ("strict", "normal", "aggressive"):
+            if min_atr_m1_pips > 0 and atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < min_atr_m1_pips:
+                return _reject(f"atr_m1_too_low({atr_m1_pips_from_trace:.2f} < {min_atr_m1_pips:.2f})", sym=raw_symbol)
+
+        # (Complément) ATR sur DF du contexte — désactivé en katana/balanced/lenient/off
+        import pandas as pd, numpy as np
+
+        def _extract_latest_df_from_context(mkt_ctx: dict, sym: str, alt: str):
+            md2 = (mkt_ctx.get("market_data") or {}).get(sym) or (mkt_ctx.get("market_data") or {}).get(alt)
+            if isinstance(md2, pd.DataFrame):
+                return md2
+            if isinstance(md2, dict):
+                df2 = md2.get("annotated_rates_df")
+                return df2 if isinstance(df2, pd.DataFrame) else None
+            return None
+
+        def _get_atr(df, period: int):
+            if df is None or len(df) < period + 2:
+                return float("nan")
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            close = df["close"].astype(float)
+            prev_close = close.shift(1)
+            tr = np.maximum.reduce([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()])
+            return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
+
+        q = self.config_manager.get("execution_quality_filters", {}) or {}
+        vol_rule = q.get("atr_volatility_filter", {}) or {}
+        if gating_mode_global in ("strict", "normal", "aggressive") and bool(vol_rule.get("enabled", False)):
+            df_ctx = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
+            period = int(vol_rule.get("period", 14))
+            min_atr = float(vol_rule.get("min_atr", 0.0))
+            max_atr = float(vol_rule.get("max_atr", 1e9))
+            atr_val = _get_atr(df_ctx, period)
+            if atr_val == atr_val:  # not NaN
+                if atr_val < min_atr:
+                    return _reject(f"atr_too_low({atr_val:.6f} < {min_atr:.6f})", sym=raw_symbol)
+                if atr_val > max_atr:
+                    return _reject(f"atr_too_high({atr_val:.6f} > {max_atr:.6f})", sym=raw_symbol)
+
+        # 9) Prix dispo
         price = self.mt5_connector.get_current_price(broker_symbol, action)
         if not price or price <= 0:
             return _reject("price_unavailable", sym=raw_symbol)
 
-        # 10) Stops level broker vs SL scalp (IGNORÉ si ignore_broker_stops_level=True)
+        # 10) Stops level broker vs SL scalp
         target_sl_pips = float(trade_decision.get("target_sl_pips", 0) or 0.0)
         is_scalping = "scalping" in str(trade_decision.get("strategy_type", "")).lower()
         sl_cap = float(self.config_manager.get("entry_rules.scalping.max_stop_pips_scalp", 0.0) or 0.0)
         reject_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
 
         if is_scalping and sl_cap > 0 and target_sl_pips > sl_cap and reject_over_cap:
-            _diag_note("sl_over_cap_IGNORED(non_blocking)", {"sl_pips": target_sl_pips, "cap": sl_cap}, raw_symbol)
+            return _reject(f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})",
+                        {"sl_pips": target_sl_pips, "cap": sl_cap}, raw_symbol)
 
-        ignore_stops_level = bool(self.config_manager.get("entry_rules.scalping.ignore_broker_stops_level", True))
-        if not ignore_stops_level:
-            try:
-                digits = int(getattr(symbol_info, "digits", 5) or 5)
-                points_per_pip = 10.0 if digits in (3, 5) else 1.0
-            except Exception:
-                points_per_pip = 10.0
-            stops_level_points = float(getattr(symbol_info, "stops_level", 0) or 0)
-            stops_level_pips = stops_level_points / points_per_pip if points_per_pip > 0 else 0.0
-            if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
-                _diag_note("stops_level_too_high_for_scalp_IGNORED", {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips}, raw_symbol)
+        # MT5 stops_level en points → pips
+        try:
+            digits = int(getattr(symbol_info, "digits", 5) or 5)
+            points_per_pip = 10.0 if digits in (3, 5) else 1.0
+        except Exception:
+            points_per_pip = 10.0
+        stops_level_points = float(getattr(symbol_info, "stops_level", 0) or 0)
+        stops_level_pips = stops_level_points / points_per_pip if points_per_pip > 0 else 0.0
+
+        if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
+            return _reject("stops_level_too_high_for_scalp",
+                        {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips}, raw_symbol)
 
         # ✅ OK
         return True, ""
-
 
 
        
