@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "version": "2.1-tight-safe",
+  "version": "2.2-katana-micro",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
@@ -9,7 +9,7 @@
   ],
   "phase_detection": {
     "use_phase_observer": true,
-    "lookback_window": 200,
+    "lookback_window": 60,
     "volatility_threshold": 0.006,
     "volume_zscore": 0.001,
     "overrides": {
@@ -18,34 +18,34 @@
     }
   },
   "magic_number": 51001,
-  "risk_per_trade_percent": 0.20,
-  "stop_loss_pips": 30,
-  "take_profit_pips": 60,
+  "risk_per_trade_percent": 0.50,
+  "stop_loss_pips": 8,
+  "take_profit_pips": 14,
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.006,
-      "max_spread_points": 50,
+      "max_spread_points": 15,
       "min_volume_score": 0.01,
       "per_symbol_overrides": {
         "EURJPY": {
           "min_volatility": 0.010,
-          "max_spread_points": 50,
+          "max_spread_points": 18,
           "max_lot_size": 0.08
         },
         "EURUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.004,
-          "max_spread_points": 40
+          "max_spread_points": 15
         },
         "GBPUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.0045,
-          "max_spread_points": 45
+          "max_spread_points": 18
         },
         "USDCHF": {
           "max_lot_size": 0.15,
           "min_volatility": 0.0035,
-          "max_spread_points": 40
+          "max_spread_points": 15
         }
       }
     },
@@ -55,7 +55,8 @@
         "M5",
         "M15"
       ],
-      "required_agreements": 3
+      "required_agreements": 2,
+      "forbid_against_m15": true
     },
     "scoring": {
       "base_score": 0.80,
@@ -76,8 +77,8 @@
     },
     "risk": {
       "max_trades_per_day": 3,
-      "cooldown_seconds_after_trade": 1200,
-      "skip_asset_if_spread_over_points": 50,
+      "cooldown_seconds_after_trade": 180,
+      "skip_asset_if_spread_over_points": 15,
       "max_lot_size": 0.15
     },
     "execution": {
@@ -123,19 +124,21 @@
     "take_profit": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 2.2,
-      "fallback_rr": 1.6
+      "atr_multiplier": 2.16,
+      "fallback_rr": 1.8,
+      "hard_max_points": 200
     },
     "stop_loss": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 1.4,
-      "hard_min_points": 30
+      "atr_multiplier": 1.20,
+      "hard_min_points": 40,
+      "hard_max_points": 120
     },
     "breakeven": {
       "enabled": true,
       "trigger_rr": 1.0,
-      "lock_points": 2
+      "lock_points": 20
     },
     "partial_take_profit": {
       "enabled": true,
@@ -146,13 +149,13 @@
       "enabled": false,
       "type": "chandelier",
       "atr_period": 14,
-      "atr_multiplier": 2.0
+      "atr_multiplier": 1.2"
     }
   },
   "exit_rules": {
     "time_based": {
       "enabled": true,
-      "max_trade_minutes": 120
+      "max_trade_minutes": 12
     },
     "invalidated_setup": {
       "enabled": true,
