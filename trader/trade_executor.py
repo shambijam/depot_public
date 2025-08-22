@@ -631,12 +631,16 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[bool, str]:
         """
-        Pré-checks d’exécution + FILTRES DE QUALITÉ (scalping "au couteau", zéro hasard).
+        Pré-checks d’exécution + FILTRES DE QUALITÉ (scalping "au couteau", zéro hasard mais non-bloquant).
         - Phase directionnelle obligatoire (pas de range/compression/uncertain)
-        - Gate micro-phase: break M1 dans le sens + retest confirmé
-        - Fallback momentum désactivé (même hors range)
+        - Gating micro-phase suivant un 'gating_mode' (strict/normal/aggressive)
+            * strict    : break M1 + retest obligatoires
+            * normal    : break M1 + (retest OU (BOS confirmé + proximité FVG) OU (OB validé proche))
+            * aggressive: normal OU (break seul + spread & ATR ok)
+        - Momentum fallback désactivé (même hors range)
         - Cohérence MTF (si fournie)
-        - ATR M1 mini / spread max / stops_level broker vs SL scalp
+        - ATR M1 mini / spread max
+        - Stops_level broker vs SL scalp
         """
 
         # --- Helpers ---
@@ -750,31 +754,61 @@ class TradeExecutor:
                         f"Spread trop élevé: {symbol_info.spread} > {max_spread_points}.",
                     )
 
-        # 7.bis) Gate micro-phase & phase directionnelle (zéro hasard)
+        # ---------- Gating Micro-phase avec profils de sévérité ----------
         dt = trade_decision.get("decision_trace") or {}
         gates = trade_decision.get("gates") or {}
 
-        # Gate micro-phase : break M1 dans le sens + retest confirmé
-        m1_break = bool(gates.get("m1_break") or dt.get("m1_break_in_direction"))
+        # Données micro-structure
+        m1_break  = bool(gates.get("m1_break") or dt.get("m1_break_in_direction"))
         m1_retest = bool(gates.get("m1_retest") or dt.get("m1_retest_confirmation"))
-        if not (m1_break and m1_retest):
-            return False, "gate_micro_phase_not_passed"
 
-        # Phase directionnelle obligatoire (pas de range/compression/uncertain)
+        bos = dt.get("bos_mss_details") or {}
+        fvg = dt.get("fvg_details") or {}
+        ob  = dt.get("ob_details")  or {}
+
+        # Phases & métriques utiles
         phase_from_decision = str(gates.get("phase") or dt.get("phase") or "").lower()
-        if phase_from_decision:
-            current_phase = phase_from_decision  # surchargera la détection plus bas
-        else:
-            current_phase = ""
+        phase_m5 = str(dt.get("phase_m5") or "").lower()
+        spread_pips_from_trace = float(dt.get("spread_pips") or 0.0)
+        atr_m1_pips_from_trace = float(dt.get("atr_m1_pips") or 0.0)
 
-        # 8) Qualité d'exécution (filtres paramétrables)
-        q = self.config_manager.get("execution_quality_filters", {})
+        # Lecture des règles scalping
+        sr = self.config_manager.get("entry_rules.scalping", {}) or {}
+        gating_mode = str(sr.get("gating_mode", "normal")).lower()  # <-- 'strict'/'normal'/'aggressive'
+        max_spread_pips = float(sr.get("max_spread_pips", 1.0) or 1.0)
+        min_atr_m1_pips = float(sr.get("min_atr_m1_pips", 0.8) or 0.0)
+        fvg_max_distance = float(sr.get("fvg_max_distance_pips", 2.0) or 2.0)
+        ob_max_distance  = float(sr.get("ob_max_distance_pips", 2.0) or 2.0)
 
-        # 8.1 Bloquer certaines phases (inclure non-directionnelles par défaut)
-        blocked_phases = set(map(str, q.get("blocked_phases", [])))
-        current_phase = str(
-            current_phase
-            or market_context.get("phase", "")
+        # Conditions alternatives (sans momentum)
+        bos_confirmed = bool(bos.get("confirmed"))
+        fvg_dist_ok   = float(fvg.get("distance_pips") or 1e9) <= fvg_max_distance
+        ob_valid_ok   = bool(ob.get("validated") or ob.get("valid"))
+        ob_dist_ok    = float(ob.get("distance_pips") or 1e9) <= ob_max_distance
+
+        cond_strict = m1_break and m1_retest
+        cond_bos_fvg = bos_confirmed and fvg_dist_ok    # BOS confirmé + FVG proche
+        cond_ob_near = ob_valid_ok and ob_dist_ok       # OB validé proche
+        cond_aggr = (
+            m1_break
+            and (spread_pips_from_trace <= max_spread_pips)
+            and (atr_m1_pips_from_trace >= max(0.0, 0.8 * min_atr_m1_pips))
+        )
+
+        if gating_mode == "strict":
+            if not cond_strict:
+                return False, "gate_strict_failed(m1_break+retest_required)"
+        elif gating_mode == "normal":
+            if not (cond_strict or cond_bos_fvg or cond_ob_near):
+                return False, "gate_normal_failed(no_retest_but_no_bos_fvg_or_ob_near)"
+        else:  # aggressive
+            if not (cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr):
+                return False, "gate_aggressive_failed"
+
+        # ---------- Phase directionnelle et autres filtres ----------
+        # Phase directionnelle obligatoire (pas de range/compression/uncertain)
+        current_phase = phase_from_decision or str(
+            market_context.get("phase", "")
             or market_context.get("market_phase", "")
             or ""
         ).lower()
@@ -787,40 +821,34 @@ class TradeExecutor:
             "uncertain",
             "no_clear_phase",
         }
-        if blocked_phases:
-            blocked = {p.lower() for p in blocked_phases} | non_directionals
-        else:
-            blocked = non_directionals
-        if current_phase in blocked or any(k in current_phase for k in ["range", "compression", "uncertain"]):
+        if current_phase in non_directionals or any(k in current_phase for k in ["range", "compression", "uncertain"]):
             return False, f"phase_not_directional({current_phase})"
 
-        # 8.2 Momentum fallback strictement désactivé (même hors range)
+        # Momentum fallback strictement désactivé
         used_rule = str(trade_decision.get("rule_name", "")).lower()
         if ("momentum" in used_rule) or bool((dt.get("used_momentum_fallback"))):
             return False, "momentum_fallback_disabled"
 
-        # 8.3 Cohérence MTF : si la décision fournit une direction MTF, elle doit matcher l'action
+        # Cohérence MTF: si présent, la direction doit matcher l'action
         mtf_dir = str((dt.get("mtf_direction") or trade_decision.get("mtf_direction", "")).lower())
         if mtf_dir in ("up", "down"):
             if (mtf_dir == "up" and action != "BUY") or (mtf_dir == "down" and action != "SELL"):
                 return False, f"mtf_direction_mismatch({mtf_dir} vs {action})"
 
-        # 8.4 ATR M1 minimal (optionnel via config, depuis decision_trace)
-        atr_m1_min = float(self.config_manager.get("entry_rules.scalping.min_atr_m1_pips", 0.0) or 0.0)
-        atr_m1_pips_from_trace = float(dt.get("atr_m1_pips") or 0.0)
-        if atr_m1_min > 0 and atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < atr_m1_min:
-            return False, f"atr_m1_too_low({atr_m1_pips_from_trace:.2f} < {atr_m1_min:.2f})"
+        # ATR M1 minimum (depuis decision_trace)
+        if min_atr_m1_pips > 0 and atr_m1_pips_from_trace > 0 and atr_m1_pips_from_trace < min_atr_m1_pips:
+            return False, f"atr_m1_too_low({atr_m1_pips_from_trace:.2f} < {min_atr_m1_pips:.2f})"
 
-        # 8.5 (Complément) Volatilité/ATR min-max via DF si dispo
+        # (Complément) Volatilité/ATR via DF si dispo
         import pandas as pd, numpy as np
 
         def _extract_latest_df_from_context(mkt_ctx: dict, sym: str, alt: str):
-            md = (mkt_ctx.get("market_data") or {}).get(sym) or (mkt_ctx.get("market_data") or {}).get(alt)
-            if isinstance(md, pd.DataFrame):
-                return md
-            if isinstance(md, dict):
-                df = md.get("annotated_rates_df")
-                return df if isinstance(df, pd.DataFrame) else None
+            md2 = (mkt_ctx.get("market_data") or {}).get(sym) or (mkt_ctx.get("market_data") or {}).get(alt)
+            if isinstance(md2, pd.DataFrame):
+                return md2
+            if isinstance(md2, dict):
+                df2 = md2.get("annotated_rates_df")
+                return df2 if isinstance(df2, pd.DataFrame) else None
             return None
 
         def _get_atr(df, period: int):
@@ -841,13 +869,14 @@ class TradeExecutor:
             )
             return float(tr.rolling(window=period, min_periods=period).mean().iloc[-1])
 
+        q = self.config_manager.get("execution_quality_filters", {})
         vol_rule = q.get("atr_volatility_filter", {})
         if vol_rule.get("enabled", False):
-            df = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
+            df_ctx = _extract_latest_df_from_context(market_context, broker_symbol, raw_symbol)
             period = int(vol_rule.get("period", 14))
             min_atr = float(vol_rule.get("min_atr", 0.0))
             max_atr = float(vol_rule.get("max_atr", 1e9))
-            atr_val = _get_atr(df, period)
+            atr_val = _get_atr(df_ctx, period)
             if atr_val == atr_val:  # not NaN
                 if atr_val < min_atr:
                     return False, f"ATR trop faible ({atr_val:.5f} < {min_atr})."
@@ -870,10 +899,9 @@ class TradeExecutor:
             return False, f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})"
 
         # Refus si le broker impose une distance mini > SL scalp
-        # MT5 renvoie stops_level en "points", ~10 points = 1 pip sur la plupart des FX.
         stops_level_points = getattr(symbol_info, "stops_level", 0) or 0
         try:
-            points_per_pip = 10.0
+            points_per_pip = 10.0  # FX standard
             stops_level_pips = float(stops_level_points) / points_per_pip
         except Exception:
             stops_level_pips = 0.0
@@ -883,6 +911,7 @@ class TradeExecutor:
 
         # OK
         return True, ""
+
 
 
     def _check_fat_finger_volume(
