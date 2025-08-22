@@ -204,7 +204,7 @@
             "M5",
             "M15"
         ],
-        "confluence_required": 2,
+        "confluence_required": 3,
         "weight_distribution": {
             "M1": 0.4,
             "M5": 0.4,
