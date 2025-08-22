@@ -1625,10 +1625,31 @@ class DecisionPipeline:
         - Micro-timing M1 (break HH/LL selon direction)
         - Contrôle de spread et d'écart EMA M1
         Pour les autres stratégies : comportement inchangé (plus permissif).
+
+        ➕ Instrumentation DIAG: note chaque refus/pass de gate au stade 'core_gate'.
         """
-        self.logger.info(
-            f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}"
-        )
+        # DIAG (safe import)
+        try:
+            from core.diagnostics import get_tracker_from_context
+            _tracker = get_tracker_from_context(context)
+        except Exception:
+            _tracker = None
+
+        def _diag_note(asset: str, reason: str, extra: dict | None = None):
+            if _tracker:
+                try:
+                    _tracker.note(asset, "core_gate", reason, extra or {})
+                except Exception:
+                    pass
+
+        def _diag_selected(asset: str, extra: dict | None = None):
+            if _tracker:
+                try:
+                    _tracker.set_selected(asset, "core_gate", extra or {})
+                except Exception:
+                    pass
+
+        self.logger.info(f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}")
 
         is_scalping = str(strategy_name).lower() == "scalping"
 
@@ -1636,23 +1657,11 @@ class DecisionPipeline:
         min_confidence_default = float(config.get("min_confidence", 0.65))
 
         # Seuils spécifiques SCALPING (lis dans prod_config.json si dispo)
-        require_align = bool(
-            self.config_manager.get("entry_rules.scalping.require_mtf_align", True)
-        )
-        require_m1_break = bool(
-            self.config_manager.get("entry_rules.scalping.require_m1_break", True)
-        )
-        max_spread_pts = float(
-            self.config_manager.get("entry_rules.scalping.max_spread_points", 50)
-        )
-        min_m1_ema_spread = float(
-            self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0)
-        )
-        min_confidence_scalp = float(
-            self.config_manager.get(
-                "entry_rules.scalping.min_confidence", min_confidence_default
-            )
-        )
+        require_align = bool(self.config_manager.get("entry_rules.scalping.require_mtf_align", True))
+        require_m1_break = bool(self.config_manager.get("entry_rules.scalping.require_m1_break", True))
+        max_spread_pts = float(self.config_manager.get("entry_rules.scalping.max_spread_points", 50))
+        min_m1_ema_spread = float(self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0))
+        min_confidence_scalp = float(self.config_manager.get("entry_rules.scalping.min_confidence", min_confidence_default))
 
         best_asset, best_score, best_signals = None, -1.0, None
 
@@ -1674,29 +1683,23 @@ class DecisionPipeline:
                 is_valid = False
                 if confidence >= min_confidence_default:
                     is_valid = True
-                    self.logger.info(
-                        f"✅ [{asset}] Accepté par CORE (non-scalping) - Confiance {confidence:.3f} >= {min_confidence_default}"
-                    )
-                elif confidence >= 0.5 and any(
-                    k in phase.lower() for k in ["bullish", "bearish", "trending"]
-                ):
+                    self.logger.info(f"✅ [{asset}] Accepté par CORE (non-scalping) - Confiance {confidence:.3f} >= {min_confidence_default}")
+                elif confidence >= 0.5 and any(k in phase.lower() for k in ["bullish", "bearish", "trending"]):
                     is_valid = True
-                    self.logger.info(
-                        f"✅ [{asset}] Accepté par CORE (non-scalping) - Phase conclusive: {phase}"
-                    )
+                    self.logger.info(f"✅ [{asset}] Accepté par CORE (non-scalping) - Phase conclusive: {phase}")
 
                 if is_valid and score > best_score:
                     best_asset, best_score, best_signals = asset, score, asset_signals
+                    _diag_selected(asset, {"strategy": strategy_name, "score": score, "mode": "non_scalping"})
+                else:
+                    if not is_valid:
+                        _diag_note(asset, "non_scalping_reject_low_conf_or_phase", {"confidence": confidence, "phase": phase})
                 continue
 
             # === Gate d'entrée SCALPING (strict mais paramétrable) ===
-            mtf_align_val = asset_signals.get(
-                "mtf_ema_align", None
-            )  # bool attendu si présent
+            mtf_align_val = asset_signals.get("mtf_ema_align", None)  # bool attendu si présent
             mtf_direction = str(asset_signals.get("mtf_direction", "none")).lower()
-            spread_points = asset_signals.get(
-                "current_spread_points", asset_signals.get("spread", float("inf"))
-            )
+            spread_points = asset_signals.get("current_spread_points", asset_signals.get("spread", float("inf")))
             try:
                 spread_points = float(spread_points)
             except Exception:
@@ -1717,10 +1720,9 @@ class DecisionPipeline:
                 if isinstance(mtf_align_val, bool):
                     align_ok = mtf_align_val is True
                 else:
-                    # si non fourni et requis → on refuse
-                    align_ok = False
+                    align_ok = False  # non fourni mais requis
 
-            # Micro-timing M1 : si direction haussière → break du dernier HH ; baissière → break LL
+            # Micro-timing M1
             m1_break_ok = True
             if require_m1_break:
                 if mtf_direction == "up":
@@ -1728,7 +1730,7 @@ class DecisionPipeline:
                 elif mtf_direction == "down":
                     m1_break_ok = m1_ll_break
                 else:
-                    m1_break_ok = False  # pas de direction claire → pas d'entrée scalping si on l'exige
+                    m1_break_ok = False  # pas de direction claire
 
             # Journalisation claire
             self.logger.debug(
@@ -1738,41 +1740,45 @@ class DecisionPipeline:
                 f"m1_break_ok={m1_break_ok} (req={require_m1_break})"
             )
 
-            is_valid = (
-                confidence_ok
-                and spread_ok
-                and ema_spread_ok
-                and align_ok
-                and m1_break_ok
-            )
+            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and m1_break_ok
 
             if not is_valid:
-                # Logs pédagogiques
+                # Logs pédagogiques + DIAG granularisé (une note par condition échouée)
                 if not confidence_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp}"
-                    )
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp}")
+                    _diag_note(asset, "confidence_below_min", {"value": confidence, "min": min_confidence_scalp})
                 if not spread_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}"
-                    )
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}")
+                    _diag_note(asset, "spread_too_high_points", {"spread_points": spread_points, "max_points": max_spread_pts})
                 if not ema_spread_ok:
                     self.logger.info(
                         f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}"
                     )
+                    _diag_note(asset, "m1_ema_spread_below_min", {"value": m1_ema_spread, "min": min_m1_ema_spread})
                 if require_align and not align_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)"
-                    )
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)")
+                    _diag_note(asset, "mtf_not_aligned", {"mtf_align": mtf_align_val})
                 if require_m1_break and not m1_break_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction})"
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction})")
+                    _diag_note(
+                        asset,
+                        "no_m1_break_in_direction",
+                        {"mtf_direction": mtf_direction, "hh_break": m1_hh_break, "ll_break": m1_ll_break},
                     )
                 continue
 
             # Candidat accepté → on compare les scores
-            self.logger.info(
-                f"✅ [{asset}] Accepté par CORE (scalping) : conditions MTF/M1 respectées"
+            self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping) : conditions MTF/M1 respectées")
+            _diag_note(
+                asset,
+                "core_gate_pass",
+                {
+                    "confidence": confidence,
+                    "spread_points": spread_points,
+                    "m1_ema_spread": m1_ema_spread,
+                    "mtf_direction": mtf_direction,
+                    "mtf_align": mtf_align_val,
+                },
             )
             if score > best_score:
                 best_asset, best_score, best_signals = asset, score, asset_signals
@@ -1782,9 +1788,9 @@ class DecisionPipeline:
             return {}
 
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-        return self._core_build_trade_decision(
-            best_asset, best_signals, config, context
-        )
+        _diag_selected(best_asset, {"strategy": strategy_name, "score": best_score})
+        return self._core_build_trade_decision(best_asset, best_signals, config, context)
+
         
     def _core_build_trade_decision(
         self,
