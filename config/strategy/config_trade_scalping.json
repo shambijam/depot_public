@@ -9,7 +9,7 @@
   ],
   "entry_rules": {
     "scalping": {
-      "gating_mode": "aggressive",
+      "gating_mode": "off",
       "require_mtf_align": false,
       "require_m1_break": false,
       "max_spread_points": 60,
