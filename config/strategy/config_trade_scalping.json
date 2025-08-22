@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "version": "2.3-katana-micro",
+  "version": "2.4-katana-micro-unleashed",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
@@ -9,15 +9,18 @@
   ],
   "entry_rules": {
     "scalping": {
-      "gating_mode": "normal",
-      "require_mtf_align": true,
+      "gating_mode": "aggressive",
+      "require_mtf_align": false,
       "require_m1_break": false,
-      "max_spread_points": 12,
+      "max_spread_points": 60,
+      "max_spread_pips": 6.0,
       "min_m1_ema_spread": 0.0,
       "min_confidence": 0.30,
-      "min_atr_m1_pips": 0.60,
-      "fvg_max_distance_pips": 4.0,
-      "ob_max_distance_pips": 3.5
+      "min_atr_m1_pips": 0.40,
+      "fvg_max_distance_pips": 8.0,
+      "ob_max_distance_pips": 6.0,
+      "max_stop_pips_scalp": 12.0,
+      "reject_if_sl_over_cap": false
     }
   },
   "execution_quality_filters": {
@@ -29,7 +32,7 @@
     }
   },
   "execution_policy": {
-    "max_spread_points": 12
+    "max_spread_points": 60
   },
   "phase_detection": {
     "use_phase_observer": true,
@@ -37,8 +40,8 @@
     "volatility_threshold": 0.006,
     "volume_zscore": 0.001,
     "overrides": {
-      "require_range_detection": true,
-      "min_lookback_bars": 500
+      "require_range_detection": false,
+      "min_lookback_bars": 300
     }
   },
   "magic_number": 51001,
@@ -47,28 +50,28 @@
   "take_profit_pips": 14,
   "decision_engine": {
     "thresholds": {
-      "min_volatility": 0.0005,
-      "max_spread_points": 12,
+      "min_volatility": 0.0004,
+      "max_spread_points": 60,
       "per_symbol_overrides": {
         "USDJPY": {
           "min_volatility": 0.0007,
-          "max_spread_points": 12,
+          "max_spread_points": 120,
           "max_lot_size": 0.08
         },
         "EURUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.0004,
-          "max_spread_points": 12
+          "max_spread_points": 60
         },
         "GBPUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.00045,
-          "max_spread_points": 12
+          "max_spread_points": 60
         },
         "USDCHF": {
           "max_lot_size": 0.15,
           "min_volatility": 0.00035,
-          "max_spread_points": 12
+          "max_spread_points": 60
         }
       }
     },
@@ -78,8 +81,8 @@
         "M5",
         "M15"
       ],
-      "required_agreements": 2,
-      "forbid_against_m15": true
+      "required_agreements": 1,
+      "forbid_against_m15": false
     },
     "scoring": {
       "base_score": 0.8,
@@ -88,37 +91,37 @@
       "mtf_bonus_per_hit": 0.1,
       "best_opportunity_bonus": 0.15,
       "global_low_vol_penalty": -0.2,
-      "high_spread_penalty": -0.3,
+      "high_spread_penalty": -0.1,
       "ob_conf_bonus": 0.25
     },
     "filters": {
-      "avoid_major_news": true,
+      "avoid_major_news": false,
       "disable_on_weekends": true,
       "min_account_equity": 0,
       "allow_only_whitelist_assets": true,
       "allow_momentum_fallback": false
     },
     "risk": {
-      "max_trades_per_day": 3,
-      "cooldown_seconds_after_trade": 180,
-      "skip_asset_if_spread_over_points": 12,
+      "max_trades_per_day": 20,
+      "cooldown_seconds_after_trade": 0,
+      "skip_asset_if_spread_over_points": 60,
       "max_lot_size": 0.15
     },
     "execution": {
       "order_type": "MARKET",
-      "slippage_points": 3,
-      "max_parallel_positions": 1,
-      "entry_on_close_only": true,
-      "confirm_spread_at_entry": true,
-      "cooldown_bars_after_miss": 3
+      "slippage_points": 5,
+      "max_parallel_positions": 2,
+      "entry_on_close_only": false,
+      "confirm_spread_at_entry": false,
+      "cooldown_bars_after_miss": 1
     },
     "katana": {
       "use_order_blocks": true,
       "ob_entry_override_enabled": true,
       "ob_entry_requires": {
         "spread_ok": true,
-        "mtf_alignment_min": 2,
-        "rr_min": 1.5
+        "mtf_alignment_min": 1,
+        "rr_min": 1.3
       }
     }
   },
@@ -134,7 +137,7 @@
         "phase_must_contain": [
           "trend"
         ],
-        "min_confidence": 0.8
+        "min_confidence": 0.30
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -154,7 +157,7 @@
           "range_retail",
           "range_low_volatility"
         ],
-        "min_confidence": 0.3
+        "min_confidence": 0.30
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -205,7 +208,7 @@
       "close_on_break_even_if_reenter": false
     },
     "news_exit": {
-      "enabled": true,
+      "enabled": false,
       "minutes_before": 2,
       "minutes_after": 2
     }
