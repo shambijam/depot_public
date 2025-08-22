@@ -1295,6 +1295,101 @@ class DecisionPipeline:
                 )
 
         return all_exit_decisions
+    
+   
+    def calculate_risk_parameters(self, context: dict, current_config: dict, trade_decision: dict) -> dict:
+        """
+        Calcule un dimensionnement 'risk-based' (lots), le RR, et fait quelques gardes de base.
+        Signature alignée à l'appel existant: (context, current_config, trade_decision).
+        Retourne un dict: { ok, volume, rr, risk_amount, notes, reason, entry_price, sl_price, tp_price }
+
+        Hypothèses:
+        - context["account_info"] contient equity/balance (fourni par _build_global_context). 
+        - context["market_data"][asset]["symbol_info"] contient trade_contract_size, point, etc. (extrait MT5). 
+        - trade_decision peut déjà inclure entry_price/sl_price/tp_price (ex: via snapshot katana).
+        """
+        notes = []
+
+        # --- 1) Entrées de base ---
+        action = str(trade_decision.get("action", "")).upper()
+        asset  = str(trade_decision.get("asset", "")).upper()
+
+        if action not in {"BUY", "SELL"} or not asset:
+            return {"ok": False, "reason": "invalid_action_or_asset"}
+
+        md = (context.get("market_data") or {}).get(asset, {})
+        symbol_info = md.get("symbol_info", {})  # dict MT5._asdict()
+        account_info = context.get("account_info", {}) or {}
+
+        # entry/sl/tp peuvent être fournis par la décision (idéal) sinon on fallback au prix courant.
+        entry = trade_decision.get("entry_price", md.get("current_price"))
+        sl    = trade_decision.get("sl_price")
+        tp    = trade_decision.get("tp_price")
+
+        if entry is None:
+            return {"ok": False, "reason": "missing_entry_price"}
+
+        # --- 2) Paramètres broker/symbole ---
+        contract = float(symbol_info.get("trade_contract_size", 100000.0))
+        point    = float(symbol_info.get("point", 0.00001))
+        vol_min  = float(symbol_info.get("volume_min", 0.01))
+        vol_max  = float(symbol_info.get("volume_max", 100.0))
+        vol_step = float(symbol_info.get("volume_step", 0.01))
+        spread_points = float(md.get("current_spread_points", 0.0))
+
+        # --- 3) Paramètres de risque de la config ---
+        rm_cfg   = (current_config or {}).get("risk_management", {})
+        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.5))   # % de l'equity
+        min_rr   = float(rm_cfg.get("min_rr", 1.2))
+        max_spread_pips = float(rm_cfg.get("max_spread_pips", 2.0))  # garde simple
+
+        equity = float(account_info.get("equity", account_info.get("balance", 0.0)))
+        if equity <= 0:
+            return {"ok": False, "reason": "no_equity"}
+
+        # --- 4) Conversions utilitaires ---
+        # Dans MT5, "spread" est en points. On approxime: 1 pip = 10 points pour la plupart des paires (5 digits).
+        pip_points = 10.0
+        spread_pips = spread_points / pip_points
+
+        # --- 5) SL/TP requis pour sizing au risque; sinon on fallback volume fixe (si configuré) ---
+        if sl is None or tp is None or sl == entry:
+            # Fallback: volume fixe si fourni; sinon min
+            fixed_vol = rm_cfg.get("fixed_volume_lots")
+            if fixed_vol is None:
+                fixed_vol = max(vol_min, vol_step)
+                notes.append("fallback_fixed_volume_min")
+            else:
+                fixed_vol = float(fixed_vol)
+            # Gardes spread
+            if spread_pips > max_spread_pips:
+                return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
+            return {
+                "ok": True, "volume": self._quantize_volume(fixed_vol, vol_min, vol_max, vol_step),
+                "rr": None, "risk_amount": equity * (risk_pct/100.0),
+                "notes": ["no_levels_for_risk_sizing"] + notes,
+                "entry_price": entry, "sl_price": sl, "tp_price": tp,
+            }
+
+        # --- 6) Sizing au risque ---
+        sl_dist = abs(entry - float(sl))
+        if sl_dist <= 0:
+            return {"ok": False, "reason": "invalid_sl_distance"}
+
+        risk_amount = equity * (risk_pct / 100.0)
+
+        # Pour un contrat Forex, la perte par lot à SL ≈ sl_dist * contract
+        # (car valeur par point par lot = contract*point ; points = sl_dist/point → produit = sl_dist*contract)
+        raw_volume = risk_amount / (sl_dist * contract)
+
+        volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
+
+        # --- 7) RR & gardes simples ---
+        rr = (abs(float(tp) - entry) / sl_dist) if sl_dist > 0 else 0.0
+        if rr < min_rr:
+            return {"ok": False, "reason": f"rr_below_min_{rr:.2_
+
+    
 
     def decide_trade_to_execute(
         self,

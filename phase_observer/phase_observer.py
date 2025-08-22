@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import MetaTrader5 as mt5
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Tuple
 from datetime import datetime, timedelta, UTC
 from pydantic import ValidationError
 from data_models.phase_observer_models import PhaseObserverRowModel
@@ -201,7 +201,120 @@ class PhaseObserver:
         # TODO: Après une mise à jour, déclencher une invalidation des caches de données
         #       qui pourraient dépendre des anciens paramètres.
 
-    # --- Fonctions de Détection des Signaux Institutionnels (SMC) ---
+  
+    def _extract_m1_break_direction(self, analyzed_m1_row: pd.Series) -> Tuple[Optional[str], bool]:
+        """Retourne ('BUY'|'SELL'|None, break_ok) via détails BOS/MSS M1 (+volume)."""
+        bos = analyzed_m1_row.get("bos_mss_details")
+        if isinstance(bos, dict):
+            t = str(bos.get("type", "")).lower()
+            vol_ok = float(bos.get("volume_ratio", 0)) > 1.5
+            if "bullish" in t:
+                return "BUY", vol_ok
+            if "bearish" in t:
+                return "SELL", vol_ok
+        return None, False
+
+    def _pick_sl_from_structure(self, analyzed_m1_row: pd.Series, side: str) -> Optional[float]:
+        """SL = bord d’OB cohérent sinon dernier swing opposé."""
+        ob = analyzed_m1_row.get("ob_details")
+        if isinstance(ob, dict) and side:
+            zone = ob.get("zone")
+            if isinstance(zone, (list, tuple)) and len(zone) == 2:
+                low, high = zone
+                if side == "BUY" and isinstance(low, (int, float)):
+                    return float(low)
+                if side == "SELL" and isinstance(high, (int, float)):
+                    return float(high)
+        # fallback swings
+        if side == "BUY" and pd.notna(analyzed_m1_row.get("last_swing_low")):
+            return float(analyzed_m1_row["last_swing_low"])
+        if side == "SELL" and pd.notna(analyzed_m1_row.get("last_swing_high")):
+            return float(analyzed_m1_row["last_swing_high"])
+        return None
+
+    def _pick_tp_from_nearest_liquidity(self, analyzed_df: pd.DataFrame, side: str) -> Optional[float]:
+        """TP = niveau de liquidité le plus proche dans le sens du trade."""
+        # NOTE: adapte le nom si ta méthode s’appelle différemment (ex: get_nearest_liquidity_level)
+        liq = self._get_nearest_liquidity_level(analyzed_df) if hasattr(self, "_get_nearest_liquidity_level") else None
+        if not liq:
+            return None
+        level = liq.get("level")
+        last_close = float(analyzed_df["close"].iloc[-1])
+        if isinstance(level, list) and len(level) == 2:
+            candidate = max(level) if side == "BUY" else min(level)
+        else:
+            candidate = float(level)
+        if side == "BUY" and candidate <= last_close:
+            candidate = last_close + abs(last_close - candidate)
+        if side == "SELL" and candidate >= last_close:
+            candidate = last_close - abs(last_close - candidate)
+        return candidate
+
+    def get_katana_snapshot(self, asset: str, strategy_config: dict) -> dict:
+        """
+        Snapshot micro-décisionnel prêt pour le pipeline (M1 dirigé par BOS/MSS, alignement M5/M15,
+        SL/TP structurels, spread/liquidité, score final, katana_ready).
+        """
+        # Appelle ton analyse MTF existante (adapte le nom si nécessaire)
+        if hasattr(self, "analyze_asset_multi_timeframe"):
+            mtf = self.analyze_asset_multi_timeframe(asset, strategy_config)
+        else:
+            # Fallback minimal si la méthode porte un autre nom
+            mtf = {}
+
+        if not mtf or not mtf.get("multi_tf_enabled", False):
+            return {"katana_ready": False, "reason": "insufficient_confluence"}
+
+        # Récupère le DF M1 complet puis (ré)analyse pour les colonnes annotées
+        m1_cfg = strategy_config.get("phase_detection", {}).get("multi_timeframe", {})
+        if hasattr(self, "_fetch_timeframe_data"):
+            m1_raw = self._fetch_timeframe_data(asset, "M1", m1_cfg)
+        else:
+            m1_raw = None
+        m1_df = self.analyze(m1_raw, asset_symbol=asset) if m1_raw is not None else None
+        if m1_df is None or m1_df.empty:
+            return {"katana_ready": False, "reason": "m1_analysis_failed"}
+
+        last = m1_df.iloc[-1]
+
+        # Direction strictement depuis BOS/MSS M1
+        side, break_ok = self._extract_m1_break_direction(last)
+        if side is None:
+            return {"katana_ready": False, "reason": "no_m1_break"}
+
+        # Alignement HTF via consensus de phase M5/M15
+        phase = str(mtf.get("phase", "unknown")).lower()
+        htf_alignment_ok = (side == "BUY" and ("bull" in phase or "up" in phase)) or \
+                        (side == "SELL" and ("bear" in phase or "down" in phase))
+
+        conf = float(m1_df["confidence_score"].iloc[-1]) if "confidence_score" in m1_df.columns else 0.0
+        spread_ok = bool(m1_df["is_liquid"].iloc[-1]) if "is_liquid" in m1_df.columns else True
+
+        entry = float(last["close"])
+        sl    = self._pick_sl_from_structure(last, side)
+        tp    = self._pick_tp_from_nearest_liquidity(m1_df, side)
+
+        snapshot = {
+            "asset": asset,
+            "entry_side": side,               # "BUY" / "SELL"
+            "entry_price": entry,
+            "sl_price": sl,
+            "tp_price": tp,
+            "m1_break_ok": bool(break_ok),
+            "htf_alignment_ok": bool(htf_alignment_ok),
+            "spread_ok": bool(spread_ok),
+            "katana_score": round(0.6*mtf.get("confidence_score", 0.0) + 0.4*conf, 3),
+            "phase": mtf.get("phase"),
+            "dominant_tf": mtf.get("dominant_tf"),
+            "signal_agreement": mtf.get("signal_agreement_rates", {}),
+        }
+
+        snapshot["katana_ready"] = all([
+            snapshot["m1_break_ok"], snapshot["htf_alignment_ok"], snapshot["spread_ok"],
+            snapshot["sl_price"] is not None, snapshot["tp_price"] is not None
+        ])
+        return snapshot
+
 
     def detect_order_block_ml_enhanced(
         self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None
