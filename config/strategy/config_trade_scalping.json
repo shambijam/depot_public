@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "version": "2.2-katana-micro",
+  "version": "2.3-katana-micro",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
@@ -9,15 +9,15 @@
   ],
   "entry_rules": {
     "scalping": {
-      "gating_mode": "aggressive",
+      "gating_mode": "normal",
       "require_mtf_align": true,
-      "require_m1_break": true,
+      "require_m1_break": false,
       "max_spread_points": 12,
       "min_m1_ema_spread": 0.0,
       "min_confidence": 0.30,
-      "min_atr_m1_pips": 0.8,
-      "fvg_max_distance_pips": 2.0,
-      "ob_max_distance_pips": 2.0
+      "min_atr_m1_pips": 0.60,
+      "fvg_max_distance_pips": 4.0,
+      "ob_max_distance_pips": 3.5
     }
   },
   "execution_quality_filters": {
