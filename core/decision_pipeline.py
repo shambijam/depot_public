@@ -2208,11 +2208,14 @@ class DecisionPipeline:
 
     def calculate_risk_parameters(self, context: dict, current_config: dict, trade_decision: dict) -> dict:
         """
-        Sizing au risque avec gardes strictes:
-        - SL borné par ATR (min/max multiples)
-        - RR minimal
-        - Spread max
-        Utilise le DF annoté disponible dans context['market_data'][asset]['annotated_rates_df'].
+        Sizing au risque — version stricte "zéro hasard" pour scalping:
+        - ❌ Refus si SL/TP manquants (plus de fallback volume fixe)
+        - ✅ Cohérence des niveaux (BUY: tp>entry>sl | SELL: tp<entry<sl)
+        - ✅ SL borné par ATR (min/max multiples)
+        - ✅ RR effectif (corrigé du spread) >= min_rr
+        - ✅ Respect du stops_level broker (distance mini)
+        - ✅ Bornes de risque (global_safety) + adaptation high_vol (si config présente)
+        - Utilise le DF annoté: context['market_data'][asset]['annotated_rates_df']
         """
         notes = []
 
@@ -2225,6 +2228,7 @@ class DecisionPipeline:
         md = (context.get("market_data") or {}).get(asset, {}) or {}
         symbol_info = md.get("symbol_info", {}) or {}
         account_info = context.get("account_info", {}) or {}
+        df = md.get("annotated_rates_df")
 
         entry = trade_decision.get("entry_price", md.get("current_price"))
         sl    = trade_decision.get("sl_price")
@@ -2238,7 +2242,11 @@ class DecisionPipeline:
         except (TypeError, ValueError):
             return {"ok": False, "reason": "invalid_level_types"}
 
-        # --- 2) Broker/symbole ---
+        # ⛔ Zéro hasard: niveaux obligatoires
+        if sl is None or tp is None or sl == entry or tp == entry:
+            return {"ok": False, "reason": "missing_sl_or_tp_levels"}
+
+        # --- 2) Broker/symbole (unités et contraintes) ---
         contract   = float(symbol_info.get("trade_contract_size", 100000.0)) or 100000.0
         point      = float(symbol_info.get("point", 0.00001)) or 0.00001
         digits     = int(symbol_info.get("digits", 5))
@@ -2246,104 +2254,127 @@ class DecisionPipeline:
         vol_max    = float(symbol_info.get("volume_max", 100.0)) or 100.0
         vol_step   = float(symbol_info.get("volume_step", 0.01)) or 0.01
         spread_pts = float(md.get("current_spread_points", 0.0)) or 0.0
+        stops_lvl_points = float(symbol_info.get("stops_level", 0.0)) or 0.0
 
-        # --- 3) Risque (config) ---
+        # Pips (FX: 10 points = 1 pip pour digits 3/5)
+        pip_points = 10.0 if digits in (3, 5) else 1.0
+        pip_size   = point * pip_points
+        spread_pips = spread_pts / pip_points
+        stops_level_pips = stops_lvl_points / pip_points
+
+        # --- 3) Risque (config) & adaptation ---
         rm_cfg   = (current_config or {}).get("risk_management", {}) or {}
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))  # resserré par défaut
-        min_rr   = float(rm_cfg.get("min_rr", 1.8))               # RR > 1.8 recommandé pour scalping
-        max_spread_pips = float(rm_cfg.get("max_spread_pips", 1.2))
+        # nommage conservé: 'risk_per_trade_pct' (cohérent avec ton code)
+        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))
+        min_rr   = float(rm_cfg.get("min_rr", 1.8))
+        max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
 
-        # Bornes SL via ATR
-        slc = rm_cfg.get("sl_constraints", {}) or {}
-        atr_cfg = rm_cfg.get("atr_settings", {}) or {}
-        atr_period = int(atr_cfg.get("period", 14))
-        min_k = float(slc.get("min_atr_multiple", 0.8))
-        max_k = float(slc.get("max_atr_multiple", 1.3))
+        # Adaptation high_vol (si meta/regime_tag fourni par la décision + config)
+        meta = trade_decision.get("meta", {}) or {}
+        regime_tag = str(meta.get("regime_tag", "")).lower()
+        adapt = (current_config or {}).get("adaptation_settings", {}).get("risk_adjustment", {}) or {}
+        if regime_tag == "high_vol":
+            mult = float(adapt.get("risk_reduction_multiplier_high_vol", 1.0) or 1.0)
+            min_after = float(adapt.get("min_risk_percent_after_adjustment", 0.01) or 0.01)
+            risk_pct = max(min_after, risk_pct * mult)
 
+        # Cap global
+        global_cap_pct = float(self.config_manager.get("global_safety.max_risk_per_trade_percent", 2.0) or 2.0)
+        risk_pct = min(risk_pct, global_cap_pct)
+
+        # Equity
         equity = float(account_info.get("equity", account_info.get("balance", 0.0)) or 0.0)
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
-        # --- 4) Spread → pips ---
-        pip_points = 10.0 if digits in (3, 5) else 1.0
-        spread_pips = spread_pts / pip_points
+        # --- 4) Cohérence des niveaux par direction ---
+        if action == "BUY" and not (tp > entry > sl):
+            return {"ok": False, "reason": "levels_incoherent_for_buy"}
+        if action == "SELL" and not (tp < entry < sl):
+            return {"ok": False, "reason": "levels_incoherent_for_sell"}
 
-        # --- 5) Si pas de niveaux, fallback volume fixe contrôlé ---
-        if sl is None or tp is None or sl == entry:
-            fixed_volume_lots = rm_cfg.get("fixed_volume_lots")
-            if fixed_volume_lots is None:
-                fixed_volume_lots = max(vol_min, vol_step)
-                notes.append("fallback_fixed_volume_min")
-            else:
-                try:
-                    fixed_volume_lots = float(fixed_volume_lots)
-                except (TypeError, ValueError):
-                    fixed_volume_lots = max(vol_min, vol_step)
-                    notes.append("fallback_fixed_volume_min_parse_error")
-            if spread_pips > max_spread_pips:
-                return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
-            return {
-                "ok": True,
-                "volume": self._quantize_volume(fixed_volume_lots, vol_min, vol_max, vol_step),
-                "rr": None,
-                "risk_amount": equity * (risk_pct / 100.0),
-                "notes": ["no_levels_for_risk_sizing"] + notes,
-                "entry_price": entry, "sl_price": sl, "tp_price": tp,
-            }
+        sl_dist = abs(entry - sl)
+        tp_dist = abs(tp - entry)
+        if sl_dist <= 0 or tp_dist <= 0:
+            return {"ok": False, "reason": "invalid_distances"}
 
-        # --- 6) SL borné par ATR ---
-        df = md.get("annotated_rates_df")  # fourni par run_bot (_build_asset_market_data)
-        atr_price = None
+        sl_pips = sl_dist / pip_size
+        tp_pips = tp_dist / pip_size
+
+        # --- 5) Bornes via ATR (si DF dispo) ---
+        atr_settings = (rm_cfg.get("atr_settings") or {})
+        slc = rm_cfg.get("sl_constraints", {}) or {}
+        atr_period = int(atr_settings.get("period", 14))
+        min_k = float(slc.get("min_atr_multiple", 0.8))
+        max_k = float(slc.get("max_atr_multiple", 1.3))
+
         if df is not None:
             try:
                 atr_price = self._compute_atr_from_df(df, period=atr_period)  # ATR en unités de prix
             except Exception:
                 atr_price = None
+            if atr_price and atr_price > 0:
+                sl_min = min_k * atr_price
+                sl_max = max_k * atr_price
+                if sl_dist < sl_min:
+                    return {"ok": False, "reason": f"sl_too_tight_vs_atr_{sl_dist:.6f}<{sl_min:.6f}"}
+                if sl_dist > sl_max:
+                    return {"ok": False, "reason": f"sl_too_wide_vs_atr_{sl_dist:.6f}>{sl_max:.6f}"}
 
-        sl_dist = abs(entry - sl)
-        if sl_dist <= 0:
-            return {"ok": False, "reason": "invalid_sl_distance"}
+        # --- 6) Stops level broker: on refuse si SL/TP en-dessous des distances mini ---
+        min_stop_price_dist = stops_lvl_points * point  # en unités de prix
+        if min_stop_price_dist > 0:
+            if sl_dist < min_stop_price_dist:
+                return {"ok": False, "reason": f"sl_below_broker_min_{sl_pips:.2f}p<{stops_level_pips:.2f}p"}
+            if tp_dist < min_stop_price_dist:
+                return {"ok": False, "reason": f"tp_below_broker_min_{tp_pips:.2f}p<{stops_level_pips:.2f}p"}
 
-        if atr_price and atr_price > 0:
-            sl_min = min_k * atr_price
-            sl_max = max_k * atr_price
-            if sl_dist < sl_min:
-                return {"ok": False, "reason": f"sl_too_tight_vs_atr_{sl_dist:.6f}<{sl_min:.6f}"}
-            if sl_dist > sl_max:
-                return {"ok": False, "reason": f"sl_too_wide_vs_atr_{sl_dist:.6f}>{sl_max:.6f}"}
-
-        # --- 7) RR & spread ---
-        rr = (abs(tp - entry) / sl_dist) if sl_dist > 0 else 0.0
-        if rr < min_rr:
-            rr_fmt = f"{rr:.2f}"; min_rr_fmt = f"{min_rr:.2f}"
-            return {"ok": False, "reason": f"rr_below_min_{rr_fmt}_<{min_rr_fmt}"}
-
-        if spread_pips > max_spread_pips:
+        # --- 7) Spread & RR effectif ---
+        if spread_pips > max_spread_pips_cfg:
             return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
+
+        # RR "brut"
+        rr = tp_dist / sl_dist if sl_dist > 0 else 0.0
+
+        # RR "effectif" (on soustrait le spread du gain potentiel)
+        spread_price = spread_pts * point
+        effective_tp_dist = max(0.0, tp_dist - spread_price)
+        rr_effective = effective_tp_dist / sl_dist if sl_dist > 0 else 0.0
+
+        if rr_effective < min_rr:
+            rr_fmt = f"{rr_effective:.2f}"; min_rr_fmt = f"{min_rr:.2f}"
+            return {"ok": False, "reason": f"rr_effective_below_min_{rr_fmt}_<{min_rr_fmt}"}
 
         # --- 8) Sizing au risque ---
         risk_amount = equity * (risk_pct / 100.0)
         try:
-            raw_volume = risk_amount / (sl_dist * contract)
+            raw_volume = risk_amount / (sl_dist * contract)  # lots = $risk / (Δprix × contract)
         except ZeroDivisionError:
             return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
 
+        # Quantification & bornes
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
 
+        # OK
         return {
             "ok": True,
             "volume": volume,
             "rr": rr,
+            "rr_effective": rr_effective,
             "risk_amount": risk_amount,
-            "notes": notes,
             "entry_price": entry,
             "sl_price": sl,
             "tp_price": tp,
+            "sl_pips": sl_pips,
+            "tp_pips": tp_pips,
+            "spread_pips": spread_pips,
+            "stops_level_pips": stops_level_pips,
+            "notes": notes,
         }
-
+        
     def _compute_atr_from_df(self, df, period: int = 14) -> float:
         """
-        ATR simple sur le DF annoté (même unités que le prix).
+        ATR simple sur le DF annoté (mêmes unités que le prix).
         Utilise high/low/close ; ignore NaN de tête de série.
         """
         import numpy as np
@@ -2363,3 +2394,5 @@ class DecisionPipeline:
             return float(atr)
         except Exception:
             return float("nan")
+
+
