@@ -1620,223 +1620,154 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         CORE évalue directement les signaux et prend la décision finale.
-        Version SCALPING « au couteau », alignée avec _core_build_trade_decision :
-        - Gate MTF + micro-phase M1 (break+retest / BOS+FVG proche / OB validé proche / mode agressif)
-        - Contrôle spread (en pips, avec fallback en points)
-        - EMA spread M1 mini
-        - AUCUN fallback momentum
-        ➕ Instrumentation DIAG ('core_gate') pour chaque motif de rejet / pass.
+
+        Version améliorée pour SCALPING :
+        - Gate d'entrée MTF (alignement M5/M15 optionnel)
+        - Micro-timing M1 (break HH/LL selon direction) rendu *conditionnel* :
+        * si aucun déclencheur alternatif solide (BOS confirmé / FVG proche / OB validé proche),
+            alors on exige le break M1 ;
+        * sinon, le break M1 n'est pas requis.
+        - Contrôle de spread et d'écart EMA M1
+        Pour les autres stratégies : comportement inchangé (plus permissif).
         """
-        # --- DIAG safe import ---
-        try:
-            from core.diagnostics import get_tracker_from_context
-            _tracker = get_tracker_from_context(context)
-        except Exception:
-            _tracker = None
-
-        def _diag_note(asset: str, reason: str, extra: Optional[dict] = None):
-            if _tracker:
-                try:
-                    _tracker.note(asset, "core_gate", reason, extra or {})
-                except Exception:
-                    pass
-
-        def _diag_selected(asset: str, extra: Optional[dict] = None):
-            if _tracker:
-                try:
-                    _tracker.set_selected(asset, "core_gate", extra or {})
-                except Exception:
-                    pass
-
         self.logger.info(f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}")
 
         is_scalping = str(strategy_name).lower() == "scalping"
 
-        # Seuils généraux
+        # Seuils généraux (fallbacks)
         min_confidence_default = float(config.get("min_confidence", 0.65))
 
-        # Seuils SCALPING depuis la config
-        sr = self.config_manager.get("entry_rules.scalping", {}) or {}
-        require_align     = bool(sr.get("require_mtf_align", True))
-        require_m1_break  = bool(sr.get("require_m1_break", True))
-        gating_mode       = str(sr.get("gating_mode", "normal")).lower()  # 'strict' | 'normal' | 'aggressive'
-        max_spread_pips_c = sr.get("max_spread_pips", None)  # priorité aux pips si fourni
-        max_spread_pts_c  = float(sr.get("max_spread_points", 50))
-        min_m1_ema_spread = float(sr.get("min_m1_ema_spread", 0.0))
-        min_conf_scalp    = float(sr.get("min_confidence", min_confidence_default))
-        fvg_max_dist_pips = float(sr.get("fvg_max_distance_pips", 2.0))
-        ob_max_dist_pips  = float(sr.get("ob_max_distance_pips", 2.0))
+        # Seuils spécifiques SCALPING (lis dans prod_config.json si dispo)
+        require_align = bool(self.config_manager.get("entry_rules.scalping.require_mtf_align", True))
+        require_m1_break = bool(self.config_manager.get("entry_rules.scalping.require_m1_break", True))
+        max_spread_pts = float(self.config_manager.get("entry_rules.scalping.max_spread_points", 50))
+        min_m1_ema_spread = float(self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0))
+        min_confidence_scalp = float(self.config_manager.get("entry_rules.scalping.min_confidence", min_confidence_default))
+
+        # Seuils d'alternatives micro (BOS/FVG/OB) — pour rendre le break M1 conditionnel
+        fvg_max = float(self.config_manager.get("entry_rules.scalping.fvg_max_distance_pips", 2.0) or 2.0)
+        ob_max  = float(self.config_manager.get("entry_rules.scalping.ob_max_distance_pips",  2.0) or 2.0)
 
         best_asset, best_score, best_signals = None, -1.0, None
 
-        for asset, s in signals.items():
-            confidence = float(s.get("confidence_score", 0.0))
-            phase = str(s.get("phase", "") or "")
+        for asset, asset_signals in signals.items():
+            confidence = float(asset_signals.get("confidence_score", 0.0))
+            phase = str(asset_signals.get("phase", ""))
 
-            # Score de classement (inchangé)
+            # Score “permissif” de base (classement des actifs)
             score = confidence
-            if s.get("ob_detected", False):        score += 0.10
-            if s.get("fvg_detected", False):       score += 0.10
-            if s.get("bos_mss_detected", False):   score += 0.15
+            if asset_signals.get("ob_detected", False):
+                score += 0.10
+            if asset_signals.get("fvg_detected", False):
+                score += 0.10
+            if asset_signals.get("bos_mss_detected", False):
+                score += 0.15
 
-            # === Non-scalping : logique permissive identique ===
+            # === Logique non-scalping : identique (permissive) ===
             if not is_scalping:
                 is_valid = False
                 if confidence >= min_confidence_default:
                     is_valid = True
-                    self.logger.info(f"✅ [{asset}] Accepté (non-scalping) – confiance {confidence:.3f} ≥ {min_confidence_default}")
+                    self.logger.info(
+                        f"✅ [{asset}] Accepté par CORE (non-scalping) - Confiance {confidence:.3f} >= {min_confidence_default}"
+                    )
                 elif confidence >= 0.5 and any(k in phase.lower() for k in ["bullish", "bearish", "trending"]):
                     is_valid = True
-                    self.logger.info(f"✅ [{asset}] Accepté (non-scalping) – phase concluante: {phase}")
+                    self.logger.info(f"✅ [{asset}] Accepté par CORE (non-scalping) - Phase conclusive: {phase}")
 
                 if is_valid and score > best_score:
-                    best_asset, best_score, best_signals = asset, score, s
-                    _diag_selected(asset, {"strategy": strategy_name, "score": score, "mode": "non_scalping"})
-                else:
-                    if not is_valid:
-                        _diag_note(asset, "non_scalping_reject_low_conf_or_phase", {"confidence": confidence, "phase": phase})
+                    best_asset, best_score, best_signals = asset, score, asset_signals
                 continue
 
-            # === SCALPING : lecture des métriques et conversions pips ===
-            point  = float(s.get("symbol_point_value") or 0.0)
-            digits = int(s.get("symbol_digits") or (5 if point and point <= 1e-5 else 3))
-            pip_points = 10.0 if digits in (3, 5) else 1.0
-            pip_size   = point * pip_points if point else (1e-5 * 10.0)  # fallback FX
+            # === Gate d'entrée SCALPING ===
+            mtf_align_val = asset_signals.get("mtf_ema_align", None)  # bool attendu si présent
+            mtf_direction = str(asset_signals.get("mtf_direction", "none")).lower()
 
-            spread_points = s.get("current_spread_points", s.get("spread", float("inf")))
+            spread_points = asset_signals.get("current_spread_points", asset_signals.get("spread", float("inf")))
             try:
                 spread_points = float(spread_points)
             except Exception:
                 spread_points = float("inf")
-            spread_pips = spread_points / pip_points if pip_points > 0 else float("inf")
 
-            # seuil spread (pips prioritaire, sinon conversion des points cfg)
-            if max_spread_pips_c is not None:
-                max_spread_pips = float(max_spread_pips_c)
-            else:
-                max_spread_pips = float(max_spread_pts_c) / pip_points if pip_points > 0 else float("inf")
+            m1_ema_spread = float(asset_signals.get("m1_ema_spread", 0.0))
+            m1_hh_break = bool(asset_signals.get("m1_last_hh_break", False))
+            m1_ll_break = bool(asset_signals.get("m1_last_ll_break", False))
 
-            m1_ema_spread = float(s.get("m1_ema_spread", 0.0))
-            mtf_align_val = s.get("mtf_ema_align", None)  # bool si présent
-            mtf_dir = str(s.get("mtf_direction", "none")).lower()
-            m1_hh_break = bool(s.get("m1_last_hh_break", False))
-            m1_ll_break = bool(s.get("m1_last_ll_break", False))
-            m1_retest   = bool(s.get("m1_retest_confirmation") or s.get("m1_retest") or False)
-            atr_m1      = float(s.get("atr_m1", 0.0) or 0.0)
-            atr_m1_pips = (atr_m1 / pip_size) if pip_size > 0 else 0.0
+            # Déclencheurs alternatifs (BOS/FVG/OB)
+            bos = asset_signals.get("bos_mss_details") or {}
+            fvg = asset_signals.get("fvg_details") or {}
+            ob  = asset_signals.get("ob_details")  or {}
 
-            bos = s.get("bos_mss_details") or {}
-            fvg = s.get("fvg_details") or {}
-            ob  = s.get("ob_details")  or {}
+            bos_ok = bool(bos.get("confirmed") or bos.get("is_confirmed"))
+            fvg_ok = float(fvg.get("distance_pips") or 1e9) <= fvg_max
+            ob_ok  = bool(ob.get("validated") or ob.get("valid")) and float(ob.get("distance_pips") or 1e9) <= ob_max
+            has_alt_trigger = bos_ok or fvg_ok or ob_ok
 
-            bos_confirmed = bool(bos.get("confirmed") or bos.get("is_confirmed"))
-            fvg_dist_ok   = float(fvg.get("distance_pips") or 1e9) <= fvg_max_dist_pips
-            ob_valid_ok   = bool(ob.get("validated") or ob.get("valid"))
-            ob_dist_ok    = float(ob.get("distance_pips") or 1e9) <= ob_max_dist_pips
-
-            # Conditions de base
-            confidence_ok = confidence >= min_conf_scalp
-            spread_ok     = spread_pips <= max_spread_pips
+            # Garde-fous généraux
+            confidence_ok = confidence >= min_confidence_scalp
+            spread_ok = spread_points <= max_spread_pts
             ema_spread_ok = m1_ema_spread >= min_m1_ema_spread
 
-            # Alignement MTF
+            # Alignement MTF (si exigé)
             align_ok = True
             if require_align:
                 if isinstance(mtf_align_val, bool):
-                    align_ok = (mtf_align_val is True)
+                    align_ok = mtf_align_val is True
                 else:
-                    align_ok = False  # requis mais non fourni
+                    align_ok = False  # si non fourni et requis → on refuse
 
-            # Micro-phase M1 : break dans le sens (si exigé)
+            # Break M1 rendu *conditionnel* : exigé seulement si pas d'alternative solide
             m1_break_ok = True
-            if require_m1_break:
-                if mtf_dir == "up":
-                    m1_break_ok = m1_hh_break and (m1_retest or gating_mode != "strict")
-                elif mtf_dir == "down":
-                    m1_break_ok = m1_ll_break and (m1_retest or gating_mode != "strict")
+            if require_m1_break and not has_alt_trigger:
+                if mtf_direction == "up":
+                    m1_break_ok = m1_hh_break
+                elif mtf_direction == "down":
+                    m1_break_ok = m1_ll_break
                 else:
-                    m1_break_ok = False
-
-            # Profils de gate (comme _core_build_trade_decision)
-            cond_strict  = m1_break_ok and m1_retest
-            cond_bos_fvg = bos_confirmed and fvg_dist_ok
-            cond_ob_near = ob_valid_ok and ob_dist_ok
-            cond_aggr    = ( (m1_hh_break or m1_ll_break) and (spread_ok) and (atr_m1_pips >= max(0.0, 0.8 * float(sr.get("min_atr_m1_pips", 0.8)))) )
-
-            if   gating_mode == "strict":
-                gate_ok = cond_strict
-            elif gating_mode == "normal":
-                gate_ok = cond_strict or cond_bos_fvg or cond_ob_near
-            else:
-                gate_ok = cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr
+                    m1_break_ok = False  # pas de direction claire → break exigé mais impossible
 
             # Journalisation claire
             self.logger.debug(
-                f"[SCALPING-GATE] {asset} | conf={confidence:.3f}/{min_conf_scalp} | "
-                f"spread={spread_pips:.2f}/{max_spread_pips:.2f}p | m1_ema_spread={m1_ema_spread:.5f}/{min_m1_ema_spread:.5f} | "
-                f"align={mtf_align_val} (req={require_align}) | dir={mtf_dir} | "
-                f"gate={gating_mode} (strict={cond_strict}, bos_fvg={cond_bos_fvg}, ob_near={cond_ob_near}, aggr={cond_aggr})"
+                f"[SCALPING-GATE] {asset} | conf={confidence:.3f}/{min_confidence_scalp} | "
+                f"spread={spread_points:.1f}/{max_spread_pts} | m1_ema_spread={m1_ema_spread:.5f}/{min_m1_ema_spread:.5f} | "
+                f"align={mtf_align_val} (req={require_align}) | dir={mtf_direction} | "
+                f"alt_trigger(bos={bos_ok}, fvg={fvg_ok}, ob={ob_ok}) | "
+                f"m1_break_ok={m1_break_ok} (req_if_no_alt={require_m1_break})"
             )
 
-            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and gate_ok
+            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and m1_break_ok
 
-            # Rejets détaillés + DIAG
             if not is_valid:
+                # Logs pédagogiques (une ligne par motif clé)
                 if not confidence_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_conf_scalp}")
-                    _diag_note(asset, "confidence_below_min", {"value": confidence, "min": min_conf_scalp})
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp}")
                 if not spread_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): spread {spread_pips:.2f}p > {max_spread_pips:.2f}p")
-                    _diag_note(asset, "spread_too_high_pips", {"spread_pips": spread_pips, "max_pips": max_spread_pips})
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}")
                 if not ema_spread_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}")
-                    _diag_note(asset, "m1_ema_spread_below_min", {"value": m1_ema_spread, "min": min_m1_ema_spread})
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}"
+                    )
                 if require_align and not align_ok:
                     self.logger.info(f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)")
-                    _diag_note(asset, "mtf_not_aligned", {"mtf_align": mtf_align_val})
-
-                # Détails de gate
-                if not gate_ok:
-                    if gating_mode == "strict":
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping): gate_strict_failed (break+retest requis)")
-                        _diag_note(asset, "gate_strict_failed", {"m1_break_ok": m1_break_ok, "m1_retest": m1_retest})
-                    elif gating_mode == "normal":
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping): gate_normal_failed (ni break+retest, ni BOS+FVG proche, ni OB validé proche)")
-                        _diag_note(asset, "gate_normal_failed", {"strict": cond_strict, "bos_fvg": cond_bos_fvg, "ob_near": cond_ob_near})
-                    else:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping): gate_aggressive_failed")
-                        _diag_note(asset, "gate_aggressive_failed", {"strict": cond_strict, "bos_fvg": cond_bos_fvg, "ob_near": cond_ob_near, "aggr": cond_aggr})
-
-                    # précision sur le break manquant si pertinent
-                    if require_m1_break and not (m1_hh_break or m1_ll_break):
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_dir})")
-                        _diag_note(asset, "no_m1_break_in_direction", {"mtf_direction": mtf_dir, "hh_break": m1_hh_break, "ll_break": m1_ll_break})
+                if require_m1_break and not has_alt_trigger and not m1_break_ok:
+                    self.logger.info(
+                        f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction}) "
+                        f"et aucun déclencheur alternatif (BOS/FVG/OB) proche"
+                    )
                 continue
 
             # Candidat accepté → on compare les scores
-            self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping) : gate={gating_mode} OK")
-            _diag_note(
-                asset,
-                "core_gate_pass",
-                {
-                    "confidence": confidence,
-                    "spread_pips": spread_pips,
-                    "m1_ema_spread": m1_ema_spread,
-                    "mtf_direction": mtf_dir,
-                    "mtf_align": mtf_align_val,
-                    "gate_mode": gating_mode,
-                },
-            )
+            self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping) : conditions MTF/M1 respectées (break_cond={require_m1_break and not has_alt_trigger})")
             if score > best_score:
-                best_asset, best_score, best_signals = asset, score, s
+                best_asset, best_score, best_signals = asset, score, asset_signals
 
         if not best_asset:
             self.logger.info("❌ CORE: Aucun asset ne respecte les critères d'entrée")
             return {}
 
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-        _diag_selected(best_asset, {"strategy": strategy_name, "score": best_score})
         return self._core_build_trade_decision(best_asset, best_signals, config, context)
+
 
     def _core_build_trade_decision(
         self,

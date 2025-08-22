@@ -279,14 +279,14 @@
     "scalping": {
       "require_mtf_align": true,
       "require_m1_break": true,
-      "gating_mode": "normal",
-      "fvg_max_distance_pips": 2.0,
-      "ob_max_distance_pips": 2.0,
-      "min_atr_m1_pips": 0.8,
+      "gating_mode": "aggressive",
+      "fvg_max_distance_pips": 3.5,
+      "ob_max_distance_pips": 3.0,
+      "min_atr_m1_pips": 0.6,
       "max_spread_pips": 1.3,
       "max_stop_pips_scalp": 6.0,
       "reject_if_sl_over_cap": false,
-      "max_spread_points": 10.0,
+      "max_spread_points": 12.0,
       "min_m1_ema_spread": 0.0,
       "min_confidence": 0.30
     }

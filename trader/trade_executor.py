@@ -787,21 +787,31 @@ class TradeExecutor:
         cond_aggr    = (m1_break and (spread_pips_from_trace <= max_spread_pips)
                         and (atr_m1_pips_from_trace >= max(0.0, 0.8 * min_atr_m1_pips)))
 
-        if   gating_mode == "strict":
+        if gating_mode == "strict":
             if not cond_strict:
                 return _reject("gate_strict_failed(m1_break+retest_required)",
                             {"break": m1_break, "retest": m1_retest}, raw_symbol)
+
         elif gating_mode == "normal":
-            if not (cond_strict or cond_bos_fvg or cond_ob_near):
+            # ✅ Aligné sur le CORE :
+            # - OK si strict (break+retest)
+            # - OK si break M1 + (retest OU BOS+FVG proche OU OB validé proche)
+            cond_normal = cond_strict or (m1_break and (m1_retest or cond_bos_fvg or cond_ob_near))
+            if not cond_normal:
                 return _reject("gate_normal_failed(no_retest_but_no_bos_fvg_or_ob_near)",
                             {"break": m1_break, "retest": m1_retest,
                                 "bos_confirmed": bos_confirmed, "fvg_ok": fvg_dist_ok, "ob_ok": ob_dist_ok},
                             raw_symbol)
+
         else:  # aggressive
-            if not (cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr):
+            # - OK si normal
+            # - OU break seul + spread&ATR ok (cond_aggr)
+            if not (cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr or
+                    (m1_break and (m1_retest or cond_bos_fvg or cond_ob_near))):
                 return _reject("gate_aggressive_failed",
                             {"break": m1_break, "retest": m1_retest, "aggr_ok": cond_aggr},
                             raw_symbol)
+
 
         # ---------- Phase directionnelle ----------
         current_phase = phase_from_decision or str(
