@@ -1703,58 +1703,85 @@ class DecisionPipeline:
             ob_ok  = bool(ob.get("validated") or ob.get("valid")) and float(ob.get("distance_pips") or 1e9) <= ob_max
             has_alt_trigger = bos_ok or fvg_ok or ob_ok
 
-            # Garde-fous généraux
+          # Conditions de base
             confidence_ok = confidence >= min_confidence_scalp
-            spread_ok = spread_points <= max_spread_pts
+            spread_ok     = spread_points <= max_spread_pts
             ema_spread_ok = m1_ema_spread >= min_m1_ema_spread
 
             # Alignement MTF (si exigé)
             align_ok = True
             if require_align:
                 if isinstance(mtf_align_val, bool):
-                    align_ok = mtf_align_val is True
+                    align_ok = (mtf_align_val is True)
                 else:
-                    align_ok = False  # si non fourni et requis → on refuse
+                    align_ok = False  # si info absente et align requis → refuse
 
-            # Break M1 rendu *conditionnel* : exigé seulement si pas d'alternative solide
+            # Micro-timing M1: break dans le sens de mtf_direction
             m1_break_ok = True
-            if require_m1_break and not has_alt_trigger:
+            if require_m1_break:
                 if mtf_direction == "up":
                     m1_break_ok = m1_hh_break
                 elif mtf_direction == "down":
                     m1_break_ok = m1_ll_break
                 else:
-                    m1_break_ok = False  # pas de direction claire → break exigé mais impossible
+                    m1_break_ok = False
 
-            # Journalisation claire
+            # --- Déclencheurs alternatifs (BOS+FVG proche OU OB validé proche) ---
+            bos = asset_signals.get("bos_mss_details", {}) or {}
+            fvg = asset_signals.get("fvg_details", {}) or {}
+            ob  = asset_signals.get("ob_details",  {}) or {}
+
+            fvg_max_distance = float(self.config_manager.get("entry_rules.scalping.fvg_max_distance_pips", 2.5))
+            ob_max_distance  = float(self.config_manager.get("entry_rules.scalping.ob_max_distance_pips",  2.5))
+
+            bos_confirmed = bool(bos.get("confirmed") or bos.get("is_confirmed") or asset_signals.get("bos_mss_detected"))
+            fvg_near      = float(fvg.get("distance_pips") or asset_signals.get("fvg_distance_pips") or 1e9) <= fvg_max_distance
+            ob_near       = (bool(ob.get("validated") or ob.get("valid") or asset_signals.get("ob_detected")) and
+                            float(ob.get("distance_pips") or asset_signals.get("ob_distance_pips") or 1e9) <= ob_max_distance)
+
+            alt_trigger_ok = (bos_confirmed and fvg_near) or ob_near
+
+            gating_mode = str(self.config_manager.get("entry_rules.scalping.gating_mode", "normal")).lower()
+            allow_alt_without_break = (gating_mode in ("normal", "aggressive")) and bool(
+                self.config_manager.get("entry_rules.scalping.allow_alt_without_break", True)
+            )
+
+            # Gate d'entrée final : break OU (alt triggers) selon le mode
+            entry_gate_ok = (m1_break_ok if require_m1_break else True)
+            if (not entry_gate_ok) and allow_alt_without_break and alt_trigger_ok:
+                entry_gate_ok = True
+
             self.logger.debug(
                 f"[SCALPING-GATE] {asset} | conf={confidence:.3f}/{min_confidence_scalp} | "
                 f"spread={spread_points:.1f}/{max_spread_pts} | m1_ema_spread={m1_ema_spread:.5f}/{min_m1_ema_spread:.5f} | "
                 f"align={mtf_align_val} (req={require_align}) | dir={mtf_direction} | "
-                f"alt_trigger(bos={bos_ok}, fvg={fvg_ok}, ob={ob_ok}) | "
-                f"m1_break_ok={m1_break_ok} (req_if_no_alt={require_m1_break})"
+                f"entry_gate_ok={entry_gate_ok} (alt={alt_trigger_ok})"
             )
 
-            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and m1_break_ok
+            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and entry_gate_ok
 
             if not is_valid:
-                # Logs pédagogiques (une ligne par motif clé)
                 if not confidence_ok:
                     self.logger.info(f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp}")
                 if not spread_ok:
                     self.logger.info(f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}")
                 if not ema_spread_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}"
-                    )
+                    self.logger.info(f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}")
                 if require_align and not align_ok:
                     self.logger.info(f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)")
-                if require_m1_break and not has_alt_trigger and not m1_break_ok:
-                    self.logger.info(
-                        f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction}) "
-                        f"et aucun déclencheur alternatif (BOS/FVG/OB) proche"
-                    )
+
+                if require_m1_break and not entry_gate_ok:
+                    if allow_alt_without_break:
+                        self.logger.info(
+                            f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction}) "
+                            f"et aucun déclencheur alternatif (BOS/FVG/OB) proche"
+                        )
+                    else:
+                        self.logger.info(
+                            f"❌ [{asset}] rejeté (scalping): break M1 exigé et absent ({mtf_direction})"
+                        )
                 continue
+
 
             # Candidat accepté → on compare les scores
             self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping) : conditions MTF/M1 respectées (break_cond={require_m1_break and not has_alt_trigger})")
@@ -2070,6 +2097,40 @@ class DecisionPipeline:
             f"(gate={gating_mode}, spread={spread_pips:.2f}p≤{max_spread_pips_allowed:.2f}p, ATR_M5={atr_m5_pips:.2f}p)"
         )
         _diag_selected(trade_decision.get("rule_name"), trade_decision.get("confidence"))
+        
+        # ==== ENRICHISSEMENT POUR pre_trade_checks ====
+        asset_signals   = asset_signals  # si ton param s'appelle autrement, adapte ici
+        digits          = int(asset_signals.get("digits", 5) or 5)
+        spread_pts_now  = float(asset_signals.get("current_spread_points", asset_signals.get("spread", 0.0)) or 0.0)
+        mtf_direction   = str(asset_signals.get("mtf_direction", "none")).lower()
+        phase           = str(asset_signals.get("phase", "")).lower()
+
+        def _points_to_pips(d, pts):
+            return float(pts) / (10.0 if d in (3, 5) else 1.0)
+
+        gates = {
+            "phase": phase,
+            "m1_break":  bool(asset_signals.get("m1_last_hh_break") if mtf_direction == "up" else asset_signals.get("m1_last_ll_break")),
+            "m1_retest": bool(asset_signals.get("m1_retest_confirmation")),
+        }
+
+        decision_trace = {
+            "phase": phase,
+            "mtf_direction": mtf_direction,
+            "m1_break_in_direction": gates["m1_break"],
+            "m1_retest_confirmation": gates["m1_retest"],
+            "bos_mss_details": asset_signals.get("bos_mss_details", {}) or {},
+            "fvg_details":     asset_signals.get("fvg_details",     {}) or {},
+            "ob_details":      asset_signals.get("ob_details",      {}) or {},
+            "atr_m1_pips":     float(asset_signals.get("atr_m1_pips", 0.0) or 0.0),
+            "spread_pips":     _points_to_pips(digits, spread_pts_now),
+            "used_momentum_fallback": False,
+        }
+
+        trade_decision["gates"] = gates
+        trade_decision["decision_trace"] = decision_trace
+        # ==== FIN ENRICHISSEMENT ====
+
         return trade_decision
 
     def _evaluate_rule(

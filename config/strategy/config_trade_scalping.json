@@ -7,6 +7,30 @@
     "USDJPY",
     "USDCHF"
   ],
+  "entry_rules": {
+    "scalping": {
+      "gating_mode": "aggressive",
+      "require_mtf_align": true,
+      "require_m1_break": true,
+      "max_spread_points": 12,
+      "min_m1_ema_spread": 0.0,
+      "min_confidence": 0.30,
+      "min_atr_m1_pips": 0.8,
+      "fvg_max_distance_pips": 2.0,
+      "ob_max_distance_pips": 2.0
+    }
+  },
+  "execution_quality_filters": {
+    "atr_volatility_filter": {
+      "enabled": false,
+      "period": 14,
+      "min_atr": 0.0,
+      "max_atr": 1000000000.0
+    }
+  },
+  "execution_policy": {
+    "max_spread_points": 12
+  },
   "phase_detection": {
     "use_phase_observer": true,
     "lookback_window": 60,
@@ -24,28 +48,27 @@
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.0005,
-      "max_spread_points": 10,
-      "min_volume_score": 0.01,
+      "max_spread_points": 12,
       "per_symbol_overrides": {
         "USDJPY": {
           "min_volatility": 0.0007,
-          "max_spread_points": 10,
+          "max_spread_points": 12,
           "max_lot_size": 0.08
         },
         "EURUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.0004,
-          "max_spread_points": 10
+          "max_spread_points": 12
         },
         "GBPUSD": {
           "max_lot_size": 0.15,
           "min_volatility": 0.00045,
-          "max_spread_points": 10
+          "max_spread_points": 12
         },
         "USDCHF": {
           "max_lot_size": 0.15,
           "min_volatility": 0.00035,
-          "max_spread_points": 10
+          "max_spread_points": 12
         }
       }
     },
@@ -78,7 +101,7 @@
     "risk": {
       "max_trades_per_day": 3,
       "cooldown_seconds_after_trade": 180,
-      "skip_asset_if_spread_over_points": 10,
+      "skip_asset_if_spread_over_points": 12,
       "max_lot_size": 0.15
     },
     "execution": {
