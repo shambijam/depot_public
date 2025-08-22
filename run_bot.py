@@ -16,6 +16,8 @@ from datetime import UTC
 from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
+from typing import Any, Dict, Optional, List, Tuple
+
 
 load_dotenv()
 
@@ -950,7 +952,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                decision_pipeline,
+                config_manager.decision_pipeline, 
                 trade_executor,
                 config_manager,
                 mecano,
