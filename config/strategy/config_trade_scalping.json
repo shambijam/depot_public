@@ -18,7 +18,7 @@
     }
   },
   "magic_number": 51001,
-  "risk_per_trade_percent": 0.50,
+  "risk_per_trade_percent": 0.6,
   "stop_loss_pips": 8,
   "take_profit_pips": 14,
   "decision_engine": {
@@ -28,7 +28,7 @@
       "min_volume_score": 0.01,
       "per_symbol_overrides": {
         "EURJPY": {
-          "min_volatility": 0.010,
+          "min_volatility": 0.01,
           "max_spread_points": 18,
           "max_lot_size": 0.08
         },
@@ -59,13 +59,13 @@
       "forbid_against_m15": true
     },
     "scoring": {
-      "base_score": 0.80,
-      "strategy_bias": 0.30,
-      "liquidity_bonus": 0.10,
-      "mtf_bonus_per_hit": 0.10,
+      "base_score": 0.8,
+      "strategy_bias": 0.3,
+      "liquidity_bonus": 0.1,
+      "mtf_bonus_per_hit": 0.1,
       "best_opportunity_bonus": 0.15,
-      "global_low_vol_penalty": -0.20,
-      "high_spread_penalty": -0.30,
+      "global_low_vol_penalty": -0.2,
+      "high_spread_penalty": -0.3,
       "ob_conf_bonus": 0.25
     },
     "filters": {
@@ -111,7 +111,7 @@
         "phase_must_contain": [
           "trend"
         ],
-        "min_confidence": 0.80
+        "min_confidence": 0.8
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -124,14 +124,14 @@
     "take_profit": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 2.16,
+      "atr_multiplier": 2.0,
       "fallback_rr": 1.8,
       "hard_max_points": 200
     },
     "stop_loss": {
       "type": "atr",
       "atr_period": 14,
-      "atr_multiplier": 1.20,
+      "atr_multiplier": 1.2,
       "hard_min_points": 40,
       "hard_max_points": 120
     },
@@ -149,7 +149,7 @@
       "enabled": false,
       "type": "chandelier",
       "atr_period": 14,
-      "atr_multiplier": 1.2"
+      "atr_multiplier": 1.2
     }
   },
   "exit_rules": {
