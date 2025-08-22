@@ -20,7 +20,8 @@
       "fvg_max_distance_pips": 8.0,
       "ob_max_distance_pips": 6.0,
       "max_stop_pips_scalp": 12.0,
-      "reject_if_sl_over_cap": false
+      "reject_if_sl_over_cap": false,
+      "demo_pretrade_bypass": true
     }
   },
   "execution_quality_filters": {
