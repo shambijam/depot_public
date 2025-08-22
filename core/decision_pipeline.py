@@ -8,6 +8,8 @@ from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from core.ai_interface import AIInterface
 from core.utils import ConfigValidationError, TradeStatus  # NOUVEL IMPORT DEPUIS UTILS
+from typing import Any, Dict, List, Optional, Tuple
+
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
@@ -1207,94 +1209,130 @@ class DecisionPipeline:
         strategy_manager_instance,
     ) -> List[Dict[str, Any]]:
         """
-        Orchestre la décision de sortie en déléguant l'évaluation des positions ouvertes
-        aux instances des stratégies qui les ont ouvertes, identifiées par leur 'magic number'.
-        Déplacée de ConfigManager.
+        Orchestrateur des sorties:
+        1) Délègue aux stratégies actives (via magic number).
+        2) Fallback générique si aucune stratégie n'est trouvée ou silencieuse:
+            - Breakeven (SL -> entry +/- 0.1 pip) si PnL latent >= X*R
+            - Trailing structurel sur dernier swing M1 en faveur
+            - Time-stop après N bougies M1
 
-        Args:
-            context (Dict): Le contexte de marché et système complet.
-            open_positions (List[Dict[str, Any]]): La liste des positions actuellement ouvertes.
-            active_config (Dict): La configuration de la stratégie active (utilisée comme fallback).
-            strategy_manager_instance: L'instance du StrategyManager.
+        context['market_data'][symbol] DOIT contenir:
+        - current_price (float) ou annotated_rates_df (DataFrame) pour récupérer last close
+        - annotated_rates_df pour détecter swings/time-stop (si dispo)
+        - symbol_info (digits/point)
 
-        Returns:
-            List[Dict[str, Any]]: Une liste consolidée de toutes les décisions de sortie provenant des stratégies actives.
+        Sortie (liste de décisions génériques):
+        - {"action": "MODIFY_SL", "position_id": ..., "symbol": ..., "new_sl": float, "reason": "breakeven|trail"}
+        - {"action": "CLOSE", "position_id": ..., "symbol": ..., "close_volume": float, "reason": "time_stop"}
         """
-        self.logger.info(
-            "Orchestration de la décision de sortie en déléguant aux stratégies actives..."
-        )
-        all_exit_decisions = []
+        self.logger.info("Orchestration des sorties (stratégies + fallback)...")
 
-        positions_by_strategy = {}
-        for pos in open_positions:
-            magic = pos.get("magic")
-            if magic:
-                positions_by_strategy.setdefault(magic, []).append(pos)
+        exit_decisions: List[Dict[str, Any]] = []
+        if not open_positions:
+            self.logger.debug("Aucune position ouverte.")
+            return exit_decisions
 
-        if not positions_by_strategy:
-            self.logger.debug("Aucune position avec un magic number à évaluer.")
-            return []
+    # ---- Helpers locaux robustes ----
+    def _pos_id(p: Dict[str, Any]) -> Any:
+        return p.get("ticket") or p.get("id") or p.get("Order") or p.get("Position") or p.get("position_id")
 
-        # Utilise StrategyManager pour accéder au _config_knowledge_base et aux classes de stratégie
-        # (Une fois StrategyManager refactorisé, _config_knowledge_base sera un attribut de celui-ci)
-        if strategy_manager_instance:
-            magic_to_strategy_map = (
-                strategy_manager_instance.get_magic_to_strategy_map()
-            )  # Nouvelle méthode à créer dans StrategyManager
-        else:  # Fallback si StrategyManager n'est pas encore injecté ou fonctionnel
-            self.logger.warning(
-                "StrategyManager non injecté. La logique de décision de sortie pourrait être limitée."
-            )
-            magic_to_strategy_map = {}
-            # Accès temporaire à l'attribut du ConfigManager pour la démo
-            if hasattr(self.config_manager, "_config_knowledge_base"):
-                for config_data in self.config_manager._config_knowledge_base.values():
-                    content = config_data.get("content", {})
-                    magic = content.get("magic_number")
-                    strategy_class = config_data.get("strategy_class")
-                    if magic and strategy_class:
-                        magic_to_strategy_map[magic] = {
-                            "class": strategy_class,
-                            "config": content,
-                        }
+    def _pos_symbol(p: Dict[str, Any]) -> Optional[str]:
+        return p.get("symbol") or p.get("Symbol")
 
-        for magic, positions in positions_by_strategy.items():
-            if magic in magic_to_strategy_map:
-                strategy_info = magic_to_strategy_map[magic]
-                strategy_class = strategy_info["class"]
-                strategy_config = strategy_info["config"]
-                strategy_name = strategy_config.get("strategy_name", "Unknown")
+    def _pos_magic(p: Dict[str, Any]) -> Optional[int]:
+        try:
+            return int(p.get("magic")) if p.get("magic") is not None else None
+        except Exception:
+            return None
 
-                self.logger.info(
-                    f"Évaluation des sorties pour {len(positions)} position(s) de la stratégie '{strategy_name}' (Magic: {magic})."
-                )
+    def _pos_side(p: Dict[str, Any]) -> Optional[str]:
+        """
+        Retourne 'BUY' ou 'SELL' selon les champs usuels.
+        MT5 Nom: type -> 0 buy / 1 sell ; ou string 'POSITION_TYPE_BUY/SELL'
+        """
+        t = p.get("type") or p.get("Type")
+        if isinstance(t, str):
+            t = t.upper()
+            if "BUY" in t:
+                return "BUY"
+            if "SELL" in t:
+                return "SELL"
+        try:
+            # MT5: 0 -> BUY ; 1 -> SELL
+            t_int = int(t)
+            return "BUY" if t_int == 0 else "SELL" if t_int == 1 else None
+        except Exception:
+            return None
+
+    def _pos_entry(p: Dict[str, Any]) -> Optional[float]:
+        for k in ("price_open", "Price", "price"):
+            if k in p:
                 try:
-                    # Passe l'instance de ConfigManager à la stratégie
-                    strategy_instance = strategy_class(
-                        config_manager_instance=self.config_manager,
-                        strategy_config=strategy_config,
-                    )
-                    exit_decisions_for_strategy = strategy_instance.evaluate_exit(
-                        context, positions
-                    )
+                    return float(p[k])
+                except Exception:
+                    pass
+        return None
 
-                    if exit_decisions_for_strategy:
-                        all_exit_decisions.extend(exit_decisions_for_strategy)
-                        self.logger.info(
-                            f"{len(exit_decisions_for_strategy)} décision(s) de sortie retournée(s) par la stratégie '{strategy_name}'."
-                        )
+    def _pos_sl(p: Dict[str, Any]) -> Optional[float]:
+        for k in ("sl", "StopLoss"):
+            if k in p:
+                try:
+                    return float(p[k])
+                except Exception:
+                    pass
+        return None
 
-                except Exception as e:
-                    self.logger.error(
-                        f"Erreur lors de l'évaluation des sorties pour la stratégie '{strategy_name}': {e}",
-                        exc_info=True,
-                    )
-            else:
-                self.logger.warning(
-                    f"Aucune stratégie trouvée pour le magic number {magic}. Les {len(positions)} position(s) associées ne peuvent pas être gérées pour la sortie."
-                )
+    def _pos_tp(p: Dict[str, Any]) -> Optional[float]:
+        for k in ("tp", "TakeProfit"):
+            if k in p:
+                try:
+                    return float(p[k])
+                except Exception:
+                    pass
+        return None
 
-        return all_exit_decisions
+    def _pos_volume(p: Dict[str, Any]) -> float:
+        for k in ("volume", "Volume"):
+            if k in p:
+                try:
+                    v = float(p[k])
+                    return v if v > 0 else 0.01
+                except Exception:
+                    pass
+        return 0.01
+
+    def _digits_info(mkt: Dict[str, Any]) -> Tuple[int, float]:
+        si = mkt.get("symbol_info", {}) or {}
+        digits = int(si.get("digits", 5))
+        point = float(si.get("point", 0.00001) or 0.00001)
+        return digits, point
+
+    def _round_to_digits(x: float, digits: int) -> float:
+        # arrondit au nombre de décimales "digits"
+        try:
+            return float(f"{x:.{digits}f}")
+        except Exception:
+            return x
+
+    def _current_price_for_symbol(sym: str, mkt: Dict[str, Any]) -> Optional[float]:
+        cp = mkt.get("current_price")
+        if isinstance(cp, (int, float)) and cp > 0:
+            return float(cp)
+        df = mkt.get("annotated_rates_df")
+        if df is not None and len(df) > 0:
+            try:
+                return float(df["close"].iloc[-1])
+            except Exception:
+                return None
+        return None
+
+    def _bars_since_open(sym: str, mkt: Dict[str, Any], open_time: Optional[float]) -> Optional[int]:
+        """
+        Compte les bougies M1 écoulées depuis l'ouverture (si DF indexé en datetime).
+        Fallback: None si impossible.
+        """
+        df = mkt.get
+
     
     def calculate_risk_parameters(self, context: dict, current_config: dict, trade_decision: dict) -> dict:
         """

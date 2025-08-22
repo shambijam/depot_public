@@ -136,20 +136,47 @@ def verify_environment_and_config(config_manager, mt5_connector, bot_mode):
 # --- Fonctions d'Aide (Helpers) pour le Cycle de Pipeline ---
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """
+    Merge récursif: pour chaque clé, si les deux valeurs sont des dicts -> merge récursif,
+    sinon la valeur 'override' remplace celle de 'base'.
+    Les listes sont remplacées (pas concaténées) pour éviter les surprises.
+    """
+    from collections.abc import Mapping
+    if not isinstance(base, Mapping) or not isinstance(override, Mapping):
+        return override
+    out = dict(base)
+    for k, v in override.items():
+        if k in out and isinstance(out[k], Mapping) and isinstance(v, Mapping):
+            out[k] = _deep_merge_dicts(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def _get_merged_config_for_asset(
     active_config: dict, config_manager: ConfigManager, asset: str
 ) -> dict:
-    """Fusionne la configuration globale avec la configuration spécifique à l'actif."""
-    asset_specific_config = config_manager.config_loader.load_asset_config(asset)
-    merged_config = active_config.copy()
+    """
+    Fusionne la configuration globale avec la configuration spécifique à l'actif.
+    - Autorise des overrides par actif pour: phase_detection, risk_management, exit_policy, etc.
+    - Merge récursif (deep) pour éviter d'écraser des sous-champs par inadvertance.
+    """
+    asset_specific_config = config_manager.config_loader.load_asset_config(asset) or {}
+    merged_config = dict(active_config or {})
+    merged_config["asset_symbol"] = asset  # pratique pour les logs/pipelines
+
+    # Strategy name:
+    # - si tu veux autoriser une stratégie différente par actif, dé-commente la ligne suivante
+    # if "strategy_name" in asset_specific_config:
+    #     merged_config["strategy_name"] = asset_specific_config["strategy_name"]
+    # Sinon on garde la logique actuelle (priorité au global) :
     if "strategy_name" in active_config:
         merged_config["strategy_name"] = active_config["strategy_name"]
-    if "phase_detection" in active_config:
-        merged_config["phase_detection"] = {
-            **merged_config.get("phase_detection", {}),
-            **asset_specific_config.get("phase_detection", {}),
-        }
-    for section in [
+
+    # Sections à merger (tu peux en ajouter/retirer selon tes fichiers d’assets)
+    sections_to_merge = [
+        "phase_detection",
         "volatility",
         "risk_management",
         "smart_targets",
@@ -157,13 +184,23 @@ def _get_merged_config_for_asset(
         "institutional_bias",
         "weighting",
         "strategy_toggles",
-    ]:
-        if section in asset_specific_config:
-            merged_config[section] = {
-                **merged_config.get(section, {}),
-                **asset_specific_config[section],
-            }
+        "exit_policy",         # <-- important pour tes sorties fallback / BE / trailing
+        "trade_limits",
+        "data_collection",
+        "broker_overrides",
+        "position_management",
+    ]
+
+    for section in sections_to_merge:
+        asset_section = asset_specific_config.get(section)
+        if asset_section is not None:
+            merged_section = _deep_merge_dicts(
+                merged_config.get(section, {}), asset_section
+            )
+            merged_config[section] = merged_section
+
     return merged_config
+
 
 
 def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
