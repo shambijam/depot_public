@@ -248,31 +248,6 @@ class MT5Connector:
             return 0.01
         return 0.0001  # majors FX
 
-    def get_spread_pips(self, symbol: str) -> float:
-        """Retourne le spread en pips avec garde-fous."""
-        info = self.mt5.symbol_info(symbol)
-        tick = self.mt5.symbol_info_tick(symbol)
-
-        point = (getattr(info, "point", 0.0) or 0.0) if info else 0.0
-        bid = getattr(tick, "bid", 0.0) or 0.0
-        ask = getattr(tick, "ask", 0.0) or 0.0
-
-        # 1) calcul direct depuis le tick si possible
-        if ask > 0.0 and bid > 0.0 and ask >= bid:
-            spread_price = ask - bid
-        else:
-            # 2) fallback: spread en "points" du symbole
-            raw_points = getattr(info, "spread", 0) or 0
-            spread_price = raw_points * point
-
-        pip = self._pip_size(symbol)
-        sp = (spread_price / pip) if pip > 0 else float("inf")
-
-        if not math.isfinite(sp) or sp < 0:
-            sp = 1e9  # sentinelle très haute si data foireuse
-
-        return sp
-
     def close_position_market(self, position) -> bool:
         """
         Ferme une position au marché en utilisant le type inverse:
@@ -329,41 +304,43 @@ class MT5Connector:
             self.logger.exception("close_position_market: %s", e)
             return False
 
-    # --- AJOUT 2: spread en pips robuste (jamais 'inf') -------------------------
-
+ 
     def get_spread_pips(self, symbol: str) -> float:
-        """
-        Retourne le spread en *pips*:
-        - utilise symbol_info.spread si dispo (>0)
-        - sinon calcule (ask-bid)
-        - jamais 'inf' (retourne un grand nombre si indisponible)
-        """
-        info = mt5.symbol_info(symbol)
-        if not info:
-            return 1e9
-        # pip_size standard selon digits
-        digits = info.digits or 5
-        point = info.point or 1e-5
-        pip_size = (
-            0.0001
-            if digits in (4, 5)
-            else (0.01 if digits in (2, 3) else (point or 1e-5))
-        )
+        """Retourne le spread en pips avec garde-fous robustes."""
+        try:
+            info = self.mt5.symbol_info(symbol)
+            tick = self.mt5.symbol_info_tick(symbol)
 
-        # 1) tenter via info.spread
-        if (info.spread or 0) > 0:
-            spread_price = info.spread * point
-            return spread_price / pip_size
+            point = float(getattr(info, "point", 0.0) or 0.0) if info else 0.0
+            pip = float(self._pip_size(symbol) or 0.0)
+            if pip <= 0.0:
+                return float("inf")  # pip inconnu => on bloque
 
-        # 2) fallback tick
-        tick = mt5.symbol_info_tick(symbol)
-        if tick and (tick.ask or 0) > 0 and (tick.bid or 0) > 0:
-            spread_price = abs(tick.ask - tick.bid)
-            if spread_price > 0:
-                return spread_price / pip_size
+            # 1) Calcul direct à partir du tick (chemin prioritaire)
+            bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick else 0.0
+            ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick else 0.0
+            if ask > 0.0 and bid > 0.0 and ask >= bid:
+                spread_price = ask - bid
 
-        # 3) dernier recours: gros nombre pour forcer un "skip" propre
-        return 1e9
+            # 2) Fallback: spread reporté par le symbole (en "points")
+            elif info and point > 0.0:
+                raw_points = int(getattr(info, "spread", 0) or 0)
+                if raw_points > 0:
+                    spread_price = raw_points * point
+                else:
+                    return float("inf")  # pas de data exploitable
+
+            else:
+                return float("inf")  # pas de data exploitable
+
+            sp = spread_price / pip
+            if not math.isfinite(sp) or sp < 0.0:
+                return float("inf")
+
+            return round(sp, 5)
+        except Exception:
+            return float("inf")
+
 
     # --- AJOUT 3: wrapper order_calc_profit sans "unpack" -----------------------
 
@@ -727,38 +704,58 @@ class MT5Connector:
     def get_current_price(self, symbol: str, action: str) -> Optional[float]:
         """
         Récupère le prix actuel (Ask pour BUY, Bid pour SELL) pour un symbole donné.
-
-        Args:
-            symbol (str): Le nom du symbole.
-            action (str): L'action de trading ("BUY" pour le prix Ask, "SELL" pour le prix Bid).
-
-        Returns:
-            Optional[float]: Le prix actuel (float), ou None si la récupération échoue.
+        Version robuste : inclut garde-fous NaN/None, fallback mid-price si ask/bid manquant,
+        et logging explicite.
         """
         if not self.is_connected:
-            self.logger.warning(
-                f"MT5: Non connecté. Impossible de récupérer le prix actuel pour '{symbol}'."
-            )  # Utilise self.logger
+            self.logger.warning(f"MT5: Non connecté. Impossible de récupérer le prix actuel pour '{symbol}'.")
             return None
 
-        # Récupère les informations de tick les plus récentes pour le symbole
-        symbol_info_tick = self.mt5.symbol_info_tick(symbol)  # Utilise self.mt5
-        if symbol_info_tick is None:
-            self.logger.error(
-                f"MT5: Échec de la récupération des données de tick pour '{symbol}'. Erreur: {self.mt5.last_error()}."
-            )  # Utilise self.logger, self.mt5
+        try:
+            tick = self.mt5.symbol_info_tick(symbol)
+        except Exception as e:
+            self.logger.error(f"MT5: Exception lors de la récupération du tick pour '{symbol}': {e}")
             return None
 
-        # Déterminer le prix en fonction de l'action souhaitée (utilise les constantes mappées)
-        if action.upper() == "BUY":  # Acheter au prix Ask (demande)
-            return symbol_info_tick.ask
-        elif action.upper() == "SELL":  # Vendre au prix Bid (offre)
-            return symbol_info_tick.bid
+        if not tick:
+            self.logger.error(f"MT5: Aucune donnée de tick pour '{symbol}'. Last_error={self.mt5.last_error()}")
+            return None
+
+        ask = getattr(tick, "ask", None)
+        bid = getattr(tick, "bid", None)
+
+        # Nettoyage NaN ou valeurs aberrantes
+        try:
+            ask = float(ask) if ask is not None else None
+            bid = float(bid) if bid is not None else None
+            if ask is not None and not (ask == ask and ask > 0):  # NaN ou <=0
+                ask = None
+            if bid is not None and not (bid == bid and bid > 0):
+                bid = None
+        except Exception:
+            ask, bid = None, None
+
+        if action.upper() == "BUY":
+            if ask is not None:
+                return ask
+            elif bid is not None:
+                self.logger.warning(f"MT5: Ask manquant pour '{symbol}', fallback Bid.")
+                return bid
+        elif action.upper() == "SELL":
+            if bid is not None:
+                return bid
+            elif ask is not None:
+                self.logger.warning(f"MT5: Bid manquant pour '{symbol}', fallback Ask.")
+                return ask
         else:
-            self.logger.warning(
-                f"MT5: Action non reconnue '{action}' pour get_current_price. Retourne le prix Bid par défaut."
-            )  # Utilise self.logger
-            return symbol_info_tick.bid
+            self.logger.warning(f"MT5: Action non reconnue '{action}' -> fallback mid-price si dispo.")
+        
+        # Fallback mid-price
+        if ask is not None and bid is not None:
+            return (ask + bid) / 2.0
+
+        self.logger.error(f"MT5: Impossible de déterminer un prix valide pour '{symbol}' (ask={ask}, bid={bid}).")
+        return None
 
     def get_account_info(
         self,
@@ -971,13 +968,13 @@ class MT5Connector:
         """
         Retourne le spread courant en *points* pour `symbol`.
 
-        Stratégie (dans cet ordre) :
-        1) spread natif MT5 (info.spread) s'il est > 0  → déjà en points
-        2) (ask - bid) / point via symbol_info_tick
-        3) fallback (ask/bid) depuis symbol_info
-        4) Depth of Market (market_book_get) pour reconstruire ask/bid
-        Choix du `point` : min positif parmi (info.point, info.trade_tick_size, 10**(-digits))
-        Renvoie 0.0 si non calculable (mais jamais inf/NaN).
+        Ordre de décision :
+        1) info.spread (déjà en points) si > 0
+        2) (ask - bid) / point depuis symbol_info_tick
+        3) fallback ask/bid depuis symbol_info
+        4) reconstruction via Depth of Market (market_book_get)
+        Choix du `point` : priorité à info.point, sinon trade_tick_size, sinon 10**(-digits)
+        Jamais NaN/Inf : retourne 0.0 si non calculable.
         """
         try:
             sym = (symbol or "").strip().upper()
@@ -997,106 +994,88 @@ class MT5Connector:
             try:
                 native = float(getattr(info, "spread", 0) or 0.0) if info else 0.0
                 if native > 0:
-                    return native
+                    return float(round(native, 2))
             except Exception:
                 pass
 
-            # === Prépare les candidats pour 'point'
-            point_candidates = []
-            if info is not None:
-                try:
-                    p = float(getattr(info, "point", 0.0) or 0.0)
-                    if p > 0:
-                        point_candidates.append(p)
-                except Exception:
-                    pass
-                try:
-                    tts = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+            # Détermination du point (ordre de préférence)
+            point = 0.0
+            try:
+                p = float(getattr(info, "point", 0.0) or 0.0) if info else 0.0
+                if p > 0:
+                    point = p
+                else:
+                    tts = float(getattr(info, "trade_tick_size", 0.0) or 0.0) if info else 0.0
                     if tts > 0:
-                        point_candidates.append(tts)
-                except Exception:
-                    pass
-                try:
-                    digits = int(getattr(info, "digits", 0) or 0)
-                    if digits > 0:
-                        point_candidates.append(10 ** (-digits))
-                except Exception:
-                    pass
+                        point = tts
+                    else:
+                        digits = int(getattr(info, "digits", 0) or 0) if info else 0
+                        if digits > 0:
+                            point = 10.0 ** (-digits)
+            except Exception:
+                point = 0.0
 
-            point = min(point_candidates) if point_candidates else 0.0
-
-            # === Récup ask/bid (tick en priorité)
             ask = bid = None
+
+            # 2) Tick en priorité
             try:
                 tick = self.mt5.symbol_info_tick(sym)
                 if tick:
                     a = getattr(tick, "ask", None)
                     b = getattr(tick, "bid", None)
-                    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                        ask, bid = float(a), float(b)
+                    a = float(a) if isinstance(a, (int, float)) else None
+                    b = float(b) if isinstance(b, (int, float)) else None
+                    if a and b and a > 0 and b > 0 and a > b:
+                        ask, bid = a, b
             except Exception:
                 pass
 
-            # Fallback sur info.{ask,bid} si tick invalide
-            if (ask is None or ask <= 0) or (bid is None or bid <= 0) or (ask <= bid):
+            # 3) Fallback : symbol_info.{ask,bid}
+            if ask is None or bid is None or not (ask > bid > 0):
                 try:
-                    a = float(getattr(info, "ask", 0) or 0.0) if info else 0.0
-                    b = float(getattr(info, "bid", 0) or 0.0) if info else 0.0
+                    a = float(getattr(info, "ask", 0.0) or 0.0) if info else 0.0
+                    b = float(getattr(info, "bid", 0.0) or 0.0) if info else 0.0
                     if a > 0 and b > 0 and a > b:
                         ask, bid = a, b
                 except Exception:
                     pass
 
-            # Dernier recours : Depth of Market
-            if (ask is None or bid is None or ask <= bid) or point <= 0:
+            # 4) Dernier recours : Depth of Market
+            if (ask is None or bid is None or not (ask > bid)) or point <= 0.0:
                 try:
                     book = self.mt5.market_book_get(sym)
                     if book:
-                        # type BUY = bids, SELL = asks
                         best_ask = None
                         best_bid = None
                         for x in book:
                             t = getattr(x, "type", None)
                             price = getattr(x, "price", None)
-                            if not isinstance(price, (int, float)):
+                            if not isinstance(price, (int, float)) or price <= 0:
                                 continue
-                            if t == self.mt5.BOOK_TYPE_SELL:
-                                best_ask = (
-                                    price
-                                    if (best_ask is None or price < best_ask)
-                                    else best_ask
-                                )
-                            elif t == self.mt5.BOOK_TYPE_BUY:
-                                best_bid = (
-                                    price
-                                    if (best_bid is None or price > best_bid)
-                                    else best_bid
-                                )
-                        if best_ask and best_bid and best_ask > best_bid:
+                            if t == getattr(self.mt5, "BOOK_TYPE_SELL", 1):
+                                best_ask = price if (best_ask is None or price < best_ask) else best_ask
+                            elif t == getattr(self.mt5, "BOOK_TYPE_BUY", 2):
+                                best_bid = price if (best_bid is None or price > best_bid) else best_bid
+                        if isinstance(best_ask, (int, float)) and isinstance(best_bid, (int, float)) and best_ask > best_bid:
                             ask, bid = float(best_ask), float(best_bid)
                 except Exception:
                     pass
 
-            # Calcul final si possible
-            if (
-                isinstance(ask, (int, float))
-                and isinstance(bid, (int, float))
-                and ask > bid
-                and point > 0
-            ):
+            # Calcul final
+            if isinstance(ask, (int, float)) and isinstance(bid, (int, float)) and ask > bid and point > 0:
                 spread_pts = (ask - bid) / point
-                if spread_pts < 0:
-                    spread_pts = abs(spread_pts)  # sécurité flottants
-                # en points, garder 2 décimales max (FX typiquement entier)
+                # garde-fous num
+                if not (spread_pts == spread_pts) or spread_pts <= 0:
+                    return 0.0
+                # En points : arrondi léger (FX souvent entier)
                 return float(round(spread_pts, 2))
 
         except Exception as e:
-            self.logger.debug(
-                f"[get_symbol_spread_points] erreur pour {symbol}: {e}", exc_info=True
-            )
+            self.logger.debug(f"[get_symbol_spread_points] erreur pour {symbol}: {e}", exc_info=True)
 
         # Jamais inf/NaN
         return 0.0
+
 
     def order_send(self, request: Dict[str, Any]) -> Optional[Any]:
         """

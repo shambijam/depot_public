@@ -760,6 +760,37 @@ def run_single_pipeline_cycle(
         active_config = decision_package.get("config_used", base_config) or base_config
         trade_decision = decision_package.get("final_decision", {}) or {}
 
+        # ---- Enrichissement Katana pour l'exécution/audit ----
+        exec_ctx = decision_package.get("execution_context") or global_context.get("execution_context") or {}
+        chosen_asset = trade_decision.get("asset")
+        if chosen_asset:
+            # spread pips pour l'actif choisi (si connu)
+            sp_map = exec_ctx.get("spreads_pips", {}) or {}
+            trade_decision["meta_spread_pips"] = sp_map.get(chosen_asset)
+            # snapshot katana pour l'actif choisi (si existant)
+            snap_map = exec_ctx.get("katana_snapshots", {}) or {}
+            chosen_snap = snap_map.get(chosen_asset, {})
+            # métriques utiles pour audit/exécution
+            trade_decision.setdefault("meta_atr_m1_pips", chosen_snap.get("atr_m1_pips"))
+            trade_decision.setdefault("meta_katana_score", chosen_snap.get("katana_score"))
+
+            # Exposer un contexte d'exécution au TradeExecutor (pour audit_logger)
+            try:
+                trade_executor.execution_context = {
+                    "signals_snapshot": (global_context.get("trading_signals", {}) or {}).get(chosen_asset, {}),
+                    "katana_snapshot": chosen_snap,
+                    "market_metrics": {
+                        "atr_m1_pips": trade_decision.get("meta_atr_m1_pips"),
+                    },
+                    "account_info": global_context.get("account_info", {}),
+                }
+            except Exception:
+                pass
+
+        # réinjecter la décision enrichie dans le package
+        decision_package["final_decision"] = trade_decision
+        decision_package.setdefault("execution_context", exec_ctx)
+
         # Sorties partielles si positions ouvertes
         current_open_positions = trade_executor.get_open_positions()
         if current_open_positions:

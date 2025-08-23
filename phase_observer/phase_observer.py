@@ -254,21 +254,33 @@ class PhaseObserver:
         """
         Snapshot micro-décisionnel prêt pour le pipeline (M1 dirigé par BOS/MSS, alignement M5/M15,
         SL/TP structurels, spread/liquidité, score final, katana_ready).
+        Version Katana serrée : ajoute contrôles de fraîcheur/ATR et rejets explicites.
         """
-        # Appelle ton analyse MTF existante (adapte le nom si nécessaire)
+        import math
+        from datetime import datetime, timezone
+
+        # --- 0) Appel MTF existant ---
         if hasattr(self, "analyze_asset_multi_timeframe"):
             mtf = self.analyze_asset_multi_timeframe(asset, strategy_config)
         else:
-            # Fallback minimal si la méthode porte un autre nom
             mtf = {}
-
         if not mtf or not mtf.get("multi_tf_enabled", False):
             return {"katana_ready": False, "reason": "insufficient_confluence"}
 
-        # Récupère le DF M1 complet puis (ré)analyse pour les colonnes annotées
-        m1_cfg = strategy_config.get("phase_detection", {}).get("multi_timeframe", {})
+        # --- 1) Récup/Analyse M1 ---
+        pd_cfg = strategy_config.get("phase_detection", {}) or {}
+        mtf_cfg = pd_cfg.get("multi_timeframe", {}) or {}
+        kat_cfg = pd_cfg.get("katana", {}) or {}
+
+        # paramètres Katana (avec défauts prudents)
+        max_age_sec = int(kat_cfg.get("max_signal_age_seconds", 30) or 30)              # fraicheur du signal M1
+        max_bos_age_bars = int(kat_cfg.get("max_bos_age_bars", 3) or 3)                 # BOS/MSS <= N dernières bougies
+        min_atr_m1_pips = float(kat_cfg.get("min_atr_m1_pips", 0.6) or 0.6)             # micro-vol minimal
+        hard_min_atr_m1_pips = float(kat_cfg.get("hard_min_atr_m1_pips", 0.12) or 0.12) # seuil incompressible
+        points_per_pip = 10.0
+
         if hasattr(self, "_fetch_timeframe_data"):
-            m1_raw = self._fetch_timeframe_data(asset, "M1", m1_cfg)
+            m1_raw = self._fetch_timeframe_data(asset, "M1", mtf_cfg)
         else:
             m1_raw = None
         m1_df = self.analyze(m1_raw, asset_symbol=asset) if m1_raw is not None else None
@@ -277,22 +289,108 @@ class PhaseObserver:
 
         last = m1_df.iloc[-1]
 
-        # Direction strictement depuis BOS/MSS M1
+        # --- 2) Fraîcheur du signal ---
+        now = datetime.now(timezone.utc)
+        ts_col = None
+        for c in ("timestamp", "time", "datetime", "ts"):
+            if c in m1_df.columns:
+                ts_col = c
+                break
+        if ts_col:
+            try:
+                last_ts = last[ts_col]
+                # compat pandas ts / epoch / string
+                if hasattr(last_ts, "to_pydatetime"):
+                    last_dt = last_ts.to_pydatetime()
+                elif isinstance(last_ts, (int, float)) and last_ts > 1e9:
+                    last_dt = datetime.fromtimestamp(float(last_ts) / 1000.0, tz=timezone.utc)
+                elif isinstance(last_ts, (int, float)):
+                    last_dt = datetime.fromtimestamp(float(last_ts), tz=timezone.utc)
+                else:
+                    # pandas parses ISO8601 en amont le plus souvent
+                    last_dt = datetime.fromisoformat(str(last_ts))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age_sec = (now - last_dt).total_seconds()
+                if age_sec > max_age_sec:
+                    return {"katana_ready": False, "reason": f"stale_m1_bar_{int(age_sec)}s"}
+            except Exception:
+                # si on ne peut pas déterminer l'âge, on ne bloque pas ici
+                pass
+
+        # --- 3) Direction strictement depuis BOS/MSS M1 + âge du break ---
         side, break_ok = self._extract_m1_break_direction(last)
-        if side is None:
+        if side is None or not break_ok:
             return {"katana_ready": False, "reason": "no_m1_break"}
 
-        # Alignement HTF via consensus de phase M5/M15
+        bos_age_bars = None
+        for k in ("bos_mss_age_bars", "m1_break_age_bars", "break_age"):
+            if k in m1_df.columns:
+                try:
+                    bos_age_bars = int(m1_df[k].iloc[-1])
+                    break
+                except Exception:
+                    pass
+        if bos_age_bars is not None and bos_age_bars > max_bos_age_bars:
+            return {"katana_ready": False, "reason": f"stale_break_{bos_age_bars}bars"}
+
+        # --- 4) Alignement HTF (M5/M15) ---
         phase = str(mtf.get("phase", "unknown")).lower()
         htf_alignment_ok = (side == "BUY" and ("bull" in phase or "up" in phase)) or \
                         (side == "SELL" and ("bear" in phase or "down" in phase))
 
-        conf = float(m1_df["confidence_score"].iloc[-1]) if "confidence_score" in m1_df.columns else 0.0
+        # --- 5) Liquidité/Spread soft flag ---
         spread_ok = bool(m1_df["is_liquid"].iloc[-1]) if "is_liquid" in m1_df.columns else True
 
+        # --- 6) ATR M1 minimal (anti SL irréaliste) ---
+        # on essaye de récupérer 'atr14' sinon on calcule
+        def _calc_atr(df, period=14):
+            import numpy as np
+            import pandas as pd
+            if df is None or len(df) < period + 2:
+                return float("nan")
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            close = df["close"].astype(float)
+            prev_close = close.shift(1)
+            tr = np.maximum.reduce(
+                [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()]
+            )
+            atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
+            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+
+        atr_m1 = None
+        if "atr14" in m1_df.columns and isinstance(m1_df["atr14"].iloc[-1], (int, float)):
+            atr_m1 = float(m1_df["atr14"].iloc[-1])
+        else:
+            atr_m1 = _calc_atr(m1_df, 14)
+
+        point = float(getattr(getattr(self, "symbol_info", None) or mtf.get("symbol_info", {}), "point", 0.0) or 0.0)
+        pip_size = point * points_per_pip if point > 0 else None
+        if pip_size and isinstance(atr_m1, float) and atr_m1 > 0:
+            atr_m1_pips = atr_m1 / pip_size
+            if atr_m1_pips < hard_min_atr_m1_pips:
+                return {"katana_ready": False, "reason": f"atr_m1_too_low_{atr_m1_pips:.3f}pips"}
+            # si inférieur au seuil "souhaité", on ne bloque pas mais on marquera en score
+            low_atr_flag = atr_m1_pips < min_atr_m1_pips
+        else:
+            atr_m1_pips = None
+            low_atr_flag = False  # inconnu => pas de pénalité dure
+
+        # --- 7) Confiance/Entry/SL/TP structurels ---
+        conf = float(m1_df["confidence_score"].iloc[-1]) if "confidence_score" in m1_df.columns else 0.0
         entry = float(last["close"])
-        sl    = self._pick_sl_from_structure(last, side)
-        tp    = self._pick_tp_from_nearest_liquidity(m1_df, side)
+        sl = self._pick_sl_from_structure(last, side)
+        tp = self._pick_tp_from_nearest_liquidity(m1_df, side)
+
+        if sl is None or tp is None or not math.isfinite(entry) or entry <= 0:
+            return {"katana_ready": False, "reason": "invalid_prices"}
+
+        # --- 8) Score & Snapshot ---
+        # bonus HTF, pénalité faible si ATR sous le seuil "souhaité"
+        htf_bonus = 0.15 if htf_alignment_ok else 0.0
+        atr_penalty = -0.10 if low_atr_flag else 0.0
+        katana_score = round(max(0.0, 0.6 * float(mtf.get("confidence_score", 0.0)) + 0.4 * conf + htf_bonus + atr_penalty), 3)
 
         snapshot = {
             "asset": asset,
@@ -303,17 +401,24 @@ class PhaseObserver:
             "m1_break_ok": bool(break_ok),
             "htf_alignment_ok": bool(htf_alignment_ok),
             "spread_ok": bool(spread_ok),
-            "katana_score": round(0.6*mtf.get("confidence_score", 0.0) + 0.4*conf, 3),
+            "atr_m1_pips": atr_m1_pips,
+            "katana_score": katana_score,
             "phase": mtf.get("phase"),
             "dominant_tf": mtf.get("dominant_tf"),
             "signal_agreement": mtf.get("signal_agreement_rates", {}),
+            "max_signal_age_seconds": max_age_sec,
+            "max_bos_age_bars": max_bos_age_bars,
         }
 
         snapshot["katana_ready"] = all([
-            snapshot["m1_break_ok"], snapshot["htf_alignment_ok"], snapshot["spread_ok"],
-            snapshot["sl_price"] is not None, snapshot["tp_price"] is not None
+            snapshot["m1_break_ok"],
+            snapshot["htf_alignment_ok"],
+            snapshot["spread_ok"],
+            snapshot["sl_price"] is not None,
+            snapshot["tp_price"] is not None,
         ])
         return snapshot
+
 
 
     def detect_order_block_ml_enhanced(

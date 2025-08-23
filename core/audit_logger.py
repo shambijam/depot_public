@@ -119,6 +119,129 @@ class AuditLogger:
             f"Changement de configuration enregistré. Source='{source}', Action='{change_info.get('action', 'unknown')}'"
         )
         # TODO: Implémenter l'écriture asynchrone pour ne pas bloquer le thread principal.
+        
+    def log_trade_execution(self, order_info: Dict[str, Any], context: Dict[str, Any]) -> None:
+        """
+        Journalise une exécution (ou tentative d'exécution) de trade au format audit (JSONL).
+        Conçu pour Katana : trace spread_pips, RR projeté, ATR M1, confluences (OB/FVG/MTF/BOS),
+        et les paramètres clés de l'ordre (symbol, action, volume, SL/TP, entry).
+
+        Args:
+            order_info: Détails de l'ordre au moment de l'envoi/réponse broker.
+                Champs typiques acceptés (tous optionnels, robustesse aux manquements) :
+                - "order_id", "ticket", "request", "response", "status", "error_code"
+                - "symbol", "action", "volume", "entry_price", "sl_price", "tp_price"
+                - "rr_projected", "spread_pips", "order_type", "magic_number"
+                - "decision_id", "strategy_type", "rule_name"
+            context: Instantané décisionnel/marché utilisé (signaux/ATR/etc.).
+                Clés utiles si disponibles :
+                - "signals" (dict par actif) ou "signals_snapshot"
+                - "katana_snapshot" (dict : katana_ready, katana_score, mtf_hits, etc.)
+                - "market_metrics" (ex: {"atr_m1_pips": 0.7})
+                - "account_info", "env"
+        """
+        from datetime import datetime, UTC
+        import json
+
+        try:
+            # Champs de base (ordre)
+            symbol = order_info.get("symbol") or order_info.get("asset")
+            action = order_info.get("action")
+            volume = order_info.get("volume")
+            entry  = order_info.get("entry_price")
+            sl     = order_info.get("sl_price")
+            tp     = order_info.get("tp_price")
+            rr     = order_info.get("rr_projected")
+            spread = order_info.get("spread_pips")
+            order_type = order_info.get("order_type")
+            ticket = order_info.get("ticket") or order_info.get("order_id")
+            status = order_info.get("status")  # "SENT", "FILLED", "REJECTED", etc.
+            error_code = order_info.get("error_code")
+
+            # Contextes (signaux / katana / marché)
+            kat = context.get("katana_snapshot") or {}
+            sig = context.get("signals_snapshot") or context.get("signals") or {}
+            mkt = context.get("market_metrics") or {}
+            acct = context.get("account_info") or {}
+
+            # Confluences Katana (robustes aux clés manquantes)
+            confluences = {
+                "mtf_hits":      kat.get("mtf_hits") or kat.get("signal_agreement", {}).get("total_agree") or 0,
+                "m1_break_ok":   bool(kat.get("m1_break_ok", False)),
+                "htf_alignment": bool(kat.get("htf_alignment_ok", False)),
+                "ob_detected":   bool(kat.get("ob_detected", False) or sig.get("ob_detected", False)),
+                "fvg_detected":  bool(kat.get("fvg_detected", False) or sig.get("fvg_detected", False)),
+            }
+
+            # Indicateurs micro-phase
+            atr_m1_pips = (
+                kat.get("atr_m1_pips")
+                or mkt.get("atr_m1_pips")
+                or sig.get("atr_m1_pips")
+            )
+
+            entry_meta = {
+                "katana_ready": bool(kat.get("katana_ready", False)),
+                "katana_score": kat.get("katana_score"),
+                "phase":        kat.get("phase") or sig.get("phase"),
+                "dominant_tf":  kat.get("dominant_tf") or sig.get("dominant_tf"),
+            }
+
+            # Payload audit
+            audit_entry = {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "category": "trade_execution",
+                "symbol": symbol,
+                "action": action,
+                "order_type": order_type,
+                "volume": volume,
+                "entry_price": entry,
+                "sl_price": sl,
+                "tp_price": tp,
+                "rr_projected": rr,
+                "spread_pips": spread,
+                "ticket": ticket,
+                "status": status,
+                "error_code": error_code,
+                "strategy_type": order_info.get("strategy_type"),
+                "rule_name": order_info.get("rule_name"),
+                "magic_number": order_info.get("magic_number"),
+                "decision_id": order_info.get("decision_id"),
+                "katana": {
+                    **entry_meta,
+                    **confluences,
+                },
+                "account": {
+                    "equity": acct.get("equity"),
+                    "balance": acct.get("balance"),
+                    "margin_free": acct.get("margin_free"),
+                },
+            }
+
+            # Ajout en mémoire (journal interne)
+            if not hasattr(self, "_audit_trail"):
+                self._audit_trail = []
+            self._audit_trail.append(audit_entry)
+
+            # Écriture JSONL immédiate si configurée
+            file_name = "trade_audit_trail.log"
+            try:
+                file_name = self.config_manager.get("trade_executor_settings.audit_trail_file_name", file_name)
+            except Exception:
+                pass
+
+            out_path = self.logs_dir / file_name
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(audit_entry, cls=CustomJSONEncoder) + "\n")
+
+            self.logger.info(
+                f"Audit trade consigné: {symbol} {action} vol={volume} rr={rr} spread={spread} "
+                f"katana(ready={entry_meta['katana_ready']}, score={entry_meta['katana_score']})"
+            )
+        except Exception as e:
+            self.logger.error(f"Échec log_trade_execution: {e}", exc_info=True)
+
 
     def get_config_history(self, filter_by: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """
