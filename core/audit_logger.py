@@ -119,12 +119,13 @@ class AuditLogger:
             f"Changement de configuration enregistré. Source='{source}', Action='{change_info.get('action', 'unknown')}'"
         )
         # TODO: Implémenter l'écriture asynchrone pour ne pas bloquer le thread principal.
-        
+            
     def log_trade_execution(self, order_info: Dict[str, Any], context: Dict[str, Any]) -> None:
         """
         Journalise une exécution (ou tentative d'exécution) de trade au format audit (JSONL).
         Conçu pour Katana : trace spread_pips, RR projeté, ATR M1, confluences (OB/FVG/MTF/BOS),
         et les paramètres clés de l'ordre (symbol, action, volume, SL/TP, entry).
+        ➕ Enrichi Bollinger : signal, scores, états (squeeze/expansion), distances, preset SL/TP pressenti.
 
         Args:
             order_info: Détails de l'ordre au moment de l'envoi/réponse broker.
@@ -133,6 +134,7 @@ class AuditLogger:
                 - "symbol", "action", "volume", "entry_price", "sl_price", "tp_price"
                 - "rr_projected", "spread_pips", "order_type", "magic_number"
                 - "decision_id", "strategy_type", "rule_name"
+                - (optionnel) "target_sl_pips", "target_tp_pips", "override_source"
             context: Instantané décisionnel/marché utilisé (signaux/ATR/etc.).
                 Clés utiles si disponibles :
                 - "signals" (dict par actif) ou "signals_snapshot"
@@ -160,7 +162,9 @@ class AuditLogger:
 
             # Contextes (signaux / katana / marché)
             kat = context.get("katana_snapshot") or {}
-            sig = context.get("signals_snapshot") or context.get("signals") or {}
+            sig_all = context.get("signals_snapshot") or context.get("signals") or {}
+            # Certains appelleurs stockent les signaux par symbole :
+            sig = (sig_all.get(symbol) if isinstance(sig_all, dict) and symbol in sig_all else sig_all) or {}
             mkt = context.get("market_metrics") or {}
             acct = context.get("account_info") or {}
 
@@ -180,11 +184,52 @@ class AuditLogger:
                 or sig.get("atr_m1_pips")
             )
 
+            # ====== Enrichissement Bollinger pour audit ======
+            # On lit d'abord dans sig (snapshot dernier bar), fallback katana_snapshot le cas échéant.
+            boll_signal = sig.get("boll_signal") or kat.get("boll_signal")
+            boll_break  = sig.get("boll_breakout_score", kat.get("boll_breakout_score"))
+            boll_revert = sig.get("boll_mean_revert_score", kat.get("boll_mean_revert_score"))
+            boll = {
+                "signal": boll_signal,
+                "breakout_score": boll_break,
+                "mean_revert_score": boll_revert,
+                "is_squeeze": bool(sig.get("boll_is_squeeze", kat.get("boll_is_squeeze", False))),
+                "is_expansion": bool(sig.get("boll_is_expansion", kat.get("boll_is_expansion", False))),
+                "squeeze_strength": sig.get("boll_squeeze_strength", sig.get("squeeze_strength", kat.get("squeeze_strength"))),
+                "band_touch": sig.get("boll_band_touch", kat.get("boll_band_touch")),
+                "in_band": sig.get("boll_in_band", kat.get("boll_in_band")),
+                "z_band": sig.get("boll_z_band", kat.get("boll_z_band")),
+                "dist_to_upper_pips": sig.get("boll_dist_to_upper_pips"),
+                "dist_to_lower_pips": sig.get("boll_dist_to_lower_pips"),
+                "dist_to_mid_pips":   sig.get("boll_dist_to_mid_pips"),
+                "bb_upper": sig.get("boll_bb_upper"),
+                "bb_lower": sig.get("boll_bb_lower"),
+                "bb_mid":   sig.get("boll_bb_mid"),
+            }
+
+            # Deviner le preset SL/TP pressenti selon le signal (à des fins d'audit uniquement)
+            preset_guess = None
+            if isinstance(boll_signal, str):
+                s = boll_signal.lower()
+                if s == "buy_breakout":   preset_guess = "on_buy_breakout"
+                elif s == "sell_breakout": preset_guess = "on_sell_breakout"
+                elif s == "buy_revert":    preset_guess = "on_buy_revert"
+                elif s == "sell_revert":   preset_guess = "on_sell_revert"
+
+            # Overrides SL/TP éventuellement passés au moteur (ex: depuis _calculate_sl_tp_prices)
+            overrides_meta = {
+                "target_sl_pips": order_info.get("target_sl_pips"),
+                "target_tp_pips": order_info.get("target_tp_pips"),
+                "override_source": order_info.get("override_source"),  # ex: "bollinger_preset" si l'appelant le renseigne
+                "preset_key_guess": preset_guess,
+            }
+
             entry_meta = {
                 "katana_ready": bool(kat.get("katana_ready", False)),
                 "katana_score": kat.get("katana_score"),
                 "phase":        kat.get("phase") or sig.get("phase"),
                 "dominant_tf":  kat.get("dominant_tf") or sig.get("dominant_tf"),
+                "atr_m1_pips":  atr_m1_pips,
             }
 
             # Payload audit
@@ -210,6 +255,8 @@ class AuditLogger:
                 "katana": {
                     **entry_meta,
                     **confluences,
+                    "bollinger": boll,
+                    "sl_tp_overrides": overrides_meta,
                 },
                 "account": {
                     "equity": acct.get("equity"),
@@ -237,10 +284,11 @@ class AuditLogger:
 
             self.logger.info(
                 f"Audit trade consigné: {symbol} {action} vol={volume} rr={rr} spread={spread} "
-                f"katana(ready={entry_meta['katana_ready']}, score={entry_meta['katana_score']})"
+                f"katana(ready={entry_meta['katana_ready']}, score={entry_meta['katana_score']}, boll_sig={boll_signal})"
             )
         except Exception as e:
             self.logger.error(f"Échec log_trade_execution: {e}", exc_info=True)
+
 
 
     def get_config_history(self, filter_by: Optional[Dict[str, Any]] = None) -> pd.DataFrame:

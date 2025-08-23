@@ -1419,6 +1419,8 @@ class TradeExecutor:
         - Arrondit aux 'digits' du symbole
         - Fallback robuste si données manquantes
         - ⚠️ Katana (micro‑phase) : SL/TP très serrés avec clamps durs/softs et rejets si au‑delà des caps.
+        - ➕ Intègre les overrides Bollinger depuis config.decision_engine.katana.bollinger_overrides.tp_sl_overrides
+        (appliqués uniquement si les seuils entry_bias sont satisfaits par les scores de trade_decision).
         """
         import pandas as pd
         import numpy as np
@@ -1447,32 +1449,68 @@ class TradeExecutor:
         # --- Overrides en PIPS (prioritaires si fournis) ---
         sl_pips_override = trade_decision.get("target_sl_pips", None)
         tp_pips_override = trade_decision.get("target_tp_pips", None)
-        # spread fourni par l'appelant (déjà validé en amont)
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-        # --- Paramètres de placement (global/prod_config) ---
+        # --- 🔁 Overrides Bollinger (Katana) conditionnels ---
+        try:
+            de = (config.get("decision_engine") or {})
+            kat = (de.get("katana") or {})
+            boll_ov = (kat.get("bollinger_overrides") or {})
+            tp_sl_map = (boll_ov.get("tp_sl_overrides") or {})
+            entry_bias = (boll_ov.get("entry_bias") or {})
+
+            boll_signal = str(trade_decision.get("boll_signal", "") or "").strip()
+            breakout_score = float(trade_decision.get("boll_breakout_score", 0.0) or 0.0)
+            revert_score = float(trade_decision.get("boll_mean_revert_score", 0.0) or 0.0)
+
+            bb_buy_min = float(entry_bias.get("breakout_buy_min", 0.55) or 0.55)
+            bb_sell_min = float(entry_bias.get("breakout_sell_min", 0.55) or 0.55)
+            rv_buy_min = float(entry_bias.get("revert_buy_min", 0.55) or 0.55)
+            rv_sell_min = float(entry_bias.get("revert_sell_min", 0.55) or 0.55)
+
+            def _apply_if_allowed(key: str, thr: float, score: float):
+                nonlocal sl_pips_override, tp_pips_override
+                block = tp_sl_map.get(key)
+                if not isinstance(block, dict) or score < thr:
+                    return
+                if sl_pips_override is None and block.get("sl_pips") is not None:
+                    sl_pips_override = float(block["sl_pips"])
+                if tp_pips_override is None and block.get("tp_pips") is not None:
+                    tp_pips_override = float(block["tp_pips"])
+
+            if boll_signal == "buy_breakout":
+                _apply_if_allowed("on_buy_breakout", bb_buy_min, breakout_score)
+            elif boll_signal == "sell_breakout":
+                _apply_if_allowed("on_sell_breakout", bb_sell_min, breakout_score)
+            elif boll_signal == "buy_revert":
+                _apply_if_allowed("on_buy_revert", rv_buy_min, revert_score)
+            elif boll_signal == "sell_revert":
+                _apply_if_allowed("on_sell_revert", rv_sell_min, revert_score)
+        except Exception as e:
+            self.logger.debug(f"[Katana/Bollinger] Overrides non appliqués: {e}")
+
+        # --- Paramètres prod / smart targets ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
         sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()   # PIPS|SWING|ATR
         tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()     # RR|ATR_MULTIPLE|PIPS
         rr_ratio = float(prod_st.get("tp_rr_ratio", 1.5) or 1.5)
 
-        # --- Paramètres “smart_targets” spécifiques stratégie (caps Katana) ---
         strat_st = (config.get("smart_targets") or {})
         st_sl = (strat_st.get("stop_loss") or {})
         st_tp = (strat_st.get("take_profit") or {})
 
-        sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)         # ex: 40 (4 pips)
-        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))  # ex: 120 (12 pips)
-        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))  # ex: 200 (20 pips)
+        sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
+        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
+        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
 
         # --- Règles d'entrée scalping (caps/flags Katana) ---
         entry_rules_scalp = ((config.get("entry_rules") or {}).get("scalping") or {})
         reject_if_sl_over_cap = bool(entry_rules_scalp.get("reject_if_sl_over_cap", False))
-        max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")  # ex: 8.0
-        min_atr_m1_pips = float(entry_rules_scalp.get("min_atr_m1_pips", 0.0) or 0.0)  # ex: 0.6 (Katana)
-        hard_min_atr_m1_pips = float(entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0)  # ex: 0.12
+        max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")
+        min_atr_m1_pips = float(entry_rules_scalp.get("min_atr_m1_pips", 0.0) or 0.0)
+        hard_min_atr_m1_pips = float(entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0)
 
-        # --- Récup du DF pour SWING/ATR (si dispo) ---
+        # --- Market data pour SWING/ATR ---
         symbol = str(trade_decision.get("asset", "")).upper()
         md = (market_context.get("market_data") or {}).get(symbol)
         rates_df = md if isinstance(md, pd.DataFrame) else None
@@ -1494,19 +1532,17 @@ class TradeExecutor:
         # ========================= SL =========================
         stop_loss_price = 0.0
 
-        # 0) PRIORITÉ override en pips
         if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
             sl_distance = float(sl_pips_override) * pip_size
             stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
             self.logger.debug(f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}")
         else:
-            # 1) SWING (si données suffisantes), sinon ATR, sinon PIPS
             if sl_method == "SWING":
                 lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
                 buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
                 if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
                     self.logger.warning(f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS.")
-                    sl_method = "ATR"  # tentative ATR avant PIPS
+                    sl_method = "ATR"
                 else:
                     recent = rates_df.tail(lookback)
                     buffer_price = buffer_pips * pip_size
@@ -1521,7 +1557,7 @@ class TradeExecutor:
                 atr_period = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
                 atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
                 atr = _compute_atr(rates_df, atr_period)
-                if not (atr == atr and atr > 0):  # NaN safe
+                if not (atr == atr and atr > 0):
                     self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
                     sl_method = "PIPS"
                 else:
@@ -1536,13 +1572,11 @@ class TradeExecutor:
         # ========================= TP =========================
         take_profit_price = 0.0
 
-        # 0) PRIORITÉ override en pips
         if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
             tp_distance = float(tp_pips_override) * pip_size
             take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
             self.logger.debug(f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}")
         else:
-            # 1) RR : basé sur SL calculé (si valide)
             if tp_method == "RR":
                 risk_distance_price = abs(entry_price - stop_loss_price)
                 if risk_distance_price <= 0:
@@ -1552,7 +1586,6 @@ class TradeExecutor:
                     tp_distance = risk_distance_price * rr_ratio
                     take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
-            # 2) ATR_MULTIPLE
             if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
                 atr_period = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
                 atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
@@ -1564,7 +1597,6 @@ class TradeExecutor:
                     tp_distance = atr_mult * atr
                     take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
-            # 3) PIPS
             if tp_method == "PIPS" and take_profit_price == 0.0:
                 tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
                 tp_distance = tp_pips * pip_size
@@ -1574,7 +1606,6 @@ class TradeExecutor:
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
-        # distances signées (en prix)
         if action == "BUY":
             sl_dist_price = entry_price - stop_loss_price
             tp_dist_price = take_profit_price - entry_price
@@ -1582,24 +1613,22 @@ class TradeExecutor:
             sl_dist_price = stop_loss_price - entry_price
             tp_dist_price = entry_price - take_profit_price
 
-        # Doivent être strictement > 0
         if sl_dist_price <= 0 or tp_dist_price <= 0:
             raise TradeExecutionError("Distances SL/TP invalides (<= 0).")
 
-        # A) Respect du stops_level minimal (broker)
+        # A) Respect stops_level (broker)
         if min_stop_distance_price > 0:
             if sl_dist_price < min_stop_distance_price:
                 sl_dist_price = min_stop_distance_price
             if tp_dist_price < min_stop_distance_price:
                 tp_dist_price = min_stop_distance_price
 
-        # B) Contraintes Katana (smart_targets) en points
+        # B) Contraintes Katana (points)
         sl_dist_points = sl_dist_price / point
         tp_dist_points = tp_dist_price / point
 
-        # B1) SL : hard min / hard max
         if math.isfinite(sl_hard_min_points) and sl_hard_min_points > 0 and sl_dist_points < sl_hard_min_points:
-            sl_dist_points = sl_hard_min_points  # on serre mais pas en‑dessous du plancher
+            sl_dist_points = sl_hard_min_points
         if math.isfinite(sl_hard_max_points) and sl_dist_points > sl_hard_max_points:
             if reject_if_sl_over_cap:
                 raise TradeExecutionError(
@@ -1607,7 +1636,6 @@ class TradeExecutor:
                 )
             sl_dist_points = sl_hard_max_points
 
-        # B2) Cap SL côté “max_stop_pips_scalp”
         if isinstance(max_stop_pips_scalp, (int, float)) and max_stop_pips_scalp > 0:
             max_stop_points_scalp = float(max_stop_pips_scalp) * points_per_pip
             if sl_dist_points > max_stop_points_scalp:
@@ -1617,50 +1645,46 @@ class TradeExecutor:
                     )
                 sl_dist_points = max_stop_points_scalp
 
-        # B3) TP : hard max (on garde serré si nécessaire)
         if math.isfinite(tp_hard_max_points) and tp_dist_points > tp_hard_max_points:
             tp_dist_points = tp_hard_max_points
 
-        # C) Micro‑phase : ATR M1 minimal (si dispo) pour éviter SL trop optimiste
-        #    On tolère un seuil "hard" très bas (ex: 0.12 pips) pour ne pas bloquer, mais on rejette si même ce seuil n'est pas atteint.
+        # C) ATR M1 minimal (si dispo)
         try:
             atr_df = (market_context.get("market_data_m1") or {}).get(symbol) or rates_df
             atr_m1 = _compute_atr(atr_df, period=14) if isinstance(atr_df, pd.DataFrame) else float("nan")
-            if atr_m1 == atr_m1 and atr_m1 > 0:  # pas NaN
+            if atr_m1 == atr_m1 and atr_m1 > 0:
                 atr_m1_pips = atr_m1 / pip_size
                 if hard_min_atr_m1_pips > 0 and atr_m1_pips < hard_min_atr_m1_pips:
                     raise TradeExecutionError(
                         f"ATR M1 trop faible ({atr_m1_pips:.3f} pips < hard_min {hard_min_atr_m1_pips:.3f})."
                     )
                 if min_atr_m1_pips > 0 and atr_m1_pips < min_atr_m1_pips:
-                    # on n'échoue pas : on serre davantage le SL/TP pour tenir compte de la micro‑volatilité
                     sl_dist_points = max(sl_dist_points, min_stop_distance_points)
                     tp_dist_points = max(tp_dist_points, min_stop_distance_points)
-        except Exception as _:
-            # ATR indisponible : on continue avec les règles de caps
+        except Exception:
             pass
 
-        # D) Ajustement très serré pour absorber le spread (évite TP trop proche “net”)
-        #    On garantit que TP >= SL + spread (en pips), sinon on augmente légèrement TP.
+        # D) Ajustement pour spread
         if spread_pips > 0:
             sl_pips_now = sl_dist_points / points_per_pip
             tp_pips_now = tp_dist_points / points_per_pip
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
 
-        # Recalcule prix SL/TP à partir des distances finales (points)
+        # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
         tp_dist_price = tp_dist_points * point
         stop_loss_price = (entry_price - sl_dist_price) if action == "BUY" else (entry_price + sl_dist_price)
         take_profit_price = (entry_price + tp_dist_price) if action == "BUY" else (entry_price - tp_dist_price)
 
-        # Dernière sécurité : SL/TP pas trop proches
         if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
             raise TradeExecutionError("SL et TP trop proches après ajustements Katana.")
 
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
+
+
 
     def _calculate_loss_per_lot_fallback(
         self, symbol_info: Any, sl_distance_price: float, current_price: float
