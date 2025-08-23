@@ -1484,7 +1484,233 @@ class PhaseObserver:
         # ... (logique originale conservée pour référence)
         return max(0.0, min(1.0, confidence))
 
-    # <<<< AJOUTEZ LA NOUVELLE MÉTHODE ICI >>>>
+    
+    def compute_bollinger_microphase_signals(
+        self,
+        df,
+        price_col: str = "close",
+        period: int = 20,
+        std_mult: float = 2.0,
+        squeeze_window: int = 100,
+        squeeze_percentile: float = 0.15,
+        min_bars: int = 200,
+        atr_period: int = 14,
+        pip_size: float | None = None,
+        mode: str = "katana",
+    ) -> dict:
+        """
+        Calcule des signaux micro-phase basés sur les Bandes de Bollinger pour le scalping Katana.
+        - NE PAS MODIFIER LA SIGNATURE ICI (pour intégration sûre).
+        - Retourne un dict prêt à consommer par le pipeline (touch, squeeze, breakout_score, mean_revert_score, distances, etc.).
+        """
+      
+        out = {
+            "ok": False,
+            "reason": None,
+            "signal": "neutral",           # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | "neutral"
+            "band_touch": None,           # "upper" | "lower" | None
+            "in_band": None,              # True si close ∈ [lower, upper]
+            "is_squeeze": None,           # compression vol
+            "is_expansion": None,         # expansion post-squeeze
+            "squeeze_strength": 0.0,      # 0..1
+            "breakout_score": 0.0,        # 0..1
+            "mean_revert_score": 0.0,     # 0..1
+            "z_band": None,               # distance normalisée au milieu
+            "dist_to_upper_pips": None,
+            "dist_to_lower_pips": None,
+            "dist_to_mid_pips": None,
+            "bb_upper": None,
+            "bb_lower": None,
+            "bb_mid": None,
+            "atr_pips": None,
+            "meta": {"period": period, "std_mult": std_mult, "mode": mode},
+        }
+
+        # --- Guardrails & inputs ---
+        if df is None or len(df) < max(min_bars, period + 2):
+            out["reason"] = f"insufficient_bars_{len(df) if df is not None else 0}"
+            return out
+        if price_col not in df.columns:
+            out["reason"] = f"missing_price_col_{price_col}"
+            return out
+
+        series = pd.to_numeric(df[price_col], errors="coerce").astype(float)
+        if series.isna().any():
+            series = series.fillna(method="ffill").fillna(method="bfill")
+        if not np.isfinite(series.iloc[-1]):
+            out["reason"] = "invalid_last_price"
+            return out
+
+        # --- Bollinger bands (ema + std of ema residuals pour stabilité micro) ---
+        mid = series.ewm(span=period, adjust=False, min_periods=period).mean()
+        resid = series - mid
+        rolling_std = resid.rolling(window=period, min_periods=period).std(ddof=0)
+        upper = mid + std_mult * rolling_std
+        lower = mid - std_mult * rolling_std
+
+        bb_mid, bb_upper, bb_lower = float(mid.iloc[-1]), float(upper.iloc[-1]), float(lower.iloc[-1])
+        price = float(series.iloc[-1])
+
+        # Sécurité bornes
+        if not all(map(np.isfinite, [bb_mid, bb_upper, bb_lower, price])):
+            out["reason"] = "nan_in_bbands"
+            return out
+
+        out["bb_mid"], out["bb_upper"], out["bb_lower"] = bb_mid, bb_upper, bb_lower
+
+        # --- ATR (pips) pour calibrer les scores et distances ---
+        def _atr(df_in: pd.DataFrame, p: int = 14) -> float:
+            try:
+                h = pd.to_numeric(df_in["high"], errors="coerce").astype(float)
+                l = pd.to_numeric(df_in["low"], errors="coerce").astype(float)
+                c = pd.to_numeric(df_in["close"], errors="coerce").astype(float)
+                tr = pd.concat([(h - l).abs(), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+                a = tr.rolling(window=p, min_periods=p).mean().iloc[-1]
+                return float(a) if np.isfinite(a) else float("nan")
+            except Exception:
+                return float("nan")
+
+        atr = _atr(df, atr_period)
+        # point->pip (essaie depuis df sinon symbol_info/Config)
+        if pip_size is None:
+            point = float(df["point"].iloc[-1]) if "point" in df.columns else float(getattr(getattr(self, "symbol_info", None), "point", 0.0) or 0.0)
+            pip_size = point * 10.0 if point > 0 else None
+        atr_pips = (atr / pip_size) if (pip_size and atr and atr > 0) else None
+        out["atr_pips"] = float(atr_pips) if atr_pips is not None and np.isfinite(atr_pips) else None
+
+        # --- Distances en pips ---
+        def _to_pips(delta: float) -> float | None:
+            if pip_size and pip_size > 0 and np.isfinite(delta):
+                return float(delta / pip_size)
+            return None
+
+        out["dist_to_upper_pips"] = _to_pips(bb_upper - price)
+        out["dist_to_lower_pips"] = _to_pips(price - bb_lower)
+        out["dist_to_mid_pips"]   = _to_pips(abs(price - bb_mid))
+
+        # --- Touch / In-band ---
+        eps = 1e-12
+        in_band = (price <= bb_upper + eps) and (price >= bb_lower - eps)
+        band_touch = "upper" if price >= bb_upper - eps else ("lower" if price <= bb_lower + eps else None)
+        out["in_band"] = bool(in_band)
+        out["band_touch"] = band_touch
+
+        # --- Squeeze / Expansion via bande-width percentile sur fenêtre longue ---
+        # width_t = (upper - lower) / mid  (normalisation relative)
+        width = (upper - lower) / (mid.replace(0, np.nan).abs())
+        if len(width.dropna()) >= min(squeeze_window, len(width)):
+            w_hist = width.tail(squeeze_window).dropna()
+            if not w_hist.empty:
+                thresh = np.nanpercentile(w_hist.values, squeeze_percentile * 100.0)
+                is_squeeze = bool(width.iloc[-1] <= thresh)
+                # expansion: sortie du squeeze + bande-width qui s'élargit
+                is_expansion = bool((~pd.isna(width.iloc[-2])) and (width.iloc[-1] > width.iloc[-2]) and (not is_squeeze))
+            else:
+                is_squeeze = False
+                is_expansion = False
+                thresh = np.nan
+        else:
+            is_squeeze = False
+            is_expansion = False
+            thresh = np.nan
+
+        out["is_squeeze"] = is_squeeze
+        out["is_expansion"] = is_expansion
+        if np.isfinite(thresh) and thresh > 0:
+            squeeze_strength = 1.0 - float(width.iloc[-1] / (thresh + 1e-12))
+            out["squeeze_strength"] = max(0.0, min(1.0, squeeze_strength))
+        else:
+            out["squeeze_strength"] = 0.0
+
+        # --- Z-band: position du prix dans le canal (-inf..+inf), 0=milieu ---
+        last_std = float(rolling_std.iloc[-1]) if np.isfinite(rolling_std.iloc[-1]) else 0.0
+        z_band = (price - bb_mid) / (last_std if last_std > 0 else np.nan)
+        out["z_band"] = float(z_band) if np.isfinite(z_band) else None
+
+        # --- Scoring mean-revert vs breakout (calibré par ATR & squeeze state) ---
+        # Intuition:
+        # - Mean reversion fort si touch de bande + squeeze en cours (faible largeur) + contre-direction momentum faible
+        # - Breakout fort si close hors bande ou touch bande avec expansion et momentum directionnel
+        close = pd.to_numeric(df["close"], errors="coerce").astype(float)
+        mom_fast = close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
+        mom_slow = close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
+        momentum = float(mom_fast - mom_slow) if all(map(np.isfinite, [mom_fast, mom_slow])) else 0.0
+
+        # normalisation momentum par ATR
+        norm_mom = float(momentum / atr) if atr and atr > 0 else 0.0
+        norm_mom = max(-3.0, min(3.0, norm_mom))  # clip
+
+        outside_upper = price > bb_upper
+        outside_lower = price < bb_lower
+
+        # Heuristiques robustes
+        mean_revert = 0.0
+        breakout = 0.0
+
+        # Mean revert: touch bande + squeeze -> forte proba de retour vers mid
+        if band_touch == "upper":
+            mean_revert += 0.55
+            mean_revert += 0.20 if is_squeeze else 0.05
+            mean_revert += 0.10 if norm_mom <= 0 else -0.10
+        elif band_touch == "lower":
+            mean_revert += 0.55
+            mean_revert += 0.20 if is_squeeze else 0.05
+            mean_revert += 0.10 if norm_mom >= 0 else -0.10
+
+        # Breakout: close en dehors + expansion -> pousse le score
+        if outside_upper:
+            breakout += 0.60
+            breakout += 0.20 if is_expansion else 0.05
+            breakout += 0.10 if norm_mom > 0 else -0.05
+        if outside_lower:
+            breakout += 0.60
+            breakout += 0.20 if is_expansion else 0.05
+            breakout += 0.10 if norm_mom < 0 else -0.05
+
+        # Adoucissement par état ATR: si ATR trop bas, pénalise les breakouts
+        if out["atr_pips"] is not None:
+            if out["atr_pips"] < 0.15:
+                breakout *= 0.7
+            elif out["atr_pips"] > 0.8:
+                breakout *= 1.05
+                mean_revert *= 0.95
+
+        # Clamp 0..1
+        mean_revert = max(0.0, min(1.0, mean_revert))
+        breakout = max(0.0, min(1.0, breakout))
+
+        out["mean_revert_score"] = round(mean_revert, 3)
+        out["breakout_score"] = round(breakout, 3)
+
+        # --- Signal final (mode katana) ---
+        signal = "neutral"
+        if mode == "katana":
+            # priorité aux breakouts hors bande, sinon mean-revert sur touch
+            if outside_upper and breakout >= 0.55:
+                signal = "buy_breakout"
+            elif outside_lower and breakout >= 0.55:
+                signal = "sell_breakout"
+            elif band_touch == "upper" and mean_revert >= 0.55:
+                signal = "sell_revert"
+            elif band_touch == "lower" and mean_revert >= 0.55:
+                signal = "buy_revert"
+            else:
+                signal = "neutral"
+        else:
+            # mode générique: compare scores
+            if breakout - mean_revert >= 0.15:
+                signal = "buy_breakout" if z_band and z_band > 0 else "sell_breakout"
+            elif mean_revert - breakout >= 0.15:
+                signal = "sell_revert" if z_band and z_band > 0 else "buy_revert"
+            else:
+                signal = "neutral"
+
+        out["signal"] = signal
+        out["ok"] = True
+        return out
+
+
+
 
     def calculate_confidence_score(self, df_row: pd.Series) -> float:
         """
@@ -2374,91 +2600,111 @@ class PhaseObserver:
                 setattr(self, attr, value)
 
     def determine_optimized_phase(self, row):
-        """Classification de phase basée sur les 4 indicateurs core"""
-        regime = row.get("regime", "unknown")
+        """Classification de phase basée sur les 4 indicateurs core (+ lecture Bollinger si dispo, sans rien casser)."""
+        regime = str(row.get("regime", "unknown"))
 
+        # --- Vars Bollinger (optionnelles, robustes si absentes) ---
+        boll_signal = row.get("boll_signal")  # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | None
+        boll_breakout = float(row.get("boll_breakout_score", 0.0) or 0.0)
+        boll_revert = float(row.get("boll_mean_revert_score", 0.0) or 0.0)
+        boll_squeeze = bool(row.get("boll_is_squeeze", False))
+        boll_expansion = bool(row.get("boll_is_expansion", False))
+
+        # --- Institutional trending regimes ---
         if "trending_institutional" in regime:
             if row.get("fvg_ob_confluence", False):
                 return "institutional_setup_premium"
             elif row.get("ob_detected", False):
                 return "institutional_setup"
             elif "bull" in regime:
+                # Hint Bollinger: si breakout haussier fort, confirmer la version breakout
+                if boll_signal in ("buy_breakout",) and boll_breakout >= 0.6:
+                    return "volatility_breakout"
                 return "trending_institutional_bull"
             else:
+                if boll_signal in ("sell_breakout",) and boll_breakout >= 0.6:
+                    return "volatility_breakout"
                 return "trending_institutional_bear"
+
+        # --- Ranges (accumulation/distribution) ---
         elif "range_accumulation" in regime:
+            # Mean-revert acheteur prioritaire lorsqu'on est en range + squeeze
+            if boll_signal == "buy_revert" and (boll_revert >= 0.55 or boll_squeeze):
+                return "range_accumulation"
             if row.get("high_quality_ob", False):
                 return "accumulation_zone"
-            else:
-                return "range_accumulation"
+            return "range_accumulation"
+
         elif "range_distribution" in regime:
-            if row.get("confirmed_structure_break", False):
-                return "distribution_breakout"
-            else:
+            # Mean-revert vendeur prioritaire en range + squeeze
+            if boll_signal == "sell_revert" and (boll_revert >= 0.55 or boll_squeeze):
                 return "range_distribution"
+            if row.get("confirmed_structure_break", False) or (
+                boll_signal in ("buy_breakout", "sell_breakout") and boll_breakout >= 0.6
+            ):
+                return "distribution_breakout"
+            return "range_distribution"
+
+        # --- High vol / chaos : privilégier breakouts Bollinger si expansion ---
         elif "high_volatility" in regime:
             if row.get("bos_mss_detected", False):
                 return "volatility_breakout"
-            else:
-                return "high_volatility_chaos"
+            if boll_expansion and boll_breakout >= 0.6:
+                return "volatility_breakout"
+            return "high_volatility_chaos"
+
+        # --- Low vol / compression : attendre expansion, sinon compression pure ---
         elif "low_volatility" in regime:
+            if boll_expansion and boll_breakout >= 0.6:
+                return "volatility_breakout"
             return "low_volatility_compression"
+
+        # --- Fallback divers hors régimes majeurs ---
         else:
             if row.get("institutional_setup", False):
                 return "smc_setup"
             elif row.get("fvg_detected", False):
                 return "fvg_opportunity"
-            else:
-                return "no_clear_phase"
+            # Opportunités de reversion discrètes si rien d'autre
+            if boll_signal in ("buy_revert", "sell_revert") and boll_revert >= 0.6:
+                return "range_accumulation" if boll_signal == "buy_revert" else "range_distribution"
+            return "no_clear_phase"
+
+            return "no_clear_phase"
 
     def calculate_optimized_confidence(self, row):
-        """Score de confiance basé sur les 4 indicateurs core uniquement, avec lecture dynamique depuis la config."""
+        """Score de confiance basé sur les 4 indicateurs core, avec lecture dynamique depuis la config (+ lecture Bollinger si dispo, non bloquante)."""
 
-        # --- 1) Lecture DYNAMIQUE: on essaie plusieurs chemins compatibles ---
+        # --- 1) Lecture DYNAMIQUE de la config (plusieurs chemins compatibles) ---
         cfg = self.config_manager.get("confidence_score_calculation", None)
         cfg_path_used = "confidence_score_calculation"
 
         if not cfg:
-            cfg = self.config_manager.get(
-                "phase_detection_defaults.confidence_score_calculation", None
-            )
+            cfg = self.config_manager.get("phase_detection_defaults.confidence_score_calculation", None)
             if cfg:
                 cfg_path_used = "phase_detection_defaults.confidence_score_calculation"
 
         if not cfg:
-            # Chemin alternatif souvent utilisé: confidence_scoring
-            cfg = self.config_manager.get(
-                "phase_detection_defaults.confidence_scoring", None
-            )
+            cfg = self.config_manager.get("phase_detection_defaults.confidence_scoring", None)
             if cfg:
                 cfg_path_used = "phase_detection_defaults.confidence_scoring"
 
-        # Fallback final si rien trouvé
         if not cfg:
             cfg = {}
 
         # --- 2) Normalisation douce des clés (compatibilité de structure) ---
-        # Ex: certains JSON utilisent "confidence_scoring.weights" au lieu de "signal_weights"
+        # Pondérations "core"
         signal_weights = cfg.get("signal_weights")
         if signal_weights is None:
             weights = cfg.get("weights")  # ex: { "fvg": 0.2, "ob": 0.3, ... }
             if isinstance(weights, dict):
                 signal_weights = {
-                    "fvg_detected": float(
-                        weights.get("fvg", weights.get("fvg_detected", 0.25))
-                    ),
-                    "ob_detected": float(
-                        weights.get("ob", weights.get("ob_detected", 0.35))
-                    ),
-                    "bos_mss_detected": float(
-                        weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))
-                    ),
-                    "regime_alignment": float(
-                        weights.get("regime", weights.get("regime_alignment", 0.15))
-                    ),
+                    "fvg_detected": float(weights.get("fvg", weights.get("fvg_detected", 0.25))),
+                    "ob_detected": float(weights.get("ob", weights.get("ob_detected", 0.35))),
+                    "bos_mss_detected": float(weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))),
+                    "regime_alignment": float(weights.get("regime", weights.get("regime_alignment", 0.15))),
                 }
             else:
-                # Défauts prudents si rien n'est fourni
                 signal_weights = {
                     "fvg_detected": 0.25,
                     "ob_detected": 0.35,
@@ -2466,7 +2712,17 @@ class PhaseObserver:
                     "regime_alignment": 0.15,
                 }
 
-        # confluence / quality : compatibilité d'intitulés
+        # Pondérations Bollinger (optionnelles)
+        boll_weights = cfg.get("bollinger_weights")
+        if not isinstance(boll_weights, dict):
+            boll_weights = {}
+        # défauts prudents
+        boll_mean_revert_w = float(boll_weights.get("mean_revert_score", 0.10))
+        boll_breakout_w   = float(boll_weights.get("breakout_score", 0.10))
+        boll_squeeze_bonus = float(boll_weights.get("squeeze_bonus", 0.05))      # bonus additif si squeeze
+        boll_expansion_bonus = float(boll_weights.get("expansion_bonus", 0.05))  # bonus additif si expansion
+
+        # Confluence / quality
         confluence_bonus = cfg.get("confluence_bonus")
         if confluence_bonus is None:
             confluence_bonus = cfg.get("confluence", {}) or {}
@@ -2477,7 +2733,7 @@ class PhaseObserver:
         base_confidence = float(cfg.get("base_confidence", cfg.get("base", 0.2)))
         max_confidence = float(cfg.get("max_confidence_cap", cfg.get("cap", 0.95)))
 
-        # --- 3) Calcul du score inchangé dans l'esprit (avec types robustes) ---
+        # --- 3) Calcul du score core (inchangé dans l'esprit) ---
         score = float(base_confidence)
 
         if bool(row.get("fvg_detected", False)):
@@ -2493,13 +2749,52 @@ class PhaseObserver:
 
         if bool(row.get("fvg_ob_confluence", False)):
             score += float(confluence_bonus.get("fvg_ob_confluence", 0.15))
-        if bool(row.get("high_quality_ob", False)) and bool(
-            row.get("bos_mss_detected", False)
-        ):
+        if bool(row.get("high_quality_ob", False)) and bool(row.get("bos_mss_detected", False)):
             score += float(confluence_bonus.get("ob_bos_confluence", 0.10))
         if bool(row.get("institutional_setup", False)):
             score += float(confluence_bonus.get("full_confluence_bonus", 0.20))
 
+        # --- 4) Lecture Bollinger (optionnelle, tolérante à l'absence) ---
+        try:
+            boll_revert = float(row.get("boll_mean_revert_score", 0.0) or 0.0)
+            boll_break  = float(row.get("boll_breakout_score", 0.0) or 0.0)
+            boll_sig    = (row.get("boll_signal") or "").strip()  # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | "neutral"
+            is_squeeze  = bool(row.get("boll_is_squeeze", False))
+            is_expansion = bool(row.get("boll_is_expansion", False))
+
+            # Ajouts additifs proportionnels aux scores 0..1
+            # -> Revert utile en range/squeeze ; Breakout utile en expansion.
+            regime = str(row.get("regime", "unknown"))
+            in_range_regime = ("range_" in regime) or ("low_volatility" in regime)
+
+            if boll_revert > 0:
+                # Légèrement boosté si régime de range/compression
+                local_w = boll_mean_revert_w * (1.15 if in_range_regime else 1.0)
+                score += local_w * max(0.0, min(1.0, boll_revert))
+
+            if boll_break > 0:
+                # Légèrement boosté si expansion ou haute volatilité
+                in_high_vol = ("high_volatility" in regime)
+                local_w = boll_breakout_w * (1.15 if (is_expansion or in_high_vol) else 1.0)
+                score += local_w * max(0.0, min(1.0, boll_break))
+
+            # Petits bonus circonstanciels, bornés
+            if is_squeeze and in_range_regime:
+                score += boll_squeeze_bonus
+            if is_expansion and ("high_volatility" in regime):
+                score += boll_expansion_bonus
+
+            # Optionnel : micro-ajustement si signal aligné avec le régime
+            if boll_sig in ("buy_breakout", "sell_breakout") and (is_expansion or "high_volatility" in regime):
+                score += min(0.05, boll_break * 0.05)
+            if boll_sig in ("buy_revert", "sell_revert") and in_range_regime and is_squeeze:
+                score += min(0.05, boll_revert * 0.05)
+
+        except Exception:
+            # Si une des colonnes n'existe pas / mauvaise forme, on ignore sans pénaliser
+            pass
+
+        # --- 5) Multiplicateurs de qualité / liquidité ---
         if bool(row.get("is_liquid", True)):
             score *= float(quality_multipliers.get("tight_spread", 1.05))
         if regime_strength > 0.8:
@@ -2507,44 +2802,29 @@ class PhaseObserver:
 
         ob_details = row.get("ob_details")
         bos_details = row.get("bos_mss_details")
-
         try:
-            if (
-                isinstance(ob_details, dict)
-                and float(ob_details.get("volume_spike", 0)) > 1.5
-            ):
-                score *= float(
-                    quality_multipliers.get("high_volume_confirmation", 1.15)
-                )
-            elif (
-                isinstance(bos_details, dict)
-                and float(bos_details.get("volume_ratio", 0)) > 1.5
-            ):
-                score *= float(
-                    quality_multipliers.get("high_volume_confirmation", 1.15)
-                )
+            if isinstance(ob_details, dict) and float(ob_details.get("volume_spike", 0)) > 1.5:
+                score *= float(quality_multipliers.get("high_volume_confirmation", 1.15))
+            elif isinstance(bos_details, dict) and float(bos_details.get("volume_ratio", 0)) > 1.5:
+                score *= float(quality_multipliers.get("high_volume_confirmation", 1.15))
         except Exception:
-            # En cas de valeur non convertible, on ignore simplement ce multiplicateur
             pass
 
-        # --- 4) Clamp final et retour ---
-        if score < 0.0:
-            score = 0.0
-        elif score > 1.0:
-            score = 1.0
+        # --- 6) Clamp final & debug ---
+        score = 0.0 if score < 0.0 else (1.0 if score > 1.0 else score)
 
-        # --- 5) (Optionnel) Log DEBUG pour s'assurer que la conf JSON est bien lue ---
         if getattr(self, "debug_confidence_logging", False):
             try:
                 self.logger.debug(
-                    f"[CONF] path='{cfg_path_used}' | base={base_confidence} | max_cap={max_confidence} | "
-                    f"signal_weights={signal_weights} | confluence_bonus={confluence_bonus} | "
-                    f"quality_multipliers={quality_multipliers} | -> score={score:.3f}"
+                    f"[CONF] path='{cfg_path_used}' | base={base_confidence} | cap={max_confidence} | "
+                    f"core_weights={signal_weights} | boll_weights={{'mean_revert': {boll_mean_revert_w}, 'breakout': {boll_breakout_w}, "
+                    f"'squeeze_bonus': {boll_squeeze_bonus}, 'expansion_bonus': {boll_expansion_bonus}}} -> score={score:.3f}"
                 )
             except Exception:
                 pass
 
         return min(max_confidence, max(0.0, score))
+
 
     def analyze(
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None
@@ -2632,9 +2912,7 @@ class PhaseObserver:
                 df_an["tick_volume"], errors="coerce"
             ).fillna(0.0)
             df_an["volume_ma"] = (
-                df_an["tick_volume"]
-                .rolling(window=volume_ma_period, min_periods=1)
-                .mean()
+                df_an["tick_volume"].rolling(window=volume_ma_period, min_periods=1).mean()
             )
             volume_mean_z = (
                 df_an["tick_volume"]
@@ -2705,6 +2983,79 @@ class PhaseObserver:
         else:
             df_an["bos_mss_details"] = [None] * len(df_an)
             df_an["bos_mss_detected"] = False
+
+        # === (NOUVEAU) MICROPHASES BOLLINGER – non intrusif, dernière barre uniquement ===
+        # Ajout contrôlé sous toggle éventuel "detect_bollinger" (True par défaut si absent).
+        if toggles.get("detect_bollinger", True):
+            try:
+                # Initialiser les colonnes de sortie (NaN / valeurs neutres) pour ne pas casser l'aval
+                for col, default in [
+                    ("boll_signal", None),
+                    ("boll_band_touch", None),
+                    ("boll_in_band", np.nan),
+                    ("boll_is_squeeze", np.nan),
+                    ("boll_is_expansion", np.nan),
+                    ("boll_breakout_score", np.nan),
+                    ("boll_mean_revert_score", np.nan),
+                    ("boll_z_band", np.nan),
+                    ("boll_dist_to_upper_pips", np.nan),
+                    ("boll_dist_to_lower_pips", np.nan),
+                    ("boll_dist_to_mid_pips", np.nan),
+                    ("boll_bb_upper", np.nan),
+                    ("boll_bb_lower", np.nan),
+                    ("boll_bb_mid", np.nan),
+                    ("boll_atr_pips", np.nan),
+                ]:
+                    if col not in df_an.columns:
+                        df_an[col] = default
+                    else:
+                        # Ne pas écraser l'historique si déjà existant
+                        pass
+
+                # Calibrage pip_size via colonne 'point' si dispo
+                pip_size = None
+                try:
+                    if "point" in df_an.columns:
+                        point_val = float(df_an["point"].iloc[-1])
+                        pip_size = point_val * 10.0 if point_val > 0 else None
+                except Exception:
+                    pip_size = None
+
+                boll = self.compute_bollinger_microphase_signals(
+                    df_an,
+                    price_col="close",
+                    period=int(self.config_manager.get("phase_detection_defaults.bollinger.period", 20)),
+                    std_mult=float(self.config_manager.get("phase_detection_defaults.bollinger.std_mult", 2.0)),
+                    squeeze_window=int(self.config_manager.get("phase_detection_defaults.bollinger.squeeze_window", 100)),
+                    squeeze_percentile=float(self.config_manager.get("phase_detection_defaults.bollinger.squeeze_percentile", 0.15)),
+                    min_bars=int(self.config_manager.get("phase_detection_defaults.bollinger.min_bars", 200)),
+                    atr_period=int(self.config_manager.get("phase_detection_defaults.bollinger.atr_period", 14)),
+                    pip_size=pip_size,
+                    mode="katana",
+                )
+
+                if isinstance(boll, dict) and boll.get("ok", False):
+                    idx = df_an.index[-1]
+                    df_an.loc[idx, "boll_signal"] = boll.get("signal")
+                    df_an.loc[idx, "boll_band_touch"] = boll.get("band_touch")
+                    df_an.loc[idx, "boll_in_band"] = bool(boll.get("in_band"))
+                    df_an.loc[idx, "boll_is_squeeze"] = bool(boll.get("is_squeeze"))
+                    df_an.loc[idx, "boll_is_expansion"] = bool(boll.get("is_expansion"))
+                    df_an.loc[idx, "boll_breakout_score"] = float(boll.get("breakout_score", np.nan))
+                    df_an.loc[idx, "boll_mean_revert_score"] = float(boll.get("mean_revert_score", np.nan))
+                    df_an.loc[idx, "boll_z_band"] = float(boll.get("z_band")) if boll.get("z_band") is not None else np.nan
+                    df_an.loc[idx, "boll_dist_to_upper_pips"] = float(boll.get("dist_to_upper_pips", np.nan)) if boll.get("dist_to_upper_pips") is not None else np.nan
+                    df_an.loc[idx, "boll_dist_to_lower_pips"] = float(boll.get("dist_to_lower_pips", np.nan)) if boll.get("dist_to_lower_pips") is not None else np.nan
+                    df_an.loc[idx, "boll_dist_to_mid_pips"] = float(boll.get("dist_to_mid_pips", np.nan)) if boll.get("dist_to_mid_pips") is not None else np.nan
+                    df_an.loc[idx, "boll_bb_upper"] = float(boll.get("bb_upper", np.nan)) if boll.get("bb_upper") is not None else np.nan
+                    df_an.loc[idx, "boll_bb_lower"] = float(boll.get("bb_lower", np.nan)) if boll.get("bb_lower") is not None else np.nan
+                    df_an.loc[idx, "boll_bb_mid"] = float(boll.get("bb_mid", np.nan)) if boll.get("bb_mid") is not None else np.nan
+                    df_an.loc[idx, "boll_atr_pips"] = float(boll.get("atr_pips", np.nan)) if boll.get("atr_pips") is not None else np.nan
+                else:
+                    self.logger.debug(f"[{current_asset_symbol}] Bollinger microphase non disponible: {boll.get('reason') if isinstance(boll, dict) else 'unknown'}")
+
+            except Exception as e:
+                self.logger.warning(f"[{current_asset_symbol}] Erreur compute_bollinger_microphase_signals: {e}", exc_info=False)
 
         # === PHASE 3: DÉTECTION LIQUIDITÉ ===
         indices_symbols = set(
@@ -2836,6 +3187,7 @@ class PhaseObserver:
             )
 
         return df_an
+
 
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):
         """

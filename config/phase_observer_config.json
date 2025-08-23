@@ -145,6 +145,12 @@
             "high_volume_confirmation": 1.10,
             "regime_strength": 1.05,
             "tight_spread": 1.05
+        },
+        "bollinger_weights": {
+            "mean_revert_score": 0.10,
+            "breakout_score": 0.10,
+            "squeeze_bonus": 0.05,
+            "expansion_bonus": 0.05
         }
     },
     "liquidity_detection": {
@@ -253,6 +259,26 @@
                     "new_york"
                 ]
             }
+        }
+    },
+    "phase_detection_defaults": {
+        "detection_toggles": {
+            "detect_fvg": true,
+            "detect_order_block": true,
+            "detect_bos_mss": true,
+            "detect_liquidity_grab": true,
+            "detect_eqh_eql": true,
+            "detect_volume_anomaly": true,
+            "detect_regime": true,
+            "detect_bollinger": true
+        },
+        "bollinger": {
+            "period": 20,
+            "std_mult": 2.0,
+            "squeeze_window": 100,
+            "squeeze_percentile": 0.15,
+            "min_bars": 200,
+            "atr_period": 14
         }
     }
 }
