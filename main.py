@@ -58,6 +58,136 @@ except ImportError as e:
     sys.exit(1)
 
 
+# === Helper: déclenchement des rapports au démarrage (IA quotidien & Mecano hebdo) ===
+def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager):
+    """
+    Déclenche au DÉMARRAGE :
+      - Rapport IA quotidien (si pas encore fait aujourd'hui)
+      - Rapport Mecano hebdo le dimanche (si pas encore fait aujourd'hui)
+    Persiste l'état dans <ai_audit>/.last_runs.json pour éviter les doublons.
+    ⚠️ Ne dépend ni de MT5 ni du pipeline : sûr à appeler juste après les instanciations.
+    """
+    import json
+    from pathlib import Path
+    from datetime import datetime
+
+    # ---- Résolution dossier ai_audit ----
+    try:
+        base_cfg = config_manager.get("paths.configs", "config")
+    except Exception:
+        base_cfg = "config"
+    try:
+        ai_audit_dir = config_manager.get("paths.ai_audit", None)
+    except Exception:
+        ai_audit_dir = None
+    ai_audit_dir = Path(ai_audit_dir or (Path(base_cfg) / "ai_audit"))
+    ai_audit_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = ai_audit_dir / ".last_runs.json"
+
+    # ---- Load state (safe) ----
+    state = {"last_daily_date": None, "last_weekly_date": None}
+    try:
+        if state_path.exists():
+            state = {**state, **json.loads(state_path.read_text(encoding="utf-8"))}
+    except Exception:
+        pass
+
+    # ---- Date/weekday (locale machine, ex: Europe/Paris) ----
+    now_local = datetime.now()
+    today_str = now_local.strftime("%Y-%m-%d")
+    weekday = now_local.weekday()  # Monday=0 ... Sunday=6
+
+    # ---- Helper: collecte de logs IA du jour (best-effort) ----
+    def _collect_daily_logs():
+        """
+        Essaie de charger les logs IA pertinents (ai_supervisor_logs.jsonl) du jour.
+        Si indisponible, renvoie une liste vide.
+        """
+        import json
+        from datetime import datetime
+        try:
+            logs_dir = Path(config_manager.get("paths.logs", "logs"))
+        except Exception:
+            logs_dir = Path("logs")
+        src = logs_dir / "ai_supervisor_logs.jsonl"
+        if not src.exists():
+            return []
+        out = []
+        cutoff = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            with src.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        ts = rec.get("timestamp")
+                        if not ts:
+                            # Pas de timestamp : on garde pour l'IA (rare)
+                            out.append(rec)
+                            continue
+                        ts_norm = str(ts).replace("Z", "+00:00")
+                        try:
+                            dt = datetime.fromisoformat(ts_norm)
+                        except Exception:
+                            dt = None
+                        if dt and dt.date() == cutoff.date():
+                            out.append(rec)
+                    except Exception:
+                        continue
+        except Exception:
+            return []
+        return out
+
+    # ---- DAILY IA ----
+    if state.get("last_daily_date") != today_str:
+        try:
+            logs_today = _collect_daily_logs()
+            ai_result = ai_decision.audit_trading_performance(
+                logs=logs_today, period="last_day", current_context=None
+            )
+            # Marquer comme fait seulement si succès IA
+            if isinstance(ai_result, dict) and "error" not in ai_result:
+                state["last_daily_date"] = today_str
+                try:
+                    ai_decision.logger.info("[Reports] Daily IA report generated on start.")
+                except Exception:
+                    pass
+            else:
+                try:
+                    ai_decision.logger.warning("[Reports] Daily IA report FAILED on start.")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                ai_decision.logger.error(f"[Reports] Daily IA report exception: {e}", exc_info=True)
+            except Exception:
+                pass
+
+    # ---- WEEKLY MECANO (Dimanche=6) ----
+    if weekday == 6 and state.get("last_weekly_date") != today_str:
+        try:
+            weekly = mecano.build_weekly_report()
+            mecano.export_report(weekly, format="json")
+            state["last_weekly_date"] = today_str
+            try:
+                mecano.logger.info("[Reports] Weekly Mecano report generated on Sunday start.")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                mecano.logger.error(f"[Reports] Weekly Mecano report exception: {e}", exc_info=True)
+            except Exception:
+                pass
+
+    # ---- Persist state (atomique simple) ----
+    try:
+        tmp = state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(state_path)
+    except Exception:
+        pass
+
+
 def verify_environment_and_config(
     config_manager: ConfigManager, mt5_connector: MT5Connector, bot_mode: str
 ) -> None:
@@ -180,9 +310,22 @@ def main(args: argparse.Namespace) -> None:
     3. Injecte les dépendances entre les modules.
     4. Lance la boucle de trading.
     """
-    # 1. Configuration initiale
-    setup_production_logging(log_level=args.log_level)
+    # 1. Configuration initiale (robuste aux args partiels)
+    log_level = getattr(args, "log_level", "INFO")
+    setup_production_logging(log_level=log_level)
     logger = logging.getLogger(__name__)
+
+    # Helper local pour envoyer une alerte Telegram (compatibilité de signature)
+    def _safe_alert(cm, msg: str, channel: str = "telegram_critical"):
+        if not cm:
+            return
+        try:
+            cm.send_alert(msg, channel)
+        except TypeError:
+            try:
+                cm.send_alert(message=msg, alert_type=channel)
+            except Exception:
+                logger.warning("Échec send_alert (toutes variantes).")
 
     # Initialiser les variables pour le bloc finally
     config_manager = None
@@ -243,23 +386,33 @@ def main(args: argparse.Namespace) -> None:
 
         config_manager.ai_decision_instance = ai_decision
 
+        # === Déclenchement des rapports au démarrage (Daily IA + Weekly Mecano) ===
+        try:
+            _trigger_fn = globals().get("_trigger_ai_and_mecano_reports_on_start")
+            if callable(_trigger_fn):
+                _trigger_fn(ai_decision, mecano, config_manager)
+            else:
+                logger.debug(
+                    "Helper '_trigger_ai_and_mecano_reports_on_start' introuvable : saut du déclenchement auto des rapports."
+                )
+        except Exception as e:
+            logger.warning(f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True)
+
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
-        bot_mode = (
-            args.mode.upper()
-            if args.mode
-            else config_manager.get("mode_execution", "DEMO").upper()
-        )
+        bot_mode_cfg = str(config_manager.get("mode_execution", "DEMO")).upper()
+        bot_mode = str(getattr(args, "mode", bot_mode_cfg) or bot_mode_cfg).upper()
+
         if config_manager.get("mode_execution") != bot_mode:
             config_manager.update_dynamic_config(
                 {"mode_execution": bot_mode}, source="mode_startup_correction"
             )
 
-        is_dry_run = args.dry_run
+        is_dry_run = bool(getattr(args, "dry_run", False))
         logger.critical(
             f"Le bot démarre en mode {'DRY RUN' if is_dry_run else bot_mode}. "
             f"{'LES TRADES RÉELS SERONT EXÉCUTÉS. SOYEZ PRUDENT !' if bot_mode == 'LIVE' and not is_dry_run else 'Aucun trade réel.'}"
         )
-        time.sleep(config_manager.get("app.startup_delay_seconds", 3))
+        time.sleep(int(config_manager.get("app.startup_delay_seconds", 3)))
 
         # ✅ Vérification centralisée
         verify_environment_and_config(config_manager, mt5_connector, bot_mode)
@@ -293,22 +446,23 @@ def main(args: argparse.Namespace) -> None:
         logger.critical(
             f"FATAL: Erreur critique lors du démarrage du bot: {e}", exc_info=True
         )
-        if config_manager:
-            config_manager.send_alert(
-                f"**SNIPER_X BOT - CRASH AU DÉMARRAGE !**\nErreur: {e}",
-                "telegram_critical",
-            )
+        _safe_alert(config_manager, f"**SNIPER_X BOT - CRASH AU DÉMARRAGE !**\nErreur: {e}")
         if mt5_connector and mt5_connector.is_connected:
             mt5_connector.disconnect()
         sys.exit(1)
 
     # --- Étape D : Lancer la Boucle de Trading ---
-    cycle_interval = args.interval or config_manager.get(
-        "bot_behavior.cycle_interval_seconds", 5
-    )
-    config_manager.send_alert(
+    try:
+        cycle_interval = getattr(args, "interval", None)
+        if cycle_interval is None:
+            cycle_interval = config_manager.get("bot_behavior.cycle_interval_seconds", 5)
+        cycle_interval = max(0.5, float(cycle_interval))  # clamp doux
+    except Exception:
+        cycle_interval = 5.0
+
+    _safe_alert(
+        config_manager,
         f"**SNIPER_X Bot Démarré!**\nMode: {'DRY RUN' if is_dry_run else bot_mode}",
-        "telegram_critical",
     )
     logger.info("SNIPER_X Bot prêt. Démarrage de la boucle de trading...")
 
@@ -336,7 +490,7 @@ def main(args: argparse.Namespace) -> None:
                 time.sleep(cycle_interval)
                 continue
 
-            print(f"📊 Lancement du pipeline de décision...")
+            print("📊 Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
@@ -383,27 +537,22 @@ def main(args: argparse.Namespace) -> None:
                 }
             )
 
-            sleep_time = max(0, cycle_interval - cycle_duration)
+            sleep_time = max(0.0, float(cycle_interval) - cycle_duration)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
         logger.warning("\nInterruption clavier détectée. Arrêt progressif...")
-        if config_manager:
-            config_manager.send_alert(
-                message="**SNIPER_X Bot Arrêté Manuellement.**",
-                alert_type="telegram_critical",
-            )
+        _safe_alert(config_manager, "**SNIPER_X Bot Arrêté Manuellement.**")
     except Exception as e:
         logger.critical(
             f"Une erreur critique non gérée a entraîné la terminaison de la boucle principale : {e}",
             exc_info=True,
         )
-        if config_manager:
-            config_manager.send_alert(
-                f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}",
-                "telegram_critical",
-            )
+        _safe_alert(
+            config_manager,
+            f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}",
+        )
     finally:
         if config_manager and config_manager.get("ai.enabled", False) and ai_decision:
             logger.info(
@@ -422,3 +571,4 @@ def main(args: argparse.Namespace) -> None:
 
         logger.info("SNIPER_X Bot est arrêté.")
         sys.exit(0)
+

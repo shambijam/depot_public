@@ -6,7 +6,7 @@ import json
 import csv
 import sys
 import pandas as pd
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, UTC
 import logging
 import traceback
 from contextlib import contextmanager
@@ -14,6 +14,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 from core.config_manager import ConfigManager
 from core.ai_interface import AIInterface
+from tempfile import NamedTemporaryFile
 
 # Initialisation du Logger pour ce module
 logger = logging.getLogger(__name__)
@@ -213,56 +214,184 @@ class Mecano:
 
     def build_weekly_report(self) -> dict:
         """
-        Compile rapport pour période configurable.
-        """
-        period_start_utc = datetime.now(UTC) - timedelta(days=self.report_period_days)
-        filtered_profiling = [d for d in self.profiling_data if datetime.fromisoformat(d["timestamp"]) >= period_start_utc]
-        filtered_errors = [d for d in self.error_data if datetime.fromisoformat(d["timestamp"]) >= period_start_utc]
-        filtered_metrics = [d for d in self.system_metrics_history if datetime.fromisoformat(d["timestamp"]) >= period_start_utc]
+        Compile un rapport d'observation (profiling/erreurs/metrics) sur la période configurée.
 
+        - Utilise self.report_period_days (fallback 7) pour définir la fenêtre [now-Δ, now].
+        - Tolère différents formats ISO pour les timestamps (avec/without timezone, 'Z', etc.).
+        - Robuste aux clés manquantes et aux valeurs None/NaN.
+        - Fournit un résumé (summary) + détails (details) prêt à exporter.
+        """
+        from datetime import datetime, UTC, timedelta
+        from math import isnan
+
+        # ---------- Helpers ----------
+        def _safe_get(obj, key, default=None):
+            try:
+                v = obj.get(key, default)
+            except Exception:
+                v = default
+            return v
+
+        def _safe_float(x, default=0.0):
+            try:
+                if x is None:
+                    return default
+                v = float(x)
+                # gérer NaN
+                return default if isnan(v) else v
+            except Exception:
+                return default
+
+        def _parse_ts(ts_str):
+            """
+            Parse ISO-8601 en objet datetime timezone-aware (UTC si absent).
+            Accepte: '2025-08-24T12:34:56', '2025-08-24T12:34:56Z', '...+00:00'
+            Retourne None si parsing impossible.
+            """
+            if not ts_str:
+                return None
+            try:
+                # Python >=3.11 comprend 'Z' via fromisoformat? Pas toujours -> normaliser.
+                ts_norm = str(ts_str).strip().replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts_norm)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                return dt.astimezone(UTC)
+            except Exception:
+                return None
+
+        # ---------- Fenêtre temporelle ----------
+        try:
+            period_days = int(getattr(self, "report_period_days", 7) or 7)
+            if period_days <= 0:
+                period_days = 7
+        except Exception:
+            period_days = 7
+
+        now_utc = datetime.now(UTC)
+        period_start_utc = now_utc - timedelta(days=period_days)
+
+        # ---------- Sources de données (tolérance aux attributs manquants) ----------
+        profiling_data = getattr(self, "profiling_data", []) or []
+        error_data = getattr(self, "error_data", []) or []
+        system_metrics_history = getattr(self, "system_metrics_history", []) or []
+        config_snapshots = getattr(self, "config_snapshots", []) or []
+
+        # ---------- Filtrage par période ----------
+        def _filter_by_period(items, ts_key="timestamp"):
+            out = []
+            for d in items:
+                if not isinstance(d, dict):
+                    continue
+                ts = _parse_ts(_safe_get(d, ts_key))
+                if ts is None:
+                    continue
+                if ts >= period_start_utc:
+                    out.append(d)
+            return out
+
+        filtered_profiling = _filter_by_period(profiling_data, "timestamp")
+        filtered_errors = _filter_by_period(error_data, "timestamp")
+        filtered_metrics = _filter_by_period(system_metrics_history, "timestamp")
+
+        # ---------- Rapport ----------
         report = {
-            "report_generated_at": datetime.now(UTC).isoformat(),
+            "report_generated_at": now_utc.isoformat(),
             "period_start": period_start_utc.isoformat(),
+            "period_days": period_days,
             "summary": {},
             "details": {
                 "profiling_data": filtered_profiling,
                 "error_data": filtered_errors,
                 "system_metrics_data": filtered_metrics,
-                "config_snapshots_paths": self.config_snapshots,
+                "config_snapshots_paths": config_snapshots,
             },
         }
 
-        # Profiling summary
+        # ---------- Profiling summary ----------
         if filtered_profiling:
-            durations = [d["duration_s"] for d in filtered_profiling]
+            # Durations sécurisées
+            durations = [_safe_float(_safe_get(d, "duration_s")) for d in filtered_profiling]
+            durations = [x for x in durations if x >= 0]
+            total_steps = len(durations)
+            avg_duration = (sum(durations) / total_steps) if total_steps else 0.0
+            max_duration = max(durations) if durations else 0.0
+
+            # top N (fallback 10)
+            try:
+                top_n = int(getattr(self, "ia_prompt_top_n_slowest_steps", 10) or 10)
+                if top_n <= 0:
+                    top_n = 10
+            except Exception:
+                top_n = 10
+
+            top_slowest = sorted(
+                filtered_profiling,
+                key=lambda x: _safe_float(_safe_get(x, "duration_s")),
+                reverse=True,
+            )[:top_n]
+
             report["summary"]["profiling_summary"] = {
-                "total_steps": len(durations),
-                "avg_duration_s": sum(durations) / len(durations) if durations else 0,
-                "max_duration_s": max(durations) if durations else 0,
-                "top_slowest_steps": sorted(filtered_profiling, key=lambda x: x["duration_s"], reverse=True)[:self.ia_prompt_top_n_slowest_steps],
+                "total_steps": total_steps,
+                "avg_duration_s": round(avg_duration, 6),
+                "max_duration_s": round(max_duration, 6),
+                "top_slowest_steps": top_slowest,
             }
 
-        # Error summary
+        # ---------- Error summary ----------
         if filtered_errors:
-            error_types = [e["type"] for e in filtered_errors]
+            types = []
+            for e in filtered_errors:
+                t = _safe_get(e, "type", "UnknownError")
+                types.append(str(t))
+            unique_types = sorted(set(types))
+            most_frequent = "N/A"
+            if types:
+                # compter sans collections.Counter pour rester light
+                counts = {}
+                for t in types:
+                    counts[t] = counts.get(t, 0) + 1
+                most_frequent = max(counts, key=counts.get)
+
             report["summary"]["error_summary"] = {
                 "total_errors": len(filtered_errors),
-                "unique_types": list(set(error_types)),
-                "most_frequent": max(set(error_types), key=error_types.count) if error_types else "N/A",
+                "unique_types": unique_types,
+                "most_frequent": most_frequent,
             }
 
-        # Metrics summary
+        # ---------- Metrics summary ----------
         if filtered_metrics:
-            cpu_vals = [m["cpu_percent"] for m in filtered_metrics if m["cpu_percent"] is not None]
-            ram_vals = [m["system_ram_percent"] for m in filtered_metrics if m["system_ram_percent"] is not None]
+            cpu_vals = [
+                _safe_float(_safe_get(m, "cpu_percent", None), default=None)
+                for m in filtered_metrics
+            ]
+            ram_vals = [
+                _safe_float(_safe_get(m, "system_ram_percent", None), default=None)
+                for m in filtered_metrics
+            ]
+            cpu_vals = [v for v in cpu_vals if v is not None]
+            ram_vals = [v for v in ram_vals if v is not None]
+
+            def _avg(seq):
+                return (sum(seq) / len(seq)) if seq else 0.0
+
             report["summary"]["system_metrics_summary"] = {
-                "avg_cpu_percent": sum(cpu_vals) / len(cpu_vals) if cpu_vals else 0,
-                "max_cpu_percent": max(cpu_vals) if cpu_vals else 0,
-                "avg_ram_percent": sum(ram_vals) / len(ram_vals) if ram_vals else 0,
-                "max_ram_percent": max(ram_vals) if ram_vals else 0,
+                "avg_cpu_percent": round(_avg(cpu_vals), 3),
+                "max_cpu_percent": round(max(cpu_vals), 3) if cpu_vals else 0.0,
+                "avg_ram_percent": round(_avg(ram_vals), 3),
+                "max_ram_percent": round(max(ram_vals), 3) if ram_vals else 0.0,
+                "samples": len(filtered_metrics),
             }
+
+        # Totaux pour lecture rapide (utile monitoring)
+        report["summary"]["totals"] = {
+            "profiling_events": len(filtered_profiling),
+            "error_events": len(filtered_errors),
+            "metrics_samples": len(filtered_metrics),
+        }
 
         return report
+
 
     def build_ia_prompt(self, report: dict) -> str:
         """
@@ -303,21 +432,89 @@ class Mecano:
 
     def export_report(self, report: dict, format: str = "json") -> None:
         """
-        Exporte rapport en format choisi.
+        Exporte le rapport au format choisi dans self.reports_dir, de manière atomique.
+        - format: "json" (défaut). Stubs sûrs pour "md" et "txt".
+        - crée le répertoire cible si nécessaire.
+        - écriture atomique (temp + replace) pour éviter les fichiers corrompus.
         """
+        
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.weekly_report_file_prefix}{ts}.{format}"
-        filepath = self.reports_dir / filename
-        temp_filepath = filepath.with_suffix(".tmp")
+
+        # Assure le répertoire de sortie
         try:
-            if format == "json":
-                with open(temp_filepath, "w", encoding="utf-8") as f:
-                    json.dump(report, f, indent=4)
-            # Ajoutez autres formats comme avant
-            temp_filepath.rename(filepath)
+            out_dir: Path = getattr(self, "reports_dir", None) or Path("config/ai_audit")
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            out_dir = Path("config/ai_audit")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Nom de fichier (préfixe configurable)
+        try:
+            prefix = getattr(self, "weekly_report_file_prefix", "weekly_report_") or "weekly_report_"
+        except Exception:
+            prefix = "weekly_report_"
+
+        # Sanitize basique du format
+        fmt = (format or "json").strip().lower()
+        if fmt not in {"json", "md", "txt"}:
+            self.logger.warning(f"Format non supporté '{format}', fallback JSON.")
+            fmt = "json"
+
+        filename = f"{prefix}{ts}.{fmt}"
+        filepath = out_dir / filename
+
+        # Écriture atomique dans le même dossier
+        tmp_path = None
+        try:
+            with NamedTemporaryFile("w", delete=False, dir=str(out_dir), encoding="utf-8") as tmp:
+                tmp_path = Path(tmp.name)
+                if fmt == "json":
+                    # Encoder custom si dispo
+                    try:
+                        CustomJSONEncoder = getattr(self.config_manager, "CustomJSONEncoder", None)
+                    except Exception:
+                        CustomJSONEncoder = None
+                    json.dump(
+                        report if isinstance(report, dict) else {"payload": report},
+                        tmp,
+                        indent=2,
+                        ensure_ascii=False,
+                        cls=CustomJSONEncoder if CustomJSONEncoder else None,
+                    )
+                elif fmt == "md":
+                    # Rendu markdown simple
+                    tmp.write(f"# Mecano Weekly Report\n\nGenerated at: {ts} UTC\n\n")
+                    tmp.write("## Summary\n\n")
+                    payload = report if isinstance(report, dict) else {"payload": str(report)}
+                    for k, v in (payload.get("summary") or {}).items():
+                        tmp.write(f"- **{k}**: {v}\n")
+                    tmp.write("\n## Details (JSON)\n\n```json\n")
+                    tmp.write(json.dumps(payload.get("details") or payload, ensure_ascii=False, indent=2))
+                    tmp.write("\n```\n")
+                else:  # txt
+                    tmp.write(json.dumps(report if isinstance(report, dict) else {"payload": report}, ensure_ascii=False, indent=2))
+
+                tmp.flush()
+                os.fsync(tmp.fileno())
+
+            # Remplacement atomique
+            tmp_path.replace(filepath)
             self.logger.info(f"Rapport exporté: '{filepath}'")
         except Exception as e:
-            self.log_exception("export_report", e)
+            # Logging d'exception robuste
+            try:
+                if hasattr(self, "log_exception"):
+                    self.log_exception("export_report", e)
+                else:
+                    self.logger.error(f"export_report: échec export '{filepath}': {e}", exc_info=True)
+            finally:
+                # Nettoyage temp si nécessaire
+                try:
+                    if tmp_path and tmp_path.exists():
+                        tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
 
     def check_resource_alerts(self) -> None:
         """

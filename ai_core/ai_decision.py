@@ -11,12 +11,13 @@ import pandas as pd
 import time
 import requests
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from llama_cpp import Llama
 from core.config_manager import ConfigManager, CustomJSONEncoder
 from strategy.base_strategy import BaseStrategy
+from tempfile import NamedTemporaryFile
 
 # Initialisation du Logger pour ce module
 logger = logging.getLogger(__name__)
@@ -897,6 +898,9 @@ class AIDecision:
             Dict[str, Any]: Un dictionnaire d'audit de performance généré par l'IA.
                             Inclut 'error' en cas d'échec. Contient également le chemin du rapport généré.
         """
+        from pathlib import Path
+        import json
+
         self.logger.info(
             f"AIDecision: Démarrage de l'audit de performance de trading pour la période '{period}'..."
         )
@@ -906,193 +910,365 @@ class AIDecision:
             self.logger.error(
                 "AIDecision: Le prompt 'audit_trading_performance' est manquant. Impossible d'auditer la performance."
             )
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    "AI Prompt Manquant: audit_trading_performance",
-                    "telegram_critical",
-                )
+            try:
+                if self.config_manager:
+                    self.config_manager.send_alert(
+                        "CRITIQUE",
+                        "AI Prompt Manquant: audit_trading_performance",
+                        "telegram_critical",
+                    )
+            except Exception:
+                pass
             return {"error": "Prompt 'audit_trading_performance' non configuré."}
 
-        log_sample_size = self.config_manager.get(
-            "ai.supervisor_settings.log_sample_size", 100
-        )
+        # Taille d'échantillon maximum envoyée à l'IA (sécurité mémoire/coût)
+        try:
+            log_sample_size = int(self.config_manager.get("ai.supervisor_settings.log_sample_size", 100))
+        except Exception:
+            log_sample_size = 100
+
         self.logger.debug(
             f"AIDecision: Utilisation d'une taille d'échantillon de logs de {log_sample_size} pour l'audit de performance."
         )
 
-        trading_summary_by_asset = {}
-        trade_details_for_ai = []
+        # === Agrégations ===
+        trading_summary_by_asset: Dict[str, Dict[str, Any]] = {}
+        trade_details_for_ai: List[Dict[str, Any]] = []
 
-        for log_entry in logs:
-            if (
-                log_entry.get("event_type") == "ai_feedback"
-            ):  # Filtrer pour les feedbacks de trade
-                original_decision = log_entry.get("original_decision", {})
-                outcome = log_entry.get("outcome", {})
+        for log_entry in logs or []:
+            if log_entry.get("event_type") != "ai_feedback":
+                continue
 
-                # Nous nous concentrons sur les trades réellement exécutés et clôturés
-                if outcome.get("status") == "executed" and "pnl_usd" in outcome:
-                    asset = original_decision.get("asset", "UNKNOWN_ASSET")
-                    strategy_type = original_decision.get(
-                        "strategy_type", "UNKNOWN_STRATEGY"
-                    )
-                    pnl_usd = outcome.get("pnl_usd", 0.0)
+            original_decision = log_entry.get("original_decision", {}) or {}
+            outcome = log_entry.get("outcome", {}) or {}
 
-                    # Récupérer la phase de marché au moment du trade si disponible
-                    # Note: `context_at_gen` dans `ai_supervisor_logs.jsonl` pour le type `ai_feedback`
-                    # peut ne pas contenir `market_data_summary`. C'est un point à améliorer pour un audit plus riche.
-                    context_summary = log_entry.get("context_at_gen", {})
-                    market_data_summary = context_summary.get(
-                        "market_data_summary", {}
-                    ).get(asset, {})
-                    phase_at_trade = market_data_summary.get("phase", "N/A")
+            # On retient uniquement les trades exécutés et clôturés avec PnL
+            if outcome.get("status") != "executed" or "pnl_usd" not in outcome:
+                continue
 
-                    # Compiler le résumé par actif
-                    if asset not in trading_summary_by_asset:
-                        trading_summary_by_asset[asset] = {
-                            "total_trades": 0,
-                            "wins": 0,
-                            "losses": 0,
-                            "total_pnl": 0.0,
-                            "pnl_by_phase": {},
-                            "win_rate_by_phase": {},
-                        }
+            asset = original_decision.get("asset", "UNKNOWN_ASSET")
+            strategy_type = original_decision.get("strategy_type", "UNKNOWN_STRATEGY")
+            pnl_usd = float(outcome.get("pnl_usd", 0.0) or 0.0)
 
-                    asset_summary = trading_summary_by_asset[asset]
-                    asset_summary["total_trades"] += 1
-                    asset_summary["total_pnl"] += pnl_usd
+            # Phase de marché au moment du trade (si dispo)
+            context_summary = log_entry.get("context_at_gen", {}) or {}
+            market_data_summary = (context_summary.get("market_data_summary", {}) or {}).get(asset, {}) or {}
+            phase_at_trade = market_data_summary.get("phase", "N/A")
 
-                    if pnl_usd > 0:
-                        asset_summary["wins"] += 1
-                    elif pnl_usd < 0:
-                        asset_summary["losses"] += 1
+            # Init agrégat asset si besoin
+            if asset not in trading_summary_by_asset:
+                trading_summary_by_asset[asset] = {
+                    "total_trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "total_pnl": 0.0,
+                    "pnl_by_phase": {},
+                    "win_rate_by_phase": {},
+                }
 
-                    # Agrégation par phase de marché
-                    if phase_at_trade not in asset_summary["pnl_by_phase"]:
-                        asset_summary["pnl_by_phase"][phase_at_trade] = {
-                            "total_pnl": 0.0,
-                            "trades": 0,
-                            "wins": 0,
-                        }
+            asset_summary = trading_summary_by_asset[asset]
+            asset_summary["total_trades"] += 1
+            asset_summary["total_pnl"] += pnl_usd
+            if pnl_usd > 0:
+                asset_summary["wins"] += 1
+            elif pnl_usd < 0:
+                asset_summary["losses"] += 1
 
-                    asset_summary["pnl_by_phase"][phase_at_trade][
-                        "total_pnl"
-                    ] += pnl_usd
-                    asset_summary["pnl_by_phase"][phase_at_trade]["trades"] += 1
-                    if pnl_usd > 0:
-                        asset_summary["pnl_by_phase"][phase_at_trade]["wins"] += 1
+            # Agrégation par phase
+            if phase_at_trade not in asset_summary["pnl_by_phase"]:
+                asset_summary["pnl_by_phase"][phase_at_trade] = {"total_pnl": 0.0, "trades": 0, "wins": 0}
+            phase_bucket = asset_summary["pnl_by_phase"][phase_at_trade]
+            phase_bucket["total_pnl"] += pnl_usd
+            phase_bucket["trades"] += 1
+            if pnl_usd > 0:
+                phase_bucket["wins"] += 1
 
-                    # Ajouter un extrait détaillé du trade pour l'IA
-                    trade_details_for_ai.append(
-                        {
-                            "asset": asset,
-                            "strategy": strategy_type,
-                            "action": original_decision.get("action"),
-                            "volume": original_decision.get("volume"),
-                            "pnl_usd": pnl_usd,
-                            "status": outcome.get("status"),
-                            "reason_closure": outcome.get("message", "N/A"),
-                            "phase_at_entry": phase_at_trade,
-                            # Suppression de 'confidence_at_entry' car l'IA ne gère plus la confiance
-                            "entry_signals": market_data_summary,  # Inclut les signaux au moment de la décision
-                        }
-                    )
+            # Échantillon détaillé (pour prompt IA)
+            trade_details_for_ai.append(
+                {
+                    "asset": asset,
+                    "strategy": strategy_type,
+                    "action": original_decision.get("action"),
+                    "volume": original_decision.get("volume"),
+                    "pnl_usd": pnl_usd,
+                    "status": outcome.get("status"),
+                    "reason_closure": outcome.get("message", "N/A"),
+                    "phase_at_entry": phase_at_trade,
+                    "entry_signals": market_data_summary,  # signaux/état au moment de la décision
+                }
+            )
 
-        # Finaliser le calcul du win_rate_by_phase
+        # Win-rate par phase (par actif)
         for asset_sum in trading_summary_by_asset.values():
             for phase, data in asset_sum["pnl_by_phase"].items():
-                if data["trades"] > 0:
-                    asset_sum["win_rate_by_phase"][phase] = round(
-                        (data["wins"] / data["trades"]) * 100, 2
-                    )
-                else:
-                    asset_sum["win_rate_by_phase"][phase] = 0.0
+                trades_n = max(0, int(data.get("trades", 0) or 0))
+                wins_n = max(0, int(data.get("wins", 0) or 0))
+                asset_sum["win_rate_by_phase"][phase] = round((wins_n / trades_n) * 100, 2) if trades_n > 0 else 0.0
 
-        # Tronquer l'échantillon détaillé des trades pour le prompt si trop volumineux
-        truncated_trade_details_json = (
-            json.dumps(
-                trade_details_for_ai[-log_sample_size:],
-                indent=2,
-                cls=self.config_manager.CustomJSONEncoder,
-            )
-            if trade_details_for_ai
-            else "None"
-        )
+        # Totaux globaux (pour résumé/notification)
+        total_trades = sum(v["total_trades"] for v in trading_summary_by_asset.values()) if trading_summary_by_asset else 0
+        total_wins = sum(v["wins"] for v in trading_summary_by_asset.values()) if trading_summary_by_asset else 0
+        total_losses = sum(v["losses"] for v in trading_summary_by_asset.values()) if trading_summary_by_asset else 0
+        total_pnl = float(sum(v["total_pnl"] for v in trading_summary_by_asset.values())) if trading_summary_by_asset else 0.0
+        win_rate = round((total_wins / total_trades) * 100, 2) if total_trades > 0 else 0.0
+
+        # Tronquage de l'échantillon pour le prompt
+        try:
+            CustomJSONEncoder = getattr(self.config_manager, "CustomJSONEncoder", None)
+        except Exception:
+            CustomJSONEncoder = None
 
         try:
-            # Le prompt ne contient plus de référence à la confiance ou priorité de l'IA
+            truncated_trade_details_json = json.dumps(
+                trade_details_for_ai[-log_sample_size:],
+                indent=2,
+                cls=CustomJSONEncoder if CustomJSONEncoder else None,  # fallback std json si encoder absent
+            ) if trade_details_for_ai else "None"
+        except Exception:
+            truncated_trade_details_json = "None"
+
+        try:
+            trading_summary_json = json.dumps(
+                trading_summary_by_asset,
+                indent=2,
+                cls=CustomJSONEncoder if CustomJSONEncoder else None,
+            )
+        except Exception:
+            trading_summary_json = json.dumps(trading_summary_by_asset, indent=2)
+
+        # Contexte courant sérialisé (optionnel)
+        try:
+            context_json = json.dumps(
+                current_context,
+                indent=2,
+                cls=CustomJSONEncoder if CustomJSONEncoder else None,
+            ) if current_context else "None"
+        except Exception:
+            context_json = "None"
+
+        # Construction du prompt
+        try:
             prompt = prompt_template.format(
                 period=period,
-                trading_summary_by_asset=json.dumps(
-                    trading_summary_by_asset,
-                    indent=2,
-                    cls=self.config_manager.CustomJSONEncoder,
-                ),
+                trading_summary_by_asset=trading_summary_json,
                 trade_details_sample=truncated_trade_details_json,
-                context=(
-                    json.dumps(
-                        current_context,
-                        indent=2,
-                        cls=self.config_manager.CustomJSONEncoder,
-                    )
-                    if current_context
-                    else "None"
-                ),
+                context=context_json,
             )
         except Exception as e:
             self.logger.error(
                 f"AIDecision: Erreur de sérialisation pour le prompt 'audit_trading_performance': {e}.",
                 exc_info=True,
             )
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    f"AI: Erreur sérialisation audit_trading_performance: {e}",
-                    "telegram_critical",
-                )
+            try:
+                if self.config_manager:
+                    self.config_manager.send_alert(
+                        "CRITIQUE",
+                        f"AI: Erreur sérialisation audit_trading_performance: {e}",
+                        "telegram_critical",
+                    )
+            except Exception:
+                pass
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
+        # Appel modèle IA
         raw_response = self._generate_raw_response(prompt)
         audit_results = self.parse_response(raw_response)
 
         if "error" not in audit_results:
-            audit_results["suggestion_type"] = (
-                "performance_audit_report"  # Type de suggestion plus précis pour le rapport
-            )
+            # Métadonnées utiles
+            audit_results["suggestion_type"] = "performance_audit_report"
+            audit_results["totals"] = {
+                "total_trades": total_trades,
+                "wins": total_wins,
+                "losses": total_losses,
+                "total_pnl": total_pnl,
+                "win_rate": win_rate,
+            }
             self._add_suggestion_to_history(audit_results)
 
-            # Sauvegarde du rapport d'audit dans le dossier /config/ai_audit
+            # Sauvegarde du rapport
             report_content_markdown = self._format_audit_report_for_file(
                 audit_results, trading_summary_by_asset, period
             )
-            report_file_path = self._save_audit_report_to_file(
-                report_content_markdown, period
-            )
+            report_file_path = self._save_audit_report_to_file(report_content_markdown, period)
             audit_results["report_file_path"] = str(report_file_path)
 
-            # Notification Telegram - Message de résumé du rapport
-            report_summary_message = (
-                f"📊 **Rapport d'Audit Journalier SNIPER_X - {period}**\n\n"
-                f"Résumé: {audit_results.get('audit_summary', 'Audit complet disponible dans les logs.')}\n"
-                f"P&L Total: ${trading_summary_by_asset.get('total_pnl', 0.0):.2f}\n"
-                f"Taux de Gain: {trading_summary_by_asset.get('win_rate', 0.0):.2f}%\n"
-                f"Consultez le rapport complet ici : {Path(report_file_path).name}"
-            )
-
-            # Utilise le nouveau type de canal "daily_audit_report_available" pour la notification
-            self.notify_telegram(
-                "daily_audit_report_available",
-                {
-                    "report_name": Path(report_file_path).name,
-                    "summary": audit_results.get(
-                        "audit_summary", f"Rapport d'audit de performance pour {period}"
-                    ),
-                    "telegram_message": report_summary_message,  # Message à envoyer spécifiquement pour Telegram
-                },
-            )
+            # Notification (résumé propre, avec vrais totaux)
+            try:
+                report_summary_message = (
+                    f"📊 **Rapport d'Audit SNIPER_X — {period}**\n\n"
+                    f"Résumé : {audit_results.get('audit_summary', 'Audit complet disponible dans le rapport.')}\n"
+                    f"Trades: {total_trades} | Wins: {total_wins} | Losses: {total_losses}\n"
+                    f"P&L Total: ${total_pnl:.2f} | Win rate: {win_rate:.2f}%\n"
+                    f"Rapport : {Path(report_file_path).name}"
+                )
+                self.notify_telegram(
+                    "daily_audit_report_available",
+                    {
+                        "report_name": Path(report_file_path).name,
+                        "summary": audit_results.get(
+                            "audit_summary", f"Rapport d'audit de performance pour {period}"
+                        ),
+                        "telegram_message": report_summary_message,
+                    },
+                )
+            except Exception as e:
+                # On n'empêche pas la réussite de l'audit si la notif échoue
+                self.logger.warning(f"AIDecision: Notification Telegram échouée: {e}")
 
         return audit_results
+
+        
+    def generate_daily_ai_reports(
+        self,
+        ai_decision,            # instance AIDecision (ou équivalent)
+        mecano,                 # instance Mecano (ou équivalent)
+        config_manager,         # instance ConfigManager (accès .get)
+        period_days: int = 1,   # 1 = quotidien ; 7 = hebdo, etc.
+    ) -> dict:
+        """
+        Génère et SAUVE les rapports des deux clients (IA Decision + Mecano) dans le même dossier.
+        - Résout le chemin unique depuis la config (paths.ai_audit), sinon fallback "config/ai_audit".
+        - Création atomique des fichiers.
+        - Robuste aux signatures/méthodes légèrement différentes (hasattr + fallbacks).
+        - Retourne les chemins des fichiers créés pour monitoring externe.
+
+        Écrit :
+        - Rapport IA (Markdown)  : ai_performance_audit_report_daily_<timestamp>.md
+        - Rapport Mecano (JSON)  : mecano_report_daily_<timestamp>.json
+        """
+                
+
+        # ---------- 1) Résolution dossier sortie unique ----------
+        try:
+            audit_dir = config_manager.get("paths.ai_audit", None)
+            if not audit_dir:
+                # certains setups déposent sous configs/
+                base_cfg = config_manager.get("paths.configs", "config")
+                audit_dir = os.path.join(base_cfg, "ai_audit")
+        except Exception:
+            audit_dir = os.path.join("config", "ai_audit")
+
+        out_dir = Path(audit_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        # utilitaires d'écriture atomique
+        def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding=encoding) as tmp:
+                tmp.write(content)
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(path)
+
+        def _atomic_write_json(path: Path, payload: dict):
+            _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+        results = {
+            "ai_decision_report_path": None,
+            "mecano_report_path": None,
+            "errors": []
+        }
+
+        # ---------- 2) Rapport IA (Markdown) ----------
+        try:
+            # a) Génération du contenu (plusieurs variantes possibles selon l’implémentation)
+            md_content = None
+
+            if hasattr(ai_decision, "audit_trading_performance"):
+                # idéal : fonction dédiée d’audit (peut accepter une période)
+                try:
+                    md_content = ai_decision.audit_trading_performance(period_days=period_days)
+                except TypeError:
+                    md_content = ai_decision.audit_trading_performance()
+            elif hasattr(ai_decision, "generate_daily_report"):
+                # fallback : génère un dict → on le transforme en markdown simple
+                rep = ai_decision.generate_daily_report(period_days=period_days)
+                md_lines = ["# AI Daily Report", ""]
+                if isinstance(rep, dict):
+                    for k, v in rep.items():
+                        md_lines.append(f"## {k}\n{v}\n")
+                else:
+                    md_lines.append(str(rep))
+                md_content = "\n".join(md_lines)
+            else:
+                raise RuntimeError("AIDecision ne fournit pas d’API de génération (audit_trading_performance / generate_daily_report manquantes).")
+
+            if not isinstance(md_content, str) or not md_content.strip():
+                md_content = f"# AI Performance Audit (empty)\n_Generated: {ts}_\n"
+
+            ai_fname = out_dir / f"ai_performance_audit_report_daily_{ts}.md"
+            _atomic_write_text(ai_fname, md_content)
+            results["ai_decision_report_path"] = str(ai_fname)
+        except Exception as e:
+            results["errors"].append(f"AI report error: {e}")
+
+        # ---------- 3) Rapport Mecano (JSON) ----------
+        try:
+            # a) Paramétrage de la période si exposée
+            if hasattr(mecano, "set_period_days"):
+                mecano.set_period_days(period_days)
+            elif hasattr(mecano, "report_period_days"):
+                try:
+                    setattr(mecano, "report_period_days", period_days)
+                except Exception:
+                    pass
+
+            # b) Génération
+            if hasattr(mecano, "build_weekly_report"):
+                try:
+                    report = mecano.build_weekly_report(period_days=period_days)
+                except TypeError:
+                    # signature sans argument (par défaut hebdo) → on acceptera le défaut
+                    report = mecano.build_weekly_report()
+            elif hasattr(mecano, "build_report"):
+                report = mecano.build_report(period_days=period_days)
+            else:
+                raise RuntimeError("Mecano ne fournit pas d’API de génération (build_weekly_report / build_report manquantes).")
+
+            if not isinstance(report, dict):
+                report = {"payload": report, "generated_at": ts, "period_days": period_days}
+
+            mec_fname = out_dir / f"mecano_report_daily_{ts}.json"
+
+            # c) Export natif si existe, sinon écriture locale atomique
+            exported = False
+            if hasattr(mecano, "export_report"):
+                try:
+                    # certaines implémentations acceptent (report, format, out_path)
+                    mecano.export_report(report, format="json", out_path=str(mec_fname))
+                    exported = True
+                except TypeError:
+                    try:
+                        mecano.export_report(report, format="json")  # laisser impl décider du nom
+                        # si on ne peut pas récupérer le nom, on écrit nous-mêmes
+                        if not mec_fname.exists():
+                            _atomic_write_json(mec_fname, report)
+                    except Exception:
+                        _atomic_write_json(mec_fname, report)
+                except Exception:
+                    _atomic_write_json(mec_fname, report)
+            else:
+                _atomic_write_json(mec_fname, report)
+
+            results["mecano_report_path"] = str(mec_fname)
+        except Exception as e:
+            results["errors"].append(f"Mecano report error: {e}")
+
+        # ---------- 4) Log minimal + retour ----------
+        try:
+            logger = getattr(self, "logger", None)
+            if logger:
+                logger.info(
+                    f"[AI AUDITS] IA='{results['ai_decision_report_path']}' | "
+                    f"Mecano='{results['mecano_report_path']}' | errors={len(results['errors'])}"
+                )
+        except Exception:
+            pass
+
+        return results
+
 
     def _format_audit_report_for_file(
         self,
@@ -1196,50 +1372,77 @@ class AIDecision:
     def _save_audit_report_to_file(self, report_content: str, period: str) -> Path:
         """
         Sauvegarde le contenu du rapport d'audit dans un fichier Markdown horodaté
-        dans le sous-dossier 'ai_audit' du dossier 'config'.
+        dans le dossier configuré pour les audits IA.
+        - Utilise self.ai_audit_reports_dir si défini, sinon paths.ai_audit,
+        sinon <paths.configs>/ai_audit, fallback final: "config/ai_audit".
+        - Écriture atomique (temp file + rename) pour éviter les fichiers corrompus.
         """
-        # Chemin de base pour les configurations
-        base_config_dir = Path(
-            self.config_manager.get("paths.configs", "config/")
-        )  # Récupérer le chemin de base des configs
+        from pathlib import Path
+        from datetime import datetime, UTC
+        from tempfile import NamedTemporaryFile
 
-        # Création du sous-dossier spécifique pour les audits IA à l'intérieur de 'config/'
-        # Utilisez self.ai_audit_reports_dir qui est configuré dans __init__
-        ai_audit_dir = Path(self.ai_audit_reports_dir)
-        ai_audit_dir.mkdir(
-            parents=True, exist_ok=True
-        )  # S'assurer que le répertoire et le sous-répertoire existent
-
-        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        report_filename = (
-            f"ai_performance_audit_report_{period.replace(' ', '_')}_{timestamp}.md"
-        )
-        report_file_path = (
-            ai_audit_dir / report_filename
-        )  # Le chemin inclut maintenant le sous-dossier de config
-
-        # Utilisation de l'écriture atomique pour la robustesse
-        temp_file_path = report_file_path.with_suffix(".tmp")
+        # --------- 1) Résolution du dossier de sortie (robuste) ---------
         try:
-            with open(temp_file_path, "w", encoding="utf-8") as f:
-                f.write(report_content)
-            temp_file_path.replace(report_file_path)
-            self.logger.info(
-                f"AIDecision: Rapport d'audit sauvegardé avec succès dans '{report_file_path}'."
-            )
+            base_configs_dir = Path(self.config_manager.get("paths.configs", "config"))
+        except Exception:
+            base_configs_dir = Path("config")
+
+        # priorité à l'attribut d'instance si déjà initialisé (ex: dans __init__)
+        ai_dir = None
+        try:
+            ai_dir = Path(getattr(self, "ai_audit_reports_dir", "") or "")
+        except Exception:
+            ai_dir = None
+
+        if not ai_dir:
+            # essaye la clé dédiée si présente
+            try:
+                ai_dir_cfg = self.config_manager.get("paths.ai_audit", None)
+                if ai_dir_cfg:
+                    ai_dir = Path(ai_dir_cfg)
+            except Exception:
+                ai_dir = None
+
+        if not ai_dir:
+            # fallback vers <configs>/ai_audit
+            ai_dir = base_configs_dir / "ai_audit"
+
+        # Assure l'existence
+        ai_dir.mkdir(parents=True, exist_ok=True)
+
+        # --------- 2) Nom de fichier horodaté ---------
+        period_safe = (period or "last_day").replace(" ", "_").replace("/", "-")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        report_filename = f"ai_performance_audit_report_{period_safe}_{timestamp}.md"
+        report_file_path = ai_dir / report_filename
+
+        # --------- 3) Écriture atomique ---------
+        try:
+            with NamedTemporaryFile("w", delete=False, dir=str(ai_dir), encoding="utf-8") as tmp:
+                tmp.write(report_content if isinstance(report_content, str) else str(report_content))
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(report_file_path)
+            self.logger.info(f"AIDecision: Rapport d'audit sauvegardé dans '{report_file_path}'.")
         except Exception as e:
             self.logger.error(
                 f"AIDecision: Échec de la sauvegarde du rapport d'audit vers '{report_file_path}': {e}",
                 exc_info=True,
             )
-            if temp_file_path.exists():
-                temp_file_path.unlink()  # Nettoyage en cas d'erreur
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    f"AI Audit Report Save Fail: {e}",
-                    "telegram_critical",
-                )
+            # best-effort cleanup
+            try:
+                if 'tmp_path' in locals() and tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                if self.config_manager:
+                    self.config_manager.send_alert(
+                        "CRITIQUE",
+                        f"AI Audit Report Save Fail: {e}",
+                        "telegram_critical",
+                    )
+            except Exception:
+                pass
 
         return report_file_path
 

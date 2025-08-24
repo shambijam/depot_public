@@ -520,6 +520,7 @@ def _mtf_readiness_gate(
         # Ne jamais bloquer si une erreur inattendue survient
         logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
         return True
+    
 
 
 def run_single_pipeline_cycle(
