@@ -2542,40 +2542,40 @@ class TradeExecutor:
 
   # --- remplace ENTIEREMENT la méthode feedback_pipeline ---
 
-def feedback_pipeline(
-    self,
-    order_id: str,
-    status: str,
-    reason: str = "",
-    pnl_usd: Optional[float] = None,
-) -> dict:
-    """
-    Construit et publie un feedback standardisé (logger passif).
-    Ne bloque jamais le pipeline en cas d'échec de log.
-    """
-    feedback = {
-        "order_id": order_id,
-        "execution_status": status,
-        "reason": reason,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "pnl_usd": pnl_usd,
-    }
-    self.logger.info(
-        f"Feedback ordre {order_id}: status='{status}', reason='{reason}', pnl={pnl_usd if pnl_usd is not None else 'N/A'}."
-    )
+    def feedback_pipeline(
+        self,
+        order_id: str,
+        status: str,
+        reason: str = "",
+        pnl_usd: Optional[float] = None,
+    ) -> dict:
+        """
+        Construit et publie un feedback standardisé (logger passif).
+        Ne bloque jamais le pipeline en cas d'échec de log.
+        """
+        feedback = {
+            "order_id": order_id,
+            "execution_status": status,
+            "reason": reason,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "pnl_usd": pnl_usd,
+        }
+        self.logger.info(
+            f"Feedback ordre {order_id}: status='{status}', reason='{reason}', pnl={pnl_usd if pnl_usd is not None else 'N/A'}."
+        )
 
-    # Publication vers le logger passif (si présent)
-    try:
-        ai_mod = getattr(self.config_manager, "ai_decision_instance", None)
-        if ai_mod:
-            # Appel moderne (decision={}, result=feedback)
-            ai_mod.feedback_on_result({}, feedback)
-            self.logger.debug(f"Feedback envoyé à AIDecision (logger passif) pour ordre {order_id}.")
-    except Exception as e:
-        # Soft-fail: jamais bloquant
-        self.logger.error(f"Échec envoi feedback à AIDecision pour ordre {order_id}: {e}", exc_info=True)
+        # Publication vers le logger passif (si présent)
+        try:
+            ai_mod = getattr(self.config_manager, "ai_decision_instance", None)
+            if ai_mod:
+                # Appel moderne (decision={}, result=feedback)
+                ai_mod.feedback_on_result({}, feedback)
+                self.logger.debug(f"Feedback envoyé à AIDecision (logger passif) pour ordre {order_id}.")
+        except Exception as e:
+            # Soft-fail: jamais bloquant
+            self.logger.error(f"Échec envoi feedback à AIDecision pour ordre {order_id}: {e}", exc_info=True)
 
-    return feedback
+        return feedback
 
 
     def manual_override_if_needed(self, mt5_request: dict) -> bool:
