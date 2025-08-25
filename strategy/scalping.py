@@ -254,6 +254,132 @@ class ScalpingStrategy(BaseStrategy):
             "comment": "SNIPER_X:scalping_katana_no_gating",
         }
         return order
+    
+        # ---------------------------------------------------------------------
+    # Sorties Katana (micro-phase, serrées) — pas de momentum fade
+    # ---------------------------------------------------------------------
+    def _pips_between(self, a: float, b: float, point: float, digits: int) -> float:
+        """Calcule |a-b| en pips selon digits (3/5 -> 10 points = 1 pip)."""
+        pip_points = 10.0 if digits in (3, 5) else 1.0
+        try:
+            return abs(float(a) - float(b)) / (float(point) * pip_points)
+        except Exception:
+            return 0.0
+
+    def evaluate_exit(
+        self,
+        context: Dict[str, Any],
+        position: Dict[str, Any],
+        latest_signals: Dict[str, Any] | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Propose une sortie partielle/totale pour une position ouverte (ou un ajustement de SL) selon des règles Katana.
+        - Retourne:
+            • {"action":"ADJUST_SL", "asset":..., "new_sl_price":...} OU
+            • {"action":"CLOSE", "asset":..., "reason": "..."} OU
+            • None si aucune action.
+        """
+        cfg = self.strategy_config or {}
+        exit_cfg = ((cfg.get("exit_rules") or {}).get("scalping") or {})
+
+        asset = str(position.get("symbol") or position.get("asset") or "").upper()
+        if not asset:
+            return None
+
+        md = (context.get("market_data") or {}).get(asset, {}) or {}
+        symbol_info = md.get("symbol_info", {}) or {}
+        point  = float(symbol_info.get("point", 0.00001) or 0.00001)
+        digits = int(symbol_info.get("digits", 5))
+
+        side = str(position.get("action") or position.get("type") or position.get("side") or "").upper()
+        if side not in ("BUY", "SELL"):
+            return None
+
+        entry_price = float(position.get("entry_price") or position.get("price_open") or 0.0)
+        sl_price    = float(position.get("sl") or 0.0) or None
+        tp_price    = float(position.get("tp") or 0.0) or None
+        cur_price   = float(md.get("current_price") or position.get("price_current") or 0.0)
+        if entry_price <= 0 or cur_price <= 0 or point <= 0:
+            return None
+
+        # --- PnL courant en pips (non signé et signé) ---
+        pnl_pips_abs = self._pips_between(cur_price, entry_price, point, digits)
+        if side == "BUY":
+            pnl_pips_signed = (cur_price - entry_price) / (point * (10.0 if digits in (3,5) else 1.0))
+        else:
+            pnl_pips_signed = (entry_price - cur_price) / (point * (10.0 if digits in (3,5) else 1.0))
+
+        # --- Paramètres de sortie (avec defaults conservateurs) ---
+        breakeven_trigger = float(exit_cfg.get("breakeven_trigger_pips", 3.0))
+        trailing_start    = float(exit_cfg.get("trailing_start_pips", 5.0))
+        trailing_step     = float(exit_cfg.get("trailing_step_pips", 1.0))
+        max_hold_seconds  = int(exit_cfg.get("max_hold_seconds", 0))  # 0 = désactivé
+        exit_on_m1_flip   = bool(exit_cfg.get("exit_on_m1_phase_flip", True))
+
+        # Derniers signaux/phase pour l’asset
+        s = (latest_signals or {}).get(asset, {}) if latest_signals else {}
+        phase_m1 = str(s.get("phase_m1") or s.get("phase") or "").lower()
+
+        # --- 1) Break-even auto ---
+        if breakeven_trigger > 0 and pnl_pips_signed >= breakeven_trigger:
+            # Calcule un SL = entry (ou légèrement positif: +0.1 pip) sans dépasser le prix courant
+            be_pad = float(exit_cfg.get("breakeven_pad_pips", 0.1))
+            new_sl = entry_price
+            if side == "BUY":
+                new_sl = min(cur_price, entry_price + be_pad * point * (10.0 if digits in (3,5) else 1.0))
+                if not sl_price or new_sl > sl_price:
+                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "breakeven"}
+            else:
+                new_sl = max(cur_price, entry_price - be_pad * point * (10.0 if digits in (3,5) else 1.0))
+                if not sl_price or new_sl < sl_price:
+                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "breakeven"}
+
+        # --- 2) Trailing léger par pas ---
+        if trailing_start > 0 and trailing_step > 0 and pnl_pips_signed >= trailing_start:
+            # SL cible = (entrée ± (pnl - step_buffer))
+            step_buffer = float(exit_cfg.get("trailing_buffer_pips", trailing_step))
+            target_lock = max(0.0, pnl_pips_signed - step_buffer)  # pips à "locker"
+            # Convertit en prix
+            lock_dist_price = target_lock * point * (10.0 if digits in (3,5) else 1.0)
+            new_sl = entry_price + lock_dist_price if side == "BUY" else entry_price - lock_dist_price
+            # Ne resserre que si c’est favorable (jamais élargir)
+            if side == "BUY":
+                if not sl_price or new_sl > sl_price:
+                    # borne pour ne pas dépasser le prix courant
+                    new_sl = min(new_sl, cur_price)
+                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "trail"}
+            else:
+                if not sl_price or new_sl < sl_price:
+                    new_sl = max(new_sl, cur_price)
+                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "trail"}
+
+        # --- 3) Flip micro‑phase M1 (optionnel, sortie totale) ---
+        if exit_on_m1_flip and phase_m1:
+            if side == "BUY" and any(k in phase_m1 for k in ("down", "bear", "expansion_down", "distribution")):
+                return {"action": "CLOSE", "asset": asset, "reason": "m1_phase_flip_against"}
+            if side == "SELL" and any(k in phase_m1 for k in ("up", "bull", "expansion_up", "accumulation")):
+                return {"action": "CLOSE", "asset": asset, "reason": "m1_phase_flip_against"}
+
+        # --- 4) Durée max (optionnel) ---
+        if max_hold_seconds and max_hold_seconds > 0:
+            # on accepte plusieurs formats d’horodatage en entrée
+            import datetime as _dt
+            opened_at = position.get("time") or position.get("time_open") or position.get("open_time")
+            try:
+                if isinstance(opened_at, (int, float)):
+                    open_dt = _dt.datetime.utcfromtimestamp(opened_at)
+                else:
+                    # iso8601 string
+                    open_dt = _dt.datetime.fromisoformat(str(opened_at).replace("Z","+00:00")).astimezone(_dt.timezone.utc)
+                now_utc = _dt.datetime.fromisoformat(str(context.get("current_time_utc"))).astimezone(_dt.timezone.utc)
+                held = (now_utc - open_dt).total_seconds()
+                if held >= max_hold_seconds:
+                    return {"action": "CLOSE", "asset": asset, "reason": "max_hold_time"}
+            except Exception:
+                pass
+
+        return None
+
 
 
    

@@ -279,7 +279,6 @@
     "scalping": {
       "require_mtf_align": true,
       "require_m1_break": true,
-      "gating_mode": "off",
       "fvg_max_distance_pips": 3.5,
       "ob_max_distance_pips": 3.0,
       "min_atr_m1_pips": 0.3,
@@ -288,7 +287,7 @@
       "reject_if_sl_over_cap": false,
       "max_spread_points": 12.0,
       "min_m1_ema_spread": 0.0,
-      "min_confidence": 0.30
+      "min_confidence": 0.3
     }
   },
   "adaptation_settings": {
@@ -348,27 +347,20 @@
     "max_spread_points": 15
   },
   "execution_quality_filters": {
-    "blocked_phases": [
-      "range_accumulation",
-      "range_distribution",
-      "low_volatility_compression"
-    ],
-    "disable_momentum_fallback_in_range": true,
+    "blocked_phases": [],
     "atr_volatility_filter": {
       "enabled": false,
       "period": 14,
       "min_atr": 0.0,
       "max_atr": 1000000.0
-    }
+    },
+    "note_only": true
   },
   "risk_management_settings": {
     "default_account_equity": 10000.0,
     "default_pip_value_per_lot": 10.0,
     "default_points_in_pip": 1e-05,
-    "min_lot_size_fallback": 0.01,
-    "default_contract_size": 100000,
-    "min_dollar_risk_per_lot_fallback": 1.0,
-    "default_lot_step_fallback": 0.01
+    "default_contract_size": 100000
   },
   "smart_sl_tp_settings": {
     "sl_placement_method": "SWING",
@@ -482,5 +474,9 @@
       "telegram_error": false,
       "telegram_info": false
     }
+  },
+  "runtime_flags": {
+    "gating_removed": true,
+    "fallbacks_removed": true
   }
 }
