@@ -409,6 +409,36 @@ class PhaseObserver:
             "max_signal_age_seconds": max_age_sec,
             "max_bos_age_bars": max_bos_age_bars,
         }
+                # --- 8bis) Micro‑phase hint (complément M1, jamais bloquant) ---
+        try:
+            micro_cfg = self.config_manager.get("features.micro_phase", {}) or {}
+            if bool(micro_cfg.get("enabled", True)):
+                hint = self.detect_micro_phase_m1(m1_df, params=micro_cfg.get("params"))
+                # stocker sous 'signals' sans rien casser
+                snapshot.setdefault("signals", {})
+                snapshot["signals"]["micro_phase_hint"] = hint
+
+                # petit boost de score si la direction micro confirme le side
+                try:
+                    if hint.get("micro_phase") and hint.get("confidence_boost", 0) > 0:
+                        if (snapshot.get("entry_side") == "BUY"  and hint.get("direction") == "BUY") or \
+                           (snapshot.get("entry_side") == "SELL" and hint.get("direction") == "SELL"):
+                            snapshot["katana_score"] = float(snapshot.get("katana_score", 0.0)) + float(hint["confidence_boost"])
+                            # bornage léger pour rester prudent
+                            if snapshot["katana_score"] > 0.98:
+                                snapshot["katana_score"] = 0.98
+                except Exception:
+                    pass
+
+                # Exposer des suggestions TPSL serrées SANS écraser le SL/TP structurels
+                if hint.get("sl_pips_suggestion") is not None:
+                    snapshot["signals"]["micro_phase_sl_pips_suggestion"] = hint["sl_pips_suggestion"]
+                if hint.get("tp_pips_suggestion") is not None:
+                    snapshot["signals"]["micro_phase_tp_pips_suggestion"] = hint["tp_pips_suggestion"]
+        except Exception as _e:
+            # totalement silencieux (zéro gate)
+            self.logger.debug(f"[{asset}] micro_phase hint non appliqué: {_e}")
+
 
         snapshot["katana_ready"] = all([
             snapshot["m1_break_ok"],

@@ -73,6 +73,7 @@ class TradeExecutor:
         self.mt5_connector = mt5_connector
         self.mode = mode.lower()
         self.mt5 = getattr(self.mt5_connector, "mt5", None)
+        self._last_trade_times = {}  # {symbol: datetime}
 
         # CORRECTION : Suppression de self.mt5 = mt5. Il est plus propre et cohérent que
         # toute interaction avec la librairie MetaTrader5 passe par le mt5_connector.
@@ -1748,6 +1749,64 @@ class TradeExecutor:
             f"(min={min_lot_account}, step={effective_step}, max={max_lot_account})."
         )
         return float(volume)
+    
+        # --- Throttle anti-rafale: simple, stateless entre runs ---
+    def _cooldown_guard(self, asset: str, now_ts: float, *,
+                        per_asset_cooldown_s: float = 20.0,
+                        min_gap_any_trade_s: float = 5.0,
+                        max_new_trades_per_cycle: int = 1) -> bool:
+        """
+        Retourne True si on DOIT SKIP l'envoi d'un nouvel ordre (cooldown).
+        - per_asset_cooldown_s: délai min entre 2 nouvelles entrées sur le même asset
+        - min_gap_any_trade_s: délai min entre 2 nouvelles entrées globales
+        - max_new_trades_per_cycle: limite de nouvelles entrées par cycle (sûreté)
+
+        Ne persiste rien: garde mémoire en RAM via attributs.
+        """
+        try:
+            # Mémoire RAM
+            if not hasattr(self, "_last_trade_ts_by_asset"):
+                self._last_trade_ts_by_asset = {}
+            if not hasattr(self, "_cycle_new_trades"):
+                self._cycle_new_trades = 0
+            if not hasattr(self, "_last_any_trade_ts"):
+                self._last_any_trade_ts = 0.0
+
+            # 1) Limite par cycle
+            if self._cycle_new_trades >= max_new_trades_per_cycle:
+                self.logger.info(f"[THROTTLE] Limite par cycle atteinte ({max_new_trades_per_cycle}).")
+                return True
+
+            # 2) Gap global
+            if self._last_any_trade_ts and (now_ts - self._last_any_trade_ts) < min_gap_any_trade_s:
+                gap = min_gap_any_trade_s - (now_ts - self._last_any_trade_ts)
+                self.logger.info(f"[THROTTLE] Gap global actif ~{gap:.1f}s.")
+                return True
+
+            # 3) Cooldown par asset
+            last_ts = self._last_trade_ts_by_asset.get(asset, 0.0)
+            if last_ts and (now_ts - last_ts) < per_asset_cooldown_s:
+                gap = per_asset_cooldown_s - (now_ts - last_ts)
+                self.logger.info(f"[THROTTLE] Cooldown {asset} encore ~{gap:.1f}s.")
+                return True
+
+            return False
+        except Exception as e:
+            self.logger.warning(f"[THROTTLE] Guard erreur (ignore): {e}")
+            return False
+
+
+    def _mark_trade_sent(self, asset: str, now_ts: float) -> None:
+        """À appeler juste APRÈS un envoi d’ordre réussi."""
+        if not hasattr(self, "_last_trade_ts_by_asset"):
+            self._last_trade_ts_by_asset = {}
+        if not hasattr(self, "_cycle_new_trades"):
+            self._cycle_new_trades = 0
+        self._last_trade_ts_by_asset[asset] = now_ts
+        self._last_any_trade_ts = now_ts
+        self._cycle_new_trades += 1
+
+
 
     def _build_mt5_request(
         self,
@@ -3066,8 +3125,26 @@ def run_trade_execution_pipeline(
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
 
-    # ----------- 7) Human-in-the-loop / dry-run -----------
-    if not trade_executor.manual_override_if_needed(mt5_request):
+        # ----------- 7) Human-in-the-loop / dry-run -----------
+    # On ne tente l'override manuel QUE si:
+    #   - la méthode existe, ET
+    #   - la config l'autorise.
+    manual_ok = True
+    try:
+        te_settings = (trade_executor.config_manager.get("trade_executor_settings", {}) 
+                       if getattr(trade_executor, "config_manager", None) else {})
+        manual_enabled = bool(te_settings.get("manual_override_enabled", False))
+    except Exception:
+        manual_enabled = False
+
+    if manual_enabled and hasattr(trade_executor, "manual_override_if_needed"):
+        try:
+            manual_ok = bool(trade_executor.manual_override_if_needed(mt5_request))
+        except Exception as e:
+            logger.warning(f"Manual override a échoué, on continue en auto: {e}")
+            manual_ok = True  # on ne bloque pas le pipeline
+
+    if not manual_ok:
         feedback = trade_executor.feedback_pipeline(
             order_id=final_decision.get("order_id", "N/A"),
             status="pending_manual_approval",
@@ -3080,6 +3157,3 @@ def run_trade_execution_pipeline(
         logger.info("[DRY RUN] Requête MT5 prête mais non envoyée.")
         return {"status": "ready", "mt5_request": mt5_request}
 
-    # ----------- 8) Exécution -----------
-    execution_result = trade_executor.execute_order(mt5_request)
-    return execution_result
