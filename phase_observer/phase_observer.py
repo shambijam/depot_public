@@ -1484,7 +1484,6 @@ class PhaseObserver:
         # ... (logique originale conservée pour référence)
         return max(0.0, min(1.0, confidence))
 
-    
     def compute_bollinger_microphase_signals(
         self,
         df,
@@ -1503,19 +1502,21 @@ class PhaseObserver:
         - NE PAS MODIFIER LA SIGNATURE ICI (pour intégration sûre).
         - Retourne un dict prêt à consommer par le pipeline (touch, squeeze, breakout_score, mean_revert_score, distances, etc.).
         """
-      
+        import numpy as np
+        import pandas as pd
+
         out = {
             "ok": False,
             "reason": None,
             "signal": "neutral",           # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | "neutral"
-            "band_touch": None,           # "upper" | "lower" | None
-            "in_band": None,              # True si close ∈ [lower, upper]
-            "is_squeeze": None,           # compression vol
-            "is_expansion": None,         # expansion post-squeeze
-            "squeeze_strength": 0.0,      # 0..1
-            "breakout_score": 0.0,        # 0..1
-            "mean_revert_score": 0.0,     # 0..1
-            "z_band": None,               # distance normalisée au milieu
+            "band_touch": None,            # "upper" | "lower" | None
+            "in_band": None,               # True si close ∈ [lower, upper]
+            "is_squeeze": None,            # compression vol
+            "is_expansion": None,          # expansion post-squeeze
+            "squeeze_strength": 0.0,       # 0..1
+            "breakout_score": 0.0,         # 0..1
+            "mean_revert_score": 0.0,      # 0..1
+            "z_band": None,                # distance normalisée au milieu
             "dist_to_upper_pips": None,
             "dist_to_lower_pips": None,
             "dist_to_mid_pips": None,
@@ -1596,15 +1597,20 @@ class PhaseObserver:
         out["band_touch"] = band_touch
 
         # --- Squeeze / Expansion via bande-width percentile sur fenêtre longue ---
-        # width_t = (upper - lower) / mid  (normalisation relative)
+        # width_t = (upper - lower) / |mid|  (normalisation relative)
         width = (upper - lower) / (mid.replace(0, np.nan).abs())
-        if len(width.dropna()) >= min(squeeze_window, len(width)):
-            w_hist = width.tail(squeeze_window).dropna()
+        w_non_na = width.dropna()
+
+        if len(w_non_na) >= min(squeeze_window, len(width)):
+            w_hist = w_non_na.tail(squeeze_window)
             if not w_hist.empty:
                 thresh = np.nanpercentile(w_hist.values, squeeze_percentile * 100.0)
                 is_squeeze = bool(width.iloc[-1] <= thresh)
                 # expansion: sortie du squeeze + bande-width qui s'élargit
-                is_expansion = bool((~pd.isna(width.iloc[-2])) and (width.iloc[-1] > width.iloc[-2]) and (not is_squeeze))
+                if len(width) >= 2 and np.isfinite(width.iloc[-2]):
+                    is_expansion = bool((width.iloc[-1] > width.iloc[-2]) and (not is_squeeze))
+                else:
+                    is_expansion = False
             else:
                 is_squeeze = False
                 is_expansion = False
@@ -1623,7 +1629,8 @@ class PhaseObserver:
             out["squeeze_strength"] = 0.0
 
         # --- Z-band: position du prix dans le canal (-inf..+inf), 0=milieu ---
-        last_std = float(rolling_std.iloc[-1]) if np.isfinite(rolling_std.iloc[-1]) else 0.0
+        last_std_val = rolling_std.iloc[-1]
+        last_std = float(last_std_val) if np.isfinite(last_std_val) else 0.0
         z_band = (price - bb_mid) / (last_std if last_std > 0 else np.nan)
         out["z_band"] = float(z_band) if np.isfinite(z_band) else None
 
@@ -1698,16 +1705,17 @@ class PhaseObserver:
                 signal = "neutral"
         else:
             # mode générique: compare scores
-            if breakout - mean_revert >= 0.15:
-                signal = "buy_breakout" if z_band and z_band > 0 else "sell_breakout"
-            elif mean_revert - breakout >= 0.15:
-                signal = "sell_revert" if z_band and z_band > 0 else "buy_revert"
+            if (breakout - mean_revert) >= 0.15:
+                signal = "buy_breakout" if (out["z_band"] is not None and out["z_band"] > 0) else "sell_breakout"
+            elif (mean_revert - breakout) >= 0.15:
+                signal = "sell_revert" if (out["z_band"] is not None and out["z_band"] > 0) else "buy_revert"
             else:
                 signal = "neutral"
 
         out["signal"] = signal
         out["ok"] = True
         return out
+
 
 
 
@@ -2825,7 +2833,6 @@ class PhaseObserver:
 
         return min(max_confidence, max(0.0, score))
 
-
     def analyze(
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None
     ) -> Optional[pd.DataFrame]:
@@ -3008,9 +3015,6 @@ class PhaseObserver:
                 ]:
                     if col not in df_an.columns:
                         df_an[col] = default
-                    else:
-                        # Ne pas écraser l'historique si déjà existant
-                        pass
 
                 # Calibrage pip_size via colonne 'point' si dispo
                 pip_size = None
@@ -3038,18 +3042,19 @@ class PhaseObserver:
                     idx = df_an.index[-1]
                     df_an.loc[idx, "boll_signal"] = boll.get("signal")
                     df_an.loc[idx, "boll_band_touch"] = boll.get("band_touch")
-                    df_an.loc[idx, "boll_in_band"] = bool(boll.get("in_band"))
-                    df_an.loc[idx, "boll_is_squeeze"] = bool(boll.get("is_squeeze"))
-                    df_an.loc[idx, "boll_is_expansion"] = bool(boll.get("is_expansion"))
+                    # ⚠️ cast explicite en float pour compat Pandas (évite FutureWarning)
+                    df_an.loc[idx, "boll_in_band"]      = float(bool(boll.get("in_band")))
+                    df_an.loc[idx, "boll_is_squeeze"]   = float(bool(boll.get("is_squeeze")))
+                    df_an.loc[idx, "boll_is_expansion"] = float(bool(boll.get("is_expansion")))
                     df_an.loc[idx, "boll_breakout_score"] = float(boll.get("breakout_score", np.nan))
                     df_an.loc[idx, "boll_mean_revert_score"] = float(boll.get("mean_revert_score", np.nan))
                     df_an.loc[idx, "boll_z_band"] = float(boll.get("z_band")) if boll.get("z_band") is not None else np.nan
                     df_an.loc[idx, "boll_dist_to_upper_pips"] = float(boll.get("dist_to_upper_pips", np.nan)) if boll.get("dist_to_upper_pips") is not None else np.nan
                     df_an.loc[idx, "boll_dist_to_lower_pips"] = float(boll.get("dist_to_lower_pips", np.nan)) if boll.get("dist_to_lower_pips") is not None else np.nan
-                    df_an.loc[idx, "boll_dist_to_mid_pips"] = float(boll.get("dist_to_mid_pips", np.nan)) if boll.get("dist_to_mid_pips") is not None else np.nan
+                    df_an.loc[idx, "boll_dist_to_mid_pips"]   = float(boll.get("dist_to_mid_pips", np.nan)) if boll.get("dist_to_mid_pips") is not None else np.nan
                     df_an.loc[idx, "boll_bb_upper"] = float(boll.get("bb_upper", np.nan)) if boll.get("bb_upper") is not None else np.nan
                     df_an.loc[idx, "boll_bb_lower"] = float(boll.get("bb_lower", np.nan)) if boll.get("bb_lower") is not None else np.nan
-                    df_an.loc[idx, "boll_bb_mid"] = float(boll.get("bb_mid", np.nan)) if boll.get("bb_mid") is not None else np.nan
+                    df_an.loc[idx, "boll_bb_mid"]   = float(boll.get("bb_mid", np.nan)) if boll.get("bb_mid") is not None else np.nan
                     df_an.loc[idx, "boll_atr_pips"] = float(boll.get("atr_pips", np.nan)) if boll.get("atr_pips") is not None else np.nan
                 else:
                     self.logger.debug(f"[{current_asset_symbol}] Bollinger microphase non disponible: {boll.get('reason') if isinstance(boll, dict) else 'unknown'}")
@@ -3187,6 +3192,7 @@ class PhaseObserver:
             )
 
         return df_an
+
 
 
     def export_to_csv(self, report_df: pd.DataFrame, filename: str):

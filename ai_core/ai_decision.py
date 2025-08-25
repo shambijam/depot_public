@@ -887,16 +887,6 @@ class AIDecision:
         Génère un rapport d'audit de performance complet, avec un bilan par actif,
         les raisons des gains/pertes, l'analyse par phase de marché, et des suggestions d'amélioration.
         Ce rapport est sauvegardé dans le dossier /config/ai_audit.
-
-        Args:
-            logs (List[Dict[str, Any]]): Liste des entrées de logs de trading pertinentes pour l'audit.
-                                        Ces logs doivent idéalement être les entrées complètes de `ConfigManager.log_decision`.
-            period (str): La période de l'audit (ex: "last_day", "last_week", "last_month"). Défaut "last_day".
-            current_context (Optional[Dict[str, Any]]): Le contexte actuel de l'environnement, passé explicitement pour l'IA.
-
-        Returns:
-            Dict[str, Any]: Un dictionnaire d'audit de performance généré par l'IA.
-                            Inclut 'error' en cas d'échec. Contient également le chemin du rapport généré.
         """
         from pathlib import Path
         import json
@@ -905,20 +895,41 @@ class AIDecision:
             f"AIDecision: Démarrage de l'audit de performance de trading pour la période '{period}'..."
         )
 
+        # --- helpers locaux ---
+        def _json_dumps_safe(obj, indent=2):
+            """Encodage JSON robuste: tente CustomJSONEncoder, sinon fallback std avec default=str."""
+            try:
+                CustomJSONEncoder = getattr(self.config_manager, "CustomJSONEncoder", None)
+                if CustomJSONEncoder:
+                    return json.dumps(obj, indent=indent, cls=CustomJSONEncoder)
+            except Exception:
+                pass
+            try:
+                return json.dumps(obj, indent=indent, ensure_ascii=False, default=str)
+            except Exception:
+                return json.dumps(str(obj), indent=indent, ensure_ascii=False)
+
+        def _safe_alert(msg: str, channel: str = "telegram_critical"):
+            """Compat signature send_alert(message, alert_type='telegram_critical')."""
+            try:
+                if self.config_manager:
+                    # priorité aux kwargs (évite l'erreur '4 were given')
+                    self.config_manager.send_alert(message=msg, alert_type=channel)
+            except TypeError:
+                try:
+                    # fallback positionnel (2 args attendus: message, alert_type)
+                    self.config_manager.send_alert(msg, channel)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         prompt_template = self.prompts.get("audit_trading_performance")
         if not prompt_template:
             self.logger.error(
                 "AIDecision: Le prompt 'audit_trading_performance' est manquant. Impossible d'auditer la performance."
             )
-            try:
-                if self.config_manager:
-                    self.config_manager.send_alert(
-                        "CRITIQUE",
-                        "AI Prompt Manquant: audit_trading_performance",
-                        "telegram_critical",
-                    )
-            except Exception:
-                pass
+            _safe_alert("AI Prompt Manquant: audit_trading_performance")
             return {"error": "Prompt 'audit_trading_performance' non configuré."}
 
         # Taille d'échantillon maximum envoyée à l'IA (sécurité mémoire/coût)
@@ -1012,39 +1023,10 @@ class AIDecision:
         total_pnl = float(sum(v["total_pnl"] for v in trading_summary_by_asset.values())) if trading_summary_by_asset else 0.0
         win_rate = round((total_wins / total_trades) * 100, 2) if total_trades > 0 else 0.0
 
-        # Tronquage de l'échantillon pour le prompt
-        try:
-            CustomJSONEncoder = getattr(self.config_manager, "CustomJSONEncoder", None)
-        except Exception:
-            CustomJSONEncoder = None
-
-        try:
-            truncated_trade_details_json = json.dumps(
-                trade_details_for_ai[-log_sample_size:],
-                indent=2,
-                cls=CustomJSONEncoder if CustomJSONEncoder else None,  # fallback std json si encoder absent
-            ) if trade_details_for_ai else "None"
-        except Exception:
-            truncated_trade_details_json = "None"
-
-        try:
-            trading_summary_json = json.dumps(
-                trading_summary_by_asset,
-                indent=2,
-                cls=CustomJSONEncoder if CustomJSONEncoder else None,
-            )
-        except Exception:
-            trading_summary_json = json.dumps(trading_summary_by_asset, indent=2)
-
-        # Contexte courant sérialisé (optionnel)
-        try:
-            context_json = json.dumps(
-                current_context,
-                indent=2,
-                cls=CustomJSONEncoder if CustomJSONEncoder else None,
-            ) if current_context else "None"
-        except Exception:
-            context_json = "None"
+        # Sérialisations robustes pour le prompt
+        truncated_trade_details_json = _json_dumps_safe(trade_details_for_ai[-log_sample_size:]) if trade_details_for_ai else "None"
+        trading_summary_json = _json_dumps_safe(trading_summary_by_asset)
+        context_json = _json_dumps_safe(current_context) if current_context else "None"
 
         # Construction du prompt
         try:
@@ -1059,15 +1041,7 @@ class AIDecision:
                 f"AIDecision: Erreur de sérialisation pour le prompt 'audit_trading_performance': {e}.",
                 exc_info=True,
             )
-            try:
-                if self.config_manager:
-                    self.config_manager.send_alert(
-                        "CRITIQUE",
-                        f"AI: Erreur sérialisation audit_trading_performance: {e}",
-                        "telegram_critical",
-                    )
-            except Exception:
-                pass
+            _safe_alert(f"AI: Erreur sérialisation audit_trading_performance: {e}")
             return {"error": f"Erreur de sérialisation pour le prompt: {e}"}
 
         # Appel modèle IA
@@ -1117,6 +1091,7 @@ class AIDecision:
                 self.logger.warning(f"AIDecision: Notification Telegram échouée: {e}")
 
         return audit_results
+
 
         
     def generate_daily_ai_reports(
