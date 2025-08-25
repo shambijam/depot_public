@@ -451,147 +451,180 @@ class AIDecision:
 
     def _generate_raw_response(
         self, prompt: str, max_tokens: Optional[int] = None
-    ) -> str:  # max_tokens devient optionnel
+    ) -> str:
         """
         Génère une réponse brute à partir du modèle AI Llama chargé.
-        Les paramètres de génération (max_tokens, temperature, top_p, stop_sequences)
-        sont lus dynamiquement depuis la configuration.
-
-        Args:
-            prompt (str): Le prompt textuel à envoyer au modèle AI.
-            max_tokens (int, optional): Le nombre maximal de tokens à générer.
-                                       Si `None`, la valeur configurée sera utilisée.
-
-        Returns:
-            str: La réponse brute générée par le modèle AI.
-                 Retourne une chaîne JSON encodée avec un message d'erreur en cas d'échec.
+        Rend la sortie *forcée JSON* autant que possible, avec post-traitement robuste :
+        - préfixe d’instructions pour exiger du JSON unique
+        - extraction éventuelle d’un bloc ```json
+        - tentative de parsing/normalisation en JSON
+        - fallback: encapsulation d’erreur JSON (jamais de texte brut)
         """
-        if not self.model:  # Utilise self.model qui est un attribut d'instance
-            self.logger.error(
-                "AIDecision: Modèle AI Llama non chargé. Impossible de générer une réponse."
-            )  # Utilise self.logger
+        import json
+        import re
+
+        if not self.model:
+            self.logger.error("AIDecision: Modèle AI Llama non chargé. Impossible de générer une réponse.")
             return json.dumps({"error": "AI model not loaded"})
 
-        # Paramètres de génération de l'IA (max_tokens, temperature, top_p, stop_sequences)
-        # Ces valeurs sont lues depuis la section 'ai.generation_params' de la configuration.
+        # Paramètres génération (dynamiques via config)
         current_max_tokens = (
-            max_tokens
-            if max_tokens is not None
+            max_tokens if max_tokens is not None
             else self.config_manager.get("ai.generation_params.max_tokens", 2048)
         )
         temperature = self.config_manager.get("ai.generation_params.temperature", 0.7)
         top_p = self.config_manager.get("ai.generation_params.top_p", 0.9)
-        # Assurez-vous que la clé 'stop_sequences' est bien dans votre prod_config.json
         stop_sequences = self.config_manager.get(
             "ai.generation_params.stop_sequences",
             ["User query:", "\n```json", "\n```", "---", "###", "```python"],
         )
 
+        # Garde‑fou : on force un format strict JSON
+        # (bilingue pour limiter l'ambiguïté)
+        json_header = (
+            "Réponds STRICTEMENT par UN SEUL objet JSON valide, sans texte, "
+            "sans balises Markdown. Si impossible, renvoie "
+            "{\"error\":\"invalid_output\",\"reason\":\"unable_to_comply\"}.\n\n"
+            "Respond STRICTLY with ONE valid JSON object, no prose, no markdown. "
+            "If you cannot comply, return "
+            "{\"error\":\"invalid_output\",\"reason\":\"unable_to_comply\"}.\n\n"
+        )
+        wrapped_prompt = f"{json_header}{prompt}"
+
         self.logger.debug(
-            f"AIDecision: Paramètres de génération AI chargés: max_tokens={current_max_tokens}, temp={temperature}, top_p={top_p}."
-        )  # Utilise self.logger
+            f"AIDecision: Paramètres génération -> max_tokens={current_max_tokens}, temp={temperature}, top_p={top_p}"
+        )
 
         try:
             response = self.model.create_completion(
-                prompt,
-                max_tokens=current_max_tokens,  # Utilise la valeur dynamique
-                temperature=temperature,  # Utilise la valeur dynamique
-                top_p=top_p,  # Utilise la valeur dynamique
-                stop=stop_sequences,  # Utilise la valeur dynamique
+                wrapped_prompt,
+                max_tokens=current_max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop_sequences,
             )
-            return response["choices"][0]["text"].strip()
+            text = (response.get("choices", [{}])[0].get("text") or "").strip()
+
+            if not text:
+                return json.dumps({"error": "empty_model_response"})
+
+            # 1) Si bloc ```json présent, on isole le contenu
+            if "```json" in text:
+                try:
+                    text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+                except Exception:
+                    # on laisse text tel quel si extraction échoue
+                    pass
+
+            # 2) Si ça ressemble à du JSON, on tente un parse pour normaliser
+            try:
+                # Détection rapide d'une structure JSON probable
+                looks_json = ("{" in text and "}" in text) or ("[" in text and "]" in text)
+                if looks_json:
+                    # tentative directe
+                    parsed = json.loads(text)
+                    # normalisation: on retourne toujours une chaîne JSON propre
+                    return json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                # 3) Sauvetage via regex JSON-like
+                try:
+                    m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+                    if m:
+                        parsed = json.loads(m.group(1))
+                        return json.dumps(parsed, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            # 4) Dernier recours: encapsuler la sortie non‑JSON dans un objet d'erreur
+            return json.dumps(
+                {"error": "model_returned_non_json", "raw_excerpt": text[:800]},
+                ensure_ascii=False
+            )
+
         except Exception as e:
             self.logger.error(
                 f"AIDecision: Erreur lors de la génération de la réponse AI brute avec Llama: {e}",
                 exc_info=True,
-            )  # Utilise self.logger
-            # Envoyer une alerte si la génération AI échoue (non critique, car peut être temporaire)
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    f"AI Génération Réponse Échec: {e}", "telegram_critical"
-                )
+            )
+            try:
+                if self.config_manager:
+                    self.config_manager.send_alert(
+                        message=f"AI Génération Réponse Échec: {e}",
+                        alert_type="telegram_critical",
+                    )
+            except Exception:
+                pass
             return json.dumps({"error": f"Failed to generate response: {e}"})
+
 
     def parse_response(self, raw_response: str) -> Dict[str, Any]:
         """
         Tente de parser une réponse JSON brute provenant du modèle AI.
-        Cette méthode gère les cas où le JSON est imbriqué dans des blocs de code Markdown
-        ou contient du texte supplémentaire, en essayant d'extraire et de valider le JSON.
-
-        Args:
-            raw_response (str): La chaîne de caractères brute reçue du modèle AI.
-
-        Returns:
-            Dict[str, Any]: Le dictionnaire Python parsé à partir du JSON.
-                            Inclut une clé 'error' si le parsing échoue.
+        Rend le parsing plus robuste : gère Markdown, texte parasite,
+        recherche d'accolades et fallback sûr si la sortie n'est pas JSON.
         """
-        self.logger.debug(
-            f"AIDecision: Tentative de parsing de la réponse brute AI. Extrait: {raw_response[:100]}..."
-        )  # Utilise self.logger
+        import json
+        import re
 
-        # Nettoyer la réponse brute pour isoler le JSON
+        self.logger.debug(
+            f"AIDecision: Tentative de parsing de la réponse brute AI. Extrait: {str(raw_response)[:120]}..."
+        )
+
+        if not raw_response or not isinstance(raw_response, str):
+            return {"error": "Réponse AI vide ou invalide", "raw_response": str(raw_response)}
+
+        # Normaliser et nettoyer
         json_str = raw_response.strip()
-        # Tenter de trouver le JSON à l'intérieur des blocs de code Markdown (```json...```)
+
+        # 1) Bloc Markdown ```json ... ```
         if "```json" in json_str:
             try:
-                # Extraire le contenu entre les balises ```json```
-                json_str = json_str.split("```json", 1)[1].split("```")[0].strip()
-            except IndexError:
-                # Si les balises sont mal formées, essayer de parser la chaîne brute
-                self.logger.warning(
-                    "AIDecision: Balises '```json' trouvées mais format invalide. Tentative de parsing de la chaîne entière."
-                )
+                json_str = json_str.split("```json", 1)[1].split("```", 1)[0].strip()
+            except Exception:
+                self.logger.warning("AIDecision: Bloc ```json mal formé, tentative fallback sur la chaîne brute.")
 
+        # 2) Tentative directe
         try:
-            # Tenter de parser la chaîne JSON
-            parsed_data = json.loads(json_str)
-            self.logger.debug("AIDecision: Parsing JSON réussi.")  # Utilise self.logger
-            return parsed_data
-        except json.JSONDecodeError as e:
-            self.logger.error(
-                f"AIDecision: Erreur de parsing JSON: {e}. Réponse brute: {raw_response[:200]}...",
-                exc_info=True,
-            )  # Utilise self.logger
-            # Si le parsing direct échoue, essayer de "sauver" le JSON en recherchant les accolades
-            try:
-                first_brace = json_str.find("{")
-                last_brace = json_str.rfind("}")
-                if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
-                    salvaged_json_str = json_str[first_brace : last_brace + 1]
-                    parsed_data = json.loads(salvaged_json_str)
-                    self.logger.warning(
-                        f"AIDecision: JSON récupéré avec succès à partir de la réponse brute. Récupéré: {salvaged_json_str[:200]}..."
-                    )  # Utilise self.logger
-                    return parsed_data
-            except Exception as salvage_e:
-                self.logger.error(
-                    f"AIDecision: Échec de la récupération du JSON: {salvage_e}",
-                    exc_info=True,
-                )  # Utilise self.logger
+            return json.loads(json_str)
+        except Exception:
+            pass
 
-            # Envoyer une alerte si le parsing JSON échoue de manière critique pour une décision
+        # 3) Sauvetage via recherche d'accolades { ... }
+        try:
+            first_brace = json_str.find("{")
+            last_brace = json_str.rfind("}")
+            if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+                candidate = json_str[first_brace:last_brace + 1]
+                return json.loads(candidate)
+        except Exception as salvage_e:
+            self.logger.debug(f"AIDecision: Sauvetage JSON échoué: {salvage_e}")
+
+        # 4) Sauvetage via regex JSON-like (par ex. liste de dicts)
+        try:
+            match = re.search(r"(\{.*\}|\[.*\])", json_str, re.DOTALL)
+            if match:
+                return json.loads(match.group(1))
+        except Exception:
+            pass
+
+        # 5) Fallback final : retour d'erreur explicite + extrait brut
+        self.logger.error(
+            f"AIDecision: Impossible de parser la réponse AI. Extrait brut: {json_str[:200]}..."
+        )
+        try:
             if self.config_manager:
                 self.config_manager.send_alert(
-                    f"AI: Échec parsing JSON de la réponse. {e}", "telegram_critical"
+                    message="AI: Échec parsing JSON réponse",
+                    alert_type="telegram_critical",
                 )
-            return {
-                "error": "Échec du parsing de la réponse AI en JSON",
-                "raw_response": raw_response,
-            }
-        except Exception as e:
-            self.logger.error(
-                f"AIDecision: Erreur inattendue dans parse_response: {e}. Réponse brute: {raw_response[:200]}...",
-                exc_info=True,
-            )  # Utilise self.logger
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    f"AI: Erreur inattendue parsing réponse: {e}", "telegram_critical"
-                )
-            return {
-                "error": "Erreur inattendue lors du parsing de la réponse",
-                "raw_response": raw_response,
-            }
-            # Ajouter cette méthode dans la classe AIDecision (ai_decision.py)
+        except Exception:
+            pass
+
+        return {
+            "error": "Échec du parsing de la réponse AI en JSON",
+            "raw_excerpt": json_str[:500],  # limite pour éviter fichiers trop gros
+        }
+
 
     def get_structured_analysis_from_prompt(self, prompt: str) -> Dict[str, Any]:
         """
