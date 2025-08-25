@@ -632,18 +632,14 @@ class TradeExecutor:
         market_context: dict,
     ) -> tuple[bool, str]:
         """
-        Pré-checks d’exécution (version BYPASS GATING).
-        ⚠️ Cette version supprime TOUT le "gating par mode" (strict/normal/balanced/aggressive/katana/lenient)
-        et ne conserve que les garde-fous essentiels pour éviter des ordres absurdes.
-
-        Garde-fous conservés :
+        Pré-checks d’exécution (version neutre, sans 'gating mode').
+        Ne conserve que les garde-fous essentiels pour éviter des ordres invalides.
+        Garde-fous :
         - action & symbole valides + whitelist
         - mapping broker + connexion MT5 + symbole MT5 valide
         - limite max de positions ouvertes (compte)
         - prix courant disponible
-        - cohérence SL vs stops_level broker (et cap SL scalping si activé)
-
-        Tout le reste des filtres de micro-phase / MTF / phase / ATR “bloquants” est supprimé.
+        - cohérence SL vs stops_level broker (et cap SL scalping si activé côté config)
         """
         # --- import DIAG (neutre si absent) ---
         try:
@@ -742,7 +738,7 @@ class TradeExecutor:
         if isinstance(current_positions, (list, tuple)) and len(current_positions) >= max_pos:
             return _reject(f"max_positions_reached:{len(current_positions)}/{max_pos}", sym=raw_symbol)
 
-        # 7) (Info) Spread points — NON BLOQUANT dans cette version
+        # 7) (Info) Spread points — NON BLOQUANT
         try:
             exec_policy = (active_config.get("execution_policy", {}) if isinstance(active_config, dict) else {})
             max_spread_points = exec_policy.get("max_spread_points")
@@ -751,27 +747,24 @@ class TradeExecutor:
         except Exception:
             pass
 
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # 8) BYPASS TOTAL du "GATING par mode" (strict/normal/balanced/aggressive/katana/lenient)
-        #    On note explicitement le bypass pour traçabilité.
-        _diag_note("gate_bypassed", {"reason": "demo/unleash_mode", "note": "all micro-phase gates disabled"}, raw_symbol)
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-        # 9) Prix courant disponible (garde-fou indispensable)
+        # 8) Prix courant disponible (garde-fou indispensable)
         price = self.mt5_connector.get_current_price(broker_symbol, action)
         if not price or price <= 0:
             return _reject("price_unavailable", sym=raw_symbol)
 
-        # 10) SL & stops_level broker (sécurité scalping minimale)
+        # 9) SL & stops_level broker (sécurité minimale)
         target_sl_pips = float(trade_decision.get("target_sl_pips", 0) or 0.0)
         is_scalping = "scalping" in str(trade_decision.get("strategy_type", "")).lower()
 
-        # Cap SL scalping optionnel
+        # Cap SL scalping optionnel (respecte le paramètre 'reject_if_sl_over_cap')
         sl_cap = float(self.config_manager.get("entry_rules.scalping.max_stop_pips_scalp", 0.0) or 0.0)
         reject_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
         if is_scalping and sl_cap > 0 and target_sl_pips > sl_cap and reject_over_cap:
-            return _reject(f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})",
-                        {"sl_pips": target_sl_pips, "cap": sl_cap}, raw_symbol)
+            return _reject(
+                f"sl_over_cap({target_sl_pips:.2f} > {sl_cap:.2f})",
+                {"sl_pips": target_sl_pips, "cap": sl_cap},
+                raw_symbol,
+            )
 
         # MT5 stops_level en points → pips
         try:
@@ -783,11 +776,15 @@ class TradeExecutor:
         stops_level_pips = stops_level_points / points_per_pip if points_per_pip > 0 else 0.0
 
         if is_scalping and target_sl_pips > 0 and stops_level_pips > target_sl_pips:
-            return _reject("stops_level_too_high_for_scalp",
-                        {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips}, raw_symbol)
+            return _reject(
+                "stops_level_too_high_for_scalp",
+                {"stops_level_pips": stops_level_pips, "sl_pips": target_sl_pips},
+                raw_symbol,
+            )
 
         # ✅ OK pour exécution
         return True, ""
+
 
 
 
