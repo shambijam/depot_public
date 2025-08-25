@@ -1687,41 +1687,46 @@ class DecisionPipeline:
         """
         CORE évalue directement les signaux et prend la décision finale.
 
-        Mode SCALPING KATANA :
-        - Pas de break M1 obligatoire.
-        - On valide si au moins un déclencheur est présent (break/BOS/FVG/OB) ou règle "2 sur 3".
-        - Qualité minimale : confiance, spread, ema_spread (+ align MTF optionnel).
+        ❌ GATING MODE SUPPRIMÉ (physiquement) :
+        - Plus aucune logique strict/normal/aggressive/katana.
+        - Critères d'acceptation *permissifs* pour le SCALPING :
+            • au moins 1 déclencheur directionnel (break M1 ou BOS confirmé)
+            OU proximité FVG/OB (avec marge douce) OU règle "2 sur 3".
+            • confiance minimale.
+        - Les contraintes spread/ema_spread/align MTF deviennent *diagnostiques* (soft),
+        n’empêchent pas l’entrée (en DEMO surtout), mais sont loggées.
+
+        Non-scalping : inchangé (confiance + phase).
         """
 
         self.logger.info(f"🔍 CORE analyse {len(signals)} assets avec paramètres {strategy_name}")
 
-        # ------- Détection des modes -------
         strat = str(strategy_name or "").lower()
         is_scalping = ("scalping" in strat)
-        gating_mode_cfg = str(self.config_manager.get("entry_rules.scalping.gating_mode", "normal")).lower()
-        is_katana = is_scalping and (gating_mode_cfg == "katana" or "katana" in strat)
 
-        # ------- Seuils généraux -------
+        # Seuils généraux
         min_confidence_default = float(config.get("min_confidence", 0.65))
 
-        # ------- Seuils SCALPING communs -------
-        require_align_default = bool(self.config_manager.get("entry_rules.scalping.require_mtf_align", True))
-        require_m1_break_default = bool(self.config_manager.get("entry_rules.scalping.require_m1_break", True))
-        max_spread_pts = float(self.config_manager.get("entry_rules.scalping.max_spread_points", 50))
-        min_m1_ema_spread = float(self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0))
-        min_confidence_scalp = float(self.config_manager.get("entry_rules.scalping.min_confidence", min_confidence_default))
+        # Seuils SCALPING (permissifs)
+        min_confidence_scalp = float(
+            self.config_manager.get("entry_rules.scalping.min_confidence", 0.55)
+        )
+        # version "katana" servait d’assouplissement : on garde une valeur basse par défaut
+        min_confidence_soft = float(
+            self.config_manager.get("entry_rules.scalping.katana_min_confidence", max(0.35, min_confidence_scalp * 0.8))
+        )
+
+        # Distances FVG / OB (proximité stricte + marge douce)
         fvg_max = float(self.config_manager.get("entry_rules.scalping.fvg_max_distance_pips", 2.0) or 2.0)
         ob_max  = float(self.config_manager.get("entry_rules.scalping.ob_max_distance_pips",  2.0) or 2.0)
-
-        # ------- Seuils KATANA spécifiques (relax) -------
-        require_align_katana = bool(self.config_manager.get("entry_rules.scalping.katana_require_mtf_align", False))
-        # confiance un peu plus souple en katana (sinon utiliser le même seuil)
-        min_confidence_katana = float(self.config_manager.get("entry_rules.scalping.katana_min_confidence",
-                                                            max(0.35, min_confidence_scalp * 0.8)))
-        # "proximité douce" optionnelle (léger coussin)
         soft_mult = float(self.config_manager.get("entry_rules.scalping.katana_soft_distance_mult", 1.25))
         fvg_soft = fvg_max * soft_mult
         ob_soft  = ob_max * soft_mult
+
+        # Paramètres "qualité" (soft only désormais)
+        max_spread_pts = float(self.config_manager.get("entry_rules.scalping.max_spread_points", 50))
+        min_m1_ema_spread = float(self.config_manager.get("entry_rules.scalping.min_m1_ema_spread", 0.0))
+        require_mtf_align_soft = bool(self.config_manager.get("entry_rules.scalping.require_mtf_align", False))
 
         best_asset, best_score, best_signals = None, -1.0, None
 
@@ -1729,7 +1734,7 @@ class DecisionPipeline:
             confidence = float(asset_signals.get("confidence_score", 0.0))
             phase = str(asset_signals.get("phase", ""))
 
-            # Score de classement (simple)
+            # Score de classement simple
             score = confidence
             if asset_signals.get("ob_detected", False):
                 score += 0.10
@@ -1738,7 +1743,7 @@ class DecisionPipeline:
             if asset_signals.get("bos_mss_detected", False):
                 score += 0.15
 
-            # === Comportement non-scalping : permissif comme avant ===
+            # === Comportement non-scalping : permissif (comme avant) ===
             if not is_scalping:
                 is_valid = False
                 if confidence >= min_confidence_default:
@@ -1754,11 +1759,11 @@ class DecisionPipeline:
                     best_asset, best_score, best_signals = asset, score, asset_signals
                 continue
 
-            # === Lecture MTF / micro-timing / marchés ===
+            # === SCALPING (gating supprimé) ===
+            # Lecture MTF / micro-timing / qualités (SOFT)
             mtf_align_val = asset_signals.get("mtf_ema_align", None)  # bool si dispo
             mtf_direction = str(asset_signals.get("mtf_direction", "none")).lower()
 
-            # spread en points
             spread_points = asset_signals.get("current_spread_points", asset_signals.get("spread", float("inf")))
             try:
                 spread_points = float(spread_points)
@@ -1779,10 +1784,10 @@ class DecisionPipeline:
             ob_dist  = float(ob.get("distance_pips")  or asset_signals.get("ob_distance_pips")  or 1e9)
             ob_valid = bool(ob.get("validated") or ob.get("valid") or asset_signals.get("ob_detected"))
 
-            fvg_ok_strict = (fvg_dist <= fvg_max)
-            ob_ok_strict  = (ob_valid and ob_dist <= ob_max)
+            fvg_ok_soft = (fvg_dist <= fvg_soft)
+            ob_ok_soft  = (ob_dist  <= ob_soft) and (ob_valid or ob_dist <= ob_max)  # accepte ultra-proximité
 
-            # Break M1 dans le sens
+            # Break M1 dans le sens MTF
             if mtf_direction == "up":
                 m1_break = m1_hh_break
             elif mtf_direction == "down":
@@ -1791,115 +1796,44 @@ class DecisionPipeline:
                 m1_break = False
 
             # “2 sur 3” : {break M1, BOS confirmé, (FVG proche OU OB proche)}
-            two_of_three = (int(bool(m1_break)) + int(bool(bos_ok)) + int(bool(fvg_ok_strict or ob_ok_strict))) >= 2
+            two_of_three = (int(bool(m1_break)) + int(bool(bos_ok)) + int(bool(fvg_ok_soft or ob_ok_soft))) >= 2
 
-            # Qualité commune
-            confidence_ok_scalp = confidence >= min_confidence_scalp
-            spread_ok     = spread_points <= max_spread_pts
-            ema_spread_ok = m1_ema_spread >= min_m1_ema_spread
+            # Seuil de confiance permissif
+            conf_ok = confidence >= min_confidence_soft
 
-            # --------------------------------
-            # MODE KATANA (relax)
-            # --------------------------------
-            if is_katana:
-                # Alignement MTF optionnel
-                align_ok = True
-                if require_align_katana:
-                    if isinstance(mtf_align_val, bool):
-                        align_ok = (mtf_align_val is True)
-                    else:
-                        align_ok = False
+            # ✅ Décision *sans gating* : déclencheur OU 2/3 + confiance
+            trigger_ok = (m1_break or bos_ok or fvg_ok_soft or ob_ok_soft or two_of_three)
+            is_valid = conf_ok and trigger_ok
 
-                # Déclencheurs katana : on autorise “proximité douce”
-                fvg_ok_katana = fvg_dist <= fvg_soft
-                ob_ok_katana  = (ob_valid and ob_dist <= ob_soft) or (ob_dist <= ob_max)  # très proche même non validé
-
-                trigger_ok = (m1_break or bos_ok or fvg_ok_katana or ob_ok_katana or two_of_three)
-                conf_ok = (confidence >= min_confidence_katana)
-
-                is_valid = conf_ok and spread_ok and ema_spread_ok and align_ok and trigger_ok
-
-                if not is_valid:
-                    # LOGS explicites
-                    if not conf_ok:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping/katana): confiance {confidence:.3f} < {min_confidence_katana:.3f}")
-                    if not spread_ok:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping/katana): spread {spread_points:.1f} > {max_spread_pts}")
-                    if not ema_spread_ok:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping/katana): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}")
-                    if require_align_katana and not align_ok:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping/katana): MTF non aligné (M5 & M15)")
-                    if not trigger_ok:
-                        self.logger.info(f"· {asset} → core_gate:gate_katana_failed")
-                    continue
-
-                self.logger.info(f"· {asset} → core_gate:gate_katana_ok")
-                self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping/katana)")
-                if score > best_score:
-                    best_asset, best_score, best_signals = asset, score, asset_signals
-                continue
-
-            # --------------------------------
-            # MODE SCALPING (normal/aggressive existants)
-            # --------------------------------
-            require_align = require_align_default
-            require_m1_break = require_m1_break_default
-            allow_alt_without_break = bool(self.config_manager.get("entry_rules.scalping.allow_alt_without_break", True))
-
-            # Alignement MTF si requis
-            align_ok = True
-            if require_align:
-                if isinstance(mtf_align_val, bool):
-                    align_ok = (mtf_align_val is True)
-                else:
-                    align_ok = False  # info absente → refuse si exigé
-
-            # Micro-timing (break demandé uniquement si exigé ET si pas d'alternatives autorisées)
-            m1_break_ok = True
-            if require_m1_break:
-                m1_break_ok = bool(m1_break)
-
-            alt_trigger_ok = (bos_ok and fvg_ok_strict) or ob_ok_strict
-            entry_gate_ok = (m1_break_ok if require_m1_break else True)
-            if (not entry_gate_ok) and allow_alt_without_break and alt_trigger_ok:
-                entry_gate_ok = True
-
-            confidence_ok = confidence_ok_scalp
-            is_valid = confidence_ok and spread_ok and ema_spread_ok and align_ok and entry_gate_ok
+            # SOFT: diagnostics (n’empêchent pas l’entrée)
+            if not conf_ok:
+                self.logger.info(f"ℹ️ [{asset}] Soft warn: confiance {confidence:.3f} < {min_confidence_soft:.3f}")
+            if spread_points > max_spread_pts:
+                self.logger.info(f"ℹ️ [{asset}] Soft warn: spread {spread_points:.1f} > {max_spread_pts} (toléré en DEMO)")
+            if m1_ema_spread < min_m1_ema_spread:
+                self.logger.info(f"ℹ️ [{asset}] Soft warn: m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}")
+            if require_mtf_align_soft:
+                if isinstance(mtf_align_val, bool) and not mtf_align_val:
+                    self.logger.info(f"ℹ️ [{asset}] Soft warn: MTF non aligné (M5 & M15)")
 
             if not is_valid:
-                if not confidence_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): confiance {confidence:.3f} < {min_confidence_scalp:.3f}")
-                if not spread_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): spread {spread_points:.1f} > {max_spread_pts}")
-                if not ema_spread_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): m1_ema_spread {m1_ema_spread:.5f} < {min_m1_ema_spread:.5f}")
-                if require_align and not align_ok:
-                    self.logger.info(f"❌ [{asset}] rejeté (scalping): MTF non aligné (M5 & M15)")
-                if require_m1_break and not entry_gate_ok:
-                    if allow_alt_without_break:
-                        self.logger.info(
-                            f"❌ [{asset}] rejeté (scalping): pas de break M1 dans le sens ({mtf_direction}) et "
-                            f"aucun déclencheur alternatif (BOS/FVG/OB) proche"
-                        )
-                    else:
-                        self.logger.info(f"❌ [{asset}] rejeté (scalping): break M1 exigé et absent ({mtf_direction})")
-                self.logger.info(f"· {asset} → core_gate:gate_normal_failed" if gating_mode_cfg == "normal" else
-                                f"· {asset} → core_gate:gate_aggressive_failed")
+                self.logger.info(
+                    f"❌ [{asset}] Rejeté (SCALPING sans gating) — conf_ok={conf_ok}, triggers: "
+                    f"break={m1_break}, bos={bos_ok}, fvg_soft={fvg_ok_soft}, ob_soft={ob_ok_soft}, 2/3={two_of_three}"
+                )
                 continue
 
-            self.logger.info(f"· {asset} → core_gate:gate_normal_ok" if gating_mode_cfg == "normal"
-                            else f"· {asset} → core_gate:gate_aggressive_ok")
-            self.logger.info(f"✅ [{asset}] Accepté par CORE (scalping)")
+            self.logger.info(f"✅ [{asset}] Accepté par CORE (SCALPING sans gating)")
             if score > best_score:
                 best_asset, best_score, best_signals = asset, score, asset_signals
 
         if not best_asset:
-            self.logger.info("❌ CORE: Aucun asset ne respecte les critères d'entrée")
+            self.logger.info("❌ CORE: Aucun asset ne respecte les critères (même sans gating)")
             return {}
 
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
         return self._core_build_trade_decision(best_asset, best_signals, config, context)
+
 
     def _core_build_trade_decision(
         self,
@@ -1911,23 +1845,20 @@ class DecisionPipeline:
         """
         CORE construit la décision finale de trade basée sur les signaux.
 
-        🔒 Version SANS fallback momentum.
-        - Direction priorisée par MTF si dispo, sinon phase (jamais momentum)
-        - Gating micro-phase contrôlé par la config:
-            * strict    : break M1 + retest obligatoires
-            * normal    : strict OU (BOS confirmé + FVG proche) OU (OB validé proche)
-            * aggressive: normal OU (break seul + spread & ATR OK)
-        - Spread: seuils lus depuis la config (pips OU points), pas de valeur codée en dur
-        - SL/TP dynamiques conservés (ATR/volatilité/spread) + garde-fous scalping
-        - decision_trace + gates cohérents avec pre_trade_checks
+        🚫 GATING SUPPRIMÉ PHYSIQUEMENT
+        - Plus de modes strict/normal/aggressive/katana ici.
+        - On détermine la direction via MTF (prioritaire) puis phase.
+        - Les contrôles ATR/Spread deviennent SOFT (diagnostic), pas bloquants.
+        - SL/TP dynamiques conservés.
         """
         from datetime import datetime, timezone
-        # DIAG local pour tracer les refus/acceptations côté CORE
+
+        # ---- DIAG (ne bloque rien) ----
         try:
             from core.diagnostics import get_tracker_from_context
             def _diag(reason: str, extra: dict | None = None):
                 try:
-                    get_tracker_from_context(context).note(asset, "core_gate", reason, extra or {})
+                    get_tracker_from_context(context).note(asset, "core", reason, extra or {})
                 except Exception:
                     pass
             def _diag_selected(rule: str, conf: float | None):
@@ -1936,12 +1867,10 @@ class DecisionPipeline:
                 except Exception:
                     pass
         except Exception:
-            def _diag(*a, **k):  # neutral fallback
-                pass
-            def _diag_selected(*a, **k):
-                pass
+            def _diag(*a, **k): pass
+            def _diag_selected(*a, **k): pass
 
-        # ---------- 0) Données de base ----------
+        # ---------- Données de base ----------
         phase = str(signals.get("phase", "") or "").lower()
         current_price = float(signals.get("close", 0) or 0)
         if current_price <= 0:
@@ -1951,7 +1880,7 @@ class DecisionPipeline:
 
         strategy_name = str(config.get("strategy_name", "")).lower() or "scalping"
 
-        # ---------- 1) Paramètres symboles / conversions ----------
+        # ---------- Symboles / conversions ----------
         point = float(signals.get("symbol_point_value") or 0.0)
         if point <= 0:
             point = float(self.config_manager.get("risk_management_settings.default_points_in_pip", 1e-5) or 1e-5)
@@ -1960,37 +1889,20 @@ class DecisionPipeline:
         pip_size = point * points_per_pip
 
         # Spread courant (points -> pips)
-        spread_points = float(signals.get("current_spread_points", signals.get("spread", 0)) or 0.0)
+        spread_points = float(signals.get("current_spread_points", signals.get("spread", 0.0)) or 0.0)
         try:
             spread_points = float(spread_points)
         except Exception:
             spread_points = 0.0
         spread_pips = max(0.0, spread_points / points_per_pip)
 
-        # ---------- 2) Seuils (spread/ATR/gating) depuis la config ----------
-        sr = self.config_manager.get("entry_rules.scalping", {}) or {}
-        # Spread: priorité au seuil en pips, sinon conversion du seuil en points, sinon exécution policy
-        if "max_spread_pips" in sr:
-            max_spread_pips_allowed = float(sr.get("max_spread_pips", 1.5) or 1.5)
-        else:
-            max_spread_points_cfg = sr.get("max_spread_points", self.config_manager.get("execution_policy.max_spread_points"))
-            max_spread_pips_allowed = float(max_spread_points_cfg) / points_per_pip if max_spread_points_cfg else 1.5
-
-        gating_mode = str(sr.get("gating_mode", "normal")).lower()   # 'strict' | 'normal' | 'aggressive'
-        min_atr_m1_pips = float(sr.get("min_atr_m1_pips", 0.8) or 0.0)
-        fvg_max_distance_pips = float(sr.get("fvg_max_distance_pips", 2.0) or 2.0)
-        ob_max_distance_pips  = float(sr.get("ob_max_distance_pips", 2.0) or 2.0)
-        mtf_soft_override = bool(sr.get("mtf_mismatch_soft_override", True))
-
-        # ---------- 3) Déterminer la direction (sans momentum) ----------
+        # ---------- Direction (MTF > phase) ----------
         action: Optional[str] = None
         mtf_dir = str(signals.get("mtf_direction", "none")).lower()
 
-        # a) priorité MTF si dispo
         if strategy_name == "scalping" and mtf_dir in ("up", "down"):
             action = "BUY" if mtf_dir == "up" else "SELL"
 
-        # b) sinon, phase directionnelle
         if action is None:
             if any(k in phase for k in ["bull", "up", "accumulation", "expansion", "trend"]):
                 action = "BUY"
@@ -2002,93 +1914,31 @@ class DecisionPipeline:
             _diag("no_direction", {"phase": phase, "mtf": mtf_dir})
             return {}
         action = action.upper()
-        if action not in ("BUY", "SELL"):
-            self.logger.warning(f"❌ Action invalide déterminée: {action}")
-            _diag("invalid_action_determined", {"action": action})
-            return {}
 
-        # ---------- 4) Gating micro-phase (non-bloquant mais strictement défini) ----------
-        m1_break  = bool(
-            signals.get("m1_break_in_direction")
-            or signals.get("break_m1_in_direction")
-            or signals.get("m1_break")
-            or signals.get("break_m1")
-            or False
-        )
-        m1_retest = bool(
-            signals.get("m1_retest_confirmation")
-            or signals.get("retest_m1_confirmation")
-            or signals.get("m1_retest")
-            or False
-        )
-        bos = signals.get("bos_mss_details") or {}
-        fvg = signals.get("fvg_details") or {}
-        ob  = signals.get("ob_details")  or {}
-
-        fvg_dist_pips = float(fvg.get("distance_pips") or 1e9)
-        ob_dist_pips  = float(ob.get("distance_pips") or 1e9)
-        bos_confirmed = bool(bos.get("confirmed") or bos.get("is_confirmed"))
-
-        # ATR M1 (prix -> pips)
+        # ---------- Métriques utiles (SOFT only) ----------
+        # ATR M1/M5 (prix → pips)
         atr_m1 = float(signals.get("atr_m1", 0.0) or 0.0)
+        atr_m5 = float(signals.get("atr_m5", 0.0) or 0.0)
         atr_m1_pips = (atr_m1 / pip_size) if pip_size > 0 else 0.0
+        atr_m5_pips = (atr_m5 / pip_size) if pip_size > 0 else 0.0
 
-        cond_strict  = (m1_break and m1_retest)
-        cond_bos_fvg = (bos_confirmed and fvg_dist_pips <= fvg_max_distance_pips)
-        cond_ob_near = (bool(ob.get("validated") or ob.get("valid")) and ob_dist_pips <= ob_max_distance_pips)
-        cond_aggr    = (m1_break and (spread_pips <= max_spread_pips_allowed) and (atr_m1_pips >= max(0.0, 0.8 * min_atr_m1_pips)))
+        # Conseils soft (logs) — rien n’est bloquant ici
+        atr_min_soft = float(self.config_manager.get("entry_rules.scalping.min_atr_m1_pips", 0.0) or 0.0)
+        max_spread_pips_soft = float(
+            self.config_manager.get("entry_rules.scalping.max_spread_pips",
+                                    (self.config_manager.get("entry_rules.scalping.max_spread_points", 50) or 50) / points_per_pip)
+            or 9999
+        )
+        if atr_min_soft > 0 and atr_m1_pips < atr_min_soft:
+            self.logger.info(f"ℹ️ {asset}: ATR M1 faible ({atr_m1_pips:.2f} < {atr_min_soft:.2f}) — toléré (DEMO).")
+            _diag("soft_atr_m1_low", {"atr_m1_pips": atr_m1_pips, "min": atr_min_soft})
+        if spread_pips > max_spread_pips_soft:
+            self.logger.info(f"ℹ️ {asset}: spread {spread_pips:.2f}p > {max_spread_pips_soft:.2f}p — toléré (DEMO).")
+            _diag("soft_spread_high", {"spread_pips": spread_pips, "max_soft": max_spread_pips_soft})
 
-        if   gating_mode == "strict":
-            gate_ok = cond_strict
-        elif gating_mode == "normal":
-            gate_ok = cond_strict or cond_bos_fvg or cond_ob_near
-        else:  # aggressive
-            gate_ok = cond_strict or cond_bos_fvg or cond_ob_near or cond_aggr
-
-        if not gate_ok:
-            self.logger.info(
-                f"⛔ {asset}: gate_{gating_mode}_failed "
-                f"(break={m1_break}, retest={m1_retest}, bos={bos_confirmed}, "
-                f"fvg_dist={fvg_dist_pips:.2f}, ob_dist={ob_dist_pips:.2f})"
-            )
-            _diag(f"gate_{gating_mode}_failed", {
-                "break": m1_break, "retest": m1_retest,
-                "bos": bos_confirmed, "fvg_dist_pips": fvg_dist_pips, "ob_dist_pips": ob_dist_pips
-            })
-            return {}
-
-        # ---------- 5) Alignement MTF souple ----------
-        if mtf_dir in ("up", "down"):
-            expected = "BUY" if mtf_dir == "up" else "SELL"
-            if expected != action:
-                if not mtf_soft_override:
-                    self.logger.info(f"⛔ {asset}: MTF mismatch (mtf={mtf_dir}, action={action})")
-                    _diag("mtf_mismatch", {"mtf": mtf_dir, "action": action})
-                    return {}
-                else:
-                    self.logger.info(f"⚠️ {asset}: MTF mismatch toléré (override micro activé).")
-
-        # ---------- 6) Garde-fous micro (ATR/Spread/SL cap) ----------
-        # 6.a ATR M1 minimum
-        atr_min = float(self.config_manager.get("entry_rules.scalping.min_atr_m1_pips", 0.0) or 0.0)
-        if atr_min > 0 and atr_m1_pips < atr_min:
-            self.logger.info(f"⛔ {asset}: ATR M1 trop faible ({atr_m1_pips:.2f} < {atr_min}).")
-            _diag("atr_m1_too_low", {"atr_m1_pips": atr_m1_pips, "min": atr_min})
-            return {}
-
-        # 6.b Spread maximum (pips)
-        if spread_pips > max_spread_pips_allowed:
-            self.logger.info(f"⛔ {asset}: spread {spread_pips:.2f}p > {max_spread_pips_allowed:.2f}p autorisé.")
-            _diag("spread_too_high", {"spread_pips": spread_pips, "max_allowed": max_spread_pips_allowed})
-            return {}
-
-        # ---------- 7) SL/TP dynamiques (ATR/vol/spread) ----------
+        # ---------- SL/TP dynamiques ----------
         base_sl_pips = float(config.get("stop_loss_pips", 20) or 20)
         base_tp_pips = float(config.get("take_profit_pips", 40) or 40)
-        magic_number = int(config.get("magic_number", 999_999))
-
-        atr_m5 = float(signals.get("atr_m5", 0.0) or 0.0)
-        atr_m5_pips = (atr_m5 / pip_size) if pip_size > 0 else 0.0
 
         # Volatilité %
         vol_pct = 0.0
@@ -2126,47 +1976,40 @@ class DecisionPipeline:
             tp_pips = base_tp_pips
             regime_tag = "normal_vol"
 
-        # Ajustements spread
-        tp_pips = max(1.0, tp_pips - spread_pips)       # protège R:R effectif
-        sl_pips = max(1.0, sl_pips + spread_pips * 0.5) # buffer anti-tap SL par spread
+        # Ajustements spread (préserve R:R effectif)
+        tp_pips = max(1.0, tp_pips - spread_pips)
+        sl_pips = max(1.0, sl_pips + spread_pips * 0.5)
 
-        # Cap SL micro-scalp
+        # Cap SL micro-scalp (SOFT: si rejet configuré, on tronque plutôt que refuser)
         sl_cap = float(self.config_manager.get("entry_rules.scalping.max_stop_pips_scalp", 0.0) or 0.0)
         reject_if_over_cap = bool(self.config_manager.get("entry_rules.scalping.reject_if_sl_over_cap", False))
         if sl_cap > 0 and sl_pips > sl_cap:
             if reject_if_over_cap:
-                self.logger.info(f"⛔ {asset}: SL calculé {sl_pips:.2f}p > cap {sl_cap:.2f}p.")
-                _diag("sl_over_cap", {"sl_pips": sl_pips, "cap": sl_cap})
-                return {}
+                self.logger.info(f"ℹ️ {asset}: SL calculé {sl_pips:.2f}p > cap {sl_cap:.2f}p — on tronque (DEMO).")
             sl_pips = sl_cap
 
-        # ---------- 8) Decision trace + construction ----------
+        # ---------- Decision trace (sans GATES) ----------
+        bos = signals.get("bos_mss_details") or {}
+        fvg = signals.get("fvg_details") or {}
+        ob  = signals.get("ob_details")  or {}
+
         decision_trace = {
             "phase": phase,
             "phase_m1": signals.get("phase_m1"),
             "phase_m5": signals.get("phase_m5"),
             "phase_m15": signals.get("phase_m15"),
-            "mtf_direction": signals.get("mtf_direction"),
-            "m1_break_in_direction": m1_break,
-            "m1_retest_confirmation": m1_retest,
+            "mtf_direction": mtf_dir,
+            "m1_break_in_direction": bool(signals.get("m1_last_hh_break") if mtf_dir == "up"
+                                        else signals.get("m1_last_ll_break")),
+            "m1_retest_confirmation": bool(signals.get("m1_retest_confirmation")),
             "bos_mss_details": bos,
             "fvg_details": fvg,
             "ob_details": ob,
-            "nearest_liquidity_level_details": signals.get("nearest_liquidity_level_details"),
             "atr_m1_pips": atr_m1_pips,
             "atr_m5_pips": atr_m5_pips,
             "spread_pips": spread_pips,
             "regime": regime_tag,
-            "used_momentum_fallback": False,  # 🔒 désactivé pour de bon
-        }
-        gates = {
-            "m1_break": m1_break,
-            "m1_retest": m1_retest,
-            "phase": phase,
-            "gate_mode": gating_mode,
-            "gate_passed": True,
-            "gate_alt_bos_fvg": cond_bos_fvg,
-            "gate_alt_ob": cond_ob_near,
+            "used_momentum_fallback": False,
         }
 
         timestamp = context.get("current_time_utc") or datetime.now(timezone.utc).isoformat()
@@ -2177,12 +2020,12 @@ class DecisionPipeline:
             "entry_price": current_price,
             "target_sl_pips": float(round(sl_pips, 3)),
             "target_tp_pips": float(round(tp_pips, 3)),
-            "rule_name": f"core_phase_scalp_{gating_mode}",
+            "rule_name": "core_phase_scalp_nogate",
             "confidence": float(signals.get("confidence_score", 0.0) or 0.0),
             "timestamp": timestamp,
             "magic_number": int(config.get("magic_number", 999_999)),
             "decision_trace": decision_trace,
-            "gates": gates,
+            # plus de "gates" ici
             "meta": {
                 "point": point,
                 "points_per_pip": points_per_pip,
@@ -2192,49 +2035,16 @@ class DecisionPipeline:
                 "atr_m5_pips": atr_m5_pips,
                 "volatility_pct": vol_pct,
                 "regime_tag": regime_tag,
-                "max_spread_pips_allowed": max_spread_pips_allowed,
+                "max_spread_pips_soft": max_spread_pips_soft,
             },
         }
 
         self.logger.info(
             f"✅ CORE {action} {asset} @ {current_price} | "
             f"SL={trade_decision['target_sl_pips']}p, TP={trade_decision['target_tp_pips']}p "
-            f"(gate={gating_mode}, spread={spread_pips:.2f}p≤{max_spread_pips_allowed:.2f}p, ATR_M5={atr_m5_pips:.2f}p)"
+            f"(NO-GATE, spread={spread_pips:.2f}p, ATR_M5={atr_m5_pips:.2f}p)"
         )
         _diag_selected(trade_decision.get("rule_name"), trade_decision.get("confidence"))
-        
-        # ==== ENRICHISSEMENT POUR pre_trade_checks ====
-        asset_signals   = asset_signals  # si ton param s'appelle autrement, adapte ici
-        digits          = int(asset_signals.get("digits", 5) or 5)
-        spread_pts_now  = float(asset_signals.get("current_spread_points", asset_signals.get("spread", 0.0)) or 0.0)
-        mtf_direction   = str(asset_signals.get("mtf_direction", "none")).lower()
-        phase           = str(asset_signals.get("phase", "")).lower()
-
-        def _points_to_pips(d, pts):
-            return float(pts) / (10.0 if d in (3, 5) else 1.0)
-
-        gates = {
-            "phase": phase,
-            "m1_break":  bool(asset_signals.get("m1_last_hh_break") if mtf_direction == "up" else asset_signals.get("m1_last_ll_break")),
-            "m1_retest": bool(asset_signals.get("m1_retest_confirmation")),
-        }
-
-        decision_trace = {
-            "phase": phase,
-            "mtf_direction": mtf_direction,
-            "m1_break_in_direction": gates["m1_break"],
-            "m1_retest_confirmation": gates["m1_retest"],
-            "bos_mss_details": asset_signals.get("bos_mss_details", {}) or {},
-            "fvg_details":     asset_signals.get("fvg_details",     {}) or {},
-            "ob_details":      asset_signals.get("ob_details",      {}) or {},
-            "atr_m1_pips":     float(asset_signals.get("atr_m1_pips", 0.0) or 0.0),
-            "spread_pips":     _points_to_pips(digits, spread_pts_now),
-            "used_momentum_fallback": False,
-        }
-
-        trade_decision["gates"] = gates
-        trade_decision["decision_trace"] = decision_trace
-        # ==== FIN ENRICHISSEMENT ====
 
         return trade_decision
 
