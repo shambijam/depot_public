@@ -1092,7 +1092,6 @@ class AIDecision:
 
         return audit_results
 
-
         
     def generate_daily_ai_reports(
         self,
