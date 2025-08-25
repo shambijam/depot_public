@@ -12,12 +12,12 @@
       "gating_mode": "katana",
       "fvg_max_distance_pips": 2.0,
       "ob_max_distance_pips": 2.0,
-      "min_atr_m1_pips": 0.3,
-      "hard_min_atr_m1_pips": 0.12,
+      "min_atr_m1_pips": 0.20,
+      "hard_min_atr_m1_pips": 0.05,
       "max_spread_pips": 3.0,
       "hard_max_spread_pips": 3.5,
       "ultra_near_pips": 0.6,
-      "max_stop_pips_scalp": 8.0,
+      "max_stop_pips_scalp": 15.0,
       "reject_if_sl_over_cap": false
     }
   },
@@ -157,10 +157,10 @@
           }
         },
         "entry_bias": {
-          "breakout_buy_min": 0.55,
-          "breakout_sell_min": 0.55,
-          "revert_buy_min": 0.55,
-          "revert_sell_min": 0.55
+          "breakout_buy_min": 0.50,
+          "breakout_sell_min": 0.50,
+          "revert_buy_min": 0.50,
+          "revert_sell_min": 0.50
         },
         "tp_sl_overrides": {
           "on_buy_breakout": {
@@ -230,14 +230,14 @@
       "atr_period": 14,
       "atr_multiplier": 2.0,
       "fallback_rr": 1.8,
-      "hard_max_points": 200
+      "hard_max_points": 400
     },
     "stop_loss": {
       "type": "atr",
       "atr_period": 14,
       "atr_multiplier": 1.2,
       "hard_min_points": 40,
-      "hard_max_points": 120
+      "hard_max_points": 200
     },
     "breakeven": {
       "enabled": true,
