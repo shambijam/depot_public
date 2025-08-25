@@ -12,13 +12,13 @@
       "gating_mode": "katana",
       "fvg_max_distance_pips": 2.0,
       "ob_max_distance_pips": 2.0,
-      "min_atr_m1_pips": 0.6,
+      "min_atr_m1_pips": 0.3,
       "hard_min_atr_m1_pips": 0.12,
-      "max_spread_pips": 2.0,
+      "max_spread_pips": 3.0,
       "hard_max_spread_pips": 3.5,
       "ultra_near_pips": 0.6,
       "max_stop_pips_scalp": 8.0,
-      "reject_if_sl_over_cap": true
+      "reject_if_sl_over_cap": false
     }
   },
   "execution_quality_filters": {
