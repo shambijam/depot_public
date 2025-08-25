@@ -2893,82 +2893,75 @@ class AIDecision:
 
         return adaptation_report
 
-    def feedback_on_result(
-        self, decision: Dict[str, Any], result: Dict[str, Any]
-    ) -> None:
+   # --- remplace ENTIEREMENT la méthode feedback_on_result ---
+
+    def feedback_on_result(self, decision: dict | None = None, result: dict | None = None) -> None:
         """
-        Incorpore le résultat d'un trade ou d'une suggestion AI (feedback) pour la traçabilité
-        et l'apprentissage futur du superviseur AI. Met à jour l'historique des suggestions
-        et journalise le feedback de manière sécurisée.
-
-        Args:
-            decision (Dict[str, Any]): La décision ou suggestion AI originale.
-            result (Dict[str, Any]): Le résultat de cette décision/suggestion (ex: statut d'exécution du trade, P&L).
+        Logger passif : enregistre un feedback d'exécution.
+        - N'influence aucune décision.
+        - Accepte (decision, result) ou un unique dict 'result' (back-compat).
+        - Écrit en JSONL avec fallback robuste (pas de CustomJSONEncoder requis).
         """
-        decision_summary = decision.get("summary", decision.get("trade_type", "N/A"))
-        result_status = result.get("status", "N/A")
-        self.logger.info(
-            f"AIDecision: Feedback reçu pour: '{decision_summary}' avec le résultat: '{result_status}'."
-        )
-
-        # Mettre à jour le statut dans l'historique des suggestions si l'ID est présent
-        suggestion_id = decision.get("id")
-        if suggestion_id:
-            found_suggestion = False
-            for entry in self.suggestion_history:
-                if entry.get("id") == suggestion_id:
-                    entry["status"] = result.get("execution_status", "unknown").lower()
-                    entry["feedback_result"] = result
-                    self.logger.info(
-                        f"AIDecision: Statut de la suggestion '{suggestion_id}' mis à jour à '{entry['status']}'."
-                    )
-                    found_suggestion = True
-                    break
-            if not found_suggestion:
-                self.logger.warning(
-                    f"AIDecision: Suggestion avec ID '{suggestion_id}' non trouvée dans l'historique pour le feedback. Historique pourrait être désynchronisé."
-                )
-
-        # Préparer l'entrée de log pour le journal d'audit de feedback AI
-        feedback_data = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "event_type": "ai_feedback",
-            "original_decision": decision,
-            "outcome": result,
-            "model_info": {"name": self.model_path, "mode": "local_llama"},
-        }
-
-        # Écrire dans le fichier de log de feedback de manière sécurisée (JSONL)
         try:
+            # Back-compat: si on l'appelle avec un seul dict (ex: l'ancien TradeExecutor)
+            if decision is not None and result is None:
+                result = decision
+                decision = {}
+
+            decision = decision or {}
+            result = result or {}
+
+            decision_summary = decision.get("summary", decision.get("trade_type", "N/A"))
+            result_status = result.get("execution_status", result.get("status", "N/A"))
+            self.logger.info(f"AIDecision[passive]: feedback '{decision_summary}' -> '{result_status}'")
+
+            # Met à jour l'historique si un id est fourni
+            suggestion_id = decision.get("id")
+            if suggestion_id:
+                for entry in self.suggestion_history:
+                    if entry.get("id") == suggestion_id:
+                        entry["status"] = str(result.get("execution_status", "unknown")).lower()
+                        entry["feedback_result"] = result
+                        break
+
+            feedback_data = {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "event_type": "ai_feedback",
+                "original_decision": decision,
+                "outcome": result,
+                "model_info": {"name": getattr(self, "model_path", "N/A"), "mode": "logger_passive"},
+            }
+
+            # Écriture robuste JSONL (plus de CustomJSONEncoder)
             log_dir = Path(self.log_dir)
             log_file_name = self.ai_supervisor_feedback_file
-
             full_log_path = log_dir / log_file_name
             os.makedirs(log_dir, exist_ok=True)
 
-            # Correction: Ajout du bloc 'with open' pour définir 'f'
-            with open(
-                full_log_path, "a", encoding="utf-8"
-            ) as f:  # Ajout du bloc with open
-                # CustomJSONEncoder est importé localement dans la fonction.
-                f.write(
-                    json.dumps(feedback_data, cls=self.config_manager.CustomJSONEncoder)
-                    + "\n"
-                )
-            self.logger.debug(
-                f"AIDecision: Log de feedback pour '{decision_summary}' sauvegardé vers '{full_log_path}'."
-            )
+            with open(full_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(feedback_data, default=str) + "\n")
+
+            self.logger.debug(f"AIDecision[passive]: feedback persisté → '{full_log_path}'")
+
         except Exception as e:
-            self.logger.error(
-                f"AIDecision: Échec de l'écriture du log de feedback vers '{full_log_path}': {e}",
-                exc_info=True,
-            )
-            if self.config_manager:
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    f"AI Feedback Log Échec: {e}",
-                    "telegram_critical",
-                )
+            # Soft-fail: on log l’erreur, sans remonter d’exception
+            self.logger.error(f"AIDecision[passive]: échec log feedback: {e}", exc_info=True)
+            # Appel compatible quelle que soit la signature de send_alert
+            try:
+                if hasattr(self.config_manager, "send_alert"):
+                    try:
+                        # (level, message, channel)
+                        self.config_manager.send_alert("CRITIQUE", f"AI Feedback Log Échec: {e}", "telegram_critical")
+                    except TypeError:
+                        # (message, channel) ou (message)
+                        try:
+                            self.config_manager.send_alert(f"AI Feedback Log Échec: {e}", "telegram_critical")
+                        except TypeError:
+                            self.config_manager.send_alert(f"AI Feedback Log Échec: {e}")
+            except Exception:
+                pass
+
+
 
     def adapt_strategy(self, feedback_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

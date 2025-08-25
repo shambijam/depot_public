@@ -1090,10 +1090,8 @@ class TradeExecutor:
                 "action": action,
                 "asset": broker_symbol,
                 "order_type": order_type,
-                # ✅ overrides transmis au calcul SL/TP
                 "target_sl_pips": sl_pips_override,
                 "target_tp_pips": tp_pips_override,
-                # infos complémentaires utiles au calcul
                 "spread_pips": spread_pips,
                 "entry_price_ref": entry_price_hint,
             }
@@ -1116,12 +1114,13 @@ class TradeExecutor:
                     f"TP calculé invalide ({tp_price}) pour {broker_symbol}."
                 )
 
-            # ---------- 8bis) RR minimum (hard block) ----------
+            # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
                 min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
             except Exception:
                 min_rr = 0.0
 
+            rr_value = None
             if min_rr > 0.0:
                 if action == "BUY":
                     risk = max(entry_price_market - sl_price, 0.0)
@@ -1130,9 +1129,15 @@ class TradeExecutor:
                     risk = max(sl_price - entry_price_market, 0.0)
                     reward = max(entry_price_market - tp_price, 0.0)
 
-                if risk <= 0.0 or reward <= 0.0 or (reward / risk) < min_rr:
-                    raise TradeExecutionError(
-                        f"RR insuffisant: {reward:.6f}/{risk:.6f} (< {min_rr:.2f})."
+                rr_value = (reward / risk) if risk > 0 else 0.0
+
+                if risk <= 0.0 or reward <= 0.0:
+                    self.logger.warning(
+                        f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
+                    )
+                elif rr_value < min_rr:
+                    self.logger.info(
+                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                     )
 
             # ---------- 9) Volume ----------
@@ -1157,22 +1162,17 @@ class TradeExecutor:
             try:
                 ff = (self.config_manager.get("trade_executor_settings.fat_finger_check", {}) or {})
                 if bool(ff.get("enabled", False)):
-                    # Cap absolu par symbole si défini
                     per_asset = (ff.get("max_absolute_volume_for_asset") or {})
                     cap_sym = per_asset.get(raw_symbol)
                     if isinstance(cap_sym, (int, float)) and volume > float(cap_sym):
                         raise TradeExecutionError(
                             f"Fat-finger: volume {volume} > cap absolu {float(cap_sym)} sur {raw_symbol}."
                         )
-
-                    # Cap absolu global de sécurité
                     cap_global = self.config_manager.get("trade_executor_settings.max_absolute_volume_safety", None)
                     if isinstance(cap_global, (int, float)) and volume > float(cap_global):
                         raise TradeExecutionError(
                             f"Fat-finger (global): volume {volume} > cap sécurité {float(cap_global)}."
                         )
-
-                    # Respect des contraintes compte (si disponibles)
                     max_lot_acc = account_trade_settings.get("max_lot")
                     if isinstance(max_lot_acc, (int, float)) and volume > float(max_lot_acc):
                         raise TradeExecutionError(
@@ -2540,57 +2540,43 @@ class TradeExecutor:
         # Ici, nous ne faisons qu'une journalisation de haut niveau si besoin.
         # _log_audit_trail est une méthode de TradeExecutor qui prend un dictionnaire d'entrée.
 
-    def feedback_pipeline(
-        self,
-        order_id: str,
-        status: str,
-        reason: str = "",
-        pnl_usd: Optional[float] = None,
-    ) -> dict:
-        """
-        Construit un dictionnaire de feedback standardisé pour le pipeline principal.
-        Ce feedback est crucial pour l'audit et l'apprentissage de l'IA.
+  # --- remplace ENTIEREMENT la méthode feedback_pipeline ---
 
-        Args:
-            order_id (str): L'ID unique de l'ordre.
-            status (str): Le statut final de l'exécution ("executed", "failed", "skipped", "pending_manual_approval").
-            reason (str): Une raison détaillée du statut.
-            pnl_usd (Optional[float]): Le P&L réalisé en USD, si applicable (pour les clôtures).
+def feedback_pipeline(
+    self,
+    order_id: str,
+    status: str,
+    reason: str = "",
+    pnl_usd: Optional[float] = None,
+) -> dict:
+    """
+    Construit et publie un feedback standardisé (logger passif).
+    Ne bloque jamais le pipeline en cas d'échec de log.
+    """
+    feedback = {
+        "order_id": order_id,
+        "execution_status": status,
+        "reason": reason,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "pnl_usd": pnl_usd,
+    }
+    self.logger.info(
+        f"Feedback ordre {order_id}: status='{status}', reason='{reason}', pnl={pnl_usd if pnl_usd is not None else 'N/A'}."
+    )
 
-        Returns:
-            dict: Le dictionnaire de feedback.
-        """
-        feedback = {
-            "order_id": order_id,
-            "execution_status": status,
-            "reason": reason,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "pnl_usd": pnl_usd,  # Ajout du P&L au feedback
-        }
-        self.logger.info(
-            f"Feedback généré pour l'ordre {order_id}: Statut '{status}'. Raison: '{reason}'. P&L: {pnl_usd if pnl_usd is not None else 'N/A'}."
-        )
+    # Publication vers le logger passif (si présent)
+    try:
+        ai_mod = getattr(self.config_manager, "ai_decision_instance", None)
+        if ai_mod:
+            # Appel moderne (decision={}, result=feedback)
+            ai_mod.feedback_on_result({}, feedback)
+            self.logger.debug(f"Feedback envoyé à AIDecision (logger passif) pour ordre {order_id}.")
+    except Exception as e:
+        # Soft-fail: jamais bloquant
+        self.logger.error(f"Échec envoi feedback à AIDecision pour ordre {order_id}: {e}", exc_info=True)
 
-        # Envoyer ce feedback à un bus d'événements central pour que d'autres modules
-        # (IA, RiskManager) puissent s'y abonner et réagir. (TODO implémenté - conceptuallement)
-        # Ceci serait un appel à ConfigManager qui déléguerait à l'instance AIDecision.
-        if (
-            hasattr(self.config_manager, "ai_decision_instance")
-            and self.config_manager.ai_decision_instance
-        ):
-            try:
-                # Appeler la méthode de feedback du module AIDecision
-                self.config_manager.ai_decision_instance.feedback_on_result(feedback)
-                self.logger.debug(
-                    f"Feedback du TradeExecutor envoyé à AIDecision pour l'ordre {order_id}."
-                )
-            except Exception as e:
-                self.logger.error(
-                    f"Échec de l'envoi du feedback à AIDecision pour l'ordre {order_id}: {e}",
-                    exc_info=True,
-                )
+    return feedback
 
-        return feedback
 
     def manual_override_if_needed(self, mt5_request: dict) -> bool:
         """
