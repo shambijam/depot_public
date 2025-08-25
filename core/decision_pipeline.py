@@ -89,6 +89,60 @@ class DecisionPipeline:
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
         # Autorise un dict par symbole, sinon valeur unique
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
+    
+    def _demo_unleash_override(self, asset_symbol: str, context: dict | None = None) -> tuple[bool | None, str]:
+        """
+        Unleash DEMO: si activé dans la config, on bypass le gate Katana en mode DEMO.
+        - Retourne (True, "demo_unleash") pour forcer l'entrée.
+        - Retourne (None, "") pour ne rien faire (continuer le gate normal).
+        Clés de config utilisées:
+        - debug.unleash.allow_all_entries_demo: bool (False par défaut)
+        - debug.unleash.max_spread_points: int | None (optionnel, None = aucune limite)
+        - debug.unleash.max_positions: int | None (optionnel, None = pas de limite)
+        """
+        try:
+            # 1) Flag principal
+            allow_unleash = bool(self.config_manager.get("debug.unleash.allow_all_entries_demo", False))
+            if not allow_unleash:
+                return (None, "")
+            # 2) Mode: uniquement en DEMO
+            mode = str(self.config_manager.get("mode_execution", "DEMO")).upper()
+            if mode != "DEMO":
+                return (None, "")
+
+            # 3) Garde-fous optionnels pour éviter des situations absurdes même en unleash
+            #    a) Spread max
+            try:
+                max_spread_pts = self.config_manager.get("debug.unleash.max_spread_points", None)
+            except Exception:
+                max_spread_pts = None
+            if max_spread_pts is not None:
+                try:
+                    last_spread = float(context.get("market_data", {}).get("spread_points", float("inf")))
+                except Exception:
+                    last_spread = float("inf")
+                if not (last_spread <= float(max_spread_pts)):
+                    return (None, "")
+
+            #    b) Limite positions ouvertes
+            try:
+                max_pos = self.config_manager.get("debug.unleash.max_positions", None)
+            except Exception:
+                max_pos = None
+            if max_pos is not None:
+                try:
+                    open_pos_count = int(context.get("account_state", {}).get("open_positions_count", 0))
+                except Exception:
+                    open_pos_count = 0
+                if open_pos_count >= int(max_pos):
+                    return (None, "")
+
+            # OK: bypass
+            return (True, "demo_unleash")
+        except Exception:
+            # En cas d’erreur, ne pas bloquer le flux normal — on laisse le gate standard décider.
+            return (None, "")
+
 
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
