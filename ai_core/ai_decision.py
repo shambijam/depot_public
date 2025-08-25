@@ -1362,10 +1362,12 @@ class AIDecision:
         except Exception:
             base_configs_dir = Path("config")
 
-        # priorité à l'attribut d'instance si déjà initialisé (ex: dans __init__)
+        # priorité à un attribut d'instance s'il est correctement défini (et non vide)
         ai_dir = None
         try:
-            ai_dir = Path(getattr(self, "ai_audit_reports_dir", "") or "")
+            ai_dir_attr = getattr(self, "ai_audit_reports_dir", None)
+            if ai_dir_attr:
+                ai_dir = Path(str(ai_dir_attr))
         except Exception:
             ai_dir = None
 
@@ -1374,7 +1376,7 @@ class AIDecision:
             try:
                 ai_dir_cfg = self.config_manager.get("paths.ai_audit", None)
                 if ai_dir_cfg:
-                    ai_dir = Path(ai_dir_cfg)
+                    ai_dir = Path(str(ai_dir_cfg))
             except Exception:
                 ai_dir = None
 
@@ -1386,16 +1388,25 @@ class AIDecision:
         ai_dir.mkdir(parents=True, exist_ok=True)
 
         # --------- 2) Nom de fichier horodaté ---------
-        period_safe = (period or "last_day").replace(" ", "_").replace("/", "-")
+        period_safe = (period or "last_day")
+        try:
+            period_safe = period_safe.replace(" ", "_").replace("/", "-")
+        except Exception:
+            period_safe = "last_day"
+
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         report_filename = f"ai_performance_audit_report_{period_safe}_{timestamp}.md"
         report_file_path = ai_dir / report_filename
 
         # --------- 3) Écriture atomique ---------
+        tmp_path = None
         try:
+            # NamedTemporaryFile avec delete=False pour compat Windows (rename après fermeture)
             with NamedTemporaryFile("w", delete=False, dir=str(ai_dir), encoding="utf-8") as tmp:
                 tmp.write(report_content if isinstance(report_content, str) else str(report_content))
                 tmp_path = Path(tmp.name)
+
+            # Remplacement atomique
             tmp_path.replace(report_file_path)
             self.logger.info(f"AIDecision: Rapport d'audit sauvegardé dans '{report_file_path}'.")
         except Exception as e:
@@ -1405,21 +1416,26 @@ class AIDecision:
             )
             # best-effort cleanup
             try:
-                if 'tmp_path' in locals() and tmp_path.exists():
+                if tmp_path and tmp_path.exists():
                     tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
+            # Alerte robuste (signature à 2 paramètres)
             try:
                 if self.config_manager:
                     self.config_manager.send_alert(
-                        "CRITIQUE",
-                        f"AI Audit Report Save Fail: {e}",
-                        "telegram_critical",
+                        message=f"AI Audit Report Save Fail: {e}",
+                        alert_type="telegram_critical",
                     )
-            except Exception:
-                pass
+            except TypeError:
+                # fallback positionnel si nécessaire
+                try:
+                    self.config_manager.send_alert(f"AI Audit Report Save Fail: {e}", "telegram_critical")
+                except Exception:
+                    pass
 
         return report_file_path
+
 
     def suggest_trading_improvements(
         self, logs: List[Dict[str, Any]], context: Dict[str, Any]

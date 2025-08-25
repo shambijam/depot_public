@@ -10,6 +10,7 @@ pour un contrôle structuré et auditable.
 
 import argparse
 import logging
+import json
 import sys
 import time
 from datetime import datetime
@@ -25,7 +26,6 @@ load_dotenv()
 try:
     from phase_observer.phase_observer import PhaseObserver
     from core.config_manager import ConfigManager
-
     importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor
     from ai_core.ai_decision import AIDecision
@@ -59,6 +59,7 @@ except ImportError as e:
 
 
 # === Helper: déclenchement des rapports au démarrage (IA quotidien & Mecano hebdo) ===
+
 def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager):
     """
     Déclenche au DÉMARRAGE :
@@ -67,20 +68,16 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     Persiste l'état dans <ai_audit>/.last_runs.json pour éviter les doublons.
     ⚠️ Ne dépend ni de MT5 ni du pipeline : sûr à appeler juste après les instanciations.
     """
-    import json
-    from pathlib import Path
-    from datetime import datetime
-
-    # ---- Résolution dossier ai_audit ----
+        # ---- Résolution dossier ai_audit ----
     try:
         base_cfg = config_manager.get("paths.configs", "config")
     except Exception:
         base_cfg = "config"
     try:
-        ai_audit_dir = config_manager.get("paths.ai_audit", None)
+        ai_audit_dir_cfg = config_manager.get("paths.ai_audit", None)
     except Exception:
-        ai_audit_dir = None
-    ai_audit_dir = Path(ai_audit_dir or (Path(base_cfg) / "ai_audit"))
+        ai_audit_dir_cfg = None
+    ai_audit_dir = Path(ai_audit_dir_cfg or (Path(base_cfg) / "ai_audit"))
     ai_audit_dir.mkdir(parents=True, exist_ok=True)
 
     state_path = ai_audit_dir / ".last_runs.json"
@@ -89,7 +86,9 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     state = {"last_daily_date": None, "last_weekly_date": None}
     try:
         if state_path.exists():
-            state = {**state, **json.loads(state_path.read_text(encoding="utf-8"))}
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state.update(loaded)
     except Exception:
         pass
 
@@ -122,7 +121,6 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
                         rec = json.loads(line)
                         ts = rec.get("timestamp")
                         if not ts:
-                            # Pas de timestamp : on garde pour l'IA (rare)
                             out.append(rec)
                             continue
                         ts_norm = str(ts).replace("Z", "+00:00")
@@ -139,7 +137,7 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
         return out
 
     # ---- DAILY IA ----
-    if state.get("last_daily_date") != today_str:
+    if ai_decision and state.get("last_daily_date") != today_str:
         try:
             logs_today = _collect_daily_logs()
             ai_result = ai_decision.audit_trading_performance(
@@ -164,7 +162,7 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
                 pass
 
     # ---- WEEKLY MECANO (Dimanche=6) ----
-    if weekday == 6 and state.get("last_weekly_date") != today_str:
+    if mecano and weekday == 6 and state.get("last_weekly_date") != today_str:
         try:
             weekly = mecano.build_weekly_report()
             mecano.export_report(weekly, format="json")

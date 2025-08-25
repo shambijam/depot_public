@@ -6,7 +6,6 @@ import json
 import csv
 import sys
 import pandas as pd
-from datetime import datetime, UTC
 import logging
 import traceback
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from pathlib import Path
 from core.config_manager import ConfigManager
 from core.ai_interface import AIInterface
 from tempfile import NamedTemporaryFile
+from datetime import datetime, UTC
 
 # Initialisation du Logger pour ce module
 logger = logging.getLogger(__name__)
@@ -437,7 +437,7 @@ class Mecano:
         - crée le répertoire cible si nécessaire.
         - écriture atomique (temp + replace) pour éviter les fichiers corrompus.
         """
-        
+      
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
         # Assure le répertoire de sortie
@@ -457,7 +457,10 @@ class Mecano:
         # Sanitize basique du format
         fmt = (format or "json").strip().lower()
         if fmt not in {"json", "md", "txt"}:
-            self.logger.warning(f"Format non supporté '{format}', fallback JSON.")
+            try:
+                self.logger.warning(f"Format non supporté '{format}', fallback JSON.")
+            except Exception:
+                pass
             fmt = "json"
 
         filename = f"{prefix}{ts}.{fmt}"
@@ -469,7 +472,7 @@ class Mecano:
             with NamedTemporaryFile("w", delete=False, dir=str(out_dir), encoding="utf-8") as tmp:
                 tmp_path = Path(tmp.name)
                 if fmt == "json":
-                    # Encoder custom si dispo
+                    # Encoder custom si dispo (fallback JSON std)
                     try:
                         CustomJSONEncoder = getattr(self.config_manager, "CustomJSONEncoder", None)
                     except Exception:
@@ -483,9 +486,9 @@ class Mecano:
                     )
                 elif fmt == "md":
                     # Rendu markdown simple
+                    payload = report if isinstance(report, dict) else {"payload": str(report)}
                     tmp.write(f"# Mecano Weekly Report\n\nGenerated at: {ts} UTC\n\n")
                     tmp.write("## Summary\n\n")
-                    payload = report if isinstance(report, dict) else {"payload": str(report)}
                     for k, v in (payload.get("summary") or {}).items():
                         tmp.write(f"- **{k}**: {v}\n")
                     tmp.write("\n## Details (JSON)\n\n```json\n")
@@ -499,21 +502,31 @@ class Mecano:
 
             # Remplacement atomique
             tmp_path.replace(filepath)
-            self.logger.info(f"Rapport exporté: '{filepath}'")
+            try:
+                self.logger.info(f"Rapport exporté: '{filepath}'")
+            except Exception:
+                pass
+
         except Exception as e:
             # Logging d'exception robuste
-            try:
-                if hasattr(self, "log_exception"):
-                    self.log_exception("export_report", e)
-                else:
-                    self.logger.error(f"export_report: échec export '{filepath}': {e}", exc_info=True)
-            finally:
-                # Nettoyage temp si nécessaire
+            if hasattr(self, "log_exception"):
                 try:
-                    if tmp_path and tmp_path.exists():
-                        tmp_path.unlink(missing_ok=True)
+                    self.log_exception("export_report", e)
                 except Exception:
                     pass
+            else:
+                try:
+                    self.logger.error(f"export_report: échec export '{filepath}': {e}", exc_info=True)
+                except Exception:
+                    pass
+        finally:
+            # Nettoyage temp si nécessaire (si le replace n'a pas eu lieu)
+            try:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
 
 
     def check_resource_alerts(self) -> None:
