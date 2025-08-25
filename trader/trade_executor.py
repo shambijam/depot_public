@@ -2981,6 +2981,10 @@ def run_trade_execution_pipeline(
     Pont unique entre la décision (DecisionPipeline) et l'exécution (TradeExecutor).
     Corrigé: on lit dans decision_package['final_decision'] au lieu des clés racine.
     Zéro tolérance aux champs manquants: on normalise et on valide avant d'appeler prepare_order.
+
+    Ajout (petite touche):
+    - Garde-fou "fat-finger" sur le volume: si volume > cap (par actif ou global),
+      on stoppe en "pending_manual_approval" avec un volume suggéré = cap.
     """
     import logging
 
@@ -3094,6 +3098,62 @@ def run_trade_execution_pipeline(
         "active_config": active_config,
     }
 
+    # ----------- 4bis) Garde-fou volume (fat-finger hard cap) -----------
+    try:
+        te_settings = (active_config or {}).get("trade_executor_settings", {}) or {}
+        ff = te_settings.get("fat_finger_check", {}) or {}
+        per_asset_caps = ff.get("max_absolute_volume_for_asset", {}) or {}
+        global_cap = float(te_settings.get("max_absolute_volume_safety", 10.0))
+        asset_cap = float(per_asset_caps.get(asset, global_cap))
+        hard_cap = min(asset_cap, global_cap)
+    except Exception:
+        # fallback ultra conservateur si config bancale
+        hard_cap = 10.0
+
+    vol = trade_decision.get("volume")
+    if vol is not None:
+        try:
+            volf = float(vol)
+        except Exception:
+            reason = f"Volume invalide (non numérique): {vol!r}"
+            logger.warning(reason)
+            feedback = trade_executor.feedback_pipeline(
+                order_id=final_decision.get("order_id", "N/A"),
+                status="failed",
+                reason=reason,
+            )
+            trade_executor._feedback_safe(trade_decision, feedback)
+            return {"status": "failed", "reason": reason}
+
+        if volf <= 0:
+            reason = "Volume invalide (<= 0)."
+            logger.warning(reason)
+            feedback = trade_executor.feedback_pipeline(
+                order_id=final_decision.get("order_id", "N/A"),
+                status="failed",
+                reason=reason,
+            )
+            trade_executor._feedback_safe(trade_decision, feedback)
+            return {"status": "failed", "reason": reason}
+
+        if volf > hard_cap:
+            reason = (
+                f"Volume demandé {volf:.2f} > cap sécurité {hard_cap:.2f} pour {asset} (fat-finger). "
+                "Passage en validation manuelle."
+            )
+            logger.warning(reason)
+            feedback = trade_executor.feedback_pipeline(
+                order_id=final_decision.get("order_id", "N/A"),
+                status="pending_manual_approval",
+                reason=reason,
+            )
+            trade_executor._feedback_safe(trade_decision, feedback)
+            return {
+                "status": "pending_manual_approval",
+                "reason": reason,
+                "suggested_volume": hard_cap,
+            }
+
     # ----------- 5) Pre-trade checks -----------
     ok, reason = trade_executor.pre_trade_checks(
         trade_decision, active_config, market_context
@@ -3125,26 +3185,8 @@ def run_trade_execution_pipeline(
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
 
-        # ----------- 7) Human-in-the-loop / dry-run -----------
-    # On ne tente l'override manuel QUE si:
-    #   - la méthode existe, ET
-    #   - la config l'autorise.
-    manual_ok = True
-    try:
-        te_settings = (trade_executor.config_manager.get("trade_executor_settings", {}) 
-                       if getattr(trade_executor, "config_manager", None) else {})
-        manual_enabled = bool(te_settings.get("manual_override_enabled", False))
-    except Exception:
-        manual_enabled = False
-
-    if manual_enabled and hasattr(trade_executor, "manual_override_if_needed"):
-        try:
-            manual_ok = bool(trade_executor.manual_override_if_needed(mt5_request))
-        except Exception as e:
-            logger.warning(f"Manual override a échoué, on continue en auto: {e}")
-            manual_ok = True  # on ne bloque pas le pipeline
-
-    if not manual_ok:
+    # ----------- 7) Human-in-the-loop / dry-run -----------
+    if not trade_executor.manual_override_if_needed(mt5_request):
         feedback = trade_executor.feedback_pipeline(
             order_id=final_decision.get("order_id", "N/A"),
             status="pending_manual_approval",
@@ -3156,4 +3198,8 @@ def run_trade_execution_pipeline(
     if is_dry_run:
         logger.info("[DRY RUN] Requête MT5 prête mais non envoyée.")
         return {"status": "ready", "mt5_request": mt5_request}
+
+    # ----------- 8) Exécution -----------
+    execution_result = trade_executor.execute_order(mt5_request)
+    return execution_result
 
