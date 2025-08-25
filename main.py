@@ -63,12 +63,13 @@ except ImportError as e:
 def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager):
     """
     Déclenche au DÉMARRAGE :
-      - Rapport IA quotidien (si pas encore fait aujourd'hui)
-      - Rapport Mecano hebdo le dimanche (si pas encore fait aujourd'hui)
+      - Rapport IA quotidien (si pas encore fait aujourd'hui ET si activé dans la conf)
+      - Rapport Mecano hebdo le dimanche (si pas encore fait aujourd'hui ET si activé dans la conf)
     Persiste l'état dans <ai_audit>/.last_runs.json pour éviter les doublons.
     ⚠️ Ne dépend ni de MT5 ni du pipeline : sûr à appeler juste après les instanciations.
     """
-        # ---- Résolution dossier ai_audit ----
+   
+    # ---- Résolution dossier ai_audit ----
     try:
         base_cfg = config_manager.get("paths.configs", "config")
     except Exception:
@@ -92,7 +93,17 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     except Exception:
         pass
 
-    # ---- Date/weekday (locale machine, ex: Europe/Paris) ----
+    # ---- Flags de configuration (interrupteurs) ----
+    # IA (daily) : on respecte ai.audit_mode.enabled et ai.audit_mode.daily_report_enabled
+    ai_global_enabled = bool(config_manager.get("ai.audit_mode.enabled", True))
+    ai_daily_enabled = bool(config_manager.get("ai.audit_mode.daily_report_enabled", True))
+    # Mecano (weekly) : compat deux chemins possibles
+    mecano_weekly_enabled = bool(
+        config_manager.get("mecano.weekly_report_enabled",
+                           config_manager.get("mecano.audit_mode.weekly_report_enabled", True))
+    )
+
+    # ---- Date/weekday (locale machine) ----
     now_local = datetime.now()
     today_str = now_local.strftime("%Y-%m-%d")
     weekday = now_local.weekday()  # Monday=0 ... Sunday=6
@@ -137,45 +148,57 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
         return out
 
     # ---- DAILY IA ----
-    if ai_decision and state.get("last_daily_date") != today_str:
-        try:
-            logs_today = _collect_daily_logs()
-            ai_result = ai_decision.audit_trading_performance(
-                logs=logs_today, period="last_day", current_context=None
-            )
-            # Marquer comme fait seulement si succès IA
-            if isinstance(ai_result, dict) and "error" not in ai_result:
-                state["last_daily_date"] = today_str
-                try:
-                    ai_decision.logger.info("[Reports] Daily IA report generated on start.")
-                except Exception:
-                    pass
-            else:
-                try:
-                    ai_decision.logger.warning("[Reports] Daily IA report FAILED on start.")
-                except Exception:
-                    pass
-        except Exception as e:
+    if ai_decision:
+        if not ai_global_enabled or not ai_daily_enabled:
             try:
-                ai_decision.logger.error(f"[Reports] Daily IA report exception: {e}", exc_info=True)
+                ai_decision.logger.info("[Reports] Daily IA report disabled by config (ai.audit_mode.daily_report_enabled=false or ai.audit_mode.enabled=false).")
             except Exception:
                 pass
+        elif state.get("last_daily_date") != today_str:
+            try:
+                logs_today = _collect_daily_logs()
+                ai_result = ai_decision.audit_trading_performance(
+                    logs=logs_today, period="last_day", current_context=None
+                )
+                # Marquer comme fait seulement si succès IA
+                if isinstance(ai_result, dict) and "error" not in ai_result:
+                    state["last_daily_date"] = today_str
+                    try:
+                        ai_decision.logger.info("[Reports] Daily IA report generated on start.")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        ai_decision.logger.warning("[Reports] Daily IA report FAILED on start.")
+                    except Exception:
+                        pass
+            except Exception as e:
+                try:
+                    ai_decision.logger.error(f"[Reports] Daily IA report exception: {e}", exc_info=True)
+                except Exception:
+                    pass
 
     # ---- WEEKLY MECANO (Dimanche=6) ----
-    if mecano and weekday == 6 and state.get("last_weekly_date") != today_str:
-        try:
-            weekly = mecano.build_weekly_report()
-            mecano.export_report(weekly, format="json")
-            state["last_weekly_date"] = today_str
+    if mecano and weekday == 6:
+        if not mecano_weekly_enabled:
             try:
-                mecano.logger.info("[Reports] Weekly Mecano report generated on Sunday start.")
+                mecano.logger.info("[Reports] Weekly Mecano report disabled by config (mecano.weekly_report_enabled=false).")
             except Exception:
                 pass
-        except Exception as e:
+        elif state.get("last_weekly_date") != today_str:
             try:
-                mecano.logger.error(f"[Reports] Weekly Mecano report exception: {e}", exc_info=True)
-            except Exception:
-                pass
+                weekly = mecano.build_weekly_report()
+                mecano.export_report(weekly, format="json")
+                state["last_weekly_date"] = today_str
+                try:
+                    mecano.logger.info("[Reports] Weekly Mecano report generated on Sunday start.")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    mecano.logger.error(f"[Reports] Weekly Mecano report exception: {e}", exc_info=True)
+                except Exception:
+                    pass
 
     # ---- Persist state (atomique simple) ----
     try:
@@ -184,6 +207,7 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
         tmp.replace(state_path)
     except Exception:
         pass
+
 
 
 def verify_environment_and_config(
