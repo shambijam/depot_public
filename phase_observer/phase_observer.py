@@ -2832,6 +2832,137 @@ class PhaseObserver:
                 pass
 
         return min(max_confidence, max(0.0, score))
+    
+        # phase_observer.py (dans class PhaseObserver)
+    def detect_micro_phase_m1(self, df_m1, params=None) -> dict:
+        """
+        Détecteur *complémentaire* de micro‑phase sur M1 (zéro gating).
+        Utilise un mini-window pour repérer une compression + petite impulsion.
+        Retourne un paquet informatif et des suggestions TPSL serrées.
+
+        Inputs:
+            df_m1: DataFrame M1 nettoyé avec colonnes ['time','open','high','low','close'] (et idéalement 'spread_points' si dispo)
+            params: dict optionnel (seuils) venant de la config
+
+        Output:
+            {
+            "micro_phase": bool,
+            "quality": float [0..1],
+            "direction": "BUY"/"SELL"/"NEUTRAL",
+            "confidence_boost": float,
+            "sl_pips_suggestion": float,
+            "tp_pips_suggestion": float,
+            "diagnostics": {...}
+            }
+        """
+        try:
+            if df_m1 is None or len(df_m1) < 60:
+                return {
+                    "micro_phase": False, "quality": 0.0, "direction": "NEUTRAL",
+                    "confidence_boost": 0.0, "sl_pips_suggestion": None, "tp_pips_suggestion": None,
+                    "diagnostics": {"reason": "not_enough_bars"}
+                }
+
+            p = (params or {})
+            # fenêtres courtes par défaut (micro)
+            w_core   = int(p.get("window_core", 20))       # cœur de range
+            w_env    = int(p.get("window_env", 60))        # environnement pour normaliser
+            k_range  = float(p.get("max_range_pips", 8.0)) # range max pour compter "micro"
+            k_imp    = float(p.get("min_impulse_pips", 3.0)) # impulsion min post-compression
+            max_spread_p = float(p.get("max_spread_pips", 2.0))
+            boost    = float(p.get("confidence_boost", 0.08))
+            tp_sl    = float(p.get("tp_over_sl", 1.2))     # tp = 1.2 * sl
+            sl_floor = float(p.get("sl_min_pips", 5.0))
+            sl_cap   = float(p.get("sl_max_pips", 10.0))
+
+            # point/pip heuristique si pas de métadonnées (FX 3/5 digits)
+            last = df_m1.iloc[-1]
+            # Essaie d’estimer la taille du "pip" depuis les colonnes
+            # Hypothèse simple: si prix > 10 -> pips = 0.01 (JPY), sinon 0.0001 (majors)
+            price = float(last["close"])
+            pip_size = 0.01 if price > 10 else 0.0001
+
+            # Spread (si dispo)
+            try:
+                spread_pips = float(df_m1["spread_points"].iloc[-1]) / 10.0
+            except Exception:
+                spread_pips = 0.0
+
+            # Range cœur et environnement
+            core = df_m1.tail(w_core)
+            env  = df_m1.tail(w_env)
+
+            core_high = float(core["high"].max())
+            core_low  = float(core["low"].min())
+            core_range_price = core_high - core_low
+            core_range_pips  = core_range_price / pip_size
+
+            env_high = float(env["high"].max())
+            env_low  = float(env["low"].min())
+            env_range_pips = (env_high - env_low) / pip_size if (env_high > env_low) else core_range_pips
+
+            # Compression: range core petit vs seuil ET petit vs env
+            compressed = (core_range_pips <= k_range) and (core_range_pips <= 0.35 * env_range_pips)
+
+            # Impulsion récente (dernières 3 barres)
+            recent = df_m1.tail(3)
+            recent_move_up   = (recent["close"].iloc[-1] - recent["open"].iloc[0]) / pip_size
+            recent_move_abs  = abs(recent_move_up)
+            impulse_ok = recent_move_abs >= k_imp
+
+            # Direction si impulsion
+            direction = "NEUTRAL"
+            if impulse_ok:
+                direction = "BUY" if recent_move_up > 0 else "SELL"
+
+            # Spread filtre *non bloquant* (juste baisse la qualité)
+            spread_penalty = 0.0
+            if spread_pips > max_spread_p:
+                # qualité réduite mais jamais 0 pour ne pas bloquer
+                spread_penalty = min(0.4, (spread_pips - max_spread_p) * 0.1)
+
+            # Qualité
+            quality = 0.0
+            if compressed and impulse_ok:
+                # plus le range est petit, mieux c’est; plus l’impulsion est forte, mieux c’est
+                q_range = max(0.0, 1.0 - (core_range_pips / max(k_range, 1e-6)))
+                q_imp   = max(0.0, min(1.0, recent_move_abs / (k_imp * 2.0)))
+                quality = 0.6 * q_range + 0.4 * q_imp
+                quality = max(0.0, min(1.0, quality - spread_penalty))
+
+            micro = bool(quality >= 0.35)  # seuil léger pour "détection"
+            conf_boost = boost if micro else 0.0
+
+            # Suggestion SL/TP (très serrés, bornés)
+            # base SL = fraction du range cœur + buffer du spread
+            base_sl = max(sl_floor, min(sl_cap, 0.5 * core_range_pips + 1.0 * spread_pips))
+            sl_pips = float(base_sl)
+            tp_pips = float(max(sl_floor, min(sl_cap * tp_sl, sl_pips * tp_sl)))
+
+            return {
+                "micro_phase": micro,
+                "quality": round(quality, 3),
+                "direction": direction,
+                "confidence_boost": round(conf_boost, 3),
+                "sl_pips_suggestion": round(sl_pips, 2),
+                "tp_pips_suggestion": round(tp_pips, 2),
+                "diagnostics": {
+                    "core_range_pips": round(core_range_pips, 2),
+                    "env_range_pips": round(env_range_pips, 2),
+                    "recent_move_pips": round(recent_move_abs, 2),
+                    "spread_pips": round(spread_pips, 2),
+                    "compressed": bool(compressed),
+                    "impulse_ok": bool(impulse_ok)
+                }
+            }
+        except Exception as e:
+            # jamais bloquant
+            return {
+                "micro_phase": False, "quality": 0.0, "direction": "NEUTRAL",
+                "confidence_boost": 0.0, "sl_pips_suggestion": None, "tp_pips_suggestion": None,
+                "diagnostics": {"error": str(e)}
+            }
+
 
     def analyze(
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None

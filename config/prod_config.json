@@ -275,6 +275,22 @@
       "max_atr_multiple": 1.8
     }
   },
+  "features": {
+    "micro_phase": {
+      "enabled": true,
+      "params": {
+        "window_core": 20,
+        "window_env": 60,
+        "max_range_pips": 8.0,
+        "min_impulse_pips": 3.0,
+        "max_spread_pips": 2.0,
+        "confidence_boost": 0.08,
+        "tp_over_sl": 1.2,
+        "sl_min_pips": 5.0,
+        "sl_max_pips": 10.0
+      }
+    }
+  },
   "entry_rules": {
     "scalping": {
       "require_mtf_align": true,
