@@ -279,7 +279,7 @@
     "scalping": {
       "require_mtf_align": true,
       "require_m1_break": true,
-      "gating_mode": "aggressive",
+      "gating_mode": "off",
       "fvg_max_distance_pips": 3.5,
       "ob_max_distance_pips": 3.0,
       "min_atr_m1_pips": 0.3,
