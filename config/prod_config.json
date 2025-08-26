@@ -326,7 +326,7 @@
       "require_m1_break": true,
       "fvg_max_distance_pips": 3.5,
       "ob_max_distance_pips": 3.0,
-      "min_atr_m1_pips": 0.3,
+      "min_atr_m1_pips": 0.4,
       "max_spread_pips": 3.0,
       "max_stop_pips_scalp": 6.0,
       "reject_if_sl_over_cap": false,
@@ -571,14 +571,14 @@
     "blacklist_duration_minutes": 60
   },
   "decision_engine": {
-    "min_decision_score": 0.62,
+    "min_decision_score": 0.70,
     "katana": {
       "bollinger_overrides": {
         "entry_bias": {
           "breakout_buy_min": 0.68,
           "breakout_sell_min": 0.68,
           "revert_buy_min": 0.70,
-          "revert_sell_min": 0.70
+          "revert_sell_min": 0.80
         },
         "tp_sl_overrides": {
           "on_buy_breakout": {
