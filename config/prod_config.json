@@ -553,7 +553,7 @@
     "market_phases_enabled": true,
     "min_liquidity_threshold": 0,
     "closed_market_check_bars": 15,
-    "trading_start_hour_utc": 7,
+    "trading_start_hour_utc": 5,
     "trading_end_hour_utc": 22,
     "allowed_weekdays": [
       0,
