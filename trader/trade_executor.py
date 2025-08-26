@@ -1623,13 +1623,14 @@ class TradeExecutor:
     ) -> float:
         """
         Sizing par risque $ (compat Katana : SL très serrés) :
-        - essaie mt5.order_calc_profit (précis)
+        - essaie mt5.order_calc_profit (retourne un float 'profit' dans l'API MT5 Python) -> précis
         - sinon tick_value/tick_size, sinon heuristique pip-value
         - clamps symbole/compte/stratégie (+ caps volume uniquement si activés)
-        - contrôle de marge (order_calc_margin) pour éviter 10019
+        - contrôle de marge (order_calc_margin retourne un float 'margin') pour éviter 10019
         - plancher de risque par lot pour éviter un sur-sizing quand SL est microscopique
         """
-        
+        import math
+
         # --- Action ---
         action = str(trade_decision.get("action", "")).upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
@@ -1667,8 +1668,11 @@ class TradeExecutor:
         if mt5_mod:
             try:
                 order_type = getattr(mt5_mod, "ORDER_TYPE_BUY", 0) if action == "BUY" else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
-                _ret, profit = mt5_mod.order_calc_profit(order_type, symbol_info.name, 1.0, entry_price, sl_price)
+                # API python MT5 retourne directement un float 'profit'
+                profit = mt5_mod.order_calc_profit(order_type, symbol_info.name, 1.0, entry_price, sl_price)
                 per_lot_loss_usd = abs(float(profit))
+                if not math.isfinite(per_lot_loss_usd) or per_lot_loss_usd <= 0:
+                    per_lot_loss_usd = None
             except Exception as e:
                 self.logger.warning(f"mt5.order_calc_profit indisponible: {e}. Fallback interne.")
                 per_lot_loss_usd = None
@@ -1728,7 +1732,6 @@ class TradeExecutor:
             max_lot_account = min(max_lot_account, float(strat_max_lot))
 
         # --- Caps volume globaux : seulement si explicitement activés ---
-        #   -> soit fat_finger_check.enabled, soit un flag dédié volume_safety_enabled
         try:
             tes = (self.config_manager.get("trade_executor_settings", {}) or {})
             ff_cfg = (tes.get("fat_finger_check", {}) or {})
@@ -1775,14 +1778,15 @@ class TradeExecutor:
         if volume <= 0:
             raise TradeExecutionError(f"Volume calculé invalide ({volume}).")
 
-        # --- Contrôle de marge (si supporté) ---
+        # --- Contrôle de marge (API Python MT5 renvoie un float 'margin') ---
         try:
             if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
                 order_type = getattr(mt5_mod, "ORDER_TYPE_BUY", 0) if action == "BUY" else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
-                _ret, margin_required = mt5_mod.order_calc_margin(order_type, symbol_info.name, volume, entry_price)
+                margin_required = mt5_mod.order_calc_margin(order_type, symbol_info.name, volume, entry_price)
                 free_margin = acct_info.get("margin_free")
-                if _ret and free_margin is not None and margin_required is not None and margin_required > free_margin:
-                    ratio = max(free_margin / margin_required, 0.0)
+                if (margin_required is not None and free_margin is not None
+                    and math.isfinite(float(margin_required)) and float(margin_required) > float(free_margin)):
+                    ratio = max(float(free_margin) / float(margin_required), 0.0)
                     reduced = max(min_lot_account, vol_min_sym, ratio * volume)
                     steps = math.floor(reduced / effective_step)
                     reduced = round(steps * effective_step, 8)
@@ -1804,10 +1808,11 @@ class TradeExecutor:
                 f"Risque réel {actual_risk_dollars:.2f}$ > max {max_dollar_risk:.2f}$ (tol {tol:.2f})."
             )
 
+        # Log de diagnostics + contraintes symbole
         self.logger.info(
             f"Sizing {symbol_info.name}: equity={equity:.2f}, risk%={risk_pct:.2f}, "
             f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.4f} -> vol={volume:.4f} "
-            f"(min={min_lot_account}, step={effective_step}, max={max_lot_account}; "
+            f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
             f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym})."
         )
         return float(volume)
