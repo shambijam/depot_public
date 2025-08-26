@@ -908,6 +908,7 @@ class TradeExecutor:
         Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
         avant toute requête MT5.
         """
+        import math
         self.logger.info("Préparation de l'ordre MT5...")
 
         # --- Raccourcis locaux ---
@@ -945,10 +946,12 @@ class TradeExecutor:
             if not isinstance(vol, (int, float)) or vol <= 0:
                 return 0.0
 
+            # clamp [vmin, vmax]
             vol = max(vmin, min(vmax, float(vol)))
+
+            # quantification au step -> FLOOR (évite les dépassements et colle au sizing risque)
             if vstep and vstep > 0:
-                # arrondi vers le multiple de step le plus proche au-dessus du min
-                steps = max(0, round((vol - vmin) / vstep))
+                steps = math.floor((vol - vmin) / vstep)
                 vol = vmin + steps * vstep
                 # re-clamp au cas où l'arrondi dépasserait vmax à 1 ulp près
                 if vol > vmax:
@@ -1059,6 +1062,17 @@ class TradeExecutor:
                     f"Symbole MT5 invalide ou introuvable ({broker_symbol}). "
                     f"Vérifie la correspondance broker."
                 )
+
+            # log des contraintes volume broker pour diagnostiquer les 0.15
+            try:
+                self.logger.info(
+                    f"[VOLUME] constraints broker {broker_symbol}: "
+                    f"min={getattr(symbol_info,'volume_min',None)}, "
+                    f"step={getattr(symbol_info,'volume_step',None)}, "
+                    f"max={getattr(symbol_info,'volume_max',None)}"
+                )
+            except Exception:
+                pass
 
             # ---------- 6bis) Spread guard (en pips) ----------
             try:
@@ -1200,9 +1214,12 @@ class TradeExecutor:
             # ---------- 9a) Normalisation par contraintes symbole ----------
             vol_before_norm = volume_final
             volume_final = _normalize_volume(symbol_info, volume_final)
-            self.logger.info(f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
-                            f"(min={getattr(symbol_info,'volume_min',None)}, step={getattr(symbol_info,'volume_step',None)}, max={getattr(symbol_info,'volume_max',None)})")
-
+            self.logger.info(
+                f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
+                f"(min={getattr(symbol_info,'volume_min',None)}, "
+                f"step={getattr(symbol_info,'volume_step',None)}, "
+                f"max={getattr(symbol_info,'volume_max',None)})"
+            )
             if volume_final <= 0:
                 raise TradeExecutionError(
                     f"Volume final invalide après normalisation ({volume_final})."
@@ -1213,6 +1230,7 @@ class TradeExecutor:
                 tes = (self.config_manager.get("trade_executor_settings", {}) or {})
                 ff = (tes.get("fat_finger_check", {}) or {})
                 ff_enabled = bool(ff.get("enabled", False))
+                vol_safety_enabled = bool(tes.get("volume_safety_enabled", False))
 
                 if ff_enabled:
                     per_asset = (ff.get("max_absolute_volume_for_asset") or {})
@@ -1221,18 +1239,23 @@ class TradeExecutor:
                         raise TradeExecutionError(
                             f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
                         )
-                    cap_global = tes.get("max_absolute_volume_safety", None)
-                    if isinstance(cap_global, (int, float)) and volume_final > float(cap_global):
-                        raise TradeExecutionError(
-                            f"Fat-finger (global): volume {volume_final} > cap sécurité {float(cap_global)}."
-                        )
+                # Cap global uniquement si safety explicitement activé
+                cap_global = tes.get("max_absolute_volume_safety", None)
+                if vol_safety_enabled and isinstance(cap_global, (int, float)) and volume_final > float(cap_global):
+                    raise TradeExecutionError(
+                        f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}."
+                    )
 
                 # Cap par compte (optionnel) dans market_context.active_broker_account.trade_settings.max_lot
                 account_trade_settings = market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
-                acc_max_lot = account_trade_settings.get("max_lot")
-                if isinstance(acc_max_lot, (int, float)) and volume_final > float(acc_max_lot):
+                acc_min = account_trade_settings.get("min_lot")
+                acc_step = account_trade_settings.get("lot_step")
+                acc_max = account_trade_settings.get("max_lot")
+                self.logger.info(f"[VOLUME] constraints compte: min={acc_min}, step={acc_step}, max={acc_max}")
+
+                if isinstance(acc_max, (int, float)) and volume_final > float(acc_max):
                     raise TradeExecutionError(
-                        f"Volume {volume_final} > max lot compte {float(acc_max_lot)}."
+                        f"Volume {volume_final} > max lot compte {float(acc_max)}."
                     )
 
             except TradeExecutionError:
@@ -1263,6 +1286,7 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
+
 
 
     def _calculate_sl_tp_prices(
