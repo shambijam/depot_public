@@ -448,7 +448,7 @@
     "manual_override_volume_threshold": 1.0,
     "manual_override_timeout_seconds": 60,
     "daily_report_format": "md",
-    "trading_start_hour_utc": 7,
+    "trading_start_hour_utc": 5,
     "trading_end_hour_utc": 22,
     "allowed_weekdays": [
       0,
