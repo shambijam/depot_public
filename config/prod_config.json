@@ -450,7 +450,7 @@
     "mt5_max_retries": 5,
     "mt5_retry_delay_seconds": 3,
     "manual_override_enabled": false,
-    "manual_override_volume_threshold": 1.0,
+    "manual_override_volume_threshold": 50,
     "manual_override_timeout_seconds": 60,
     "daily_report_format": "md",
     "trading_start_hour_utc": 5,
@@ -480,7 +480,7 @@
       "avg_volume_lookback": 20,
       "max_volume_multiplier_from_avg": 5.0
     },
-    "max_absolute_volume_safety": 10.0,
+    "max_absolute_volume_safety": 100.0,
     "max_risk_deviation_multiplier": 1.05,
     "report_float_format_csv": "%.5f",
     "report_title_template": "# Rapport Quotidien des Trades - {date}",

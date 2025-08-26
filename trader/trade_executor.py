@@ -933,6 +933,28 @@ class TradeExecutor:
             }
             return mapping.get(a, "")
 
+        def _normalize_volume(symbol_info, vol: float) -> float:
+            """Clamp & round le volume selon les contraintes du symbole MT5."""
+            try:
+                vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
+                vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+                vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
+            except Exception:
+                vmin, vmax, vstep = 0.0, float("inf"), 0.0
+
+            if not isinstance(vol, (int, float)) or vol <= 0:
+                return 0.0
+
+            vol = max(vmin, min(vmax, float(vol)))
+            if vstep and vstep > 0:
+                # arrondi vers le multiple de step le plus proche au-dessus du min
+                steps = max(0, round((vol - vmin) / vstep))
+                vol = vmin + steps * vstep
+                # re-clamp au cas où l'arrondi dépasserait vmax à 1 ulp près
+                if vol > vmax:
+                    vol = max(vmin, vmax)
+            return float(vol)
+
         # ---------- 1) Action ----------
         action_raw = _first_non_empty(
             trade_decision.get("final_action"),
@@ -1051,14 +1073,14 @@ class TradeExecutor:
 
             max_spread_cap = None
             if isinstance(cap_soft, (int, float)):
-                max_spread_cap = cap_soft
+                max_spread_cap = float(cap_soft)
             if isinstance(cap_hard, (int, float)):
-                max_spread_cap = min(max_spread_cap, cap_hard) if max_spread_cap else cap_hard
+                max_spread_cap = min(max_spread_cap, float(cap_hard)) if max_spread_cap is not None else float(cap_hard)
 
             if max_spread_cap is not None:
-                if not math.isfinite(spread_pips) or spread_pips > float(max_spread_cap):
+                if not math.isfinite(spread_pips) or spread_pips > max_spread_cap:
                     raise TradeExecutionError(
-                        f"Spread trop élevé: {spread_pips:.3f} pips > cap {float(max_spread_cap):.3f} pips."
+                        f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips."
                     )
 
             # ---------- 7) Prix d'entrée ----------
@@ -1141,54 +1163,88 @@ class TradeExecutor:
                         f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                     )
 
-            # ---------- 9) Volume ----------
-            account_trade_settings = market_context.get(
-                "active_broker_account", {}
-            ).get("trade_settings", {})
-            volume = self._calculate_risk_based_volume(
-                {"action": action, "asset": broker_symbol, "order_type": order_type},
-                active_config,
-                market_context,
-                symbol_info,
-                entry_price_market,
-                sl_price,
-                account_trade_settings,
-            )
-            if not isinstance(volume, (int, float)) or volume <= 0:
+            # ---------- 9) Volume : priorise optionnellement le volume de la décision ----------
+            # Paramétrage : risk_management.use_decision_volume_if_present = true/false
+            use_decision_vol = bool(self.config_manager.get("risk_management.use_decision_volume_if_present", False))
+            decision_volume = trade_decision.get("volume") or trade_decision.get("target_volume")
+
+            volume_final = None
+            volume_source = None
+
+            if use_decision_vol and isinstance(decision_volume, (int, float)) and float(decision_volume) > 0:
+                volume_final = float(decision_volume)
+                volume_source = "decision"
+                self.logger.info(f"[VOLUME] utilisation du volume de décision: {volume_final}")
+            else:
+                account_trade_settings = market_context.get(
+                    "active_broker_account", {}
+                ).get("trade_settings", {})
+                volume_calc = self._calculate_risk_based_volume(
+                    {"action": action, "asset": broker_symbol, "order_type": order_type},
+                    active_config,
+                    market_context,
+                    symbol_info,
+                    entry_price_market,
+                    sl_price,
+                    account_trade_settings,
+                )
+                volume_final = float(volume_calc)
+                volume_source = "risk_sizer"
+                self.logger.info(f"[VOLUME] volume calculé par risk sizer: {volume_final}")
+
+            if not isinstance(volume_final, (int, float)) or volume_final <= 0:
                 raise TradeExecutionError(
-                    f"Volume calculé invalide ({volume}) pour {broker_symbol}."
+                    f"Volume calculé invalide ({volume_final}) pour {broker_symbol}."
                 )
 
-            # ---------- 9bis) Fat-finger checks ----------
+            # ---------- 9a) Normalisation par contraintes symbole ----------
+            vol_before_norm = volume_final
+            volume_final = _normalize_volume(symbol_info, volume_final)
+            self.logger.info(f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
+                            f"(min={getattr(symbol_info,'volume_min',None)}, step={getattr(symbol_info,'volume_step',None)}, max={getattr(symbol_info,'volume_max',None)})")
+
+            if volume_final <= 0:
+                raise TradeExecutionError(
+                    f"Volume final invalide après normalisation ({volume_final})."
+                )
+
+            # ---------- 9b) Fat-finger & caps globaux (seulement si explicitement activés) ----------
             try:
-                ff = (self.config_manager.get("trade_executor_settings.fat_finger_check", {}) or {})
-                if bool(ff.get("enabled", False)):
+                tes = (self.config_manager.get("trade_executor_settings", {}) or {})
+                ff = (tes.get("fat_finger_check", {}) or {})
+                ff_enabled = bool(ff.get("enabled", False))
+
+                if ff_enabled:
                     per_asset = (ff.get("max_absolute_volume_for_asset") or {})
                     cap_sym = per_asset.get(raw_symbol)
-                    if isinstance(cap_sym, (int, float)) and volume > float(cap_sym):
+                    if isinstance(cap_sym, (int, float)) and volume_final > float(cap_sym):
                         raise TradeExecutionError(
-                            f"Fat-finger: volume {volume} > cap absolu {float(cap_sym)} sur {raw_symbol}."
+                            f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
                         )
-                    cap_global = self.config_manager.get("trade_executor_settings.max_absolute_volume_safety", None)
-                    if isinstance(cap_global, (int, float)) and volume > float(cap_global):
+                    cap_global = tes.get("max_absolute_volume_safety", None)
+                    if isinstance(cap_global, (int, float)) and volume_final > float(cap_global):
                         raise TradeExecutionError(
-                            f"Fat-finger (global): volume {volume} > cap sécurité {float(cap_global)}."
+                            f"Fat-finger (global): volume {volume_final} > cap sécurité {float(cap_global)}."
                         )
-                    max_lot_acc = account_trade_settings.get("max_lot")
-                    if isinstance(max_lot_acc, (int, float)) and volume > float(max_lot_acc):
-                        raise TradeExecutionError(
-                            f"Fat-finger (compte): volume {volume} > max lot compte {float(max_lot_acc)}."
-                        )
+
+                # Cap par compte (optionnel) dans market_context.active_broker_account.trade_settings.max_lot
+                account_trade_settings = market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
+                acc_max_lot = account_trade_settings.get("max_lot")
+                if isinstance(acc_max_lot, (int, float)) and volume_final > float(acc_max_lot):
+                    raise TradeExecutionError(
+                        f"Volume {volume_final} > max lot compte {float(acc_max_lot)}."
+                    )
+
             except TradeExecutionError:
                 raise
             except Exception as e:
-                self.logger.warning(f"Vérif fat-finger partielle échouée: {e}")
+                self.logger.warning(f"Vérif volume (fat-finger/caps) partielle échouée: {e}")
 
             # ---------- 10) Construction requête ----------
             return self._build_mt5_request(
                 {"action": action, "asset": broker_symbol, "order_type": order_type},
                 active_config,
-                volume,
+                volume_final,
                 entry_price_market,
                 sl_price,
                 tp_price,
@@ -1207,6 +1263,7 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
+
 
     def _calculate_sl_tp_prices(
         self,
@@ -1568,12 +1625,11 @@ class TradeExecutor:
         Sizing par risque $ (compat Katana : SL très serrés) :
         - essaie mt5.order_calc_profit (précis)
         - sinon tick_value/tick_size, sinon heuristique pip-value
-        - clamps symbole/compte/stratégie + fat-finger (absolu & dynamique)
+        - clamps symbole/compte/stratégie (+ caps volume uniquement si activés)
         - contrôle de marge (order_calc_margin) pour éviter 10019
         - plancher de risque par lot pour éviter un sur-sizing quand SL est microscopique
         """
-        import math
-
+        
         # --- Action ---
         action = str(trade_decision.get("action", "")).upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
@@ -1620,7 +1676,7 @@ class TradeExecutor:
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
             point = float(getattr(symbol_info, "point", 0.0) or 0.0)
             tick_value = float(getattr(symbol_info, "tick_value", 0.0) or 0.0)
-            tick_size = float(getattr(symbol_info, "tick_size", 0.0) or 0.0)
+            tick_size  = float(getattr(symbol_info, "tick_size", 0.0) or 0.0)
             # Heuristique pip-size (FX majeurs/JPY/Gold) : 1 pip = 10 points
             points_per_pip = 10.0 if point > 0 else 1.0
             pip_size = point * points_per_pip if point > 0 else 0.0001
@@ -1652,16 +1708,16 @@ class TradeExecutor:
             )
             per_lot_loss_usd = min_dlr_per_lot
 
-        # --- Volume brut ---
+        # --- Volume brut (non normalisé) ---
         raw_volume = max_dollar_risk / per_lot_loss_usd
 
         # --- Contraintes symbole/compte ---
-        vol_min_sym = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-        vol_max_sym = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+        vol_min_sym  = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+        vol_max_sym  = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
         vol_step_sym = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
 
-        min_lot_account = float(account_trade_settings.get("min_lot", vol_min_sym) or vol_min_sym)
-        max_lot_account = float(account_trade_settings.get("max_lot", vol_max_sym) or vol_max_sym)
+        min_lot_account  = float(account_trade_settings.get("min_lot", vol_min_sym) or vol_min_sym)
+        max_lot_account  = float(account_trade_settings.get("max_lot", vol_max_sym) or vol_max_sym)
         lot_step_account = float(account_trade_settings.get("lot_step", vol_step_sym) or vol_step_sym)
 
         # --- Cap stratégie (ex: scalping.max_lot_size) ---
@@ -1671,23 +1727,26 @@ class TradeExecutor:
         if isinstance(strat_max_lot, (int, float)) and strat_max_lot > 0:
             max_lot_account = min(max_lot_account, float(strat_max_lot))
 
-        # --- Safety absolu ---
-        max_volume_safety = float(
-            self.config_manager.get("trade_executor_settings.max_absolute_volume_safety", 50.0)
-        )
-        if raw_volume > max_volume_safety:
-            self.logger.warning(f"Volume brut {raw_volume:.4f} > safety {max_volume_safety:.4f} -> clamp.")
-            raw_volume = max_volume_safety
-
-        # --- Fat-finger dynamique (moyenne récente * multiplicateur) ---
+        # --- Caps volume globaux : seulement si explicitement activés ---
+        #   -> soit fat_finger_check.enabled, soit un flag dédié volume_safety_enabled
         try:
-            ff = (self.config_manager.get("trade_executor_settings.fat_finger_check", {}) or {})
-            if bool(ff.get("enabled", False)) and bool(ff.get("enable_dynamic_check", False)):
-                lookback = int(ff.get("avg_volume_lookback", 20) or 20)
-                mult = float(ff.get("max_volume_multiplier_from_avg", 5.0) or 5.0)
-                # recherche d'un historique de volumes dans le contexte (selon intégration)
+            tes = (self.config_manager.get("trade_executor_settings", {}) or {})
+            ff_cfg = (tes.get("fat_finger_check", {}) or {})
+            safety_enabled = bool(ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False))
+            max_volume_safety = tes.get("max_absolute_volume_safety", None)
+            if safety_enabled and isinstance(max_volume_safety, (int, float)) and math.isfinite(float(max_volume_safety)):
+                if raw_volume > float(max_volume_safety):
+                    self.logger.warning(f"Cap volume sécurité: {raw_volume:.4f} -> {float(max_volume_safety):.4f}")
+                    raw_volume = float(max_volume_safety)
+        except Exception as e:
+            self.logger.warning(f"Lecture caps volume sécurité échouée: {e}")
+
+        # --- Fat-finger dynamique (moyenne récente * multiplicateur) - seulement si activé ---
+        try:
+            if bool(ff_cfg.get("enabled", False)) and bool(ff_cfg.get("enable_dynamic_check", False)):
+                lookback = int(ff_cfg.get("avg_volume_lookback", 20) or 20)
+                mult = float(ff_cfg.get("max_volume_multiplier_from_avg", 5.0) or 5.0)
                 recent = []
-                # exemples de clés possibles laissées par le pipeline :
                 for k in ("recent_executed_trades", "recent_volumes", "volume_history"):
                     seq = context.get(k)
                     if isinstance(seq, list):
@@ -1703,10 +1762,12 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Vérif fat-finger dynamique non appliquée: {e}")
 
-        # --- Arrondi & clamps finaux ---
+        # --- Arrondi & clamps finaux (priorité au respect du risque -> floor) ---
         volume = max(min_lot_account, vol_min_sym, raw_volume)
         volume = min(max_lot_account, vol_max_sym, volume)
-        effective_step = max(lot_step_account, vol_step_sym) or 0.01
+        effective_step = max(lot_step_account, vol_step_sym)
+        if effective_step <= 0:
+            effective_step = 0.01
         steps = math.floor(volume / effective_step)
         volume = round(steps * effective_step, 8)
         volume = max(min_lot_account, volume)
@@ -1746,9 +1807,11 @@ class TradeExecutor:
         self.logger.info(
             f"Sizing {symbol_info.name}: equity={equity:.2f}, risk%={risk_pct:.2f}, "
             f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.4f} -> vol={volume:.4f} "
-            f"(min={min_lot_account}, step={effective_step}, max={max_lot_account})."
+            f"(min={min_lot_account}, step={effective_step}, max={max_lot_account}; "
+            f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym})."
         )
         return float(volume)
+
     
         # --- Throttle anti-rafale: simple, stateless entre runs ---
     def _cooldown_guard(self, asset: str, now_ts: float, *,
@@ -1827,6 +1890,7 @@ class TradeExecutor:
         - validation min distance (stops_level)
         - mapping filling/deviation robustes
         - injection métadonnées (non envoyées au broker) pour audit.
+        - normalisation volume (min/step/max)
         """
         self.logger.info("Construction de la requête MT5 finale...")
         action_str = str(trade_decision.get("action", "")).upper()  # BUY, SELL
@@ -1846,6 +1910,22 @@ class TradeExecutor:
         digits = int(getattr(symbol_info, "digits", 0) or 0)
         point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         min_stop_distance_price = float(getattr(symbol_info, "trade_stops_level", 0) or 0) * point
+
+        # Normalisation volume selon min/step/max
+        vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
+        vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+        vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
+        volume_raw = float(volume)
+        volume_norm = max(vmin, min(vmax, volume_raw))
+        if vstep and vstep > 0:
+            steps = max(0, round((volume_norm - vmin) / vstep))
+            volume_norm = vmin + steps * vstep
+            if volume_norm > vmax:
+                volume_norm = vmax
+        self.logger.info(f"[VOLUME] avant_norm={volume_raw} → après_norm={volume_norm} (min={vmin}, step={vstep}, max={vmax})")
+
+        if volume_norm <= 0:
+            raise TradeExecutionError(f"Volume final invalide ({volume_norm}).")
 
         # Arrondis prix d'entrée/SL/TP aux digits du symbole
         if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
@@ -1876,7 +1956,7 @@ class TradeExecutor:
         request = {
             "action": mt5_action_deal,
             "symbol": symbol_info.name,
-            "volume": float(volume),
+            "volume": float(volume_norm),
             "magic": trade_decision.get("magic_number", config.get("magic_number")),
             "sl": sl_price,
             "tp": tp_price,
@@ -1992,6 +2072,7 @@ class TradeExecutor:
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
         return request
+
 
 
     def _update_internal_position_state(
