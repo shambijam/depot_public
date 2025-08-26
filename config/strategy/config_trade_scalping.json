@@ -19,7 +19,12 @@
       "ultra_near_pips": 0.6,
       "max_stop_pips_scalp": 15.0,
       "reject_if_sl_over_cap": false,
-      "m1_break_bonus": 0.12
+      "m1_break_bonus": 0.12,
+      "only_trade_at_range_edges": false,
+      "allow_midline_entries": true,
+      "mid_entry_score_min": 0.55,
+      "range_score_min": 0.62,
+      "range_debounce_bars": 3
     }
   },
   "execution_quality_filters": {
@@ -40,7 +45,8 @@
     "volume_zscore": 0.001,
     "overrides": {
       "require_range_detection": false,
-      "min_lookback_bars": 300
+      "min_lookback_bars": 300,
+      "use_bollinger_microphase": true
     },
     "bollinger_overrides": {
       "min_revert_score": 0.55,
@@ -180,6 +186,53 @@
             "tp_pips": 10,
             "sl_pips": 6
           }
+        },
+        "range_scoring": {
+          "enabled": true,
+          "weights": {
+            "bandwidth": 0.35,
+            "adx": 0.25,
+            "ema_slope": 0.20,
+            "rsi_width": 0.20
+          },
+          "threshold_in": 0.62,
+          "threshold_out": 0.52,
+          "debounce_bars": 3,
+          "rsi_period": 14,
+          "ema_slope_window": 10,
+          "adx_period": 14,
+          "rsi_width_window": 14
+        },
+        "midline_entry": {
+          "enabled": true,
+          "pos_band_min": 0.10,
+          "pos_band_max": 0.65,
+          "mom_norm_min": 0.05,
+          "base_threshold": 0.55,
+          "min_range_duration_bars": 4,
+          "sl_tp_profile": "midline",
+          "use_rr_override": true,
+          "rr_target": 1.10,
+          "sl_pips_override": 5,
+          "tp_pips_override": 7,
+          "per_symbol": {
+            "EURUSD": {
+              "pos_band_min": 0.10,
+              "pos_band_max": 0.60
+            },
+            "GBPUSD": {
+              "pos_band_min": 0.12,
+              "pos_band_max": 0.62
+            },
+            "USDJPY": {
+              "pos_band_min": 0.10,
+              "pos_band_max": 0.65
+            },
+            "USDCHF": {
+              "pos_band_min": 0.10,
+              "pos_band_max": 0.65
+            }
+          }
         }
       }
     }
@@ -223,6 +276,32 @@
         "BUY": "enter on bullish micro-break with OB confluence and spread <= max_spread_points",
         "SELL": "enter on bearish micro-break with OB confluence and spread <= max_spread_points"
       }
+    },
+    {
+      "name": "range_midline_scalping",
+      "priority": 3,
+      "conditions": {
+        "phase_must_contain": [
+          "range",
+          "range_low_volatility",
+          "range_retail"
+        ],
+        "min_confidence": 0.30,
+        "requires": {
+          "is_range": true,
+          "mid_entry": [
+            "buy",
+            "sell"
+          ],
+          "mid_entry_score_min": 0.55,
+          "range_score_min": 0.62
+        }
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter if mid_entry == 'buy' and spread <= max_spread_points",
+        "SELL": "enter if mid_entry == 'sell' and spread <= max_spread_points"
+      }
     }
   ],
   "smart_targets": {
@@ -255,6 +334,17 @@
       "type": "chandelier",
       "atr_period": 14,
       "atr_multiplier": 1.2
+    },
+    "profiles": {
+      "midline": {
+        "description": "SL/TP serrés pour entrées médiane en range",
+        "sl_type": "pips",
+        "sl_pips": 5,
+        "tp_type": "rr",
+        "tp_rr_ratio": 1.10,
+        "tp_pips_fallback": 7,
+        "respect_broker_min_distance": true
+      }
     }
   },
   "exit_rules": {

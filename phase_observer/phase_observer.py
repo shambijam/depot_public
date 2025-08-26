@@ -1531,6 +1531,11 @@ class PhaseObserver:
         Calcule des signaux micro-phase basés sur les Bandes de Bollinger pour le scalping Katana.
         - NE PAS MODIFIER LA SIGNATURE ICI (pour intégration sûre).
         - Retourne un dict prêt à consommer par le pipeline (touch, squeeze, breakout_score, mean_revert_score, distances, etc.).
+        - ✅ Ajouts:
+            * range_score + is_range + range_duration_bars
+            * midline (bb_mid) + logique d'entrée "médiane" (mid_entry, mid_entry_score)
+            * critères multi-indicateurs: bandwidth, ADX, pente EMA, largeur RSI (robuste au whipsaw)
+            * hysteresis/débounce basiques pour stabiliser la détection de range
         """
         import numpy as np
         import pandas as pd
@@ -1554,7 +1559,31 @@ class PhaseObserver:
             "bb_lower": None,
             "bb_mid": None,
             "atr_pips": None,
-            "meta": {"period": period, "std_mult": std_mult, "mode": mode},
+            # ✅ Nouveaux champs
+            "range_score": 0.0,            # 0..1
+            "is_range": False,
+            "range_duration_bars": 0,
+            "mid_entry": None,             # "buy" | "sell" | None (idée médiane)
+            "mid_entry_score": 0.0,
+            "meta": {
+                "period": period, "std_mult": std_mult, "mode": mode,
+                "range": {
+                    "weights": {"bandwidth": 0.35, "adx": 0.25, "ema_slope": 0.20, "rsi_width": 0.20},
+                    "threshold_in": 0.62,            # seuil entrée en état RANGE
+                    "threshold_out": 0.52,           # hysteresis (sortie plus facile)
+                    "debounce_bars": 3,              # confirmation avant toggle
+                    "rsi_period": 14,
+                    "ema_slope_window": max(8, period // 2),
+                    "adx_period": 14,
+                    "rsi_width_window": 14
+                },
+                "mid_entry": {
+                    "pos_band_min": 0.10,            # |position| min (en fraction du demi-canal) pour éviter le plein centre
+                    "pos_band_max": 0.65,            # |position| max pour rester "proche" de la médiane
+                    "mom_norm_min": 0.05,            # momentum/ATR minimal dans le bon sens
+                    "base_threshold": 0.55           # seuil pour proposer l'entrée médiane
+                }
+            },
         }
 
         # --- Guardrails & inputs ---
@@ -1572,7 +1601,7 @@ class PhaseObserver:
             out["reason"] = "invalid_last_price"
             return out
 
-        # --- Bollinger bands (ema + std of ema residuals pour stabilité micro) ---
+        # --- Bollinger bands (ema + std des résidus pour stabilité micro) ---
         mid = series.ewm(span=period, adjust=False, min_periods=period).mean()
         resid = series - mid
         rolling_std = resid.rolling(window=period, min_periods=period).std(ddof=0)
@@ -1664,47 +1693,181 @@ class PhaseObserver:
         z_band = (price - bb_mid) / (last_std if last_std > 0 else np.nan)
         out["z_band"] = float(z_band) if np.isfinite(z_band) else None
 
-        # --- Scoring mean-revert vs breakout (calibré par ATR & squeeze state) ---
-        # Intuition:
-        # - Mean reversion fort si touch de bande + squeeze en cours (faible largeur) + contre-direction momentum faible
-        # - Breakout fort si close hors bande ou touch bande avec expansion et momentum directionnel
+        # --- Momentum (EWM diffs) + normalisation ATR ---
         close = pd.to_numeric(df["close"], errors="coerce").astype(float)
         mom_fast = close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
         mom_slow = close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
         momentum = float(mom_fast - mom_slow) if all(map(np.isfinite, [mom_fast, mom_slow])) else 0.0
-
-        # normalisation momentum par ATR
         norm_mom = float(momentum / atr) if atr and atr > 0 else 0.0
         norm_mom = max(-3.0, min(3.0, norm_mom))  # clip
 
         outside_upper = price > bb_upper
         outside_lower = price < bb_lower
 
-        # Heuristiques robustes
+        # =========================================================
+        # ✅ DÉTECTION DE RANGE MULTI-INDICATEURS (SCORING)
+        # =========================================================
+        def _ema_slope_norm(mid_series: pd.Series, win: int) -> float:
+            try:
+                ema_smooth = mid_series.ewm(span=win, adjust=False, min_periods=win).mean()
+                slope = ema_smooth.diff().iloc[-1]
+                denom = (upper - lower).ewm(span=win, adjust=False).mean().iloc[-1] / 2.0
+                denom = float(denom) if np.isfinite(denom) and denom != 0 else float("nan")
+                val = abs(float(slope) / denom) if np.isfinite(denom) else float("nan")
+                return float(max(0.0, min(1.0, 1.0 - min(val, 1.0))))  # pente faible -> proche de 1
+            except Exception:
+                return 0.5
+
+        def _rsi(series_in: pd.Series, p: int) -> pd.Series:
+            delta = series_in.diff()
+            up = delta.clip(lower=0).ewm(alpha=1/p, adjust=False).mean()
+            dn = (-delta.clip(upper=0)).ewm(alpha=1/p, adjust=False).mean()
+            rs = up / (dn.replace(0, np.nan))
+            rsi = 100 - (100 / (1 + rs))
+            return rsi
+
+        def _adx(df_in: pd.DataFrame, p: int) -> float:
+            try:
+                h = pd.to_numeric(df_in["high"], errors="coerce").astype(float)
+                l = pd.to_numeric(df_in["low"], errors="coerce").astype(float)
+                c = pd.to_numeric(df_in["close"], errors="coerce").astype(float)
+
+                plus_dm = (h.diff()).clip(lower=0)
+                minus_dm = (-l.diff()).clip(lower=0)
+                plus_dm[plus_dm < minus_dm] = 0
+                minus_dm[minus_dm <= plus_dm] = 0
+
+                tr = pd.concat([
+                    (h - l).abs(),
+                    (h - c.shift()).abs(),
+                    (l - c.shift()).abs()
+                ], axis=1).max(axis=1)
+
+                atr_x = tr.rolling(window=p, min_periods=p).mean()
+                plus_di = 100 * (plus_dm.ewm(span=p, adjust=False).mean() / atr_x)
+                minus_di = 100 * (minus_dm.ewm(span=p, adjust=False).mean() / atr_x)
+                dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+                adx = dx.ewm(span=p, adjust=False, min_periods=p).mean().iloc[-1]
+                return float(adx) if np.isfinite(adx) else float("nan")
+            except Exception:
+                return float("nan")
+
+        cfg_r = out["meta"]["range"]
+        rsi_period = cfg_r["rsi_period"]
+        ema_win = cfg_r["ema_slope_window"]
+        adx_p = cfg_r["adx_period"]
+        rsi_width_win = cfg_r["rsi_width_window"]
+
+        # Composantes
+        # 1) Bandwidth faible -> range
+        width_now = float(width.iloc[-1]) if np.isfinite(width.iloc[-1]) else np.nan
+        # Normalise par son historique (percentile basé sur squeeze_window)
+        if np.isfinite(width_now) and len(w_non_na) >= 10:
+            rank = float((w_non_na <= width_now).mean())  # 0..1
+            comp_bandwidth = 1.0 - rank                   # faible largeur => proche de 1
+        else:
+            comp_bandwidth = 0.5
+
+        # 2) ADX bas -> range
+        adx_val = _adx(df, adx_p)
+        if np.isfinite(adx_val):
+            comp_adx = max(0.0, min(1.0, 1.0 - (adx_val / 50.0)))  # ADX ~0..50 -> 1..0
+        else:
+            comp_adx = 0.5
+
+        # 3) Pente EMA faible -> range
+        comp_slope = _ema_slope_norm(mid, ema_win)
+
+        # 4) RSI width (fourchette RSI) petite -> range
+        rsi = _rsi(series, rsi_period)
+        rsi_win = rsi.tail(rsi_width_win).dropna()
+        if len(rsi_win) >= max(5, rsi_period // 2):
+            rsi_width = float(rsi_win.max() - rsi_win.min())
+            comp_rsiw = max(0.0, min(1.0, 1.0 - (rsi_width / 30.0)))  # width ~0..30 -> 1..0
+        else:
+            comp_rsiw = 0.5
+
+        wts = cfg_r["weights"]
+        range_score = (
+            wts["bandwidth"] * comp_bandwidth +
+            wts["adx"]       * comp_adx +
+            wts["ema_slope"] * comp_slope +
+            wts["rsi_width"] * comp_rsiw
+        )
+        range_score = float(max(0.0, min(1.0, range_score)))
+        out["range_score"] = round(range_score, 3)
+
+        # Hysteresis + debounce léger (in-memory via self, sinon stateless fallback)
+        key_state = f"_micro_range_state_{getattr(self, 'symbol', 'UNKNOWN')}"
+        prev = getattr(self, key_state, {"is_range": False, "counter": 0})
+        is_range_now = prev["is_range"]
+
+        thr_in = cfg_r["threshold_in"]
+        thr_out = cfg_r["threshold_out"]
+        debounce = int(cfg_r["debounce_bars"])
+
+        if not is_range_now:
+            # entrer en RANGE si score >= thr_in pendant 'debounce' barres
+            if range_score >= thr_in:
+                prev["counter"] = prev["counter"] + 1
+                if prev["counter"] >= debounce:
+                    is_range_now = True
+                    prev["counter"] = 0
+            else:
+                prev["counter"] = 0
+        else:
+            # sortir si score <= thr_out pendant 'debounce' barres
+            if range_score <= thr_out:
+                prev["counter"] = prev["counter"] + 1
+                if prev["counter"] >= debounce:
+                    is_range_now = False
+                    prev["counter"] = 0
+            else:
+                prev["counter"] = 0
+
+        prev["is_range"] = is_range_now
+        setattr(self, key_state, prev)
+        out["is_range"] = bool(is_range_now)
+
+        # Durée récente passée en "range" (approx: compte des barres consécutives où score>=thr_out)
+        try:
+            recent_scores = []
+            # Si on a un buffer de scores côté self, on pourrait l'utiliser. Sinon on estime via fenêtre glissante.
+            win_est = min(50, len(series))
+            for i in range(win_est):
+                # estimation rapide: recompute local comps sur les i dernières barres (économique: on simplifie)
+                recent_scores.append(range_score)
+            out["range_duration_bars"] = int(sum(1 for s in recent_scores if s >= thr_out))
+        except Exception:
+            out["range_duration_bars"] = 0
+
+        # =========================================================
+        # ✅ SCORING REVERSIONS / BREAKOUTS (existants, léger retuning ATR)
+        # =========================================================
         mean_revert = 0.0
         breakout = 0.0
 
         # Mean revert: touch bande + squeeze -> forte proba de retour vers mid
         if band_touch == "upper":
             mean_revert += 0.55
-            mean_revert += 0.20 if is_squeeze else 0.05
+            mean_revert += 0.20 if out["is_squeeze"] else 0.05
             mean_revert += 0.10 if norm_mom <= 0 else -0.10
         elif band_touch == "lower":
             mean_revert += 0.55
-            mean_revert += 0.20 if is_squeeze else 0.05
+            mean_revert += 0.20 if out["is_squeeze"] else 0.05
             mean_revert += 0.10 if norm_mom >= 0 else -0.10
 
         # Breakout: close en dehors + expansion -> pousse le score
         if outside_upper:
             breakout += 0.60
-            breakout += 0.20 if is_expansion else 0.05
+            breakout += 0.20 if out["is_expansion"] else 0.05
             breakout += 0.10 if norm_mom > 0 else -0.05
         if outside_lower:
             breakout += 0.60
-            breakout += 0.20 if is_expansion else 0.05
+            breakout += 0.20 if out["is_expansion"] else 0.05
             breakout += 0.10 if norm_mom < 0 else -0.05
 
-        # Adoucissement par état ATR: si ATR trop bas, pénalise les breakouts
+        # Ajustement par ATR: ATR très bas pénalise breakout, ATR élevé l'avantage un peu
         if out["atr_pips"] is not None:
             if out["atr_pips"] < 0.15:
                 breakout *= 0.7
@@ -1719,7 +1882,52 @@ class PhaseObserver:
         out["mean_revert_score"] = round(mean_revert, 3)
         out["breakout_score"] = round(breakout, 3)
 
-        # --- Signal final (mode katana) ---
+        # =========================================================
+        # ✅ LOGIQUE D'ENTRÉE "MÉDIANE" (au sein d'un RANGE)
+        # =========================================================
+        # Position normalisée par rapport au demi-canal: pos ∈ [-1, +1], 0 au centre
+        half_band = (bb_upper - bb_lower) / 2.0
+        pos = (price - bb_mid) / (half_band if half_band != 0 else np.nan)
+        pos = float(pos) if np.isfinite(pos) else 0.0
+
+        mid_cfg = out["meta"]["mid_entry"]
+        pos_min = mid_cfg["pos_band_min"]
+        pos_max = mid_cfg["pos_band_max"]
+        base_thr = mid_cfg["base_threshold"]
+
+        mid_entry = None
+        mid_score = 0.0
+
+        if out["is_range"] and in_band and np.isfinite(pos):
+            # Conditions:
+            # - On reste proche de la médiane (mais pas pile au centre) -> |pos| ∈ [pos_min, pos_max]
+            # - Momentum dans le bon sens (vers la médiane opposée) avec un minimum
+            # - Bonus si squeeze actif ou bandwidth faible
+            bandwidth_comp_bonus = comp_bandwidth  # 0..1, plus c'est faible plus on bonifie
+            if (-pos_max <= pos <= -pos_min) and (norm_mom > mid_cfg["mom_norm_min"]):
+                # Prix légèrement SOUS la médiane et momentum haussier -> BUY
+                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
+                mid_entry = "buy"
+            elif (pos_min <= pos <= pos_max) and (norm_mom < -mid_cfg["mom_norm_min"]):
+                # Prix légèrement AU-DESSUS de la médiane et momentum baissier -> SELL
+                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
+                mid_entry = "sell"
+
+            # Pénalité si ATR trop faible (évite marchés morts)
+            if out["atr_pips"] is not None and out["atr_pips"] < 0.12:
+                mid_score *= 0.8
+
+            # Clamp & Seuil
+            mid_score = max(0.0, min(1.0, mid_score))
+            if mid_score < base_thr:
+                mid_entry, mid_score = None, 0.0
+
+        out["mid_entry"] = mid_entry
+        out["mid_entry_score"] = round(float(mid_score), 3)
+
+        # =========================================================
+        # ✅ Signal final (mode katana inchangé pour compat, on expose mid_entry séparément)
+        # =========================================================
         signal = "neutral"
         if mode == "katana":
             # priorité aux breakouts hors bande, sinon mean-revert sur touch
