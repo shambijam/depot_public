@@ -469,7 +469,7 @@
       "max_multiplier": 2.5
     },
     "fat_finger_check": {
-      "enabled": true,
+      "enabled": false,
       "max_absolute_volume_for_asset": {
         "EURUSD": 23.0,
         "GBPUSD": 24.0,
