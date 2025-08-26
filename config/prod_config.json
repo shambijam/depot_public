@@ -221,7 +221,7 @@
     "audit_mode": {
       "enabled": true,
       "background_analysis": false,
-      "daily_report_enabled": true,
+      "daily_report_enabled": false,
       "daily_report_time": "23:55",
       "observations_to_track": [
         "all_decisions",
@@ -371,7 +371,7 @@
         "take_profit_pips": 60,
         "stop_loss_pips": 20,
         "enable_trailing_stop": true,
-        "risk_per_trade_percent": 0.4
+        "risk_per_trade_percent": 3.0
       }
     },
     "phase_detection": {
