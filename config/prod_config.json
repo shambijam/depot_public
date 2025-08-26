@@ -219,9 +219,9 @@
       "ttl_seconds": 300
     },
     "audit_mode": {
-      "enabled": false,
+      "enabled": true,
       "background_analysis": false,
-      "daily_report_enabled": false,
+      "daily_report_enabled": true,
       "daily_report_time": "23:55",
       "observations_to_track": [
         "all_decisions",
@@ -293,6 +293,8 @@
     "min_optimal_score_threshold": 0.001
   },
   "risk_management": {
+    "max_consecutive_losses_before_pause": 2,
+    "pause_minutes_after_streak": 20,
     "risk_per_trade_pct": 0.25,
     "min_rr": 1.6,
     "max_spread_pips": 3.0,
@@ -334,6 +336,8 @@
       "min_m1_ema_spread": 0.0,
       "min_confidence": 0.3,
       "min_rr_at_entry": 1.2,
+      "adx_period": 14,
+      "adx_trend_min": 18,
       "no_reentry_after_win_candles": 2,
       "no_reentry_after_loss_candles": 4,
       "min_distance_to_bbands_pips": 1.5,
@@ -427,7 +431,8 @@
     "per_symbol_cooldown_candles": 3,
     "max_trades_per_day": 80,
     "max_trades_per_symbol_per_day": 20,
-    "max_slippage_pips": 0.6
+    "max_slippage_pips": 0.6,
+    "cooldown_after_same_direction_loss_candles": 4
   },
   "filters": {
     "trading_sessions": [
@@ -578,7 +583,9 @@
           "breakout_buy_min": 0.68,
           "breakout_sell_min": 0.68,
           "revert_buy_min": 0.70,
-          "revert_sell_min": 0.80
+          "revert_sell_min": 0.80,
+          "priority": "BREAKOUT_OVER_REVERT",
+          "breakout_margin_min": 0.08
         },
         "tp_sl_overrides": {
           "on_buy_breakout": {
