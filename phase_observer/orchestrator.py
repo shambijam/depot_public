@@ -35,6 +35,7 @@ class PhaseObserver:
         """
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
+        self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
 
         # === Nouveau : instance de FeaturesExtractor ===
         self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)

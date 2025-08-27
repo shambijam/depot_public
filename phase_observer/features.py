@@ -1,9 +1,9 @@
-
+#phase_observer/features.py
+# --- MUST BE FIRST LINE ---
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, Optional, Tuple, List
-
 import numpy as np
 import pandas as pd
 import time
@@ -12,6 +12,34 @@ try:
     import MetaTrader5 as mt5  # type: ignore
 except Exception:
     mt5 = None  # type: ignore
+
+
+class FeaturesExtractor:
+    def __init__(self, logger: Optional[logging.Logger] = None, config_manager: Any = None):
+        self.logger = logger or logging.getLogger(__name__)
+        self.config_manager = config_manager
+
+    def clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        return _clean_dataframe(self, df)
+
+    def get_swing_points(self, df: pd.DataFrame, order: Optional[int] = None):
+        return _get_swing_points(self, df, order)
+
+    def get_adaptive_swing_points(self, df: pd.DataFrame):
+        return _get_adaptive_swing_points(self, df)
+
+    def calculate_volatility_regime(self, df: pd.DataFrame) -> str:
+        return _calculate_volatility_regime(self, df)
+
+    def get_trend(self, df: pd.DataFrame) -> pd.Series:
+        return _get_trend(self, df)
+
+    def calculate_quality_metrics(self, tf_analyses: Dict, confluence: Dict, divergences: Dict, start_time: float):
+        return _calculate_quality_metrics(self, tf_analyses, confluence, divergences, start_time)
+
+    def fetch_timeframe_data(self, asset: str, timeframe: str, config: Dict):
+        return _fetch_timeframe_data(self, asset, timeframe, config)
+
 
 
 def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
