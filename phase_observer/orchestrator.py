@@ -1,5 +1,4 @@
 # phase_observer/orchestrator.py
-
 # --- MUST BE FIRST LINE ---
 from __future__ import annotations
 
@@ -17,41 +16,68 @@ import numpy as np
 import pandas as pd
 
 # Local
-from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
-from .validators import calculate_confidence_score, calculate_optimized_confidence
-
-# utils.load_data est optionnel selon ta base de code : on protège l'import
-try:
-    from .utils import load_data
-except Exception:
-    load_data = None
+from .types import (
+    Direction,
+    Phase,
+    PhaseSignal,
+    PhaseSnapshot,
+    MarketFeatures,
+    PhaseMemory,
+)
+from .config import ConfigManager
+from .validators import calculate_confidence_score  # si utilisé quelque part
 from .features import (
     _clean_dataframe,
-    _get_swing_points,
-    _get_adaptive_swing_points,
-    _calculate_volatility_regime,
-    _get_trend,
-    _calculate_quality_metrics,
-    _fetch_timeframe_data,
+    detect_market_regime,
+    detect_fvg_enhanced,
+    detect_order_block_ml_enhanced,
+    detect_bos_mss_enhanced,
+    compute_bollinger_microphase_signals,
+)
+from .utils import (
+    _extract_m1_break_direction,
+    _pick_sl_from_structure,
+    _pick_tp_from_nearest_liquidity,
+    _get_nearest_liquidity_level,
+    _build_enhanced_signals,
+    _detect_tf_divergences,
+    _calculate_advanced_confluence,
 )
 
-# Alias UTC
+# Alias pratique si ton code utilise `UTC`
 UTC = timezone.utc
 
 
 class PhaseObserver:
-    # Annotations de classe (OK pour Pylance)
+    # annotations au niveau classe (ok pour Pylance)
     signal_weights: Dict[str, float]
     confluence_bonus: Dict[str, float]
 
-    def __init__(self, config_manager=None):
+    def __init__(self, config_manager: Optional[ConfigManager] = None):
         """
         Initialise le PhaseObserver avec les paramètres de configuration.
         """
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
 
-        # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
+        # === Bind des helpers module-level en méthodes d'instance ===
+        # features.py
+        self._clean_dataframe = _clean_dataframe.__get__(self)
+        self.detect_market_regime = detect_market_regime.__get__(self)
+        self.detect_fvg_enhanced = detect_fvg_enhanced.__get__(self)
+        self.detect_order_block_ml_enhanced = detect_order_block_ml_enhanced.__get__(self)
+        self.detect_bos_mss_enhanced = detect_bos_mss_enhanced.__get__(self)
+        self.compute_bollinger_microphase_signals = compute_bollinger_microphase_signals.__get__(self)
+        # utils.py
+        self._extract_m1_break_direction = _extract_m1_break_direction.__get__(self)
+        self._pick_sl_from_structure = _pick_sl_from_structure.__get__(self)
+        self._pick_tp_from_nearest_liquidity = _pick_tp_from_nearest_liquidity.__get__(self)
+        self._get_nearest_liquidity_level = _get_nearest_liquidity_level.__get__(self)
+        self._build_enhanced_signals = _build_enhanced_signals.__get__(self)
+        self._detect_tf_divergences = _detect_tf_divergences.__get__(self)
+        self._calculate_advanced_confluence = _calculate_advanced_confluence.__get__(self)
+
+        # === Défauts ===
         self.lookback_window = 12
         self.volatility_threshold = 0.0001
         self.volume_zscore = 1.2
@@ -63,8 +89,8 @@ class PhaseObserver:
         self.min_allowed_spread_for_liquid_check = 10
         self.min_volume_for_liquid_check = 5
         self.base_confidence = 0.25
-        self.signal_weights = {}      # plus d’annotation ici
-        self.confluence_bonus = {}    # idem
+        self.signal_weights = {}
+        self.confluence_bonus = {}
         self.detect_fvg = True
         self.detect_order_block = True
         self.detect_bos_mss = True
@@ -72,7 +98,7 @@ class PhaseObserver:
         self.detect_eqh_eql = True
         self.detect_volume_anomaly = True
 
-        # CHARGER LA CONFIG SI DISPONIBLE (écrasera les valeurs par défaut)
+        # === Config optionnelle (override des défauts) ===
         if getattr(self, "config_manager", None):
             try:
                 self.lookback_window = self.config_manager.get(
@@ -84,7 +110,7 @@ class PhaseObserver:
                 self.volume_zscore = self.config_manager.get(
                     "core_parameters.volume_zscore", self.volume_zscore
                 )
-                # ... etc pour les autres paramètres si présents
+                # ... étends si besoin
             except Exception as e:
                 self.logger.warning(
                     f"Impossible de charger config: {e}. Utilisation des valeurs par défaut."
@@ -93,6 +119,7 @@ class PhaseObserver:
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+
 
 
     def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
