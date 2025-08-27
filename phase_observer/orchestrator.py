@@ -24,7 +24,6 @@ from .types import (
     MarketFeatures,
     PhaseMemory,
 )
-from .config import ConfigManager
 from .validators import calculate_confidence_score  # si utilisé quelque part
 from .features import (
     _clean_dataframe,
