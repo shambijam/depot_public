@@ -16,18 +16,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
-# Local imports
-from .types import (
-    Direction,
-    Phase,
-    PhaseSignal,
-    PhaseSnapshot,
-    MarketFeatures,
-    PhaseMemory,
-)
-from .config import ConfigManager
-from .validators import calculate_confidence_score
-from .utils import load_data
+# Local
+from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
+from .validators import calculate_confidence_score, calculate_optimized_confidence
+
+# utils.load_data est optionnel selon ta base de code : on protège l'import
+try:
+    from .utils import load_data
+except Exception:
+    load_data = None
 from .features import (
     _clean_dataframe,
     _get_swing_points,
