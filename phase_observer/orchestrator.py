@@ -20,6 +20,16 @@ import pandas as pd
 from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
 from .validators import calculate_confidence_score, calculate_optimized_confidence
 from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
+from .detectors import (
+    detect_order_block_ml_enhanced,
+    detect_fvg_enhanced,
+    detect_bos_mss_enhanced,
+    detect_market_regime,
+    detect_micro_phase_m1,
+    determine_optimized_phase,
+    determine_phase,
+    
+)
 
 # Alias UTC
 UTC = timezone.utc
