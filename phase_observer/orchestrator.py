@@ -172,7 +172,7 @@ class PhaseObserver:
             current_asset_symbol = asset_symbol or "UNKNOWN_ASSET"
 
             # NOTE: suppose que _clean_dataframe est bien résolu (même module/classe)
-            df_an = self.features._clean_dataframe(df.copy())
+            df_an = self.features.clean_dataframe(df.copy())
             if df_an is None or df_an.empty:
                 self.logger.error("Échec du nettoyage DataFrame")
                 return None

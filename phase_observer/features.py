@@ -446,10 +446,7 @@ def _fetch_timeframe_data(
             else:
                 self.logger.warning(f"[{asset}] Données vides/None pour TF={tf_key}, lookback={lookback_bars}")
 
-        # 5) Fallback simulation (utile DEV)
-        self.logger.warning(f"MT5Connector indisponible, simulation {tf_key}")
-        return _fallback_simulation_data(self, tf_key, lookback_bars)
-
+       
     except Exception as e:
         self.logger.error(f"Erreur acquisition {asset} {timeframe}: {e}", exc_info=True)
         return None
