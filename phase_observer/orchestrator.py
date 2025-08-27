@@ -19,7 +19,7 @@ import pandas as pd
 # Local
 from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
 from .validators import calculate_confidence_score, calculate_optimized_confidence
-from .utils import load_data
+from .utils import _extract_m1_break_direction, _pick_sl_from_structure, _pick_tp_from_nearest_liquidity, _get_nearest_liquidity_level, _build_enhanced_signals, _detect_tf_divergences, _calculate_advanced_confluence, _
 from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
 
 # Alias UTC
