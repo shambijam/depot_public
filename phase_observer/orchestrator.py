@@ -19,23 +19,10 @@ import pandas as pd
 # Local
 from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
 from .validators import calculate_confidence_score, calculate_optimized_confidence
+from .utils import load_data
+from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
 
-try:
-    from .utils import load_data
-except Exception:
-    load_data = None
-
-# 👉 Ici on importe les helpers SANS self
-from .features import (
-    _clean_dataframe,
-    _get_swing_points,
-    _get_adaptive_swing_points,
-    _calculate_volatility_regime,
-    _get_trend,
-    _calculate_quality_metrics,
-    _fetch_timeframe_data,
-)
-
+# Alias UTC
 UTC = timezone.utc
 
 
@@ -50,6 +37,9 @@ class PhaseObserver:
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
 
+        # === Nouveau : instance de FeaturesExtractor ===
+        self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
+
         # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
         self.lookback_window = 12
         self.volatility_threshold = 0.0001
@@ -62,8 +52,8 @@ class PhaseObserver:
         self.min_allowed_spread_for_liquid_check = 10
         self.min_volume_for_liquid_check = 5
         self.base_confidence = 0.25
-        self.signal_weights = {}      # plus d’annotation ici
-        self.confluence_bonus = {}    # idem
+        self.signal_weights = {}
+        self.confluence_bonus = {}
         self.detect_fvg = True
         self.detect_order_block = True
         self.detect_bos_mss = True
@@ -83,7 +73,7 @@ class PhaseObserver:
                 self.volume_zscore = self.config_manager.get(
                     "core_parameters.volume_zscore", self.volume_zscore
                 )
-                # ... etc pour les autres paramètres si présents
+                # ... etc pour les autres paramètres
             except Exception as e:
                 self.logger.warning(
                     f"Impossible de charger config: {e}. Utilisation des valeurs par défaut."
@@ -92,6 +82,7 @@ class PhaseObserver:
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+
 
 
     def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
@@ -181,7 +172,7 @@ class PhaseObserver:
             current_asset_symbol = asset_symbol or "UNKNOWN_ASSET"
 
             # NOTE: suppose que _clean_dataframe est bien résolu (même module/classe)
-            df_an = self._clean_dataframe(df.copy())
+            df_an = self.features._clean_dataframe(df.copy())
             if df_an is None or df_an.empty:
                 self.logger.error("Échec du nettoyage DataFrame")
                 return None
