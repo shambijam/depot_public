@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from phase_observer.phase_observer import PhaseObserver
+    from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
     importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor

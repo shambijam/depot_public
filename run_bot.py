@@ -24,7 +24,7 @@ from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 load_dotenv()
 
 try:
-    from phase_observer.phase_observer import PhaseObserver
+    from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
     from core.decision_pipeline import DecisionPipeline
     from trader.trade_executor import run_trade_execution_pipeline
