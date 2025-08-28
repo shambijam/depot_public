@@ -562,8 +562,9 @@ class PhaseObserver:
 
             # === PHASE 6: SCORE DE CONFIANCE ===
             df_an["confidence_score"] = df_an.apply(
-            calculate_optimized_confidence, axis=1
-          )
+            lambda row: calculate_optimized_confidence(row, self.signal_weights, self.confluence_bonus),
+            axis=1,
+            )
 
 
             # === PHASE 7: MÉTRIQUES + LOG FINAL ===
