@@ -907,14 +907,19 @@ class TradeExecutor:
         Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
         Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
         avant toute requête MT5.
+
+        ✅ Intégration 'katana midline scalp'
+        - Consomme les hints : sl_pips_hint / tp_pips_hint (ou target_sl_pips / target_tp_pips)
+        - Propage les infos Bollinger (bb_mid/upper/lower, level_mode) à _calculate_sl_tp_prices
+        - Garde-fous spread / fenêtre / RR (inchangé, permissif)
         """
         import math
         self.logger.info("Préparation de l'ordre MT5...")
 
         # --- Raccourcis locaux ---
-        trade_decision = decision_package.get("trade_decision", {}) or {}
-        active_config = decision_package.get("active_config", {}) or {}
-        market_context = decision_package.get("market_context", {}) or {}
+        trade_decision  = decision_package.get("trade_decision", {}) or {}
+        active_config   = decision_package.get("active_config", {}) or {}
+        market_context  = decision_package.get("market_context", {}) or {}
 
         # ---------- Helpers internes ----------
         def _first_non_empty(*vals):
@@ -925,20 +930,14 @@ class TradeExecutor:
 
         def _normalize_action(a: str) -> str:
             a = (a or "").strip().upper()
-            mapping = {
-                "BUY": "BUY",
-                "SELL": "SELL",
-                "LONG": "BUY",
-                "SHORT": "SELL",
-                "CLOSE": "CLOSE",
-            }
+            mapping = {"BUY": "BUY", "SELL": "SELL", "LONG": "BUY", "SHORT": "SELL", "CLOSE": "CLOSE"}
             return mapping.get(a, "")
 
         def _normalize_volume(symbol_info, vol: float) -> float:
             """Clamp & round le volume selon les contraintes du symbole MT5."""
             try:
-                vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
-                vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+                vmin  = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
+                vmax  = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
                 vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
             except Exception:
                 vmin, vmax, vstep = 0.0, float("inf"), 0.0
@@ -946,14 +945,10 @@ class TradeExecutor:
             if not isinstance(vol, (int, float)) or vol <= 0:
                 return 0.0
 
-            # clamp [vmin, vmax]
             vol = max(vmin, min(vmax, float(vol)))
-
-            # quantification au step -> FLOOR (évite les dépassements et colle au sizing risque)
             if vstep and vstep > 0:
                 steps = math.floor((vol - vmin) / vstep)
                 vol = vmin + steps * vstep
-                # re-clamp au cas où l'arrondi dépasserait vmax à 1 ulp près
                 if vol > vmax:
                     vol = max(vmin, vmax)
             return float(vol)
@@ -970,10 +965,7 @@ class TradeExecutor:
         action = _normalize_action(action_raw)
 
         if not action:
-            msg = (
-                f"Action de trade invalide: '{action_raw}' "
-                "(attendu: BUY/SELL/CLOSE/LONG/SHORT)."
-            )
+            msg = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
 
@@ -992,45 +984,32 @@ class TradeExecutor:
 
         allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
         if allowed and raw_symbol not in allowed:
-            msg = (
-                f"Asset '{raw_symbol}' non autorisé par la stratégie "
-                f"(whitelist: {sorted(allowed)})."
-            )
+            msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
 
         # ---------- 3) Mapping broker ----------
-        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
-            raw_symbol, raw_symbol
-        )
+        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(raw_symbol, raw_symbol)
         if not broker_symbol or str(broker_symbol).upper() == "UNKNOWN":
-            msg = (
-                f"Mapping broker invalide pour l'asset '{raw_symbol}' "
-                f"(résultat: '{broker_symbol}')."
-            )
+            msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
-
         broker_symbol = str(broker_symbol).upper()
 
         # ---------- 3bis) Fenêtre/Calendrier de trading (hard block) ----------
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
-            start_h = int(tes.get("trading_start_hour_utc", 0))
-            end_h = int(tes.get("trading_end_hour_utc", 24))
+            start_h   = int(tes.get("trading_start_hour_utc", 0))
+            end_h     = int(tes.get("trading_end_hour_utc", 24))
             allowed_wd = set(tes.get("allowed_weekdays", list(range(7))))
         except Exception:
             start_h, end_h, allowed_wd = 0, 24, set(range(7))
 
         now_utc = datetime.utcnow()
         if now_utc.weekday() not in allowed_wd:
-            raise TradeExecutionError(
-                f"Jour non autorisé pour trader (weekday={now_utc.weekday()})."
-            )
+            raise TradeExecutionError(f"Jour non autorisé pour trader (weekday={now_utc.weekday()}).")
         if not (start_h <= now_utc.hour < end_h):
-            raise TradeExecutionError(
-                f"Hors fenêtre horaire UTC ({start_h:02d}-{end_h:02d})."
-            )
+            raise TradeExecutionError(f"Hors fenêtre horaire UTC ({start_h:02d}-{end_h:02d}).")
 
         # ---------- 4) Cas CLOSE ----------
         if action == "CLOSE":
@@ -1043,13 +1022,7 @@ class TradeExecutor:
 
         # ---------- 5) order_type sécurisé ----------
         order_type = str(trade_decision.get("order_type", "MARKET")).upper()
-        allowed_order_types = {
-            "MARKET",
-            "BUY_LIMIT",
-            "SELL_LIMIT",
-            "BUY_STOP",
-            "SELL_STOP",
-        }
+        allowed_order_types = {"MARKET", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
         if order_type not in allowed_order_types:
             self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
             order_type = "MARKET"
@@ -1059,11 +1032,10 @@ class TradeExecutor:
             symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
             if not symbol_info or not getattr(symbol_info, "name", None):
                 raise TradeExecutionError(
-                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). "
-                    f"Vérifie la correspondance broker."
+                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie la correspondance broker."
                 )
 
-            # log des contraintes volume broker pour diagnostiquer les 0.15
+            # log contraintes volume broker
             try:
                 self.logger.info(
                     f"[VOLUME] constraints broker {broker_symbol}: "
@@ -1080,10 +1052,9 @@ class TradeExecutor:
             except Exception:
                 spread_pips = float("inf")
 
-            # caps stratégie (pips)
-            entry_rules = (active_config.get("entry_rules") or {}).get("scalping") or {}
-            cap_soft = entry_rules.get("max_spread_pips")
-            cap_hard = entry_rules.get("hard_max_spread_pips")
+            entry_rules  = (active_config.get("entry_rules") or {}).get("scalping") or {}
+            cap_soft     = entry_rules.get("max_spread_pips")
+            cap_hard     = entry_rules.get("hard_max_spread_pips")
 
             max_spread_cap = None
             if isinstance(cap_soft, (int, float)):
@@ -1093,35 +1064,43 @@ class TradeExecutor:
 
             if max_spread_cap is not None:
                 if not math.isfinite(spread_pips) or spread_pips > max_spread_cap:
-                    raise TradeExecutionError(
-                        f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips."
-                    )
+                    raise TradeExecutionError(f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips.")
 
             # ---------- 7) Prix d'entrée ----------
-            entry_price_market = self.mt5_connector.get_current_price(
-                broker_symbol, action
-            )
+            entry_price_market = self.mt5_connector.get_current_price(broker_symbol, action)
             if not entry_price_market or entry_price_market <= 0:
-                raise TradeExecutionError(
-                    f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
-                )
+                raise TradeExecutionError(f"Impossible de récupérer un prix de marché valide pour {broker_symbol}.")
 
-            # Si limit/stop et qu'un entry_price est proposé par la décision → utiliser comme trigger par défaut
             entry_price_hint = trade_decision.get("entry_price")
-            trigger_price = trade_decision.get("trigger_price")
+            trigger_price    = trade_decision.get("trigger_price")
             if trigger_price is None:
-                if (
-                    order_type != "MARKET"
-                    and isinstance(entry_price_hint, (int, float))
-                    and entry_price_hint > 0
-                ):
+                if (order_type != "MARKET" and isinstance(entry_price_hint, (int, float)) and entry_price_hint > 0):
                     trigger_price = entry_price_hint
                 else:
                     trigger_price = entry_price_market
 
             # ---------- 8) SL/TP (avec overrides en pips) ----------
-            sl_pips_override = trade_decision.get("target_sl_pips")
-            tp_pips_override = trade_decision.get("target_tp_pips")
+            # Supporte désormais sl/tp "hint" pour la stratégie midline
+            sl_pips_override = (
+                trade_decision.get("target_sl_pips")
+                if trade_decision.get("target_sl_pips") is not None
+                else trade_decision.get("sl_pips_hint")  # <- nouveau
+            )
+            tp_pips_override = (
+                trade_decision.get("target_tp_pips")
+                if trade_decision.get("target_tp_pips") is not None
+                else trade_decision.get("tp_pips_hint")  # <- nouveau
+            )
+
+            # Infos Bollinger/midline (si présentes) à propager au calculateur de niveaux
+            boll = trade_decision.get("boll") or market_context.get("boll") or {}
+            # compat: champs à plat
+            for k in ("bb_mid", "bb_upper", "bb_lower"):
+                if k in trade_decision and k not in boll:
+                    try:
+                        boll[k] = float(trade_decision.get(k))
+                    except Exception:
+                        pass
 
             order_ctx = {
                 "action": action,
@@ -1131,25 +1110,24 @@ class TradeExecutor:
                 "target_tp_pips": tp_pips_override,
                 "spread_pips": spread_pips,
                 "entry_price_ref": entry_price_hint,
+                # --- midline mode / boll info pour _calculate_sl_tp_prices ---
+                "level_mode": trade_decision.get("level_mode", None),  # ex: "boll_midline"
+                "boll": {
+                    "bb_mid": boll.get("bb_mid"),
+                    "bb_upper": boll.get("bb_upper"),
+                    "bb_lower": boll.get("bb_lower"),
+                },
             }
 
             sl_price, tp_price = self._calculate_sl_tp_prices(
-                order_ctx,
-                active_config,
-                symbol_info,
-                entry_price_market,
-                market_context,
+                order_ctx, active_config, symbol_info, entry_price_market, market_context
             )
 
             # Validations SL/TP
             if not isinstance(sl_price, (int, float)) or sl_price <= 0:
-                raise TradeExecutionError(
-                    f"SL calculé invalide ({sl_price}) pour {broker_symbol}."
-                )
+                raise TradeExecutionError(f"SL calculé invalide ({sl_price}) pour {broker_symbol}.")
             if not isinstance(tp_price, (int, float)) or tp_price <= 0:
-                raise TradeExecutionError(
-                    f"TP calculé invalide ({tp_price}) pour {broker_symbol}."
-                )
+                raise TradeExecutionError(f"TP calculé invalide ({tp_price}) pour {broker_symbol}.")
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
@@ -1169,47 +1147,35 @@ class TradeExecutor:
                 rr_value = (reward / risk) if risk > 0 else 0.0
 
                 if risk <= 0.0 or reward <= 0.0:
-                    self.logger.warning(
-                        f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
-                    )
+                    self.logger.warning(f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif.")
                 elif rr_value < min_rr:
-                    self.logger.info(
-                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
-                    )
+                    self.logger.info(f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif.")
 
-            # ---------- 9) Volume : priorise optionnellement le volume de la décision ----------
-            # Paramétrage : risk_management.use_decision_volume_if_present = true/false
+            # ---------- 9) Volume ----------
             use_decision_vol = bool(self.config_manager.get("risk_management.use_decision_volume_if_present", False))
-            decision_volume = trade_decision.get("volume") or trade_decision.get("target_volume")
+            decision_volume  = trade_decision.get("volume") or trade_decision.get("target_volume")
 
             volume_final = None
-            volume_source = None
-
             if use_decision_vol and isinstance(decision_volume, (int, float)) and float(decision_volume) > 0:
                 volume_final = float(decision_volume)
-                volume_source = "decision"
                 self.logger.info(f"[VOLUME] utilisation du volume de décision: {volume_final}")
             else:
-                account_trade_settings = market_context.get(
-                    "active_broker_account", {}
-                ).get("trade_settings", {})
-                volume_calc = self._calculate_risk_based_volume(
-                    {"action": action, "asset": broker_symbol, "order_type": order_type},
-                    active_config,
-                    market_context,
-                    symbol_info,
-                    entry_price_market,
-                    sl_price,
-                    account_trade_settings,
+                account_trade_settings = market_context.get("active_broker_account", {}).get("trade_settings", {})
+                volume_final = float(
+                    self._calculate_risk_based_volume(
+                        {"action": action, "asset": broker_symbol, "order_type": order_type},
+                        active_config,
+                        market_context,
+                        symbol_info,
+                        entry_price_market,
+                        sl_price,
+                        account_trade_settings,
+                    )
                 )
-                volume_final = float(volume_calc)
-                volume_source = "risk_sizer"
                 self.logger.info(f"[VOLUME] volume calculé par risk sizer: {volume_final}")
 
             if not isinstance(volume_final, (int, float)) or volume_final <= 0:
-                raise TradeExecutionError(
-                    f"Volume calculé invalide ({volume_final}) pour {broker_symbol}."
-                )
+                raise TradeExecutionError(f"Volume calculé invalide ({volume_final}) pour {broker_symbol}.")
 
             # ---------- 9a) Normalisation par contraintes symbole ----------
             vol_before_norm = volume_final
@@ -1221,11 +1187,9 @@ class TradeExecutor:
                 f"max={getattr(symbol_info,'volume_max',None)})"
             )
             if volume_final <= 0:
-                raise TradeExecutionError(
-                    f"Volume final invalide après normalisation ({volume_final})."
-                )
+                raise TradeExecutionError(f"Volume final invalide après normalisation ({volume_final}).")
 
-            # ---------- 9b) Fat-finger & caps globaux (seulement si explicitement activés) ----------
+            # ---------- 9b) Fat-finger & caps globaux (optionnels) ----------
             try:
                 tes = (self.config_manager.get("trade_executor_settings", {}) or {})
                 ff = (tes.get("fat_finger_check", {}) or {})
@@ -1236,28 +1200,20 @@ class TradeExecutor:
                     per_asset = (ff.get("max_absolute_volume_for_asset") or {})
                     cap_sym = per_asset.get(raw_symbol)
                     if isinstance(cap_sym, (int, float)) and volume_final > float(cap_sym):
-                        raise TradeExecutionError(
-                            f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
-                        )
-                # Cap global uniquement si safety explicitement activé
+                        raise TradeExecutionError(f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}.")
+
                 cap_global = tes.get("max_absolute_volume_safety", None)
                 if vol_safety_enabled and isinstance(cap_global, (int, float)) and volume_final > float(cap_global):
-                    raise TradeExecutionError(
-                        f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}."
-                    )
+                    raise TradeExecutionError(f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}.")
 
-                # Cap par compte (optionnel) dans market_context.active_broker_account.trade_settings.max_lot
                 account_trade_settings = market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
-                acc_min = account_trade_settings.get("min_lot")
+                acc_min  = account_trade_settings.get("min_lot")
                 acc_step = account_trade_settings.get("lot_step")
-                acc_max = account_trade_settings.get("max_lot")
+                acc_max  = account_trade_settings.get("max_lot")
                 self.logger.info(f"[VOLUME] constraints compte: min={acc_min}, step={acc_step}, max={acc_max}")
 
                 if isinstance(acc_max, (int, float)) and volume_final > float(acc_max):
-                    raise TradeExecutionError(
-                        f"Volume {volume_final} > max lot compte {float(acc_max)}."
-                    )
-
+                    raise TradeExecutionError(f"Volume {volume_final} > max lot compte {float(acc_max)}.")
             except TradeExecutionError:
                 raise
             except Exception as e:
@@ -1279,13 +1235,8 @@ class TradeExecutor:
         except TradeExecutionError:
             raise
         except Exception as e:
-            self.logger.error(
-                f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
-                exc_info=True,
-            )
-            raise TradeExecutionError(
-                f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
-            ) from e
+            self.logger.error(f"Erreur inattendue préparation ordre {broker_symbol}: {e}", exc_info=True)
+            raise TradeExecutionError(f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}") from e
 
 
 
@@ -1304,9 +1255,10 @@ class TradeExecutor:
         - Conversion PIPS → prix corrigée (1 pip = 10 points pour FX/Gold)
         - Arrondit aux 'digits' du symbole
         - Fallback robuste si données manquantes
-        - ⚠️ Katana (micro‑phase) : SL/TP très serrés avec clamps durs/softs et rejets si au‑delà des caps.
+        - ⚔️ Mode 'boll_midline' (katana scalp) : SL au-delà de la bande opposée + buffer, TP vers/sur la médiane (léger overshoot).
+        * Si des hints/overrides existent, on les respecte; sinon, on calcule depuis les bandes.
         - ➕ Intègre les overrides Bollinger depuis config.decision_engine.katana.bollinger_overrides.tp_sl_overrides
-        (appliqués uniquement si les seuils entry_bias sont satisfaits par les scores de trade_decision).
+        (appliqués uniquement si les seuils entry_bias sont satisfaits).
         """
         import pandas as pd
         import numpy as np
@@ -1337,7 +1289,7 @@ class TradeExecutor:
         tp_pips_override = trade_decision.get("target_tp_pips", None)
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-        # --- 🔁 Overrides Bollinger (Katana) conditionnels ---
+        # --- 🔁 Overrides Bollinger (Katana) conditionnels (si config les active) ---
         try:
             de = (config.get("decision_engine") or {})
             kat = (de.get("katana") or {})
@@ -1375,7 +1327,7 @@ class TradeExecutor:
         except Exception as e:
             self.logger.debug(f"[Katana/Bollinger] Overrides non appliqués: {e}")
 
-        # --- Paramètres prod / smart targets ---
+        # --- Paramètres SL/TP standards ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
         sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()   # PIPS|SWING|ATR
         tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()     # RR|ATR_MULTIPLE|PIPS
@@ -1389,7 +1341,7 @@ class TradeExecutor:
         sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
         tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
 
-        # --- Règles d'entrée scalping (caps/flags Katana) ---
+        # --- Règles scalping (caps/guards Katana) ---
         entry_rules_scalp = ((config.get("entry_rules") or {}).get("scalping") or {})
         reject_if_sl_over_cap = bool(entry_rules_scalp.get("reject_if_sl_over_cap", False))
         max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")
@@ -1415,78 +1367,149 @@ class TradeExecutor:
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
-        # ========================= SL =========================
+        # =====================================================================
+        # ⚔️ Mode 'boll_midline' si demandé ET si pas d'overrides explicites
+        # =====================================================================
         stop_loss_price = 0.0
+        take_profit_price = 0.0
 
+        try:
+            level_mode = str(trade_decision.get("level_mode") or "").lower()
+            boll = (trade_decision.get("boll") or {}) if isinstance(trade_decision.get("boll"), dict) else {}
+            bb_mid = float(boll.get("bb_mid")) if boll.get("bb_mid") is not None else float("nan")
+            bb_up  = float(boll.get("bb_upper")) if boll.get("bb_upper") is not None else float("nan")
+            bb_lo  = float(boll.get("bb_lower")) if boll.get("bb_lower") is not None else float("nan")
+
+            # Config midline spécifique (scalping)
+            mid_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get("boll_midline", {}) or {}
+            rr_min         = float(mid_cfg.get("min_rr", 1.1) or 1.1)
+            k_halfband_tp  = float(mid_cfg.get("tp_halfband_k", 0.6) or 0.6)
+            buffer_pips_min= float(mid_cfg.get("buffer_pips_min", 1.5) or 1.5)
+            mid_overshoot_k= float(mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05)  # 5% du demi-canal au-delà de la médiane
+
+            valid_boll = all(map(lambda x: isinstance(x, (int, float)) and math.isfinite(x), [bb_mid, bb_up, bb_lo]))
+            can_apply_midline = (level_mode == "boll_midline") and valid_boll and isinstance(entry_price, (int, float)) and entry_price > 0
+
+            # On applique UNIQUEMENT si aucun override pips explicite n'a été fourni
+            if can_apply_midline and (sl_pips_override is None and tp_pips_override is None):
+                half_band_price = (bb_up - bb_lo) / 2.0
+                buffer_price = max(min_stop_distance_price, (buffer_pips_min * pip_size) if pip_size > 0 else min_stop_distance_price)
+
+                if action == "BUY":
+                    # SL sous la bande basse + buffer
+                    stop_loss_price = float(bb_lo - buffer_price)
+                    # TP vers la médiane (avec léger overshoot)
+                    target_mid_price = float(bb_mid + mid_overshoot_k * half_band_price)
+                    # Si on était très proche/dejà au-dessus de mid (cas bord), fallback: k*half-band
+                    direct_tp = max(0.0, target_mid_price - entry_price)
+                    fallback_tp = k_halfband_tp * half_band_price
+                    tp_distance_price = max(direct_tp, fallback_tp)
+                    take_profit_price = float(entry_price + tp_distance_price)
+
+                else:  # SELL
+                    # SL au-dessus de la bande haute + buffer
+                    stop_loss_price = float(bb_up + buffer_price)
+                    # TP vers la médiane (avec léger overshoot en dessous)
+                    target_mid_price = float(bb_mid - mid_overshoot_k * half_band_price)
+                    direct_tp = max(0.0, entry_price - target_mid_price)
+                    fallback_tp = k_halfband_tp * half_band_price
+                    tp_distance_price = max(direct_tp, fallback_tp)
+                    take_profit_price = float(entry_price - tp_distance_price)
+
+                # RR minimal (soft) sur la base des distances initiales
+                try:
+                    if action == "BUY":
+                        risk = max(entry_price - stop_loss_price, 0.0)
+                        reward = max(take_profit_price - entry_price, 0.0)
+                    else:
+                        risk = max(stop_loss_price - entry_price, 0.0)
+                        reward = max(entry_price - take_profit_price, 0.0)
+
+                    if risk > 0 and reward > 0 and (reward / risk) < rr_min:
+                        # Étire TP pour atteindre RR min (laisser les clamps plus bas ajuster si besoin)
+                        desired_reward = rr_min * risk
+                        if action == "BUY":
+                            take_profit_price = entry_price + desired_reward
+                        else:
+                            take_profit_price = entry_price - desired_reward
+                except Exception:
+                    pass
+        except Exception as e:
+            self.logger.debug(f"[boll_midline] application partielle: {e}")
+
+        # ========================= SL (standards si non fixé) =========================
         if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
             sl_distance = float(sl_pips_override) * pip_size
             stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
             self.logger.debug(f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}")
         else:
-            if sl_method == "SWING":
-                lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
-                buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-                if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
-                    self.logger.warning(f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS.")
-                    sl_method = "ATR"
-                else:
-                    recent = rates_df.tail(lookback)
-                    buffer_price = buffer_pips * pip_size
-                    if action == "BUY":
-                        swing_low = float(recent["low"].min())
-                        stop_loss_price = swing_low - buffer_price
-                    else:
-                        swing_high = float(recent["high"].max())
-                        stop_loss_price = swing_high + buffer_price
+            if stop_loss_price == 0.0:  # pas fixé par midline
+                if "smart_sl_tp_settings" in config:
+                    prod_st = config.get("smart_sl_tp_settings") or {}
 
-            if sl_method == "ATR" and stop_loss_price == 0.0:
-                atr_period = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
-                atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
-                atr = _compute_atr(rates_df, atr_period)
-                if not (atr == atr and atr > 0):
-                    self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
-                    sl_method = "PIPS"
-                else:
-                    sl_distance = atr_mult * atr
+                if sl_method == "SWING":
+                    lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
+                    buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
+                    if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
+                        self.logger.warning(f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS.")
+                        sl_method = "ATR"
+                    else:
+                        recent = rates_df.tail(lookback)
+                        buffer_price = buffer_pips * pip_size
+                        if action == "BUY":
+                            swing_low = float(recent["low"].min())
+                            stop_loss_price = swing_low - buffer_price
+                        else:
+                            swing_high = float(recent["high"].max())
+                            stop_loss_price = swing_high + buffer_price
+
+                if sl_method == "ATR" and stop_loss_price == 0.0:
+                    atr_period = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
+                    atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
+                    atr = _compute_atr(rates_df, atr_period)
+                    if not (atr == atr and atr > 0):
+                        self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
+                        sl_method = "PIPS"
+                    else:
+                        sl_distance = atr_mult * atr
+                        stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
+
+                if sl_method == "PIPS" and stop_loss_price == 0.0:
+                    sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
+                    sl_distance = sl_pips * pip_size
                     stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
 
-            if sl_method == "PIPS" and stop_loss_price == 0.0:
-                sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
-                sl_distance = sl_pips * pip_size
-                stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
-
-        # ========================= TP =========================
-        take_profit_price = 0.0
-
+        # ========================= TP (standards si non fixé) =========================
         if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
             tp_distance = float(tp_pips_override) * pip_size
             take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
             self.logger.debug(f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}")
         else:
-            if tp_method == "RR":
-                risk_distance_price = abs(entry_price - stop_loss_price)
-                if risk_distance_price <= 0:
-                    self.logger.warning("Distance de risque nulle pour TP RR. Fallback PIPS.")
-                    tp_method = "PIPS"
-                else:
-                    tp_distance = risk_distance_price * rr_ratio
-                    take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+            if take_profit_price == 0.0:  # pas fixé par midline
+                if tp_method == "RR":
+                    risk_distance_price = abs(entry_price - stop_loss_price)
+                    if risk_distance_price <= 0:
+                        self.logger.warning("Distance de risque nulle pour TP RR. Fallback PIPS.")
+                        tp_method = "PIPS"
+                    else:
+                        tp_distance = risk_distance_price * rr_ratio
+                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
-            if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
-                atr_period = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
-                atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
-                atr = _compute_atr(rates_df, atr_period)
-                if not (atr == atr and atr > 0):
-                    self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
-                    tp_method = "PIPS"
-                else:
-                    tp_distance = atr_mult * atr
-                    take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+                if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
+                    atr_period = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
+                    atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
+                    atr = _compute_atr(rates_df, atr_period)
+                    if not (atr == atr and atr > 0):
+                        self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
+                        tp_method = "PIPS"
+                    else:
+                        tp_distance = atr_mult * atr
+                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
-            if tp_method == "PIPS" and take_profit_price == 0.0:
-                tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
-                tp_distance = tp_pips * pip_size
-                take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+                if tp_method == "PIPS" and take_profit_price == 0.0:
+                    tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
+                    tp_distance = tp_pips * pip_size
+                    take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
         # ========================= Validations Katana & ajustements serrés =========================
         if entry_price <= 0:
@@ -1550,7 +1573,7 @@ class TradeExecutor:
         except Exception:
             pass
 
-        # D) Ajustement pour spread
+        # D) Ajustement pour spread (évite TP < SL + spread)
         if spread_pips > 0:
             sl_pips_now = sl_dist_points / points_per_pip
             tp_pips_now = tp_dist_points / points_per_pip

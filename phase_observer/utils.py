@@ -180,39 +180,143 @@ def _get_nearest_liquidity_level(self, df: pd.DataFrame) -> Optional[Dict[str, A
 
 def _build_enhanced_signals(self, confluence: Dict, quality: Dict, tf_analyses: Dict, asset: str) -> Dict[str, Any]:
     """
-    Construction des signaux finaux enrichis (non bloquant).
+    Construction des signaux finaux enrichis (audit-ready, compat descendante).
+    - Sortie compacte pour l'orchestrateur/decision engine
+    - Expose phase/biais, score, méta MTF, et flags de signaux clés
+    - Tolérant: retourne un paquet cohérent même en cas d'imperfections d'entrée
     """
     try:
-        # Signaux de base depuis confluence
-        base_signals = {
-            "phase": confluence.get("phase", "uncertain"),
-            "confidence_score": float(confluence.get("confluence_score", 0.0) or 0.0),
-            "is_liquid": True,  # TODO: branche ton vrai critère de liquidité ici
-            "current_price": float(tf_analyses.get("M1", {}).get("last_close", 0.0) or 0.0)
-                if isinstance(tf_analyses.get("M1"), dict) else 0.0,
+        confluence = confluence or {}
+        quality    = quality or {}
+        tf_analyses = tf_analyses or {}
+
+        # --- Helpers ---
+        def _safe_float(x, default=0.0) -> float:
+            try:
+                f = float(x)
+                if f != f:  # NaN
+                    return float(default)
+                return f
+            except Exception:
+                return float(default)
+
+        # Récup prix courant (priorité M1.last_close -> M1.close -> autre TF)
+        current_price = 0.0
+        try:
+            m1 = tf_analyses.get("M1", {}) if isinstance(tf_analyses.get("M1"), dict) else {}
+            if "last_close" in m1:
+                current_price = _safe_float(m1.get("last_close", 0.0))
+            elif "close" in m1:
+                current_price = _safe_float(m1.get("close", 0.0))
+            else:
+                # fallback: cherche un champ 'last_close' dans le TF dominant
+                dom_tf = str(confluence.get("dominant_timeframe") or "")
+                if dom_tf and isinstance(tf_analyses.get(dom_tf), dict):
+                    current_price = _safe_float(tf_analyses[dom_tf].get("last_close", 0.0))
+        except Exception:
+            pass
+
+        # Liquidité (prend M1 si dispo)
+        is_liquid = True
+        try:
+            if isinstance(tf_analyses.get("M1"), dict) and "is_liquid" in tf_analyses["M1"]:
+                is_liquid = bool(tf_analyses["M1"]["is_liquid"])
+        except Exception:
+            pass
+
+        # Champs confluence principaux (avec fallbacks)
+        phase         = confluence.get("phase", "uncertain")
+        phase_bucket  = confluence.get("phase_bucket", None)
+        bias          = confluence.get("bias", "NEUTRAL")
+        conf_score    = _safe_float(confluence.get("confluence_score", 0.0), 0.0)
+        base_conf     = _safe_float(confluence.get("base_confluence", conf_score), conf_score)
+        dom_tf        = confluence.get("dominant_timeframe", None)
+
+        signal_scores = confluence.get("signal_scores", {}) or {}
+        agreement     = confluence.get("agreement_rates", confluence.get("signal_agreement_rates", {})) or {}
+        weights_used  = confluence.get("weights_used", {}) or {}
+        supporting    = confluence.get("supporting_tfs", {}) or {}
+
+        # Flags dérivés des scores (seuils prudents)
+        def _flag(score_key: str, thr: float = 0.5) -> bool:
+            try:
+                return float(signal_scores.get(score_key, 0.0) or 0.0) > float(thr)
+            except Exception:
+                return False
+
+        bos_flag  = _flag("bos_mss_detected", 0.50)
+        lqg_flag  = _flag("liquidity_grab_detected", 0.50)
+        ob_flag   = _flag("ob_detected", 0.50)
+
+        # Qualité & composants
+        quality_grade   = quality.get("performance_grade", "D")
+        exec_time_ms    = _safe_float(quality.get("execution_time_ms", quality.get("execution_time_ms", 0.0)), 0.0)
+        quality_comps   = quality.get("components", {})
+        weights_quality = quality.get("weights", {})
+
+        # Décomposition TF pour debug/trace (phase par TF)
+        tf_breakdown = {tf: (ana.get("phase") if isinstance(ana, dict) else None) for tf, ana in tf_analyses.items()}
+
+        # Paquet final (compact + meta)
+        final = {
+            # --- signaux décisionnels de base ---
+            "phase": phase,
+            "bias": bias,  # "BUY" / "SELL" / "NEUTRAL"
+            "phase_bucket": phase_bucket,  # "bull" / "bear" / "range" / "unknown"
+            "confidence_score": conf_score,
+            "is_liquid": bool(is_liquid),
+            "current_price": current_price,
             "asset": asset,
-        }
 
-        # Enrichissement multi-TF
-        multi_tf_enhancement = {
+            # --- méta MTF & confluence ---
             "multi_tf_enabled": True,
-            "tf_consensus": bool(confluence.get("phase_consistency", False)),
-            "dominant_tf": confluence.get("dominant_timeframe", "M5"),
-            "quality_grade": quality.get("performance_grade", "C"),
-            "execution_time_ms": float(quality.get("execution_time_ms", 0.0) or 0.0),
-            # Signaux de confluence (booléens dérivés)
-            "bos_mss_detected": (confluence.get("signal_scores", {}).get("bos_mss_detected", 0.0) or 0.0) > 0.5,
-            "liquidity_grab_detected": (confluence.get("signal_scores", {}).get("liquidity_grab_detected", 0.0) or 0.0) > 0.5,
-            "ob_detected": (confluence.get("signal_scores", {}).get("ob_detected", 0.0) or 0.0) > 0.5,
-            # Méta-données pour debugging
-            "tf_breakdown": {tf: analysis.get("phase") for tf, analysis in (tf_analyses or {}).items()},
-            "signal_agreement_rates": confluence.get("agreement_rates", {}),
+            "dominant_tf": dom_tf,
+            "base_confluence": base_conf,
+            "signal_scores": signal_scores,
+            "signal_agreement_rates": agreement,   # alias compat
+            "weights_used": weights_used,
+            "supporting_tfs": supporting,
+            "tf_breakdown": tf_breakdown,
+
+            # --- flags clés (booléens) ---
+            "bos_mss_detected": bos_flag,
+            "liquidity_grab_detected": lqg_flag,
+            "ob_detected": ob_flag,
+
+            # --- qualité & performance ---
+            "quality_grade": quality_grade,
+            "execution_time_ms": exec_time_ms,
+            "quality_components": quality_comps or None,
+            "quality_weights": weights_quality or None,
         }
 
-        return {**base_signals, **multi_tf_enhancement}
+        return final
+
     except Exception as e:
         self.logger.warning(f"_build_enhanced_signals fallback: {e}")
-        return {"phase": "uncertain", "confidence_score": 0.0, "is_liquid": True, "current_price": 0.0, "asset": asset}
+        return {
+            "phase": "uncertain",
+            "bias": "NEUTRAL",
+            "phase_bucket": "unknown",
+            "confidence_score": 0.0,
+            "is_liquid": True,
+            "current_price": 0.0,
+            "asset": asset,
+            "multi_tf_enabled": True,
+            "dominant_tf": None,
+            "signal_scores": {},
+            "signal_agreement_rates": {},
+            "weights_used": {},
+            "supporting_tfs": {"phase": None, "bias": None},
+            "bos_mss_detected": False,
+            "liquidity_grab_detected": False,
+            "ob_detected": False,
+            "quality_grade": "D",
+            "execution_time_ms": 0.0,
+            "quality_components": None,
+            "quality_weights": None,
+        }
+
     
 def _detect_tf_divergences(self, tf_analyses: Dict) -> Dict[str, Any]:
     """
