@@ -1631,6 +1631,7 @@ class DecisionPipeline:
         - Reste 100% compatible avec le sizing existant (on pousse sl/tp en *pips* cibles)
         """
         import math
+        import numpy as np
 
         # DIAG local
         try:
@@ -1758,6 +1759,23 @@ class DecisionPipeline:
             except Exception:
                 return default
 
+        def _num(val, fallback=np.nan) -> float:
+            try:
+                v = float(val)
+                return v if math.isfinite(v) else fallback
+            except Exception:
+                return fallback
+
+        def _to_bool(x, default=False) -> bool:
+            try:
+                if isinstance(x, (int, float)):
+                    return bool(x)
+                if isinstance(x, str):
+                    return x.strip().lower() in {"1", "true", "yes", "y", "on"}
+                return bool(x)
+            except Exception:
+                return default
+
         boll = (
             signals.get("boll")
             or signals.get("bollinger")
@@ -1765,43 +1783,37 @@ class DecisionPipeline:
             or signals.get("m1_boll")
             or {}
         )
-        bb_mid = float(
-            _get(lambda: boll.get("bb_mid"), signals.get("bb_mid", float("nan")))
-        )
-        bb_up = float(
-            _get(lambda: boll.get("bb_upper"), signals.get("bb_upper", float("nan")))
-        )
-        bb_lo = float(
-            _get(lambda: boll.get("bb_lower"), signals.get("bb_lower", float("nan")))
-        )
-        is_range = bool(
-            _get(lambda: boll.get("is_range"), signals.get("is_range", False))
-        )
-        is_exp = bool(
-            _get(lambda: boll.get("is_expansion"), signals.get("is_expansion", False))
+
+        # Niveaux Bollinger robustes aux None/NaN
+        bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
+        bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
+        bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
+        is_range = _to_bool(_get(lambda: boll.get("is_range"), signals.get("is_range")))
+        is_exp = _to_bool(
+            _get(lambda: boll.get("is_expansion"), signals.get("is_expansion"))
         )
         mid_entry = (
-            str(_get(lambda: boll.get("mid_entry"), signals.get("mid_entry", ""))) or ""
+            str(_get(lambda: boll.get("mid_entry"), signals.get("mid_entry", "")) or "")
         ).lower()
 
         # Prix courant (de la décision ou des signaux M1)
         price = None
         for key in ("entry_price", "current_price", "last_close", "close"):
-            if key in trade_decision:
+            if key in trade_decision and trade_decision.get(key) is not None:
                 price = trade_decision.get(key)
                 break
-            if isinstance(signals.get("M1"), dict) and key in signals["M1"]:
+            if (
+                isinstance(signals.get("M1"), dict)
+                and signals["M1"].get(key) is not None
+            ):
                 price = signals["M1"].get(key)
                 break
-            if key in signals:
+            if signals.get(key) is not None:
                 price = signals.get(key)
                 break
-        try:
-            price = float(price)
-        except Exception:
-            price = float("nan")
+        price = _num(price)
 
-        # pip_size
+        # pip_size (best effort, non bloquant ici)
         pip_size = None
         try:
             si = getattr(self, "symbol_info", None)
@@ -1811,17 +1823,18 @@ class DecisionPipeline:
             elif isinstance(si, dict):
                 point = float(si.get("point", 0.0) or 0.0)
             if point <= 0 and "point" in signals:
-                point = float(signals.get("point") or 0.0)
+                point = _num(signals.get("point"), 0.0)
             pip_size = point * 10.0 if point > 0 else None
         except Exception:
             pip_size = None
 
-        # Gate midline
-        if any(math.isnan(x) for x in (bb_mid, bb_up, bb_lo)) or not math.isfinite(
-            price
+        # Gate midline (on n'applique que si toutes les valeurs sont valides)
+        if any(
+            not (isinstance(x, float) and math.isfinite(x))
+            for x in (bb_mid, bb_up, bb_lo, price)
         ):
             self.logger.debug(
-                "Bollinger midline indisponible ou prix invalide -> pas de gate midline."
+                "Bollinger midline indisponible/prix invalide -> on saute le gate midline (pas d'erreur)."
             )
         else:
             half_band = (bb_up - bb_lo) / 2.0
@@ -1868,6 +1881,7 @@ class DecisionPipeline:
                     target_tp_pips = max(
                         tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
                     )
+                    # SL: buffer sous lower
                     target_sl_pips = max(
                         buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
                     )
@@ -1880,28 +1894,29 @@ class DecisionPipeline:
                     target_tp_pips = max(
                         tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
                     )
+                    # SL: buffer au-dessus d'upper
                     target_sl_pips = max(
                         buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
                     )
 
-            # RR minimal estimé
+            # RR minimal (soft)
             if (
-                target_tp_pips is not None
-                and target_sl_pips is not None
+                (target_tp_pips is not None)
+                and (target_sl_pips is not None)
                 and target_sl_pips > 0
             ):
                 rr_est = float(target_tp_pips / target_sl_pips)
                 if rr_est < rr_min:
                     target_tp_pips = rr_min * target_sl_pips
 
-            # Injecter pour le RiskEngine/Executor (clés *officielles* attendues par l’exécuteur)
+            # Injecter pour RiskEngine/Executor
             if target_tp_pips is not None:
                 trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
             if target_sl_pips is not None:
                 trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
             trade_decision["rule_name"] = "katana_midline_scalp"
             trade_decision["level_mode"] = "boll_midline"
-            trade_decision.setdefault("boll", {})  # pour l'exécuteur SL/TP midline
+            trade_decision.setdefault("boll", {})
             trade_decision["boll"].update(
                 {"bb_mid": bb_mid, "bb_upper": bb_up, "bb_lower": bb_lo}
             )
