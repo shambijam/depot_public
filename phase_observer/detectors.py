@@ -556,11 +556,14 @@ class Detectors:
         - NE PAS MODIFIER LA SIGNATURE ICI (pour intégration sûre).
         - Retourne un dict prêt à consommer par le pipeline (touch, squeeze, breakout_score, mean_revert_score, distances, etc.).
         - ✅ Ajouts/Optimisations:
-            * Conserve et met à jour en continu les bandes sur TOUT l'historique (bb_upper/bb_lower/bb_mid) -> out["series"]
+            * Séries complètes bb_upper/bb_lower/bb_mid (mise à jour continue) -> out["series"]
+            * Bandes plus ROBUSTES (EMA + écart-type robustifié par MAD/winsor)
             * range_score + is_range + range_duration_bars
             * midline (bb_mid) + logique d'entrée "médiane" (mid_entry, mid_entry_score)
-            * critères multi-indicateurs: bandwidth, ADX, pente EMA, largeur RSI (robuste au whipsaw)
+            * gate d’entrée mediane 'entry_gate_ok' (distance mini à la médiane)
+            * critères multi-indicateurs: bandwidth, ADX, pente EMA, largeur RSI
             * hysteresis/débounce basiques pour stabiliser la détection de range
+            * ✅ Correction pandas: remplace .fillna(method="ffill") par .ffill()
         """
         import numpy as np
         import pandas as pd
@@ -590,30 +593,34 @@ class Detectors:
             "range_duration_bars": 0,
             "mid_entry": None,  # "buy" | "sell" | None (idée médiane)
             "mid_entry_score": 0.0,
+            # Gate d'entrée (BUY sous mid, SELL au-dessus) + distance mini à la médiane
+            "entry_gate_ok": False,
+            "mid_distance_ratio": 0.0,   # |price-mid| / half_band (0..1)
+            "half_band_pips": None,
             "meta": {
                 "period": period,
                 "std_mult": std_mult,
                 "mode": mode,
                 "range": {
-                    "weights": {
-                        "bandwidth": 0.35,
-                        "adx": 0.25,
-                        "ema_slope": 0.20,
-                        "rsi_width": 0.20,
-                    },
-                    "threshold_in": 0.62,  # seuil entrée en état RANGE
-                    "threshold_out": 0.52,  # hysteresis (sortie plus facile)
-                    "debounce_bars": 3,  # confirmation avant toggle
+                    "weights": {"bandwidth": 0.35, "adx": 0.25, "ema_slope": 0.20, "rsi_width": 0.20},
+                    "threshold_in": 0.62,
+                    "threshold_out": 0.52,
+                    "debounce_bars": 3,
                     "rsi_period": 14,
                     "ema_slope_window": max(8, period // 2),
                     "adx_period": 14,
                     "rsi_width_window": 14,
                 },
                 "mid_entry": {
-                    "pos_band_min": 0.10,  # |position| min (en fraction du demi-canal) pour éviter le plein centre
-                    "pos_band_max": 0.65,  # |position| max pour rester "proche" de la médiane
-                    "mom_norm_min": 0.05,  # momentum/ATR minimal dans le bon sens
-                    "base_threshold": 0.55,  # seuil pour proposer l'entrée médiane
+                    "pos_band_min": 0.12,  # distance mini à la médiane (exigence renforcée)
+                    "pos_band_max": 0.65,
+                    "mom_norm_min": 0.05,
+                    "base_threshold": 0.55,
+                },
+                # Paramètres robustification des bandes
+                "robust": {
+                    "winsor_alpha": 0.05,     # 5% winsorisation des résidus
+                    "mad_blend": 0.40,        # mélange 40% MAD, 60% STD
                 },
             },
             # ⚡ Séries historiques complètes des bandes pour traçage/backtest/export
@@ -630,22 +637,40 @@ class Detectors:
 
         series = pd.to_numeric(df[price_col], errors="coerce").astype(float)
         if series.isna().any():
-            series = series.fillna(method="ffill").fillna(method="bfill")
+            series = series.ffill().bfill()
         if not np.isfinite(series.iloc[-1]):
             out["reason"] = "invalid_last_price"
             return out
 
-        # --- Bollinger bands FULL HISTORY (ema + std des résidus pour stabilité micro) ---
+        # === Bandes de Bollinger ROBUSTES sur tout l'historique ===
         mid = series.ewm(span=period, adjust=False, min_periods=period).mean()
-        resid = series - mid
-        rolling_std = resid.rolling(window=period, min_periods=period).std(ddof=0)
-        upper = mid + std_mult * rolling_std
-        lower = mid - std_mult * rolling_std
+        resid_raw = series - mid
 
-        # Clamp/ffill pour robustesse historique
-        bb_mid_series = mid.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
-        bb_upper_series = upper.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
-        bb_lower_series = lower.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+        # Winsorisation simple des résidus (limite l'effet des mèches extrêmes)
+        try:
+            alpha = float(out["meta"]["robust"]["winsor_alpha"])
+            lo = resid_raw.quantile(alpha)
+            hi = resid_raw.quantile(1 - alpha)
+            resid_w = resid_raw.clip(lower=lo, upper=hi)
+        except Exception:
+            resid_w = resid_raw
+
+        # Écart-type classique + MAD (écart absolu médian) -> mélange
+        rolling_std = resid_w.rolling(window=period, min_periods=period).std(ddof=0)
+        med = resid_w.rolling(window=period, min_periods=period).median()
+        mad = (resid_w - med).abs().rolling(window=period, min_periods=period).median()
+        mad_sigma = 1.4826 * mad  # MAD -> proxy sigma
+
+        blend = float(out["meta"]["robust"]["mad_blend"])
+        robust_sigma = (1.0 - blend) * rolling_std + blend * mad_sigma
+
+        upper = mid + std_mult * robust_sigma
+        lower = mid - std_mult * robust_sigma
+
+        # Clamp/ffill pour robustesse historique (et suppression FutureWarning)
+        bb_mid_series = mid.replace([np.inf, -np.inf], np.nan).ffill()
+        bb_upper_series = upper.replace([np.inf, -np.inf], np.nan).ffill()
+        bb_lower_series = lower.replace([np.inf, -np.inf], np.nan).ffill()
 
         # ⚡ Export séries complètes dans la sortie (historique entier)
         out["series"]["bb_mid"] = bb_mid_series
@@ -671,10 +696,7 @@ class Detectors:
                 h = pd.to_numeric(df_in["high"], errors="coerce").astype(float)
                 l = pd.to_numeric(df_in["low"], errors="coerce").astype(float)
                 c = pd.to_numeric(df_in["close"], errors="coerce").astype(float)
-                tr = pd.concat(
-                    [(h - l).abs(), (h - c.shift()).abs(), (l - c.shift()).abs()],
-                    axis=1,
-                ).max(axis=1)
+                tr = pd.concat([(h - l).abs(), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
                 a = tr.rolling(window=p, min_periods=p).mean().iloc[-1]
                 return float(a) if np.isfinite(a) else float("nan")
             except Exception:
@@ -690,9 +712,7 @@ class Detectors:
             )
             pip_size = point * 10.0 if point > 0 else None
         atr_pips = (atr / pip_size) if (pip_size and atr and atr > 0) else None
-        out["atr_pips"] = (
-            float(atr_pips) if atr_pips is not None and np.isfinite(atr_pips) else None
-        )
+        out["atr_pips"] = float(atr_pips) if atr_pips is not None and np.isfinite(atr_pips) else None
 
         # --- Distances en pips ---
         def _to_pips(delta: float) -> float | None:
@@ -707,16 +727,11 @@ class Detectors:
         # --- Touch / In-band ---
         eps = 1e-12
         in_band = (price <= bb_upper + eps) and (price >= bb_lower - eps)
-        band_touch = (
-            "upper"
-            if price >= bb_upper - eps
-            else ("lower" if price <= bb_lower + eps else None)
-        )
+        band_touch = "upper" if price >= bb_upper - eps else ("lower" if price <= bb_lower + eps else None)
         out["in_band"] = bool(in_band)
         out["band_touch"] = band_touch
 
-        # --- Squeeze / Expansion via bande-width percentile sur fenêtre longue ---
-        # width_t = (upper - lower) / |mid|  (normalisation relative)
+        # --- Squeeze / Expansion via bande-width percentile ---
         width = (upper - lower) / (mid.replace(0, np.nan).abs())
         w_non_na = width.dropna()
 
@@ -725,11 +740,8 @@ class Detectors:
             if not w_hist.empty:
                 thresh = np.nanpercentile(w_hist.values, squeeze_percentile * 100.0)
                 is_squeeze = bool(width.iloc[-1] <= thresh)
-                # expansion: sortie du squeeze + bande-width qui s'élargit
                 if len(width) >= 2 and np.isfinite(width.iloc[-2]):
-                    is_expansion = bool(
-                        (width.iloc[-1] > width.iloc[-2]) and (not is_squeeze)
-                    )
+                    is_expansion = bool((width.iloc[-1] > width.iloc[-2]) and (not is_squeeze))
                 else:
                     is_expansion = False
             else:
@@ -750,7 +762,7 @@ class Detectors:
             out["squeeze_strength"] = 0.0
 
         # --- Z-band: position du prix dans le canal (-inf..+inf), 0=milieu ---
-        last_std_val = rolling_std.iloc[-1]
+        last_std_val = robust_sigma.iloc[-1]
         last_std = float(last_std_val) if np.isfinite(last_std_val) else 0.0
         z_band = (price - bb_mid) / (last_std if last_std > 0 else np.nan)
         out["z_band"] = float(z_band) if np.isfinite(z_band) else None
@@ -759,11 +771,7 @@ class Detectors:
         close = pd.to_numeric(df["close"], errors="coerce").astype(float)
         mom_fast = close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
         mom_slow = close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
-        momentum = (
-            float(mom_fast - mom_slow)
-            if all(map(np.isfinite, [mom_fast, mom_slow]))
-            else 0.0
-        )
+        momentum = float(mom_fast - mom_slow) if all(map(np.isfinite, [mom_fast, mom_slow])) else 0.0
         norm_mom = float(momentum / atr) if atr and atr > 0 else 0.0
         norm_mom = max(-3.0, min(3.0, norm_mom))  # clip
 
@@ -824,7 +832,6 @@ class Detectors:
         rsi_width_win = cfg_r["rsi_width_window"]
 
         # Composantes
-        # 1) Bandwidth faible -> range (normalisé par son historique)
         width_now = float(width.iloc[-1]) if np.isfinite(width.iloc[-1]) else np.nan
         if np.isfinite(width_now) and len(w_non_na) >= 10:
             rank = float((w_non_na <= width_now).mean())  # 0..1
@@ -832,22 +839,15 @@ class Detectors:
         else:
             comp_bandwidth = 0.5
 
-        # 2) ADX bas -> range
         adx_val = _adx(df, adx_p)
-        if np.isfinite(adx_val):
-            comp_adx = max(0.0, min(1.0, 1.0 - (adx_val / 50.0)))  # ADX ~0..50 -> 1..0
-        else:
-            comp_adx = 0.5
-
-        # 3) Pente EMA faible -> range
+        comp_adx = max(0.0, min(1.0, 1.0 - (adx_val / 50.0))) if np.isfinite(adx_val) else 0.5
         comp_slope = _ema_slope_norm(mid, ema_win)
 
-        # 4) RSI width (fourchette RSI) petite -> range
         rsi = _rsi(series, rsi_period)
         rsi_win = rsi.tail(rsi_width_win).dropna()
         if len(rsi_win) >= max(5, rsi_period // 2):
             rsi_width = float(rsi_win.max() - rsi_win.min())
-            comp_rsiw = max(0.0, min(1.0, 1.0 - (rsi_width / 30.0)))  # width ~0..30 -> 1..0
+            comp_rsiw = max(0.0, min(1.0, 1.0 - (rsi_width / 30.0)))
         else:
             comp_rsiw = 0.5
 
@@ -861,7 +861,7 @@ class Detectors:
         range_score = float(max(0.0, min(1.0, range_score)))
         out["range_score"] = round(range_score, 3)
 
-        # Hysteresis + debounce léger (in-memory via self, sinon stateless fallback)
+        # Hysteresis + debounce
         key_state = f"_micro_range_state_{getattr(self, 'symbol', 'UNKNOWN')}"
         prev = getattr(self, key_state, {"is_range": False, "counter": 0})
         is_range_now = prev["is_range"]
@@ -871,7 +871,6 @@ class Detectors:
         debounce = int(cfg_r["debounce_bars"])
 
         if not is_range_now:
-            # entrer en RANGE si score >= thr_in pendant 'debounce' barres
             if range_score >= thr_in:
                 prev["counter"] = prev["counter"] + 1
                 if prev["counter"] >= debounce:
@@ -880,7 +879,6 @@ class Detectors:
             else:
                 prev["counter"] = 0
         else:
-            # sortir si score <= thr_out pendant 'debounce' barres
             if range_score <= thr_out:
                 prev["counter"] = prev["counter"] + 1
                 if prev["counter"] >= debounce:
@@ -893,24 +891,22 @@ class Detectors:
         setattr(self, key_state, prev)
         out["is_range"] = bool(is_range_now)
 
-        # Durée récente passée en "range" (approx: compte des barres consécutives où score>=thr_out)
+        # Durée récente passée en "range" (approximation)
         try:
             recent_scores = []
             win_est = min(50, len(series))
             for _ in range(win_est):
-                # estimation simplifiée (on peut plugger un buffer circulaire réel ici)
                 recent_scores.append(range_score)
             out["range_duration_bars"] = int(sum(1 for s in recent_scores if s >= thr_out))
         except Exception:
             out["range_duration_bars"] = 0
 
         # =========================================================
-        # ✅ SCORING REVERSIONS / BREAKOUTS (existants, léger retuning ATR)
+        # ✅ SCORING REVERSIONS / BREAKOUTS
         # =========================================================
         mean_revert = 0.0
         breakout = 0.0
 
-        # Mean revert: touch bande + squeeze -> forte proba de retour vers mid
         if band_touch == "upper":
             mean_revert += 0.55
             mean_revert += 0.20 if out["is_squeeze"] else 0.05
@@ -920,7 +916,6 @@ class Detectors:
             mean_revert += 0.20 if out["is_squeeze"] else 0.05
             mean_revert += 0.10 if norm_mom >= 0 else -0.10
 
-        # Breakout: close en dehors + expansion -> pousse le score
         if outside_upper:
             breakout += 0.60
             breakout += 0.20 if out["is_expansion"] else 0.05
@@ -930,7 +925,6 @@ class Detectors:
             breakout += 0.20 if out["is_expansion"] else 0.05
             breakout += 0.10 if norm_mom < 0 else -0.05
 
-        # Ajustement par ATR: ATR très bas pénalise breakout, ATR élevé l'avantage un peu
         if out["atr_pips"] is not None:
             if out["atr_pips"] < 0.15:
                 breakout *= 0.7
@@ -938,7 +932,6 @@ class Detectors:
                 breakout *= 1.05
                 mean_revert *= 0.95
 
-        # Clamp 0..1
         mean_revert = max(0.0, min(1.0, mean_revert))
         breakout = max(0.0, min(1.0, breakout))
 
@@ -946,12 +939,13 @@ class Detectors:
         out["breakout_score"] = round(breakout, 3)
 
         # =========================================================
-        # ✅ LOGIQUE D'ENTRÉE "MÉDIANE" (au sein d'un RANGE)
+        # ✅ LOGIQUE D'ENTRÉE "MÉDIANE" + GATE
         # =========================================================
-        # Position normalisée par rapport au demi-canal: pos ∈ [-1, +1], 0 au centre
         half_band = (bb_upper - bb_lower) / 2.0
         pos = (price - bb_mid) / (half_band if half_band != 0 else np.nan)
         pos = float(pos) if np.isfinite(pos) else 0.0
+        out["half_band_pips"] = _to_pips(half_band) if half_band and np.isfinite(half_band) else None
+        out["mid_distance_ratio"] = abs(pos) if np.isfinite(pos) else 0.0
 
         mid_cfg = out["meta"]["mid_entry"]
         pos_min = mid_cfg["pos_band_min"]
@@ -960,48 +954,39 @@ class Detectors:
 
         mid_entry = None
         mid_score = 0.0
+        entry_gate_ok = False
 
         if out["is_range"] and in_band and np.isfinite(pos):
-            # Conditions:
-            # - proche de la médiane mais pas au centre -> |pos| ∈ [pos_min, pos_max]
-            # - Momentum dans le bon sens (vers la médiane opposée) avec un minimum
-            # - Bonus si squeeze actif ou bandwidth faible
-            bandwidth_comp_bonus = comp_bandwidth  # 0..1, plus c'est faible plus on bonifie
+            # Conditions d'idée d'entrée
+            bandwidth_comp_bonus = comp_bandwidth
             if (-pos_max <= pos <= -pos_min) and (norm_mom > mid_cfg["mom_norm_min"]):
-                # Prix légèrement SOUS la médiane et momentum haussier -> BUY
-                mid_score = (
-                    0.45
-                    + 0.25 * bandwidth_comp_bonus
-                    + 0.15 * max(0.0, min(1.0, range_score))
-                )
+                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
                 mid_entry = "buy"
             elif (pos_min <= pos <= pos_max) and (norm_mom < -mid_cfg["mom_norm_min"]):
-                # Prix légèrement AU-DESSUS de la médiane et momentum baissier -> SELL
-                mid_score = (
-                    0.45
-                    + 0.25 * bandwidth_comp_bonus
-                    + 0.15 * max(0.0, min(1.0, range_score))
-                )
+                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
                 mid_entry = "sell"
 
-            # Pénalité si ATR trop faible (évite marchés morts)
+            # Pénalité ATR très faible
             if out["atr_pips"] is not None and out["atr_pips"] < 0.12:
                 mid_score *= 0.8
 
-            # Clamp & Seuil
             mid_score = max(0.0, min(1.0, mid_score))
             if mid_score < base_thr:
                 mid_entry, mid_score = None, 0.0
 
+            # ✅ Gate strict: distance mini à la médiane (évite les entrées "au milieu")
+            if mid_entry is not None and (abs(pos) >= pos_min):
+                entry_gate_ok = True
+
         out["mid_entry"] = mid_entry
         out["mid_entry_score"] = round(float(mid_score), 3)
+        out["entry_gate_ok"] = bool(entry_gate_ok)
 
         # =========================================================
-        # ✅ Signal final (mode katana inchangé pour compat, on expose mid_entry séparément)
+        # ✅ Signal final (mode katana conservé)
         # =========================================================
         signal = "neutral"
         if mode == "katana":
-            # priorité aux breakouts hors bande, sinon mean-revert sur touch
             if outside_upper and breakout >= 0.55:
                 signal = "buy_breakout"
             elif outside_lower and breakout >= 0.55:
@@ -1013,19 +998,10 @@ class Detectors:
             else:
                 signal = "neutral"
         else:
-            # mode générique: compare scores
             if (breakout - mean_revert) >= 0.15:
-                signal = (
-                    "buy_breakout"
-                    if (out["z_band"] is not None and out["z_band"] > 0)
-                    else "sell_breakout"
-                )
+                signal = "buy_breakout" if (out["z_band"] is not None and out["z_band"] > 0) else "sell_breakout"
             elif (mean_revert - breakout) >= 0.15:
-                signal = (
-                    "sell_revert"
-                    if (out["z_band"] is not None and out["z_band"] > 0)
-                    else "buy_revert"
-                )
+                signal = "sell_revert" if (out["z_band"] is not None and out["z_band"] > 0) else "buy_revert"
             else:
                 signal = "neutral"
 

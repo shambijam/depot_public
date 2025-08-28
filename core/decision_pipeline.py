@@ -1624,9 +1624,14 @@ class DecisionPipeline:
         mais sans déléguer la décision finale aux instances de stratégie.
         DecisionPipeline est le SEUL DÉCIDEUR.
 
-        Returns:
-            Dict: La décision de trade (dict) ou {} si aucune opportunité valide.
+        ➕ Version 'katana midline scalp' :
+        - Gate d’entrée Bollinger médiane (BUY ∈ [lower, mid], SELL ∈ [mid, upper])
+        - Interdit en expansion/surge (anti-chaos)
+        - TPSL serrés basés sur half-band & médiane (RR min configurable)
+        - Reste 100% compatible avec le sizing existant (on pousse sl/tp en *pips* cibles)
         """
+        import math
+
         # DIAG local
         try:
             from core.diagnostics import get_tracker_from_context
@@ -1738,6 +1743,169 @@ class DecisionPipeline:
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
 
+        # 3bis) ⚔️ Gate 'Katana Midline Scalp' basé sur Bollinger (anti-chaos + TPSL serrés)
+        scalp_cfg = (current_config.get("scalping") or {}).get("boll_midline", {}) or {}
+        rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
+        k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
+        buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
+        allow_in_range = bool(scalp_cfg.get("require_range_regime", True))
+        block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
+
+        # ----- Récup des infos Bollinger depuis 'signals' (multi-sources tolérantes) -----
+        def _get(path, default=None):
+            try:
+                return path()  # lambda
+            except Exception:
+                return default
+
+        boll = (
+            signals.get("boll")
+            or signals.get("bollinger")
+            or signals.get("boll_micro")
+            or signals.get("m1_boll")
+            or {}
+        )
+        bb_mid = float(
+            _get(lambda: boll.get("bb_mid"), signals.get("bb_mid", float("nan")))
+        )
+        bb_up = float(
+            _get(lambda: boll.get("bb_upper"), signals.get("bb_upper", float("nan")))
+        )
+        bb_lo = float(
+            _get(lambda: boll.get("bb_lower"), signals.get("bb_lower", float("nan")))
+        )
+        is_range = bool(
+            _get(lambda: boll.get("is_range"), signals.get("is_range", False))
+        )
+        is_exp = bool(
+            _get(lambda: boll.get("is_expansion"), signals.get("is_expansion", False))
+        )
+        mid_entry = (
+            str(_get(lambda: boll.get("mid_entry"), signals.get("mid_entry", ""))) or ""
+        ).lower()
+
+        # Prix courant (de la décision ou des signaux M1)
+        price = None
+        for key in ("entry_price", "current_price", "last_close", "close"):
+            if key in trade_decision:
+                price = trade_decision.get(key)
+                break
+            if isinstance(signals.get("M1"), dict) and key in signals["M1"]:
+                price = signals["M1"].get(key)
+                break
+            if key in signals:
+                price = signals.get(key)
+                break
+        try:
+            price = float(price)
+        except Exception:
+            price = float("nan")
+
+        # pip_size
+        pip_size = None
+        try:
+            si = getattr(self, "symbol_info", None)
+            point = 0.0
+            if si is not None and hasattr(si, "point"):
+                point = float(getattr(si, "point") or 0.0)
+            elif isinstance(si, dict):
+                point = float(si.get("point", 0.0) or 0.0)
+            if point <= 0 and "point" in signals:
+                point = float(signals.get("point") or 0.0)
+            pip_size = point * 10.0 if point > 0 else None
+        except Exception:
+            pip_size = None
+
+        # Gate midline
+        if any(math.isnan(x) for x in (bb_mid, bb_up, bb_lo)) or not math.isfinite(
+            price
+        ):
+            self.logger.debug(
+                "Bollinger midline indisponible ou prix invalide -> pas de gate midline."
+            )
+        else:
+            half_band = (bb_up - bb_lo) / 2.0
+            in_buy_zone = (price <= bb_mid) and (price >= bb_lo)
+            in_sell_zone = (price >= bb_mid) and (price <= bb_up)
+
+            if block_on_expansion and is_exp:
+                self.logger.info(
+                    "Gate rejeté: expansion Bollinger active (anti-chaos)."
+                )
+                return {}
+
+            if allow_in_range and not is_range:
+                self.logger.info("Gate rejeté: régime non-range pour midline scalp.")
+                return {}
+
+            if normalized_action == "BUY":
+                if not (in_buy_zone and mid_entry == "buy"):
+                    self.logger.info(
+                        "Gate BUY rejeté: condition midline non satisfaite (zone ou mid_entry)."
+                    )
+                    return {}
+            elif normalized_action == "SELL":
+                if not (in_sell_zone and mid_entry == "sell"):
+                    self.logger.info(
+                        "Gate SELL rejeté: condition midline non satisfaite (zone ou mid_entry)."
+                    )
+                    return {}
+
+            # --- TPSL serrés par défaut (en pips) ---
+            hb_pips = None
+            if pip_size and pip_size > 0:
+                hb_pips = max(0.0, half_band / pip_size)
+
+            target_tp_pips: float | None = None
+            target_sl_pips: float | None = None
+
+            if normalized_action == "BUY":
+                if pip_size and pip_size > 0:
+                    tp_to_mid_pips = max(0.0, (bb_mid - price) / pip_size)
+                    fallback_tp = (
+                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                    )
+                    target_tp_pips = max(
+                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                    )
+                    target_sl_pips = max(
+                        buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
+                    )
+            else:  # SELL
+                if pip_size and pip_size > 0:
+                    tp_to_mid_pips = max(0.0, (price - bb_mid) / pip_size)
+                    fallback_tp = (
+                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                    )
+                    target_tp_pips = max(
+                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                    )
+                    target_sl_pips = max(
+                        buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
+                    )
+
+            # RR minimal estimé
+            if (
+                target_tp_pips is not None
+                and target_sl_pips is not None
+                and target_sl_pips > 0
+            ):
+                rr_est = float(target_tp_pips / target_sl_pips)
+                if rr_est < rr_min:
+                    target_tp_pips = rr_min * target_sl_pips
+
+            # Injecter pour le RiskEngine/Executor (clés *officielles* attendues par l’exécuteur)
+            if target_tp_pips is not None:
+                trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
+            if target_sl_pips is not None:
+                trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
+            trade_decision["rule_name"] = "katana_midline_scalp"
+            trade_decision["level_mode"] = "boll_midline"
+            trade_decision.setdefault("boll", {})  # pour l'exécuteur SL/TP midline
+            trade_decision["boll"].update(
+                {"bb_mid": bb_mid, "bb_upper": bb_up, "bb_lower": bb_lo}
+            )
+
         # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
@@ -1813,6 +1981,10 @@ class DecisionPipeline:
         - Pas de paramètres bloquants : tout est converti en scoring "soft".
         - Seul filtre dur conservé : confiance minimale (faible par défaut).
         - Les critères (BOS/MSS, OB, FVG, break M1, MTF, spread, etc.) influencent le score sans bloquer.
+        ➕ Biais 'Katana Midline Scalp' :
+        * Bonus si (is_range==True) & (is_expansion==False) & mid_entry ∈ {buy,sell} avec mid_entry_score élevé
+        * Pénalité si expansion (chaos) ou bandes mal exploitées (touch répété sans revert)
+        * Passe les méta-infos Bollinger au package décisionnel pour l’étape suivante
         """
         self.logger.info(
             f"🔍 CORE analyse {len(signals)} assets | strategy={strategy_name}"
@@ -1822,7 +1994,6 @@ class DecisionPipeline:
         is_scalping = "scalping" in strat
 
         # --- Seuils généraux (non stricts) ---
-        # Valeur par défaut volontairement basse pour favoriser l'exploration au début
         min_confidence = float(config.get("min_confidence", 0.30))
 
         # Distances FVG / OB (proximité "soft")
@@ -1863,6 +2034,18 @@ class DecisionPipeline:
             .get("strategy_bias", 0.30)
             or 0.30
         )
+
+        # ➕ Pondérations 'Katana Midline'
+        W_BOLL_MID_OK = 0.18  # is_range & !expansion & mid_entry présent
+        W_MID_SCORE_K = 0.20  # contribution de mid_entry_score (0..1) * K
+        W_MEANREV_K = 0.08  # bonus mean_revert (range)
+        W_BREAK_PENALTY = (
+            -0.06
+        )  # petite pénalité breakout score en régime range (évite poursuites)
+        PEN_EXPANSION = (
+            -0.25
+        )  # blocage soft si expansion (sera dur dans le gate suivant)
+        PEN_TOUCH_ONLY = -0.05  # si touch bande sans signal exploitable
 
         best_asset, best_score, best_signals = None, float("-inf"), None
 
@@ -1948,7 +2131,24 @@ class DecisionPipeline:
             except Exception:
                 vol_z = 0.0
 
-            # --- Scoring permissif ---
+            # --------- BOLLINGER midline (multi-sources tolérantes) ---------
+            boll = (
+                s.get("boll")
+                or s.get("bollinger")
+                or s.get("boll_micro")
+                or (s.get("signals") or {}).get("micro_phase_hint")
+                or {}
+            )
+
+            is_range = bool(boll.get("is_range", False))
+            is_expansion = bool(boll.get("is_expansion", False))
+            band_touch = boll.get("band_touch")  # 'upper'/'lower'/None
+            mid_entry = (str(boll.get("mid_entry", "")) or "").lower()
+            mid_score = float(boll.get("mid_entry_score", 0.0) or 0.0)
+            mr_score = float(boll.get("mean_revert_score", 0.0) or 0.0)
+            br_score = float(boll.get("breakout_score", 0.0) or 0.0)
+
+            # --- Scoring permissif global ---
             score = 0.0
             score += W_CONF * confidence
             score += BASE_BIAS
@@ -1967,8 +2167,31 @@ class DecisionPipeline:
             if vol_z < 0.0:
                 score += PEN_LOW_VOL
 
+            # --- Biais Katana Midline (SOFT dans le score; le vrai gate est plus loin) ---
+            if is_scalping:
+                if is_expansion:
+                    score += PEN_EXPANSION  # chaos
+                if is_range and not is_expansion:
+                    # mid_entry présent → bonus
+                    if mid_entry in ("buy", "sell"):
+                        score += W_BOLL_MID_OK
+                    # contribution continue du mid_entry_score (plus il est haut, mieux c'est)
+                    score += mid_score * W_MID_SCORE_K
+                    # Encourager mean-revert en range, décourager breakout chasing
+                    score += mr_score * W_MEANREV_K
+                    score += br_score * W_BREAK_PENALTY
+                # petite pénalité si on touche une bande sans vraie structure
+                if (
+                    band_touch in ("upper", "lower")
+                    and mid_score < 0.4
+                    and mr_score < 0.5
+                    and br_score < 0.5
+                ):
+                    score += PEN_TOUCH_ONLY
+
             self.logger.debug(
-                "CORE score %s -> %.4f | conf=%.3f bos=%s ob_soft=%s fvg_soft=%s m1_break=%s mtf=%d spread=%.1f volZ=%.2f",
+                "CORE score %s -> %.4f | conf=%.3f bos=%s ob_soft=%s fvg_soft=%s m1_break=%s mtf=%d "
+                "spread=%.1f volZ=%.2f | boll: range=%s exp=%s mid=%s(%.2f) mr=%.2f br=%.2f",
                 asset,
                 score,
                 confidence,
@@ -1979,10 +2202,28 @@ class DecisionPipeline:
                 mtf_hits,
                 spread_points,
                 vol_z,
+                is_range,
+                is_expansion,
+                mid_entry,
+                mid_score,
+                mr_score,
+                br_score,
             )
 
             if score > best_score:
                 best_asset, best_score, best_signals = asset, score, s
+                # s contient peut-être déjà 'boll' → on s’assure d’unifier la clé
+                if isinstance(boll, dict) and boll:
+                    best_signals.setdefault("boll", boll)
+                    # expose aussi quelques alias plats (exploités par d’autres briques)
+                    best_signals.setdefault("bb_mid", boll.get("bb_mid"))
+                    best_signals.setdefault("bb_upper", boll.get("bb_upper"))
+                    best_signals.setdefault("bb_lower", boll.get("bb_lower"))
+                    best_signals.setdefault("mid_entry", mid_entry)
+                    best_signals.setdefault("mid_entry_score", mid_score)
+                    best_signals.setdefault("boll_mean_revert_score", mr_score)
+                    best_signals.setdefault("boll_breakout_score", br_score)
+                    best_signals.setdefault("boll_signal", boll.get("signal"))
 
         if not best_asset:
             self.logger.info(
@@ -2004,9 +2245,9 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         Construit la décision finale de trade à partir des signaux, en mode permissif.
-        - Pas de paramètres bloquants : les contrôles qualité restent informatifs.
-        - Direction priorisée par MTF, sinon déduite de la phase.
-        - SL/TP dynamiques et ajustés par la volatilité et le spread.
+        - Direction priorisée par MTF, sinon par phase, sinon par Bollinger mid_entry (scalp).
+        - Injecte des *hints* TP/SL serrés “midline” quand le setup Bollinger le justifie.
+        - Aucune contrainte dure ici : les gardes stricts (expansion/ATR/stops) sont vérifiés plus tard.
         """
         from datetime import datetime, timezone
 
@@ -2038,8 +2279,13 @@ class DecisionPipeline:
 
         # ---------- Données de base ----------
         phase = str(signals.get("phase", "") or "").lower()
-        current_price = float(signals.get("close", 0) or 0)
-        if current_price <= 0:
+        # Prix (tolérant multi-sources)
+        current_price = None
+        for k in ("current_price", "last_close", "close", "entry_price"):
+            if k in signals and isinstance(signals[k], (int, float)):
+                current_price = float(signals[k])
+                break
+        if not isinstance(current_price, (int, float)) or current_price <= 0:
             self.logger.error("Prix actuel manquant ou invalide pour %s", asset)
             _diag("invalid_price_or_close", {"close": signals.get("close")})
             return {}
@@ -2047,12 +2293,11 @@ class DecisionPipeline:
         strategy_name = str(config.get("strategy_name", "")).lower() or "scalping"
 
         # ---------- Symboles / conversions ----------
+        # point / digits : on tente via signaux puis config manager
         point = float(signals.get("symbol_point_value") or 0.0)
         if point <= 0:
             point = float(
-                self.config_manager.get(
-                    "risk_management_settings.default_points_in_pip", 1e-5
-                )
+                self.config_manager.get("risk_management_settings.default_point", 1e-5)
                 or 1e-5
             )
         digits = int(signals.get("symbol_digits") or (5 if point <= 1e-5 else 3))
@@ -2066,14 +2311,11 @@ class DecisionPipeline:
             )
         except Exception:
             spread_points = 0.0
-        spread_pips = max(
-            0.0, spread_points / points_per_pip if points_per_pip > 0 else 0.0
-        )
+        spread_pips = max(0.0, spread_points / (points_per_pip or 1.0))
 
-        # ---------- Direction (MTF > phase) ----------
+        # ---------- Direction (MTF > phase > mid_entry) ----------
         action: Optional[str] = None
         mtf_dir = str(signals.get("mtf_direction", "none")).lower()
-
         if strategy_name == "scalping" and mtf_dir in ("up", "down"):
             action = "BUY" if mtf_dir == "up" else "SELL"
 
@@ -2084,6 +2326,30 @@ class DecisionPipeline:
                 action = "BUY"
             elif any(k in phase for k in ["bear", "down", "distribution"]):
                 action = "SELL"
+
+        # Bollinger (pour éventuellement départager / midline hints)
+        boll = (
+            signals.get("boll")
+            or signals.get("bollinger")
+            or signals.get("boll_micro")
+            or (signals.get("signals") or {}).get("micro_phase_hint")
+            or {}
+        )
+        bb_mid = boll.get("bb_mid")
+        bb_upper = boll.get("bb_upper")
+        bb_lower = boll.get("bb_lower")
+        is_range = bool(boll.get("is_range", False))
+        is_exp = bool(boll.get("is_expansion", False))
+        mid_entry = (str(boll.get("mid_entry", "")) or "").lower()
+        mid_entry_score = float(boll.get("mid_entry_score", 0.0) or 0.0)
+
+        # Si toujours pas d'action, tente la midline
+        if action is None and is_range and not is_exp and mid_entry in ("buy", "sell"):
+            action = "BUY" if mid_entry == "buy" else "SELL"
+            _diag(
+                "action_from_boll_mid_entry",
+                {"mid_entry": mid_entry, "score": mid_entry_score},
+            )
 
         if action is None:
             self.logger.info(
@@ -2138,7 +2404,7 @@ class DecisionPipeline:
                 {"spread_pips": spread_pips, "max_soft": max_spread_pips_soft},
             )
 
-        # ---------- SL/TP dynamiques ----------
+        # ---------- SL/TP dynamiques de base (fallback) ----------
         base_sl_pips = float(config.get("stop_loss_pips", 20) or 20)
         base_tp_pips = float(config.get("take_profit_pips", 40) or 40)
 
@@ -2191,7 +2457,82 @@ class DecisionPipeline:
             _diag("sl_capped", {"from": sl_pips, "to": sl_cap})
             sl_pips = sl_cap
 
-        # ---------- Trace de décision (sans 'gating' ni 'momentum fallback') ----------
+        # ---------- ➕ Hints “Katana midline” (si setup valide) ----------
+        # Objectif : Buy < mid → TP vers mid (overshoot léger), SL au-delà de la bande opposée (+buffer)
+        #            Sell > mid → TP vers mid, SL au-delà de l’autre bande (+buffer)
+        rule_name = "core_phase_permissive"
+        level_mode = None
+        tp_hint = None
+        sl_hint = None
+
+        try:
+            mid_mode_cfg = (
+                (config.get("entry_rules") or {}).get("scalping") or {}
+            ).get("boll_midline", {}) or {}
+            rr_min = float(mid_mode_cfg.get("min_rr", 1.1) or 1.1)
+            k_halfband_tp = float(mid_mode_cfg.get("tp_halfband_k", 0.6) or 0.6)
+            buffer_pips_min = float(mid_mode_cfg.get("buffer_pips_min", 1.5) or 1.5)
+
+            valid_boll = all(
+                isinstance(v, (int, float)) for v in (bb_mid, bb_upper, bb_lower)
+            )
+            if (
+                valid_boll
+                and is_range
+                and not is_exp
+                and mid_entry in ("buy", "sell")
+                and mid_entry_score >= 0.55
+            ):
+                half_band_price = (bb_upper - bb_lower) / 2.0
+                half_band_pips = (half_band_price / pip_size) if pip_size > 0 else None
+                level_mode = "boll_midline"
+                rule_name = "core_katana_midline"
+
+                if action == "BUY":
+                    # Entrée idéale : sous la médiane
+                    if isinstance(half_band_pips, float):
+                        to_mid_pips = max(0.0, (bb_mid - current_price) / pip_size)
+                        tp_hint = max(to_mid_pips, k_halfband_tp * half_band_pips)
+                        sl_hint = max(
+                            buffer_pips_min,
+                            (current_price - bb_lower) / pip_size + buffer_pips_min,
+                        )
+                else:  # SELL
+                    if isinstance(half_band_pips, float):
+                        to_mid_pips = max(0.0, (current_price - bb_mid) / pip_size)
+                        tp_hint = max(to_mid_pips, k_halfband_tp * half_band_pips)
+                        sl_hint = max(
+                            buffer_pips_min,
+                            (bb_upper - current_price) / pip_size + buffer_pips_min,
+                        )
+
+                # RR soft min
+                if (
+                    isinstance(tp_hint, float)
+                    and isinstance(sl_hint, float)
+                    and sl_hint > 0
+                    and (tp_hint / sl_hint) < rr_min
+                ):
+                    tp_hint = rr_min * sl_hint
+
+                # Si les hints existent, on préfère ces cibles serrées
+                if isinstance(tp_hint, float) and tp_hint > 0:
+                    tp_pips = tp_hint
+                if isinstance(sl_hint, float) and sl_hint > 0:
+                    sl_pips = sl_hint
+
+                _diag(
+                    "midline_hints_set",
+                    {
+                        "tp_pips": tp_pips,
+                        "sl_pips": sl_pips,
+                        "rr_soft": (tp_pips / max(sl_pips, 1e-12)),
+                    },
+                )
+        except Exception as e:
+            self.logger.debug(f"[core_build] midline hints: {e}")
+
+        # ---------- Trace de décision ----------
         decision_trace = {
             "phase": phase,
             "phase_m1": signals.get("phase_m1"),
@@ -2210,7 +2551,21 @@ class DecisionPipeline:
             "atr_m1_pips": atr_m1_pips,
             "atr_m5_pips": atr_m5_pips,
             "spread_pips": spread_pips,
-            "regime": regime_tag,
+            "volatility_pct": vol_pct,
+            "regime": ("range" if is_range else "non_range"),
+            "boll": {
+                "bb_mid": bb_mid,
+                "bb_upper": bb_upper,
+                "bb_lower": bb_lower,
+                "is_range": is_range,
+                "is_expansion": is_exp,
+                "mid_entry": mid_entry,
+                "mid_entry_score": mid_entry_score,
+                "mean_revert_score": boll.get("mean_revert_score"),
+                "breakout_score": boll.get("breakout_score"),
+                "signal": boll.get("signal"),
+            },
+            "level_mode": level_mode or "standard",
         }
 
         timestamp = (
@@ -2223,26 +2578,31 @@ class DecisionPipeline:
             "entry_price": current_price,
             "target_sl_pips": float(round(sl_pips, 3)),
             "target_tp_pips": float(round(tp_pips, 3)),
-            "rule_name": "core_phase_permissive",
+            "rule_name": rule_name,
             "confidence": float(signals.get("confidence_score", 0.0) or 0.0),
             "timestamp": timestamp,
             "magic_number": int(config.get("magic_number", 999_999)),
             "decision_trace": decision_trace,
-            "meta": {
-                "point": point,
-                "points_per_pip": points_per_pip,
-                "spread_points": spread_points,
-                "spread_pips": spread_pips,
-                "atr_m5": atr_m5,
-                "atr_m5_pips": atr_m5_pips,
-                "volatility_pct": vol_pct,
-                "regime_tag": regime_tag,
-                "max_spread_pips_soft": max_spread_pips_soft,
-            },
+            # Hints explicites pour l’executor/risk engine
+            "level_mode": level_mode or "standard",
+            "sl_pips_hint": (
+                float(round(sl_hint, 3)) if isinstance(sl_hint, float) else None
+            ),
+            "tp_pips_hint": (
+                float(round(tp_hint, 3)) if isinstance(tp_hint, float) else None
+            ),
+            # Expose Bollinger à l’executor (pour mode 'boll_midline' dans _calculate_sl_tp_prices)
+            "boll": (
+                {"bb_mid": bb_mid, "bb_upper": bb_upper, "bb_lower": bb_lower}
+                if all(
+                    isinstance(v, (int, float)) for v in (bb_mid, bb_upper, bb_lower)
+                )
+                else {}
+            ),
         }
 
         self.logger.info(
-            "CORE %s %s @ %.5f | SL=%.2fp, TP=%.2fp | spread=%.2fp, ATR_M5=%.2fp",
+            "CORE %s %s @ %.5f | SL=%.2fp, TP=%.2fp | spread=%.2fp, ATR_M5=%.2fp | rule=%s",
             action,
             asset,
             current_price,
@@ -2250,6 +2610,7 @@ class DecisionPipeline:
             trade_decision["target_tp_pips"],
             spread_pips,
             atr_m5_pips,
+            rule_name,
         )
         _diag_selected(
             trade_decision.get("rule_name"), trade_decision.get("confidence")
@@ -2431,12 +2792,24 @@ class DecisionPipeline:
         self, context: dict, current_config: dict, trade_decision: dict
     ) -> dict:
         """
-        Sizing au risque — version PERMISSIVE (no hard reject ATR/spread/RR) :
-        - Refuse uniquement si: action/symbole/prix invalide, niveaux manquants, distances nulles, equity nulle,
-        incohérence directionnelle PRIX, ou contraintes BROKER (stops_level) impossibles à satisfaire.
-        - ATR: ajuste le SL dans [min_k*ATR ; max_k*ATR] si dispo, au lieu de refuser.
-        - Spread: jamais bloquant; on note et on ajuste le TP pour préserver le RR effectif si possible.
-        - RR effectif: on tente d'augmenter le TP (jusqu'à un cap) pour atteindre min_rr, sinon on accepte en mode permissif.
+        Sizing au risque — version PERMISSIVE & MIDLINE-READY
+        ----------------------------------------------------
+        Priorités des niveaux (de la plus forte à la plus faible):
+        1) Hints midline (sl_pips_hint/tp_pips_hint) — si level_mode == "boll_midline"
+        2) target_sl_pips / target_tp_pips        — décision de base
+        3) sl_price / tp_price                    — si fournis explicitement en prix
+
+        Refus uniquement si:
+        - action/symbole/prix invalide
+        - niveaux manquants ou distances nulles
+        - incohérence directionnelle (BUY: sl<entry<tp ; SELL: tp<entry<sl)
+        - equity nulle
+        - contraintes BROKER (stops_level) impossibles à satisfaire
+
+        Ajustements permissifs:
+        - SL borné dans [min_k*ATR ; max_k*ATR] (si ATR dispo)
+        - Spread => jamais bloquant ; on note et on étire TP pour RR effectif ≥ min_rr (capé à max_tp_to_sl_ratio)
+        - Rounding aux `digits` après tous les ajustements
         """
         notes = []
 
@@ -2450,52 +2823,67 @@ class DecisionPipeline:
         symbol_info = md.get("symbol_info", {}) or {}
         account_info = context.get("account_info", {}) or {}
 
-        # Prefer M1 annotated DF for ATR (scalping), fallback to generic
+        # DataFrame ATR: priorité M1 (scalping)
         df_m1 = md.get("annotated_rates_df_m1")
         df = df_m1 if df_m1 is not None else md.get("annotated_rates_df")
 
+        # Prix d’entrée
         entry = trade_decision.get("entry_price", md.get("current_price"))
         try:
             if entry is None:
                 return {"ok": False, "reason": "missing_entry_price"}
             entry = float(entry)
-        except (TypeError, ValueError):
+            if not (
+                entry == entry and entry > 0
+            ):  # nan/inf check implicite via (entry==entry)
+                return {"ok": False, "reason": "invalid_entry_price"}
+        except Exception:
             return {"ok": False, "reason": "invalid_entry_price"}
 
         # --- 2) Broker/symbole (unités et contraintes) ---
-        contract = float(symbol_info.get("trade_contract_size", 100000.0)) or 100000.0
-        point = float(symbol_info.get("point", 0.00001)) or 0.00001
+        contract = float(symbol_info.get("trade_contract_size", 100000.0) or 100000.0)
+        point = float(symbol_info.get("point", 0.00001) or 0.00001)
         digits = int(symbol_info.get("digits", 5) or 5)
-        vol_min = float(symbol_info.get("volume_min", 0.01)) or 0.01
-        vol_max = float(symbol_info.get("volume_max", 100.0)) or 100.0
-        vol_step = float(symbol_info.get("volume_step", 0.01)) or 0.01
-        spread_pts = float(md.get("current_spread_points", 0.0)) or 0.0
-        stops_lvl_points = float(symbol_info.get("stops_level", 0.0)) or 0.0
+        vol_min = float(symbol_info.get("volume_min", 0.01) or 0.01)
+        vol_max = float(symbol_info.get("volume_max", 100.0) or 100.0)
+        vol_step = float(symbol_info.get("volume_step", 0.01) or 0.01)
 
-        # Pips (FX: 10 points = 1 pip pour digits 3/5)
+        # Stops level (robuste aux variations de clé)
+        stops_lvl_points = (
+            float(symbol_info.get("trade_stops_level", 0.0) or 0.0)
+            if "trade_stops_level" in symbol_info
+            else float(symbol_info.get("stops_level", 0.0) or 0.0)
+        )
+
+        # Spread actuel (points)
+        spread_pts = float(md.get("current_spread_points", 0.0) or 0.0)
+
+        # Pips (FX: digits 3/5 => 10 points = 1 pip)
         pip_points = 10.0 if digits in (3, 5) else 1.0
         pip_size = max(1e-12, point * pip_points)  # garde-fou
         spread_pips = spread_pts / pip_points
         stops_level_pips = stops_lvl_points / pip_points
+        min_stop_price_dist = stops_lvl_points * point
 
         # --- 3) Risque (config) & adaptation ---
         rm_cfg = (current_config or {}).get("risk_management", {}) or {}
         risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))
         min_rr = float(rm_cfg.get("min_rr", 1.8))
         max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
-        # Cap de ratio TP/SL pour ajustements permissifs
         max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 3.5))
 
         # Adaptation high_vol (si meta/regime_tag fourni)
         meta = trade_decision.get("meta", {}) or {}
         regime_tag = str(meta.get("regime_tag", "")).lower()
-        adapt = (current_config or {}).get("adaptation_settings", {}).get(
+        adapt_risk = (current_config or {}).get("adaptation_settings", {}).get(
             "risk_adjustment", {}
         ) or {}
         if regime_tag == "high_vol":
-            mult = float(adapt.get("risk_reduction_multiplier_high_vol", 1.0) or 1.0)
+            mult = float(
+                adapt_risk.get("risk_reduction_multiplier_high_vol", 1.0) or 1.0
+            )
             min_after = float(
-                adapt.get("min_risk_percent_after_adjustment", 0.01) or 0.01
+                adapt_risk.get("min_risk_percent_after_adjustment", 0.01) or 0.01
             )
             risk_pct = max(min_after, risk_pct * mult)
 
@@ -2513,57 +2901,67 @@ class DecisionPipeline:
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
-        # --- 4) Niveaux: PRIX vs PIPS ---
-        sl_price = trade_decision.get("sl_price")
-        tp_price = trade_decision.get("tp_price")
-        sl_pips_in = trade_decision.get("target_sl_pips")
-        tp_pips_in = trade_decision.get("target_tp_pips")
+        # --- 4) Niveaux: PRIX vs PIPS (priorités avec MIDLINE) ---
+        # Hints midline (si level_mode = boll_midline)
+        level_mode_in = str(trade_decision.get("level_mode", "")).lower()
+        sl_hint = trade_decision.get("sl_pips_hint")
+        tp_hint = trade_decision.get("tp_pips_hint")
 
-        have_price_levels = (sl_price is not None) and (tp_price is not None)
-        have_pip_levels = (sl_pips_in is not None) and (tp_pips_in is not None)
+        # Target pips (décision standard)
+        sl_pips_target = trade_decision.get("target_sl_pips")
+        tp_pips_target = trade_decision.get("target_tp_pips")
 
-        if not have_price_levels and not have_pip_levels:
+        # Niveaux prix explicitement fournis (rare)
+        sl_price_in = trade_decision.get("sl_price")
+        tp_price_in = trade_decision.get("tp_price")
+
+        # On construit en priorité en PIPS (midline hint > target pips), sinon on accepte les prix
+        sl_pips_val = None
+        tp_pips_val = None
+
+        if (
+            level_mode_in == "boll_midline"
+            and isinstance(sl_hint, (int, float))
+            and isinstance(tp_hint, (int, float))
+        ):
+            sl_pips_val = float(sl_hint)
+            tp_pips_val = float(tp_hint)
+            notes.append("levels_from_midline_hints")
+        elif isinstance(sl_pips_target, (int, float)) and isinstance(
+            tp_pips_target, (int, float)
+        ):
+            sl_pips_val = float(sl_pips_target)
+            tp_pips_val = float(tp_pips_target)
+            notes.append("levels_from_target_pips")
+        elif sl_price_in is not None and tp_price_in is not None:
+            try:
+                sl_price_in = float(sl_price_in)
+                tp_price_in = float(tp_price_in)
+            except Exception:
+                return {"ok": False, "reason": "invalid_level_types"}
+            # Convertit en pips pour unifier la suite
+            sl_pips_val = abs(entry - sl_price_in) / pip_size
+            tp_pips_val = abs(tp_price_in - entry) / pip_size
+            notes.append("levels_from_price")
+        else:
             return {"ok": False, "reason": "missing_sl_or_tp_levels"}
 
-        if have_price_levels:
-            try:
-                sl_price = float(sl_price)
-                tp_price = float(tp_price)
-            except (TypeError, ValueError):
-                return {"ok": False, "reason": "invalid_level_types"}
-            sl_dist_price = abs(entry - sl_price)
-            tp_dist_price = abs(tp_price - entry)
-            if sl_dist_price <= 0 or tp_dist_price <= 0:
-                return {"ok": False, "reason": "invalid_distances_price"}
+        if not (sl_pips_val > 0 and tp_pips_val > 0):
+            return {"ok": False, "reason": "invalid_distances_pips"}
 
-            # Cohérence directionnelle (PRIX)
-            if action == "BUY" and not (tp_price > entry > sl_price):
+        # Reconstruire les PRIX depuis les pips (cohérence directionnelle)
+        sl_dist_price = sl_pips_val * pip_size
+        tp_dist_price = tp_pips_val * pip_size
+        if action == "BUY":
+            sl_price = entry - sl_dist_price
+            tp_price = entry + tp_dist_price
+            if not (sl_price < entry < tp_price):
                 return {"ok": False, "reason": "levels_incoherent_for_buy"}
-            if action == "SELL" and not (tp_price < entry < sl_price):
+        else:  # SELL
+            sl_price = entry + sl_dist_price
+            tp_price = entry - tp_dist_price
+            if not (tp_price < entry < sl_price):
                 return {"ok": False, "reason": "levels_incoherent_for_sell"}
-
-            sl_pips_val = sl_dist_price / pip_size
-            tp_pips_val = tp_dist_price / pip_size
-            level_mode = "price"
-        else:
-            # Mode PIPS: construire des prix cohérents autour de entry
-            try:
-                sl_pips_val = float(sl_pips_in)
-                tp_pips_val = float(tp_pips_in)
-            except (TypeError, ValueError):
-                return {"ok": False, "reason": "invalid_pip_types"}
-            if sl_pips_val <= 0 or tp_pips_val <= 0:
-                return {"ok": False, "reason": "invalid_distances_pips"}
-
-            sl_dist_price = sl_pips_val * pip_size
-            tp_dist_price = tp_pips_val * pip_size
-            if action == "BUY":
-                sl_price = entry - sl_dist_price
-                tp_price = entry + tp_dist_price
-            else:  # SELL
-                sl_price = entry + sl_dist_price
-                tp_price = entry - tp_dist_price
-            level_mode = "pips"
 
         # --- 5) Bornes via ATR (AJUSTEMENT, pas de reject) ---
         atr_settings = rm_cfg.get("atr_settings") or {}
@@ -2572,29 +2970,22 @@ class DecisionPipeline:
         min_k = float(slc.get("min_atr_multiple", 0.8))
         max_k = float(slc.get("max_atr_multiple", 1.3))
 
-        # ATR source preference: DF_M1 -> DF -> trade_decision/meta -> signals pips
+        # ATR en unités de prix
         atr_price = None
         try:
             if df is not None:
-                atr_price = self._compute_atr_from_df(
-                    df, period=atr_period
-                )  # ATR en unités de prix
+                atr_price = self._compute_atr_from_df(df, period=atr_period)
         except Exception:
             atr_price = None
 
-        if atr_price is None or atr_price <= 0:
-            # fallback à partir des métadonnées si dispo (pips -> prix)
+        if not (isinstance(atr_price, float) and atr_price > 0):
+            # fallback: ATR M1 en pips depuis meta/trace -> prix
             atr_m1_pips = None
-            # meta direct
+            dt = trade_decision.get("decision_trace") or {}
             if isinstance(meta.get("atr_m1_pips"), (int, float)):
                 atr_m1_pips = float(meta["atr_m1_pips"])
-            # trace/decision
-            if atr_m1_pips is None and isinstance(
-                trade_decision.get("decision_trace", {}), dict
-            ):
-                dt = trade_decision["decision_trace"]
-                if isinstance(dt.get("atr_m1_pips"), (int, float)):
-                    atr_m1_pips = float(dt["atr_m1_pips"])
+            elif isinstance(dt.get("atr_m1_pips"), (int, float)):
+                atr_m1_pips = float(dt["atr_m1_pips"])
             if isinstance(atr_m1_pips, float) and atr_m1_pips > 0:
                 atr_price = atr_m1_pips * pip_size
 
@@ -2620,10 +3011,9 @@ class DecisionPipeline:
                 )
                 notes.append(f"sl_capped_to_atr_max:{sl_pips_val:.2f}p")
 
-        # --- 6) Stops level broker: AJUSTEMENT prioritaire (refuse seulement si impossible) ---
-        min_stop_price_dist = stops_lvl_points * point  # en unités de prix
+        # --- 6) Stops level broker: AJUSTEMENTS (refus seulement si impossible) ---
         if min_stop_price_dist > 0:
-            # Ajuster SL si en-dessous de la distance mini
+            # SL ≥ min distance
             if sl_dist_price < min_stop_price_dist:
                 sl_dist_price = min_stop_price_dist
                 sl_pips_val = sl_dist_price / pip_size
@@ -2633,8 +3023,7 @@ class DecisionPipeline:
                     else (entry + sl_dist_price)
                 )
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
-
-            # Ajuster TP si en-dessous de la distance mini
+            # TP ≥ min distance
             if tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
@@ -2645,7 +3034,7 @@ class DecisionPipeline:
                 )
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
 
-            # Vérifier encore (si incohérence numérique)
+            # si une incohérence subsiste (numérique)
             if sl_dist_price <= 0 or tp_dist_price <= 0:
                 return {"ok": False, "reason": "broker_min_distance_unreachable"}
 
@@ -2654,63 +3043,55 @@ class DecisionPipeline:
             sl_price = round(sl_price, digits)
             tp_price = round(tp_price, digits)
 
-        # --- 7) Spread & RR effectif (SOFT + ajustement TP) ---
+        # --- 7) Spread & RR effectif (ajustement TP) ---
         if spread_pips > max_spread_pips_cfg:
             notes.append(f"high_spread:{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p")
 
+        # Distances finales (en prix)
+        sl_dist_price = abs(entry - sl_price)
+        tp_dist_price = abs(tp_price - entry)
+
         # RR nominal
-        rr = tp_dist_price / sl_dist_price if sl_dist_price > 0 else 0.0
+        rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-        # RR effectif (soustraire le spread du gain potentiel)
-        if level_mode == "price":
-            effective_tp_dist = max(0.0, tp_dist_price - (spread_pts * point))
-            rr_effective = (
-                (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
-            )
-            spread_comp = spread_pts * point
-        else:
-            effective_tp_pips = max(0.0, tp_pips_val - spread_pips)
-            rr_effective = (effective_tp_pips / sl_pips_val) if sl_pips_val > 0 else 0.0
-            spread_comp = spread_pips * pip_size  # en prix pour calculs suivants
+        # RR effectif: compense le spread côté récompense
+        # (même formule BUY/SELL car on prend des distances absolues et on retranche la pénalité spread)
+        spread_comp_price = spread_pts * point
+        effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
+        rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-        # Tenter d'atteindre min_rr en augmentant le TP (jusqu'au cap)
+        # Étire le TP pour tenter d’atteindre min_rr (capé)
         if rr_effective < min_rr:
             required_eff_tp_dist = min_rr * sl_dist_price
-            new_tp_dist_price = (
-                required_eff_tp_dist + spread_comp
-            )  # compenser le spread
-
+            new_tp_dist_price = required_eff_tp_dist + spread_comp_price
             cap_tp_dist_price = max_tp_sl_ratio * sl_dist_price
+
             if new_tp_dist_price <= cap_tp_dist_price:
                 tp_dist_price = new_tp_dist_price
-                tp_pips_val = tp_dist_price / pip_size
                 tp_price = (
                     (entry + tp_dist_price)
                     if action == "BUY"
                     else (entry - tp_dist_price)
                 )
-
-                # Respect du broker min (re-check au cas où)
+                # Respect broker min (recheck)
                 if min_stop_price_dist > 0 and tp_dist_price < min_stop_price_dist:
                     tp_dist_price = min_stop_price_dist
-                    tp_pips_val = tp_dist_price / pip_size
                     tp_price = (
                         (entry + tp_dist_price)
                         if action == "BUY"
                         else (entry - tp_dist_price)
                     )
                     notes.append("tp_extended_but_limited_by_broker_min")
-
-                # Rounding après extension
                 tp_price = round(tp_price, digits)
                 notes.append(f"tp_extended_for_min_rr:{min_rr:.2f}")
-
-                # recalcul rr/rr_effective
-                effective_tp_dist = max(0.0, tp_dist_price - spread_comp)
+                # Recalc RR
+                sl_dist_price = abs(entry - sl_price)
+                tp_dist_price = abs(tp_price - entry)
+                effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
                 rr_effective = (
                     (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
                 )
-                rr = tp_dist_price / sl_dist_price if sl_dist_price > 0 else 0.0
+                rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
             else:
                 notes.append(
                     f"min_rr_not_reached_but_accepted:{rr_effective:.2f}<{min_rr:.2f};cap={max_tp_sl_ratio:.2f}x"
@@ -2725,6 +3106,7 @@ class DecisionPipeline:
         except ZeroDivisionError:
             return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
 
+        # Quantification volume selon broker
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
 
         return {
@@ -2736,34 +3118,11 @@ class DecisionPipeline:
             "entry_price": entry,
             "sl_price": sl_price,
             "tp_price": tp_price,
-            "sl_pips": sl_pips_val,
-            "tp_pips": tp_pips_val,
+            "sl_pips": sl_dist_price / pip_size,
+            "tp_pips": tp_dist_price / pip_size,
             "spread_pips": spread_pips,
             "stops_level_pips": stops_level_pips,
             "notes": notes,
-            "level_mode": level_mode,
+            "level_mode": level_mode_in
+            or ("boll_midline" if "levels_from_midline_hints" in notes else "pips"),
         }
-
-    def _compute_atr_from_df(self, df, period: int = 14) -> float:
-        """
-        ATR simple sur le DF annoté (mêmes unités que le prix).
-        Utilise high/low/close ; ignore NaN de tête de série.
-        """
-        import numpy as np
-
-        if len(df) < period + 2:
-            return float("nan")
-        high = df["high"].astype(float)
-        low = df["low"].astype(float)
-        close = df["close"].astype(float)
-
-        prev_close = close.shift(1)
-        tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
-        try:
-            return float(atr)
-        except Exception:
-            return float("nan")
