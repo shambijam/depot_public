@@ -18,8 +18,9 @@ class Detectors:
     Chaque méthode correspond à une logique de détection spécifique.
     """
 
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(self, logger=None, config_manager=None):
         self.logger = logger or logging.getLogger(__name__)
+        self.config_manager = config_manager
 
     def detect_order_block_ml_enhanced(
         self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None

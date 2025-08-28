@@ -42,7 +42,8 @@ class PhaseObserver:
         self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
         
         # Ajout de la classe Detectors
-        self.detectors = Detectors(self.logger)
+        self.detectors = Detectors(self.logger, self.config_manager)
+
 
         # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
         self.lookback_window = 12
