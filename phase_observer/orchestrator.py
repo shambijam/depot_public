@@ -153,20 +153,11 @@ class PhaseObserver:
     ) -> Optional[pd.DataFrame]:
         """
         🎯 PIPELINE D'ANALYSE OPTIMISÉ - 4 INDICATEURS CORE SEULEMENT
-
-        Architecture Trading Desk:
-        1. FVG Enhanced (magnitude + tracking)
-        2. Order Blocks ML Enhanced (scoring sophistiqué)
-        3. Adaptive Swing Points (régime-aware)
-        4. Market Regime Detection (remplace trend basique)
-
-        Performance target: 78%+ win rate, <50ms processing time
         """
+
         try:
             n_bars = 0 if df is None else len(df)
-            self.logger.info(
-                f"🚀 SNIPER_X Optimized Pipeline - Processing {n_bars} bars"
-            )
+            self.logger.info(f"🚀 SNIPER_X Optimized Pipeline - Processing {n_bars} bars")
 
             if df is None or df.empty:
                 self.logger.error("DataFrame vide fourni à analyze()")
@@ -174,14 +165,12 @@ class PhaseObserver:
 
             # === PHASE 1: PRÉPARATION DONNÉES ===
             current_asset_symbol = asset_symbol or "UNKNOWN_ASSET"
-
-            # NOTE: suppose que _clean_dataframe est bien résolu (même module/classe)
             df_an = self.features.clean_dataframe(df.copy())
             if df_an is None or df_an.empty:
                 self.logger.error("Échec du nettoyage DataFrame")
                 return None
 
-            # Force colonnes prix en numérique
+            # Nettoyage des colonnes prix
             for _col in ("close", "high", "low", "open"):
                 if _col in df_an.columns:
                     df_an[_col] = pd.to_numeric(df_an[_col], errors="coerce")
@@ -195,7 +184,7 @@ class PhaseObserver:
                 self.logger.error("Trop peu de barres après nettoyage pour analyze()")
                 return None
 
-            # Initialisation colonnes requises
+            # Colonnes requises
             required_columns = {
                 "spread": 0.0,
                 "point": 0.00001,
@@ -205,15 +194,13 @@ class PhaseObserver:
             for col, default_val in required_columns.items():
                 if col not in df_an.columns:
                     df_an[col] = float(default_val)
-                    self.logger.warning(
-                        f"Colonne '{col}' ajoutée avec valeur par défaut"
-                    )
+                    self.logger.warning(f"Colonne '{col}' ajoutée avec valeur par défaut")
                 else:
                     df_an[col] = pd.to_numeric(df_an[col], errors="coerce").fillna(
                         float(default_val)
                     )
 
-            # === Volatilité en % ===
+            # Volatilité
             try:
                 if "close" in df_an.columns:
                     ret = df_an["close"].pct_change().fillna(0.0)
@@ -227,12 +214,10 @@ class PhaseObserver:
                 else:
                     df_an["volatility_pct"] = 0.0
             except Exception as e:
-                self.logger.warning(
-                    f"[{current_asset_symbol}] Échec calcul volatilité_pct: {e}"
-                )
+                self.logger.warning(f"[{current_asset_symbol}] Échec calcul volatilité_pct: {e}")
                 df_an["volatility_pct"] = 0.0
 
-            # === Bloc volume momentum ===
+            # Volume momentum
             try:
                 volume_ma_period = (
                     int(
@@ -249,47 +234,15 @@ class PhaseObserver:
             volume_zscore_period = 50
 
             if "tick_volume" in df_an.columns and len(df_an) > volume_zscore_period:
-                df_an["tick_volume"] = pd.to_numeric(
-                    df_an["tick_volume"], errors="coerce"
-                ).fillna(0.0)
-                df_an["volume_ma"] = (
-                    df_an["tick_volume"]
-                    .rolling(window=volume_ma_period, min_periods=1)
-                    .mean()
-                )
-
-                volume_mean_z = (
-                    df_an["tick_volume"]
-                    .rolling(window=volume_zscore_period, min_periods=1)
-                    .mean()
-                )
-                volume_std_z = (
-                    df_an["tick_volume"]
-                    .rolling(window=volume_zscore_period, min_periods=1)
-                    .std(ddof=0)
-                    .replace(0, np.nan)
-                )
-                df_an["volume_zscore"] = (
-                    ((df_an["tick_volume"] - volume_mean_z) / volume_std_z)
-                    .replace([np.inf, -np.inf], 0.0)
-                    .fillna(0.0)
-                )
-
-                vol_std_ma = (
-                    df_an["tick_volume"]
-                    .rolling(window=volume_ma_period, min_periods=1)
-                    .std(ddof=0)
-                    .replace(0, np.nan)
-                )
-                df_an["volume_momentum"] = (
-                    ((df_an["tick_volume"] - df_an["volume_ma"]) / vol_std_ma)
-                    .replace([np.inf, -np.inf], 0.0)
-                    .fillna(0.0)
-                )
+                df_an["tick_volume"] = pd.to_numeric(df_an["tick_volume"], errors="coerce").fillna(0.0)
+                df_an["volume_ma"] = df_an["tick_volume"].rolling(window=volume_ma_period, min_periods=1).mean()
+                volume_mean_z = df_an["tick_volume"].rolling(window=volume_zscore_period, min_periods=1).mean()
+                volume_std_z = df_an["tick_volume"].rolling(window=volume_zscore_period, min_periods=1).std(ddof=0).replace(0, np.nan)
+                df_an["volume_zscore"] = ((df_an["tick_volume"] - volume_mean_z) / volume_std_z).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+                vol_std_ma = df_an["tick_volume"].rolling(window=volume_ma_period, min_periods=1).std(ddof=0).replace(0, np.nan)
+                df_an["volume_momentum"] = ((df_an["tick_volume"] - df_an["volume_ma"]) / vol_std_ma).replace([np.inf, -np.inf], 0.0).fillna(0.0)
             else:
-                self.logger.warning(
-                    f"Données volume insuffisantes pour {current_asset_symbol}"
-                )
+                self.logger.warning(f"Données volume insuffisantes pour {current_asset_symbol}")
                 df_an["volume_zscore"] = 0.0
                 df_an["volume_momentum"] = 0.0
 
@@ -297,12 +250,7 @@ class PhaseObserver:
             toggles = {}
             try:
                 if getattr(self, "config_manager", None):
-                    toggles = (
-                        self.config_manager.get(
-                            "phase_detection_defaults.detection_toggles", {}
-                        )
-                        or {}
-                    )
+                    toggles = self.config_manager.get("phase_detection_defaults.detection_toggles", {}) or {}
             except Exception:
                 toggles = {}
 
@@ -316,27 +264,21 @@ class PhaseObserver:
 
             if toggles.get("detect_fvg", True):
                 df_an["fvg_details"] = self.detectors.detect_fvg_enhanced(df_an)
-                df_an["fvg_detected"] = df_an["fvg_details"].apply(
-                    lambda x: x is not None
-                )
+                df_an["fvg_detected"] = df_an["fvg_details"].apply(lambda x: x is not None)
             else:
                 df_an["fvg_details"] = [None] * len(df_an)
                 df_an["fvg_detected"] = False
 
             if toggles.get("detect_order_block", True):
                 df_an["ob_details"] = self.detectors.detect_order_block_ml_enhanced(df_an)
-                df_an["ob_detected"] = df_an["ob_details"].apply(
-                    lambda x: x is not None
-                )
+                df_an["ob_detected"] = df_an["ob_details"].apply(lambda x: x is not None)
             else:
                 df_an["ob_details"] = [None] * len(df_an)
                 df_an["ob_detected"] = False
 
             if toggles.get("detect_bos_mss", True):
                 df_an["bos_mss_details"] = self.detectors.detect_bos_mss_enhanced(df_an)
-                df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
-                    lambda x: x is not None
-                )
+                df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(lambda x: x is not None)
             else:
                 df_an["bos_mss_details"] = [None] * len(df_an)
                 df_an["bos_mss_detected"] = False
@@ -375,7 +317,7 @@ class PhaseObserver:
                     except Exception:
                         pip_size = None
 
-                    boll = self.compute_bollinger_microphase_signals(
+                    boll = self.detectors.compute_bollinger_microphase_signals(
                         df_an,
                         price_col="close",
                         period=int(
@@ -620,8 +562,9 @@ class PhaseObserver:
 
             # === PHASE 6: SCORE DE CONFIANCE ===
             df_an["confidence_score"] = df_an.apply(
-                self.calculate_optimized_confidence, axis=1
-            )
+            calculate_optimized_confidence, axis=1
+          )
+
 
             # === PHASE 7: MÉTRIQUES + LOG FINAL ===
             if not df_an.empty:
