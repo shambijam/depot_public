@@ -36,14 +36,12 @@ class PhaseObserver:
         """
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
-        self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
 
-        # === Nouveau : instance de FeaturesExtractor ===
+        # === Instance unique de FeaturesExtractor ===
         self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
         
-        # Ajout de la classe Detectors
-        self.detectors = Detectors(self.logger, self.config_manager)
-
+        # === Instance unique de Detectors ===
+        self.detectors = Detectors(config_manager=config_manager)
 
         # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
         self.lookback_window = 12
@@ -87,6 +85,7 @@ class PhaseObserver:
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+
 
 
 
@@ -573,7 +572,9 @@ class PhaseObserver:
             ) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
 
             # === PHASE 5: PHASE OPTIMISÉE + FALLBACK ===
-            df_an["phase_primary"] = df_an.apply(self.determine_optimized_phase, axis=1)
+            df_an["phase_primary"] = df_an.apply(self.detectors.determine_optimized_phase, axis=1)
+
+
 
             try:
                 low_th = (
