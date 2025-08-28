@@ -248,72 +248,196 @@ def _detect_tf_divergences(self, tf_analyses: Dict) -> Dict[str, Any]:
     
 def _calculate_advanced_confluence(self, tf_analyses: Dict, weights: Dict, asset: str) -> Dict[str, Any]:
     """
-    Algorithme de confluence sophistiqué avec scoring non-linéaire.
-    Tolérant : n’échoue jamais → renvoie un paquet cohérent.
+    Algorithme de confluence 'desk banque privée' – robuste, non-linéaire, sans double comptage.
+    - Normalise les poids selon les TF réellement présents
+    - Agrégation non-linéaire des signaux (1 - ∏(1 - w_i)) => rendements décroissants
+    - Consensus de phase (strict + par 'bucket' bull/bear/range)
+    - Consensus de biais directionnel (BUY/SELL/NEUTRAL)
+    - Tolérant: n'échoue jamais → renvoie un paquet cohérent et audit-ready
     """
     try:
-        confluence_scores: Dict[str, float] = {}
+        # -------- Helpers --------
+        def _normalize_weights(ws: Dict[str, float], keys: list[str]) -> Dict[str, float]:
+            w = {k: float(ws.get(k, 0.0) or 0.0) for k in keys}
+            total = sum(v for v in w.values() if v > 0)
+            if total <= 0:
+                n = max(1, len(keys))
+                return {k: 1.0 / n for k in keys}
+            return {k: (max(0.0, v) / total) for k, v in w.items()}
+
+        def _phase_bucket(ph: str) -> str:
+            s = str(ph or "unknown").lower()
+            if ("bull" in s) or ("up" in s):
+                return "bull"
+            if ("bear" in s) or ("down" in s):
+                return "bear"
+            if ("range" in s) or ("side" in s) or ("consolid" in s):
+                return "range"
+            return "unknown"
+
+        def _bias_from_analysis(a: Dict[str, Any]) -> str:
+            # Cherche un champ directionnel standard : 'bias' | 'entry_bias' | 'direction' | 'signal_side'
+            for k in ("bias", "entry_bias", "direction", "signal_side"):
+                if k in a and a[k]:
+                    v = str(a[k]).upper()
+                    if v.startswith("B"):
+                        return "BUY"
+                    if v.startswith("S"):
+                        return "SELL"
+                    if v.startswith("N"):
+                        return "NEUTRAL"
+            return "NEUTRAL"
+
+        # -------- Inputs & weight normalization --------
+        tf_analyses = tf_analyses or {}
+        if not tf_analyses:
+            raise ValueError("empty tf_analyses")
+
+        tf_list = list(tf_analyses.keys())
+        weights = _normalize_weights(weights or {}, tf_list)
+
+        # -------- Signals to aggregate (extensible) --------
+        # Garder un noyau critique et agréger uniquement ceux présents dans au moins un TF
+        base_signals = ["bos_mss_detected", "liquidity_grab_detected", "ob_detected"]
+        present_signals = []
+        for s in base_signals:
+            if any(bool(a.get(s, False)) for a in tf_analyses.values()):
+                present_signals.append(s)
+        if not present_signals:
+            # si rien de présent, on garde au moins un placeholder pour base_confluence = 0
+            present_signals = base_signals[:1]
+
+        # -------- Phases & buckets --------
+        tf_phase_map: Dict[str, str] = {tf: str(a.get("phase", "unknown")) for tf, a in tf_analyses.items()}
+        phases = list(tf_phase_map.values())
+        phase_consistency_strict = (len(set(phases)) == 1 and len(phases) > 0)
+
+        tf_bucket_map: Dict[str, str] = {tf: _phase_bucket(p) for tf, p in tf_phase_map.items()}
+        # Poids par bucket
+        bucket_weights: Dict[str, float] = {"bull": 0.0, "bear": 0.0, "range": 0.0, "unknown": 0.0}
+        for tf, b in tf_bucket_map.items():
+            bucket_weights[b] = bucket_weights.get(b, 0.0) + weights.get(tf, 0.0)
+        # Accord 'large' par bucket (0..1)
+        bucket_agreement = max(bucket_weights.values()) if bucket_weights else 0.0
+        bucket_winner = max(bucket_weights, key=bucket_weights.get) if bucket_weights else "unknown"
+
+        # -------- Aggregation non-linéaire des signaux --------
+        signal_scores: Dict[str, float] = {}
         signal_agreement: Dict[str, float] = {}
 
-        # Phases dominantes
-        phases = [str(analysis.get("phase", "unknown")) for analysis in (tf_analyses or {}).values()]
-        phase_consistency = (len(set(phases)) == 1 and len(phases) > 0)
+        for signal in present_signals:
+            # prob_OR = 1 - ∏(1 - w_tf) pour les TF où signal==True
+            prod = 1.0
+            agree_w = 0.0
+            for tf, analysis in tf_analyses.items():
+                if bool(analysis.get(signal, False)):
+                    w = float(weights.get(tf, 0.0))
+                    prod *= (1.0 - max(0.0, min(1.0, w)))
+                    agree_w += w
+            score = 1.0 - prod  # borné [0,1], rendements décroissants (anti double comptage)
+            signal_scores[signal] = float(max(0.0, min(1.0, score)))
+            signal_agreement[signal] = float(max(0.0, min(1.0, agree_w)))
 
-        # Signaux critiques
-        critical_signals = ["bos_mss_detected", "liquidity_grab_detected", "ob_detected"]
-
-        for signal in critical_signals:
-            signal_scores = []
-            for tf, analysis in (tf_analyses or {}).items():
-                if analysis.get(signal, False):
-                    weight = float(weights.get(tf, 0.33) or 0.33)
-                    signal_scores.append(weight)
-
-            confluence_scores[signal] = float(sum(signal_scores))
-            signal_agreement[signal] = (len(signal_scores) / max(1, len(tf_analyses)))
-
-        # Base
-        base_confluence = (sum(confluence_scores.values()) / max(1, len(critical_signals)))
-
-        # Bonus cohérence de phase
-        phase_bonus = 0.3 if phase_consistency else 0.0
-
-        # Bonus d’accord moyen
-        avg_agreement = (sum(signal_agreement.values()) / max(1, len(signal_agreement))) if signal_agreement else 0.0
-        agreement_bonus = avg_agreement * 0.2
-
-        final_confluence_score = float(min(1.0, base_confluence + phase_bonus + agreement_bonus))
-
-        # Phase finale (consensus) — fallback si la méthode n’existe pas
-        if hasattr(self, "_determine_consensus_phase"):
-            final_phase = self._determine_consensus_phase(phases, tf_analyses, weights)
+        # Base confluence: moyenne des scores de signaux présents
+        if signal_scores:
+            base_confluence = sum(signal_scores.values()) / len(signal_scores)
         else:
-            # Fallback simple : majorité pondérée
+            base_confluence = 0.0
+
+        # Bonus cohérence de phase (bucket + strict)
+        # - bonus 'large' selon accord par bucket (jusqu’à +0.20)
+        # - petit bonus si strictement tous identiques (+0.10)
+        phase_bonus = (0.20 * bucket_agreement) + (0.10 if phase_consistency_strict else 0.0)
+
+        # -------- Consensus de BIAIS (BUY/SELL/NEUTRAL) --------
+        bias_weights = {"BUY": 0.0, "SELL": 0.0, "NEUTRAL": 0.0}
+        for tf, a in tf_analyses.items():
+            b = _bias_from_analysis(a)
+            bias_weights[b] = bias_weights.get(b, 0.0) + weights.get(tf, 0.0)
+
+        # normaliser (déjà normalisés par TF, mais on clamp par sécurité)
+        for k in list(bias_weights.keys()):
+            bias_weights[k] = float(max(0.0, min(1.0, bias_weights[k])))
+
+        # Choix biais final
+        final_bias = max(bias_weights, key=bias_weights.get) if bias_weights else "NEUTRAL"
+        bias_agreement = float(bias_weights.get(final_bias, 0.0))  # 0..1
+        bias_bonus = 0.15 * bias_agreement  # jusqu’à +0.15
+
+        # -------- Score final de confluence --------
+        final_confluence_score = float(max(0.0, min(1.0, base_confluence + phase_bonus + bias_bonus)))
+
+        # -------- Phase finale (consensus pondéré) --------
+        if hasattr(self, "_determine_consensus_phase"):
+            try:
+                final_phase = self._determine_consensus_phase(phases, tf_analyses, weights)
+            except Exception:
+                # fallback pondéré par phase exacte
+                counter: Dict[str, float] = {}
+                for tf, ph in tf_phase_map.items():
+                    counter[ph] = counter.get(ph, 0.0) + weights.get(tf, 0.0)
+                final_phase = max(counter, key=counter.get) if counter else "uncertain"
+        else:
             counter: Dict[str, float] = {}
-            for tf, analysis in (tf_analyses or {}).items():
-                ph = str(analysis.get("phase", "unknown"))
-                counter[ph] = counter.get(ph, 0.0) + float(weights.get(tf, 0.33) or 0.33)
+            for tf, ph in tf_phase_map.items():
+                counter[ph] = counter.get(ph, 0.0) + weights.get(tf, 0.0)
             final_phase = max(counter, key=counter.get) if counter else "uncertain"
 
-        return {
+        # TF dominant (poids max)
+        dominant_tf = max(weights, key=weights.get) if weights else None
+
+        # Supporting TFs (ceux qui soutiennent phase et biais finaux)
+        supporting_phase_tfs = [tf for tf, ph in tf_phase_map.items() if ph == final_phase]
+        supporting_bias_tfs  = [tf for tf, a in tf_analyses.items() if _bias_from_analysis(a) == final_bias]
+
+        result = {
             "phase": final_phase,
+            "phase_bucket": bucket_winner,
+            "bias": final_bias,  # "BUY" | "SELL" | "NEUTRAL"
+
             "confluence_score": final_confluence_score,
-            "signal_scores": confluence_scores,
-            "phase_consistency": phase_consistency,
-            "agreement_rates": signal_agreement,
-            "dominant_timeframe": max(weights, key=weights.get) if weights else None,
+            "base_confluence": float(base_confluence),
+            "phase_bonus": float(round(phase_bonus, 4)),
+            "bias_bonus": float(round(bias_bonus, 4)),
+
+            "signal_scores": signal_scores,             # non-linéaires 0..1
+            "agreement_rates": signal_agreement,        # pondération cumulée par signal 0..1
+            "signal_agreement_rates": signal_agreement, # alias compat
+
+            "phase_consistency": bool(phase_consistency_strict),
+            "phase_bucket_agreement": float(round(bucket_agreement, 4)),
+
+            "bias_weights": {k: float(round(v, 4)) for k, v in bias_weights.items()},
+            "dominant_timeframe": dominant_tf,
+            "weights_used": {k: float(round(v, 6)) for k, v in weights.items()},
+            "supporting_tfs": {
+                "phase": supporting_phase_tfs or None,
+                "bias": supporting_bias_tfs or None,
+            },
         }
+        return result
+
     except Exception as e:
         self.logger.warning(f"_calculate_advanced_confluence fallback: {e}")
         return {
             "phase": "uncertain",
+            "phase_bucket": "unknown",
+            "bias": "NEUTRAL",
             "confluence_score": 0.0,
+            "base_confluence": 0.0,
+            "phase_bonus": 0.0,
+            "bias_bonus": 0.0,
             "signal_scores": {},
-            "phase_consistency": False,
             "agreement_rates": {},
+            "signal_agreement_rates": {},
+            "phase_consistency": False,
+            "phase_bucket_agreement": 0.0,
+            "bias_weights": {"BUY": 0.0, "SELL": 0.0, "NEUTRAL": 1.0},
             "dominant_timeframe": None,
+            "weights_used": {},
+            "supporting_tfs": {"phase": None, "bias": None},
         }
-   
+
   
 
  

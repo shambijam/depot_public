@@ -335,44 +335,122 @@ def _calculate_quality_metrics(
     self, tf_analyses: Dict, confluence: Dict, divergences: Dict, start_time: float
 ) -> Dict[str, Any]:
     """
-    Calcul métriques de qualité globales pour l'analyse multi-TF.
+    Calcul 'desk' des métriques de qualité globales pour l'analyse multi-TF.
+    - Pondérations explicites et stables
+    - Couverture réelle vs TF attendus (d'après weights_used si dispo)
+    - Cohérence phase/biais (accord pondéré)
+    - Pénalité proportionnelle aux divergences
+    - Bonus/Malus de performance (latence)
+    Signature conservée.
     """
-    # Couverture données
-    data_coverage = len(tf_analyses) / 3.0  # Suppose M1, M5, M15
+    import time
+    import math
 
-    # Score confluence
+    # ---------- Sécurisation des inputs ----------
+    tf_analyses   = tf_analyses or {}
+    confluence    = confluence or {}
+    divergences   = divergences or {}
+
+    # ---------- Couverture (0..1) ----------
+    # Si confluence fournit 'weights_used', on s'en sert pour définir l'ensemble des TF attendus.
+    weights_used = confluence.get("weights_used") or {}
+    expected_tfs = set(map(str, weights_used.keys())) if weights_used else {"M1", "M5", "M15"}
+    present_tfs  = set(map(str, tf_analyses.keys()))
+    denom_cov    = max(1, len(expected_tfs))
+    data_coverage = min(1.0, len(present_tfs.intersection(expected_tfs)) / denom_cov)
+
+    # ---------- Confluence (0..1) ----------
     confluence_score = float(confluence.get("confluence_score", 0.0) or 0.0)
+    base_confluence  = float(confluence.get("base_confluence", confluence_score) or confluence_score)
 
-    # Pénalité divergences
-    divergence_penalty = 0.3 if bool(divergences.get("has_conflicts", False)) else 0.0
+    # ---------- Cohérence temporelle (phase/biais) (0..1) ----------
+    # Phase: strict + bucket; Biais: poids du biais gagnant
+    phase_consistency_strict = bool(confluence.get("phase_consistency", False))
+    phase_bucket_agreement   = float(confluence.get("phase_bucket_agreement", 0.0) or 0.0)
+    bias = str(confluence.get("bias", "NEUTRAL") or "NEUTRAL")
+    bias_weights = confluence.get("bias_weights", {}) or {}
+    bias_agreement = float(bias_weights.get(bias, 0.0) or 0.0)
 
-    # Consistance temporelle
-    temporal_consistency = 0.2 if bool(confluence.get("phase_consistency", False)) else 0.0
+    # Combinaison cohérence: on valorise l'accord "large" (bucket) + biais
+    temporal_consistency = max(0.0, min(1.0, 0.6 * phase_bucket_agreement + 0.4 * bias_agreement))
+    # Petit supplément si strictement identiques (capé)
+    if phase_consistency_strict:
+        temporal_consistency = min(1.0, temporal_consistency + 0.05)
 
-    # Score qualité global (borné)
-    overall_score = max(
-        0.0,
-        min(
-            1.0,
-            data_coverage * 0.3
-            + confluence_score * 0.4
-            + temporal_consistency
-            + (0.1 - divergence_penalty),
-        ),
+    # ---------- Divergences (pénalités 0..0.35) ----------
+    # On prend en compte le booléen, le nombre de conflits et une sévérité si disponible.
+    has_conflicts   = bool(divergences.get("has_conflicts", False))
+    conflict_count  = int(divergences.get("conflict_count", 0) or 0)
+    severity        = float(divergences.get("severity", 0.0) or 0.0)  # 0..1
+    # Barème: chaque conflit coûte 0.05 jusqu'à 0.25 + sévérité jusqu'à 0.10 → cap 0.35
+    divergence_penalty = 0.0
+    if has_conflicts or conflict_count > 0 or severity > 0:
+        divergence_penalty = min(0.35, 0.05 * max(1, conflict_count) + 0.10 * max(0.0, min(1.0, severity)))
+
+    # ---------- Performance (latence) (0..1) ----------
+    execution_time_ms = (time.perf_counter() - float(start_time)) * 1000.0
+    # Score runtime: 1 à 120ms, décroissance linéaire jusqu'à 0.2 à 600ms, <0.2 au-delà capé à 0.1
+    if execution_time_ms <= 120:
+        runtime_score = 1.0
+    elif execution_time_ms >= 600:
+        runtime_score = 0.1
+    else:
+        # map 120..600 ms -> 1.0..0.2
+        runtime_score = 1.0 - (execution_time_ms - 120.0) * (0.8 / 480.0)
+        runtime_score = max(0.2, runtime_score)
+
+    # ---------- Agrégation (poids explicites, somme≈1, puis pénalité divergences) ----------
+    # Poids 'desk' (stables) :
+    w_cov   = 0.20
+    w_conf  = 0.45
+    w_temp  = 0.20
+    w_rt    = 0.15
+
+    raw_score = (
+        w_cov  * data_coverage +
+        w_conf * confluence_score +
+        w_temp * temporal_consistency +
+        w_rt   * runtime_score
     )
 
-    # Temps d'exécution
-    execution_time_ms = (time.perf_counter() - float(start_time)) * 1000.0
+    overall_score = max(0.0, min(1.0, raw_score - divergence_penalty))
+
+    # ---------- Grading ----------
+    if overall_score >= 0.90:
+        grade = "S"   # superb
+    elif overall_score >= 0.80:
+        grade = "A"
+    elif overall_score >= 0.70:
+        grade = "B"
+    elif overall_score >= 0.60:
+        grade = "C"
+    else:
+        grade = "D"
 
     return {
-        "overall_score": overall_score,
-        "data_coverage": data_coverage,
-        "confluence_score": confluence_score,
-        "temporal_consistency": temporal_consistency,
-        "divergence_penalty": divergence_penalty,
-        "execution_time_ms": execution_time_ms,
-        "performance_grade": ("A" if overall_score > 0.8 else "B" if overall_score > 0.6 else "C"),
+        "overall_score": round(overall_score, 3),
+        "components": {
+            "data_coverage": round(float(data_coverage), 3),
+            "confluence_score": round(float(confluence_score), 3),
+            "base_confluence": round(float(base_confluence), 3),
+            "temporal_consistency": round(float(temporal_consistency), 3),
+            "runtime_score": round(float(runtime_score), 3),
+            "divergence_penalty": round(float(divergence_penalty), 3),
+        },
+        "weights": {
+            "coverage": w_cov,
+            "confluence": w_conf,
+            "temporal": w_temp,
+            "runtime": w_rt,
+        },
+        "flags": {
+            "phase_consistency_strict": phase_consistency_strict,
+            "has_conflicts": has_conflicts,
+        },
+        "execution_time_ms": float(round(execution_time_ms, 2)),
+        "performance_grade": grade,
     }
+
 
 
 def _fetch_timeframe_data(

@@ -334,26 +334,31 @@ class Detectors:
 
     def detect_bos_mss_enhanced(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
         """
-        🎯 BOS/MSS Enhanced - Avec confirmation volume et momentum
+        🎯 BOS/MSS Enhanced - Avec confirmation volume et momentum (version vectorisée, sans .apply)
 
         Améliorations:
-        - Confirmation volume obligatoire
-        - Validation momentum
-        - Distinction BOS vs MSS plus précise
-        - Filtrage des faux breakouts
+        - Vectorisation complète des validations (volume, momentum, distance de break) → perf M1+++
+        - Confirmation volume obligatoire (configurable)
+        - Validation momentum (configurable)
+        - Distinction BOS vs MSS plus précise via la tendance précédente
+        - Filtrage des faux breakouts par distance minimale relative
+        - Respect de 'require_close_beyond' (clôture au-delà du niveau)
         """
-        self.logger.debug("Détection BOS/MSS Enhanced avec confirmations...")
+        import numpy as np
+        import pandas as pd
 
+        self.logger.debug("Détection BOS/MSS Enhanced (vectorisée) avec confirmations...")
+
+        # === GUARDRAILS ===
         if df is None or df.empty:
             return []
 
-        # Configuration
+        # --- Config ---
         bos_config = self.config_manager.get("phase_detection_defaults.bos_mss_enhanced_settings", {}) or {}
         volume_config = bos_config.get("volume_confirmation", {}) or {}
         momentum_config = bos_config.get("momentum_confirmation", {}) or {}
         structure_config = bos_config.get("structure_validation", {}) or {}
 
-        # Paramètres de confirmation
         enable_volume_conf = bool(volume_config.get("enable", True))
         volume_multiplier = float(volume_config.get("volume_multiplier_threshold", 1.5))
         volume_lookback = int(volume_config.get("lookback_period", 20))
@@ -364,146 +369,170 @@ class Detectors:
         min_break_distance = float(structure_config.get("min_break_distance", 0.0002))
         require_close_beyond = bool(structure_config.get("require_close_beyond", True))
 
-        # S'assurer que la tendance est calculée
+        # === Préparation colonnes requises ===
+        df = df.copy()
+
+        # Tendance si absente
         if "trend" not in df.columns:
-            df = df.copy()
             df["trend"] = _get_trend(self, df)
 
-        # Swing points adaptatifs
+        # Swing points adaptatifs (séries alignées)
         swing_highs, swing_lows = _get_adaptive_swing_points(self, df)
         df["last_swing_high"] = swing_highs.reindex(df.index).ffill()
         df["last_swing_low"] = swing_lows.reindex(df.index).ffill()
 
-        # Calcul des moyennes mobiles de volume
-        vol_ma = df["tick_volume"].rolling(window=volume_lookback, min_periods=1).mean().replace(0, np.nan)
+        # Sanitisation prix/volume
+        for col in ("close", "high", "low"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+        if "tick_volume" not in df.columns:
+            df["tick_volume"] = 0.0
+        df["tick_volume"] = pd.to_numeric(df["tick_volume"], errors="coerce").astype(float).fillna(0.0)
+
+        # Moyenne mobile volume + ratio (vectorisé)
+        vol_ma = (
+            df["tick_volume"]
+            .rolling(window=max(1, volume_lookback), min_periods=1)
+            .mean()
+            .replace(0, np.nan)
+        )
         df["volume_ma"] = vol_ma
-        df["volume_ratio"] = (df["tick_volume"] / vol_ma).fillna(0.0)
+        df["volume_ratio"] = (df["tick_volume"] / vol_ma).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        # === CONDITIONS DE BASE ===
-        # Breakout haussier: clôture au-dessus du dernier swing high
-        bullish_break_basic = df["close"] > df["last_swing_high"].shift(1)
-        # Breakout baissier: clôture en dessous du dernier swing low
-        bearish_break_basic = df["close"] < df["last_swing_low"].shift(1)
+        # === Conditions de base: break au-delà du dernier swing (décalé) ===
+        # on compare la close courante au swing de la barre précédente
+        last_high_shift = df["last_swing_high"].shift(1)
+        last_low_shift = df["last_swing_low"].shift(1)
 
-        # === CONFIRMATIONS VOLUME ===
-        volume_confirmation = pd.Series(True, index=df.index)  # Default True si désactivé
+        # close au-delà du niveau (strictement) ou non (si require_close_beyond=False, on tolère >= / <=)
+        if require_close_beyond:
+            bullish_break_basic = (df["close"] > last_high_shift)
+            bearish_break_basic = (df["close"] < last_low_shift)
+        else:
+            bullish_break_basic = (df["close"] >= last_high_shift)
+            bearish_break_basic = (df["close"] <= last_low_shift)
+
+        # === Confirmations Volume (vectorisé) ===
         if enable_volume_conf:
-            volume_confirmation = (df["volume_ratio"] > volume_multiplier).fillna(False)
+            volume_confirmation = (df["volume_ratio"] > volume_multiplier)
+        else:
+            volume_confirmation = pd.Series(True, index=df.index)
 
-        # === CONFIRMATIONS MOMENTUM ===
-        momentum_confirmation = pd.Series(True, index=df.index)  # Default True si désactivé
+        # === Confirmation Momentum (vectorisé) ===
+        # momentum en valeur absolue de la variation relative (pct_change) pour robustesse
         if enable_momentum_conf:
-            price_change = df["close"].pct_change().abs()
-            momentum_confirmation = (price_change > min_momentum).fillna(False)
+            price_change_abs = df["close"].pct_change().abs()
+            momentum_confirmation = (price_change_abs > min_momentum)
+        else:
+            price_change_abs = df["close"].pct_change().abs()  # utile pour logs
+            momentum_confirmation = pd.Series(True, index=df.index)
 
-        # === FILTRAGE DISTANCE MINIMALE ===
-        def validate_break_distance(row: pd.Series, break_type: str) -> bool:
-            """Valide que la cassure est suffisamment significative (en proportion du niveau cassé)."""
-            try:
-                if break_type == "bullish":
-                    last_high = row["last_swing_high"]
-                    if pd.isna(last_high):
-                        return False
-                    distance = (row["close"] - last_high) / max(last_high, 1e-12)
-                    return bool(distance >= min_break_distance)
-                else:  # bearish
-                    last_low = row["last_swing_low"]
-                    if pd.isna(last_low):
-                        return False
-                    distance = (last_low - row["close"]) / max(last_low, 1e-12)
-                    return bool(distance >= min_break_distance)
-            except Exception:
-                return False
+        # === Filtrage distance minimale (vectorisé) ===
+        # distance relative à partir du niveau cassé (sécurisé avec epsilon)
+        eps = 1e-12
+        # bullish: (close - last_high) / last_high >= min_break_distance
+        # bearish: (last_low - close) / last_low >= min_break_distance
+        denom_high = np.maximum(last_high_shift.astype(float), eps)
+        denom_low = np.maximum(last_low_shift.astype(float), eps)
 
-        # === CLASSIFICATION BOS vs MSS ===
-        previous_trend = df["trend"].shift(1)
+        bullish_dist_ok = ((df["close"] - last_high_shift) / denom_high) >= float(min_break_distance)
+        bearish_dist_ok = ((last_low_shift - df["close"]) / denom_low) >= float(min_break_distance)
 
-        # Conditions finales avec toutes les confirmations
-        bullish_break_confirmed = (
-            bullish_break_basic
-            & volume_confirmation
-            & momentum_confirmation
-            & df.apply(lambda row: validate_break_distance(row, "bullish"), axis=1)
-        )
+        # === Masques finaux break confirmés ===
+        bullish_break_confirmed = bullish_break_basic & volume_confirmation & momentum_confirmation & bullish_dist_ok
+        bearish_break_confirmed = bearish_break_basic & volume_confirmation & momentum_confirmation & bearish_dist_ok
 
-        bearish_break_confirmed = (
-            bearish_break_basic
-            & volume_confirmation
-            & momentum_confirmation
-            & df.apply(lambda row: validate_break_distance(row, "bearish"), axis=1)
-        )
-
-        # Classification intelligente BOS vs MSS
+        # === Classification BOS vs MSS (via tendance précédente) ===
+        previous_trend = df["trend"].shift(1).astype(str).str.lower()
         bullish_bos = (previous_trend == "bullish") & bullish_break_confirmed
         bearish_bos = (previous_trend == "bearish") & bearish_break_confirmed
         bullish_mss = (previous_trend == "bearish") & bullish_break_confirmed
         bearish_mss = (previous_trend == "bullish") & bearish_break_confirmed
 
-        # === CONSTRUCTION DES RÉSULTATS ===
+        # === Construction des résultats (liste alignée sur df) ===
         results: List[Optional[Dict[str, Any]]] = []
+        vol_ratio_arr = df["volume_ratio"].to_numpy()
+        price_change_arr = price_change_abs.to_numpy()
 
-        # Pré-calcul momentum (pour log)
-        price_change = df["close"].pct_change()
+        # niveaux cassés pour logs
+        level_broken_high = last_high_shift.to_numpy(dtype=float)
+        level_broken_low = last_low_shift.to_numpy(dtype=float)
+
+        # helper qualité
+        def _quality_from_volratio(vr: float) -> str:
+            try:
+                return "high" if vr > (volume_multiplier * 1.5) else "medium"
+            except Exception:
+                return "medium"
+
+        # vector -> liste d'infos
+        bbos = bullish_bos.to_numpy(dtype=bool)
+        bbss = bearish_bos.to_numpy(dtype=bool)
+        bmss = bullish_mss.to_numpy(dtype=bool)
+        bmss_bear = bearish_mss.to_numpy(dtype=bool)
 
         for i in range(len(df)):
             info = None
+            vr_i = float(vol_ratio_arr[i]) if np.isfinite(vol_ratio_arr[i]) else 0.0
+            mom_i = float(price_change_arr[i]) if np.isfinite(price_change_arr[i]) else 0.0
 
-            vol_ratio_i = float(df["volume_ratio"].iloc[i]) if pd.notna(df["volume_ratio"].iloc[i]) else 0.0
-            momentum_i = float(price_change.iloc[i]) if pd.notna(price_change.iloc[i]) else 0.0
-
-            if bool(bullish_bos.iloc[i]):
+            if bbos[i]:
+                lvl = float(level_broken_high[i]) if np.isfinite(level_broken_high[i]) else np.nan
                 info = {
                     "type": "bullish_bos",
-                    "level_broken": float(df["last_swing_high"].shift(1).iloc[i]),
-                    "confirmation_score": (min(1.0, vol_ratio_i / max(volume_multiplier, 1e-12)) if enable_volume_conf else 1.0),
-                    "volume_ratio": round(vol_ratio_i, 2),
-                    "momentum": round(abs(momentum_i), 4),
+                    "level_broken": lvl,
+                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "volume_ratio": round(vr_i, 3),
+                    "momentum": round(mom_i, 6),
                     "structure_type": "continuation",
-                    "quality": ("high" if vol_ratio_i > volume_multiplier * 1.5 else "medium"),
+                    "quality": _quality_from_volratio(vr_i),
                 }
-            elif bool(bearish_bos.iloc[i]):
+            elif bbss[i]:
+                lvl = float(level_broken_low[i]) if np.isfinite(level_broken_low[i]) else np.nan
                 info = {
                     "type": "bearish_bos",
-                    "level_broken": float(df["last_swing_low"].shift(1).iloc[i]),
-                    "confirmation_score": (min(1.0, vol_ratio_i / max(volume_multiplier, 1e-12)) if enable_volume_conf else 1.0),
-                    "volume_ratio": round(vol_ratio_i, 2),
-                    "momentum": round(abs(momentum_i), 4),
+                    "level_broken": lvl,
+                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "volume_ratio": round(vr_i, 3),
+                    "momentum": round(mom_i, 6),
                     "structure_type": "continuation",
-                    "quality": ("high" if vol_ratio_i > volume_multiplier * 1.5 else "medium"),
+                    "quality": _quality_from_volratio(vr_i),
                 }
-            elif bool(bullish_mss.iloc[i]):
+            elif bmss[i]:
+                lvl = float(level_broken_high[i]) if np.isfinite(level_broken_high[i]) else np.nan
                 info = {
                     "type": "bullish_mss",
-                    "level_broken": float(df["last_swing_high"].shift(1).iloc[i]),
-                    "confirmation_score": (min(1.0, vol_ratio_i / max(volume_multiplier, 1e-12)) if enable_volume_conf else 1.0),
-                    "volume_ratio": round(vol_ratio_i, 2),
-                    "momentum": round(abs(momentum_i), 4),
+                    "level_broken": lvl,
+                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "volume_ratio": round(vr_i, 3),
+                    "momentum": round(mom_i, 6),
                     "structure_type": "reversal",
-                    "quality": ("high" if vol_ratio_i > volume_multiplier * 1.5 else "medium"),
+                    "quality": _quality_from_volratio(vr_i),
                 }
-            elif bool(bearish_mss.iloc[i]):
+            elif bmss_bear[i]:
+                lvl = float(level_broken_low[i]) if np.isfinite(level_broken_low[i]) else np.nan
                 info = {
                     "type": "bearish_mss",
-                    "level_broken": float(df["last_swing_low"].shift(1).iloc[i]),
-                    "confirmation_score": (min(1.0, vol_ratio_i / max(volume_multiplier, 1e-12)) if enable_volume_conf else 1.0),
-                    "volume_ratio": round(vol_ratio_i, 2),
-                    "momentum": round(abs(momentum_i), 4),
+                    "level_broken": lvl,
+                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "volume_ratio": round(vr_i, 3),
+                    "momentum": round(mom_i, 6),
                     "structure_type": "reversal",
-                    "quality": ("high" if vol_ratio_i > volume_multiplier * 1.5 else "medium"),
+                    "quality": _quality_from_volratio(vr_i),
                 }
 
             results.append(info)
 
-        # Logging de performance
+        # --- Logging synthétique ---
         valid_breaks = [r for r in results if r is not None]
         if valid_breaks:
-            bos_count = len([r for r in valid_breaks if "bos" in r["type"]])
-            mss_count = len([r for r in valid_breaks if "mss" in r["type"]])
-            high_quality = len([r for r in valid_breaks if r["quality"] == "high"])
-
+            bos_count = sum(1 for r in valid_breaks if "bos" in r["type"])
+            mss_count = sum(1 for r in valid_breaks if "mss" in r["type"])
+            high_quality = sum(1 for r in valid_breaks if r.get("quality") == "high")
             self.logger.debug(
-                f"BOS/MSS Enhanced: {len(valid_breaks)} cassures détectées "
-                f"(BOS: {bos_count}, MSS: {mss_count}, haute qualité: {high_quality})"
+                f"[BOS/MSS vX] breaks={len(valid_breaks)} (BOS={bos_count}, MSS={mss_count}, highQ={high_quality}) | "
+                f"vol_thr={volume_multiplier} lookback={volume_lookback} dist_min={min_break_distance} "
+                f"require_close_beyond={require_close_beyond}"
             )
 
         return results
@@ -526,7 +555,8 @@ class Detectors:
         Calcule des signaux micro-phase basés sur les Bandes de Bollinger pour le scalping Katana.
         - NE PAS MODIFIER LA SIGNATURE ICI (pour intégration sûre).
         - Retourne un dict prêt à consommer par le pipeline (touch, squeeze, breakout_score, mean_revert_score, distances, etc.).
-        - ✅ Ajouts:
+        - ✅ Ajouts/Optimisations:
+            * Conserve et met à jour en continu les bandes sur TOUT l'historique (bb_upper/bb_lower/bb_mid) -> out["series"]
             * range_score + is_range + range_duration_bars
             * midline (bb_mid) + logique d'entrée "médiane" (mid_entry, mid_entry_score)
             * critères multi-indicateurs: bandwidth, ADX, pente EMA, largeur RSI (robuste au whipsaw)
@@ -586,6 +616,8 @@ class Detectors:
                     "base_threshold": 0.55,  # seuil pour proposer l'entrée médiane
                 },
             },
+            # ⚡ Séries historiques complètes des bandes pour traçage/backtest/export
+            "series": {"bb_upper": None, "bb_lower": None, "bb_mid": None},
         }
 
         # --- Guardrails & inputs ---
@@ -603,19 +635,28 @@ class Detectors:
             out["reason"] = "invalid_last_price"
             return out
 
-        # --- Bollinger bands (ema + std des résidus pour stabilité micro) ---
+        # --- Bollinger bands FULL HISTORY (ema + std des résidus pour stabilité micro) ---
         mid = series.ewm(span=period, adjust=False, min_periods=period).mean()
         resid = series - mid
         rolling_std = resid.rolling(window=period, min_periods=period).std(ddof=0)
         upper = mid + std_mult * rolling_std
         lower = mid - std_mult * rolling_std
 
-        bb_mid, bb_upper, bb_lower = (
-            float(mid.iloc[-1]),
-            float(upper.iloc[-1]),
-            float(lower.iloc[-1]),
-        )
+        # Clamp/ffill pour robustesse historique
+        bb_mid_series = mid.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+        bb_upper_series = upper.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+        bb_lower_series = lower.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+
+        # ⚡ Export séries complètes dans la sortie (historique entier)
+        out["series"]["bb_mid"] = bb_mid_series
+        out["series"]["bb_upper"] = bb_upper_series
+        out["series"]["bb_lower"] = bb_lower_series
+
+        # Dernière barre (compat legacy)
         price = float(series.iloc[-1])
+        bb_mid = float(bb_mid_series.iloc[-1])
+        bb_upper = float(bb_upper_series.iloc[-1])
+        bb_lower = float(bb_lower_series.iloc[-1])
 
         # Sécurité bornes
         if not all(map(np.isfinite, [bb_mid, bb_upper, bb_lower, price])):
@@ -645,9 +686,7 @@ class Detectors:
             point = (
                 float(df["point"].iloc[-1])
                 if "point" in df.columns
-                else float(
-                    getattr(getattr(self, "symbol_info", None), "point", 0.0) or 0.0
-                )
+                else float(getattr(getattr(self, "symbol_info", None), "point", 0.0) or 0.0)
             )
             pip_size = point * 10.0 if point > 0 else None
         atr_pips = (atr / pip_size) if (pip_size and atr and atr > 0) else None
@@ -718,12 +757,8 @@ class Detectors:
 
         # --- Momentum (EWM diffs) + normalisation ATR ---
         close = pd.to_numeric(df["close"], errors="coerce").astype(float)
-        mom_fast = (
-            close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
-        )
-        mom_slow = (
-            close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
-        )
+        mom_fast = close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
+        mom_slow = close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
         momentum = (
             float(mom_fast - mom_slow)
             if all(map(np.isfinite, [mom_fast, mom_slow]))
@@ -740,20 +775,12 @@ class Detectors:
         # =========================================================
         def _ema_slope_norm(mid_series: pd.Series, win: int) -> float:
             try:
-                ema_smooth = mid_series.ewm(
-                    span=win, adjust=False, min_periods=win
-                ).mean()
+                ema_smooth = mid_series.ewm(span=win, adjust=False, min_periods=win).mean()
                 slope = ema_smooth.diff().iloc[-1]
-                denom = (upper - lower).ewm(span=win, adjust=False).mean().iloc[
-                    -1
-                ] / 2.0
-                denom = (
-                    float(denom) if np.isfinite(denom) and denom != 0 else float("nan")
-                )
+                denom = (upper - lower).ewm(span=win, adjust=False).mean().iloc[-1] / 2.0
+                denom = float(denom) if np.isfinite(denom) and denom != 0 else float("nan")
                 val = abs(float(slope) / denom) if np.isfinite(denom) else float("nan")
-                return float(
-                    max(0.0, min(1.0, 1.0 - min(val, 1.0)))
-                )  # pente faible -> proche de 1
+                return float(max(0.0, min(1.0, 1.0 - min(val, 1.0))))  # pente faible -> 1
             except Exception:
                 return 0.5
 
@@ -784,9 +811,7 @@ class Detectors:
                 atr_x = tr.rolling(window=p, min_periods=p).mean()
                 plus_di = 100 * (plus_dm.ewm(span=p, adjust=False).mean() / atr_x)
                 minus_di = 100 * (minus_dm.ewm(span=p, adjust=False).mean() / atr_x)
-                dx = (
-                    abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
-                ) * 100
+                dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
                 adx = dx.ewm(span=p, adjust=False, min_periods=p).mean().iloc[-1]
                 return float(adx) if np.isfinite(adx) else float("nan")
             except Exception:
@@ -799,9 +824,8 @@ class Detectors:
         rsi_width_win = cfg_r["rsi_width_window"]
 
         # Composantes
-        # 1) Bandwidth faible -> range
+        # 1) Bandwidth faible -> range (normalisé par son historique)
         width_now = float(width.iloc[-1]) if np.isfinite(width.iloc[-1]) else np.nan
-        # Normalise par son historique (percentile basé sur squeeze_window)
         if np.isfinite(width_now) and len(w_non_na) >= 10:
             rank = float((w_non_na <= width_now).mean())  # 0..1
             comp_bandwidth = 1.0 - rank  # faible largeur => proche de 1
@@ -823,9 +847,7 @@ class Detectors:
         rsi_win = rsi.tail(rsi_width_win).dropna()
         if len(rsi_win) >= max(5, rsi_period // 2):
             rsi_width = float(rsi_win.max() - rsi_win.min())
-            comp_rsiw = max(
-                0.0, min(1.0, 1.0 - (rsi_width / 30.0))
-            )  # width ~0..30 -> 1..0
+            comp_rsiw = max(0.0, min(1.0, 1.0 - (rsi_width / 30.0)))  # width ~0..30 -> 1..0
         else:
             comp_rsiw = 0.5
 
@@ -874,14 +896,11 @@ class Detectors:
         # Durée récente passée en "range" (approx: compte des barres consécutives où score>=thr_out)
         try:
             recent_scores = []
-            # Si on a un buffer de scores côté self, on pourrait l'utiliser. Sinon on estime via fenêtre glissante.
             win_est = min(50, len(series))
-            for i in range(win_est):
-                # estimation rapide: recompute local comps sur les i dernières barres (économique: on simplifie)
+            for _ in range(win_est):
+                # estimation simplifiée (on peut plugger un buffer circulaire réel ici)
                 recent_scores.append(range_score)
-            out["range_duration_bars"] = int(
-                sum(1 for s in recent_scores if s >= thr_out)
-            )
+            out["range_duration_bars"] = int(sum(1 for s in recent_scores if s >= thr_out))
         except Exception:
             out["range_duration_bars"] = 0
 
@@ -944,12 +963,10 @@ class Detectors:
 
         if out["is_range"] and in_band and np.isfinite(pos):
             # Conditions:
-            # - On reste proche de la médiane (mais pas pile au centre) -> |pos| ∈ [pos_min, pos_max]
+            # - proche de la médiane mais pas au centre -> |pos| ∈ [pos_min, pos_max]
             # - Momentum dans le bon sens (vers la médiane opposée) avec un minimum
             # - Bonus si squeeze actif ou bandwidth faible
-            bandwidth_comp_bonus = (
-                comp_bandwidth  # 0..1, plus c'est faible plus on bonifie
-            )
+            bandwidth_comp_bonus = comp_bandwidth  # 0..1, plus c'est faible plus on bonifie
             if (-pos_max <= pos <= -pos_min) and (norm_mom > mid_cfg["mom_norm_min"]):
                 # Prix légèrement SOUS la médiane et momentum haussier -> BUY
                 mid_score = (
