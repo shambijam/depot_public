@@ -313,7 +313,7 @@ class PhaseObserver:
                 toggles = {}
 
             if toggles.get("detect_regime", True):
-                df_an["regime"] = self.detect_market_regime(df_an)
+                df_an["regime"] = detect_market_regime(df_an)
                 df_an["regime_detected"] = True
             else:
                 df_an["regime"] = "unknown"
@@ -321,7 +321,7 @@ class PhaseObserver:
                 df_an["regime_strength"] = 0.5
 
             if toggles.get("detect_fvg", True):
-                df_an["fvg_details"] = self.detect_fvg_enhanced(df_an)
+                df_an["fvg_details"] = detect_fvg_enhanced(df_an)
                 df_an["fvg_detected"] = df_an["fvg_details"].apply(
                     lambda x: x is not None
                 )
@@ -330,7 +330,7 @@ class PhaseObserver:
                 df_an["fvg_detected"] = False
 
             if toggles.get("detect_order_block", True):
-                df_an["ob_details"] = self.detect_order_block_ml_enhanced(df_an)
+                df_an["ob_details"] = detect_order_block_ml_enhanced(df_an)
                 df_an["ob_detected"] = df_an["ob_details"].apply(
                     lambda x: x is not None
                 )
@@ -339,7 +339,7 @@ class PhaseObserver:
                 df_an["ob_detected"] = False
 
             if toggles.get("detect_bos_mss", True):
-                df_an["bos_mss_details"] = self.detect_bos_mss_enhanced(df_an)
+                df_an["bos_mss_details"] = detect_bos_mss_enhanced(df_an)
                 df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
                     lambda x: x is not None
                 )
