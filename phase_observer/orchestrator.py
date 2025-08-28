@@ -20,17 +20,8 @@ import pandas as pd
 from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
 from .validators import calculate_confidence_score, calculate_optimized_confidence
 from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
-from .detectors import (
-    detect_order_block_ml_enhanced,
-    detect_fvg_enhanced,
-    detect_bos_mss_enhanced,
-    detect_market_regime,
-    detect_micro_phase_m1,
-    determine_optimized_phase,
-    determine_phase,
+from .detectors import Detectors
     
-)
-
 # Alias UTC
 UTC = timezone.utc
 
@@ -49,6 +40,9 @@ class PhaseObserver:
 
         # === Nouveau : instance de FeaturesExtractor ===
         self.features = FeaturesExtractor(config_manager=config_manager, logger=self.logger)
+        
+        # Ajout de la classe Detectors
+        self.detectors = Detectors(self.logger)
 
         # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
         self.lookback_window = 12
@@ -313,7 +307,7 @@ class PhaseObserver:
                 toggles = {}
 
             if toggles.get("detect_regime", True):
-                df_an["regime"] = detect_market_regime(df_an)
+                df_an["regime"] = self.detectors.detect_market_regime(df_an)
                 df_an["regime_detected"] = True
             else:
                 df_an["regime"] = "unknown"
@@ -321,7 +315,7 @@ class PhaseObserver:
                 df_an["regime_strength"] = 0.5
 
             if toggles.get("detect_fvg", True):
-                df_an["fvg_details"] = detect_fvg_enhanced(df_an)
+                df_an["fvg_details"] = self.detectors.detect_fvg_enhanced(df_an)
                 df_an["fvg_detected"] = df_an["fvg_details"].apply(
                     lambda x: x is not None
                 )
@@ -330,7 +324,7 @@ class PhaseObserver:
                 df_an["fvg_detected"] = False
 
             if toggles.get("detect_order_block", True):
-                df_an["ob_details"] = detect_order_block_ml_enhanced(df_an)
+                df_an["ob_details"] = self.detectors.detect_order_block_ml_enhanced(df_an)
                 df_an["ob_detected"] = df_an["ob_details"].apply(
                     lambda x: x is not None
                 )
@@ -339,7 +333,7 @@ class PhaseObserver:
                 df_an["ob_detected"] = False
 
             if toggles.get("detect_bos_mss", True):
-                df_an["bos_mss_details"] = detect_bos_mss_enhanced(df_an)
+                df_an["bos_mss_details"] = self.detectors.detect_bos_mss_enhanced(df_an)
                 df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
                     lambda x: x is not None
                 )
