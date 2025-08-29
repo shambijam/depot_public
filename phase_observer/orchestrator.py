@@ -277,7 +277,10 @@ class PhaseObserver:
         self, df: pd.DataFrame, asset_symbol: Optional[str] = None
     ) -> Optional[pd.DataFrame]:
         """
-        🎯 PIPELINE D'ANALYSE OPTIMISÉ - 4 INDICATEURS CORE SEULEMENT
+        🎯 PIPELINE D'ANALYSE OPTIMISÉ (STRICT / NO FALLBACK)
+        - Conserve les 4 indicateurs core
+        - Supprime tout mappage 'fallback_*' : si pas de phase → 'no_clear_phase'
+        - Conserve la volatilité pour reporting/diag, mais ne force plus de phase
         """
 
         try:
@@ -321,11 +324,9 @@ class PhaseObserver:
                     df_an[col] = float(default_val)
                     self.logger.warning(f"Colonne '{col}' ajoutée avec valeur par défaut")
                 else:
-                    df_an[col] = pd.to_numeric(df_an[col], errors="coerce").fillna(
-                        float(default_val)
-                    )
+                    df_an[col] = pd.to_numeric(df_an[col], errors="coerce").fillna(float(default_val))
 
-            # Volatilité
+            # Volatilité (utile au reporting mais ne force plus la phase)
             try:
                 if "close" in df_an.columns:
                     ret = df_an["close"].pct_change().fillna(0.0)
@@ -411,7 +412,7 @@ class PhaseObserver:
             # === (NOUVEAU) MICROPHASES BOLLINGER – non intrusif, dernière barre uniquement ===
             if toggles.get("detect_bollinger", True):
                 try:
-                    # Initialiser les colonnes de sortie
+                    # Initialiser colonnes
                     init_cols = [
                         ("boll_signal", None),
                         ("boll_band_touch", None),
@@ -433,7 +434,7 @@ class PhaseObserver:
                         if col not in df_an.columns:
                             df_an[col] = default
 
-                    # Calibrage pip_size via 'point' si dispo
+                    # pip_size via 'point' si dispo
                     pip_size = None
                     try:
                         if "point" in df_an.columns:
@@ -445,37 +446,12 @@ class PhaseObserver:
                     boll = self.detectors.compute_bollinger_microphase_signals(
                         df_an,
                         price_col="close",
-                        period=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.period", 20
-                            )
-                        ),
-                        std_mult=float(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.std_mult", 2.0
-                            )
-                        ),
-                        squeeze_window=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.squeeze_window", 100
-                            )
-                        ),
-                        squeeze_percentile=float(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.squeeze_percentile",
-                                0.15,
-                            )
-                        ),
-                        min_bars=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.min_bars", 200
-                            )
-                        ),
-                        atr_period=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.atr_period", 14
-                            )
-                        ),
+                        period=int(self.config_manager.get("phase_detection_defaults.bollinger.period", 20)),
+                        std_mult=float(self.config_manager.get("phase_detection_defaults.bollinger.std_mult", 2.0)),
+                        squeeze_window=int(self.config_manager.get("phase_detection_defaults.bollinger.squeeze_window", 100)),
+                        squeeze_percentile=float(self.config_manager.get("phase_detection_defaults.bollinger.squeeze_percentile", 0.15)),
+                        min_bars=int(self.config_manager.get("phase_detection_defaults.bollinger.min_bars", 200)),
+                        atr_period=int(self.config_manager.get("phase_detection_defaults.bollinger.atr_period", 14)),
                         pip_size=pip_size,
                         mode="katana",
                     )
@@ -484,70 +460,22 @@ class PhaseObserver:
                         idx = df_an.index[-1]
                         df_an.loc[idx, "boll_signal"] = boll.get("signal")
                         df_an.loc[idx, "boll_band_touch"] = boll.get("band_touch")
-                        df_an.loc[idx, "boll_in_band"] = float(
-                            bool(boll.get("in_band"))
-                        )
-                        df_an.loc[idx, "boll_is_squeeze"] = float(
-                            bool(boll.get("is_squeeze"))
-                        )
-                        df_an.loc[idx, "boll_is_expansion"] = float(
-                            bool(boll.get("is_expansion"))
-                        )
-                        df_an.loc[idx, "boll_breakout_score"] = float(
-                            boll.get("breakout_score", np.nan)
-                        )
-                        df_an.loc[idx, "boll_mean_revert_score"] = float(
-                            boll.get("mean_revert_score", np.nan)
-                        )
-                        df_an.loc[idx, "boll_z_band"] = (
-                            float(boll.get("z_band"))
-                            if boll.get("z_band") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_dist_to_upper_pips"] = (
-                            float(boll.get("dist_to_upper_pips", np.nan))
-                            if boll.get("dist_to_upper_pips") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_dist_to_lower_pips"] = (
-                            float(boll.get("dist_to_lower_pips", np.nan))
-                            if boll.get("dist_to_lower_pips") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_dist_to_mid_pips"] = (
-                            float(boll.get("dist_to_mid_pips", np.nan))
-                            if boll.get("dist_to_mid_pips") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_bb_upper"] = (
-                            float(boll.get("bb_upper", np.nan))
-                            if boll.get("bb_upper") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_bb_lower"] = (
-                            float(boll.get("bb_lower", np.nan))
-                            if boll.get("bb_lower") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_bb_mid"] = (
-                            float(boll.get("bb_mid", np.nan))
-                            if boll.get("bb_mid") is not None
-                            else np.nan
-                        )
-                        df_an.loc[idx, "boll_atr_pips"] = (
-                            float(boll.get("atr_pips", np.nan))
-                            if boll.get("atr_pips") is not None
-                            else np.nan
-                        )
+                        df_an.loc[idx, "boll_in_band"] = float(bool(boll.get("in_band")))
+                        df_an.loc[idx, "boll_is_squeeze"] = float(bool(boll.get("is_squeeze")))
+                        df_an.loc[idx, "boll_is_expansion"] = float(bool(boll.get("is_expansion")))
+                        df_an.loc[idx, "boll_breakout_score"] = float(boll.get("breakout_score", np.nan))
+                        df_an.loc[idx, "boll_mean_revert_score"] = float(boll.get("mean_revert_score", np.nan))
+                        df_an.loc[idx, "boll_z_band"] = (float(boll.get("z_band")) if boll.get("z_band") is not None else np.nan)
+                        df_an.loc[idx, "boll_dist_to_upper_pips"] = (float(boll.get("dist_to_upper_pips", np.nan)) if boll.get("dist_to_upper_pips") is not None else np.nan)
+                        df_an.loc[idx, "boll_dist_to_lower_pips"] = (float(boll.get("dist_to_lower_pips", np.nan)) if boll.get("dist_to_lower_pips") is not None else np.nan)
+                        df_an.loc[idx, "boll_dist_to_mid_pips"] = (float(boll.get("dist_to_mid_pips", np.nan)) if boll.get("dist_to_mid_pips") is not None else np.nan)
+                        df_an.loc[idx, "boll_bb_upper"] = (float(boll.get("bb_upper", np.nan)) if boll.get("bb_upper") is not None else np.nan)
+                        df_an.loc[idx, "boll_bb_lower"] = (float(boll.get("bb_lower", np.nan)) if boll.get("bb_lower") is not None else np.nan)
+                        df_an.loc[idx, "boll_bb_mid"] = (float(boll.get("bb_mid", np.nan)) if boll.get("bb_mid") is not None else np.nan)
+                        df_an.loc[idx, "boll_atr_pips"] = (float(boll.get("atr_pips", np.nan)) if boll.get("atr_pips") is not None else np.nan)
                     else:
-                        reason = (
-                            (boll or {}).get("reason")
-                            if isinstance(boll, dict)
-                            else "unknown"
-                        )
-                        self.logger.debug(
-                            f"[{current_asset_symbol}] Bollinger microphase non disponible: {reason}"
-                        )
+                        reason = ((boll or {}).get("reason") if isinstance(boll, dict) else "unknown")
+                        self.logger.debug(f"[{current_asset_symbol}] Bollinger microphase non disponible: {reason}")
                 except Exception as e:
                     self.logger.warning(
                         f"[{current_asset_symbol}] Erreur compute_bollinger_microphase_signals: {e}",
@@ -557,11 +485,7 @@ class PhaseObserver:
             # === PHASE 3: DÉTECTION LIQUIDITÉ ===
             try:
                 indices_symbols = (
-                    set(
-                        self.config_manager.get(
-                            "global_safety.indices_symbols", ["US30", "NAS100"]
-                        )
-                    )
+                    set(self.config_manager.get("global_safety.indices_symbols", ["US30", "NAS100"]))
                     if getattr(self, "config_manager", None)
                     else {"US30", "NAS100"}
                 )
@@ -569,61 +493,15 @@ class PhaseObserver:
                 indices_symbols = {"US30", "NAS100"}
 
             if (asset_symbol or "UNKNOWN_ASSET") in indices_symbols:
-                max_spread = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.liquidity_detection.indices_settings.max_allowed_spread_points",
-                            50,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 50.0
-                )
-                min_volume = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.liquidity_detection.indices_settings.min_volume_threshold",
-                            10,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 10.0
-                )
+                max_spread = float(self.config_manager.get("phase_detection_defaults.liquidity_detection.indices_settings.max_allowed_spread_points", 50)) if getattr(self, "config_manager", None) else 50.0
+                min_volume = float(self.config_manager.get("phase_detection_defaults.liquidity_detection.indices_settings.min_volume_threshold", 10)) if getattr(self, "config_manager", None) else 10.0
             else:
-                max_spread = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points",
-                            10,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 10.0
-                )
-                min_volume = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold",
-                            1,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 1.0
-                )
+                max_spread = float(self.config_manager.get("phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points", 10)) if getattr(self, "config_manager", None) else 10.0
+                min_volume = float(self.config_manager.get("phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold", 1)) if getattr(self, "config_manager", None) else 1.0
 
-            last_spread = (
-                float(df_an["spread"].iloc[-1])
-                if "spread" in df_an.columns
-                else float("inf")
-            )
-            last_volume = (
-                float(df_an["tick_volume"].iloc[-1])
-                if "tick_volume" in df_an.columns
-                else 0.0
-            )
-            df_an["is_liquid"] = (last_spread <= max_spread) and (
-                last_volume >= min_volume
-            )
+            last_spread = float(df_an["spread"].iloc[-1]) if "spread" in df_an.columns else float("inf")
+            last_volume = float(df_an["tick_volume"].iloc[-1]) if "tick_volume" in df_an.columns else 0.0
+            df_an["is_liquid"] = (last_spread <= max_spread) and (last_volume >= min_volume)
 
             # === PHASE 4: SIGNAUX DE CONFLUENCE ===
             df_an["fvg_ob_confluence"] = df_an["fvg_detected"] & df_an["ob_detected"]
@@ -631,100 +509,34 @@ class PhaseObserver:
                 lambda x: isinstance(x, dict) and float(x.get("ml_score", 0.0)) > 0.8
             )
             df_an["confirmed_structure_break"] = df_an["bos_mss_details"].apply(
-                lambda x: isinstance(x, dict)
-                and float(x.get("volume_ratio", 0.0)) > 2.0
+                lambda x: isinstance(x, dict) and float(x.get("volume_ratio", 0.0)) > 2.0
             )
-            df_an["institutional_setup"] = df_an["regime"].astype(str).str.contains(
-                "institutional", na=False
-            ) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
+            df_an["institutional_setup"] = df_an["regime"].astype(str).str.contains("institutional", na=False) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
 
-            # === PHASE 5: PHASE OPTIMISÉE + FALLBACK ===
+            # === PHASE 5: PHASE OPTIMISÉE — AUCUN FALLBACK ===
             df_an["phase_primary"] = df_an.apply(self.detectors.determine_optimized_phase, axis=1)
-
-
-
-            try:
-                low_th = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.regime_detection_settings.volatility.thresholds.low_pct",
-                            0.03,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 0.03
-                )
-                high_th = (
-                    float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.regime_detection_settings.volatility.thresholds.high_pct",
-                            0.15,
-                        )
-                    )
-                    if getattr(self, "config_manager", None)
-                    else 0.15
-                )
-            except Exception:
-                low_th, high_th = 0.03, 0.15
-
             df_an["phase"] = df_an["phase_primary"]
             df_an["phase_rule"] = "primary"
-
-            def _apply_phase_fallback(row: pd.Series):
-                p = str(row.get("phase_primary", "no_clear_phase"))
-                if p != "no_clear_phase":
-                    return p, "primary"
-                v = float(row.get("volatility_pct", 0.0))
-                if v < low_th:
-                    return "range_retail", "fallback_low"
-                if v >= high_th:
-                    return "range_distribution", "fallback_high"
-                return "no_clear_phase", "fallback_mid"
-
-            phase_fallback_vals = df_an.apply(_apply_phase_fallback, axis=1)
-            df_an["phase"] = [p for p, _r in phase_fallback_vals]
-            df_an["phase_rule"] = [_r for _p, _r in phase_fallback_vals]
+            df_an["phase_is_uncertain"] = (df_an["phase"] == "no_clear_phase")
 
             # === PHASE 6: SCORE DE CONFIANCE ===
             df_an["confidence_score"] = df_an.apply(
-            lambda row: self.calculate_optimized_confidence(row),
-            axis=1,
-    )
-
-
+                lambda row: self.calculate_optimized_confidence(row),
+                axis=1,
+            )
 
             # === PHASE 7: MÉTRIQUES + LOG FINAL ===
             if not df_an.empty:
                 try:
-                    total_signals = (
-                        df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]]
-                        .sum()
-                        .sum()
-                    )
+                    total_signals = df_an[["fvg_detected", "ob_detected", "bos_mss_detected"]].sum().sum()
                 except Exception:
                     total_signals = 0
-                avg_confidence = (
-                    float(df_an["confidence_score"].mean())
-                    if "confidence_score" in df_an.columns
-                    else 0.0
-                )
+                avg_confidence = float(df_an["confidence_score"].mean()) if "confidence_score" in df_an.columns else 0.0
                 last_phase = str(df_an["phase"].iloc[-1])
                 last_confidence = float(df_an["confidence_score"].iloc[-1])
-                last_regime = (
-                    str(df_an["regime"].iloc[-1])
-                    if "regime" in df_an.columns
-                    else "unknown"
-                )
-                last_vol = (
-                    float(df_an["volatility_pct"].iloc[-1])
-                    if "volatility_pct" in df_an.columns
-                    else 0.0
-                )
-                last_rule = (
-                    str(df_an["phase_rule"].iloc[-1])
-                    if "phase_rule" in df_an.columns
-                    else "primary"
-                )
+                last_regime = (str(df_an["regime"].iloc[-1]) if "regime" in df_an.columns else "unknown")
+                last_vol = (float(df_an["volatility_pct"].iloc[-1]) if "volatility_pct" in df_an.columns else 0.0)
+                last_rule = str(df_an["phase_rule"].iloc[-1]) if "phase_rule" in df_an.columns else "primary"
 
                 self.logger.info(
                     f"🎯 [{current_asset_symbol}] Pipeline terminé: "
@@ -733,10 +545,15 @@ class PhaseObserver:
                     f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
                 )
 
+                # Info supplémentaire utile en mode strict
+                if last_phase == "no_clear_phase":
+                    self.logger.info(f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict).")
+
             return df_an
         except Exception as e:
             self.logger.error(f"analyze() failure: {e}", exc_info=True)
             return None
+
 
     def analyze_asset_multi_timeframe(
         self, asset: str, strategy_config: Dict
