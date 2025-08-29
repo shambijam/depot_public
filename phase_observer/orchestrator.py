@@ -555,19 +555,11 @@ class PhaseObserver:
             return None
 
 
-    def analyze_asset_multi_timeframe(
-        self, asset: str, strategy_config: Dict
-    ) -> Dict[str, Any]:
+    def analyze_asset_multi_timeframe(self, asset: str, strategy_config: Dict) -> Dict[str, Any]:
         """
-        🏛️ ANALYSE MULTI-TIMEFRAME INSTITUTIONNELLE 🏛️
-        Version "desk banque privée" :
-        - Acquisition robuste + cache TTL par TF (avec contrôle de fraîcheur par TF)
-        - Analyse par TF avec sauvegarde/restauration systématique des paramètres (try/finally)
-        - Confluence & divergences + métriques de qualité
-        - Poids de confluence normalisés et traçables
-        - Journalisation et diagnostics (cache, fraîcheur, erreurs)
-        - Fallbacks maîtrisés si données insuffisantes/obsolètes
-        Signature et dépendances internes (helpers) conservées.
+        🏛️ ANALYSE MULTI-TIMEFRAME INSTITUTIONNELLE (STRICT, NO FALLBACK) 🏛️
+        - Pas d'analyse single-TF de secours
+        - Si MTF non exploitable → paquet 'no_clear_phase' + raisons + diagnostics
         """
         import time
         from typing import Dict as _Dict, Any as _Any
@@ -576,68 +568,76 @@ class PhaseObserver:
 
         analysis_start_time = time.perf_counter()
 
-        # ========== PHASE 1: VALIDATION & INITIALISATION ==========
+        def _neutral(asset_sym: str, reason: str, extra: dict | None = None) -> Dict[str, Any]:
+            base = {
+                "asset": asset_sym,
+                "phase": "no_clear_phase",
+                "multi_tf_enabled": True,
+                "quality": {"overall_score": 0.0},
+                "reason": reason,
+                "timeframes_used": [],
+                "confluence_weights": {},
+                "analysis_errors": None,
+                "cache_efficiency_pct": 0.0,
+                "data_freshness": {},
+            }
+            if extra:
+                base.update(extra)
+            # log synthétique
+            self.logger.info(f"⛔ [{asset_sym}] MTF neutre (no trade): {reason}")
+            return base
+
+        # ========== PHASE 1: VALIDATION & INIT ==========
         try:
             multi_tf_config = (strategy_config.get("phase_detection", {}) or {}).get("multi_timeframe", {}) or {}
         except Exception:
             multi_tf_config = {}
 
         if not bool(multi_tf_config.get("enabled", False)):
-            self.logger.debug(f"[{asset}] Multi-TF désactivé, fallback analyse standard")
-            return self._analyze_single_tf_fallback(asset)
+            self.logger.debug(f"[{asset}] Multi-TF désactivé (strict, no fallback).")
+            return _neutral(asset, "mtf_disabled")
 
-        # Config avancée
         timeframes = multi_tf_config.get("timeframes", ["M1", "M5", "M15"]) or ["M1", "M5", "M15"]
-        # Sanitize/unique
         timeframes = [str(tf).upper().strip() for tf in timeframes if str(tf).strip()]
-        timeframes = list(dict.fromkeys(timeframes))  # preserve order, unique
+        timeframes = list(dict.fromkeys(timeframes))
 
         confluence_weights = multi_tf_config.get("confluence_weights", {"M1": 0.5, "M5": 0.3, "M15": 0.2}) or {"M1": 0.5, "M5": 0.3, "M15": 0.2}
-        # Normalisation des poids (traçable)
         def _normalize_weights(d: _Dict[str, float]) -> _Dict[str, float]:
             w = {k.upper(): float(v) for k, v in d.items() if k}
             total = sum(max(0.0, v) for v in w.values())
             if total <= 0:
-                # défaut proportionnel simple si erroné
-                n = max(1, len(w))
-                return {k: 1.0 / n for k in w}
+                n = max(1, len(w)) or 1
+                return {k: 1.0 / n for k in (w or {"M1": 1.0})}
             return {k: max(0.0, v) / total for k, v in w.items()}
         confluence_weights = _normalize_weights(confluence_weights)
 
-        cache_ttl_seconds  = int(multi_tf_config.get("cache_ttl_seconds", 30) or 30)
-        quality_threshold  = float(multi_tf_config.get("min_quality_score", 0.7) or 0.7)
+        cache_ttl_seconds = int(multi_tf_config.get("cache_ttl_seconds", 30) or 30)
+        quality_threshold = float(multi_tf_config.get("min_quality_score", 0.7) or 0.7)
 
-        # Fraîcheur max par TF (défauts sensés) : si non fournie, ~2 bougies par TF
+        # Fraîcheur max par TF (~2 bougies)
         tf_max_stale = multi_tf_config.get("max_tf_staleness_seconds", {}) or {}
         def _tf_to_seconds(tf: str) -> int:
             m = tf.upper()
-            if m.endswith("MIN"):  # ex "1MIN"
-                try:
-                    return int(m[:-3]) * 60
-                except Exception:
-                    return 60
+            if m.endswith("MIN"):
+                try: return int(m[:-3]) * 60
+                except: return 60
             if m.startswith("M"):
-                try:
-                    return int(m[1:]) * 60
-                except Exception:
-                    return 60
+                try: return int(m[1:]) * 60
+                except: return 60
             if m.startswith("H"):
-                try:
-                    return int(m[1:]) * 3600
-                except Exception:
-                    return 3600
+                try: return int(m[1:]) * 3600
+                except: return 3600
             return 60
         default_max_stale_by_tf = {tf: 2 * _tf_to_seconds(tf) for tf in timeframes}
-        # merge override user
         for k, v in list(tf_max_stale.items()):
             try:
                 default_max_stale_by_tf[str(k).upper()] = int(v)
             except Exception:
                 pass
 
-        self.logger.info(f"🎯 [{asset}] KATANA Multi-TF activé: {timeframes}")
+        self.logger.info(f"🎯 [{asset}] KATANA Multi-TF (STRICT) activé: {timeframes}")
 
-        # ========== PHASE 2: ACQUISITION DONNÉES AVEC CACHE INTELLIGENT ==========
+        # ========== PHASE 2: ACQUISITION + FRAÎCHEUR ==========
         tf_data_cache: Dict[str, pd.DataFrame] = {}
         cache_hits = 0
         data_freshness: Dict[str, _Dict[str, _Any]] = {}
@@ -647,31 +647,21 @@ class PhaseObserver:
 
         for tf in timeframes:
             cache_key = f"{asset}_{tf}_{now_bucket}"
-
-            # Vérification cache
             cached_ok = False
             if hasattr(self, "_tf_data_cache"):
                 cached_item = getattr(self, "_tf_data_cache", {}).get(cache_key)
-                if cached_item is not None:
-                    # accepter pd.DataFrame direct (compat) ou dict {"data": df, "fetched_at": ts}
-                    if isinstance(cached_item, pd.DataFrame):
-                        tf_data_cache[tf] = cached_item
-                        cache_hits += 1
-                        cached_ok = True
-                        self.logger.debug(f"🚀 [{asset}] Cache HIT pour {tf}")
-                    elif isinstance(cached_item, dict) and isinstance(cached_item.get("data"), pd.DataFrame):
-                        tf_data_cache[tf] = cached_item["data"]
-                        cache_hits += 1
-                        cached_ok = True
-                        self.logger.debug(f"🚀 [{asset}] Cache HIT(meta) pour {tf}")
+                if isinstance(cached_item, pd.DataFrame):
+                    tf_data_cache[tf] = cached_item; cache_hits += 1; cached_ok = True
+                    self.logger.debug(f"🚀 [{asset}] Cache HIT pour {tf}")
+                elif isinstance(cached_item, dict) and isinstance(cached_item.get("data"), pd.DataFrame):
+                    tf_data_cache[tf] = cached_item["data"]; cache_hits += 1; cached_ok = True
+                    self.logger.debug(f"🚀 [{asset}] Cache HIT(meta) pour {tf}")
 
             if not cached_ok:
-                # Acquisition données fraîches
                 try:
                     tf_data = self._fetch_timeframe_data(asset, tf, multi_tf_config)
                     if tf_data is not None and not tf_data.empty:
                         tf_data_cache[tf] = tf_data
-                        # Mise à jour cache
                         if not hasattr(self, "_tf_data_cache"):
                             self._tf_data_cache = {}
                         self._tf_data_cache[cache_key] = {"data": tf_data, "fetched_at": now_epoch}
@@ -680,25 +670,21 @@ class PhaseObserver:
                         self.logger.warning(f"⚠️ [{asset}] Échec acquisition {tf}")
                         continue
                 except Exception as e:
-                    self.logger.error(f"💥 [{asset}] Erreur critique fetch {tf}: {e}", exc_info=False)
+                    self.logger.error(f"💥 [{asset}] Erreur fetch {tf}: {e}", exc_info=False)
                     continue
 
-            # Contrôle de fraîcheur de la DERNIÈRE barre par TF
+            # Fraîcheur dernière barre
             try:
                 df_tf = tf_data_cache[tf]
-                ts_col = None
-                for c in ("timestamp", "time", "datetime", "ts"):
-                    if c in df_tf.columns:
-                        ts_col = c
-                        break
-                last_dt = None
-                if ts_col is not None:
+                ts_col = next((c for c in ("timestamp","time","datetime","ts") if c in df_tf.columns), None)
+                from datetime import datetime, timezone
+                age_sec = 0.0
+                if ts_col:
                     last_ts = df_tf[ts_col].iloc[-1]
-                    from datetime import datetime, timezone
                     if hasattr(last_ts, "to_pydatetime"):
                         last_dt = last_ts.to_pydatetime()
                     elif isinstance(last_ts, (int, float)) and last_ts > 1e9:
-                        last_dt = datetime.fromtimestamp(float(last_ts) / 1000.0, tz=timezone.utc)
+                        last_dt = datetime.fromtimestamp(float(last_ts)/1000.0, tz=timezone.utc)
                     elif isinstance(last_ts, (int, float)):
                         last_dt = datetime.fromtimestamp(float(last_ts), tz=timezone.utc)
                     else:
@@ -706,54 +692,35 @@ class PhaseObserver:
                         if last_dt.tzinfo is None:
                             last_dt = last_dt.replace(tzinfo=timezone.utc)
                     age_sec = max(0.0, (datetime.now(timezone.utc) - last_dt).total_seconds())
-                else:
-                    # fallback via index si datetime-like
-                    idx_last = df_tf.index[-1]
-                    try:
-                        from datetime import datetime, timezone
-                        if hasattr(idx_last, "to_pydatetime"):
-                            last_dt = idx_last.to_pydatetime()
-                            age_sec = max(0.0, (datetime.now(timezone.utc) - last_dt).total_seconds())
-                        else:
-                            age_sec = 0.0  # inconnu => on n’invalide pas
-                    except Exception:
-                        age_sec = 0.0
-
                 max_stale = int(default_max_stale_by_tf.get(tf, 120))
                 data_freshness[tf] = {"age_sec": float(age_sec), "max_allowed": float(max_stale)}
                 if age_sec > max_stale:
                     self.logger.warning(f"⚠️ [{asset}] {tf} stale: {age_sec:.1f}s > {max_stale}s (skipped)")
-                    # retire ce TF trop vieux
                     tf_data_cache.pop(tf, None)
             except Exception as e:
-                self.logger.debug(f"[{asset}] Freshness check fail {tf}: {e}")
+                self.logger.debug(f"[{asset}] Freshness check {tf} fail: {e}")
 
-        # Vérification intégrité données
         if len(tf_data_cache) < 2:
-            self.logger.warning(f"⚠️ [{asset}] Données insuffisantes ({len(tf_data_cache)}/{len(timeframes)}) pour Multi-TF")
-            return self._analyze_single_tf_fallback(asset)
+            return _neutral(asset, "not_enough_tf_data", {
+                "timeframes_used": list(tf_data_cache.keys()),
+                "data_freshness": data_freshness
+            })
 
         cache_efficiency = (cache_hits / max(1, len(timeframes))) * 100.0
         self.logger.debug(f"📊 [{asset}] Cache efficiency: {cache_efficiency:.1f}%")
 
-        # ========== PHASE 3: ANALYSE VECTORIELLE PAR TF ==========
+        # ========== PHASE 3: ANALYSE PAR TF ==========
         tf_analyses: Dict[str, Dict[str, Any]] = {}
         analysis_errors: list[str] = []
 
         for tf, tf_data in tf_data_cache.items():
-            # Config spécifique TF
             tf_config = self._get_tf_specific_config(tf, multi_tf_config)
             original_params = self._backup_current_params()
             try:
-                # Override temporaire
                 self._load_settings(overrides=tf_config)
-
-                # Analyse
                 analyzed_data = self.analyze(tf_data, asset_symbol=asset)
                 if analyzed_data is None or analyzed_data.empty:
-                    raise ValueError(f"Analyse {tf} retournée vide")
-
-                # Extraction signaux dernière barre
+                    raise ValueError(f"Analyse {tf} vide")
                 last_signals = self._extract_last_bar_signals(analyzed_data, tf)
                 tf_analyses[tf] = last_signals
                 self.logger.debug(f"✅ [{asset}] {tf} analysé: Phase={last_signals.get('phase')}")
@@ -761,53 +728,45 @@ class PhaseObserver:
                 analysis_errors.append(f"{tf}: {str(e)}")
                 self.logger.error(f"💥 [{asset}] Erreur analyse {tf}: {e}", exc_info=False)
             finally:
-                # Restauration systématique
                 try:
                     self._restore_params(original_params)
                 except Exception as e:
                     self.logger.error(f"💥 [{asset}] Restore params {tf} échoué: {e}", exc_info=False)
 
-        # ========== PHASE 4: FUSION & CONFLUENCE ==========
         if len(tf_analyses) < 2:
-            self.logger.warning(f"⚠️ [{asset}] Analyses insuffisantes pour confluence")
-            return self._analyze_single_tf_fallback(asset)
+            return _neutral(asset, "insufficient_tf_analyses", {
+                "timeframes_used": list(tf_analyses.keys()),
+                "analysis_errors": analysis_errors,
+                "data_freshness": data_freshness,
+                "cache_efficiency_pct": round(cache_efficiency, 1),
+            })
 
-        # Harmoniser les poids aux TF réellement présents
-        present_weights = {tf: confluence_weights.get(tf, 0.0) for tf in tf_analyses.keys()}
-        present_weights = _normalize_weights(present_weights)
-
+        # ========== PHASE 4: CONFLUENCE & DIVERGENCES ==========
+        present_weights = _normalize_weights({tf: confluence_weights.get(tf, 0.0) for tf in tf_analyses.keys()})
         confluence_result = self._calculate_advanced_confluence(tf_analyses, present_weights, asset)
-
-        # Détection divergences inter-TF
         divergence_analysis = self._detect_tf_divergences(tf_analyses)
 
-        # ========== PHASE 5: SCORING QUALITÉ & MÉTRIQUES ==========
+        # ========== PHASE 5: QUALITÉ ==========
         quality_metrics = self._calculate_quality_metrics(tf_analyses, confluence_result, divergence_analysis, analysis_start_time)
 
-        # Filtrage qualité
         if float(quality_metrics.get("overall_score", 0.0)) < quality_threshold:
-            self.logger.warning(
-                f"⚠️ [{asset}] Qualité insuffisante ({float(quality_metrics.get('overall_score', 0.0)):.3f} < {quality_threshold})"
-            )
-            lowq_resp = self._build_low_quality_response(asset, quality_metrics)
-            # enrichir d’un minimum d’infos MTF pour transparence
-            try:
-                lowq_resp.update({
-                    "multi_tf_enabled": True,
-                    "timeframes_used": list(tf_analyses.keys()),
-                    "confluence_weights": present_weights,
-                    "analysis_errors": analysis_errors or None,
-                    "cache_efficiency_pct": round(cache_efficiency, 1),
-                    "data_freshness": data_freshness,
-                })
-            except Exception:
-                pass
-            return lowq_resp
+            # STRICT: pas de fallback ; on sort neutre (no trade)
+            return _neutral(asset, "quality_below_threshold", {
+                "timeframes_used": list(tf_analyses.keys()),
+                "confluence_weights": present_weights,
+                "analysis_errors": analysis_errors or None,
+                "cache_efficiency_pct": round(cache_efficiency, 1),
+                "data_freshness": data_freshness,
+                "quality": quality_metrics,
+                "confluence": {
+                    "phase": confluence_result.get("phase"),
+                    "confluence_score": confluence_result.get("confluence_score"),
+                    "phase_consistency": confluence_result.get("phase_consistency"),
+                },
+            })
 
-        # ========== PHASE 6: CONSTRUCTION RÉPONSE FINALE ==========
+        # ========== PHASE 6: RÉPONSE FINALE ==========
         final_signals = self._build_enhanced_signals(confluence_result, quality_metrics, tf_analyses, asset)
-
-        # Enrichissements diagnostics (audit-ready)
         try:
             final_signals.update({
                 "multi_tf_enabled": True,
@@ -822,14 +781,14 @@ class PhaseObserver:
 
         execution_time = (time.perf_counter() - analysis_start_time) * 1000.0
         self.logger.info(
-            f"🎯 [{asset}] KATANA Multi-TF terminé: "
+            f"🎯 [{asset}] KATANA Multi-TF (STRICT) terminé: "
             f"Phase={final_signals.get('phase')} | "
             f"Qualité={quality_metrics.get('overall_score', 0.0):.3f} | "
             f"TFs={final_signals.get('timeframes_used')} | "
             f"Temps={execution_time:.1f}ms"
         )
-
         return final_signals
+
 
 
     def get_katana_snapshot(self, asset: str, strategy_config: dict) -> dict:
