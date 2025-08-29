@@ -1,5 +1,4 @@
-
-#phase_observer/detectors.py
+# phase_observer/detectors.py
 from __future__ import annotations
 
 import logging
@@ -12,6 +11,8 @@ from .features import (
     _get_adaptive_swing_points,
     _get_trend,
 )
+
+
 class Detectors:
     """
     Classe regroupant tous les détecteurs de phases de marché.
@@ -40,13 +41,22 @@ class Detectors:
             return [None] * (0 if df is None else len(df))
 
         # Configuration ML
-        ob_config = self.config_manager.get("phase_detection_defaults.order_block_ml_settings", {}) or {}
+        ob_config = (
+            self.config_manager.get(
+                "phase_detection_defaults.order_block_ml_settings", {}
+            )
+            or {}
+        )
         enable_ml = bool(ob_config.get("enable_ml_scoring", True))
         confluence_config = ob_config.get("confluence_requirements", {}) or {}
         impulse_weights = ob_config.get("impulse_strength_weights", {}) or {}
 
         # Paramètres de base
-        impulse_threshold = float(self.config_manager.get("phase_detection_defaults.impulse_threshold", 0.0005))
+        impulse_threshold = float(
+            self.config_manager.get(
+                "phase_detection_defaults.impulse_threshold", 0.0005
+            )
+        )
 
         # Pré-calcul des features pour ML
         df = df.copy()
@@ -54,13 +64,22 @@ class Detectors:
         df["candle_size"] = (df["high"] - df["low"]).replace(0, np.nan)
         df["body_ratio"] = (df["candle_move"].abs() / df["candle_size"]).fillna(0.0)
 
-        vol_ma = df["tick_volume"].rolling(window=20, min_periods=1).mean().replace(0, np.nan)
+        vol_ma = (
+            df["tick_volume"]
+            .rolling(window=20, min_periods=1)
+            .mean()
+            .replace(0, np.nan)
+        )
         df["volume_ma"] = vol_ma
         df["volume_ratio"] = (df["tick_volume"] / vol_ma).fillna(1.0)
 
         # Identification des OB potentiels
-        bullish_ob_mask = (df["candle_move"] > impulse_threshold) & (df["candle_move"].shift(1) < 0)
-        bearish_ob_mask = (df["candle_move"] < -impulse_threshold) & (df["candle_move"].shift(1) > 0)
+        bullish_ob_mask = (df["candle_move"] > impulse_threshold) & (
+            df["candle_move"].shift(1) < 0
+        )
+        bearish_ob_mask = (df["candle_move"] < -impulse_threshold) & (
+            df["candle_move"].shift(1) > 0
+        )
         potential_ob_mask = bullish_ob_mask | bearish_ob_mask
 
         # Swing points pour confluence
@@ -94,7 +113,9 @@ class Detectors:
                 # === ML FEATURE EXTRACTION ===
 
                 # 1. Impulse Strength Score
-                price_movement_strength = float(abs(impulse_candle["candle_move"]) / max(impulse_threshold, 1e-12))
+                price_movement_strength = float(
+                    abs(impulse_candle["candle_move"]) / max(impulse_threshold, 1e-12)
+                )
                 volume_spike_strength = float(impulse_candle["volume_ratio"])
                 body_ratio_strength = float(impulse_candle["body_ratio"])
 
@@ -103,9 +124,12 @@ class Detectors:
 
                 # Calcul score impulse pondéré
                 impulse_score = (
-                    price_movement_strength * float(impulse_weights.get("price_movement", 0.4))
-                    + volume_spike_strength * float(impulse_weights.get("volume_spike", 0.3))
-                    + time_compression * float(impulse_weights.get("time_compression", 0.3))
+                    price_movement_strength
+                    * float(impulse_weights.get("price_movement", 0.4))
+                    + volume_spike_strength
+                    * float(impulse_weights.get("volume_spike", 0.3))
+                    + time_compression
+                    * float(impulse_weights.get("time_compression", 0.3))
                 )
 
                 # 2. Confluence Factors Scoring
@@ -120,7 +144,8 @@ class Detectors:
 
                 # Market Extreme Confluence (Swing points)
                 extreme_confluence = bool(
-                    (ob_candle.name in swing_highs.index) or (ob_candle.name in swing_lows.index)
+                    (ob_candle.name in swing_highs.index)
+                    or (ob_candle.name in swing_lows.index)
                 )
                 if extreme_confluence:
                     confluence_score += 0.30
@@ -129,7 +154,9 @@ class Detectors:
                 # Volume Confirmation
                 volume_confirmation = True
                 if confluence_config.get("require_volume_confirmation", True):
-                    volume_confirmation = volume_spike_strength > 1.2  # 20% au-dessus de la moyenne
+                    volume_confirmation = (
+                        volume_spike_strength > 1.2
+                    )  # 20% au-dessus de la moyenne
                     if volume_confirmation:
                         confluence_score += 0.20
                 confluence_details["volume_confirmation"] = volume_confirmation
@@ -138,14 +165,21 @@ class Detectors:
                 ob_is_bullish = bool(bullish_ob_mask.iloc[pos])
                 trend_alignment = True
                 if confluence_config.get("require_trend_alignment", True):
-                    current_trend = df["trend"].iloc[pos] if "trend" in df.columns else "neutral"
-                    if (ob_is_bullish and current_trend == "bullish") or ((not ob_is_bullish) and current_trend == "bearish"):
+                    current_trend = (
+                        df["trend"].iloc[pos] if "trend" in df.columns else "neutral"
+                    )
+                    if (ob_is_bullish and current_trend == "bullish") or (
+                        (not ob_is_bullish) and current_trend == "bearish"
+                    ):
                         trend_alignment = True
                         confluence_score += 0.15
                     else:
                         trend_alignment = False
                     # HTF alignment bonus
-                    if htf_trend and ((ob_is_bullish and htf_trend == "bullish") or ((not ob_is_bullish) and htf_trend == "bearish")):
+                    if htf_trend and (
+                        (ob_is_bullish and htf_trend == "bullish")
+                        or ((not ob_is_bullish) and htf_trend == "bearish")
+                    ):
                         confluence_score += 0.10
                 confluence_details["trend_alignment"] = trend_alignment
 
@@ -154,7 +188,8 @@ class Detectors:
                 future_candles = df.iloc[pos + 1 :]
                 if not future_candles.empty:
                     mitigated = future_candles[
-                        (future_candles["high"] >= ob_zone[0]) & (future_candles["low"] <= ob_zone[1])
+                        (future_candles["high"] >= ob_zone[0])
+                        & (future_candles["low"] <= ob_zone[1])
                     ]
                     if not mitigated.empty:
                         unmitigated = False
@@ -171,7 +206,9 @@ class Detectors:
                     ml_score = float(confluence_score)
 
                 # 5. Filtrage par seuil de confluence
-                min_confluence = float(confluence_config.get("min_confluence_score", 0.6))
+                min_confluence = float(
+                    confluence_config.get("min_confluence_score", 0.6)
+                )
 
                 if ml_score >= min_confluence:
                     results[pos] = {
@@ -183,24 +220,32 @@ class Detectors:
                         "confluence_details": confluence_details,
                         "unmitigated": bool(unmitigated),
                         "volume_spike": round(volume_spike_strength, 2),
-                        "formation_quality": ("high" if ml_score > 0.8 else "medium" if ml_score > 0.6 else "low"),
+                        "formation_quality": (
+                            "high"
+                            if ml_score > 0.8
+                            else "medium" if ml_score > 0.6 else "low"
+                        ),
                     }
 
             except Exception as e:
-                self.logger.warning(f"Erreur processing OB à l'index {ob_timestamp}: {e}", exc_info=False)
+                self.logger.warning(
+                    f"Erreur processing OB à l'index {ob_timestamp}: {e}",
+                    exc_info=False,
+                )
                 continue
 
         # Performance logging
         valid_obs = [r for r in results if r is not None]
         if valid_obs:
             avg_ml_score = float(np.mean([ob["ml_score"] for ob in valid_obs]))
-            high_quality = len([ob for ob in valid_obs if ob["formation_quality"] == "high"])
+            high_quality = len(
+                [ob for ob in valid_obs if ob["formation_quality"] == "high"]
+            )
             self.logger.debug(
                 f"OB ML Enhanced: {len(valid_obs)} OB détectés, score ML moyen: {avg_ml_score:.3f}, haute qualité: {high_quality}"
             )
 
         return results
-
 
     def detect_fvg_enhanced(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
         """
@@ -218,8 +263,15 @@ class Detectors:
             return []
 
         # Récupération des paramètres enhanced
-        fvg_config = self.config_manager.get("phase_detection_defaults.fvg_enhanced_settings", {}) or {}
-        min_gap_magnitude = float(fvg_config.get("min_gap_magnitude_percent", 0.15)) / 100.0
+        fvg_config = (
+            self.config_manager.get(
+                "phase_detection_defaults.fvg_enhanced_settings", {}
+            )
+            or {}
+        )
+        min_gap_magnitude = (
+            float(fvg_config.get("min_gap_magnitude_percent", 0.15)) / 100.0
+        )
         gap_fill_threshold = float(fvg_config.get("gap_fill_threshold", 0.8))
         enable_tracking = bool(fvg_config.get("enable_gap_tracking", True))
         max_gap_age = int(fvg_config.get("max_gap_age_bars", 50))
@@ -235,11 +287,17 @@ class Detectors:
         bullish_fvg_condition = np.zeros(len(df), dtype=bool)
         bearish_fvg_condition = np.zeros(len(df), dtype=bool)
 
-        bullish_fvg_condition[valid_indices] = low_p0[valid_indices] > high_p2[valid_indices]
-        bearish_fvg_condition[valid_indices] = high_p0[valid_indices] < low_p2[valid_indices]
+        bullish_fvg_condition[valid_indices] = (
+            low_p0[valid_indices] > high_p2[valid_indices]
+        )
+        bearish_fvg_condition[valid_indices] = (
+            high_p0[valid_indices] < low_p2[valid_indices]
+        )
 
         results: List[Optional[Dict[str, Any]]] = []
-        active_gaps: List[Dict[str, Any]] = []  # Tracking des gaps actifs pour remplissage
+        active_gaps: List[Dict[str, Any]] = (
+            []
+        )  # Tracking des gaps actifs pour remplissage
 
         for i in range(len(df)):
             fvg_info = None
@@ -253,7 +311,9 @@ class Detectors:
 
                 magnitude_percent = gap_size / max(current_price, 1e-12)
                 if magnitude_percent >= min_gap_magnitude:
-                    quality_score = min(1.0, magnitude_percent / max(min_gap_magnitude * 2.0, 1e-12))
+                    quality_score = min(
+                        1.0, magnitude_percent / max(min_gap_magnitude * 2.0, 1e-12)
+                    )
                     fvg_info = {
                         "type": "bullish",
                         "top": gap_top,
@@ -275,7 +335,9 @@ class Detectors:
 
                 magnitude_percent = gap_size / max(current_price, 1e-12)
                 if magnitude_percent >= min_gap_magnitude:
-                    quality_score = min(1.0, magnitude_percent / max(min_gap_magnitude * 2.0, 1e-12))
+                    quality_score = min(
+                        1.0, magnitude_percent / max(min_gap_magnitude * 2.0, 1e-12)
+                    )
                     fvg_info = {
                         "type": "bearish",
                         "top": gap_top,
@@ -327,12 +389,15 @@ class Detectors:
         valid_gaps = [r for r in results if r is not None]
         if valid_gaps:
             avg_quality = float(np.mean([g["quality_score"] for g in valid_gaps]))
-            self.logger.debug(f"FVG Enhanced: {len(valid_gaps)} gaps détectés, qualité moyenne: {avg_quality:.3f}")
+            self.logger.debug(
+                f"FVG Enhanced: {len(valid_gaps)} gaps détectés, qualité moyenne: {avg_quality:.3f}"
+            )
 
         return results
 
-
-    def detect_bos_mss_enhanced(self, df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
+    def detect_bos_mss_enhanced(
+        self, df: pd.DataFrame
+    ) -> List[Optional[Dict[str, Any]]]:
         """
         🎯 BOS/MSS Enhanced - Avec confirmation volume et momentum (version vectorisée, sans .apply)
 
@@ -347,14 +412,21 @@ class Detectors:
         import numpy as np
         import pandas as pd
 
-        self.logger.debug("Détection BOS/MSS Enhanced (vectorisée) avec confirmations...")
+        self.logger.debug(
+            "Détection BOS/MSS Enhanced (vectorisée) avec confirmations..."
+        )
 
         # === GUARDRAILS ===
         if df is None or df.empty:
             return []
 
         # --- Config ---
-        bos_config = self.config_manager.get("phase_detection_defaults.bos_mss_enhanced_settings", {}) or {}
+        bos_config = (
+            self.config_manager.get(
+                "phase_detection_defaults.bos_mss_enhanced_settings", {}
+            )
+            or {}
+        )
         volume_config = bos_config.get("volume_confirmation", {}) or {}
         momentum_config = bos_config.get("momentum_confirmation", {}) or {}
         structure_config = bos_config.get("structure_validation", {}) or {}
@@ -387,7 +459,9 @@ class Detectors:
                 df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
         if "tick_volume" not in df.columns:
             df["tick_volume"] = 0.0
-        df["tick_volume"] = pd.to_numeric(df["tick_volume"], errors="coerce").astype(float).fillna(0.0)
+        df["tick_volume"] = (
+            pd.to_numeric(df["tick_volume"], errors="coerce").astype(float).fillna(0.0)
+        )
 
         # Moyenne mobile volume + ratio (vectorisé)
         vol_ma = (
@@ -397,7 +471,9 @@ class Detectors:
             .replace(0, np.nan)
         )
         df["volume_ma"] = vol_ma
-        df["volume_ratio"] = (df["tick_volume"] / vol_ma).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        df["volume_ratio"] = (
+            (df["tick_volume"] / vol_ma).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        )
 
         # === Conditions de base: break au-delà du dernier swing (décalé) ===
         # on compare la close courante au swing de la barre précédente
@@ -406,15 +482,15 @@ class Detectors:
 
         # close au-delà du niveau (strictement) ou non (si require_close_beyond=False, on tolère >= / <=)
         if require_close_beyond:
-            bullish_break_basic = (df["close"] > last_high_shift)
-            bearish_break_basic = (df["close"] < last_low_shift)
+            bullish_break_basic = df["close"] > last_high_shift
+            bearish_break_basic = df["close"] < last_low_shift
         else:
-            bullish_break_basic = (df["close"] >= last_high_shift)
-            bearish_break_basic = (df["close"] <= last_low_shift)
+            bullish_break_basic = df["close"] >= last_high_shift
+            bearish_break_basic = df["close"] <= last_low_shift
 
         # === Confirmations Volume (vectorisé) ===
         if enable_volume_conf:
-            volume_confirmation = (df["volume_ratio"] > volume_multiplier)
+            volume_confirmation = df["volume_ratio"] > volume_multiplier
         else:
             volume_confirmation = pd.Series(True, index=df.index)
 
@@ -422,7 +498,7 @@ class Detectors:
         # momentum en valeur absolue de la variation relative (pct_change) pour robustesse
         if enable_momentum_conf:
             price_change_abs = df["close"].pct_change().abs()
-            momentum_confirmation = (price_change_abs > min_momentum)
+            momentum_confirmation = price_change_abs > min_momentum
         else:
             price_change_abs = df["close"].pct_change().abs()  # utile pour logs
             momentum_confirmation = pd.Series(True, index=df.index)
@@ -435,12 +511,26 @@ class Detectors:
         denom_high = np.maximum(last_high_shift.astype(float), eps)
         denom_low = np.maximum(last_low_shift.astype(float), eps)
 
-        bullish_dist_ok = ((df["close"] - last_high_shift) / denom_high) >= float(min_break_distance)
-        bearish_dist_ok = ((last_low_shift - df["close"]) / denom_low) >= float(min_break_distance)
+        bullish_dist_ok = ((df["close"] - last_high_shift) / denom_high) >= float(
+            min_break_distance
+        )
+        bearish_dist_ok = ((last_low_shift - df["close"]) / denom_low) >= float(
+            min_break_distance
+        )
 
         # === Masques finaux break confirmés ===
-        bullish_break_confirmed = bullish_break_basic & volume_confirmation & momentum_confirmation & bullish_dist_ok
-        bearish_break_confirmed = bearish_break_basic & volume_confirmation & momentum_confirmation & bearish_dist_ok
+        bullish_break_confirmed = (
+            bullish_break_basic
+            & volume_confirmation
+            & momentum_confirmation
+            & bullish_dist_ok
+        )
+        bearish_break_confirmed = (
+            bearish_break_basic
+            & volume_confirmation
+            & momentum_confirmation
+            & bearish_dist_ok
+        )
 
         # === Classification BOS vs MSS (via tendance précédente) ===
         previous_trend = df["trend"].shift(1).astype(str).str.lower()
@@ -474,47 +564,81 @@ class Detectors:
         for i in range(len(df)):
             info = None
             vr_i = float(vol_ratio_arr[i]) if np.isfinite(vol_ratio_arr[i]) else 0.0
-            mom_i = float(price_change_arr[i]) if np.isfinite(price_change_arr[i]) else 0.0
+            mom_i = (
+                float(price_change_arr[i]) if np.isfinite(price_change_arr[i]) else 0.0
+            )
 
             if bbos[i]:
-                lvl = float(level_broken_high[i]) if np.isfinite(level_broken_high[i]) else np.nan
+                lvl = (
+                    float(level_broken_high[i])
+                    if np.isfinite(level_broken_high[i])
+                    else np.nan
+                )
                 info = {
                     "type": "bullish_bos",
                     "level_broken": lvl,
-                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "confirmation_score": (
+                        min(1.0, vr_i / max(volume_multiplier, eps))
+                        if enable_volume_conf
+                        else 1.0
+                    ),
                     "volume_ratio": round(vr_i, 3),
                     "momentum": round(mom_i, 6),
                     "structure_type": "continuation",
                     "quality": _quality_from_volratio(vr_i),
                 }
             elif bbss[i]:
-                lvl = float(level_broken_low[i]) if np.isfinite(level_broken_low[i]) else np.nan
+                lvl = (
+                    float(level_broken_low[i])
+                    if np.isfinite(level_broken_low[i])
+                    else np.nan
+                )
                 info = {
                     "type": "bearish_bos",
                     "level_broken": lvl,
-                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "confirmation_score": (
+                        min(1.0, vr_i / max(volume_multiplier, eps))
+                        if enable_volume_conf
+                        else 1.0
+                    ),
                     "volume_ratio": round(vr_i, 3),
                     "momentum": round(mom_i, 6),
                     "structure_type": "continuation",
                     "quality": _quality_from_volratio(vr_i),
                 }
             elif bmss[i]:
-                lvl = float(level_broken_high[i]) if np.isfinite(level_broken_high[i]) else np.nan
+                lvl = (
+                    float(level_broken_high[i])
+                    if np.isfinite(level_broken_high[i])
+                    else np.nan
+                )
                 info = {
                     "type": "bullish_mss",
                     "level_broken": lvl,
-                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "confirmation_score": (
+                        min(1.0, vr_i / max(volume_multiplier, eps))
+                        if enable_volume_conf
+                        else 1.0
+                    ),
                     "volume_ratio": round(vr_i, 3),
                     "momentum": round(mom_i, 6),
                     "structure_type": "reversal",
                     "quality": _quality_from_volratio(vr_i),
                 }
             elif bmss_bear[i]:
-                lvl = float(level_broken_low[i]) if np.isfinite(level_broken_low[i]) else np.nan
+                lvl = (
+                    float(level_broken_low[i])
+                    if np.isfinite(level_broken_low[i])
+                    else np.nan
+                )
                 info = {
                     "type": "bearish_mss",
                     "level_broken": lvl,
-                    "confirmation_score": (min(1.0, vr_i / max(volume_multiplier, eps)) if enable_volume_conf else 1.0),
+                    "confirmation_score": (
+                        min(1.0, vr_i / max(volume_multiplier, eps))
+                        if enable_volume_conf
+                        else 1.0
+                    ),
                     "volume_ratio": round(vr_i, 3),
                     "momentum": round(mom_i, 6),
                     "structure_type": "reversal",
@@ -536,7 +660,6 @@ class Detectors:
             )
 
         return results
-
 
     def compute_bollinger_microphase_signals(
         self,
@@ -595,14 +718,19 @@ class Detectors:
             "mid_entry_score": 0.0,
             # Gate d'entrée (BUY sous mid, SELL au-dessus) + distance mini à la médiane
             "entry_gate_ok": False,
-            "mid_distance_ratio": 0.0,   # |price-mid| / half_band (0..1)
+            "mid_distance_ratio": 0.0,  # |price-mid| / half_band (0..1)
             "half_band_pips": None,
             "meta": {
                 "period": period,
                 "std_mult": std_mult,
                 "mode": mode,
                 "range": {
-                    "weights": {"bandwidth": 0.35, "adx": 0.25, "ema_slope": 0.20, "rsi_width": 0.20},
+                    "weights": {
+                        "bandwidth": 0.35,
+                        "adx": 0.25,
+                        "ema_slope": 0.20,
+                        "rsi_width": 0.20,
+                    },
                     "threshold_in": 0.62,
                     "threshold_out": 0.52,
                     "debounce_bars": 3,
@@ -619,8 +747,8 @@ class Detectors:
                 },
                 # Paramètres robustification des bandes
                 "robust": {
-                    "winsor_alpha": 0.05,     # 5% winsorisation des résidus
-                    "mad_blend": 0.40,        # mélange 40% MAD, 60% STD
+                    "winsor_alpha": 0.05,  # 5% winsorisation des résidus
+                    "mad_blend": 0.40,  # mélange 40% MAD, 60% STD
                 },
             },
             # ⚡ Séries historiques complètes des bandes pour traçage/backtest/export
@@ -696,7 +824,10 @@ class Detectors:
                 h = pd.to_numeric(df_in["high"], errors="coerce").astype(float)
                 l = pd.to_numeric(df_in["low"], errors="coerce").astype(float)
                 c = pd.to_numeric(df_in["close"], errors="coerce").astype(float)
-                tr = pd.concat([(h - l).abs(), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+                tr = pd.concat(
+                    [(h - l).abs(), (h - c.shift()).abs(), (l - c.shift()).abs()],
+                    axis=1,
+                ).max(axis=1)
                 a = tr.rolling(window=p, min_periods=p).mean().iloc[-1]
                 return float(a) if np.isfinite(a) else float("nan")
             except Exception:
@@ -708,11 +839,15 @@ class Detectors:
             point = (
                 float(df["point"].iloc[-1])
                 if "point" in df.columns
-                else float(getattr(getattr(self, "symbol_info", None), "point", 0.0) or 0.0)
+                else float(
+                    getattr(getattr(self, "symbol_info", None), "point", 0.0) or 0.0
+                )
             )
             pip_size = point * 10.0 if point > 0 else None
         atr_pips = (atr / pip_size) if (pip_size and atr and atr > 0) else None
-        out["atr_pips"] = float(atr_pips) if atr_pips is not None and np.isfinite(atr_pips) else None
+        out["atr_pips"] = (
+            float(atr_pips) if atr_pips is not None and np.isfinite(atr_pips) else None
+        )
 
         # --- Distances en pips ---
         def _to_pips(delta: float) -> float | None:
@@ -727,7 +862,11 @@ class Detectors:
         # --- Touch / In-band ---
         eps = 1e-12
         in_band = (price <= bb_upper + eps) and (price >= bb_lower - eps)
-        band_touch = "upper" if price >= bb_upper - eps else ("lower" if price <= bb_lower + eps else None)
+        band_touch = (
+            "upper"
+            if price >= bb_upper - eps
+            else ("lower" if price <= bb_lower + eps else None)
+        )
         out["in_band"] = bool(in_band)
         out["band_touch"] = band_touch
 
@@ -741,7 +880,9 @@ class Detectors:
                 thresh = np.nanpercentile(w_hist.values, squeeze_percentile * 100.0)
                 is_squeeze = bool(width.iloc[-1] <= thresh)
                 if len(width) >= 2 and np.isfinite(width.iloc[-2]):
-                    is_expansion = bool((width.iloc[-1] > width.iloc[-2]) and (not is_squeeze))
+                    is_expansion = bool(
+                        (width.iloc[-1] > width.iloc[-2]) and (not is_squeeze)
+                    )
                 else:
                     is_expansion = False
             else:
@@ -769,9 +910,17 @@ class Detectors:
 
         # --- Momentum (EWM diffs) + normalisation ATR ---
         close = pd.to_numeric(df["close"], errors="coerce").astype(float)
-        mom_fast = close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
-        mom_slow = close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
-        momentum = float(mom_fast - mom_slow) if all(map(np.isfinite, [mom_fast, mom_slow])) else 0.0
+        mom_fast = (
+            close.diff().ewm(span=max(2, period // 5), adjust=False).mean().iloc[-1]
+        )
+        mom_slow = (
+            close.diff().ewm(span=max(3, period // 2), adjust=False).mean().iloc[-1]
+        )
+        momentum = (
+            float(mom_fast - mom_slow)
+            if all(map(np.isfinite, [mom_fast, mom_slow]))
+            else 0.0
+        )
         norm_mom = float(momentum / atr) if atr and atr > 0 else 0.0
         norm_mom = max(-3.0, min(3.0, norm_mom))  # clip
 
@@ -783,12 +932,20 @@ class Detectors:
         # =========================================================
         def _ema_slope_norm(mid_series: pd.Series, win: int) -> float:
             try:
-                ema_smooth = mid_series.ewm(span=win, adjust=False, min_periods=win).mean()
+                ema_smooth = mid_series.ewm(
+                    span=win, adjust=False, min_periods=win
+                ).mean()
                 slope = ema_smooth.diff().iloc[-1]
-                denom = (upper - lower).ewm(span=win, adjust=False).mean().iloc[-1] / 2.0
-                denom = float(denom) if np.isfinite(denom) and denom != 0 else float("nan")
+                denom = (upper - lower).ewm(span=win, adjust=False).mean().iloc[
+                    -1
+                ] / 2.0
+                denom = (
+                    float(denom) if np.isfinite(denom) and denom != 0 else float("nan")
+                )
                 val = abs(float(slope) / denom) if np.isfinite(denom) else float("nan")
-                return float(max(0.0, min(1.0, 1.0 - min(val, 1.0))))  # pente faible -> 1
+                return float(
+                    max(0.0, min(1.0, 1.0 - min(val, 1.0)))
+                )  # pente faible -> 1
             except Exception:
                 return 0.5
 
@@ -819,7 +976,9 @@ class Detectors:
                 atr_x = tr.rolling(window=p, min_periods=p).mean()
                 plus_di = 100 * (plus_dm.ewm(span=p, adjust=False).mean() / atr_x)
                 minus_di = 100 * (minus_dm.ewm(span=p, adjust=False).mean() / atr_x)
-                dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+                dx = (
+                    abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+                ) * 100
                 adx = dx.ewm(span=p, adjust=False, min_periods=p).mean().iloc[-1]
                 return float(adx) if np.isfinite(adx) else float("nan")
             except Exception:
@@ -840,7 +999,9 @@ class Detectors:
             comp_bandwidth = 0.5
 
         adx_val = _adx(df, adx_p)
-        comp_adx = max(0.0, min(1.0, 1.0 - (adx_val / 50.0))) if np.isfinite(adx_val) else 0.5
+        comp_adx = (
+            max(0.0, min(1.0, 1.0 - (adx_val / 50.0))) if np.isfinite(adx_val) else 0.5
+        )
         comp_slope = _ema_slope_norm(mid, ema_win)
 
         rsi = _rsi(series, rsi_period)
@@ -897,7 +1058,9 @@ class Detectors:
             win_est = min(50, len(series))
             for _ in range(win_est):
                 recent_scores.append(range_score)
-            out["range_duration_bars"] = int(sum(1 for s in recent_scores if s >= thr_out))
+            out["range_duration_bars"] = int(
+                sum(1 for s in recent_scores if s >= thr_out)
+            )
         except Exception:
             out["range_duration_bars"] = 0
 
@@ -944,7 +1107,9 @@ class Detectors:
         half_band = (bb_upper - bb_lower) / 2.0
         pos = (price - bb_mid) / (half_band if half_band != 0 else np.nan)
         pos = float(pos) if np.isfinite(pos) else 0.0
-        out["half_band_pips"] = _to_pips(half_band) if half_band and np.isfinite(half_band) else None
+        out["half_band_pips"] = (
+            _to_pips(half_band) if half_band and np.isfinite(half_band) else None
+        )
         out["mid_distance_ratio"] = abs(pos) if np.isfinite(pos) else 0.0
 
         mid_cfg = out["meta"]["mid_entry"]
@@ -960,10 +1125,18 @@ class Detectors:
             # Conditions d'idée d'entrée
             bandwidth_comp_bonus = comp_bandwidth
             if (-pos_max <= pos <= -pos_min) and (norm_mom > mid_cfg["mom_norm_min"]):
-                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
+                mid_score = (
+                    0.45
+                    + 0.25 * bandwidth_comp_bonus
+                    + 0.15 * max(0.0, min(1.0, range_score))
+                )
                 mid_entry = "buy"
             elif (pos_min <= pos <= pos_max) and (norm_mom < -mid_cfg["mom_norm_min"]):
-                mid_score = 0.45 + 0.25 * bandwidth_comp_bonus + 0.15 * max(0.0, min(1.0, range_score))
+                mid_score = (
+                    0.45
+                    + 0.25 * bandwidth_comp_bonus
+                    + 0.15 * max(0.0, min(1.0, range_score))
+                )
                 mid_entry = "sell"
 
             # Pénalité ATR très faible
@@ -999,16 +1172,23 @@ class Detectors:
                 signal = "neutral"
         else:
             if (breakout - mean_revert) >= 0.15:
-                signal = "buy_breakout" if (out["z_band"] is not None and out["z_band"] > 0) else "sell_breakout"
+                signal = (
+                    "buy_breakout"
+                    if (out["z_band"] is not None and out["z_band"] > 0)
+                    else "sell_breakout"
+                )
             elif (mean_revert - breakout) >= 0.15:
-                signal = "sell_revert" if (out["z_band"] is not None and out["z_band"] > 0) else "buy_revert"
+                signal = (
+                    "sell_revert"
+                    if (out["z_band"] is not None and out["z_band"] > 0)
+                    else "buy_revert"
+                )
             else:
                 signal = "neutral"
 
         out["signal"] = signal
         out["ok"] = True
         return out
-
 
     def detect_market_regime(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -1029,7 +1209,12 @@ class Detectors:
         if df is None or df.empty:
             return pd.Series(dtype=object)
 
-        regime_config = self.config_manager.get("phase_detection_defaults.regime_detection_settings", {}) or {}
+        regime_config = (
+            self.config_manager.get(
+                "phase_detection_defaults.regime_detection_settings", {}
+            )
+            or {}
+        )
         adx_config = regime_config.get("adx_settings", {}) or {}
         vol_config = regime_config.get("volatility_regimes", {}) or {}
         volume_config = regime_config.get("volume_profile", {}) or {}
@@ -1056,8 +1241,16 @@ class Detectors:
             dm_minus = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
             atr = tr.rolling(window=period, min_periods=1).mean().replace(0, np.nan)
-            dm_plus_smooth = pd.Series(dm_plus, index=_df.index).rolling(window=period, min_periods=1).mean()
-            dm_minus_smooth = pd.Series(dm_minus, index=_df.index).rolling(window=period, min_periods=1).mean()
+            dm_plus_smooth = (
+                pd.Series(dm_plus, index=_df.index)
+                .rolling(window=period, min_periods=1)
+                .mean()
+            )
+            dm_minus_smooth = (
+                pd.Series(dm_minus, index=_df.index)
+                .rolling(window=period, min_periods=1)
+                .mean()
+            )
 
             di_plus = 100.0 * dm_plus_smooth / atr
             di_minus = 100.0 * dm_minus_smooth / atr
@@ -1080,18 +1273,27 @@ class Detectors:
         volatility = np.sqrt(gk_vol.rolling(window=vol_period, min_periods=1).mean())
 
         # Percentile dynamique sur fenêtre glissante
-        vol_percentiles = volatility.rolling(window=max(100, vol_period * 5), min_periods=1).apply(
-            lambda x: (x <= x.iloc[-1]).mean() * 100.0, raw=False
-        )
+        vol_percentiles = volatility.rolling(
+            window=max(100, vol_period * 5), min_periods=1
+        ).apply(lambda x: (x <= x.iloc[-1]).mean() * 100.0, raw=False)
 
         # === 3. VOLUME PROFILE INSTITUTIONNEL ===
-        enable_institutional = bool(volume_config.get("enable_institutional_detection", True))
+        enable_institutional = bool(
+            volume_config.get("enable_institutional_detection", True)
+        )
         volume_ma_period = int(volume_config.get("volume_ma_period", 20))
-        institutional_threshold = float(volume_config.get("institutional_threshold", 1.8))
+        institutional_threshold = float(
+            volume_config.get("institutional_threshold", 1.8)
+        )
 
         institutional_activity = pd.Series(False, index=df.index)
         if enable_institutional and "tick_volume" in df.columns:
-            volume_ma = df["tick_volume"].rolling(window=volume_ma_period, min_periods=1).mean().replace(0, np.nan)
+            volume_ma = (
+                df["tick_volume"]
+                .rolling(window=volume_ma_period, min_periods=1)
+                .mean()
+                .replace(0, np.nan)
+            )
             volume_ratio = (df["tick_volume"] / volume_ma).fillna(0.0)
             institutional_activity = volume_ratio > institutional_threshold
 
@@ -1100,22 +1302,42 @@ class Detectors:
 
         for i in range(len(df)):
             current_adx = float(adx.iloc[i]) if pd.notna(adx.iloc[i]) else 0.0
-            current_di_plus = float(di_plus.iloc[i]) if pd.notna(di_plus.iloc[i]) else 0.0
-            current_di_minus = float(di_minus.iloc[i]) if pd.notna(di_minus.iloc[i]) else 0.0
-            current_vol_percentile = float(vol_percentiles.iloc[i]) if pd.notna(vol_percentiles.iloc[i]) else 50.0
+            current_di_plus = (
+                float(di_plus.iloc[i]) if pd.notna(di_plus.iloc[i]) else 0.0
+            )
+            current_di_minus = (
+                float(di_minus.iloc[i]) if pd.notna(di_minus.iloc[i]) else 0.0
+            )
+            current_vol_percentile = (
+                float(vol_percentiles.iloc[i])
+                if pd.notna(vol_percentiles.iloc[i])
+                else 50.0
+            )
             is_institutional = bool(institutional_activity.iloc[i])
 
             if current_adx > trending_threshold:
                 if current_di_plus > current_di_minus:
-                    regimes.iloc[i] = "trending_institutional_bull" if is_institutional else "trending_retail_bull"
+                    regimes.iloc[i] = (
+                        "trending_institutional_bull"
+                        if is_institutional
+                        else "trending_retail_bull"
+                    )
                 else:
-                    regimes.iloc[i] = "trending_institutional_bear" if is_institutional else "trending_retail_bear"
+                    regimes.iloc[i] = (
+                        "trending_institutional_bear"
+                        if is_institutional
+                        else "trending_retail_bear"
+                    )
 
             elif current_adx < ranging_threshold:
                 if is_institutional:
                     recent_closes = df["close"].iloc[max(0, i - 10) : i + 1]
                     if len(recent_closes) > 5:
-                        regimes.iloc[i] = "range_accumulation" if (recent_closes.iloc[-1] > recent_closes.mean()) else "range_distribution"
+                        regimes.iloc[i] = (
+                            "range_accumulation"
+                            if (recent_closes.iloc[-1] > recent_closes.mean())
+                            else "range_distribution"
+                        )
                     else:
                         regimes.iloc[i] = "range_institutional"
                 else:
@@ -1129,13 +1351,19 @@ class Detectors:
                     regimes.iloc[i] = "transitional"
 
         # === 5. CALCUL MÉTRIQUES DE QUALITÉ DU RÉGIME ===
-        def calculate_regime_strength(regime_series: pd.Series, adx_series: pd.Series) -> pd.Series:
+        def calculate_regime_strength(
+            regime_series: pd.Series, adx_series: pd.Series
+        ) -> pd.Series:
             """Calcule la force/confiance du régime détecté."""
-            regime_strength = pd.Series(0.5, index=regime_series.index, dtype=float)  # Base 50%
+            regime_strength = pd.Series(
+                0.5, index=regime_series.index, dtype=float
+            )  # Base 50%
 
             for i in range(len(regime_series)):
                 regime = str(regime_series.iloc[i])
-                adx_val = float(adx_series.iloc[i]) if pd.notna(adx_series.iloc[i]) else 0.0
+                adx_val = (
+                    float(adx_series.iloc[i]) if pd.notna(adx_series.iloc[i]) else 0.0
+                )
 
                 if "trending" in regime:
                     if adx_val > 40:
@@ -1170,15 +1398,20 @@ class Detectors:
         # === 6. LOGGING DE PERFORMANCE ===
         if len(regimes) > 0:
             regime_counts = regimes.value_counts()
-            dominant_regime = regime_counts.index[0] if len(regime_counts) > 0 else "unknown"
+            dominant_regime = (
+                regime_counts.index[0] if len(regime_counts) > 0 else "unknown"
+            )
             avg_strength = float(regime_strength.mean())
-            self.logger.debug(f"Régime de marché: {dominant_regime} (force moyenne: {avg_strength:.2f})")
+            self.logger.debug(
+                f"Régime de marché: {dominant_regime} (force moyenne: {avg_strength:.2f})"
+            )
             self.logger.debug(f"Distribution régimes: {dict(regime_counts.head(3))}")
 
         return regimes
 
-
-    def detect_micro_phase_m1(self, df_m1: pd.DataFrame, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def detect_micro_phase_m1(
+        self, df_m1: pd.DataFrame, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Détecteur *complémentaire* de micro-phase sur M1 (zéro gating).
         Utilise un mini-window pour repérer une compression + petite impulsion.
@@ -1187,49 +1420,67 @@ class Detectors:
         try:
             if df_m1 is None or len(df_m1) < 60:
                 return {
-                    "micro_phase": False, "quality": 0.0, "direction": "NEUTRAL",
-                    "confidence_boost": 0.0, "sl_pips_suggestion": None, "tp_pips_suggestion": None,
-                    "diagnostics": {"reason": "not_enough_bars"}
+                    "micro_phase": False,
+                    "quality": 0.0,
+                    "direction": "NEUTRAL",
+                    "confidence_boost": 0.0,
+                    "sl_pips_suggestion": None,
+                    "tp_pips_suggestion": None,
+                    "diagnostics": {"reason": "not_enough_bars"},
                 }
 
-            p = (params or {})
+            p = params or {}
             # fenêtres courtes par défaut (micro)
-            w_core   = int(p.get("window_core", 20))        # cœur de range
-            w_env    = int(p.get("window_env", 60))         # environnement pour normaliser
-            k_range  = float(p.get("max_range_pips", 8.0))  # range max pour compter "micro"
-            k_imp    = float(p.get("min_impulse_pips", 3.0))# impulsion min post-compression
+            w_core = int(p.get("window_core", 20))  # cœur de range
+            w_env = int(p.get("window_env", 60))  # environnement pour normaliser
+            k_range = float(
+                p.get("max_range_pips", 8.0)
+            )  # range max pour compter "micro"
+            k_imp = float(
+                p.get("min_impulse_pips", 3.0)
+            )  # impulsion min post-compression
             max_spread_p = float(p.get("max_spread_pips", 2.0))
-            boost    = float(p.get("confidence_boost", 0.08))
-            tp_sl    = float(p.get("tp_over_sl", 1.2))      # tp = 1.2 * sl
+            boost = float(p.get("confidence_boost", 0.08))
+            tp_sl = float(p.get("tp_over_sl", 1.2))  # tp = 1.2 * sl
             sl_floor = float(p.get("sl_min_pips", 5.0))
-            sl_cap   = float(p.get("sl_max_pips", 10.0))
+            sl_cap = float(p.get("sl_max_pips", 10.0))
 
             last = df_m1.iloc[-1]
             price = float(last["close"])
             pip_size = 0.01 if price > 10 else 0.0001
 
             try:
-                spread_pips = float(df_m1.get("spread_points", pd.Series([0])).iloc[-1]) / 10.0
+                spread_pips = (
+                    float(df_m1.get("spread_points", pd.Series([0])).iloc[-1]) / 10.0
+                )
             except Exception:
                 spread_pips = 0.0
 
             core = df_m1.tail(w_core)
-            env  = df_m1.tail(w_env)
+            env = df_m1.tail(w_env)
 
             core_high = float(core["high"].max())
-            core_low  = float(core["low"].min())
+            core_low = float(core["low"].min())
             core_range_price = core_high - core_low
-            core_range_pips  = core_range_price / pip_size
+            core_range_pips = core_range_price / pip_size
 
             env_high = float(env["high"].max())
-            env_low  = float(env["low"].min())
-            env_range_pips = (env_high - env_low) / pip_size if (env_high > env_low) else core_range_pips
+            env_low = float(env["low"].min())
+            env_range_pips = (
+                (env_high - env_low) / pip_size
+                if (env_high > env_low)
+                else core_range_pips
+            )
 
-            compressed = (core_range_pips <= k_range) and (core_range_pips <= 0.35 * env_range_pips)
+            compressed = (core_range_pips <= k_range) and (
+                core_range_pips <= 0.35 * env_range_pips
+            )
 
             recent = df_m1.tail(3)
-            recent_move_up   = (float(recent["close"].iloc[-1]) - float(recent["open"].iloc[0])) / pip_size
-            recent_move_abs  = abs(recent_move_up)
+            recent_move_up = (
+                float(recent["close"].iloc[-1]) - float(recent["open"].iloc[0])
+            ) / pip_size
+            recent_move_abs = abs(recent_move_up)
             impulse_ok = recent_move_abs >= k_imp
 
             direction = "NEUTRAL"
@@ -1243,14 +1494,16 @@ class Detectors:
             quality = 0.0
             if compressed and impulse_ok:
                 q_range = max(0.0, 1.0 - (core_range_pips / max(k_range, 1e-6)))
-                q_imp   = max(0.0, min(1.0, recent_move_abs / max(k_imp * 2.0, 1e-6)))
+                q_imp = max(0.0, min(1.0, recent_move_abs / max(k_imp * 2.0, 1e-6)))
                 quality = 0.6 * q_range + 0.4 * q_imp
                 quality = max(0.0, min(1.0, quality - spread_penalty))
 
             micro = bool(quality >= 0.35)
             conf_boost = boost if micro else 0.0
 
-            base_sl = max(sl_floor, min(sl_cap, 0.5 * core_range_pips + 1.0 * spread_pips))
+            base_sl = max(
+                sl_floor, min(sl_cap, 0.5 * core_range_pips + 1.0 * spread_pips)
+            )
             sl_pips = float(base_sl)
             tp_pips = float(max(sl_floor, min(sl_cap * tp_sl, sl_pips * tp_sl)))
 
@@ -1267,24 +1520,29 @@ class Detectors:
                     "recent_move_pips": round(recent_move_abs, 2),
                     "spread_pips": round(spread_pips, 2),
                     "compressed": bool(compressed),
-                    "impulse_ok": bool(impulse_ok)
-                }
+                    "impulse_ok": bool(impulse_ok),
+                },
             }
         except Exception as e:
             # jamais bloquant
             return {
-                "micro_phase": False, "quality": 0.0, "direction": "NEUTRAL",
-                "confidence_boost": 0.0, "sl_pips_suggestion": None, "tp_pips_suggestion": None,
-                "diagnostics": {"error": str(e)}
+                "micro_phase": False,
+                "quality": 0.0,
+                "direction": "NEUTRAL",
+                "confidence_boost": 0.0,
+                "sl_pips_suggestion": None,
+                "tp_pips_suggestion": None,
+                "diagnostics": {"error": str(e)},
             }
-
 
     def determine_optimized_phase(self, row: Dict[str, Any]) -> str:
         """Classification de phase basée sur les 4 indicateurs core (+ lecture Bollinger si dispo, non bloquante)."""
         regime = str(row.get("regime", "unknown"))
 
         # --- Vars Bollinger (optionnelles, robustes si absentes) ---
-        boll_signal = row.get("boll_signal")  # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | None
+        boll_signal = row.get(
+            "boll_signal"
+        )  # "buy_revert" | "sell_revert" | "buy_breakout" | "sell_breakout" | None
         boll_breakout = float(row.get("boll_breakout_score", 0.0) or 0.0)
         boll_revert = float(row.get("boll_mean_revert_score", 0.0) or 0.0)
         boll_squeeze = bool(row.get("boll_is_squeeze", False))
@@ -1317,7 +1575,8 @@ class Detectors:
             if boll_signal == "sell_revert" and (boll_revert >= 0.55 or boll_squeeze):
                 return "range_distribution"
             if row.get("confirmed_structure_break", False) or (
-                boll_signal in ("buy_breakout", "sell_breakout") and boll_breakout >= 0.6
+                boll_signal in ("buy_breakout", "sell_breakout")
+                and boll_breakout >= 0.6
             ):
                 return "distribution_breakout"
             return "range_distribution"
@@ -1343,9 +1602,12 @@ class Detectors:
             elif row.get("fvg_detected", False):
                 return "fvg_opportunity"
             if boll_signal in ("buy_revert", "sell_revert") and boll_revert >= 0.6:
-                return "range_accumulation" if boll_signal == "buy_revert" else "range_distribution"
+                return (
+                    "range_accumulation"
+                    if boll_signal == "buy_revert"
+                    else "range_distribution"
+                )
             return "no_clear_phase"
-
 
     def determine_phase(self, market_data: pd.DataFrame) -> str:
         """

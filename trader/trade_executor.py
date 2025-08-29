@@ -5,9 +5,10 @@ import os
 import sys
 import time
 import uuid
-import math
 import json
 import pandas as pd
+import numpy as np
+import math
 import jsonschema
 from core.config_manager import ConfigManager, CustomJSONEncoder
 from datetime import datetime, UTC  # AMÉLIORATION: Import explicite de UTC
@@ -1442,13 +1443,15 @@ class TradeExecutor:
         - Respecte trade_stops_level du broker
         - Conversion PIPS → prix corrigée (1 pip = 10 points pour FX/Gold)
         - Arrondit aux 'digits' du symbole
-        - Fallback robuste si données manquantes
-        - ⚔️ Mode 'boll_midline' (katana scalp) : SL au-delà de la bande opposée + buffer, TP vers/sur la médiane (léger overshoot).
-        Si des hints/overrides existent, on les respecte; sinon, on calcule depuis les bandes.
+        - ⚔️ Mode strict 'boll_midline_strict' (katana scalp) :
+            * SL au-delà de la bande opposée + buffer (aucun fallback)
+            * TP vers/sur la médiane (léger overshoot capé), RR >= min_rr sinon REJET
+            * Exige boll.{bb_mid, bb_upper, bb_lower} + pip_size valides et entry_gate_ok=True
+        - Mode non-strict 'boll_midline' :
+            * même logique, mais autorise les méthodes standards si les niveaux Bollinger/hints manquent
         - ➕ Intègre les overrides Bollinger depuis config.decision_engine.katana.bollinger_overrides.tp_sl_overrides
         (appliqués uniquement si les seuils entry_bias sont satisfaits).
-        - ➕ Consomme les hints micro-phase: 'entry_gate_ok', 'half_band_pips', 'mid_distance_ratio' si présents
-        pour éviter les TP trop ambitieux et refuser les cas mal “placés” autour de la médiane.
+        - ➕ Consomme (si présents) : 'entry_gate_ok', 'half_band_pips', 'mid_distance_ratio'
         """
         import pandas as pd
         import numpy as np
@@ -1467,9 +1470,7 @@ class TradeExecutor:
         if point <= 0:
             raise TradeExecutionError("symbol_info.point invalide (<=0).")
         digits = int(getattr(symbol_info, "digits", 0) or 0)
-        min_stop_distance_points = int(
-            getattr(symbol_info, "trade_stops_level", 0) or 0
-        )
+        min_stop_distance_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
         min_stop_distance_price = min_stop_distance_points * point
 
         # --- Heuristique pip-size: 1 pip = 10 points (FX majeurs / JPY / XAU) ---
@@ -1483,19 +1484,15 @@ class TradeExecutor:
 
         # --- 🔁 Overrides Bollinger (Katana) conditionnels (si config les active) ---
         try:
-            de = config.get("decision_engine") or {}
-            kat = de.get("katana") or {}
-            boll_ov = kat.get("bollinger_overrides") or {}
-            tp_sl_map = boll_ov.get("tp_sl_overrides") or {}
-            entry_bias = boll_ov.get("entry_bias") or {}
+            de = (config.get("decision_engine") or {})
+            kat = (de.get("katana") or {})
+            boll_ov = (kat.get("bollinger_overrides") or {})
+            tp_sl_map = (boll_ov.get("tp_sl_overrides") or {})
+            entry_bias = (boll_ov.get("entry_bias") or {})
 
             boll_signal = str(trade_decision.get("boll_signal", "") or "").strip()
-            breakout_score = float(
-                trade_decision.get("boll_breakout_score", 0.0) or 0.0
-            )
-            revert_score = float(
-                trade_decision.get("boll_mean_revert_score", 0.0) or 0.0
-            )
+            breakout_score = float(trade_decision.get("boll_breakout_score", 0.0) or 0.0)
+            revert_score = float(trade_decision.get("boll_mean_revert_score", 0.0) or 0.0)
 
             bb_buy_min = float(entry_bias.get("breakout_buy_min", 0.55) or 0.55)
             bb_sell_min = float(entry_bias.get("breakout_sell_min", 0.55) or 0.55)
@@ -1525,36 +1522,24 @@ class TradeExecutor:
 
         # --- Paramètres SL/TP standards ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
-        sl_method = str(
-            prod_st.get("sl_placement_method", "PIPS")
-        ).upper()  # PIPS|SWING|ATR
-        tp_method = str(
-            prod_st.get("tp_placement_method", "RR")
-        ).upper()  # RR|ATR_MULTIPLE|PIPS
+        sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()      # PIPS|SWING|ATR
+        tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()        # RR|ATR_MULTIPLE|PIPS
         rr_ratio = float(prod_st.get("tp_rr_ratio", 1.5) or 1.5)
 
-        strat_st = config.get("smart_targets") or {}
-        st_sl = strat_st.get("stop_loss") or {}
-        st_tp = strat_st.get("take_profit") or {}
+        strat_st = (config.get("smart_targets") or {})
+        st_sl = (strat_st.get("stop_loss") or {})
+        st_tp = (strat_st.get("take_profit") or {})
 
         sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
-        sl_hard_max_points = float(
-            st_sl.get("hard_max_points", float("inf")) or float("inf")
-        )
-        tp_hard_max_points = float(
-            st_tp.get("hard_max_points", float("inf")) or float("inf")
-        )
+        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
+        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
 
         # --- Règles scalping (caps/guards Katana) ---
-        entry_rules_scalp = (config.get("entry_rules") or {}).get("scalping") or {}
-        reject_if_sl_over_cap = bool(
-            entry_rules_scalp.get("reject_if_sl_over_cap", False)
-        )
+        entry_rules_scalp = ((config.get("entry_rules") or {}).get("scalping") or {})
+        reject_if_sl_over_cap = bool(entry_rules_scalp.get("reject_if_sl_over_cap", False))
         max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")
         min_atr_m1_pips = float(entry_rules_scalp.get("min_atr_m1_pips", 0.0) or 0.0)
-        hard_min_atr_m1_pips = float(
-            entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0
-        )
+        hard_min_atr_m1_pips = float(entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0)
 
         # --- Market data pour SWING/ATR ---
         symbol = str(trade_decision.get("asset", "")).upper()
@@ -1570,198 +1555,133 @@ class TradeExecutor:
             close = df["close"].astype(float)
             prev_close = close.shift(1)
             tr = np.maximum.reduce(
-                [
-                    (high - low).abs(),
-                    (high - prev_close).abs(),
-                    (low - prev_close).abs(),
-                ]
+                [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()]
             )
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
         # =====================================================================
-        # ⚔️ Mode 'boll_midline' si demandé ET si pas d'overrides explicites
+        # ⚔️ Mode 'boll_midline' / 'boll_midline_strict'
         # =====================================================================
         stop_loss_price = 0.0
         take_profit_price = 0.0
 
         try:
             level_mode = str(trade_decision.get("level_mode") or "").lower()
-            boll = (
-                trade_decision.get("boll")
-                if isinstance(trade_decision.get("boll"), dict)
-                else {}
-            )
-            bb_mid = (
-                float(boll.get("bb_mid"))
-                if boll and boll.get("bb_mid") is not None
-                else float("nan")
-            )
-            bb_up = (
-                float(boll.get("bb_upper"))
-                if boll and boll.get("bb_upper") is not None
-                else float("nan")
-            )
-            bb_lo = (
-                float(boll.get("bb_lower"))
-                if boll and boll.get("bb_lower") is not None
-                else float("nan")
-            )
+            strict_mode = (level_mode == "boll_midline_strict")
+
+            boll = trade_decision.get("boll") if isinstance(trade_decision.get("boll"), dict) else {}
+            bb_mid = float(boll.get("bb_mid")) if boll.get("bb_mid") is not None else float("nan")
+            bb_up  = float(boll.get("bb_upper")) if boll.get("bb_upper") is not None else float("nan")
+            bb_lo  = float(boll.get("bb_lower")) if boll.get("bb_lower") is not None else float("nan")
+
             entry_gate_ok = bool(trade_decision.get("entry_gate_ok", True))
             half_band_pips_hint = trade_decision.get("half_band_pips")
             mid_dist_ratio = float(trade_decision.get("mid_distance_ratio", 0.0) or 0.0)
 
             # Config midline spécifique (scalping)
-            mid_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get(
-                "boll_midline", {}
-            ) or {}
-            rr_min = float(mid_cfg.get("min_rr", 1.1) or 1.1)
+            mid_cfg = (((config.get("entry_rules") or {}).get("scalping") or {}).get("boll_midline") or {})
+            rr_min_mid = float(mid_cfg.get("min_rr", 1.1) or 1.1)
             k_halfband_tp = float(mid_cfg.get("tp_halfband_k", 0.6) or 0.6)
             buffer_pips_min = float(mid_cfg.get("buffer_pips_min", 1.5) or 1.5)
-            mid_overshoot_k = float(
-                mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05
-            )  # 5% demi-canal
-            min_mid_ratio = float(
-                mid_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
-            )  # distance mini à la médiane
+            mid_overshoot_k = float(mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05)      # 5% demi-canal
+            min_mid_ratio   = float(mid_cfg.get("min_mid_distance_ratio", 0.12) or 0.12)  # distance mini à la médiane
 
-            valid_boll = all(
-                map(
-                    lambda x: isinstance(x, (int, float)) and math.isfinite(x),
-                    [bb_mid, bb_up, bb_lo],
-                )
-            )
-            can_apply_midline = (
-                level_mode == "boll_midline"
-                and valid_boll
-                and isinstance(entry_price, (int, float))
-                and entry_price > 0
-                and sl_pips_override is None
-                and tp_pips_override is None
-            )
+            valid_boll = all(isinstance(x, (int, float)) and math.isfinite(x) for x in (bb_mid, bb_up, bb_lo))
+            can_apply_midline = (level_mode in {"boll_midline", "boll_midline_strict"}) and valid_boll and isinstance(entry_price, (int, float)) and entry_price > 0 and (sl_pips_override is None) and (tp_pips_override is None)
 
-            # Gate: si compute_bollinger_microphase_signals a dit non, on refuse le set-up ici
-            if can_apply_midline and not entry_gate_ok:
-                raise TradeExecutionError("Gate médiane refusé (entry_gate_ok=False).")
+            # En mode STRICT, tout manque → REJET immédiat (aucun fallback)
+            if strict_mode:
+                if not can_apply_midline:
+                    raise TradeExecutionError("Mode strict: niveaux Bollinger/entry/overrides invalides.")
+                if not entry_gate_ok:
+                    raise TradeExecutionError("Mode strict: entry_gate_ok=False (gate médiane refusé).")
+                if not (pip_size and pip_size > 0):
+                    raise TradeExecutionError("Mode strict: pip_size indisponible.")
+            # En mode non-strict : si on ne peut pas appliquer midline, on laissera les méthodes standards plus bas
 
             if can_apply_midline:
                 half_band_price = (bb_up - bb_lo) / 2.0
-                # si un hint existe en pips, on l'utilise pour calibrer (robuste symboles exotiques)
-                if (
-                    isinstance(half_band_pips_hint, (int, float))
-                    and half_band_pips_hint > 0
-                    and pip_size > 0
-                ):
+                if isinstance(half_band_pips_hint, (int, float)) and half_band_pips_hint > 0 and pip_size > 0:
                     half_band_price = float(half_band_pips_hint) * pip_size
 
+                if not (half_band_price and half_band_price > 0):
+                    if strict_mode:
+                        raise TradeExecutionError("Mode strict: half_band nul/invalide.")
+                    else:
+                        raise Exception("half_band invalide, on laissera les méthodes standards.")
+
+                # Ajustement prudence si trop proche de la médiane
                 if mid_dist_ratio < min_mid_ratio:
-                    # trop proche du centre -> éviter les TP irréalistes
                     k_halfband_tp = min(k_halfband_tp, 0.5)
 
                 buffer_price = max(
                     min_stop_distance_price,
-                    (
-                        (buffer_pips_min * pip_size)
-                        if pip_size > 0
-                        else min_stop_distance_price
-                    ),
+                    (buffer_pips_min * pip_size) if pip_size and pip_size > 0 else min_stop_distance_price,
                 )
 
                 if action == "BUY":
                     # SL sous la bande basse + buffer
                     stop_loss_price = float(bb_lo - buffer_price)
 
-                    # TP vers médiane (léger overshoot) mais JAMAIS au-delà de la bande haute
+                    # TP vers médiane (léger overshoot capé), jamais au-dessus d'upper
                     target_mid_price = float(bb_mid + mid_overshoot_k * half_band_price)
                     direct_tp = max(0.0, target_mid_price - entry_price)
                     fallback_tp = max(0.0, k_halfband_tp * half_band_price)
                     tp_distance_price = max(direct_tp, fallback_tp)
-
                     take_profit_price = float(entry_price + tp_distance_price)
-                    take_profit_price = min(
-                        take_profit_price, bb_up - buffer_price * 0.25
-                    )  # cap léger sous upper
+                    take_profit_price = min(take_profit_price, bb_up - buffer_price * 0.25)
 
-                    # si entrée au-dessus de la médiane (cas pathologique), ramener TP sous médiane
                     if entry_price >= bb_mid:
-                        take_profit_price = min(
-                            take_profit_price, bb_mid + 0.15 * half_band_price
-                        )
+                        take_profit_price = min(take_profit_price, bb_mid + 0.15 * half_band_price)
 
                 else:  # SELL
                     # SL au-dessus de la bande haute + buffer
                     stop_loss_price = float(bb_up + buffer_price)
 
-                    # TP vers médiane (overshoot léger) mais JAMAIS en-dessous de la bande basse
+                    # TP vers médiane (overshoot capé), jamais en-dessous de lower
                     target_mid_price = float(bb_mid - mid_overshoot_k * half_band_price)
                     direct_tp = max(0.0, entry_price - target_mid_price)
                     fallback_tp = max(0.0, k_halfband_tp * half_band_price)
                     tp_distance_price = max(direct_tp, fallback_tp)
-
                     take_profit_price = float(entry_price - tp_distance_price)
-                    take_profit_price = max(
-                        take_profit_price, bb_lo + buffer_price * 0.25
-                    )  # cap léger au-dessus de lower
+                    take_profit_price = max(take_profit_price, bb_lo + buffer_price * 0.25)
 
                     if entry_price <= bb_mid:
-                        take_profit_price = max(
-                            take_profit_price, bb_mid - 0.15 * half_band_price
-                        )
+                        take_profit_price = max(take_profit_price, bb_mid - 0.15 * half_band_price)
 
-                # RR minimal (soft)
-                try:
-                    if action == "BUY":
-                        risk = max(entry_price - stop_loss_price, 0.0)
-                        reward = max(take_profit_price - entry_price, 0.0)
-                    else:
-                        risk = max(stop_loss_price - entry_price, 0.0)
-                        reward = max(entry_price - take_profit_price, 0.0)
+                # RR contrôle
+                risk = (entry_price - stop_loss_price) if action == "BUY" else (stop_loss_price - entry_price)
+                reward = (take_profit_price - entry_price) if action == "BUY" else (entry_price - take_profit_price)
 
-                    if risk > 0 and reward > 0 and (reward / risk) < rr_min:
-                        desired_reward = rr_min * risk
-                        if action == "BUY":
-                            take_profit_price = min(
-                                entry_price + desired_reward,
-                                bb_up - buffer_price * 0.25,
-                            )
-                        else:
-                            take_profit_price = max(
-                                entry_price - desired_reward,
-                                bb_lo + buffer_price * 0.25,
-                            )
-                except Exception:
-                    pass
+                if not (risk > 0 and reward > 0):
+                    if strict_mode:
+                        raise TradeExecutionError("Mode strict: distances risk/reward invalides.")
+                else:
+                    rr_val = reward / risk
+                    if strict_mode and (rr_val < rr_min_mid):
+                        raise TradeExecutionError(f"Mode strict: RR {rr_val:.2f} < min_rr {rr_min_mid:.2f}.")
+                    # en non-strict, on laisse le reste du pipeline s’occuper d’un éventuel ajustement plus loin
+
         except TradeExecutionError:
+            # En mode strict, on propage l’erreur (aucun fallback)
             raise
         except Exception as e:
-            self.logger.debug(f"[boll_midline] application partielle: {e}")
+            # En non-strict, si midline impraticable ici, on retombe (plus bas) sur les méthodes standards
+            self.logger.debug(f"[boll_midline] application partielle/non-strict: {e}")
 
         # ========================= SL (standards si non fixé) =========================
         if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
             sl_distance = float(sl_pips_override) * pip_size
-            stop_loss_price = (
-                entry_price - sl_distance
-                if action == "BUY"
-                else entry_price + sl_distance
-            )
-            self.logger.debug(
-                f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}"
-            )
+            stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
+            self.logger.debug(f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}")
         else:
-            if stop_loss_price == 0.0:  # pas fixé par midline
-                if "smart_sl_tp_settings" in config:
-                    prod_st = config.get("smart_sl_tp_settings") or {}
-
+            if stop_loss_price == 0.0:  # non fixé par 'boll_midline'
                 if sl_method == "SWING":
                     lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
                     buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-                    if (
-                        not isinstance(rates_df, pd.DataFrame)
-                        or len(rates_df) < lookback
-                    ):
-                        self.logger.warning(
-                            f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
-                        )
+                    if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
+                        self.logger.warning(f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS.")
                         sl_method = "ATR"
                     else:
                         recent = rates_df.tail(lookback)
@@ -1774,13 +1694,7 @@ class TradeExecutor:
                             stop_loss_price = swing_high + buffer_price
 
                 if sl_method == "ATR" and stop_loss_price == 0.0:
-                    atr_period = int(
-                        prod_st.get(
-                            "sl_atr_period",
-                            prod_st.get("atr_settings", {}).get("period", 14),
-                        )
-                        or 14
-                    )
+                    atr_period = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
                     atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
                     atr = _compute_atr(rates_df, atr_period)
                     if not (atr == atr and atr > 0):
@@ -1788,54 +1702,31 @@ class TradeExecutor:
                         sl_method = "PIPS"
                     else:
                         sl_distance = atr_mult * atr
-                        stop_loss_price = (
-                            entry_price - sl_distance
-                            if action == "BUY"
-                            else entry_price + sl_distance
-                        )
+                        stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
 
                 if sl_method == "PIPS" and stop_loss_price == 0.0:
                     sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
                     sl_distance = sl_pips * pip_size
-                    stop_loss_price = (
-                        entry_price - sl_distance
-                        if action == "BUY"
-                        else entry_price + sl_distance
-                    )
+                    stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
 
         # ========================= TP (standards si non fixé) =========================
         if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
             tp_distance = float(tp_pips_override) * pip_size
-            take_profit_price = (
-                entry_price + tp_distance
-                if action == "BUY"
-                else entry_price - tp_distance
-            )
-            self.logger.debug(
-                f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}"
-            )
+            take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+            self.logger.debug(f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}")
         else:
-            if take_profit_price == 0.0:  # pas fixé par midline
+            if take_profit_price == 0.0:  # non fixé par 'boll_midline'
                 if tp_method == "RR":
                     risk_distance_price = abs(entry_price - stop_loss_price)
                     if risk_distance_price <= 0:
-                        self.logger.warning(
-                            "Distance de risque nulle pour TP RR. Fallback PIPS."
-                        )
+                        self.logger.warning("Distance de risque nulle pour TP RR. Fallback PIPS.")
                         tp_method = "PIPS"
                     else:
                         tp_distance = risk_distance_price * rr_ratio
-                        take_profit_price = (
-                            entry_price + tp_distance
-                            if action == "BUY"
-                            else entry_price - tp_distance
-                        )
+                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
                 if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
-                    atr_period = int(
-                        prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14))
-                        or 14
-                    )
+                    atr_period = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
                     atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
                     atr = _compute_atr(rates_df, atr_period)
                     if not (atr == atr and atr > 0):
@@ -1843,22 +1734,14 @@ class TradeExecutor:
                         tp_method = "PIPS"
                     else:
                         tp_distance = atr_mult * atr
-                        take_profit_price = (
-                            entry_price + tp_distance
-                            if action == "BUY"
-                            else entry_price - tp_distance
-                        )
+                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
                 if tp_method == "PIPS" and take_profit_price == 0.0:
                     tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
                     tp_distance = tp_pips * pip_size
-                    take_profit_price = (
-                        entry_price + tp_distance
-                        if action == "BUY"
-                        else entry_price - tp_distance
-                    )
+                    take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
 
-        # ========================= Validations Katana & ajustements serrés =========================
+        # ========================= Validations Katana & ajustements de sécurité =========================
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
@@ -1883,11 +1766,7 @@ class TradeExecutor:
         sl_dist_points = sl_dist_price / point
         tp_dist_points = tp_dist_price / point
 
-        if (
-            math.isfinite(sl_hard_min_points)
-            and sl_hard_min_points > 0
-            and sl_dist_points < sl_hard_min_points
-        ):
+        if math.isfinite(sl_hard_min_points) and sl_hard_min_points > 0 and sl_dist_points < sl_hard_min_points:
             sl_dist_points = sl_hard_min_points
         if math.isfinite(sl_hard_max_points) and sl_dist_points > sl_hard_max_points:
             if reject_if_sl_over_cap:
@@ -1910,14 +1789,8 @@ class TradeExecutor:
 
         # C) ATR M1 minimal (si dispo)
         try:
-            atr_df = (market_context.get("market_data_m1") or {}).get(
-                symbol
-            ) or rates_df
-            atr_m1 = (
-                _compute_atr(atr_df, period=14)
-                if isinstance(atr_df, pd.DataFrame)
-                else float("nan")
-            )
+            atr_df = (market_context.get("market_data_m1") or {}).get(symbol) or rates_df
+            atr_m1 = _compute_atr(atr_df, period=14) if isinstance(atr_df, pd.DataFrame) else float("nan")
             if atr_m1 == atr_m1 and atr_m1 > 0:
                 atr_m1_pips = atr_m1 / pip_size
                 if hard_min_atr_m1_pips > 0 and atr_m1_pips < hard_min_atr_m1_pips:
@@ -1940,16 +1813,8 @@ class TradeExecutor:
         # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
         tp_dist_price = tp_dist_points * point
-        stop_loss_price = (
-            (entry_price - sl_dist_price)
-            if action == "BUY"
-            else (entry_price + sl_dist_price)
-        )
-        take_profit_price = (
-            (entry_price + tp_dist_price)
-            if action == "BUY"
-            else (entry_price - tp_dist_price)
-        )
+        stop_loss_price = (entry_price - sl_dist_price) if action == "BUY" else (entry_price + sl_dist_price)
+        take_profit_price = (entry_price + tp_dist_price) if action == "BUY" else (entry_price - tp_dist_price)
 
         if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
             raise TradeExecutionError("SL et TP trop proches après ajustements Katana.")
@@ -1957,6 +1822,7 @@ class TradeExecutor:
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
+
 
     def _calculate_loss_per_lot_fallback(
         self, symbol_info: Any, sl_distance_price: float, current_price: float
@@ -2362,27 +2228,34 @@ class TradeExecutor:
         Market / Limit / Stop, avec contrôles durcis (style desk).
         - Arrondis aux digits
         - Distances mini broker (stops_level / trade_stops_level)
-        - Cohérence directionnelle prix/SL/TP
-        - Normalisation volume (min/step/max) par FLOOR
+        - Cohérence directionnelle prix/SL/TP (vs price_ref)
+        - Normalisation volume (min/step/max) par FLOOR (jamais de dépassement)
         - Deviation/Filling policy robustes
         - Expiration (GTC/DAY/SPECIFIED)
-        - Métadonnées d’audit (ignorées par MT5)
+        - Métadonnées d’audit & compliance_flags (ignorées par MT5)
 
-        Ne modifie pas la signature. Lève TradeExecutionError en cas d’invalidité bloquante.
+        Lève TradeExecutionError en cas d’invalidité bloquante.
         """
         from datetime import datetime, timezone, timedelta
         import math
 
+        # ——— import des constantes MT5, robustifié ———
+        mt5 = None
+        try:
+            import MetaTrader5 as _mt5  # type: ignore
+            mt5 = _mt5
+        except Exception:
+            # tente via le connector (certains wrappers exposent mt5 dedans)
+            mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
+
         self.logger.info("Construction de la requête MT5 finale...")
 
-        # --- Validations & normalisations de base ---
+        # --- Validations de base ---
         action_str = str(trade_decision.get("action", "")).upper()  # BUY / SELL
         expected_symbol = str(trade_decision.get("asset", "") or "N/A")
 
         if action_str not in ("BUY", "SELL"):
-            raise TradeExecutionError(
-                f"Action invalide: '{action_str}' (attendu BUY/SELL)."
-            )
+            raise TradeExecutionError(f"Action invalide: '{action_str}' (attendu BUY/SELL).")
 
         if (
             (not symbol_info)
@@ -2399,7 +2272,7 @@ class TradeExecutor:
         if not (point > 0):
             raise TradeExecutionError("symbol_info.point invalide (<= 0).")
 
-        # stops_level (certains brokers exposent 'stops_level', d'autres 'trade_stops_level')
+        # stops_level (clé broker tolérante)
         stops_lvl_points = float(
             getattr(symbol_info, "trade_stops_level", 0)
             or getattr(symbol_info, "stops_level", 0)
@@ -2414,10 +2287,11 @@ class TradeExecutor:
 
         if not isinstance(volume, (int, float)) or volume <= 0:
             raise TradeExecutionError(f"Volume invalide ({volume}).")
+
         vol = float(volume)
         vol = max(vmin, min(vmax, vol))
         if vstep and vstep > 0:
-            # on utilise FLOOR pour ne pas dépasser la taille calculée par le risk sizer
+            # FLOOR: ne jamais surdimensionner par rapport au sizing
             steps = math.floor((vol - vmin) / vstep + 1e-12)
             vol = vmin + steps * vstep
             if vol > vmax:
@@ -2429,7 +2303,7 @@ class TradeExecutor:
             f"[VOLUME] avant={volume} -> après={vol} (min={vmin}, step={vstep}, max={vmax})"
         )
 
-        # --- Prix d’entrée marché & niveaux SL/TP arrondis ---
+        # --- Prix d’entrée & niveaux SL/TP arrondis ---
         if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
             raise TradeExecutionError("Prix d'entrée marché invalide.")
         entry_price_market = round(float(entry_price_market), digits)
@@ -2440,75 +2314,50 @@ class TradeExecutor:
         except Exception:
             raise TradeExecutionError("SL/TP non numériques.")
 
-        # --- Mapping constantes MT5 (tolérant : via self OU mt5) ---
+        # --- Mapping constantes MT5 (tolérant) ---
+        if mt5 is None:
+            raise TradeExecutionError("Module/constantes MT5 indisponibles.")
+
         # Actions
-        mt5_action_deal = getattr(
-            self, "TRADE_ACTION_DEAL", getattr(mt5, "TRADE_ACTION_DEAL", None)
-        )
-        mt5_action_pending = getattr(
-            self, "TRADE_ACTION_PENDING", getattr(mt5, "TRADE_ACTION_PENDING", None)
-        )
+        mt5_action_deal = getattr(mt5, "TRADE_ACTION_DEAL", None)
+        mt5_action_pending = getattr(mt5, "TRADE_ACTION_PENDING", None)
         if mt5_action_deal is None or mt5_action_pending is None:
-            raise TradeExecutionError("Constantes MT5 d'action introuvables.")
+            raise TradeExecutionError("Constantes MT5 TRADE_ACTION introuvables.")
 
-        # Types ordre
-        order_type_str = str(order_type_str or "MARKET").upper()
-        order_map = (getattr(self, "mt5_mappings", {}) or {}).get(
-            "order_types", {}
-        ) or {}
-        fill_map = (getattr(self, "mt5_mappings", {}) or {}).get(
-            "order_filling_policies", {}
-        ) or {}
-        time_map = (getattr(self, "mt5_mappings", {}) or {}).get(
-            "order_time_flags", {}
-        ) or {}
-
-        ORDER_TYPE_BUY = getattr(
-            self, "ORDER_TYPE_BUY", getattr(mt5, "ORDER_TYPE_BUY", None)
-        )
-        ORDER_TYPE_SELL = getattr(
-            self, "ORDER_TYPE_SELL", getattr(mt5, "ORDER_TYPE_SELL", None)
-        )
+        # Types d’ordre
+        ORDER_TYPE_BUY = getattr(mt5, "ORDER_TYPE_BUY", None)
+        ORDER_TYPE_SELL = getattr(mt5, "ORDER_TYPE_SELL", None)
         if ORDER_TYPE_BUY is None or ORDER_TYPE_SELL is None:
-            raise TradeExecutionError("Constantes MT5 type BUY/SELL introuvables.")
+            raise TradeExecutionError("Constantes MT5 ORDER_TYPE BUY/SELL introuvables.")
+
+        # Mapping custom (facultatif)
+        order_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_types", {}) or {}
+        fill_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_filling_policies", {}) or {}
+        time_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_time_flags", {}) or {}
 
         # Time flags
-        ORDER_TIME_GTC = getattr(
-            self, "ORDER_TIME_GTC", getattr(mt5, "ORDER_TIME_GTC", None)
-        )
-        ORDER_TIME_DAY = getattr(
-            mt5,
-            time_map.get("DAY", "ORDER_TIME_DAY"),
-            getattr(mt5, "ORDER_TIME_DAY", None),
-        )
+        ORDER_TIME_GTC = getattr(mt5, "ORDER_TIME_GTC", None)
+        ORDER_TIME_DAY = getattr(mt5, time_map.get("DAY", "ORDER_TIME_DAY"), getattr(mt5, "ORDER_TIME_DAY", None))
         ORDER_TIME_SPECIFIED = getattr(
-            mt5,
-            time_map.get("SPECIFIED", "ORDER_TIME_SPECIFIED"),
-            getattr(mt5, "ORDER_TIME_SPECIFIED", None),
+            mt5, time_map.get("SPECIFIED", "ORDER_TIME_SPECIFIED"), getattr(mt5, "ORDER_TIME_SPECIFIED", None)
         )
         if ORDER_TIME_GTC is None:
             raise TradeExecutionError("Constante MT5 ORDER_TIME_GTC introuvable.")
 
         # Filling policy
-        filling_policy_str = str(
-            config.get("execution_policy.type_filling", "FOK")
-        ).upper()
-        mt5_filling_policy = getattr(
-            mt5,
-            fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
-            getattr(mt5, "ORDER_FILLING_FOK", None),
-        )
+        filling_policy_str = str(config.get("execution_policy", {}).get("type_filling", "FOK")).upper()
+        mt5_filling_policy = getattr(mt5, fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
+                                    getattr(mt5, "ORDER_FILLING_FOK", None))
         if mt5_filling_policy is None:
             raise TradeExecutionError("Constante MT5 filling policy introuvable.")
 
         # Déviation (points)
-        deviation_points = int(
-            config.get("execution_policy.max_deviation_points", 20) or 20
-        )
+        deviation_points = int(config.get("execution_policy", {}).get("max_deviation_points", 20) or 20)
         if deviation_points < 0:
             deviation_points = 0
 
         # --- Construction base requête ---
+        order_type_str = str(order_type_str or "MARKET").upper()
         request = {
             "symbol": symbol_info.name,
             "volume": float(vol),
@@ -2529,53 +2378,31 @@ class TradeExecutor:
             price_ref = float(request["price"])
         elif order_type_str in ("BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"):
             request["action"] = mt5_action_pending
-            mapped = order_map.get(order_type_str)
-            if mapped is None:
-                raise TradeExecutionError(
-                    f"Type d'ordre différé non supporté: '{order_type_str}'."
-                )
-            request["type"] = getattr(mt5, mapped)
+            mapped = order_map.get(order_type_str, f"ORDER_TYPE_{order_type_str}")
+            order_type_const = getattr(mt5, mapped, None)
+            if order_type_const is None:
+                raise TradeExecutionError(f"Type d'ordre différé non supporté: '{order_type_str}'.")
+            request["type"] = order_type_const
 
-            # Trigger proposé ou fallback
-            trig = (
-                trigger_price
-                if isinstance(trigger_price, (int, float)) and trigger_price > 0
-                else entry_price_market
-            )
+            # Trigger proposé ou fallback sur marché (mais on vérifie les distances ensuite)
+            trig = trigger_price if isinstance(trigger_price, (int, float)) and trigger_price > 0 else entry_price_market
             trig = round(float(trig), digits)
-            # Prix marché actuel pour validations de proximité
+
+            # Lecture du tick pour validations côté bid/ask
             tick = self.mt5_connector.get_symbol_info_tick(symbol_info.name)
             if not tick or not hasattr(tick, "ask") or not hasattr(tick, "bid"):
                 raise TradeExecutionError(f"Tick invalide pour {symbol_info.name}.")
             ask = float(getattr(tick, "ask") or 0.0)
             bid = float(getattr(tick, "bid") or 0.0)
             if not (ask > 0 and bid > 0 and ask > bid):
-                raise TradeExecutionError(
-                    f"Prix marché invalides (ask/bid) pour {symbol_info.name}."
-                )
+                raise TradeExecutionError(f"Prix marché invalides (ask/bid) pour {symbol_info.name}.")
 
             # Règles MT5: distances min par type, côté BID/ASK
-            # - BUY_LIMIT doit être < ASK - min_dist
-            # - SELL_LIMIT doit être > BID + min_dist
-            # - BUY_STOP  doit être > ASK + min_dist
-            # - SELL_STOP doit être < BID - min_dist
             too_close = (
-                (
-                    order_type_str == "BUY_LIMIT"
-                    and not (trig < ask - min_stop_distance_price)
-                )
-                or (
-                    order_type_str == "SELL_LIMIT"
-                    and not (trig > bid + min_stop_distance_price)
-                )
-                or (
-                    order_type_str == "BUY_STOP"
-                    and not (trig > ask + min_stop_distance_price)
-                )
-                or (
-                    order_type_str == "SELL_STOP"
-                    and not (trig < bid - min_stop_distance_price)
-                )
+                (order_type_str == "BUY_LIMIT" and not (trig < ask - min_stop_distance_price))
+                or (order_type_str == "SELL_LIMIT" and not (trig > bid + min_stop_distance_price))
+                or (order_type_str == "BUY_STOP"  and not (trig > ask + min_stop_distance_price))
+                or (order_type_str == "SELL_STOP" and not (trig < bid - min_stop_distance_price))
             )
             if too_close:
                 raise TradeExecutionError(
@@ -2587,20 +2414,15 @@ class TradeExecutor:
             price_ref = float(trig)
 
             # Expiration
-            expiration_policy = str(
-                (config.get("order_expiration_policy") or {}).get("type", "GTC")
-            ).upper()
+            expiration_policy = str((config.get("order_expiration_policy") or {}).get("type", "GTC")).upper()
             if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
                 request["type_time"] = ORDER_TIME_DAY
             elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
                 request["type_time"] = ORDER_TIME_SPECIFIED
-                # défaut = +1 jour UTC si non fourni
                 exp_str = (config.get("order_expiration_policy") or {}).get(
-                    "datetime",
-                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                    "datetime", (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
                 )
                 try:
-                    # tolère string ISO (avec ou sans tz) ou epoch seconds
                     if isinstance(exp_str, (int, float)):
                         request["expiration"] = int(exp_str)
                     else:
@@ -2614,7 +2436,7 @@ class TradeExecutor:
         else:
             raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
 
-        # --- Cohérence directionnelle des niveaux vs prix de référence ---
+        # --- Cohérence directionnelle des niveaux vs price_ref ---
         eps = max(point, 1e-12)
         if action_str == "BUY":
             if not (tp_price > price_ref + eps and price_ref > sl_price + eps):
@@ -2627,7 +2449,7 @@ class TradeExecutor:
                     f"Incohérence SELL: TP({tp_price}) < Price({price_ref}) < SL({sl_price}) attendue."
                 )
 
-        # --- Distances min broker (SL/TP vs price) ---
+        # --- Distances min broker (SL/TP vs price_ref) ---
         if min_stop_distance_price > 0:
             if action_str == "BUY":
                 if (price_ref - sl_price) < min_stop_distance_price - 1e-12:
@@ -2648,20 +2470,13 @@ class TradeExecutor:
                         f"TP trop proche: Δ={price_ref - tp_price:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
                     )
 
-        # --- Commentaire court et traçabilité ---
-        # Ex: SNIPER_X|scalping|MARKET|katana_mid|RR1.8
-        comment_tpl = self.config_manager.get(
-            "trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}"
-        )
+        # --- Commentaire & tags succincts ---
+        comment_tpl = self.config_manager.get("trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}")
         max_len = int(self.config_manager.get("trading.comment_max_length", 31) or 31)
         strategy_tag = str(config.get("strategy_name", "N/A"))
         rule_name = str(trade_decision.get("rule_name", "") or "")
         level_mode = str(trade_decision.get("level_mode", "") or "")
-        rr_proj = (
-            trade_decision.get("meta_rr_projected")
-            or trade_decision.get("rr")
-            or trade_decision.get("rr_effective")
-        )
+        rr_proj = trade_decision.get("meta_rr_projected") or trade_decision.get("rr") or trade_decision.get("rr_effective")
 
         extra_tag_parts = []
         if "katana" in rule_name.lower():
@@ -2676,21 +2491,25 @@ class TradeExecutor:
             comment = f"{comment}|{'-'.join(extra_tag_parts)}"
         request["comment"] = comment[:max_len]
 
-        # --- Champs standards finaux ---
-        request.setdefault(
-            "action",
-            mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending,
-        )
+        # --- Defaults ---
+        request.setdefault("action", mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending)
         request.setdefault("type_time", ORDER_TIME_GTC)
 
-        # --- Métadonnées d’audit (ignorées par MT5) ---
-        # Gardées pour logging/diagnostic en back-office
+        # --- Compliance & audit (pour nos logs, ignoré par MT5) ---
         request["_meta_rule_name"] = rule_name
         request["_meta_level_mode"] = level_mode
         request["_meta_action"] = action_str
         request["_meta_rr"] = rr_proj
-        request["_meta_spread_pips"] = trade_decision.get("meta_spread_pips")
-        request["_meta_atr_m1_pips"] = trade_decision.get("meta_atr_m1_pips")
+        request["_meta_stops_level_points"] = stops_lvl_points
+        request["_meta_point"] = point
+
+        request["_compliance_flags"] = {
+            "direction_ok": True,
+            "stops_ok": True,
+            "price_digits_ok": True,
+            "midline_strict": (level_mode.lower() == "boll_midline_strict"),
+            "order_type": order_type_str,
+        }
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
         return request

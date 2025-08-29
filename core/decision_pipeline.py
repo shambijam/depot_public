@@ -1624,11 +1624,13 @@ class DecisionPipeline:
         mais sans déléguer la décision finale aux instances de stratégie.
         DecisionPipeline est le SEUL DÉCIDEUR.
 
-        ➕ Version 'katana midline scalp' :
-        - Gate d’entrée Bollinger médiane (BUY ∈ [lower, mid], SELL ∈ [mid, upper])
-        - Interdit en expansion/surge (anti-chaos)
-        - TPSL serrés basés sur half-band & médiane (RR min configurable)
-        - Reste 100% compatible avec le sizing existant (on pousse sl/tp en *pips* cibles)
+        ⚔️ Version STRICT 'katana midline scalp' (NO FALLBACK):
+        - Gate d’entrée Bollinger médiane obligatoire (BUY ∈ [lower, mid], SELL ∈ [mid, upper])
+        - 'entry_gate_ok' requis (depuis micro-phase Bollinger) + distance mini à la médiane
+        - Refus explicite si données Bollinger ou prix invalides
+        - Interdit en expansion/surge (anti-chaos) et hors range si requis
+        - TPSL serrés basés sur half-band & médiane, rejet si RR < min_rr (aucun ajustement soft)
+        - Attache systématique des niveaux Bollinger au package décisionnel
         """
         import math
         import numpy as np
@@ -1678,7 +1680,6 @@ class DecisionPipeline:
         trade_decision = self._core_evaluate_signals(
             context, current_config, signals, strategy_name
         )
-
         if not trade_decision:
             self.logger.info(
                 f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
@@ -1744,15 +1745,18 @@ class DecisionPipeline:
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
 
-        # 3bis) ⚔️ Gate 'Katana Midline Scalp' basé sur Bollinger (anti-chaos + TPSL serrés)
+        # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
         scalp_cfg = (current_config.get("scalping") or {}).get("boll_midline", {}) or {}
         rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
         k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
         buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
-        allow_in_range = bool(scalp_cfg.get("require_range_regime", True))
+        require_range = bool(scalp_cfg.get("require_range_regime", True))
         block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
+        min_mid_ratio = float(
+            scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
+        )  # distance mini à la médiane
 
-        # ----- Récup des infos Bollinger depuis 'signals' (multi-sources tolérantes) -----
+        # ----- Récup des infos Bollinger -----
         def _get(path, default=None):
             try:
                 return path()  # lambda
@@ -1784,7 +1788,6 @@ class DecisionPipeline:
             or {}
         )
 
-        # Niveaux Bollinger robustes aux None/NaN
         bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
         bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
         bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
@@ -1795,6 +1798,19 @@ class DecisionPipeline:
         mid_entry = (
             str(_get(lambda: boll.get("mid_entry"), signals.get("mid_entry", "")) or "")
         ).lower()
+
+        # ✅ micro-phase strict flags
+        entry_gate_ok = _to_bool(
+            _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
+            default=False,
+        )
+        mid_distance_ratio = _num(
+            _get(
+                lambda: boll.get("mid_distance_ratio"),
+                signals.get("mid_distance_ratio"),
+            ),
+            np.nan,
+        )
 
         # Prix courant (de la décision ou des signaux M1)
         price = None
@@ -1813,7 +1829,7 @@ class DecisionPipeline:
                 break
         price = _num(price)
 
-        # pip_size (best effort, non bloquant ici)
+        # pip_size
         pip_size = None
         try:
             si = getattr(self, "symbol_info", None)
@@ -1828,98 +1844,102 @@ class DecisionPipeline:
         except Exception:
             pip_size = None
 
-        # Gate midline (on n'applique que si toutes les valeurs sont valides)
+        # ❌ NO FALLBACK: données Bollinger/price + gate micro-phase doivent être valides
         if any(
             not (isinstance(x, float) and math.isfinite(x))
             for x in (bb_mid, bb_up, bb_lo, price)
         ):
-            self.logger.debug(
-                "Bollinger midline indisponible/prix invalide -> on saute le gate midline (pas d'erreur)."
+            self.logger.info(
+                "Rejet: données Bollinger/price invalides pour midline scalp (mode strict)."
             )
-        else:
-            half_band = (bb_up - bb_lo) / 2.0
-            in_buy_zone = (price <= bb_mid) and (price >= bb_lo)
-            in_sell_zone = (price >= bb_mid) and (price <= bb_up)
-
-            if block_on_expansion and is_exp:
+            return {}
+        if not entry_gate_ok:
+            self.logger.info(
+                "Rejet: entry_gate_ok=False depuis micro-phase (mode strict)."
+            )
+            return {}
+        if isinstance(mid_distance_ratio, float) and math.isfinite(mid_distance_ratio):
+            if mid_distance_ratio < min_mid_ratio:
                 self.logger.info(
-                    "Gate rejeté: expansion Bollinger active (anti-chaos)."
+                    f"Rejet: distance à la médiane insuffisante ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f})."
                 )
                 return {}
 
-            if allow_in_range and not is_range:
-                self.logger.info("Gate rejeté: régime non-range pour midline scalp.")
+        half_band = (bb_up - bb_lo) / 2.0
+        in_buy_zone = (price <= bb_mid) and (price >= bb_lo)
+        in_sell_zone = (price >= bb_mid) and (price <= bb_up)
+
+        if block_on_expansion and is_exp:
+            self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
+            return {}
+        if require_range and not is_range:
+            self.logger.info("Rejet: régime non-range pour midline scalp.")
+            return {}
+
+        if normalized_action == "BUY":
+            if not (in_buy_zone and mid_entry == "buy"):
+                self.logger.info(
+                    "Rejet BUY: condition midline non satisfaite (zone ou mid_entry)."
+                )
+                return {}
+        elif normalized_action == "SELL":
+            if not (in_sell_zone and mid_entry == "sell"):
+                self.logger.info(
+                    "Rejet SELL: condition midline non satisfaite (zone ou mid_entry)."
+                )
+                return {}
+        elif normalized_action == "CLOSE":
+            # Laisse passer la fermeture sans gate
+            pass
+
+        # --- TPSL serrés (en pips) ---
+        if normalized_action in {"BUY", "SELL"}:
+            if not (pip_size and pip_size > 0):
+                self.logger.info("Rejet: pip_size indisponible (mode strict).")
                 return {}
 
-            if normalized_action == "BUY":
-                if not (in_buy_zone and mid_entry == "buy"):
-                    self.logger.info(
-                        "Gate BUY rejeté: condition midline non satisfaite (zone ou mid_entry)."
-                    )
-                    return {}
-            elif normalized_action == "SELL":
-                if not (in_sell_zone and mid_entry == "sell"):
-                    self.logger.info(
-                        "Gate SELL rejeté: condition midline non satisfaite (zone ou mid_entry)."
-                    )
-                    return {}
-
-            # --- TPSL serrés par défaut (en pips) ---
-            hb_pips = None
-            if pip_size and pip_size > 0:
-                hb_pips = max(0.0, half_band / pip_size)
-
+            hb_pips = max(0.0, half_band / pip_size)
             target_tp_pips: float | None = None
             target_sl_pips: float | None = None
 
             if normalized_action == "BUY":
-                if pip_size and pip_size > 0:
-                    tp_to_mid_pips = max(0.0, (bb_mid - price) / pip_size)
-                    fallback_tp = (
-                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
-                    )
-                    target_tp_pips = max(
-                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
-                    )
-                    # SL: buffer sous lower
-                    target_sl_pips = max(
-                        buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
-                    )
+                tp_to_mid_pips = max(0.0, (bb_mid - price) / pip_size)
+                fallback_tp = (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                target_tp_pips = max(tp_to_mid_pips, (fallback_tp or tp_to_mid_pips))
+                # SL: buffer sous lower
+                target_sl_pips = max(
+                    buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
+                )
             else:  # SELL
-                if pip_size and pip_size > 0:
-                    tp_to_mid_pips = max(0.0, (price - bb_mid) / pip_size)
-                    fallback_tp = (
-                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
-                    )
-                    target_tp_pips = max(
-                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
-                    )
-                    # SL: buffer au-dessus d'upper
-                    target_sl_pips = max(
-                        buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
-                    )
+                tp_to_mid_pips = max(0.0, (price - bb_mid) / pip_size)
+                fallback_tp = (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                target_tp_pips = max(tp_to_mid_pips, (fallback_tp or tp_to_mid_pips))
+                # SL: buffer au-dessus d'upper
+                target_sl_pips = max(
+                    buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
+                )
 
-            # RR minimal (soft)
-            if (
-                (target_tp_pips is not None)
-                and (target_sl_pips is not None)
-                and target_sl_pips > 0
-            ):
-                rr_est = float(target_tp_pips / target_sl_pips)
-                if rr_est < rr_min:
-                    target_tp_pips = rr_min * target_sl_pips
+            # ❌ NO FALLBACK: RR doit respecter min_rr (on rejette si insuffisant)
+            if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
+                self.logger.info("Rejet: TPSL non calculables (mode strict).")
+                return {}
+            rr_est = float(target_tp_pips / target_sl_pips)
+            if rr_est < rr_min:
+                self.logger.info(
+                    f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
+                )
+                return {}
 
             # Injecter pour RiskEngine/Executor
-            if target_tp_pips is not None:
-                trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
-            if target_sl_pips is not None:
-                trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
-            trade_decision["rule_name"] = "katana_midline_scalp"
-            trade_decision["level_mode"] = "boll_midline"
-            trade_decision.setdefault("boll", {})
-            trade_decision["boll"].update(
-                {"bb_mid": bb_mid, "bb_upper": bb_up, "bb_lower": bb_lo}
-            )
+            trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
+            trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
+            trade_decision["rule_name"] = "katana_midline_scalp_strict"
+            trade_decision["level_mode"] = "boll_midline_strict"
+            trade_decision["boll"] = {
+                "bb_mid": bb_mid,
+                "bb_upper": bb_up,
+                "bb_lower": bb_lo,
+            }
 
         # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
         active_broker_account = context.get("active_broker_account", {})
@@ -1931,7 +1951,6 @@ class DecisionPipeline:
         self.logger.debug(
             f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}"
         )
-
         if len(current_open_positions) >= max_positions_for_account:
             self.logger.warning(
                 f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}."
@@ -2807,24 +2826,27 @@ class DecisionPipeline:
         self, context: dict, current_config: dict, trade_decision: dict
     ) -> dict:
         """
-        Sizing au risque — version PERMISSIVE & MIDLINE-READY
-        ----------------------------------------------------
+        Sizing au risque — version STRICT-AWARE (midline strict) & safe par défaut
+        -------------------------------------------------------------------------
         Priorités des niveaux (de la plus forte à la plus faible):
-        1) Hints midline (sl_pips_hint/tp_pips_hint) — si level_mode == "boll_midline"
+        1) Hints midline (sl_pips_hint/tp_pips_hint) — si level_mode == "boll_midline" / "boll_midline_strict"
         2) target_sl_pips / target_tp_pips        — décision de base
         3) sl_price / tp_price                    — si fournis explicitement en prix
 
-        Refus uniquement si:
+        REFUS explicites (hard):
         - action/symbole/prix invalide
         - niveaux manquants ou distances nulles
         - incohérence directionnelle (BUY: sl<entry<tp ; SELL: tp<entry<sl)
         - equity nulle
         - contraintes BROKER (stops_level) impossibles à satisfaire
+        - (STRICT midline) spread au-delà du cap
+        - (STRICT midline) RR_effectif < min_rr (pas d’étirement “TP pour atteindre RR”)
+        - (STRICT midline) volume quantifié ≤ 0
 
-        Ajustements permissifs:
+        Ajustements permissifs (non stricts / legacy):
         - SL borné dans [min_k*ATR ; max_k*ATR] (si ATR dispo)
-        - Spread => jamais bloquant ; on note et on étire TP pour RR effectif ≥ min_rr (capé à max_tp_to_sl_ratio)
-        - Rounding aux `digits` après tous les ajustements
+        - Spread noté ; on peut étirer TP pour RR_effectif ≥ min_rr (capé à max_tp_to_sl_ratio)
+        - Rounding aux `digits` après ajustements
         """
         notes = []
 
@@ -2848,9 +2870,7 @@ class DecisionPipeline:
             if entry is None:
                 return {"ok": False, "reason": "missing_entry_price"}
             entry = float(entry)
-            if not (
-                entry == entry and entry > 0
-            ):  # nan/inf check implicite via (entry==entry)
+            if not (entry == entry and entry > 0):  # nan/inf check
                 return {"ok": False, "reason": "invalid_entry_price"}
         except Exception:
             return {"ok": False, "reason": "invalid_entry_price"}
@@ -2887,6 +2907,16 @@ class DecisionPipeline:
         max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
         max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 3.5))
 
+        # Mode strict pour midline ?
+        level_mode_in = str(trade_decision.get("level_mode", "")).lower()
+        strict_cfg = (current_config or {}).get("strict_modes", {}) or {}
+        strict_for_midline = bool(
+            strict_cfg.get("midline", True)
+        )  # default True: strict sur midline
+        is_midline_strict = level_mode_in in {"boll_midline_strict"} or (
+            level_mode_in == "boll_midline" and strict_for_midline
+        )
+
         # Adaptation high_vol (si meta/regime_tag fourni)
         meta = trade_decision.get("meta", {}) or {}
         regime_tag = str(meta.get("regime_tag", "")).lower()
@@ -2917,8 +2947,6 @@ class DecisionPipeline:
             return {"ok": False, "reason": "no_equity"}
 
         # --- 4) Niveaux: PRIX vs PIPS (priorités avec MIDLINE) ---
-        # Hints midline (si level_mode = boll_midline)
-        level_mode_in = str(trade_decision.get("level_mode", "")).lower()
         sl_hint = trade_decision.get("sl_pips_hint")
         tp_hint = trade_decision.get("tp_pips_hint")
 
@@ -2930,12 +2958,12 @@ class DecisionPipeline:
         sl_price_in = trade_decision.get("sl_price")
         tp_price_in = trade_decision.get("tp_price")
 
-        # On construit en priorité en PIPS (midline hint > target pips), sinon on accepte les prix
+        # On construit en priorité en PIPS (midline hint > target pips), sinon prix
         sl_pips_val = None
         tp_pips_val = None
 
         if (
-            level_mode_in == "boll_midline"
+            level_mode_in in {"boll_midline", "boll_midline_strict"}
             and isinstance(sl_hint, (int, float))
             and isinstance(tp_hint, (int, float))
         ):
@@ -2978,14 +3006,13 @@ class DecisionPipeline:
             if not (tp_price < entry < sl_price):
                 return {"ok": False, "reason": "levels_incoherent_for_sell"}
 
-        # --- 5) Bornes via ATR (AJUSTEMENT, pas de reject) ---
+        # --- 5) Bornes via ATR (ajustements seulement si NON strict) ---
         atr_settings = rm_cfg.get("atr_settings") or {}
         slc = rm_cfg.get("sl_constraints", {}) or {}
         atr_period = int(atr_settings.get("period", 14))
         min_k = float(slc.get("min_atr_multiple", 0.8))
         max_k = float(slc.get("max_atr_multiple", 1.3))
 
-        # ATR en unités de prix
         atr_price = None
         try:
             if df is not None:
@@ -2994,7 +3021,7 @@ class DecisionPipeline:
             atr_price = None
 
         if not (isinstance(atr_price, float) and atr_price > 0):
-            # fallback: ATR M1 en pips depuis meta/trace -> prix
+            # fallback: ATR M1 en pips -> prix (si dispo)
             atr_m1_pips = None
             dt = trade_decision.get("decision_trace") or {}
             if isinstance(meta.get("atr_m1_pips"), (int, float)):
@@ -3004,7 +3031,7 @@ class DecisionPipeline:
             if isinstance(atr_m1_pips, float) and atr_m1_pips > 0:
                 atr_price = atr_m1_pips * pip_size
 
-        if isinstance(atr_price, float) and atr_price > 0:
+        if (not is_midline_strict) and isinstance(atr_price, float) and atr_price > 0:
             sl_min = max(0.0, min_k * atr_price)
             sl_max = max(sl_min, max_k * atr_price)
             if sl_dist_price < sl_min:
@@ -3026,9 +3053,8 @@ class DecisionPipeline:
                 )
                 notes.append(f"sl_capped_to_atr_max:{sl_pips_val:.2f}p")
 
-        # --- 6) Stops level broker: AJUSTEMENTS (refus seulement si impossible) ---
+        # --- 6) Stops level broker (hard) ---
         if min_stop_price_dist > 0:
-            # SL ≥ min distance
             if sl_dist_price < min_stop_price_dist:
                 sl_dist_price = min_stop_price_dist
                 sl_pips_val = sl_dist_price / pip_size
@@ -3038,7 +3064,6 @@ class DecisionPipeline:
                     else (entry + sl_dist_price)
                 )
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
-            # TP ≥ min distance
             if tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
@@ -3048,8 +3073,6 @@ class DecisionPipeline:
                     else (entry - tp_dist_price)
                 )
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
-
-            # si une incohérence subsiste (numérique)
             if sl_dist_price <= 0 or tp_dist_price <= 0:
                 return {"ok": False, "reason": "broker_min_distance_unreachable"}
 
@@ -3058,10 +3081,7 @@ class DecisionPipeline:
             sl_price = round(sl_price, digits)
             tp_price = round(tp_price, digits)
 
-        # --- 7) Spread & RR effectif (ajustement TP) ---
-        if spread_pips > max_spread_pips_cfg:
-            notes.append(f"high_spread:{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p")
-
+        # --- 7) Spread & RR effectif ---
         # Distances finales (en prix)
         sl_dist_price = abs(entry - sl_price)
         tp_dist_price = abs(tp_price - entry)
@@ -3069,48 +3089,67 @@ class DecisionPipeline:
         # RR nominal
         rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-        # RR effectif: compense le spread côté récompense
-        # (même formule BUY/SELL car on prend des distances absolues et on retranche la pénalité spread)
+        # RR effectif: pénalise la récompense par le spread
         spread_comp_price = spread_pts * point
         effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-        # Étire le TP pour tenter d’atteindre min_rr (capé)
-        if rr_effective < min_rr:
-            required_eff_tp_dist = min_rr * sl_dist_price
-            new_tp_dist_price = required_eff_tp_dist + spread_comp_price
-            cap_tp_dist_price = max_tp_sl_ratio * sl_dist_price
-
-            if new_tp_dist_price <= cap_tp_dist_price:
-                tp_dist_price = new_tp_dist_price
-                tp_price = (
-                    (entry + tp_dist_price)
-                    if action == "BUY"
-                    else (entry - tp_dist_price)
+        if is_midline_strict:
+            # Hard spreads cap
+            if spread_pips > max_spread_pips_cfg:
+                return {
+                    "ok": False,
+                    "reason": f"spread_too_high_{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p",
+                }
+            # RR effectif minimal requis — pas d’étirement permissif
+            if rr_effective < min_rr:
+                return {
+                    "ok": False,
+                    "reason": f"rr_effective_below_min_{rr_effective:.2f}<{min_rr:.2f}",
+                }
+        else:
+            # Mode permissif (legacy): possibilité d'étirer le TP (capé)
+            if spread_pips > max_spread_pips_cfg:
+                notes.append(
+                    f"high_spread:{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p"
                 )
-                # Respect broker min (recheck)
-                if min_stop_price_dist > 0 and tp_dist_price < min_stop_price_dist:
-                    tp_dist_price = min_stop_price_dist
+            if rr_effective < min_rr:
+                required_eff_tp_dist = min_rr * sl_dist_price
+                new_tp_dist_price = required_eff_tp_dist + spread_comp_price
+                cap_tp_dist_price = max_tp_sl_ratio * sl_dist_price
+
+                if new_tp_dist_price <= cap_tp_dist_price:
+                    tp_dist_price = new_tp_dist_price
                     tp_price = (
                         (entry + tp_dist_price)
                         if action == "BUY"
                         else (entry - tp_dist_price)
                     )
-                    notes.append("tp_extended_but_limited_by_broker_min")
-                tp_price = round(tp_price, digits)
-                notes.append(f"tp_extended_for_min_rr:{min_rr:.2f}")
-                # Recalc RR
-                sl_dist_price = abs(entry - sl_price)
-                tp_dist_price = abs(tp_price - entry)
-                effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
-                rr_effective = (
-                    (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
-                )
-                rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
-            else:
-                notes.append(
-                    f"min_rr_not_reached_but_accepted:{rr_effective:.2f}<{min_rr:.2f};cap={max_tp_sl_ratio:.2f}x"
-                )
+                    # Respect broker min (recheck)
+                    if min_stop_price_dist > 0 and tp_dist_price < min_stop_price_dist:
+                        tp_dist_price = min_stop_price_dist
+                        tp_price = (
+                            (entry + tp_dist_price)
+                            if action == "BUY"
+                            else (entry - tp_dist_price)
+                        )
+                        notes.append("tp_extended_but_limited_by_broker_min")
+                    tp_price = round(tp_price, digits)
+                    notes.append(f"tp_extended_for_min_rr:{min_rr:.2f}")
+                    # Recalc RR
+                    sl_dist_price = abs(entry - sl_price)
+                    tp_dist_price = abs(tp_price - entry)
+                    effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
+                    rr_effective = (
+                        (effective_tp_dist / sl_dist_price)
+                        if sl_dist_price > 0
+                        else 0.0
+                    )
+                    rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
+                else:
+                    notes.append(
+                        f"min_rr_not_reached_but_accepted:{rr_effective:.2f}<{min_rr:.2f};cap={max_tp_sl_ratio:.2f}x"
+                    )
 
         # --- 8) Sizing au risque ---
         risk_amount = equity * (risk_pct / 100.0)
@@ -3123,6 +3162,9 @@ class DecisionPipeline:
 
         # Quantification volume selon broker
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
+
+        if is_midline_strict and (not isinstance(volume, (int, float)) or volume <= 0):
+            return {"ok": False, "reason": "volume_after_quantization_zero"}
 
         return {
             "ok": True,
