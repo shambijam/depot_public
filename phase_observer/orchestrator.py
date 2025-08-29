@@ -15,12 +15,16 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Third-party
 import numpy as np
 import pandas as pd
+import os
 
 # Local
 from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures, PhaseMemory
 from .validators import calculate_confidence_score
 from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
 from .detectors import Detectors
+from phase_observer.reporter import PhaseObserverReporter
+from datetime import datetime, timezone
+
     
 # Alias UTC
 UTC = timezone.utc
@@ -1803,3 +1807,24 @@ class PhaseObserver:
             )
             if temp_path.exists():
                 temp_path.unlink()
+                
+      
+        
+    def end_of_day_phase_report(self, symbol: str, frames_by_tf: dict):
+        """
+        frames_by_tf: dict { "M1": df_m1, "M5": df_m5, "M15": df_m15 }
+        """
+        reporter = PhaseObserverReporter(config_manager=self.config_manager, logger=self.logger)
+        report = reporter.run_daily_report_for_asset(symbol, frames_by_tf, tz=timezone.utc)
+
+        date_tag = str(datetime.now(timezone.utc).date())
+        base_dir = self.config_manager.get("reporting.base_dir", "reports")
+        os.makedirs(base_dir, exist_ok=True)
+
+        md_path = os.path.join(base_dir, f"{symbol}_{date_tag}_phase_report.md")
+        jsonl_path = os.path.join(base_dir, f"{symbol}_{date_tag}_phase_report.jsonl")
+
+        reporter.export_markdown(report, md_path)
+        reporter.export_jsonl(report, jsonl_path)
+        self.logger.info(f"[REPORT] {symbol} → {md_path} | {jsonl_path}")
+        
