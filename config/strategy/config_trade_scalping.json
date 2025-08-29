@@ -100,14 +100,15 @@
   "entry_rules": {
     "scalping": {
       "boll_midline": {
-        "min_rr": 1.0,
+        "strict_mode": false,
+        "min_rr": 1.1,
         "tp_halfband_k": 1.0,
         "buffer_pips_min": 0.8,
         "min_mid_distance_ratio": 0.06,
         "require_range_regime": false,
         "block_on_expansion": false,
         "min_confidence": 0.3,
-        "katana_min_confidence": 0.35,
+        "katana_min_confidence": 0.30,
         "fvg_max_distance_pips": 2.0,
         "ob_max_distance_pips": 2.0,
         "katana_soft_distance_mult": 1.25,
