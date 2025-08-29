@@ -3,6 +3,7 @@ import logging
 import json
 import pandas as pd
 import numpy as np
+import math
 from datetime import datetime, UTC
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
@@ -1631,9 +1632,14 @@ class DecisionPipeline:
         - Interdit en expansion/surge (anti-chaos) et hors range si requis
         - TPSL serrés basés sur half-band & médiane, rejet si RR < min_rr (aucun ajustement soft)
         - Attache systématique des niveaux Bollinger au package décisionnel
+
+        ➕ Intégration optionnelle EMA/RSI/ATR Trailing (entrées uniquement)
+        - Si activé et qu’une entrée BUY/SELL est proposée, on construit SL/TP (TP via min_rr*SL)
+            et on bypass le gate Bollinger. La gestion des EXIT/UPDATE_TRAIL reste au position manager.
         """
         import math
         import numpy as np
+        import pandas as pd  # nécessaire pour vérifier DataFrame
 
         # DIAG local
         try:
@@ -1745,74 +1751,14 @@ class DecisionPipeline:
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
 
-        # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
-        scalp_cfg = (current_config.get("scalping") or {}).get("boll_midline", {}) or {}
-        rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
-        k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
-        buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
-        require_range = bool(scalp_cfg.get("require_range_regime", True))
-        block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
-        min_mid_ratio = float(
-            scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
-        )  # distance mini à la médiane
-
-        # ----- Récup des infos Bollinger -----
-        def _get(path, default=None):
+        # --- Prix courant (commun à tous les modules) ---
+        def _num(v, default=np.nan):
             try:
-                return path()  # lambda
+                x = float(v)
+                return x if math.isfinite(x) else default
             except Exception:
                 return default
 
-        def _num(val, fallback=np.nan) -> float:
-            try:
-                v = float(val)
-                return v if math.isfinite(v) else fallback
-            except Exception:
-                return fallback
-
-        def _to_bool(x, default=False) -> bool:
-            try:
-                if isinstance(x, (int, float)):
-                    return bool(x)
-                if isinstance(x, str):
-                    return x.strip().lower() in {"1", "true", "yes", "y", "on"}
-                return bool(x)
-            except Exception:
-                return default
-
-        boll = (
-            signals.get("boll")
-            or signals.get("bollinger")
-            or signals.get("boll_micro")
-            or signals.get("m1_boll")
-            or {}
-        )
-
-        bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
-        bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
-        bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
-        is_range = _to_bool(_get(lambda: boll.get("is_range"), signals.get("is_range")))
-        is_exp = _to_bool(
-            _get(lambda: boll.get("is_expansion"), signals.get("is_expansion"))
-        )
-        mid_entry = (
-            str(_get(lambda: boll.get("mid_entry"), signals.get("mid_entry", "")) or "")
-        ).lower()
-
-        # ✅ micro-phase strict flags
-        entry_gate_ok = _to_bool(
-            _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
-            default=False,
-        )
-        mid_distance_ratio = _num(
-            _get(
-                lambda: boll.get("mid_distance_ratio"),
-                signals.get("mid_distance_ratio"),
-            ),
-            np.nan,
-        )
-
-        # Prix courant (de la décision ou des signaux M1)
         price = None
         for key in ("entry_price", "current_price", "last_close", "close"):
             if key in trade_decision and trade_decision.get(key) is not None:
@@ -1829,117 +1775,264 @@ class DecisionPipeline:
                 break
         price = _num(price)
 
-        # pip_size
-        pip_size = None
-        try:
-            si = getattr(self, "symbol_info", None)
-            point = 0.0
-            if si is not None and hasattr(si, "point"):
-                point = float(getattr(si, "point") or 0.0)
-            elif isinstance(si, dict):
-                point = float(si.get("point", 0.0) or 0.0)
-            if point <= 0 and "point" in signals:
-                point = _num(signals.get("point"), 0.0)
-            pip_size = point * 10.0 if point > 0 else None
-        except Exception:
-            pip_size = None
-
-        # ❌ NO FALLBACK: données Bollinger/price + gate micro-phase doivent être valides
-        if any(
-            not (isinstance(x, float) and math.isfinite(x))
-            for x in (bb_mid, bb_up, bb_lo, price)
+        # ==========================================================
+        # ➕ Option EMA/RSI/ATR Trailing — ENTRÉES UNIQUEMENT
+        # ==========================================================
+        used_ema_decision = False
+        if (
+            strategy_name.lower() == "scalping"
+            and current_config.get("use_ema_rsi_atr_trail", True)
+            and isinstance(price, float)
+            and math.isfinite(price)
         ):
-            self.logger.info(
-                "Rejet: données Bollinger/price invalides pour midline scalp (mode strict)."
+            md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+            df_ema = md.get("annotated_rates_df") or md.get("rates_df")
+            if isinstance(df_ema, pd.DataFrame) and not df_ema.empty:
+                account_equity = float(
+                    (context.get("account_info", {}) or {}).get("equity", 0.0) or 0.0
+                )
+                ema_dec = self._build_decision_ema_rsi_atr_trail(
+                    asset_raw,
+                    df_ema,
+                    price,
+                    account_equity,
+                    context.get("current_position"),
+                    current_config,
+                )
+                # On ne traite ici que les entrées BUY/SELL (uppercase)
+                act = str((ema_dec or {}).get("action", "")).upper()
+                if act in {"BUY", "SELL"}:
+                    # fabrique TP via min_rr * distance_SL pour satisfaire calculate_risk_parameters
+                    try:
+                        sl_price = float(ema_dec["stop_loss"])
+                    except Exception:
+                        sl_price = float("nan")
+
+                    if math.isfinite(sl_price):
+                        min_rr = float(
+                            (
+                                (current_config.get("risk_management", {}) or {}).get(
+                                    "min_rr", 1.5
+                                )
+                            )
+                            or 1.5
+                        )
+                        sl_dist = abs(price - sl_price)
+                        tp_price = (
+                            price + min_rr * sl_dist
+                            if act == "BUY"
+                            else price - min_rr * sl_dist
+                        )
+
+                        trade_decision = {
+                            "action": act,
+                            "asset": asset_raw,
+                            "order_type": "MARKET",
+                            "entry_price": price,
+                            "sl_price": float(round(sl_price, 10)),
+                            "tp_price": float(round(tp_price, 10)),
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "ema_rsi_atr",
+                        }
+                        used_ema_decision = True
+                    else:
+                        self.logger.info(
+                            "EMA/RSI/ATR: SL invalide -> on ignore l'entrée EMA et on continue."
+                        )
+                elif act in {"EXIT_LONG", "EXIT_SHORT", "UPDATE_TRAIL"}:
+                    # Gestion de position -> pas ici
+                    self.logger.debug(
+                        "EMA/RSI/ATR: action de gestion de position détectée (ignorée dans le decision engine)."
+                    )
+
+        # ==========================================================
+        # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
+        #       exécuté uniquement si on n'a PAS utilisé l'alternative EMA
+        # ==========================================================
+        if not used_ema_decision:
+            scalp_cfg = (current_config.get("scalping") or {}).get(
+                "boll_midline", {}
+            ) or {}
+            rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
+            k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
+            buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
+            require_range = bool(scalp_cfg.get("require_range_regime", True))
+            block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
+            min_mid_ratio = float(
+                scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
+            )  # distance mini à la médiane
+
+            def _get(path, default=None):
+                try:
+                    return path()  # lambda
+                except Exception:
+                    return default
+
+            def _to_bool(x, default=False) -> bool:
+                try:
+                    if isinstance(x, (int, float)):
+                        return bool(x)
+                    if isinstance(x, str):
+                        return x.strip().lower() in {"1", "true", "yes", "y", "on"}
+                    return bool(x)
+                except Exception:
+                    return default
+
+            boll = (
+                signals.get("boll")
+                or signals.get("bollinger")
+                or signals.get("boll_micro")
+                or signals.get("m1_boll")
+                or {}
             )
-            return {}
-        if not entry_gate_ok:
-            self.logger.info(
-                "Rejet: entry_gate_ok=False depuis micro-phase (mode strict)."
+
+            bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
+            bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
+            bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
+            is_range = _to_bool(
+                _get(lambda: boll.get("is_range"), signals.get("is_range"))
             )
-            return {}
-        if isinstance(mid_distance_ratio, float) and math.isfinite(mid_distance_ratio):
-            if mid_distance_ratio < min_mid_ratio:
+            is_exp = _to_bool(
+                _get(lambda: boll.get("is_expansion"), signals.get("is_expansion"))
+            )
+            mid_entry = (
+                str(
+                    _get(lambda: boll.get("mid_entry"), signals.get("mid_entry", ""))
+                    or ""
+                )
+            ).lower()
+
+            # ✅ micro-phase strict flags
+            entry_gate_ok = _to_bool(
+                _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
+                default=False,
+            )
+            mid_distance_ratio = _num(
+                _get(
+                    lambda: boll.get("mid_distance_ratio"),
+                    signals.get("mid_distance_ratio"),
+                ),
+                np.nan,
+            )
+
+            # ❌ NO FALLBACK: données Bollinger/price + gate micro-phase doivent être valides
+            if any(
+                not (isinstance(x, float) and math.isfinite(x))
+                for x in (bb_mid, bb_up, bb_lo, price)
+            ):
                 self.logger.info(
-                    f"Rejet: distance à la médiane insuffisante ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f})."
+                    "Rejet: données Bollinger/price invalides pour midline scalp (mode strict)."
                 )
                 return {}
-
-        half_band = (bb_up - bb_lo) / 2.0
-        in_buy_zone = (price <= bb_mid) and (price >= bb_lo)
-        in_sell_zone = (price >= bb_mid) and (price <= bb_up)
-
-        if block_on_expansion and is_exp:
-            self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
-            return {}
-        if require_range and not is_range:
-            self.logger.info("Rejet: régime non-range pour midline scalp.")
-            return {}
-
-        if normalized_action == "BUY":
-            if not (in_buy_zone and mid_entry == "buy"):
+            if not entry_gate_ok:
                 self.logger.info(
-                    "Rejet BUY: condition midline non satisfaite (zone ou mid_entry)."
+                    "Rejet: entry_gate_ok=False depuis micro-phase (mode strict)."
                 )
                 return {}
-        elif normalized_action == "SELL":
-            if not (in_sell_zone and mid_entry == "sell"):
-                self.logger.info(
-                    "Rejet SELL: condition midline non satisfaite (zone ou mid_entry)."
-                )
-                return {}
-        elif normalized_action == "CLOSE":
-            # Laisse passer la fermeture sans gate
-            pass
+            if isinstance(mid_distance_ratio, float) and math.isfinite(
+                mid_distance_ratio
+            ):
+                if mid_distance_ratio < min_mid_ratio:
+                    self.logger.info(
+                        f"Rejet: distance à la médiane insuffisante ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f})."
+                    )
+                    return {}
 
-        # --- TPSL serrés (en pips) ---
-        if normalized_action in {"BUY", "SELL"}:
-            if not (pip_size and pip_size > 0):
-                self.logger.info("Rejet: pip_size indisponible (mode strict).")
-                return {}
+            # pip_size
+            pip_size = None
+            try:
+                si = getattr(self, "symbol_info", None)
+                point = 0.0
+                if si is not None and hasattr(si, "point"):
+                    point = float(getattr(si, "point") or 0.0)
+                elif isinstance(si, dict):
+                    point = float(si.get("point", 0.0) or 0.0)
+                if point <= 0 and "point" in signals:
+                    point = _num(signals.get("point"), 0.0)
+                pip_size = point * 10.0 if point > 0 else None
+            except Exception:
+                pip_size = None
 
-            hb_pips = max(0.0, half_band / pip_size)
-            target_tp_pips: float | None = None
-            target_sl_pips: float | None = None
+            half_band = (bb_up - bb_lo) / 2.0
+            in_buy_zone = (price <= bb_mid) and (price >= bb_lo)
+            in_sell_zone = (price >= bb_mid) and (price <= bb_up)
+
+            if block_on_expansion and is_exp:
+                self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
+                return {}
+            if require_range and not is_range:
+                self.logger.info("Rejet: régime non-range pour midline scalp.")
+                return {}
 
             if normalized_action == "BUY":
-                tp_to_mid_pips = max(0.0, (bb_mid - price) / pip_size)
-                fallback_tp = (k_halfband_tp * hb_pips) if hb_pips is not None else None
-                target_tp_pips = max(tp_to_mid_pips, (fallback_tp or tp_to_mid_pips))
-                # SL: buffer sous lower
-                target_sl_pips = max(
-                    buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
-                )
-            else:  # SELL
-                tp_to_mid_pips = max(0.0, (price - bb_mid) / pip_size)
-                fallback_tp = (k_halfband_tp * hb_pips) if hb_pips is not None else None
-                target_tp_pips = max(tp_to_mid_pips, (fallback_tp or tp_to_mid_pips))
-                # SL: buffer au-dessus d'upper
-                target_sl_pips = max(
-                    buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
-                )
+                if not (in_buy_zone and mid_entry == "buy"):
+                    self.logger.info(
+                        "Rejet BUY: condition midline non satisfaite (zone ou mid_entry)."
+                    )
+                    return {}
+            elif normalized_action == "SELL":
+                if not (in_sell_zone and mid_entry == "sell"):
+                    self.logger.info(
+                        "Rejet SELL: condition midline non satisfaite (zone ou mid_entry)."
+                    )
+                    return {}
+            elif normalized_action == "CLOSE":
+                pass  # fermeture autorisée
 
-            # ❌ NO FALLBACK: RR doit respecter min_rr (on rejette si insuffisant)
-            if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
-                self.logger.info("Rejet: TPSL non calculables (mode strict).")
-                return {}
-            rr_est = float(target_tp_pips / target_sl_pips)
-            if rr_est < rr_min:
-                self.logger.info(
-                    f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
-                )
-                return {}
+            # --- TPSL serrés (en pips) ---
+            if normalized_action in {"BUY", "SELL"}:
+                if not (pip_size and pip_size > 0):
+                    self.logger.info("Rejet: pip_size indisponible (mode strict).")
+                    return {}
 
-            # Injecter pour RiskEngine/Executor
-            trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
-            trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
-            trade_decision["rule_name"] = "katana_midline_scalp_strict"
-            trade_decision["level_mode"] = "boll_midline_strict"
-            trade_decision["boll"] = {
-                "bb_mid": bb_mid,
-                "bb_upper": bb_up,
-                "bb_lower": bb_lo,
-            }
+                hb_pips = max(0.0, half_band / pip_size)
+                target_tp_pips: float | None = None
+                target_sl_pips: float | None = None
+
+                if normalized_action == "BUY":
+                    tp_to_mid_pips = max(0.0, (bb_mid - price) / pip_size)
+                    fallback_tp = (
+                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                    )
+                    target_tp_pips = max(
+                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                    )
+                    target_sl_pips = max(
+                        buffer_pips_min, (price - bb_lo) / pip_size + buffer_pips_min
+                    )
+                else:  # SELL
+                    tp_to_mid_pips = max(0.0, (price - bb_mid) / pip_size)
+                    fallback_tp = (
+                        (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                    )
+                    target_tp_pips = max(
+                        tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                    )
+                    target_sl_pips = max(
+                        buffer_pips_min, (bb_up - price) / pip_size + buffer_pips_min
+                    )
+
+                # ❌ NO FALLBACK: RR doit respecter min_rr
+                if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
+                    self.logger.info("Rejet: TPSL non calculables (mode strict).")
+                    return {}
+                rr_est = float(target_tp_pips / target_sl_pips)
+                if rr_est < rr_min:
+                    self.logger.info(
+                        f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
+                    )
+                    return {}
+
+                # Injecter pour RiskEngine/Executor
+                trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
+                trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
+                trade_decision["rule_name"] = "katana_midline_scalp_strict"
+                trade_decision["level_mode"] = "boll_midline_strict"
+                trade_decision["boll"] = {
+                    "bb_mid": bb_mid,
+                    "bb_upper": bb_up,
+                    "bb_lower": bb_lo,
+                }
 
         # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
         active_broker_account = context.get("active_broker_account", {})
@@ -2651,6 +2744,407 @@ class DecisionPipeline:
         )
 
         return trade_decision
+
+    def _build_decision_ema_rsi_atr_trail(
+        self,
+        asset: str,
+        df: pd.DataFrame,
+        current_price: float,
+        account_equity: float,
+        current_position: dict | None,
+        config: dict,
+    ) -> dict:
+        """
+        Version intégrée de l’algo EMA/RSI/ATR trailing stop (scalping).
+        - Utilise les params de config si dispo, sinon des défauts sûrs.
+        - Retourne un package décisionnel enrichi pour le RiskEngine/Executor/Reporter.
+        """
+      
+        # --- Paramètres (fallback depuis config) ---
+        risk_pct = float(config.get("risk_per_trade_pct", 1.0))
+        ema_short_period = int(config.get("ema_short_period", 5))
+        ema_long_period = int(config.get("ema_long_period", 20))
+        rsi_period = int(config.get("rsi_period", 14))
+        rsi_overbought = float(config.get("rsi_overbought", 70))
+        rsi_oversold = float(config.get("rsi_oversold", 30))
+        atr_period = int(config.get("atr_period", 14))
+        atr_mult_init = float(config.get("atr_multiplier_initial", 1.5))
+        atr_mult_trail = float(config.get("atr_multiplier_trailing", 1.0))
+        vol_th = float(config.get("volatility_filter_threshold", 0.5))  # en %
+        rr_hint = float(config.get("rr_hint", 1.2))  # pour tp_pips_hint
+
+        # --- Garde-fous basiques ---
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return {"action": "HOLD", "reason": "no_data"}
+        need = max(ema_long_period, rsi_period, atr_period) + 1
+        if len(df) < need:
+            return {"action": "HOLD", "reason": f"insufficient_bars_{len(df)}/{need}"}
+        try:
+            cp = float(current_price)
+            if not (cp > 0 and math.isfinite(cp)):
+                return {"action": "HOLD", "reason": "invalid_current_price"}
+        except Exception:
+            return {"action": "HOLD", "reason": "invalid_current_price"}
+
+        # --- Sanitize/numérisation colonnes ---
+        df = df.copy()
+        for c in ("open", "high", "low", "close", "volume"):
+            if c not in df.columns:
+                # colonnes minimales indispensables
+                if c in ("high", "low", "close"):
+                    return {"action": "HOLD", "reason": "missing_ohlc"}
+                df[c] = np.nan
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(subset=["high", "low", "close"], how="any", inplace=True)
+        if len(df) < need:
+            return {
+                "action": "HOLD",
+                "reason": f"insufficient_bars_postclean_{len(df)}/{need}",
+            }
+
+        # --- EMA ---
+        df["ema_short"] = (
+            df["close"]
+            .ewm(span=ema_short_period, adjust=False, min_periods=ema_short_period)
+            .mean()
+        )
+        df["ema_long"] = (
+            df["close"]
+            .ewm(span=ema_long_period, adjust=False, min_periods=ema_long_period)
+            .mean()
+        )
+
+        # --- RSI (simple) ---
+        delta = df["close"].diff()
+        gain = delta.clip(lower=0).rolling(rsi_period, min_periods=rsi_period).mean()
+        loss = (-delta.clip(upper=0)).rolling(rsi_period, min_periods=rsi_period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        df["rsi"] = (100 - (100 / (1 + rs))).clip(lower=0, upper=100)
+
+        # --- ATR (True Range) ---
+        hc = (df["high"] - df["close"].shift()).abs()
+        lc = (df["low"] - df["close"].shift()).abs()
+        tr = pd.concat([(df["high"] - df["low"]).abs(), hc, lc], axis=1).max(axis=1)
+        df["atr"] = tr.rolling(window=atr_period, min_periods=atr_period).mean()
+
+        # --- Dernières valeurs ---
+        try:
+            ema_short_cur = float(df["ema_short"].iloc[-1])
+            ema_long_cur = float(df["ema_long"].iloc[-1])
+            ema_short_prev = float(df["ema_short"].iloc[-2])
+            ema_long_prev = float(df["ema_long"].iloc[-2])
+            rsi_cur = float(df["rsi"].iloc[-1])
+            atr_cur = float(df["atr"].iloc[-1])
+        except Exception:
+            return {"action": "HOLD", "reason": "indicator_nan"}
+
+        if not (math.isfinite(atr_cur) and atr_cur > 0):
+            return {"action": "HOLD", "reason": "atr_unavailable"}
+
+        # --- Volatility filter ---
+        volatility_pct = (atr_cur / cp) * 100.0
+        if volatility_pct < vol_th:
+            decision = {
+                "action": "HOLD",
+                "reason": f"low_volatility_{volatility_pct:.2f}%<{vol_th:.2f}%",
+            }
+            decision.update(
+                {
+                    "rule_name": "ema_rsi_atr_trail",
+                    "level_mode": "scalping",
+                    "asset": asset,
+                    "atr_pips": atr_cur,  # en unités de prix; si tu veux en pips -> convertir via pip_size
+                    "ema_short": ema_short_cur,
+                    "ema_long": ema_long_cur,
+                    "rsi": rsi_cur,
+                }
+            )
+            return decision
+
+        # --- pip_size (si 'point' présent) pour fournir des hints pips ---
+        pip_size = None
+        try:
+            point_col = float(df["point"].iloc[-1]) if "point" in df.columns else 0.0
+            pip_size = point_col * 10.0 if point_col > 0 else None
+        except Exception:
+            pip_size = None
+
+        # ========= Gestion d'une position existante =========
+        if current_position:
+            pos_type = str(current_position.get("type", "")).lower()
+            trail = (
+                float(current_position.get("trailing_stop", cp))
+                if current_position.get("trailing_stop") is not None
+                else cp
+            )
+
+            if pos_type == "long":
+                new_trail = max(trail, cp - atr_cur * atr_mult_trail)
+
+                # Exit par trailing touché
+                if cp <= trail:
+                    decision = {
+                        "action": "EXIT_LONG",
+                        "asset": asset,
+                        "exit_price": cp,
+                        "reason": "trailing_hit",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                # Exit par signal inverse fort
+                if (ema_short_cur < ema_long_cur) and (rsi_cur > rsi_overbought):
+                    decision = {
+                        "action": "EXIT_LONG",
+                        "asset": asset,
+                        "exit_price": cp,
+                        "reason": "inverse_signal",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                # Update trailing
+                if new_trail > trail:
+                    decision = {
+                        "action": "UPDATE_TRAIL",
+                        "asset": asset,
+                        "trailing_stop": new_trail,
+                        "reason": "adaptive_trail_update",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                decision = {
+                    "action": "HOLD",
+                    "asset": asset,
+                    "reason": "position_active",
+                }
+                decision.update(
+                    {
+                        "rule_name": "ema_rsi_atr_trail",
+                        "level_mode": "scalping",
+                        "atr_pips": atr_cur,
+                        "ema_short": ema_short_cur,
+                        "ema_long": ema_long_cur,
+                        "rsi": rsi_cur,
+                    }
+                )
+                return decision
+
+            elif pos_type == "short":
+                new_trail = min(trail, cp + atr_cur * atr_mult_trail)
+
+                if cp >= trail:
+                    decision = {
+                        "action": "EXIT_SHORT",
+                        "asset": asset,
+                        "exit_price": cp,
+                        "reason": "trailing_hit",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                if (ema_short_cur > ema_long_cur) and (rsi_cur < rsi_oversold):
+                    decision = {
+                        "action": "EXIT_SHORT",
+                        "asset": asset,
+                        "exit_price": cp,
+                        "reason": "inverse_signal",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                if new_trail < trail:
+                    decision = {
+                        "action": "UPDATE_TRAIL",
+                        "asset": asset,
+                        "trailing_stop": new_trail,
+                        "reason": "adaptive_trail_update",
+                    }
+                    decision.update(
+                        {
+                            "rule_name": "ema_rsi_atr_trail",
+                            "level_mode": "scalping",
+                            "atr_pips": atr_cur,
+                            "ema_short": ema_short_cur,
+                            "ema_long": ema_long_cur,
+                            "rsi": rsi_cur,
+                        }
+                    )
+                    return decision
+
+                decision = {
+                    "action": "HOLD",
+                    "asset": asset,
+                    "reason": "position_active",
+                }
+                decision.update(
+                    {
+                        "rule_name": "ema_rsi_atr_trail",
+                        "level_mode": "scalping",
+                        "atr_pips": atr_cur,
+                        "ema_short": ema_short_cur,
+                        "ema_long": ema_long_cur,
+                        "rsi": rsi_cur,
+                    }
+                )
+                return decision
+
+            # type inconnu
+            decision = {
+                "action": "HOLD",
+                "asset": asset,
+                "reason": "unknown_position_type",
+            }
+            decision.update(
+                {
+                    "rule_name": "ema_rsi_atr_trail",
+                    "level_mode": "scalping",
+                    "atr_pips": atr_cur,
+                    "ema_short": ema_short_cur,
+                    "ema_long": ema_long_cur,
+                    "rsi": rsi_cur,
+                }
+            )
+            return decision
+
+        # ========= Pas de position : signaux d'entrée =========
+        risk_amount = float(account_equity) * (risk_pct / 100.0)
+
+        # LONG
+        if (
+            (ema_short_prev <= ema_long_prev)
+            and (ema_short_cur > ema_long_cur)
+            and (rsi_cur < rsi_overbought)
+        ):
+            stop_loss = cp - atr_cur * atr_mult_init
+            sl_dist = max(cp - stop_loss, 1e-9)
+            size = risk_amount / sl_dist
+
+            decision = {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": cp,
+                "stop_loss": stop_loss,
+                "position_size": size,
+                "type": "long",
+                "reason": "ema_cross_rsi_filter",
+            }
+
+            # Hints en pips (si pip_size dispo)
+            if pip_size and pip_size > 0:
+                sl_pips = sl_dist / pip_size
+                decision["sl_pips_hint"] = float(sl_pips)
+                decision["tp_pips_hint"] = float(rr_hint * sl_pips)
+
+            decision.update(
+                {
+                    "rule_name": "ema_rsi_atr_trail",
+                    "level_mode": "scalping",
+                    "atr_pips": atr_cur,
+                    "ema_short": ema_short_cur,
+                    "ema_long": ema_long_cur,
+                    "rsi": rsi_cur,
+                }
+            )
+            return decision
+
+        # SHORT
+        if (
+            (ema_short_prev >= ema_long_prev)
+            and (ema_short_cur < ema_long_cur)
+            and (rsi_cur > rsi_oversold)
+        ):
+            stop_loss = cp + atr_cur * atr_mult_init
+            sl_dist = max(stop_loss - cp, 1e-9)
+            size = risk_amount / sl_dist
+
+            decision = {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": cp,
+                "stop_loss": stop_loss,
+                "position_size": size,
+                "type": "short",
+                "reason": "ema_cross_rsi_filter",
+            }
+
+            if pip_size and pip_size > 0:
+                sl_pips = sl_dist / pip_size
+                decision["sl_pips_hint"] = float(sl_pips)
+                decision["tp_pips_hint"] = float(rr_hint * sl_pips)
+
+            decision.update(
+                {
+                    "rule_name": "ema_rsi_atr_trail",
+                    "level_mode": "scalping",
+                    "atr_pips": atr_cur,
+                    "ema_short": ema_short_cur,
+                    "ema_long": ema_long_cur,
+                    "rsi": rsi_cur,
+                }
+            )
+            return decision
+
+        # Rien à faire
+        decision = {"action": "HOLD", "asset": asset, "reason": "no_signal"}
+        decision.update(
+            {
+                "rule_name": "ema_rsi_atr_trail",
+                "level_mode": "scalping",
+                "atr_pips": atr_cur,
+                "ema_short": ema_short_cur,
+                "ema_long": ema_long_cur,
+                "rsi": rsi_cur,
+            }
+        )
+        return decision
 
     def _evaluate_rule(
         self, rule: Dict[str, Any], asset_signals: Dict[str, Any]
