@@ -26,6 +26,7 @@ load_dotenv()
 try:
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
+
     importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor
     from ai_core.ai_decision import AIDecision
@@ -60,6 +61,7 @@ except ImportError as e:
 
 # === Helper: déclenchement des rapports au démarrage (IA quotidien & Mecano hebdo) ===
 
+
 def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager):
     """
     Déclenche au DÉMARRAGE :
@@ -68,7 +70,7 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     Persiste l'état dans <ai_audit>/.last_runs.json pour éviter les doublons.
     ⚠️ Ne dépend ni de MT5 ni du pipeline : sûr à appeler juste après les instanciations.
     """
-   
+
     # ---- Résolution dossier ai_audit ----
     try:
         base_cfg = config_manager.get("paths.configs", "config")
@@ -96,11 +98,15 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     # ---- Flags de configuration (interrupteurs) ----
     # IA (daily) : on respecte ai.audit_mode.enabled et ai.audit_mode.daily_report_enabled
     ai_global_enabled = bool(config_manager.get("ai.audit_mode.enabled", True))
-    ai_daily_enabled = bool(config_manager.get("ai.audit_mode.daily_report_enabled", True))
+    ai_daily_enabled = bool(
+        config_manager.get("ai.audit_mode.daily_report_enabled", True)
+    )
     # Mecano (weekly) : compat deux chemins possibles
     mecano_weekly_enabled = bool(
-        config_manager.get("mecano.weekly_report_enabled",
-                           config_manager.get("mecano.audit_mode.weekly_report_enabled", True))
+        config_manager.get(
+            "mecano.weekly_report_enabled",
+            config_manager.get("mecano.audit_mode.weekly_report_enabled", True),
+        )
     )
 
     # ---- Date/weekday (locale machine) ----
@@ -116,6 +122,7 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
         """
         import json
         from datetime import datetime
+
         try:
             logs_dir = Path(config_manager.get("paths.logs", "logs"))
         except Exception:
@@ -151,7 +158,9 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     if ai_decision:
         if not ai_global_enabled or not ai_daily_enabled:
             try:
-                ai_decision.logger.info("[Reports] Daily IA report disabled by config (ai.audit_mode.daily_report_enabled=false or ai.audit_mode.enabled=false).")
+                ai_decision.logger.info(
+                    "[Reports] Daily IA report disabled by config (ai.audit_mode.daily_report_enabled=false or ai.audit_mode.enabled=false)."
+                )
             except Exception:
                 pass
         elif state.get("last_daily_date") != today_str:
@@ -164,17 +173,23 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
                 if isinstance(ai_result, dict) and "error" not in ai_result:
                     state["last_daily_date"] = today_str
                     try:
-                        ai_decision.logger.info("[Reports] Daily IA report generated on start.")
+                        ai_decision.logger.info(
+                            "[Reports] Daily IA report generated on start."
+                        )
                     except Exception:
                         pass
                 else:
                     try:
-                        ai_decision.logger.warning("[Reports] Daily IA report FAILED on start.")
+                        ai_decision.logger.warning(
+                            "[Reports] Daily IA report FAILED on start."
+                        )
                     except Exception:
                         pass
             except Exception as e:
                 try:
-                    ai_decision.logger.error(f"[Reports] Daily IA report exception: {e}", exc_info=True)
+                    ai_decision.logger.error(
+                        f"[Reports] Daily IA report exception: {e}", exc_info=True
+                    )
                 except Exception:
                     pass
 
@@ -182,7 +197,9 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
     if mecano and weekday == 6:
         if not mecano_weekly_enabled:
             try:
-                mecano.logger.info("[Reports] Weekly Mecano report disabled by config (mecano.weekly_report_enabled=false).")
+                mecano.logger.info(
+                    "[Reports] Weekly Mecano report disabled by config (mecano.weekly_report_enabled=false)."
+                )
             except Exception:
                 pass
         elif state.get("last_weekly_date") != today_str:
@@ -191,23 +208,28 @@ def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager)
                 mecano.export_report(weekly, format="json")
                 state["last_weekly_date"] = today_str
                 try:
-                    mecano.logger.info("[Reports] Weekly Mecano report generated on Sunday start.")
+                    mecano.logger.info(
+                        "[Reports] Weekly Mecano report generated on Sunday start."
+                    )
                 except Exception:
                     pass
             except Exception as e:
                 try:
-                    mecano.logger.error(f"[Reports] Weekly Mecano report exception: {e}", exc_info=True)
+                    mecano.logger.error(
+                        f"[Reports] Weekly Mecano report exception: {e}", exc_info=True
+                    )
                 except Exception:
                     pass
 
     # ---- Persist state (atomique simple) ----
     try:
         tmp = state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         tmp.replace(state_path)
     except Exception:
         pass
-
 
 
 def verify_environment_and_config(
@@ -418,7 +440,9 @@ def main(args: argparse.Namespace) -> None:
                     "Helper '_trigger_ai_and_mecano_reports_on_start' introuvable : saut du déclenchement auto des rapports."
                 )
         except Exception as e:
-            logger.warning(f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True)
+            logger.warning(
+                f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True
+            )
 
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode_cfg = str(config_manager.get("mode_execution", "DEMO")).upper()
@@ -468,7 +492,9 @@ def main(args: argparse.Namespace) -> None:
         logger.critical(
             f"FATAL: Erreur critique lors du démarrage du bot: {e}", exc_info=True
         )
-        _safe_alert(config_manager, f"**SNIPER_X BOT - CRASH AU DÉMARRAGE !**\nErreur: {e}")
+        _safe_alert(
+            config_manager, f"**SNIPER_X BOT - CRASH AU DÉMARRAGE !**\nErreur: {e}"
+        )
         if mt5_connector and mt5_connector.is_connected:
             mt5_connector.disconnect()
         sys.exit(1)
@@ -477,7 +503,9 @@ def main(args: argparse.Namespace) -> None:
     try:
         cycle_interval = getattr(args, "interval", None)
         if cycle_interval is None:
-            cycle_interval = config_manager.get("bot_behavior.cycle_interval_seconds", 5)
+            cycle_interval = config_manager.get(
+                "bot_behavior.cycle_interval_seconds", 5
+            )
         cycle_interval = max(0.5, float(cycle_interval))  # clamp doux
     except Exception:
         cycle_interval = 5.0
@@ -490,6 +518,32 @@ def main(args: argparse.Namespace) -> None:
 
     cycle_count = 0
     daily_trade_count = 0
+
+    # 🚀 NOUVEAU: construire une *seule fois* la liste d'actifs du gate de readiness
+    # depuis la même source que le pipeline (cohérence des actifs traités).
+    try:
+        base_config = config_manager.get_current_dynamic_config()
+        global_safety = base_config.get("global_safety", {}) or {}
+        all_symbols = list(global_safety.get("global_allowed_symbols", []))
+
+        active_mt5_account_details = config_manager.get_mt5_account_credentials(
+            mode=bot_mode
+        )
+        account_allowed = set(
+            (active_mt5_account_details or {}).get("allowed_symbols", [])
+        )
+
+        readiness_symbols = [
+            a for a in all_symbols if not account_allowed or a in account_allowed
+        ]
+        if not readiness_symbols:
+            readiness_symbols = all_symbols  # filet de sécurité
+    except Exception as e:
+        logger.warning(
+            f"Impossible de construire readiness_symbols dynamiques, fallback statique. Détail: {e}"
+        )
+        readiness_symbols = ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"]  # fallback ultime
+
     try:
         while True:
             cycle_count += 1
@@ -498,12 +552,12 @@ def main(args: argparse.Namespace) -> None:
             )
             cycle_start_time = time.time()
 
-            # 🔒 Gate readiness MTF vérifié à chaque cycle
+            # 🔒 Gate readiness MTF vérifié à chaque cycle (avec liste dynamique cohérente)
             if not _mtf_readiness_gate(
                 mt5_connector,
                 phase_observer,
                 config_manager,
-                ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"],
+                readiness_symbols,
                 cycle_count,
             ):
                 logger.info(
@@ -593,4 +647,3 @@ def main(args: argparse.Namespace) -> None:
 
         logger.info("SNIPER_X Bot est arrêté.")
         sys.exit(0)
-

@@ -20,7 +20,6 @@ from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 
 
-
 load_dotenv()
 
 try:
@@ -145,6 +144,7 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     Les listes sont remplacées (pas concaténées) pour éviter les surprises.
     """
     from collections.abc import Mapping
+
     if not isinstance(base, Mapping) or not isinstance(override, Mapping):
         return override
     out = dict(base)
@@ -186,7 +186,7 @@ def _get_merged_config_for_asset(
         "institutional_bias",
         "weighting",
         "strategy_toggles",
-        "exit_policy",         # <-- important pour tes sorties fallback / BE / trailing
+        "exit_policy",  # <-- important pour tes sorties fallback / BE / trailing
         "trade_limits",
         "data_collection",
         "broker_overrides",
@@ -202,7 +202,6 @@ def _get_merged_config_for_asset(
             merged_config[section] = merged_section
 
     return merged_config
-
 
 
 def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
@@ -520,7 +519,6 @@ def _mtf_readiness_gate(
         # Ne jamais bloquer si une erreur inattendue survient
         logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
         return True
-    
 
 
 def run_single_pipeline_cycle(
@@ -534,14 +532,41 @@ def run_single_pipeline_cycle(
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-    """Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique)."""
+    """
+    Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique).
+
+    Corrections & améliorations intégrées dans CE BLOC :
+    - ✅ SUPPRIME la duplication du bloc (bug: le code recommençait après le `return`).
+    - ✅ Import local sécurisé de `get_tracker_from_context` pour éviter NameError au `finally`.
+    - ✅ Injection NORMALISÉE des infos Bollinger/Micro-phase dans `signals["boll"]` + alias `signals["m1_boll"]`.
+    - ✅ Injection robuste de `signals["point"]` et `signals["close"]` (fallbacks) pour le calcul de pips en aval.
+    - ✅ Injection de `signals["phase"]` et `signals["confidence_score"]` depuis l’annotated DF (cohérence décisionnelle).
+    - ✅ Calcul du spread en points consolidé (déjà présent) conservé, avec fallback infini en cas d’échec.
+    """
+    import logging
+    from typing import Dict, Any
+    import pandas as pd
+
+    # import DIAG local (sécurisé)
+    try:
+        from core.diagnostics import get_tracker_from_context
+    except Exception:
+
+        def get_tracker_from_context(_):  # no-op fallback
+            class _N:
+                def emit_summary(self, *_args, **_kwargs): ...
+
+            return _N()
+
     logger = logging.getLogger(__name__)
     print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
     logger.info(
         f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
     )
     trade_executed_successfully = False
-    global_context = {}  # pour éviter NameError dans le finally si erreur avant construction
+    global_context: Dict[str, Any] = (
+        {}
+    )  # évite NameError dans le finally si erreur avant construction
 
     try:
         if not mt5_connector.is_connected:
@@ -621,15 +646,16 @@ def run_single_pipeline_cycle(
                     logger.warning(f"[{asset}] Annotated DF vide. Actif ignoré.")
                     continue
 
-                latest_signals_row = annotated_rates_df.iloc[-1]
+                # === LIGNE ACTIVE → on lit la dernière ligne annotée par le PhaseObserver
+                latest = annotated_rates_df.iloc[-1]
                 logger.info(
-                    f"[PhaseObserver] Actif: {asset} | Phase: {latest_signals_row.get('phase', 'N/A')}"
+                    f"[PhaseObserver] Actif: {asset} | Phase: {latest.get('phase', 'N/A')}"
                 )
 
-                # Builder des signaux de l'actif (fonction utilitaire locale au run_bot)
-                signals = (
+                # === Builder des signaux de l'actif (fonction utilitaire locale au run_bot)
+                signals: Dict[str, Any] = (
                     _build_asset_trading_signals(
-                        latest_signals_row,
+                        latest,
                         symbol_info_mt5,
                         asset=asset,
                         mt5_connector=mt5_connector,
@@ -643,7 +669,89 @@ def run_single_pipeline_cycle(
                     if not isinstance(close_val, (int, float)) or close_val <= 0:
                         signals["close"] = float(annotated_rates_df["close"].iloc[-1])
                 except Exception:
-                    # Worst-case: ne bloque pas le cycle
+                    pass  # ne bloque pas le cycle
+
+                # -- Injection du point (utile pour le sizing pips en aval)
+                try:
+                    point_val = signals.get("point")
+                    if not isinstance(point_val, (int, float)) or point_val <= 0:
+                        if "point" in annotated_rates_df.columns:
+                            signals["point"] = float(
+                                annotated_rates_df["point"].iloc[-1]
+                            )
+                        elif symbol_info_mt5 and getattr(symbol_info_mt5, "point", 0.0):
+                            signals["point"] = float(getattr(symbol_info_mt5, "point"))
+                except Exception:
+                    pass
+
+                # -- Injection NORMALISÉE des infos Bollinger/Micro-phase
+                try:
+                    boll = {
+                        "bb_mid": (
+                            float(latest.get("bb_mid"))
+                            if pd.notna(latest.get("bb_mid"))
+                            else None
+                        ),
+                        "bb_upper": (
+                            float(latest.get("bb_upper"))
+                            if pd.notna(latest.get("bb_upper"))
+                            else None
+                        ),
+                        "bb_lower": (
+                            float(latest.get("bb_lower"))
+                            if pd.notna(latest.get("bb_lower"))
+                            else None
+                        ),
+                        "is_range": (
+                            bool(latest.get("is_range"))
+                            if latest.get("is_range") is not None
+                            else None
+                        ),
+                        "is_expansion": (
+                            bool(latest.get("is_expansion"))
+                            if latest.get("is_expansion") is not None
+                            else None
+                        ),
+                        "mid_entry": (
+                            str(latest.get("mid_entry")).lower()
+                            if latest.get("mid_entry") is not None
+                            else None
+                        ),
+                        "entry_gate_ok": (
+                            bool(latest.get("entry_gate_ok"))
+                            if latest.get("entry_gate_ok") is not None
+                            else None
+                        ),
+                        "mid_distance_ratio": (
+                            float(latest.get("mid_distance_ratio"))
+                            if latest.get("mid_distance_ratio") is not None
+                            and pd.notna(latest.get("mid_distance_ratio"))
+                            else None
+                        ),
+                    }
+                    # Nettoyage léger: ne garder que les clés non-None
+                    boll = {k: v for k, v in boll.items() if v is not None}
+                    if boll:
+                        signals["boll"] = boll
+                        signals["m1_boll"] = dict(
+                            boll
+                        )  # alias compatible avec les lecteurs alternatifs
+                except Exception:
+                    # on n'interrompt pas le cycle si une clé manque
+                    pass
+
+                # -- Phase & score de confiance (cohérence décisionnelle)
+                try:
+                    if "phase" not in signals and latest.get("phase") is not None:
+                        signals["phase"] = str(latest.get("phase"))
+                    if (
+                        "confidence_score" not in signals
+                        and latest.get("confidence_score") is not None
+                    ):
+                        signals["confidence_score"] = float(
+                            latest.get("confidence_score")
+                        )
+                except Exception:
                     pass
 
                 # -- Injection d'un spread en points ROBUSTE (évite les "inf")
@@ -762,7 +870,11 @@ def run_single_pipeline_cycle(
         trade_decision = decision_package.get("final_decision", {}) or {}
 
         # ---- Enrichissement Katana pour l'exécution/audit ----
-        exec_ctx = decision_package.get("execution_context") or global_context.get("execution_context") or {}
+        exec_ctx = (
+            decision_package.get("execution_context")
+            or global_context.get("execution_context")
+            or {}
+        )
         chosen_asset = trade_decision.get("asset")
         if chosen_asset:
             # spread pips pour l'actif choisi (si connu)
@@ -772,13 +884,19 @@ def run_single_pipeline_cycle(
             snap_map = exec_ctx.get("katana_snapshots", {}) or {}
             chosen_snap = snap_map.get(chosen_asset, {})
             # métriques utiles pour audit/exécution
-            trade_decision.setdefault("meta_atr_m1_pips", chosen_snap.get("atr_m1_pips"))
-            trade_decision.setdefault("meta_katana_score", chosen_snap.get("katana_score"))
+            trade_decision.setdefault(
+                "meta_atr_m1_pips", chosen_snap.get("atr_m1_pips")
+            )
+            trade_decision.setdefault(
+                "meta_katana_score", chosen_snap.get("katana_score")
+            )
 
             # Exposer un contexte d'exécution au TradeExecutor (pour audit_logger)
             try:
                 trade_executor.execution_context = {
-                    "signals_snapshot": (global_context.get("trading_signals", {}) or {}).get(chosen_asset, {}),
+                    "signals_snapshot": (
+                        global_context.get("trading_signals", {}) or {}
+                    ).get(chosen_asset, {}),
                     "katana_snapshot": chosen_snap,
                     "market_metrics": {
                         "atr_m1_pips": trade_decision.get("meta_atr_m1_pips"),
@@ -840,13 +958,14 @@ def run_single_pipeline_cycle(
     finally:
         # DIAG: imprime le résumé des blocages / sélections AVANT le log de fin de cycle
         try:
-            get_tracker_from_context(global_context).emit_summary(logging.getLogger(__name__))
+            get_tracker_from_context(global_context).emit_summary(
+                logging.getLogger(__name__)
+            )
         except Exception:
             pass
 
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
 
 
 def main(args: argparse.Namespace) -> None:
@@ -1033,7 +1152,7 @@ def main(args: argparse.Namespace) -> None:
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
-                config_manager.decision_pipeline, 
+                config_manager.decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
