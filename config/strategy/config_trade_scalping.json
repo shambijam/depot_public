@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "version": "2.5-katana-micro-nogate",
+  "version": "2.6-katana-micro-openvalves",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
@@ -24,8 +24,8 @@
       "use_bollinger_microphase": true
     },
     "bollinger_overrides": {
-      "min_revert_score": 0.55,
-      "min_breakout_score": 0.55,
+      "min_revert_score": 0.48,
+      "min_breakout_score": 0.48,
       "use_squeeze_filter": true,
       "use_expansion_filter": true
     }
@@ -35,14 +35,18 @@
       "name": "baseline_scalping",
       "priority": 1,
       "conditions": {
-        "signal_must_contain": [
+        "signal_must_contain_any": [
           "fvg_detected",
-          "ob_detected"
+          "ob_detected",
+          "momentum_burst",
+          "micro_pullback"
         ],
-        "phase_must_contain": [
-          "trend"
+        "phase_must_contain_any": [
+          "trend",
+          "trending_retail_bull",
+          "trending_retail_bear"
         ],
-        "min_confidence": 0.3
+        "min_confidence": 0.25
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -54,40 +58,42 @@
       "name": "range_scalping_microbreak",
       "priority": 2,
       "conditions": {
-        "signal_must_contain": [
-          "ob_detected"
+        "signal_must_contain_any": [
+          "ob_detected",
+          "liquidity_sweep_detected",
+          "micro_breakout"
         ],
-        "phase_must_contain": [
+        "phase_must_contain_any": [
           "range",
           "range_retail",
           "range_low_volatility"
         ],
-        "min_confidence": 0.3
+        "min_confidence": 0.25
       },
       "order_type": "MARKET",
       "action_logic": {
-        "BUY": "enter on bullish micro-break with OB confluence and spread <= max_spread_points",
-        "SELL": "enter on bearish micro-break with OB confluence and spread <= max_spread_points"
+        "BUY": "enter on bullish micro-break with OB/liquidity confluence and spread <= max_spread_points",
+        "SELL": "enter on bearish micro-break with OB/liquidity confluence and spread <= max_spread_points"
       }
     },
     {
       "name": "range_midline_scalping",
       "priority": 3,
       "conditions": {
-        "phase_must_contain": [
+        "phase_must_contain_any": [
           "range",
           "range_low_volatility",
           "range_retail"
         ],
-        "min_confidence": 0.3,
+        "min_confidence": 0.28,
         "requires": {
           "is_range": true,
           "mid_entry": [
             "buy",
             "sell"
           ],
-          "mid_entry_score_min": 0.55,
-          "range_score_min": 0.62
+          "mid_entry_score_min": 0.50,
+          "range_score_min": 0.58
         }
       },
       "order_type": "MARKET",
@@ -95,34 +101,61 @@
         "BUY": "enter if mid_entry == 'buy' and spread <= max_spread_points",
         "SELL": "enter if mid_entry == 'sell' and spread <= max_spread_points"
       }
+    },
+    {
+      "name": "momentum_trail_scalp",
+      "priority": 4,
+      "conditions": {
+        "signal_must_contain_any": [
+          "momentum_burst",
+          "m1_two_bull_candles",
+          "m1_two_bear_candles"
+        ],
+        "min_confidence": 0.22
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter on 2+ bullish M1 candles with positive M5 bias; immediately arm trailing",
+        "SELL": "enter on 2+ bearish M1 candles with negative M5 bias; immediately arm trailing"
+      }
     }
   ],
   "entry_rules": {
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
-        "min_rr": 1.1,
+        "min_rr": 1.05,
         "tp_halfband_k": 1.0,
-        "buffer_pips_min": 0.8,
-        "min_mid_distance_ratio": 0.06,
+        "buffer_pips_min": 0.3,
+        "min_mid_distance_ratio": 0.03,
         "require_range_regime": false,
         "block_on_expansion": false,
-        "min_confidence": 0.3,
-        "katana_min_confidence": 0.30,
-        "fvg_max_distance_pips": 2.0,
-        "ob_max_distance_pips": 2.0,
-        "katana_soft_distance_mult": 1.25,
-        "min_atr_m1_pips": 0.2,
-        "max_spread_pips": 3.0,
-        "ultra_near_pips": 0.6,
+        "min_confidence": 0.28,
+        "katana_min_confidence": 0.28,
+        "fvg_max_distance_pips": 3.0,
+        "ob_max_distance_pips": 3.0,
+        "katana_soft_distance_mult": 1.35,
+        "min_atr_m1_pips": 0.05,
+        "max_spread_pips": 4.0,
+        "ultra_near_pips": 0.5,
         "max_stop_pips_scalp": 15.0,
         "reject_if_sl_over_cap": false,
-        "m1_break_bonus": 0.12,
+        "m1_break_bonus": 0.15,
         "only_trade_at_range_edges": false,
         "allow_midline_entries": true,
-        "mid_entry_score_min": 0.55,
-        "range_score_min": 0.62,
-        "range_debounce_bars": 3
+        "allow_breakout_entries": true,
+        "mid_entry_score_min": 0.50,
+        "range_score_min": 0.58,
+        "range_debounce_bars": 2
+      },
+      "momentum": {
+        "enabled": true,
+        "m1_min_consecutive_candles": 2,
+        "m1_body_to_range_min": 0.55,
+        "m5_bias_filter": true,
+        "pullback_max_bars": 2,
+        "max_spread_pips": 4.0,
+        "min_atr_m1_pips": 0.05
       }
     }
   },
@@ -182,7 +215,8 @@
       "global_low_vol_penalty": -0.2,
       "high_spread_penalty": -0.1,
       "ob_conf_bonus": 0.25,
-      "mtf_shortfall_penalty": -0.08
+      "mtf_shortfall_penalty": -0.08,
+      "momentum_bonus": 0.20
     },
     "filters": {
       "avoid_major_news": false,
@@ -203,6 +237,16 @@
       "entry_on_close_only": false,
       "confirm_spread_at_entry": false,
       "cooldown_bars_after_miss": 1
+    },
+    "fallbacks": {
+      "enabled": true,
+      "max_depth": 2,
+      "order": [
+        "katana.ob_entry",
+        "momentum_trail_scalp",
+        "range_midline_scalping",
+        "range_scalping_microbreak"
+      ]
     },
     "katana": {
       "use_order_blocks": true,
@@ -242,10 +286,10 @@
           }
         },
         "entry_bias": {
-          "breakout_buy_min": 0.5,
-          "breakout_sell_min": 0.5,
-          "revert_buy_min": 0.5,
-          "revert_sell_min": 0.5
+          "breakout_buy_min": 0.47,
+          "breakout_sell_min": 0.47,
+          "revert_buy_min": 0.47,
+          "revert_sell_min": 0.47
         },
         "tp_sl_overrides": {
           "on_buy_breakout": {
@@ -273,9 +317,9 @@
             "ema_slope": 0.2,
             "rsi_width": 0.2
           },
-          "threshold_in": 0.62,
-          "threshold_out": 0.52,
-          "debounce_bars": 3,
+          "threshold_in": 0.58,
+          "threshold_out": 0.50,
+          "debounce_bars": 2,
           "rsi_period": 14,
           "ema_slope_window": 10,
           "adx_period": 14,
@@ -283,11 +327,11 @@
         },
         "midline_entry": {
           "enabled": true,
-          "pos_band_min": 0.1,
-          "pos_band_max": 0.65,
-          "mom_norm_min": 0.05,
-          "base_threshold": 0.55,
-          "min_range_duration_bars": 4,
+          "pos_band_min": 0.08,
+          "pos_band_max": 0.70,
+          "mom_norm_min": 0.04,
+          "base_threshold": 0.50,
+          "min_range_duration_bars": 3,
           "sl_tp_profile": "midline",
           "use_rr_override": true,
           "rr_target": 1.1,
@@ -295,20 +339,20 @@
           "tp_pips_override": 7,
           "per_symbol": {
             "EURUSD": {
-              "pos_band_min": 0.1,
-              "pos_band_max": 0.6
+              "pos_band_min": 0.08,
+              "pos_band_max": 0.68
             },
             "GBPUSD": {
-              "pos_band_min": 0.12,
-              "pos_band_max": 0.62
+              "pos_band_min": 0.10,
+              "pos_band_max": 0.70
             },
             "USDJPY": {
-              "pos_band_min": 0.1,
-              "pos_band_max": 0.65
+              "pos_band_min": 0.08,
+              "pos_band_max": 0.70
             },
             "USDCHF": {
-              "pos_band_min": 0.1,
-              "pos_band_max": 0.65
+              "pos_band_min": 0.08,
+              "pos_band_max": 0.70
             }
           }
         }
@@ -341,10 +385,12 @@
       "close_percent": 50
     },
     "trailing": {
-      "enabled": false,
+      "enabled": true,
       "type": "chandelier",
       "atr_period": 14,
-      "atr_multiplier": 1.2
+      "atr_multiplier": 1.0,
+      "arm_immediately_on_momentum_rule": true,
+      "step_points_min": 8
     },
     "profiles": {
       "midline": {
@@ -355,13 +401,21 @@
         "tp_rr_ratio": 1.1,
         "tp_pips_fallback": 7,
         "respect_broker_min_distance": true
+      },
+      "momentum_scalp": {
+        "description": "Profil dynamique pour momentum_trail_scalp",
+        "sl_type": "atr",
+        "sl_atr_multiplier": 1.0,
+        "tp_type": "rr",
+        "tp_rr_ratio": 1.2,
+        "respect_broker_min_distance": true
       }
     }
   },
   "exit_rules": {
     "time_based": {
       "enabled": true,
-      "max_trade_minutes": 12
+      "max_trade_minutes": 18
     },
     "invalidated_setup": {
       "enabled": true,
@@ -375,15 +429,15 @@
   },
   "risk_management": {
     "risk_per_trade_pct": 0.6,
-    "min_rr": 1.6,
-    "max_spread_pips": 1.2,
+    "min_rr": 1.5,
+    "max_spread_pips": 1.4,
     "max_tp_to_sl_ratio": 3.5,
     "atr_settings": {
       "period": 14
     },
     "sl_constraints": {
-      "min_atr_multiple": 0.8,
-      "max_atr_multiple": 1.3
+      "min_atr_multiple": 0.75,
+      "max_atr_multiple": 1.35
     },
     "risk_adjustment": {
       "risk_reduction_multiplier_high_vol": 0.5,
