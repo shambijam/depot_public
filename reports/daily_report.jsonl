@@ -1,0 +1,4 @@
+{"_header": {"symbol": "EURUSD", "timeframes": ["M1", "M5"], "date_utc": "2025-08-30", "generated_at": "2025-08-30T04:23:30.389649+00:00", "version": "1.0"}}
+{"_stats": {"counts": {"ob": 0, "fvg": 0, "bos": 0, "regime_snapshots": 0, "boll_events": 0}, "regimes": {}, "regime_transitions": []}}
+{"ts": "2025-07-31T23:39:00+00:00", "symbol": "EURUSD", "timeframe": "M1", "type": "hygiene", "bars": 100, "nan_ratio": 0.0, "holes": 0, "start": "2025-07-31T22:00:00+00:00", "end": "2025-07-31T23:39:00+00:00"}
+{"ts": "2025-07-31T23:39:00+00:00", "symbol": "EURUSD", "timeframe": "M5", "type": "hygiene", "bars": 100, "nan_ratio": 0.0, "holes": 0, "start": "2025-07-31T22:00:00+00:00", "end": "2025-07-31T23:39:00+00:00"}

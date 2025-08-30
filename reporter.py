@@ -13,7 +13,7 @@ Export: Markdown lisible par humain OU JSONL (1 ligne = 1 événement)
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional, Iterable, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import math
@@ -116,84 +116,88 @@ class PhaseObserverReporter:
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
 
     # --------------- Public API ---------------
-
     def run_daily_report_for_asset(
-        self,
-        symbol: str,
-        tf_frames: Dict[str, pd.DataFrame],
-        tz: timezone | None = timezone.utc,
-    ) -> Dict[str, Any]:
-        """
-        Construit un rapport complet pour un symbole sur plusieurs TF (ex: {"M1":df1, "M5":df5, ...})
-        Retourne un dict structuré {meta, stats, events}
-        """
-        events: List[dict] = []
-        macro = {"ob": 0, "fvg": 0, "bos": 0, "regime_snapshots": 0, "boll_events": 0}
-        regime_hist: List[RegimeSnapshot] = []
+            self,
+            symbol: str,
+            tf_frames: Dict[str, pd.DataFrame],
+            tz: timezone | None = timezone.utc,
+            day_offset: int = 0,   # <--- nouveau paramètre
+        ) -> Dict[str, Any]:
+            """
+            Construit un rapport complet pour un symbole sur plusieurs TF (ex: {"M1":df1, "M5":df5, ...})
+            Retourne un dict structuré {meta, stats, events}
+            day_offset: 0 = aujourd'hui, -1 = hier, -2 = avant-hier, etc.
+            """
+            events: List[dict] = []
+            macro = {"ob": 0, "fvg": 0, "bos": 0, "regime_snapshots": 0, "boll_events": 0}
+            regime_hist: List[RegimeSnapshot] = []
 
-        for tf, df in (tf_frames or {}).items():
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                self.logger.warning(f"[{symbol}] TF {tf} vide/absent pour le reporter.")
-                continue
+            for tf, df in (tf_frames or {}).items():
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    self.logger.warning(f"[{symbol}] TF {tf} vide/absent pour le reporter.")
+                    continue
 
-            # 1) Hygiène
-            hy = self._compute_hygiene(df)
-            # 2) OB/FVG/BOS/MSS
-            ob_evts = self._collect_ob(symbol, tf, df)
-            macro["ob"] += len(ob_evts)
-            fvg_evts = self._collect_fvg(symbol, tf, df)
-            macro["fvg"] += len(fvg_evts)
-            bos_evts = self._collect_bos(symbol, tf, df)
-            macro["bos"] += len(bos_evts)
+                # 1) Hygiène
+                hy = self._compute_hygiene(df)
+                # 2) OB/FVG/BOS/MSS
+                ob_evts = self._collect_ob(symbol, tf, df)
+                macro["ob"] += len(ob_evts)
+                fvg_evts = self._collect_fvg(symbol, tf, df)
+                macro["fvg"] += len(fvg_evts)
+                bos_evts = self._collect_bos(symbol, tf, df)
+                macro["bos"] += len(bos_evts)
 
-            # 3) Régime
-            regime_series = self._collect_regime_series(symbol, tf, df)
-            macro["regime_snapshots"] += len(regime_series)
-            regime_hist.extend(regime_series)
+                # 3) Régime
+                regime_series = self._collect_regime_series(symbol, tf, df)
+                macro["regime_snapshots"] += len(regime_series)
+                regime_hist.extend(regime_series)
 
-            # 4) Bollinger microphase (dernière barre + meta série si demandée)
-            boll_evt = self._collect_boll_micro(symbol, tf, df)
-            macro["boll_events"] += 1 if boll_evt else 0
+                # 4) Bollinger microphase (dernière barre + meta série si demandée)
+                boll_evt = self._collect_boll_micro(symbol, tf, df)
+                macro["boll_events"] += 1 if boll_evt else 0
 
-            # 5) Convert to dicts + merge
-            events.extend([asdict(x) for x in ob_evts])
-            events.extend([asdict(x) for x in fvg_evts])
-            events.extend([asdict(x) for x in bos_evts])
-            events.extend([asdict(x) for x in regime_series])
-            if boll_evt:
-                events.append(asdict(boll_evt))
+                # 5) Convert to dicts + merge
+                events.extend([asdict(x) for x in ob_evts])
+                events.extend([asdict(x) for x in fvg_evts])
+                events.extend([asdict(x) for x in bos_evts])
+                events.extend([asdict(x) for x in regime_series])
+                if boll_evt:
+                    events.append(asdict(boll_evt))
 
-            # Hygiène en tant que meta-event minimal (facilite audit)
-            events.append(
-                {
-                    "ts": self._last_ts_iso(df),
-                    "symbol": symbol,
-                    "timeframe": tf,
-                    "type": "hygiene",
-                    "bars": hy["bars"],
-                    "nan_ratio": hy["nan_ratio"],
-                    "holes": hy["holes"],
-                    "start": hy["start"],
-                    "end": hy["end"],
-                }
-            )
+                # Hygiène en tant que meta-event minimal (facilite audit)
+                events.append(
+                    {
+                        "ts": self._last_ts_iso(df),
+                        "symbol": symbol,
+                        "timeframe": tf,
+                        "type": "hygiene",
+                        "bars": hy["bars"],
+                        "nan_ratio": hy["nan_ratio"],
+                        "holes": hy["holes"],
+                        "start": hy["start"],
+                        "end": hy["end"],
+                    }
+                )
 
-        # Agrégations macro: distribution régimes + transitions
-        regime_stats, regime_transitions = self._aggregate_regimes(regime_hist)
-        stats = {
-            "counts": macro,
-            "regimes": regime_stats,
-            "regime_transitions": regime_transitions,
-        }
+            # Agrégations macro: distribution régimes + transitions
+            regime_stats, regime_transitions = self._aggregate_regimes(regime_hist)
+            stats = {
+                "counts": macro,
+                "regimes": regime_stats,
+                "regime_transitions": regime_transitions,
+            }
 
-        meta = {
-            "symbol": symbol,
-            "timeframes": list(tf_frames.keys()),
-            "date_utc": str(datetime.now(timezone.utc).date()),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "version": "1.0",
-        }
-        return {"meta": meta, "stats": stats, "events": events}
+            # ✅ correction ici : date peut être décalée avec day_offset
+            target_date = datetime.now(timezone.utc).date() + timedelta(days=day_offset)
+
+            meta = {
+                "symbol": symbol,
+                "timeframes": list(tf_frames.keys()),
+                "date_utc": str(target_date),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "version": "1.0",
+            }
+            return {"meta": meta, "stats": stats, "events": events}
 
     def export_markdown(self, report: Dict[str, Any], path: str) -> None:
         """Écrit un rapport humain-lisible (Markdown)"""

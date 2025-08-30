@@ -409,9 +409,7 @@ class Detectors:
         - Filtrage des faux breakouts par distance minimale relative
         - Respect de 'require_close_beyond' (clôture au-delà du niveau)
         """
-        import numpy as np
-        import pandas as pd
-
+       
         self.logger.debug(
             "Détection BOS/MSS Enhanced (vectorisée) avec confirmations..."
         )
@@ -688,9 +686,7 @@ class Detectors:
             * hysteresis/débounce basiques pour stabiliser la détection de range
             * ✅ Correction pandas: remplace .fillna(method="ffill") par .ffill()
         """
-        import numpy as np
-        import pandas as pd
-
+     
         out = {
             "ok": False,
             "reason": None,

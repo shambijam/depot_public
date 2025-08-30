@@ -343,8 +343,7 @@ def _calculate_quality_metrics(
     - Bonus/Malus de performance (latence)
     Signature conservée.
     """
-    import time
-    import math
+
 
     # ---------- Sécurisation des inputs ----------
     tf_analyses   = tf_analyses or {}
