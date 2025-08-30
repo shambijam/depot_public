@@ -6,6 +6,265 @@ import math
 
 
 class ScalpingStrategy(BaseStrategy):
+
+    def _rule_liquidity_sweep(self, asset, df, cfg_rule, context):
+        """Independent entry rule: sweep of prior swing + absorption.
+        Detects if the latest candle swept above/below the recent extremes and closed back inside.
+        Config keys (defaults):
+        lookback: 30, min_wick_frac: 0.55, min_body_frac: 0.20, absorb_close_back_in: True,
+        prefer_direction: 'auto', min_confidence: 0.40, sl_pips: 6, tp_pips: 8.1
+        """
+        try:
+            if df is None or len(df) < max(40, int(cfg_rule.get("lookback", 30)) + 3):
+                return None
+            lookback = int(cfg_rule.get("lookback", 30))
+            min_wick_frac = float(cfg_rule.get("min_wick_frac", 0.55))
+            min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
+            min_conf = float(cfg_rule.get("min_confidence", 0.40))
+            sl_pips = float(cfg_rule.get("sl_pips", 6.0))
+            tp_pips = float(cfg_rule.get("tp_pips", 8.1))
+
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+            open_ = df["open"]
+            prev_high = high.iloc[-(lookback + 1) : -1].max()
+            prev_low = low.iloc[-(lookback + 1) : -1].min()
+
+            h = float(high.iloc[-1])
+            l = float(low.iloc[-1])
+            c = float(close.iloc[-1])
+            o = float(open_.iloc[-1])
+            rng = max(1e-12, h - l)
+            body = abs(c - o)
+            body_frac = body / rng if rng > 0 else 0.0
+            upper_wick = max(0.0, h - max(c, o))
+            lower_wick = max(0.0, min(c, o) - l)
+            uw_frac = upper_wick / rng
+            lw_frac = lower_wick / rng
+
+            side = None
+            conf = 0.0
+            # Bearish sweep: take liquidity above previous highs, then close back below that level with strong upper wick
+            if (
+                h > prev_high
+                and c < prev_high
+                and uw_frac >= min_wick_frac
+                and body_frac >= min_body_frac
+            ):
+                side = "SELL"
+                # Confidence boosts with how far swept and wick/body quality
+                sweep_amp = (h - prev_high) / max(1e-12, rng)
+                conf = min(
+                    1.0,
+                    0.35
+                    + 0.35 * min(1.0, sweep_amp)
+                    + 0.15 * min(1.0, uw_frac)
+                    + 0.15 * min(1.0, body_frac / min_body_frac),
+                )
+            # Bullish sweep: take liquidity below previous lows, then close back above that level with strong lower wick
+            elif (
+                l < prev_low
+                and c > prev_low
+                and lw_frac >= min_wick_frac
+                and body_frac >= min_body_frac
+            ):
+                side = "BUY"
+                sweep_amp = (prev_low - l) / max(1e-12, rng)
+                conf = min(
+                    1.0,
+                    0.35
+                    + 0.35 * min(1.0, sweep_amp)
+                    + 0.15 * min(1.0, lw_frac)
+                    + 0.15 * min(1.0, body_frac / min_body_frac),
+                )
+
+            if not side or conf < min_conf:
+                return None
+
+            order = {
+                "action": "OPEN",
+                "asset": asset,
+                "side": side,
+                "sl_pips": sl_pips,
+                "tp_pips": tp_pips,
+                "volume": cfg_rule.get("volume")
+                or (self.strategy_config or {}).get("default_volume")
+                or 0.01,
+                "rule_name": f"scalping:liquidity_sweep:{asset}",
+                "confidence": conf,
+                "meta": {
+                    "prev_high": float(prev_high),
+                    "prev_low": float(prev_low),
+                    "uw_frac": float(uw_frac),
+                    "lw_frac": float(lw_frac),
+                    "body_frac": float(body_frac),
+                    "lookback": lookback,
+                },
+            }
+            return order
+        except Exception as e:
+            try:
+                self.logger.exception(f"Liquidity sweep rule failed for {asset}: {e}")
+            except Exception:
+                pass
+            return None
+
+
+def _rule_midline_bollinger(self, asset, df, cfg_rule, context):
+    """Independent entry rule: mean-revert vs Bollinger midline.
+    Config keys (with defaults if missing):
+      length: 20, k: 2.0, mode: 'mean_revert'|'momentum', epsilon_band_frac: 0.15,
+      min_body_frac: 0.20, allow_counter_mtf: True, min_confidence: 0.35,
+      sl_pips: 6, tp_pips: 8.1
+    """
+    try:
+        if df is None or len(df) < max(30, int(cfg_rule.get("length", 20)) + 5):
+            return None
+        close = df["close"]
+        open_ = df["open"]
+        high = df["high"]
+        low = df["low"]
+        length = int(cfg_rule.get("length", 20))
+        k = float(cfg_rule.get("k", 2.0))
+        mode = (cfg_rule.get("mode") or "mean_revert").lower()
+        eps_band = float(cfg_rule.get("epsilon_band_frac", 0.15))
+        min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
+        min_conf = float(cfg_rule.get("min_confidence", 0.35))
+        sl_pips = float(cfg_rule.get("sl_pips", 6.0))
+        tp_pips = float(cfg_rule.get("tp_pips", 8.1))
+
+        mid = self._sma(close, length)
+        std = self._std(close, length)
+        if mid is None or std is None:
+            return None
+        bw = std * k  # half-band "strength"
+        last_mid = mid.iloc[-1]
+        last_bw = float(bw.iloc[-1] or 0.0)
+        last_close = float(close.iloc[-1])
+        last_open = float(open_.iloc[-1])
+        last_high = float(high.iloc[-1])
+        last_low = float(low.iloc[-1])
+        rng = max(1e-12, last_high - last_low)
+        body = abs(last_close - last_open)
+        body_frac = body / rng if rng > 0 else 0.0
+
+        if last_bw <= 0:
+            return None
+
+        # Distance to midline, normalized by band width
+        dist_norm = (last_close - last_mid) / last_bw
+
+        side = None
+        # Mean-revert: trade back toward the midline when price is outside/near bands
+        if mode.startswith("mean"):
+            # If price is below midline (negative dist), prefer BUY; above -> SELL.
+            if dist_norm <= -eps_band:
+                side = "BUY"
+            elif dist_norm >= eps_band:
+                side = "SELL"
+        else:
+            # Momentum: follow direction away from midline with body confirmation
+            if dist_norm >= eps_band and last_close > last_open:
+                side = "BUY"
+            elif dist_norm <= -eps_band and last_close < last_open:
+                side = "SELL"
+
+        if not side:
+            return None
+
+        # Confidence: combine distance & body quality
+        conf = min(
+            1.0,
+            max(
+                0.0,
+                0.5 * min(1.0, abs(dist_norm))
+                + 0.5 * min(1.0, body_frac / max(1e-6, min_body_frac)),
+            ),
+        )
+        if conf < min_conf:
+            return None
+
+        # Build order
+        meta = self._safe_asset_meta(context, asset)
+        order = {
+            "action": "OPEN",
+            "asset": asset,
+            "side": side,
+            "sl_pips": sl_pips,
+            "tp_pips": tp_pips,
+            "volume": cfg_rule.get("volume")
+            or (self.strategy_config or {}).get("default_volume")
+            or 0.01,
+            "rule_name": f"scalping:midline_bollinger:{asset}",
+            "confidence": conf,
+            "meta": {
+                "dist_norm": float(dist_norm),
+                "band_width": float(last_bw),
+                "body_frac": float(body_frac),
+                "length": length,
+                "k": k,
+            },
+        }
+        return order
+    except Exception as e:
+        try:
+            self.logger.exception(f"Midline rule failed for {asset}: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _atr(self, df, length: int = 14):
+    try:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr = (high - low).abs()
+        tr = tr.combine((high - prev_close).abs(), max)
+        tr = tr.combine((low - prev_close).abs(), max)
+        return tr.rolling(int(length)).mean()
+    except Exception:
+        return None
+
+
+def _std(self, series, length: int):
+    try:
+        return series.rolling(int(length)).std(ddof=0)
+    except Exception:
+        return None
+
+
+def _sma(self, series, length: int):
+    try:
+        return series.rolling(int(length)).mean()
+    except Exception:
+        return None
+
+
+def _safe_asset_meta(self, context, asset):
+    meta = {}
+    try:
+        # Try from context.asset_configs first
+        acfg = ((context or {}).get("asset_configs") or {}).get(asset) or {}
+        if isinstance(acfg, dict):
+            meta["digits"] = acfg.get("digits")
+            meta["point"] = acfg.get("point")
+        # Try open_positions meta if available
+        pos = ((context or {}).get("open_positions") or {}).get(asset) or {}
+        meta["digits"] = meta.get("digits") or pos.get("digits")
+        meta["point"] = meta.get("point") or pos.get("point")
+    except Exception:
+        pass
+    # Fallbacks
+    if not meta.get("digits"):
+        meta["digits"] = 5 if asset.endswith(("USD", "CHF")) else 3
+    if not meta.get("point"):
+        # default MetaTrader 'point' for 5-digit FX pairs
+        meta["point"] = 1e-5 if meta["digits"] >= 5 else 0.001
+    return meta
+
     """
     Stratégie de Scalping pour SNIPER_X.
     - Choisit le meilleur actif parmi les signaux fournis par le DecisionPipeline
@@ -17,27 +276,31 @@ class ScalpingStrategy(BaseStrategy):
     # Initialisation & utilitaires
     # ---------------------------------------------------------------------
     def __init__(self, config_manager_instance: Any, strategy_config: Dict[str, Any]):
-            """Initialise la stratégie en chargeant les paramètres clés."""
-            super().__init__(config_manager_instance, strategy_config)
-            self._refresh_from_config()
-            # Log neutre (suppression de toute référence au momentum fade)
-            self.logger.info(
-                "ScalpingStrategy initialisée | magic=%s | assets=%d | TP=%.2f pips | SL=%.2f pips",
-                self.magic_number,
-                len(self.tradeable_assets or []),
-                getattr(self, "take_profit_pips", float("nan")),
-                getattr(self, "stop_loss_pips", float("nan")),
-    )
+        """Initialise la stratégie en chargeant les paramètres clés."""
+        super().__init__(config_manager_instance, strategy_config)
+        self._refresh_from_config()
+        # Log neutre (suppression de toute référence au momentum fade)
+        self.logger.info(
+            "ScalpingStrategy initialisée | magic=%s | assets=%d | TP=%.2f pips | SL=%.2f pips",
+            self.magic_number,
+            len(self.tradeable_assets or []),
+            getattr(self, "take_profit_pips", float("nan")),
+            getattr(self, "stop_loss_pips", float("nan")),
+        )
 
     def _refresh_from_config(self) -> None:
         """Recharge les attributs dérivés de la configuration courante (sans momentum fade)."""
         # --- Paramètres essentiels ---
-        self.tradeable_assets: List[str] = list(self.strategy_config.get("tradeable_assets", []))
+        self.tradeable_assets: List[str] = list(
+            self.strategy_config.get("tradeable_assets", [])
+        )
         self.magic_number = self.strategy_config.get("magic_number")
 
         # Valeurs par défaut raisonnables si absentes
         try:
-            self.take_profit_pips = float(self.strategy_config.get("take_profit_pips", 10))
+            self.take_profit_pips = float(
+                self.strategy_config.get("take_profit_pips", 10)
+            )
         except Exception:
             self.take_profit_pips = 10.0
 
@@ -88,7 +351,7 @@ class ScalpingStrategy(BaseStrategy):
                 return "SELL"
 
             return None
-        
+
     def evaluate_entry(
         self, context: Dict[str, Any], signals: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -98,13 +361,72 @@ class ScalpingStrategy(BaseStrategy):
         - Scoring purement soft (OB/FVG/MTF/break M1 en BONUS/PÉNALITÉ), pas de hard-block
         - Ne refait PAS les vérifications de marché (spread, horaires) ici
         """
-        self.logger.debug("ScalpingStrategy: évaluation d'entrée (Katana, no-gating)...")
+        self.logger.debug(
+            "ScalpingStrategy: évaluation d'entrée (Katana, no-gating)..."
+        )
+
+        # === NEW MULTI-RULE PRECHECKS ===
+        # We evaluate independent rules in this priority:
+        #   1) Liquidity sweep
+        #   2) Midline Bollinger
+        #   3) Katana (existing fallback/no-gate)
+        rules_cfg = (self.strategy_config or {}).get("entry_rules") or {}
+        ls_cfg = (
+            (rules_cfg.get("liquidity_sweep") or {})
+            if isinstance(rules_cfg, dict)
+            else {}
+        )
+        mb_cfg = (
+            (rules_cfg.get("midline_bollinger") or {})
+            if isinstance(rules_cfg, dict)
+            else {}
+        )
+
+        candidates = []
+
+        # Helper to try a rule over all assets and collect best candidate by confidence
+        def try_rule_over_assets(rule_fn, rcfg, rule_name_hint):
+            best = None
+            for asset, df in market_data.items():
+                if df is None or not hasattr(df, "iloc"):
+                    continue
+                try:
+                    order = rule_fn(asset, df, rcfg, context)
+                    if order:
+                        if (best is None) or (
+                            order.get("confidence", 0.0) > best.get("confidence", 0.0)
+                        ):
+                            best = order
+                except Exception:
+                    pass
+            if best:
+                candidates.append(best)
+
+        # Apply Liquidity Sweep first if enabled (default True)
+        if bool(ls_cfg.get("enabled", True)):
+            try_rule_over_assets(self._rule_liquidity_sweep, ls_cfg, "liquidity_sweep")
+
+        # Apply Midline Bollinger if enabled (default True)
+        if bool(mb_cfg.get("enabled", True)):
+            try_rule_over_assets(
+                self._rule_midline_bollinger, mb_cfg, "midline_bollinger"
+            )
+
+        # If any candidate beat the minimal confidence, return the best
+        if candidates:
+            best_cand = sorted(
+                candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
+            )[0]
+            # Ensure we've set action field
+            best_cand["action"] = "OPEN"
+            return best_cand
+        # === END MULTI-RULE PRECHECKS ===
 
         # --- Raccourcis config ---
         cfg = self.strategy_config or {}
-        entry_rules = ((cfg.get("entry_rules") or {}).get("scalping") or {})
-        dec_eng = (cfg.get("decision_engine") or {})
-        scoring_cfg = (dec_eng.get("scoring") or {})
+        entry_rules = (cfg.get("entry_rules") or {}).get("scalping") or {}
+        dec_eng = cfg.get("decision_engine") or {}
+        scoring_cfg = dec_eng.get("scoring") or {}
 
         # Seul seuil "dur" conservé : confiance minimale
         min_conf = float(entry_rules.get("min_confidence", 0.30) or 0.30)
@@ -114,13 +436,21 @@ class ScalpingStrategy(BaseStrategy):
         liquidity_bonus = float(scoring_cfg.get("liquidity_bonus", 0.10) or 0.10)
         ob_conf_bonus = float(scoring_cfg.get("ob_conf_bonus", 0.25) or 0.25)
         base_bias = float(scoring_cfg.get("strategy_bias", 0.30) or 0.30)
-        high_spread_penalty = float(scoring_cfg.get("high_spread_penalty", -0.10) or -0.10)
-        low_vol_penalty = float(scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20)
+        high_spread_penalty = float(
+            scoring_cfg.get("high_spread_penalty", -0.10) or -0.10
+        )
+        low_vol_penalty = float(
+            scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20
+        )
 
         # bonus soft spécifiques (remplacent l'ancien gating)
         m1_break_bonus = float(entry_rules.get("m1_break_bonus", 0.12) or 0.12)
-        mtf_min_hits_target = int((dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1)
-        mtf_shortfall_penalty = float(scoring_cfg.get("mtf_shortfall_penalty", -0.08) or -0.08)
+        mtf_min_hits_target = int(
+            (dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1
+        )
+        mtf_shortfall_penalty = float(
+            scoring_cfg.get("mtf_shortfall_penalty", -0.08) or -0.08
+        )
 
         def _bool(x, key: str) -> bool:
             v = (x or {}).get(key)
@@ -154,7 +484,7 @@ class ScalpingStrategy(BaseStrategy):
                     hits += 1
             return hits
 
-        spreads = (context.get("spreads_pips") or {})
+        spreads = context.get("spreads_pips") or {}
 
         best_asset: Optional[str] = None
         best_score: float = float("-inf")
@@ -168,18 +498,31 @@ class ScalpingStrategy(BaseStrategy):
             # 1) Seuil de confiance (unique filtre dur)
             confidence = _get_confidence(s)
             if confidence < min_conf:
-                self.logger.debug("Asset %s rejeté (confidence %.3f < %.3f).", asset, confidence, min_conf)
+                self.logger.debug(
+                    "Asset %s rejeté (confidence %.3f < %.3f).",
+                    asset,
+                    confidence,
+                    min_conf,
+                )
                 continue
 
             # 2) Indices de confluence (SOFT)
-            ob = _bool(s, "ob_detected") or _bool(s, "order_block") or _bool(s, "order_block_ml_enhanced")
+            ob = (
+                _bool(s, "ob_detected")
+                or _bool(s, "order_block")
+                or _bool(s, "order_block_ml_enhanced")
+            )
             fvg = _bool(s, "fvg_detected") or _bool(s, "fvg_enhanced")
             m1_break = _bool(s, "m1_break") or _bool(s, "bos_mss_enhanced")
 
             mtf_hits = _get_mtf_hits(s)
 
             # 3) Features marché (SOFT)
-            spread_pips = float(spreads.get(asset, 0.0)) if isinstance(spreads.get(asset), (int, float)) else 0.0
+            spread_pips = (
+                float(spreads.get(asset, 0.0))
+                if isinstance(spreads.get(asset), (int, float))
+                else 0.0
+            )
             vol_z = _float(s, "volume_zscore", 0.0)
             low_vol = vol_z < 0.0
 
@@ -211,7 +554,15 @@ class ScalpingStrategy(BaseStrategy):
 
             self.logger.debug(
                 "Katana scoring (no-gating) %s -> score=%.4f | conf=%.3f ob=%s fvg=%s m1_break=%s mtf=%d spread=%.2f volZ=%.2f",
-                asset, score, confidence, ob, fvg, m1_break, mtf_hits, spread_pips, vol_z
+                asset,
+                score,
+                confidence,
+                ob,
+                fvg,
+                m1_break,
+                mtf_hits,
+                spread_pips,
+                vol_z,
             )
 
             if score > best_score:
@@ -229,17 +580,26 @@ class ScalpingStrategy(BaseStrategy):
                 }
 
         if not best_asset:
-            self.logger.info("Aucun actif ne dépasse le seuil minimal de confiance (no-gating).")
+            self.logger.info(
+                "Aucun actif ne dépasse le seuil minimal de confiance (no-gating)."
+            )
             return None
 
         action = self._infer_action_from_signals(signals.get(best_asset, {}) or {})
         if action is None:
-            self.logger.warning("Direction non déterminée pour %s. Trade annulé. (debug=%s)", best_asset, best_debug)
+            self.logger.warning(
+                "Direction non déterminée pour %s. Trade annulé. (debug=%s)",
+                best_asset,
+                best_debug,
+            )
             return None
 
         self.logger.info(
             "MEILLEUR CANDIDAT KATANA (no-gating): %s | score=%.3f | action=%s | debug=%s",
-            best_asset, best_score, action, best_debug
+            best_asset,
+            best_score,
+            action,
+            best_debug,
         )
 
         order = {
@@ -254,8 +614,9 @@ class ScalpingStrategy(BaseStrategy):
             "comment": "SNIPER_X:scalping_katana_no_gating",
         }
         return order
-    
+
         # ---------------------------------------------------------------------
+
     # Sorties Katana (micro-phase, serrées) — pas de momentum fade
     # ---------------------------------------------------------------------
     def _pips_between(self, a: float, b: float, point: float, digits: int) -> float:
@@ -280,7 +641,7 @@ class ScalpingStrategy(BaseStrategy):
             • None si aucune action.
         """
         cfg = self.strategy_config or {}
-        exit_cfg = ((cfg.get("exit_rules") or {}).get("scalping") or {})
+        exit_cfg = (cfg.get("exit_rules") or {}).get("scalping") or {}
 
         asset = str(position.get("symbol") or position.get("asset") or "").upper()
         if not asset:
@@ -288,33 +649,43 @@ class ScalpingStrategy(BaseStrategy):
 
         md = (context.get("market_data") or {}).get(asset, {}) or {}
         symbol_info = md.get("symbol_info", {}) or {}
-        point  = float(symbol_info.get("point", 0.00001) or 0.00001)
+        point = float(symbol_info.get("point", 0.00001) or 0.00001)
         digits = int(symbol_info.get("digits", 5))
 
-        side = str(position.get("action") or position.get("type") or position.get("side") or "").upper()
+        side = str(
+            position.get("action") or position.get("type") or position.get("side") or ""
+        ).upper()
         if side not in ("BUY", "SELL"):
             return None
 
-        entry_price = float(position.get("entry_price") or position.get("price_open") or 0.0)
-        sl_price    = float(position.get("sl") or 0.0) or None
-        tp_price    = float(position.get("tp") or 0.0) or None
-        cur_price   = float(md.get("current_price") or position.get("price_current") or 0.0)
+        entry_price = float(
+            position.get("entry_price") or position.get("price_open") or 0.0
+        )
+        sl_price = float(position.get("sl") or 0.0) or None
+        tp_price = float(position.get("tp") or 0.0) or None
+        cur_price = float(
+            md.get("current_price") or position.get("price_current") or 0.0
+        )
         if entry_price <= 0 or cur_price <= 0 or point <= 0:
             return None
 
         # --- PnL courant en pips (non signé et signé) ---
         pnl_pips_abs = self._pips_between(cur_price, entry_price, point, digits)
         if side == "BUY":
-            pnl_pips_signed = (cur_price - entry_price) / (point * (10.0 if digits in (3,5) else 1.0))
+            pnl_pips_signed = (cur_price - entry_price) / (
+                point * (10.0 if digits in (3, 5) else 1.0)
+            )
         else:
-            pnl_pips_signed = (entry_price - cur_price) / (point * (10.0 if digits in (3,5) else 1.0))
+            pnl_pips_signed = (entry_price - cur_price) / (
+                point * (10.0 if digits in (3, 5) else 1.0)
+            )
 
         # --- Paramètres de sortie (avec defaults conservateurs) ---
         breakeven_trigger = float(exit_cfg.get("breakeven_trigger_pips", 3.0))
-        trailing_start    = float(exit_cfg.get("trailing_start_pips", 5.0))
-        trailing_step     = float(exit_cfg.get("trailing_step_pips", 1.0))
-        max_hold_seconds  = int(exit_cfg.get("max_hold_seconds", 0))  # 0 = désactivé
-        exit_on_m1_flip   = bool(exit_cfg.get("exit_on_m1_phase_flip", True))
+        trailing_start = float(exit_cfg.get("trailing_start_pips", 5.0))
+        trailing_step = float(exit_cfg.get("trailing_step_pips", 1.0))
+        max_hold_seconds = int(exit_cfg.get("max_hold_seconds", 0))  # 0 = désactivé
+        exit_on_m1_flip = bool(exit_cfg.get("exit_on_m1_phase_flip", True))
 
         # Derniers signaux/phase pour l’asset
         s = (latest_signals or {}).get(asset, {}) if latest_signals else {}
@@ -326,63 +697,120 @@ class ScalpingStrategy(BaseStrategy):
             be_pad = float(exit_cfg.get("breakeven_pad_pips", 0.1))
             new_sl = entry_price
             if side == "BUY":
-                new_sl = min(cur_price, entry_price + be_pad * point * (10.0 if digits in (3,5) else 1.0))
+                new_sl = min(
+                    cur_price,
+                    entry_price + be_pad * point * (10.0 if digits in (3, 5) else 1.0),
+                )
                 if not sl_price or new_sl > sl_price:
-                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "breakeven"}
+                    return {
+                        "action": "ADJUST_SL",
+                        "asset": asset,
+                        "new_sl_price": new_sl,
+                        "reason": "breakeven",
+                    }
             else:
-                new_sl = max(cur_price, entry_price - be_pad * point * (10.0 if digits in (3,5) else 1.0))
+                new_sl = max(
+                    cur_price,
+                    entry_price - be_pad * point * (10.0 if digits in (3, 5) else 1.0),
+                )
                 if not sl_price or new_sl < sl_price:
-                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "breakeven"}
+                    return {
+                        "action": "ADJUST_SL",
+                        "asset": asset,
+                        "new_sl_price": new_sl,
+                        "reason": "breakeven",
+                    }
 
         # --- 2) Trailing léger par pas ---
-        if trailing_start > 0 and trailing_step > 0 and pnl_pips_signed >= trailing_start:
+        if (
+            trailing_start > 0
+            and trailing_step > 0
+            and pnl_pips_signed >= trailing_start
+        ):
             # SL cible = (entrée ± (pnl - step_buffer))
             step_buffer = float(exit_cfg.get("trailing_buffer_pips", trailing_step))
             target_lock = max(0.0, pnl_pips_signed - step_buffer)  # pips à "locker"
             # Convertit en prix
-            lock_dist_price = target_lock * point * (10.0 if digits in (3,5) else 1.0)
-            new_sl = entry_price + lock_dist_price if side == "BUY" else entry_price - lock_dist_price
+            lock_dist_price = target_lock * point * (10.0 if digits in (3, 5) else 1.0)
+            new_sl = (
+                entry_price + lock_dist_price
+                if side == "BUY"
+                else entry_price - lock_dist_price
+            )
             # Ne resserre que si c’est favorable (jamais élargir)
             if side == "BUY":
                 if not sl_price or new_sl > sl_price:
                     # borne pour ne pas dépasser le prix courant
                     new_sl = min(new_sl, cur_price)
-                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "trail"}
+                    return {
+                        "action": "ADJUST_SL",
+                        "asset": asset,
+                        "new_sl_price": new_sl,
+                        "reason": "trail",
+                    }
             else:
                 if not sl_price or new_sl < sl_price:
                     new_sl = max(new_sl, cur_price)
-                    return {"action": "ADJUST_SL", "asset": asset, "new_sl_price": new_sl, "reason": "trail"}
+                    return {
+                        "action": "ADJUST_SL",
+                        "asset": asset,
+                        "new_sl_price": new_sl,
+                        "reason": "trail",
+                    }
 
         # --- 3) Flip micro‑phase M1 (optionnel, sortie totale) ---
         if exit_on_m1_flip and phase_m1:
-            if side == "BUY" and any(k in phase_m1 for k in ("down", "bear", "expansion_down", "distribution")):
-                return {"action": "CLOSE", "asset": asset, "reason": "m1_phase_flip_against"}
-            if side == "SELL" and any(k in phase_m1 for k in ("up", "bull", "expansion_up", "accumulation")):
-                return {"action": "CLOSE", "asset": asset, "reason": "m1_phase_flip_against"}
+            if side == "BUY" and any(
+                k in phase_m1
+                for k in ("down", "bear", "expansion_down", "distribution")
+            ):
+                return {
+                    "action": "CLOSE",
+                    "asset": asset,
+                    "reason": "m1_phase_flip_against",
+                }
+            if side == "SELL" and any(
+                k in phase_m1 for k in ("up", "bull", "expansion_up", "accumulation")
+            ):
+                return {
+                    "action": "CLOSE",
+                    "asset": asset,
+                    "reason": "m1_phase_flip_against",
+                }
 
         # --- 4) Durée max (optionnel) ---
         if max_hold_seconds and max_hold_seconds > 0:
             # on accepte plusieurs formats d’horodatage en entrée
             import datetime as _dt
-            opened_at = position.get("time") or position.get("time_open") or position.get("open_time")
+
+            opened_at = (
+                position.get("time")
+                or position.get("time_open")
+                or position.get("open_time")
+            )
             try:
                 if isinstance(opened_at, (int, float)):
                     open_dt = _dt.datetime.utcfromtimestamp(opened_at)
                 else:
                     # iso8601 string
-                    open_dt = _dt.datetime.fromisoformat(str(opened_at).replace("Z","+00:00")).astimezone(_dt.timezone.utc)
-                now_utc = _dt.datetime.fromisoformat(str(context.get("current_time_utc"))).astimezone(_dt.timezone.utc)
+                    open_dt = _dt.datetime.fromisoformat(
+                        str(opened_at).replace("Z", "+00:00")
+                    ).astimezone(_dt.timezone.utc)
+                now_utc = _dt.datetime.fromisoformat(
+                    str(context.get("current_time_utc"))
+                ).astimezone(_dt.timezone.utc)
                 held = (now_utc - open_dt).total_seconds()
                 if held >= max_hold_seconds:
-                    return {"action": "CLOSE", "asset": asset, "reason": "max_hold_time"}
+                    return {
+                        "action": "CLOSE",
+                        "asset": asset,
+                        "reason": "max_hold_time",
+                    }
             except Exception:
                 pass
 
         return None
 
-
-
-   
     def get_parameters(self) -> Dict[str, Any]:
         """Retourne une copie des paramètres de configuration de la stratégie."""
         return dict(self.strategy_config)

@@ -17,11 +17,13 @@ from datetime import datetime, timezone
 import json
 import os
 import math
+import logging
 
 import pandas as pd
 
 # Dépend de tes détecteurs existants
-from .detectors import Detectors
+from phase_observer.detectors import Detectors
+
 
 
 # ---------- Data Records (structures claires pour JSONL) ----------
@@ -105,7 +107,7 @@ class PhaseObserverReporter:
     """
 
     def __init__(self, config_manager=None, logger=None):
-        import logging
+       
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)

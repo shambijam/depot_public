@@ -22,7 +22,7 @@ from .types import Direction, Phase, PhaseSignal, PhaseSnapshot, MarketFeatures,
 from .validators import calculate_confidence_score
 from .features import FeaturesExtractor   # ✅ on importe la classe, plus les fonctions
 from .detectors import Detectors
-from phase_observer.reporter import PhaseObserverReporter
+from reporter import PhaseObserverReporter
 from datetime import datetime, timezone
 
     
