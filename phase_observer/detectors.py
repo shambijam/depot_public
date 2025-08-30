@@ -658,6 +658,56 @@ class Detectors:
             )
 
         return results
+    
+    def detect_big_reversal_candle(
+        self, df: pd.DataFrame, min_body_ratio: float = 0.65, min_size_mult: float = 2.5
+    ) -> List[Optional[Dict[str, Any]]]:
+        """
+        📌 Détection de grandes bougies de retournement (big reversal candles)
+        avec couplage OB/FVG/BOS.
+
+        - min_body_ratio : proportion du corps vs taille totale (bougie pleine)
+        - min_size_mult : multiple de la taille moyenne des 20 dernières bougies
+        """
+
+        if df is None or len(df) < 30:
+            return []
+
+        df = df.copy()
+        df["candle_size"] = df["high"] - df["low"]
+        df["body_size"] = (df["close"] - df["open"]).abs()
+        df["body_ratio"] = df["body_size"] / df["candle_size"].replace(0, np.nan)
+
+        avg_size = df["candle_size"].rolling(20).mean()
+
+        signals: List[Optional[Dict[str, Any]]] = []
+
+        for i in range(len(df)):
+            try:
+                size_ok = df["candle_size"].iloc[i] > min_size_mult * avg_size.iloc[i]
+                body_ok = df["body_ratio"].iloc[i] >= min_body_ratio
+                if size_ok and body_ok:
+                    direction = "bullish" if df["close"].iloc[i] > df["open"].iloc[i] else "bearish"
+
+                    signals.append({
+                        "index": i,
+                        "timestamp": str(df.index[i]),
+                        "type": f"big_reversal_{direction}",
+                        "body_ratio": round(df["body_ratio"].iloc[i], 3),
+                        "candle_size": round(df["candle_size"].iloc[i], 5),
+                        "avg_size": round(avg_size.iloc[i], 5),
+                        # Couplage avec OB/FVG/BOS
+                        "near_ob": bool("ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])),
+                        "near_fvg": bool("fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])),
+                        "near_bos": bool("bos" in df.columns and not pd.isna(df["bos"].iloc[i])),
+                    })
+                else:
+                    signals.append(None)
+            except Exception:
+                signals.append(None)
+
+        return signals
+
 
     def compute_bollinger_microphase_signals(
         self,

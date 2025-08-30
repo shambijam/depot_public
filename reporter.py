@@ -101,6 +101,21 @@ class BollRecord:
     meta: Optional[dict] = None
 
 
+@dataclass
+class BigReversalRecord:
+    ts: str
+    symbol: str
+    timeframe: str
+    type: str  # big_reversal_bullish / big_reversal_bearish
+    body_ratio: float
+    candle_size: float
+    avg_size: float
+    near_ob: bool
+    near_fvg: bool
+    near_bos: bool
+    meta: Optional[dict] = None
+
+
 class PhaseObserverReporter:
     """
     Reporter instanciable (un logger + config_manager en option).
@@ -108,6 +123,35 @@ class PhaseObserverReporter:
     - aggregate() produit des stats macro
     - export_markdown() / export_jsonl() écrivent le rapport
     """
+        
+
+    def _collect_big_reversal(self, symbol: str, tf: str, df: pd.DataFrame) -> List[BigReversalRecord]:
+        out: List[BigReversalRecord] = []
+        try:
+            detections = self.detectors.detect_big_reversal_candle(df) or []
+            for d in detections:
+                if not d:
+                    continue
+                out.append(BigReversalRecord(
+                    ts=str(d.get("timestamp")),
+                    symbol=symbol,
+                    timeframe=tf,
+                    type=d.get("type", "big_reversal_unknown"),
+                    body_ratio=d.get("body_ratio", 0.0),
+                    candle_size=d.get("candle_size", 0.0),
+                    avg_size=d.get("avg_size", 0.0),
+                    near_ob=bool(d.get("near_ob")),
+                    near_fvg=bool(d.get("near_fvg")),
+                    near_bos=bool(d.get("near_bos")),
+                    meta={k: v for k, v in d.items() if k not in {
+                        "timestamp","type","body_ratio","candle_size","avg_size","near_ob","near_fvg","near_bos"
+                    }}
+                ))
+        except Exception as e:
+            self._swallow("BigReversal", symbol, tf, e)
+        return out
+
+   
 
     def __init__(self, config_manager=None, logger=None):
 
@@ -146,6 +190,11 @@ class PhaseObserverReporter:
                 macro["fvg"] += len(fvg_evts)
                 bos_evts = self._collect_bos(symbol, tf, df)
                 macro["bos"] += len(bos_evts)
+                
+                # 2.5) Grandes bougies de retournement
+                big_reversal_evts = self._collect_big_reversal(symbol, tf, df)
+                macro["big_reversal"] = macro.get("big_reversal", 0) + len(big_reversal_evts)
+               
 
                 # 3) Régime
                 regime_series = self._collect_regime_series(symbol, tf, df)
@@ -160,6 +209,7 @@ class PhaseObserverReporter:
                 events.extend([asdict(x) for x in ob_evts])
                 events.extend([asdict(x) for x in fvg_evts])
                 events.extend([asdict(x) for x in bos_evts])
+                events.extend([asdict(x) for x in big_reversal_evts])
                 events.extend([asdict(x) for x in regime_series])
                 if boll_evt:
                     events.append(asdict(boll_evt))
@@ -592,6 +642,7 @@ class PhaseObserverReporter:
             "BOS/MSS",
             "type",
             ("bullish_bos", "bearish_bos", "bullish_mss", "bearish_mss", "unknown"),
+        _section("Big Reversal Candles", "type", ("big_reversal_bullish", "big_reversal_bearish")) 
         )
 
         # Bollinger micro (dernière mesure par TF)

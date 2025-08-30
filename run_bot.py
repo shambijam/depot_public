@@ -543,9 +543,7 @@ def run_single_pipeline_cycle(
     - ✅ Injection de `signals["phase"]` et `signals["confidence_score"]` depuis l’annotated DF (cohérence décisionnelle).
     - ✅ Calcul du spread en points consolidé (déjà présent) conservé, avec fallback infini en cas d’échec.
     """
-    import logging
-    from typing import Dict, Any
-    import pandas as pd
+   
 
     # import DIAG local (sécurisé)
     try:
@@ -753,6 +751,21 @@ def run_single_pipeline_cycle(
                         )
                 except Exception:
                     pass
+                
+                # -- Détection Big Reversal Candle (nouvelle règle)
+                try:
+                    br_cfg = (base_config.get("scalping") or {}).get("big_reversal", {})
+                    if br_cfg.get("enabled", False):
+                        br_signals = phase_observer.detectors.detect_big_reversal_candle(
+                            annotated_rates_df,
+                            min_body_ratio=float(br_cfg.get("min_body_ratio", 0.65)),
+                            min_size_mult=float(br_cfg.get("min_size_mult", 2.5)),
+                        )
+                        if br_signals and br_signals[-1]:
+                            signals["big_reversal"] = br_signals[-1]  # on garde la dernière bougie détectée
+                except Exception as e:
+                    logger.warning(f"[{asset}] Big Reversal detection skipped: {e}")
+
 
                 # -- Injection d'un spread en points ROBUSTE (évite les "inf")
                 try:

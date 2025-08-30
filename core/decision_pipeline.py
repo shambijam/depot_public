@@ -1638,9 +1638,6 @@ class DecisionPipeline:
             et on bypass le gate Bollinger. La gestion des EXIT/UPDATE_TRAIL reste au position manager.
         """
         # 👉 Imports locaux nécessaires (évite NameError sur math/np/pd)
-        import math
-        import numpy as np
-        import pandas as pd
 
         # DIAG local
         try:
@@ -1852,6 +1849,34 @@ class DecisionPipeline:
                     self.logger.debug(
                         "EMA/RSI/ATR: action de gestion de position détectée (ignorée dans le decision engine)."
                     )
+
+                    # ==========================================================
+            # ➕ Gate "Big Reversal Candle" (OB/FVG/BOS confluence)
+            # ==========================================================
+            if not used_ema_decision:
+                try:
+                    md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+                    df_rev = md.get("annotated_rates_df")
+                    if isinstance(df_rev, pd.DataFrame) and not df_rev.empty:
+                        from phase_observer.detectors import Detectors
+
+                        det = Detectors()
+                        rev_signals = det.detect_big_reversal_candle(df_rev)
+                        last_signal = rev_signals[-1] if rev_signals else None
+
+                        if last_signal and last_signal.get("type"):
+                            trade_decision.update(
+                                {
+                                    "rule_name": "big_reversal_candle",
+                                    "level_mode": "big_reversal",
+                                    "big_reversal": last_signal,
+                                }
+                            )
+                            self.logger.info(
+                                f"🎯 Signal Big Reversal validé ({last_signal['type']}) pour {asset_raw}"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
 
         # ==========================================================
         # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
@@ -2103,8 +2128,6 @@ class DecisionPipeline:
             f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
         return trade_decision
-
-
 
     def _core_evaluate_signals(
         self,
@@ -2769,7 +2792,7 @@ class DecisionPipeline:
         - Utilise les params de config si dispo, sinon des défauts sûrs.
         - Retourne un package décisionnel enrichi pour le RiskEngine/Executor/Reporter.
         """
-      
+
         # --- Paramètres (fallback depuis config) ---
         risk_pct = float(config.get("risk_per_trade_pct", 1.0))
         ema_short_period = int(config.get("ema_short_period", 5))

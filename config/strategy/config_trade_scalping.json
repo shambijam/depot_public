@@ -525,5 +525,16 @@
     "scalping": {
       "liquidity_rule_bonus": 0.2
     }
+  },
+  "big_reversal": {
+    "enabled": true,
+    "min_body_ratio": 0.65,
+    "min_size_mult": 2.5,
+    "require_confluence": true,
+    "confluence_with": [
+      "OB",
+      "FVG",
+      "BOS"
+    ]
   }
 }
