@@ -543,7 +543,6 @@ def run_single_pipeline_cycle(
     - ✅ Injection de `signals["phase"]` et `signals["confidence_score"]` depuis l’annotated DF (cohérence décisionnelle).
     - ✅ Calcul du spread en points consolidé (déjà présent) conservé, avec fallback infini en cas d’échec.
     """
-   
 
     # import DIAG local (sécurisé)
     try:
@@ -751,21 +750,26 @@ def run_single_pipeline_cycle(
                         )
                 except Exception:
                     pass
-                
+
                 # -- Détection Big Reversal Candle (nouvelle règle)
                 try:
                     br_cfg = (base_config.get("scalping") or {}).get("big_reversal", {})
                     if br_cfg.get("enabled", False):
-                        br_signals = phase_observer.detectors.detect_big_reversal_candle(
-                            annotated_rates_df,
-                            min_body_ratio=float(br_cfg.get("min_body_ratio", 0.65)),
-                            min_size_mult=float(br_cfg.get("min_size_mult", 2.5)),
+                        br_signals = (
+                            phase_observer.detectors.detect_big_reversal_candle(
+                                annotated_rates_df,
+                                min_body_ratio=float(
+                                    br_cfg.get("min_body_ratio", 0.65)
+                                ),
+                                min_size_mult=float(br_cfg.get("min_size_mult", 2.5)),
+                            )
                         )
                         if br_signals and br_signals[-1]:
-                            signals["big_reversal"] = br_signals[-1]  # on garde la dernière bougie détectée
+                            signals["big_reversal"] = br_signals[
+                                -1
+                            ]  # on garde la dernière bougie détectée
                 except Exception as e:
                     logger.warning(f"[{asset}] Big Reversal detection skipped: {e}")
-
 
                 # -- Injection d'un spread en points ROBUSTE (évite les "inf")
                 try:
@@ -878,9 +882,41 @@ def run_single_pipeline_cycle(
         print("=" * 60 + "\n")
 
         # ✅ Sécuriser l'accès même si decision_package == None
+        decision_package = decision_pipeline.institutional_decision_pipeline(
+            global_context
+        )
         decision_package = decision_package or {}
         active_config = decision_package.get("config_used", base_config) or base_config
         trade_decision = decision_package.get("final_decision", {}) or {}
+
+        # === Compteurs de trade ===
+        risk_cfg = active_config.get("risk_management") or {}
+        max_trades_per_day = int(risk_cfg.get("max_trades_per_day", 999))
+        max_trades_per_asset = int(risk_cfg.get("max_trades_per_asset_per_day", 999))
+
+        if "trade_counters" not in global_context:
+            global_context["trade_counters"] = {
+                "daily_total": daily_trade_count,
+                "per_asset": {},
+            }
+
+        asset_name = trade_decision.get("asset")
+        if asset_name:
+            asset_count = global_context["trade_counters"]["per_asset"].get(
+                asset_name, 0
+            )
+
+            if global_context["trade_counters"]["daily_total"] >= max_trades_per_day:
+                logger.warning(
+                    f"Limite journalière {max_trades_per_day} atteinte -> PAS DE TRADE"
+                )
+                return False
+
+            if asset_count >= max_trades_per_asset:
+                logger.warning(
+                    f"Limite journalière atteinte pour {asset_name} ({max_trades_per_asset}) -> PAS DE TRADE"
+                )
+                return False
 
         # ---- Enrichissement Katana pour l'exécution/audit ----
         exec_ctx = (
@@ -959,6 +995,14 @@ def run_single_pipeline_cycle(
             feedback = run_trade_execution_pipeline(trade_executor, decision_package)
             if feedback and feedback.get("status") == "executed":
                 trade_executed_successfully = True
+
+                # ✅ Incrémenter les compteurs
+            global_context["trade_counters"]["daily_total"] += 1
+            if asset_name:
+                global_context["trade_counters"]["per_asset"][asset_name] = (
+                    global_context["trade_counters"]["per_asset"].get(asset_name, 0) + 1
+                )
+
         else:
             regime = (decision_package.get("context", {}) or {}).get(
                 "current_market_regime", "inconnu"

@@ -296,6 +296,8 @@
     "max_consecutive_losses_before_pause": 2,
     "pause_minutes_after_streak": 20,
     "risk_per_trade_pct": 0.25,
+    "max_trades_per_day": 80,
+    "max_trades_per_symbol_per_day": 20,
     "min_rr": 1.6,
     "max_spread_pips": 3.0,
     "atr_settings": {
@@ -429,8 +431,6 @@
   "execution": {
     "trade_cooldown_seconds": 90,
     "per_symbol_cooldown_candles": 3,
-    "max_trades_per_day": 80,
-    "max_trades_per_symbol_per_day": 20,
     "max_slippage_pips": 0.6,
     "cooldown_after_same_direction_loss_candles": 4
   },
