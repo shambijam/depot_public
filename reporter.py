@@ -22,38 +22,45 @@ import pandas as pd
 
 from phase_observer.detectors import Detectors
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> f854050 (ajout_fonction_trailing_stop)
 # ---------- Data Records (structures claires pour JSONL) ----------
+
 
 @dataclass
 class OBRecord:
     ts: str
     symbol: str
     timeframe: str
-    kind: str           # bullish/bearish
+    kind: str  # bullish/bearish
     zone_high: float
     zone_low: float
     quality: Optional[str] = None
     score: Optional[float] = None
     meta: Optional[dict] = None
 
+
 @dataclass
 class FVGRecord:
     ts: str
     symbol: str
     timeframe: str
-    direction: str      # up/down
+    direction: str  # up/down
     gap_top: float
     gap_bottom: float
     quality: Optional[str] = None
     score: Optional[float] = None
     meta: Optional[dict] = None
 
+
 @dataclass
 class BOSRecord:
     ts: str
     symbol: str
     timeframe: str
-    type: str           # bullish_bos/bearish_bos/bullish_mss/bearish_mss
+    type: str  # bullish_bos/bearish_bos/bullish_mss/bearish_mss
     level_broken: float
     confirmation_score: Optional[float] = None
     volume_ratio: Optional[float] = None
@@ -62,6 +69,7 @@ class BOSRecord:
     quality: Optional[str] = None
     meta: Optional[dict] = None
 
+
 @dataclass
 class RegimeSnapshot:
     ts: str
@@ -69,12 +77,13 @@ class RegimeSnapshot:
     timeframe: str
     regime: str
 
+
 @dataclass
 class BollRecord:
     ts: str
     symbol: str
     timeframe: str
-    signal: str                 # buy_revert / sell_revert / buy_breakout / sell_breakout / neutral
+    signal: str  # buy_revert / sell_revert / buy_breakout / sell_breakout / neutral
     is_range: bool
     is_squeeze: bool
     is_expansion: bool
@@ -85,7 +94,7 @@ class BollRecord:
     dist_to_mid_pips: Optional[float] = None
     dist_to_upper_pips: Optional[float] = None
     dist_to_lower_pips: Optional[float] = None
-    mid_entry: Optional[str] = None       # buy/sell/None
+    mid_entry: Optional[str] = None  # buy/sell/None
     mid_entry_score: Optional[float] = None
     entry_gate_ok: Optional[bool] = None
     half_band_pips: Optional[float] = None
@@ -103,7 +112,10 @@ class PhaseObserverReporter:
     """
 
     def __init__(self, config_manager=None, logger=None):
+<<<<<<< HEAD
      
+=======
+>>>>>>> f854050 (ajout_fonction_trailing_stop)
 
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
@@ -122,10 +134,7 @@ class PhaseObserverReporter:
         Retourne un dict structuré {meta, stats, events}
         """
         events: List[dict] = []
-        macro = {
-            "ob": 0, "fvg": 0, "bos": 0,
-            "regime_snapshots": 0, "boll_events": 0
-        }
+        macro = {"ob": 0, "fvg": 0, "bos": 0, "regime_snapshots": 0, "boll_events": 0}
         regime_hist: List[RegimeSnapshot] = []
 
         for tf, df in (tf_frames or {}).items():
@@ -136,9 +145,12 @@ class PhaseObserverReporter:
             # 1) Hygiène
             hy = self._compute_hygiene(df)
             # 2) OB/FVG/BOS/MSS
-            ob_evts = self._collect_ob(symbol, tf, df);          macro["ob"] += len(ob_evts)
-            fvg_evts = self._collect_fvg(symbol, tf, df);        macro["fvg"] += len(fvg_evts)
-            bos_evts = self._collect_bos(symbol, tf, df);        macro["bos"] += len(bos_evts)
+            ob_evts = self._collect_ob(symbol, tf, df)
+            macro["ob"] += len(ob_evts)
+            fvg_evts = self._collect_fvg(symbol, tf, df)
+            macro["fvg"] += len(fvg_evts)
+            bos_evts = self._collect_bos(symbol, tf, df)
+            macro["bos"] += len(bos_evts)
 
             # 3) Régime
             regime_series = self._collect_regime_series(symbol, tf, df)
@@ -147,7 +159,7 @@ class PhaseObserverReporter:
 
             # 4) Bollinger microphase (dernière barre + meta série si demandée)
             boll_evt = self._collect_boll_micro(symbol, tf, df)
-            macro["boll_events"] += (1 if boll_evt else 0)
+            macro["boll_events"] += 1 if boll_evt else 0
 
             # 5) Convert to dicts + merge
             events.extend([asdict(x) for x in ob_evts])
@@ -158,17 +170,19 @@ class PhaseObserverReporter:
                 events.append(asdict(boll_evt))
 
             # Hygiène en tant que meta-event minimal (facilite audit)
-            events.append({
-                "ts": self._last_ts_iso(df),
-                "symbol": symbol,
-                "timeframe": tf,
-                "type": "hygiene",
-                "bars": hy["bars"],
-                "nan_ratio": hy["nan_ratio"],
-                "holes": hy["holes"],
-                "start": hy["start"],
-                "end": hy["end"]
-            })
+            events.append(
+                {
+                    "ts": self._last_ts_iso(df),
+                    "symbol": symbol,
+                    "timeframe": tf,
+                    "type": "hygiene",
+                    "bars": hy["bars"],
+                    "nan_ratio": hy["nan_ratio"],
+                    "holes": hy["holes"],
+                    "start": hy["start"],
+                    "end": hy["end"],
+                }
+            )
 
         # Agrégations macro: distribution régimes + transitions
         regime_stats, regime_transitions = self._aggregate_regimes(regime_hist)
@@ -199,8 +213,14 @@ class PhaseObserverReporter:
         """Écrit un JSONL: 1 événement par ligne (+ header/stats en 1ère/2e lignes)"""
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"_header": report.get("meta", {})}, ensure_ascii=False) + "\n")
-            f.write(json.dumps({"_stats": report.get("stats", {})}, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps({"_header": report.get("meta", {})}, ensure_ascii=False)
+                + "\n"
+            )
+            f.write(
+                json.dumps({"_stats": report.get("stats", {})}, ensure_ascii=False)
+                + "\n"
+            )
             for evt in report.get("events", []):
                 f.write(json.dumps(evt, ensure_ascii=False) + "\n")
         self.logger.info(f"[Reporter] JSONL écrit: {path}")
@@ -215,15 +235,26 @@ class PhaseObserverReporter:
                 if not d:
                     continue
                 ts = self._match_ts(df, d)
-                out.append(OBRecord(
-                    ts=ts, symbol=symbol, timeframe=tf,
-                    kind=str(d.get("type", "unknown")),
-                    zone_high=float(d.get("zone_high", d.get("high", float("nan")))),
-                    zone_low=float(d.get("zone_low", d.get("low", float("nan")))),
-                    quality=d.get("quality"),
-                    score=self._safe_float(d.get("score")),
-                    meta={k: d.get(k) for k in d.keys() if k not in {"type","zone_high","zone_low","quality","score"}}
-                ))
+                out.append(
+                    OBRecord(
+                        ts=ts,
+                        symbol=symbol,
+                        timeframe=tf,
+                        kind=str(d.get("type", "unknown")),
+                        zone_high=float(
+                            d.get("zone_high", d.get("high", float("nan")))
+                        ),
+                        zone_low=float(d.get("zone_low", d.get("low", float("nan")))),
+                        quality=d.get("quality"),
+                        score=self._safe_float(d.get("score")),
+                        meta={
+                            k: d.get(k)
+                            for k in d.keys()
+                            if k
+                            not in {"type", "zone_high", "zone_low", "quality", "score"}
+                        },
+                    )
+                )
         except Exception as e:
             self._swallow("OB", symbol, tf, e)
         return out
@@ -236,15 +267,32 @@ class PhaseObserverReporter:
                 if not d:
                     continue
                 ts = self._match_ts(df, d)
-                out.append(FVGRecord(
-                    ts=ts, symbol=symbol, timeframe=tf,
-                    direction=str(d.get("direction","unknown")),
-                    gap_top=float(d.get("gap_top", d.get("high", float("nan")))),
-                    gap_bottom=float(d.get("gap_bottom", d.get("low", float("nan")))),
-                    quality=d.get("quality"),
-                    score=self._safe_float(d.get("score")),
-                    meta={k: d.get(k) for k in d.keys() if k not in {"direction","gap_top","gap_bottom","quality","score"}}
-                ))
+                out.append(
+                    FVGRecord(
+                        ts=ts,
+                        symbol=symbol,
+                        timeframe=tf,
+                        direction=str(d.get("direction", "unknown")),
+                        gap_top=float(d.get("gap_top", d.get("high", float("nan")))),
+                        gap_bottom=float(
+                            d.get("gap_bottom", d.get("low", float("nan")))
+                        ),
+                        quality=d.get("quality"),
+                        score=self._safe_float(d.get("score")),
+                        meta={
+                            k: d.get(k)
+                            for k in d.keys()
+                            if k
+                            not in {
+                                "direction",
+                                "gap_top",
+                                "gap_bottom",
+                                "quality",
+                                "score",
+                            }
+                        },
+                    )
+                )
         except Exception as e:
             self._swallow("FVG", symbol, tf, e)
         return out
@@ -257,24 +305,43 @@ class PhaseObserverReporter:
                 if not d:
                     continue
                 ts = self._match_ts(df, d)
-                out.append(BOSRecord(
-                    ts=ts, symbol=symbol, timeframe=tf,
-                    type=str(d.get("type","unknown")),
-                    level_broken=float(d.get("level_broken", float("nan"))),
-                    confirmation_score=self._safe_float(d.get("confirmation_score")),
-                    volume_ratio=self._safe_float(d.get("volume_ratio")),
-                    momentum=self._safe_float(d.get("momentum")),
-                    structure_type=d.get("structure_type"),
-                    quality=d.get("quality"),
-                    meta={k: d.get(k) for k in d.keys() if k not in {
-                        "type","level_broken","confirmation_score","volume_ratio","momentum","structure_type","quality"
-                    }}
-                ))
+                out.append(
+                    BOSRecord(
+                        ts=ts,
+                        symbol=symbol,
+                        timeframe=tf,
+                        type=str(d.get("type", "unknown")),
+                        level_broken=float(d.get("level_broken", float("nan"))),
+                        confirmation_score=self._safe_float(
+                            d.get("confirmation_score")
+                        ),
+                        volume_ratio=self._safe_float(d.get("volume_ratio")),
+                        momentum=self._safe_float(d.get("momentum")),
+                        structure_type=d.get("structure_type"),
+                        quality=d.get("quality"),
+                        meta={
+                            k: d.get(k)
+                            for k in d.keys()
+                            if k
+                            not in {
+                                "type",
+                                "level_broken",
+                                "confirmation_score",
+                                "volume_ratio",
+                                "momentum",
+                                "structure_type",
+                                "quality",
+                            }
+                        },
+                    )
+                )
         except Exception as e:
             self._swallow("BOS/MSS", symbol, tf, e)
         return out
 
-    def _collect_regime_series(self, symbol: str, tf: str, df: pd.DataFrame) -> List[RegimeSnapshot]:
+    def _collect_regime_series(
+        self, symbol: str, tf: str, df: pd.DataFrame
+    ) -> List[RegimeSnapshot]:
         out: List[RegimeSnapshot] = []
         try:
             # détecteur supposé retourner une Series ou colonne 'regime' déjà présente
@@ -286,24 +353,34 @@ class PhaseObserverReporter:
                 return out
             ts_col = self._detect_ts_col(df)
             for i in range(len(df)):
-                out.append(RegimeSnapshot(
-                    ts=str(self._to_iso(df.iloc[i][ts_col])) if ts_col else self._last_ts_iso(df),
-                    symbol=symbol,
-                    timeframe=tf,
-                    regime=str(regimes.iloc[i])
-                ))
+                out.append(
+                    RegimeSnapshot(
+                        ts=(
+                            str(self._to_iso(df.iloc[i][ts_col]))
+                            if ts_col
+                            else self._last_ts_iso(df)
+                        ),
+                        symbol=symbol,
+                        timeframe=tf,
+                        regime=str(regimes.iloc[i]),
+                    )
+                )
         except Exception as e:
             self._swallow("Regime", symbol, tf, e)
         return out
 
-    def _collect_boll_micro(self, symbol: str, tf: str, df: pd.DataFrame) -> Optional[BollRecord]:
+    def _collect_boll_micro(
+        self, symbol: str, tf: str, df: pd.DataFrame
+    ) -> Optional[BollRecord]:
         try:
             b = self.detectors.compute_bollinger_microphase_signals(df)
             if not b or not b.get("ok"):
                 return None
             ts = self._last_ts_iso(df)
             return BollRecord(
-                ts=ts, symbol=symbol, timeframe=tf,
+                ts=ts,
+                symbol=symbol,
+                timeframe=tf,
                 signal=str(b.get("signal")),
                 is_range=bool(b.get("is_range")),
                 is_squeeze=bool(b.get("is_squeeze")),
@@ -325,7 +402,7 @@ class PhaseObserverReporter:
                     "squeeze_strength": b.get("squeeze_strength"),
                     "is_expansion": b.get("is_expansion"),
                     "range_duration_bars": b.get("range_duration_bars"),
-                }
+                },
             )
         except Exception as e:
             self._swallow("BollMicro", symbol, tf, e)
@@ -333,14 +410,16 @@ class PhaseObserverReporter:
 
     # --------------- Aggregations ---------------
 
-    def _aggregate_regimes(self, snapshots: List[RegimeSnapshot]) -> Tuple[Dict[str,int], List[Dict[str,Any]]]:
+    def _aggregate_regimes(
+        self, snapshots: List[RegimeSnapshot]
+    ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
         # Distribution
         dist: Dict[str, int] = {}
         for s in snapshots:
             dist[s.regime] = dist.get(s.regime, 0) + 1
 
         # Transitions (regime_t-1 -> regime_t)
-        transitions: Dict[Tuple[str,str], int] = {}
+        transitions: Dict[Tuple[str, str], int] = {}
         prev: Optional[str] = None
         for s in snapshots:
             cur = s.regime
@@ -348,7 +427,9 @@ class PhaseObserverReporter:
                 transitions[(prev, cur)] = transitions.get((prev, cur), 0) + 1
             prev = cur
 
-        trans_rows = [{"from": a, "to": b, "count": c} for (a,b), c in transitions.items()]
+        trans_rows = [
+            {"from": a, "to": b, "count": c} for (a, b), c in transitions.items()
+        ]
         trans_rows.sort(key=lambda x: (-x["count"], x["from"], x["to"]))
         return dist, trans_rows
 
@@ -357,7 +438,11 @@ class PhaseObserverReporter:
     def _compute_hygiene(self, df: pd.DataFrame) -> Dict[str, Any]:
         bars = len(df)
         nan_ratio = float(df.isna().sum().sum()) / max(1, df.size)
-        holes = int(df.index.to_series().diff().gt(pd.Timedelta("90s")).sum()) if isinstance(df.index, pd.DatetimeIndex) else 0
+        holes = (
+            int(df.index.to_series().diff().gt(pd.Timedelta("90s")).sum())
+            if isinstance(df.index, pd.DatetimeIndex)
+            else 0
+        )
         return {
             "bars": bars,
             "nan_ratio": round(nan_ratio, 6),
@@ -378,7 +463,9 @@ class PhaseObserverReporter:
                 dt = ts_val.to_pydatetime()
             elif isinstance(ts_val, (int, float)):
                 # tolère ms ou s
-                dt = datetime.fromtimestamp(ts_val / (1000.0 if ts_val > 1e12 else 1.0), tz=timezone.utc)
+                dt = datetime.fromtimestamp(
+                    ts_val / (1000.0 if ts_val > 1e12 else 1.0), tz=timezone.utc
+                )
             else:
                 dt = datetime.fromisoformat(str(ts_val))
                 if dt.tzinfo is None:
@@ -408,9 +495,13 @@ class PhaseObserverReporter:
         try:
             if isinstance(idx_or_dict, dict):
                 if "index" in idx_or_dict and isinstance(idx_or_dict["index"], int):
-                    i = max(0, min(len(df)-1, idx_or_dict["index"]))
+                    i = max(0, min(len(df) - 1, idx_or_dict["index"]))
                     ts_col = self._detect_ts_col(df)
-                    return self._to_iso(df.iloc[i][ts_col]) if ts_col else self._last_ts_iso(df)
+                    return (
+                        self._to_iso(df.iloc[i][ts_col])
+                        if ts_col
+                        else self._last_ts_iso(df)
+                    )
             return self._last_ts_iso(df)
         except Exception:
             return self._last_ts_iso(df)
@@ -423,7 +514,9 @@ class PhaseObserverReporter:
             return None
 
     def _swallow(self, block: str, symbol: str, tf: str, e: Exception):
-        self.logger.error(f"[Reporter] {block} failed for {symbol} {tf}: {e}", exc_info=False)
+        self.logger.error(
+            f"[Reporter] {block} failed for {symbol} {tf}: {e}", exc_info=False
+        )
 
     # --------------- Markdown rendering ---------------
 
@@ -433,7 +526,9 @@ class PhaseObserverReporter:
         events = report.get("events", [])
 
         lines: List[str] = []
-        lines.append(f"# PhaseObserver – Rapport journalier ({meta.get('date_utc', meta.get('generated_at',''))})")
+        lines.append(
+            f"# PhaseObserver – Rapport journalier ({meta.get('date_utc', meta.get('generated_at',''))})"
+        )
         lines.append("")
         lines.append(f"- **Symbole**: `{meta.get('symbol','?')}`")
         lines.append(f"- **Timeframes**: {', '.join(meta.get('timeframes', []))}")
@@ -442,8 +537,12 @@ class PhaseObserverReporter:
         lines.append("")
         lines.append("## Statistiques globales")
         counts = stats.get("counts", {})
-        lines.append(f"- OB: **{counts.get('ob',0)}** | FVG: **{counts.get('fvg',0)}** | BOS/MSS: **{counts.get('bos',0)}**")
-        lines.append(f"- Snapshots Régime: **{counts.get('regime_snapshots',0)}** | Bollinger micro: **{counts.get('boll_events',0)}**")
+        lines.append(
+            f"- OB: **{counts.get('ob',0)}** | FVG: **{counts.get('fvg',0)}** | BOS/MSS: **{counts.get('bos',0)}**"
+        )
+        lines.append(
+            f"- Snapshots Régime: **{counts.get('regime_snapshots',0)}** | Bollinger micro: **{counts.get('boll_events',0)}**"
+        )
         lines.append("")
         lines.append("### Distribution des régimes")
         for reg, c in (stats.get("regimes", {}) or {}).items():
@@ -460,20 +559,42 @@ class PhaseObserverReporter:
             lines.append(f"## {title}")
             cnt = 0
             for evt in events:
-                if isinstance(evt, dict) and key_filter in evt and evt.get(key_filter) in wanted:
+                if (
+                    isinstance(evt, dict)
+                    and key_filter in evt
+                    and evt.get(key_filter) in wanted
+                ):
                     cnt += 1
-                    lines.append(f"- **{evt.get('ts','?')}** `{evt.get('symbol','?')}` `{evt.get('timeframe','?')}` → **{evt.get(key_filter)}**  ")
+                    lines.append(
+                        f"- **{evt.get('ts','?')}** `{evt.get('symbol','?')}` `{evt.get('timeframe','?')}` → **{evt.get(key_filter)}**  "
+                    )
                     # détails connus
-                    for k in ("zone_high","zone_low","gap_top","gap_bottom","level_broken","quality","score","confirmation_score","volume_ratio","momentum","structure_type"):
+                    for k in (
+                        "zone_high",
+                        "zone_low",
+                        "gap_top",
+                        "gap_bottom",
+                        "level_broken",
+                        "quality",
+                        "score",
+                        "confirmation_score",
+                        "volume_ratio",
+                        "momentum",
+                        "structure_type",
+                    ):
                         if k in evt and evt[k] is not None:
                             lines.append(f"  - {k}: {evt[k]}")
             if cnt == 0:
                 lines.append("_Aucun évènement._")
             lines.append("")
 
-        _section("Order Blocks", "type", ("bullish","bearish","unknown"))
-        _section("FVG", "direction", ("up","down","unknown"))
-        _section("BOS/MSS", "type", ("bullish_bos","bearish_bos","bullish_mss","bearish_mss","unknown"))
+        _section("Order Blocks", "type", ("bullish", "bearish", "unknown"))
+        _section("FVG", "direction", ("up", "down", "unknown"))
+        _section(
+            "BOS/MSS",
+            "type",
+            ("bullish_bos", "bearish_bos", "bullish_mss", "bearish_mss", "unknown"),
+        )
 
         # Bollinger micro (dernière mesure par TF)
         lines.append("## Bollinger Microphase (dernière mesure par TF)")
@@ -486,9 +607,49 @@ class PhaseObserverReporter:
         else:
             for tf, b in boll_by_tf.items():
                 lines.append(f"### {tf}")
-                lines.append(f"- signal: **{b.get('signal')}** | is_range={b.get('is_range')} | squeeze={b.get('is_squeeze')} | expansion={b.get('is_expansion')}")
-                lines.append(f"- range_score: {b.get('range_score')} | atr_pips: {b.get('atr_pips')}")
-                lines.append(f"- mid_entry: {b.get('mid_entry')} (score={b.get('mid_entry_score')}) | entry_gate_ok={b.get('entry_gate_ok')}")
-                lines.append(f"- dist_mid_pips: {b.get('dist_to_mid_pips')} | half_band_pips: {b.get('half_band_pips')}")
+                lines.append(
+                    f"- signal: **{b.get('signal')}** | is_range={b.get('is_range')} | squeeze={b.get('is_squeeze')} | expansion={b.get('is_expansion')}"
+                )
+                lines.append(
+                    f"- range_score: {b.get('range_score')} | atr_pips: {b.get('atr_pips')}"
+                )
+                lines.append(
+                    f"- mid_entry: {b.get('mid_entry')} (score={b.get('mid_entry_score')}) | entry_gate_ok={b.get('entry_gate_ok')}"
+                )
+                lines.append(
+                    f"- dist_mid_pips: {b.get('dist_to_mid_pips')} | half_band_pips: {b.get('half_band_pips')}"
+                )
                 lines.append("")
         return "\n".join(lines)
+
+
+if __name__ == "__main__":
+
+    # Exemple : charger un CSV ou des données pour tester
+    # ⚠️ à adapter selon ce que tu veux vraiment analyser
+    dummy_df = pd.DataFrame(
+        {
+            "time": pd.date_range("2025-08-01", periods=100, freq="T"),
+            "open": [1.1 + i * 0.0001 for i in range(100)],
+            "high": [1.11 + i * 0.0001 for i in range(100)],
+            "low": [1.09 + i * 0.0001 for i in range(100)],
+            "close": [1.1 + i * 0.0001 for i in range(100)],
+            "volume": [100 + i for i in range(100)],
+        }
+    )
+
+    # Construire le reporter
+    reporter = PhaseObserverReporter()
+
+    # Lancer un rapport pour 1 symbole et plusieurs TF
+    report = reporter.run_daily_report_for_asset(
+        symbol="EURUSD",
+        tf_frames={"M1": dummy_df, "M5": dummy_df},
+    )
+
+    # Exporter en Markdown et JSONL
+    os.makedirs("reports", exist_ok=True)
+    reporter.export_markdown(report, "reports/daily_report.md")
+    reporter.export_jsonl(report, "reports/daily_report.jsonl")
+
+    print("✅ Rapport généré dans le dossier reports/")

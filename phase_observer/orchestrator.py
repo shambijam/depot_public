@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict as _Dict, Any as _Any
 
 # Third-party
 import numpy as np
@@ -561,11 +562,7 @@ class PhaseObserver:
         - Pas d'analyse single-TF de secours
         - Si MTF non exploitable → paquet 'no_clear_phase' + raisons + diagnostics
         """
-        import time
-        from typing import Dict as _Dict, Any as _Any
-        import numpy as np
-        import pandas as pd
-
+       
         analysis_start_time = time.perf_counter()
 
         def _neutral(asset_sym: str, reason: str, extra: dict | None = None) -> Dict[str, Any]:
@@ -677,7 +674,7 @@ class PhaseObserver:
             try:
                 df_tf = tf_data_cache[tf]
                 ts_col = next((c for c in ("timestamp","time","datetime","ts") if c in df_tf.columns), None)
-                from datetime import datetime, timezone
+                
                 age_sec = 0.0
                 if ts_col:
                     last_ts = df_tf[ts_col].iloc[-1]
@@ -848,7 +845,7 @@ class PhaseObserver:
         last = m1_df.iloc[-1]
 
         # Fraîcheur du signal
-        from datetime import datetime, timezone
+        
         now = datetime.now(timezone.utc)
         ts_col = None
         for c in ("timestamp", "time", "datetime", "ts"):
