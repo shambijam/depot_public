@@ -1748,22 +1748,28 @@ class DecisionPipeline:
         trade_decision["action"] = normalized_action
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
-        
-            # ==========================================================
+
+        # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
         # ==========================================================
-        rm_cfg = (current_config.get("risk_management") or {})
+        rm_cfg = current_config.get("risk_management") or {}
         max_trades_total = int(rm_cfg.get("max_trades_per_day", 999))
         max_trades_asset = int(rm_cfg.get("max_trades_per_asset_per_day", 999))
 
         trades_today = int(context.get("daily_trade_count", 0))
-        trades_for_asset_today = int((context.get("trades_by_asset", {}) or {}).get(asset_raw, 0))
+        trades_for_asset_today = int(
+            (context.get("trades_by_asset", {}) or {}).get(asset_raw, 0)
+        )
 
         if trades_today >= max_trades_total:
-            self.logger.warning(f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte.")
+            self.logger.warning(
+                f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte."
+            )
             return {}
         if trades_for_asset_today >= max_trades_asset:
-            self.logger.warning(f"🚫 Trade bloqué: limite {max_trades_asset} atteinte pour {asset_raw}.")
+            self.logger.warning(
+                f"🚫 Trade bloqué: limite {max_trades_asset} atteinte pour {asset_raw}."
+            )
             return {}
 
         # --- Prix courant (commun à tous les modules) ---

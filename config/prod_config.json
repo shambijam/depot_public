@@ -39,8 +39,7 @@
     "EXECUTION & BROKER": [
       "trade_executor_settings",
       "mt5_connector_settings",
-      "account_settings",
-      "execution_policy"
+      "account_settings"
     ],
     "MARKET HOURS & NEWS": [
       "bot_behavior",
@@ -127,7 +126,6 @@
   "strategies": {
     "default_strategy": "scalping",
     "config_mapping": {
-      "dynamic": "config_trade_dynamic.json",
       "liquidity": "config_trade_liquidity.json",
       "scalping": "config_trade_scalping.json"
     },
@@ -239,7 +237,6 @@
     "strategy_weights": {
       "liquidity": 0.25,
       "scalping": 0.35,
-      "dynamic": 0.25,
       "trending": 0.8,
       "reversal": 0.7,
       "manipulation": 0.6,
@@ -453,17 +450,6 @@
     "manual_override_volume_threshold": 50,
     "manual_override_timeout_seconds": 60,
     "daily_report_format": "md",
-    "trading_start_hour_utc": 5,
-    "trading_end_hour_utc": 22,
-    "allowed_weekdays": [
-      0,
-      1,
-      2,
-      3,
-      4,
-      5,
-      6
-    ],
     "smart_spread_check": {
       "enabled": true,
       "max_multiplier": 2.5
@@ -525,7 +511,6 @@
     "log_file_name": "mt5_connector.log",
     "trade_history_start_date": "2020-01-01",
     "enable_console_logging": true,
-    "log_level": "INFO",
     "csv_separators_to_test": [
       ";",
       ",",
