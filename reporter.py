@@ -649,5 +649,18 @@ if __name__ == "__main__":
     os.makedirs("reports", exist_ok=True)
     reporter.export_markdown(report, "reports/daily_report.md")
     reporter.export_jsonl(report, "reports/daily_report.jsonl")
-
+     
     print("✅ Rapport généré dans le dossier reports/")
+    
+    reporter = PhaseObserverReporter()
+
+    # Exemple : dictionnaire de DataFrames par timeframe
+    tf_frames = {
+        "M1": pd.DataFrame(),   # ⚠️ Ici tu mettras tes vraies données M1
+        "M5": pd.DataFrame(),   # ⚠️ Ici tes données M5
+    }
+
+    # Rapport d’hier (-1)
+    report = reporter.run_daily_report_for_asset("EURUSD", tf_frames, day_offset=-1)
+
+    reporter.export_markdown(report, "reports/daily_report_yesterday.md")
