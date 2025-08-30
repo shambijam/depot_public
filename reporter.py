@@ -23,6 +23,10 @@ import pandas as pd
 from phase_observer.detectors import Detectors
 
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e611d5220e03e5afd69ad9c6d7ca05bbef5b2a0d
 # ---------- Data Records (structures claires pour JSONL) ----------
 
 
@@ -109,8 +113,11 @@ class PhaseObserverReporter:
     """
 
     def __init__(self, config_manager=None, logger=None):
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> e611d5220e03e5afd69ad9c6d7ca05bbef5b2a0d
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
