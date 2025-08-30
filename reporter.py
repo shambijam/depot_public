@@ -22,10 +22,8 @@ import pandas as pd
 
 from phase_observer.detectors import Detectors
 
-<<<<<<< HEAD
-=======
 
->>>>>>> f854050 (ajout_fonction_trailing_stop)
+
 # ---------- Data Records (structures claires pour JSONL) ----------
 
 
@@ -112,11 +110,6 @@ class PhaseObserverReporter:
     """
 
     def __init__(self, config_manager=None, logger=None):
-<<<<<<< HEAD
-     
-=======
->>>>>>> f854050 (ajout_fonction_trailing_stop)
-
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
