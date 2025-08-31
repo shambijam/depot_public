@@ -3382,10 +3382,10 @@ class DecisionPipeline:
         1) Hints midline (sl_pips_hint/tp_pips_hint) — si level_mode == "boll_midline" / "boll_midline_strict"
         2) target_sl_pips / target_tp_pips        — décision de base
         3) sl_price / tp_price                    — si fournis explicitement en prix
+        4) fallback dynamique via default_sl_pips (config risk_management) si SL absent
 
         REFUS explicites (hard):
         - action/symbole/prix invalide
-        - niveaux manquants ou distances nulles
         - incohérence directionnelle (BUY: sl<entry<tp ; SELL: tp<entry<sl)
         - equity nulle
         - contraintes BROKER (stops_level) impossibles à satisfaire
@@ -3456,6 +3456,7 @@ class DecisionPipeline:
         min_rr = float(rm_cfg.get("min_rr", 1.8))
         max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
         max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 3.5))
+        default_sl_pips = float(rm_cfg.get("default_sl_pips", 10.0))  # ✅ ajout
 
         # Mode strict pour midline ?
         level_mode_in = str(trade_decision.get("level_mode", "")).lower()
@@ -3504,11 +3505,10 @@ class DecisionPipeline:
         sl_pips_target = trade_decision.get("target_sl_pips")
         tp_pips_target = trade_decision.get("target_tp_pips")
 
-        # Niveaux prix explicitement fournis (rare)
+        # Niveaux prix explicitement fournis
         sl_price_in = trade_decision.get("sl_price")
         tp_price_in = trade_decision.get("tp_price")
 
-        # On construit en priorité en PIPS (midline hint > target pips), sinon prix
         sl_pips_val = None
         tp_pips_val = None
 
@@ -3526,34 +3526,38 @@ class DecisionPipeline:
             sl_pips_val = float(sl_pips_target)
             tp_pips_val = float(tp_pips_target)
             notes.append("levels_from_target_pips")
-        elif sl_price_in is not None and tp_price_in is not None:
+        elif sl_price_in is not None:
             try:
                 sl_price_in = float(sl_price_in)
-                tp_price_in = float(tp_price_in)
+                tp_price_in = float(tp_price_in) if tp_price_in is not None else None
             except Exception:
                 return {"ok": False, "reason": "invalid_level_types"}
-            # Convertit en pips pour unifier la suite
             sl_pips_val = abs(entry - sl_price_in) / pip_size
-            tp_pips_val = abs(tp_price_in - entry) / pip_size
+            tp_pips_val = abs(tp_price_in - entry) / pip_size if tp_price_in else None
             notes.append("levels_from_price")
         else:
-            return {"ok": False, "reason": "missing_sl_or_tp_levels"}
+            # ✅ Nouveau : fallback dynamique si SL absent
+            sl_pips_val = default_sl_pips
+            tp_pips_val = None
+            notes.append(f"used_default_sl:{default_sl_pips}p")
 
-        if not (sl_pips_val > 0 and tp_pips_val > 0):
-            return {"ok": False, "reason": "invalid_distances_pips"}
+        # Vérification distance SL
+        if not (sl_pips_val and sl_pips_val > 0):
+            return {"ok": False, "reason": "invalid_sl_distance"}
 
-        # Reconstruire les PRIX depuis les pips (cohérence directionnelle)
+        # Reconstruire les PRIX depuis les pips
         sl_dist_price = sl_pips_val * pip_size
-        tp_dist_price = tp_pips_val * pip_size
+        tp_dist_price = tp_pips_val * pip_size if tp_pips_val else None
+
         if action == "BUY":
             sl_price = entry - sl_dist_price
-            tp_price = entry + tp_dist_price
-            if not (sl_price < entry < tp_price):
+            tp_price = entry + tp_dist_price if tp_dist_price else None
+            if tp_price and not (sl_price < entry < tp_price):
                 return {"ok": False, "reason": "levels_incoherent_for_buy"}
         else:  # SELL
             sl_price = entry + sl_dist_price
-            tp_price = entry - tp_dist_price
-            if not (tp_price < entry < sl_price):
+            tp_price = entry - tp_dist_price if tp_dist_price else None
+            if tp_price and not (tp_price < entry < sl_price):
                 return {"ok": False, "reason": "levels_incoherent_for_sell"}
 
         # --- 5) Bornes via ATR (ajustements seulement si NON strict) ---
@@ -3571,7 +3575,6 @@ class DecisionPipeline:
             atr_price = None
 
         if not (isinstance(atr_price, float) and atr_price > 0):
-            # fallback: ATR M1 en pips -> prix (si dispo)
             atr_m1_pips = None
             dt = trade_decision.get("decision_trace") or {}
             if isinstance(meta.get("atr_m1_pips"), (int, float)):
@@ -3614,7 +3617,7 @@ class DecisionPipeline:
                     else (entry + sl_dist_price)
                 )
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
-            if tp_dist_price < min_stop_price_dist:
+            if tp_dist_price and tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
                 tp_price = (
@@ -3623,94 +3626,42 @@ class DecisionPipeline:
                     else (entry - tp_dist_price)
                 )
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
-            if sl_dist_price <= 0 or tp_dist_price <= 0:
-                return {"ok": False, "reason": "broker_min_distance_unreachable"}
 
-        # --- Rounding prix aux digits broker (après ajustements) ---
+        # --- Rounding prix ---
         if isinstance(digits, int) and digits >= 0:
             sl_price = round(sl_price, digits)
-            tp_price = round(tp_price, digits)
+            if tp_price:
+                tp_price = round(tp_price, digits)
 
-        # --- 7) Spread & RR effectif ---
-        # Distances finales (en prix)
-        sl_dist_price = abs(entry - sl_price)
-        tp_dist_price = abs(tp_price - entry)
-
-        # RR nominal
-        rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
-
-        # RR effectif: pénalise la récompense par le spread
+        # --- 7) Spread & RR ---
+        rr = (
+            (tp_dist_price / sl_dist_price)
+            if (tp_dist_price and sl_dist_price > 0)
+            else None
+        )
         spread_comp_price = spread_pts * point
-        effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
+        effective_tp_dist = max(0.0, (tp_dist_price or 0.0) - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
         if is_midline_strict:
-            # Hard spreads cap
             if spread_pips > max_spread_pips_cfg:
                 return {
                     "ok": False,
                     "reason": f"spread_too_high_{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p",
                 }
-            # RR effectif minimal requis — pas d’étirement permissif
-            if rr_effective < min_rr:
+            if rr is not None and rr_effective < min_rr:
                 return {
                     "ok": False,
                     "reason": f"rr_effective_below_min_{rr_effective:.2f}<{min_rr:.2f}",
                 }
-        else:
-            # Mode permissif (legacy): possibilité d'étirer le TP (capé)
-            if spread_pips > max_spread_pips_cfg:
-                notes.append(
-                    f"high_spread:{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p"
-                )
-            if rr_effective < min_rr:
-                required_eff_tp_dist = min_rr * sl_dist_price
-                new_tp_dist_price = required_eff_tp_dist + spread_comp_price
-                cap_tp_dist_price = max_tp_sl_ratio * sl_dist_price
-
-                if new_tp_dist_price <= cap_tp_dist_price:
-                    tp_dist_price = new_tp_dist_price
-                    tp_price = (
-                        (entry + tp_dist_price)
-                        if action == "BUY"
-                        else (entry - tp_dist_price)
-                    )
-                    # Respect broker min (recheck)
-                    if min_stop_price_dist > 0 and tp_dist_price < min_stop_price_dist:
-                        tp_dist_price = min_stop_price_dist
-                        tp_price = (
-                            (entry + tp_dist_price)
-                            if action == "BUY"
-                            else (entry - tp_dist_price)
-                        )
-                        notes.append("tp_extended_but_limited_by_broker_min")
-                    tp_price = round(tp_price, digits)
-                    notes.append(f"tp_extended_for_min_rr:{min_rr:.2f}")
-                    # Recalc RR
-                    sl_dist_price = abs(entry - sl_price)
-                    tp_dist_price = abs(tp_price - entry)
-                    effective_tp_dist = max(0.0, tp_dist_price - spread_comp_price)
-                    rr_effective = (
-                        (effective_tp_dist / sl_dist_price)
-                        if sl_dist_price > 0
-                        else 0.0
-                    )
-                    rr = (tp_dist_price / sl_dist_price) if sl_dist_price > 0 else 0.0
-                else:
-                    notes.append(
-                        f"min_rr_not_reached_but_accepted:{rr_effective:.2f}<{min_rr:.2f};cap={max_tp_sl_ratio:.2f}x"
-                    )
 
         # --- 8) Sizing au risque ---
         risk_amount = equity * (risk_pct / 100.0)
         try:
-            raw_volume = risk_amount / (
-                sl_dist_price * contract
-            )  # lots = $risk / (Δprix × contract)
+            raw_volume = risk_amount / (sl_dist_price * contract)
         except ZeroDivisionError:
             return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
 
-        # Quantification volume selon broker
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
 
         if is_midline_strict and (not isinstance(volume, (int, float)) or volume <= 0):
@@ -3726,7 +3677,7 @@ class DecisionPipeline:
             "sl_price": sl_price,
             "tp_price": tp_price,
             "sl_pips": sl_dist_price / pip_size,
-            "tp_pips": tp_dist_price / pip_size,
+            "tp_pips": (tp_dist_price / pip_size) if tp_dist_price else None,
             "spread_pips": spread_pips,
             "stops_level_pips": stops_level_pips,
             "notes": notes,

@@ -292,9 +292,11 @@
   "risk_management": {
     "max_consecutive_losses_before_pause": 2,
     "pause_minutes_after_streak": 20,
-    "risk_per_trade_pct": 0.25,
+    "risk_per_trade_pct": 0.73,
     "max_trades_per_day": 80,
     "max_trades_per_symbol_per_day": 20,
+    "fixed_volume_lots": 0.01,
+    "default_sl_pips": 10,
     "min_rr": 1.6,
     "max_spread_pips": 3.0,
     "atr_settings": {
