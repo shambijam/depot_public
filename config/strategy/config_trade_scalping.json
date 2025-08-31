@@ -101,7 +101,7 @@
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
-        "min_rr": 1.1,
+        "min_rr": 0.73,
         "tp_halfband_k": 1.0,
         "buffer_pips_min": 0.8,
         "min_mid_distance_ratio": 0.06,
@@ -246,7 +246,7 @@
       "ob_entry_requires": {
         "spread_ok": true,
         "mtf_alignment_min": 0,
-        "rr_min": 1.0
+        "rr_min": 0.5
       },
       "bollinger_overrides": {
         "enabled": true,
@@ -278,10 +278,10 @@
           }
         },
         "entry_bias": {
-          "breakout_buy_min": 0.5,
-          "breakout_sell_min": 0.5,
-          "revert_buy_min": 0.5,
-          "revert_sell_min": 0.5
+          "breakout_buy_min": 0.11,
+          "breakout_sell_min": 0.11,
+          "revert_buy_min": 0.91,
+          "revert_sell_min": 0.91
         },
         "tp_sl_overrides": {
           "on_buy_breakout": {
@@ -410,9 +410,9 @@
     }
   },
   "risk_management": {
-    "risk_per_trade_pct": 3.0,
-    "min_rr": 1.1,
-    "max_spread_pips": 1.2,
+    "risk_per_trade_pct": 0.751,
+    "min_rr": 0.73,
+    "max_spread_pips": 10.0,
     "max_tp_to_sl_ratio": 3.5,
     "atr_settings": {
       "period": 14
