@@ -547,9 +547,7 @@ def main(args: argparse.Namespace) -> None:
     try:
         while True:
             cycle_count += 1
-            print(
-                f"🔄 SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}"
-            )
+            print(f"[Cycle] SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
             cycle_start_time = time.time()
 
             # 🔒 Gate readiness MTF vérifié à chaque cycle (avec liste dynamique cohérente)
@@ -566,7 +564,7 @@ def main(args: argparse.Namespace) -> None:
                 time.sleep(cycle_interval)
                 continue
 
-            print("📊 Lancement du pipeline de décision...")
+            print("[Pipeline] Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 phase_observer,
