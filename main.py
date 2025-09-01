@@ -42,6 +42,8 @@ try:
     from core.strategy_manager import StrategyManager
     from core.ai_interface import AIInterface
     from core.decision_pipeline import DecisionPipeline
+    from phase_observer import PhaseObserver, PhaseMemoryManager
+
     from run_bot import (
         _mtf_readiness_gate,
         verify_environment_and_config,

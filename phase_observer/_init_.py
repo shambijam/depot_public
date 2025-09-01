@@ -1,16 +1,10 @@
-# phase_observer/__init__.py
-
-from __future__ import annotations
 from .orchestrator import PhaseObserver
+from .memory import PhaseMemoryManager
 from . import types, memory, validators, features, detectors, config
 
-
-
-
-
-
-
 __all__ = [
+    "PhaseObserver",
+    "PhaseMemoryManager",
     "orchestrator",
     "types",
     "memory",

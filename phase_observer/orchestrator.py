@@ -32,6 +32,8 @@ from .features import FeaturesExtractor  # ✅ on importe la classe, plus les fo
 from .detectors import Detectors
 from reporter import PhaseObserverReporter
 from datetime import datetime, timezone
+from .memory import PhaseMemoryManager
+
 
 
 # Alias UTC
@@ -96,9 +98,14 @@ class PhaseObserver:
                     f"Impossible de charger config: {e}. Utilisation des valeurs par défaut."
                 )
 
+        # === Ajout mémoire des phases ===
+        from .memory import PhaseMemoryManager
+        self.memory = PhaseMemoryManager()
+
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + Bollinger + bougies + qualité + lissage mémoire)."""
