@@ -104,39 +104,55 @@ class PhaseMemoryManager:
         memory.last_update = datetime.utcnow()
         return adjusted
 
+    def get_memory(self, asset_symbol: str) -> PhaseMemory:
+        """Retourne (ou initialise) la mémoire de phase pour un actif."""
+        if asset_symbol not in self._phase_counters:
+            self._phase_counters[asset_symbol] = PhaseMemory()
+        return self._phase_counters[asset_symbol]
+
     def update_memory(
-        memory: PhaseMemory,
-        new_signals: List[PhaseSignal],
+        self,
+        asset_symbol: str,
+        new_phase: str,
+        new_signals: Optional[List[PhaseSignal]] = None,
         snapshot: Optional[PhaseSnapshot] = None,
         *,
         keep_last: int = 200,
     ) -> PhaseMemory:
-        """Ajoute des signaux récents et met à jour le snapshot courant (avec découpe + suivi des transitions de phase)."""
+        """Met à jour la mémoire d’un actif donné."""
+        memory = self.get_memory(asset_symbol)
+
         if not isinstance(memory.recent_signals, list):
             memory.recent_signals = []
-        memory.recent_signals.extend(new_signals)
+
+        if new_signals:
+            memory.recent_signals.extend(new_signals)
         if len(memory.recent_signals) > keep_last:
             memory.recent_signals = memory.recent_signals[-keep_last:]
 
         if snapshot is not None:
-            # --- Détection de changement de phase ---
             old_phase = memory.last_snapshot.phase if memory.last_snapshot else None
-            new_phase = snapshot.phase if snapshot else None
+            new_phase_snapshot = snapshot.phase if snapshot else None
 
-            if old_phase and new_phase and old_phase != new_phase:
-                print(
-                    f"[Memory] 📊 Phase changée: {old_phase} → {new_phase} @ {snapshot.timestamp}"
+            if old_phase and new_phase_snapshot and old_phase != new_phase_snapshot:
+                self.logger.info(
+                    f"[Memory] 📊 Phase changée: {old_phase} → {new_phase_snapshot} @ {snapshot.timestamp}"
                 )
-                # Optionnel: garder un historique de transitions
                 if not hasattr(memory, "phase_transitions"):
                     memory.phase_transitions = []
                 memory.phase_transitions.append(
-                    {"from": old_phase, "to": new_phase, "time": snapshot.timestamp}
+                    {
+                        "from": old_phase,
+                        "to": new_phase_snapshot,
+                        "time": snapshot.timestamp,
+                    }
                 )
-
             memory.last_snapshot = snapshot
 
+        # Toujours mettre à jour la phase courante
+        memory.last_phase = new_phase
         memory.last_update = datetime.utcnow()
+        self._last_phases[asset_symbol] = new_phase
         return memory
 
     def apply_phase_memory(
