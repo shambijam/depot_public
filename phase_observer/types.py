@@ -106,7 +106,7 @@ class MarketFeatures:
     microstructure: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
+
 @dataclass(slots=True)
 class PhaseMemory:
     """Mémoire interne pour stabiliser et lisser les signaux de phase."""
