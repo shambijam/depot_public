@@ -122,14 +122,21 @@ class PhaseMemoryManager:
         """Met à jour la mémoire d’un actif donné."""
         memory = self.get_memory(asset_symbol)
 
+        # Sécurité : s'assurer que recent_signals est bien une liste
         if not isinstance(memory.recent_signals, list):
             memory.recent_signals = []
 
+        # Ajouter les nouveaux signaux
         if new_signals:
             memory.recent_signals.extend(new_signals)
         if len(memory.recent_signals) > keep_last:
             memory.recent_signals = memory.recent_signals[-keep_last:]
 
+        # Initialiser transitions si manquant
+        if not hasattr(memory, "phase_transitions") or memory.phase_transitions is None:
+            memory.phase_transitions = []
+
+        # Gérer snapshot et transitions
         if snapshot is not None:
             old_phase = memory.last_snapshot.phase if memory.last_snapshot else None
             new_phase_snapshot = snapshot.phase if snapshot else None
@@ -138,8 +145,6 @@ class PhaseMemoryManager:
                 self.logger.info(
                     f"[Memory] 📊 Phase changée: {old_phase} → {new_phase_snapshot} @ {snapshot.timestamp}"
                 )
-                if not hasattr(memory, "phase_transitions"):
-                    memory.phase_transitions = []
                 memory.phase_transitions.append(
                     {
                         "from": old_phase,
@@ -153,7 +158,13 @@ class PhaseMemoryManager:
         memory.last_phase = new_phase
         memory.last_update = datetime.utcnow()
         self._last_phases[asset_symbol] = new_phase
+
+        # 🔥 BONUS : reset compteur de persistance (cohérent avec apply_phase_memory)
+        if asset_symbol in self._phase_counters:
+            self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
+
         return memory
+
 
     def apply_phase_memory(
         self, asset_symbol: str, current_phase: str, confidence: float
@@ -165,7 +176,7 @@ class PhaseMemoryManager:
             memory = self.get_memory(asset_symbol)
             last_phase = memory.last_phase
 
-            # Config
+            # Charger config si dispo
             threshold = 0.55
             persistence_required = 2
             if getattr(self, "config_manager", None):
@@ -194,7 +205,7 @@ class PhaseMemoryManager:
             if current_phase == "no_clear_phase" or confidence < threshold:
                 return last_phase
 
-            # ✅ Utiliser un vrai dict pour les compteurs
+            # 🔥 S'assurer que self._phase_counters est bien un dict de dicts
             if asset_symbol not in self._phase_counters:
                 self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
 
@@ -213,15 +224,14 @@ class PhaseMemoryManager:
                 counters["candidate"] = current_phase
                 counters["count"] = 1
 
-            # Validation seulement après persistance_required cycles
+            # Valider transition seulement après persistance_required cycles
             if counters["count"] >= persistence_required:
                 self.logger.info(
                     f"[Memory] ✅ Transition confirmée: {last_phase} → {current_phase} "
                     f"(confiance={confidence:.2f}, persistance={counters['count']})"
                 )
                 self.update_memory(asset_symbol, current_phase)
-                counters["candidate"] = None
-                counters["count"] = 0
+                self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
                 return current_phase
             else:
                 self.logger.debug(
