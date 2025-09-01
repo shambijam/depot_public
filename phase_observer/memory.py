@@ -160,17 +160,12 @@ class PhaseMemoryManager:
     ) -> str:
         """
         📌 Stabilisation de phase via mémoire améliorée
-        - Si current_phase == "no_clear_phase" → on garde la dernière phase
-        - Seuil de confiance dynamique (configurable, défaut = 0.55)
-        - Persistance : une phase candidate doit apparaître plusieurs fois
-        avant de remplacer la phase en cours
-        - Logs détaillés pour chaque décision
         """
         try:
             memory = self.get_memory(asset_symbol)
             last_phase = memory.last_phase
 
-            # Charger config si dispo
+            # Config
             threshold = 0.55
             persistence_required = 2
             if getattr(self, "config_manager", None):
@@ -199,13 +194,11 @@ class PhaseMemoryManager:
             if current_phase == "no_clear_phase" or confidence < threshold:
                 return last_phase
 
-            # ✅ Utiliser bien _phase_counters comme dict
+            # ✅ Utiliser un vrai dict pour les compteurs
             if asset_symbol not in self._phase_counters:
-                self._phase_counters[asset_symbol] = {}
+                self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
 
             counters = self._phase_counters[asset_symbol]
-            counters.setdefault("candidate", None)
-            counters.setdefault("count", 0)
 
             # Cas 3: candidate identique à la dernière → reset compteur
             if current_phase == last_phase:
@@ -220,7 +213,7 @@ class PhaseMemoryManager:
                 counters["candidate"] = current_phase
                 counters["count"] = 1
 
-            # Valider transition seulement après persistance_required cycles
+            # Validation seulement après persistance_required cycles
             if counters["count"] >= persistence_required:
                 self.logger.info(
                     f"[Memory] ✅ Transition confirmée: {last_phase} → {current_phase} "
