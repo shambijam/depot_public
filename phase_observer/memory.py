@@ -132,10 +132,6 @@ class PhaseMemoryManager:
         if len(memory.recent_signals) > keep_last:
             memory.recent_signals = memory.recent_signals[-keep_last:]
 
-        # Initialiser transitions si manquant
-        if not hasattr(memory, "phase_transitions") or memory.phase_transitions is None:
-            memory.phase_transitions = []
-
         # Gérer snapshot et transitions
         if snapshot is not None:
             old_phase = memory.last_snapshot.phase if memory.last_snapshot else None
@@ -166,17 +162,21 @@ class PhaseMemoryManager:
         return memory
 
 
+
     def apply_phase_memory(
         self, asset_symbol: str, current_phase: str, confidence: float
     ) -> str:
         """
         📌 Stabilisation de phase via mémoire améliorée
+        - Si current_phase == "no_clear_phase" → on garde la dernière phase
+        - Seuil de confiance dynamique (configurable, défaut = 0.55)
+        - Persistance : une phase candidate doit apparaître plusieurs fois avant d'être validée
         """
         try:
             memory = self.get_memory(asset_symbol)
             last_phase = memory.last_phase
 
-            # Charger config si dispo
+            # Charger la config si dispo
             threshold = 0.55
             persistence_required = 2
             if getattr(self, "config_manager", None):
@@ -201,23 +201,23 @@ class PhaseMemoryManager:
                 self.update_memory(asset_symbol, current_phase)
                 return current_phase
 
-            # Cas 2: pas clair ou faible confiance → conserver
+            # Cas 2: pas clair ou faible confiance → conserver la précédente
             if current_phase == "no_clear_phase" or confidence < threshold:
                 return last_phase
 
-            # 🔥 S'assurer que self._phase_counters est bien un dict de dicts
+            # 🔥 Initialiser le compteur pour l’actif si manquant
             if asset_symbol not in self._phase_counters:
                 self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
 
             counters = self._phase_counters[asset_symbol]
 
-            # Cas 3: candidate identique à la dernière → reset compteur
+            # Cas 3: la phase candidate est identique à la dernière → reset
             if current_phase == last_phase:
                 counters["candidate"] = None
                 counters["count"] = 0
                 return last_phase
 
-            # Cas 4: candidate différente → incrémenter compteur
+            # Cas 4: candidate différente → incrémentation du compteur
             if counters["candidate"] == current_phase:
                 counters["count"] += 1
             else:

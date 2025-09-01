@@ -115,6 +115,7 @@ class PhaseMemory:
     recent_signals: List[PhaseSignal] = field(default_factory=list)
     caches: Dict[str, Any] = field(default_factory=dict)
     last_update: Optional[datetime] = None
+    phase_transitions: List[Dict[str, Any]] = field(default_factory=list)
 
     # Petites utilitaires pratiques (optionnel mais handy)
     def touch(self, snapshot: PhaseSnapshot | None = None) -> None:
