@@ -249,7 +249,7 @@
         "rr_min": 0.5
       },
       "bollinger_overrides": {
-        "enabled": true,
+        "enabled": false,
         "min_bars": 200,
         "period": 20,
         "std_mult": 2.0,
