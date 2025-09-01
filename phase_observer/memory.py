@@ -199,7 +199,7 @@ class PhaseMemoryManager:
             if current_phase == "no_clear_phase" or confidence < threshold:
                 return last_phase
 
-            # Initialiser compteur pour cet actif
+            # ✅ Utiliser bien _phase_counters comme dict
             if asset_symbol not in self._phase_counters:
                 self._phase_counters[asset_symbol] = {}
 
@@ -240,6 +240,7 @@ class PhaseMemoryManager:
         except Exception as e:
             self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
             return current_phase
+
 
     def reset_memory(memory: PhaseMemory) -> None:
         """Purge la mémoire en douceur (sans recréer l’objet)."""
