@@ -56,8 +56,9 @@ def stability_filter(
         stability_note: List[str] = []
 
         if last_bias is not None and hasattr(sig, "direction"):
-            if (str(last_bias) == "BUY" and str(sig.direction) == "SELL") or \
-               (str(last_bias) == "SELL" and str(sig.direction) == "BUY"):
+            if (str(last_bias) == "BUY" and str(sig.direction) == "SELL") or (
+                str(last_bias) == "SELL" and str(sig.direction) == "BUY"
+            ):
                 q = max(0.0, q - float(hysteresis))
                 stability_note.append("hysteresis_penalty")
 
@@ -72,13 +73,15 @@ def stability_filter(
 
         # Mise à jour du signal (non destructif)
         sig.meta = dict(sig.meta or {})
-        sig.meta.update({
-            "stability_persist": pc,
-            "stability_ema_quality": round(new_ema, 4),
-            "stability_notes": stability_note,
-            "last_phase": str(last_phase) if last_phase is not None else None,
-            "last_bias": str(last_bias) if last_bias is not None else None,
-        })
+        sig.meta.update(
+            {
+                "stability_persist": pc,
+                "stability_ema_quality": round(new_ema, 4),
+                "stability_notes": stability_note,
+                "last_phase": str(last_phase) if last_phase is not None else None,
+                "last_bias": str(last_bias) if last_bias is not None else None,
+            }
+        )
         sig.quality = max(0.0, min(1.0, q))
         adjusted.append(sig)
 
@@ -96,7 +99,7 @@ def update_memory(
     *,
     keep_last: int = 200,
 ) -> PhaseMemory:
-    """Ajoute des signaux récents et met à jour le snapshot courant (avec découpe)."""
+    """Ajoute des signaux récents et met à jour le snapshot courant (avec découpe + suivi des transitions de phase)."""
     if not isinstance(memory.recent_signals, list):
         memory.recent_signals = []
     memory.recent_signals.extend(new_signals)
@@ -104,10 +107,109 @@ def update_memory(
         memory.recent_signals = memory.recent_signals[-keep_last:]
 
     if snapshot is not None:
+        # --- Détection de changement de phase ---
+        old_phase = memory.last_snapshot.phase if memory.last_snapshot else None
+        new_phase = snapshot.phase if snapshot else None
+
+        if old_phase and new_phase and old_phase != new_phase:
+            print(
+                f"[Memory] 📊 Phase changée: {old_phase} → {new_phase} @ {snapshot.timestamp}"
+            )
+            # Optionnel: garder un historique de transitions
+            if not hasattr(memory, "phase_transitions"):
+                memory.phase_transitions = []
+            memory.phase_transitions.append(
+                {"from": old_phase, "to": new_phase, "time": snapshot.timestamp}
+            )
+
         memory.last_snapshot = snapshot
 
     memory.last_update = datetime.utcnow()
     return memory
+
+
+def apply_phase_memory(
+    self, asset_symbol: str, current_phase: str, confidence: float
+) -> str:
+    """
+    📌 Stabilisation de phase via mémoire améliorée
+    - Si current_phase == "no_clear_phase" → on garde la dernière phase
+    - Seuil de confiance dynamique (configurable, défaut = 0.55)
+    - Persistance : une phase candidate doit apparaître plusieurs fois
+      avant de remplacer la phase en cours
+    - Logs détaillés pour chaque décision
+    """
+    try:
+        last_phase = self.get_last_phase(asset_symbol)
+        if not hasattr(self, "_phase_counters"):
+            self._phase_counters = {}
+
+        # Configurable
+        threshold = float(
+            getattr(self, "config_manager", {}).get(
+                "phase_detection_defaults.memory.min_confidence_threshold", 0.55
+            )
+            if getattr(self, "config_manager", None)
+            else 0.55
+        )
+        persistence_required = int(
+            getattr(self, "config_manager", {}).get(
+                "phase_detection_defaults.memory.persistence_cycles", 2
+            )
+            if getattr(self, "config_manager", None)
+            else 2
+        )
+
+        # Cas 1: pas de phase précédente → init
+        if not last_phase:
+            self.update_memory(asset_symbol, current_phase)
+            return current_phase
+
+        # Cas 2: pas clair ou faible confiance → conserver
+        if current_phase == "no_clear_phase" or confidence < threshold:
+            return last_phase
+
+        # Initialiser compteur pour cet actif
+        if asset_symbol not in self._phase_counters:
+            self._phase_counters[asset_symbol] = {}
+
+        counters = self._phase_counters[asset_symbol]
+        counters.setdefault("candidate", None)
+        counters.setdefault("count", 0)
+
+        # Cas 3: candidate identique à la dernière → reset compteur
+        if current_phase == last_phase:
+            counters["candidate"] = None
+            counters["count"] = 0
+            return last_phase
+
+        # Cas 4: candidate différente → incrémenter compteur
+        if counters["candidate"] == current_phase:
+            counters["count"] += 1
+        else:
+            counters["candidate"] = current_phase
+            counters["count"] = 1
+
+        # Valider transition seulement après persistance_required cycles
+        if counters["count"] >= persistence_required:
+            self.logger.info(
+                f"[Memory] Transition confirmée: {last_phase} → {current_phase} "
+                f"(confiance={confidence:.2f}, persistance={counters['count']})"
+            )
+            self.update_memory(asset_symbol, current_phase)
+            counters["candidate"] = None
+            counters["count"] = 0
+            return current_phase
+        else:
+            self.logger.debug(
+                f"[Memory] Transition en attente: {last_phase} → {current_phase} "
+                f"(confiance={confidence:.2f}, tentative {counters['count']}/{persistence_required})"
+            )
+            return last_phase
+
+    except Exception as e:
+        self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
+        return current_phase
 
 
 def reset_memory(memory: PhaseMemory) -> None:

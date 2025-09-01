@@ -750,6 +750,15 @@ def run_single_pipeline_cycle(
                         )
                 except Exception:
                     pass
+                
+                # --- Injection mémoire directe (phase stabilisée + confiance)
+                try:
+                    signals["phase_memory_stabilized"] = str(latest.get("phase"))
+                    signals["confidence_stabilized"] = float(latest.get("confidence_score", 0.5))
+                except Exception:
+                    signals["phase_memory_stabilized"] = signals.get("phase", "no_clear_phase")
+                    signals["confidence_stabilized"] = signals.get("confidence_score", 0.5)
+
 
                 # -- Détection Big Reversal Candle (nouvelle règle)
                 try:

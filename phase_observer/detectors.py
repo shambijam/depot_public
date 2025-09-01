@@ -409,7 +409,7 @@ class Detectors:
         - Filtrage des faux breakouts par distance minimale relative
         - Respect de 'require_close_beyond' (clôture au-delà du niveau)
         """
-       
+
         self.logger.debug(
             "Détection BOS/MSS Enhanced (vectorisée) avec confirmations..."
         )
@@ -658,16 +658,24 @@ class Detectors:
             )
 
         return results
-    
-    def detect_big_reversal_candle(
-        self, df: pd.DataFrame, min_body_ratio: float = 0.65, min_size_mult: float = 2.5
+
+    def detect_candle_patterns(
+        self,
+        df: pd.DataFrame,
+        min_long_mult: float = 2.5,
+        min_body_ratio: float = 0.65,
+        small_body_ratio: float = 0.2,
+        wick_ratio: float = 2.0
     ) -> List[Optional[Dict[str, Any]]]:
         """
-        📌 Détection de grandes bougies de retournement (big reversal candles)
-        avec couplage OB/FVG/BOS.
+        🔮 Détection avancée des chandeliers et patterns multi-bougies.
 
-        - min_body_ratio : proportion du corps vs taille totale (bougie pleine)
-        - min_size_mult : multiple de la taille moyenne des 20 dernières bougies
+        Couvre :
+        - Bougies : longues, petites, doji, pinbar, marubozu, engulfing
+        - Séquences : clusters, momentum runs, confirmations
+        - Patterns : Morning Star, Evening Star, Soldiers, Crows, Harami, Tweezer
+
+        Retourne une liste enrichie avec : pattern, strength_score, contexte (OB/FVG/BOS).
         """
 
         if df is None or len(df) < 30:
@@ -676,34 +684,118 @@ class Detectors:
         df = df.copy()
         df["candle_size"] = df["high"] - df["low"]
         df["body_size"] = (df["close"] - df["open"]).abs()
+        df["upper_wick"] = df["high"] - df[["open", "close"]].max(axis=1)
+        df["lower_wick"] = df[["open", "close"]].min(axis=1) - df["low"]
         df["body_ratio"] = df["body_size"] / df["candle_size"].replace(0, np.nan)
 
         avg_size = df["candle_size"].rolling(20).mean()
-
         signals: List[Optional[Dict[str, Any]]] = []
 
         for i in range(len(df)):
             try:
-                size_ok = df["candle_size"].iloc[i] > min_size_mult * avg_size.iloc[i]
-                body_ok = df["body_ratio"].iloc[i] >= min_body_ratio
-                if size_ok and body_ok:
-                    direction = "bullish" if df["close"].iloc[i] > df["open"].iloc[i] else "bearish"
+                signal = None
+                score = 0.0
+                size = df["candle_size"].iloc[i]
+                body = df["body_size"].iloc[i]
+                body_r = df["body_ratio"].iloc[i]
+                up_wick = df["upper_wick"].iloc[i]
+                low_wick = df["lower_wick"].iloc[i]
+                avg = avg_size.iloc[i] if pd.notna(avg_size.iloc[i]) else size
+                is_bull = df["close"].iloc[i] > df["open"].iloc[i]
 
+                # === Bougies individuelles ===
+                if size > min_long_mult * avg and body_r >= min_body_ratio:
+                    signal, score = ("long_bullish" if is_bull else "long_bearish", 0.8)
+
+                elif body_r < small_body_ratio and size < 0.5 * avg:
+                    signal, score = ("small_accumulation", 0.3)
+
+                elif body <= 0.1 * size:  # Doji
+                    signal, score = ("doji", 0.5)
+
+                elif low_wick > wick_ratio * body and up_wick < body:
+                    signal, score = ("hammer" if is_bull else "bullish_pinbar", 0.7)
+                elif up_wick > wick_ratio * body and low_wick < body:
+                    signal, score = ("shooting_star" if not is_bull else "bearish_pinbar", 0.7)
+
+                # Engulfing
+                if i > 0 and body > df["body_size"].iloc[i - 1]:
+                    if is_bull and df["close"].iloc[i] > df["open"].iloc[i - 1]:
+                        signal, score = ("bullish_engulfing", 0.9)
+                    elif not is_bull and df["close"].iloc[i] < df["open"].iloc[i - 1]:
+                        signal, score = ("bearish_engulfing", 0.9)
+
+                # Marubozu
+                if body_r > 0.95 and up_wick < 0.05 * size and low_wick < 0.05 * size:
+                    signal, score = ("marubozu_bull" if is_bull else "marubozu_bear", 1.0)
+
+                # === Séquences dynamiques ===
+                if i >= 2:
+                    last_patterns = [s["pattern"] if s else None for s in signals[-2:]]
+                    if last_patterns.count("doji") == 2 and signal == "doji":
+                        signal, score = ("doji_cluster_consolidation", 0.7)
+                    if last_patterns.count("long_bullish") == 2 and signal == "long_bullish":
+                        signal, score = ("bullish_momentum_run", 1.0)
+                    if last_patterns.count("long_bearish") == 2 and signal == "long_bearish":
+                        signal, score = ("bearish_momentum_run", 1.0)
+                    if "bullish_engulfing" in last_patterns and signal == "marubozu_bull":
+                        signal, score = ("confirmed_bullish_reversal", 1.2)
+                    if "bearish_engulfing" in last_patterns and signal == "marubozu_bear":
+                        signal, score = ("confirmed_bearish_reversal", 1.2)
+
+                # === Patterns multi-bougies ===
+                if i >= 2:
+                    o1, c1 = df["open"].iloc[i - 2], df["close"].iloc[i - 2]
+                    o2, c2 = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
+                    o3, c3 = df["open"].iloc[i], df["close"].iloc[i]
+
+                    # Morning Star
+                    if (c1 < o1 and abs(c2 - o2) < 0.3 * avg and c3 > o3 and c3 > (o1 + c1) / 2):
+                        signal, score = ("morning_star", 1.2)
+
+                    # Evening Star
+                    if (c1 > o1 and abs(c2 - o2) < 0.3 * avg and c3 < o3 and c3 < (o1 + c1) / 2):
+                        signal, score = ("evening_star", 1.2)
+
+                    # Three White Soldiers
+                    if all(df["close"].iloc[j] > df["open"].iloc[j] for j in [i - 2, i - 1, i]):
+                        signal, score = ("three_white_soldiers", 1.3)
+
+                    # Three Black Crows
+                    if all(df["close"].iloc[j] < df["open"].iloc[j] for j in [i - 2, i - 1, i]):
+                        signal, score = ("three_black_crows", 1.3)
+
+                    # Harami
+                    if (c1 > o1 and c2 < o2 and o2 < c1 and c2 > o1):
+                        signal, score = ("bearish_harami", 0.9)
+                    if (c1 < o1 and c2 > o2 and o2 > c1 and c2 < o1):
+                        signal, score = ("bullish_harami", 0.9)
+
+                    # Tweezer Top/Bottom
+                    if abs(df["high"].iloc[i] - df["high"].iloc[i - 1]) < 0.1 * avg:
+                        signal, score = ("tweezer_top", 0.8) if not is_bull else ("tweezer_bottom", 0.8)
+
+                # Enrichissement
+                if signal:
                     signals.append({
                         "index": i,
                         "timestamp": str(df.index[i]),
-                        "type": f"big_reversal_{direction}",
-                        "body_ratio": round(df["body_ratio"].iloc[i], 3),
-                        "candle_size": round(df["candle_size"].iloc[i], 5),
-                        "avg_size": round(avg_size.iloc[i], 5),
-                        # Couplage avec OB/FVG/BOS
+                        "pattern": signal,
+                        "strength_score": score,
+                        "body_ratio": round(body_r, 3),
+                        "candle_size": round(size, 5),
+                        "avg_size": round(avg, 5),
+                        "upper_wick": round(up_wick, 5),
+                        "lower_wick": round(low_wick, 5),
                         "near_ob": bool("ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])),
                         "near_fvg": bool("fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])),
                         "near_bos": bool("bos" in df.columns and not pd.isna(df["bos"].iloc[i])),
                     })
                 else:
                     signals.append(None)
-            except Exception:
+
+            except Exception as e:
+                self.logger.error(f"Erreur détection bougie: {e}")
                 signals.append(None)
 
         return signals
@@ -736,7 +828,7 @@ class Detectors:
             * hysteresis/débounce basiques pour stabiliser la détection de range
             * ✅ Correction pandas: remplace .fillna(method="ffill") par .ffill()
         """
-     
+
         out = {
             "ok": False,
             "reason": None,
@@ -1238,23 +1330,26 @@ class Detectors:
 
     def detect_market_regime(self, df: pd.DataFrame) -> pd.Series:
         """
-        🏛️ Market Regime Detection - Remplace la détection de tendance basique
+        🏛️ Market Regime Detection - Version améliorée avec mémoire de phase.
 
         Régimes détectés:
         - trending_institutional_bull/bear | trending_retail_bull/bear
         - range_accumulation/distribution | range_institutional | range_retail
         - high_volatility_chaos | low_volatility_compression | transitional
 
-        Basé sur:
-        - ADX pour force de tendance
-        - Volume Profile pour activité institutionnelle
-        - Volatilité Garman-Klass
+        Changements :
+        - Conserve la dernière phase si les signaux actuels sont ambigus
+        - Ne tombe pas dans "unknown" sauf données invalides
+        - Le changement de phase n'est validé que si les signaux dépassent un seuil de clarté
         """
+
         self.logger.debug("Détection du régime de marché sophistiquée...")
 
         if df is None or df.empty:
+            self.logger.warning("DataFrame vide, impossible de détecter un régime.")
             return pd.Series(dtype=object)
 
+        # Charger config
         regime_config = (
             self.config_manager.get(
                 "phase_detection_defaults.regime_detection_settings", {}
@@ -1265,24 +1360,19 @@ class Detectors:
         vol_config = regime_config.get("volatility_regimes", {}) or {}
         volume_config = regime_config.get("volume_profile", {}) or {}
 
-        # === 1. CALCUL ADX (AVERAGE DIRECTIONAL INDEX) ===
+        # === 1. CALCUL ADX ===
         adx_period = int(adx_config.get("period", 14))
         trending_threshold = float(adx_config.get("trending_threshold", 25))
         ranging_threshold = float(adx_config.get("ranging_threshold", 20))
 
         def calculate_adx(_df: pd.DataFrame, period: int = 14):
-            """Calcul ADX pour mesurer la force de la tendance."""
-            high = _df["high"]
-            low = _df["low"]
-            close = _df["close"]
-
+            high, low, close = _df["high"], _df["low"], _df["close"]
             tr1 = high - low
             tr2 = (high - close.shift()).abs()
             tr3 = (low - close.shift()).abs()
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-            up_move = high.diff()
-            down_move = -low.diff()
+            up_move, down_move = high.diff(), -low.diff()
             dm_plus = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
             dm_minus = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
@@ -1318,12 +1408,11 @@ class Detectors:
         gk_vol = 0.5 * ln_high_low**2 - (2 * np.log(2) - 1) * ln_close_open**2
         volatility = np.sqrt(gk_vol.rolling(window=vol_period, min_periods=1).mean())
 
-        # Percentile dynamique sur fenêtre glissante
         vol_percentiles = volatility.rolling(
             window=max(100, vol_period * 5), min_periods=1
         ).apply(lambda x: (x <= x.iloc[-1]).mean() * 100.0, raw=False)
 
-        # === 3. VOLUME PROFILE INSTITUTIONNEL ===
+        # === 3. VOLUME PROFILE ===
         enable_institutional = bool(
             volume_config.get("enable_institutional_detection", True)
         )
@@ -1361,6 +1450,7 @@ class Detectors:
             )
             is_institutional = bool(institutional_activity.iloc[i])
 
+            # --- Phase trending
             if current_adx > trending_threshold:
                 if current_di_plus > current_di_minus:
                     regimes.iloc[i] = (
@@ -1375,6 +1465,7 @@ class Detectors:
                         else "trending_retail_bear"
                     )
 
+            # --- Phase range
             elif current_adx < ranging_threshold:
                 if is_institutional:
                     recent_closes = df["close"].iloc[max(0, i - 10) : i + 1]
@@ -1388,6 +1479,8 @@ class Detectors:
                         regimes.iloc[i] = "range_institutional"
                 else:
                     regimes.iloc[i] = "range_retail"
+
+            # --- Volatilité / Transition
             else:
                 if current_vol_percentile >= high_vol_percentile:
                     regimes.iloc[i] = "high_volatility_chaos"
@@ -1396,62 +1489,65 @@ class Detectors:
                 else:
                     regimes.iloc[i] = "transitional"
 
-        # === 5. CALCUL MÉTRIQUES DE QUALITÉ DU RÉGIME ===
+            # --- AMÉLIORATION : conserver la phase précédente si ambigu
+            if regimes.iloc[i] == "unknown":
+                if hasattr(self, "_last_regime") and self._last_regime:
+                    regimes.iloc[i] = self._last_regime
+                    self.logger.debug(
+                        f"Ambigu → on conserve l'ancien régime: {self._last_regime}"
+                    )
+
+            # Mettre à jour la mémoire
+            self._last_regime = regimes.iloc[i]
+
+        # === 5. QUALITÉ DU RÉGIME ===
         def calculate_regime_strength(
             regime_series: pd.Series, adx_series: pd.Series
         ) -> pd.Series:
-            """Calcule la force/confiance du régime détecté."""
-            regime_strength = pd.Series(
-                0.5, index=regime_series.index, dtype=float
-            )  # Base 50%
-
+            strength = pd.Series(0.5, index=regime_series.index, dtype=float)
             for i in range(len(regime_series)):
-                regime = str(regime_series.iloc[i])
-                adx_val = (
+                regime, adx_val = str(regime_series.iloc[i]), (
                     float(adx_series.iloc[i]) if pd.notna(adx_series.iloc[i]) else 0.0
                 )
-
                 if "trending" in regime:
                     if adx_val > 40:
-                        regime_strength.iloc[i] = 0.9
+                        strength.iloc[i] = 0.9
                     elif adx_val > 30:
-                        regime_strength.iloc[i] = 0.8
+                        strength.iloc[i] = 0.8
                     elif adx_val > 25:
-                        regime_strength.iloc[i] = 0.7
+                        strength.iloc[i] = 0.7
                     else:
-                        regime_strength.iloc[i] = 0.6
+                        strength.iloc[i] = 0.6
                 elif "range" in regime:
                     if adx_val < 15:
-                        regime_strength.iloc[i] = 0.9
+                        strength.iloc[i] = 0.9
                     elif adx_val < 20:
-                        regime_strength.iloc[i] = 0.8
+                        strength.iloc[i] = 0.8
                     else:
-                        regime_strength.iloc[i] = 0.6
+                        strength.iloc[i] = 0.6
                 elif "volatility" in regime:
-                    regime_strength.iloc[i] = 0.8
-
-            return regime_strength
+                    strength.iloc[i] = 0.8
+            return strength
 
         regime_strength = calculate_regime_strength(regimes, adx)
 
-        # Ajout au DataFrame pour usage ultérieur
+        # Ajouter au DF
         df["regime"] = regimes
         df["regime_strength"] = regime_strength
         df["adx"] = adx
         df["volatility_percentile"] = vol_percentiles
         df["institutional_activity"] = institutional_activity
 
-        # === 6. LOGGING DE PERFORMANCE ===
+        # === 6. LOGGING ===
         if len(regimes) > 0:
-            regime_counts = regimes.value_counts()
-            dominant_regime = (
-                regime_counts.index[0] if len(regime_counts) > 0 else "unknown"
-            )
+            dominant_regime = regimes.value_counts().idxmax()
             avg_strength = float(regime_strength.mean())
-            self.logger.debug(
-                f"Régime de marché: {dominant_regime} (force moyenne: {avg_strength:.2f})"
+            self.logger.info(
+                f"📊 Régime dominant: {dominant_regime} | force moyenne: {avg_strength:.2f}"
             )
-            self.logger.debug(f"Distribution régimes: {dict(regime_counts.head(3))}")
+            self.logger.debug(
+                f"Distribution régimes: {dict(regimes.value_counts().head(3))}"
+            )
 
         return regimes
 

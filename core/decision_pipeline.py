@@ -2236,18 +2236,24 @@ class DecisionPipeline:
             if not isinstance(s, dict) or not s:
                 continue
 
-            confidence = float(
-                s.get("confidence_score", s.get("confidence", 0.0)) or 0.0
+           # --- Phase & confiance : priorité aux valeurs stabilisées par la mémoire ---
+            phase = str(
+                s.get("phase_memory_stabilized", s.get("phase", "no_clear_phase"))
             )
+            confidence = float(
+                s.get("confidence_stabilized", s.get("confidence_score", s.get("confidence", 0.0))) or 0.0
+            )
+
             if confidence < min_confidence:
-                # Unique filtre dur conservé (faible par défaut)
                 self.logger.debug(
-                    "Asset %s ignoré: confidence %.3f < %.3f",
+                    "Asset %s ignoré: confidence %.3f < %.3f (phase=%s)",
                     asset,
                     confidence,
                     min_confidence,
+                    phase,
                 )
                 continue
+
 
             # Composantes de confluence (SOFT)
             bos_ok = bool(
@@ -2460,8 +2466,10 @@ class DecisionPipeline:
             def _diag_selected(*a, **k):
                 pass
 
-        # ---------- Données de base ----------
-        phase = str(signals.get("phase", "") or "").lower()
+       # Phase stabilisée par mémoire prioritaire
+        phase = str(
+            signals.get("phase_memory_stabilized", signals.get("phase", "no_clear_phase"))
+        ).lower()
         # Prix (tolérant multi-sources)
         current_price = None
         for k in ("current_price", "last_close", "close", "entry_price"):
@@ -2762,7 +2770,9 @@ class DecisionPipeline:
             "target_sl_pips": float(round(sl_pips, 3)),
             "target_tp_pips": float(round(tp_pips, 3)),
             "rule_name": rule_name,
-            "confidence": float(signals.get("confidence_score", 0.0) or 0.0),
+            "confidence": float(
+                signals.get("confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0)
+            ),
             "timestamp": timestamp,
             "magic_number": int(config.get("magic_number", 999_999)),
             "decision_trace": decision_trace,
