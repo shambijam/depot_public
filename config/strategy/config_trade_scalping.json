@@ -256,7 +256,7 @@
         "squeeze_window": 100,
         "squeeze_percentile": 0.15,
         "atr_period": 14,
-        "mode": "katana",
+        "mode": "permissive",
         "per_symbol": {
           "EURUSD": {
             "period": 18,
