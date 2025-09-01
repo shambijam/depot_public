@@ -5,7 +5,7 @@ from typing import List
 import pandas as pd
 
 from .types import Phase, PhaseSignal, PhaseMemory, PhaseSnapshot
-from .memory import stability_filter
+
 
 
 def calculate_confidence_score(self, df_row: pd.Series) -> float:
