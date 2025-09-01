@@ -10,7 +10,7 @@ from pathlib import Path
 from core.ai_interface import AIInterface
 from core.utils import ConfigValidationError, TradeStatus  # NOUVEL IMPORT DEPUIS UTILS
 from typing import Any, Dict, List, Optional, Tuple
-from phase_observer import PhaseObserver, PhaseMemoryManager
+
 
 
 
