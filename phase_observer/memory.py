@@ -167,25 +167,28 @@ class PhaseMemoryManager:
         - Logs détaillés pour chaque décision
         """
         try:
-            last_phase = self.get_last_phase(asset_symbol)
-            if not hasattr(self, "_phase_counters"):
-                self._phase_counters = {}
+            memory = self.get_memory(asset_symbol)
+            last_phase = memory.last_phase
 
-            # Configurable
-            threshold = float(
-                getattr(self, "config_manager", {}).get(
-                    "phase_detection_defaults.memory.min_confidence_threshold", 0.55
-                )
-                if getattr(self, "config_manager", None)
-                else 0.55
-            )
-            persistence_required = int(
-                getattr(self, "config_manager", {}).get(
-                    "phase_detection_defaults.memory.persistence_cycles", 2
-                )
-                if getattr(self, "config_manager", None)
-                else 2
-            )
+            # Charger config si dispo
+            threshold = 0.55
+            persistence_required = 2
+            if getattr(self, "config_manager", None):
+                try:
+                    threshold = float(
+                        self.config_manager.get(
+                            "phase_detection_defaults.memory.min_confidence_threshold",
+                            threshold,
+                        )
+                    )
+                    persistence_required = int(
+                        self.config_manager.get(
+                            "phase_detection_defaults.memory.persistence_cycles",
+                            persistence_required,
+                        )
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[Memory] config_manager get failed: {e}")
 
             # Cas 1: pas de phase précédente → init
             if not last_phase:
@@ -220,7 +223,7 @@ class PhaseMemoryManager:
             # Valider transition seulement après persistance_required cycles
             if counters["count"] >= persistence_required:
                 self.logger.info(
-                    f"[Memory] Transition confirmée: {last_phase} → {current_phase} "
+                    f"[Memory] ✅ Transition confirmée: {last_phase} → {current_phase} "
                     f"(confiance={confidence:.2f}, persistance={counters['count']})"
                 )
                 self.update_memory(asset_symbol, current_phase)
@@ -229,7 +232,7 @@ class PhaseMemoryManager:
                 return current_phase
             else:
                 self.logger.debug(
-                    f"[Memory] Transition en attente: {last_phase} → {current_phase} "
+                    f"[Memory] ⏳ Transition en attente: {last_phase} → {current_phase} "
                     f"(confiance={confidence:.2f}, tentative {counters['count']}/{persistence_required})"
                 )
                 return last_phase

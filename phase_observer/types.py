@@ -107,9 +107,11 @@ class MarketFeatures:
 
 
 @dataclass(slots=True)
+@dataclass(slots=True)
 class PhaseMemory:
     """Mémoire interne pour stabiliser et lisser les signaux de phase."""
     last_snapshot: Optional[PhaseSnapshot] = None
+    last_phase: Optional[str] = None   # <--- 🔥 AJOUT ICI
     recent_signals: List[PhaseSignal] = field(default_factory=list)
     caches: Dict[str, Any] = field(default_factory=dict)
     last_update: Optional[datetime] = None
