@@ -9,7 +9,7 @@ from .types import PhaseSignal, PhaseMemory, PhaseSnapshot, Direction
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["stability_filter", "update_memory", "reset_memory"]
+__all__ = ["stability_filter", "update_memory", "reset_memory", "apply_phase_memory"]
 
 
 class PhaseMemoryManager:
@@ -19,11 +19,38 @@ class PhaseMemoryManager:
         self.config_manager = config_manager
         self.logger = logger or logging.getLogger(__name__)
         self._last_phases: Dict[str, str] = {}
-        self._phase_counters: Dict[str, Dict[str, Any]] = {}
+        self._phase_counters: Dict[str, PhaseMemory] = {}
 
     def get_last_phase(self, asset_symbol: str) -> Optional[str]:
         """Retourne la dernière phase connue pour un actif, ou None si inconnu."""
         return self._last_phases.get(asset_symbol)
+
+    def get_memory(self, asset_symbol: str) -> PhaseMemory:
+        """Retourne (ou initialise) la mémoire de phase pour un actif."""
+        memory = self._phase_counters.get(asset_symbol)
+
+        # 🔹 Si aucune mémoire → initialiser
+        if memory is None:
+            memory = PhaseMemory()
+            self._phase_counters[asset_symbol] = memory
+            return memory
+
+        # 🔹 Si jamais un dict a été stocké par erreur → convertir
+        if isinstance(memory, dict):
+            try:
+                memory = PhaseMemory.from_dict(memory)
+                self._phase_counters[asset_symbol] = memory
+                self.logger.warning(
+                    f"[Memory] ⚠️ Conversion d’un dict brut vers PhaseMemory pour {asset_symbol}"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"[Memory] Impossible de convertir dict en PhaseMemory ({asset_symbol}): {e}"
+                )
+                memory = PhaseMemory()
+                self._phase_counters[asset_symbol] = memory
+
+        return memory
 
     def stability_filter(
         signals: List[PhaseSignal],
@@ -104,12 +131,6 @@ class PhaseMemoryManager:
         memory.last_update = datetime.utcnow()
         return adjusted
 
-    def get_memory(self, asset_symbol: str) -> PhaseMemory:
-        """Retourne (ou initialise) la mémoire de phase pour un actif."""
-        if asset_symbol not in self._phase_counters:
-            self._phase_counters[asset_symbol] = PhaseMemory()
-        return self._phase_counters[asset_symbol]
-
     def update_memory(
         self,
         asset_symbol: str,
@@ -155,104 +176,85 @@ class PhaseMemoryManager:
         memory.last_update = datetime.utcnow()
         self._last_phases[asset_symbol] = new_phase
 
-        # 🔥 BONUS : reset compteur de persistance (cohérent avec apply_phase_memory)
-        if asset_symbol in self._phase_counters:
-            self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
+        # 🔥 Correction : persistance stockée dans l’objet, pas en dict brut
+        if not hasattr(memory, "counters") or not isinstance(memory.counters, dict):
+            memory.counters = {}
+        memory.counters["persistence"] = {"candidate": None, "count": 0}
 
         return memory
 
 
+def apply_phase_memory(
+    self, asset_symbol: str, current_phase: str, confidence: float
+) -> str:
+    """
+    📌 Stabilisation de phase via mémoire améliorée
+    - Assure que la mémoire est toujours normalisée
+    - Évite les plantages si `get_memory()` renvoie un dict
+    """
+    try:
+        memory = self.get_memory(asset_symbol)
 
-    def apply_phase_memory(
-        self, asset_symbol: str, current_phase: str, confidence: float
-    ) -> str:
-        """
-        📌 Stabilisation de phase via mémoire améliorée
-        - Si current_phase == "no_clear_phase" → on garde la dernière phase
-        - Seuil de confiance dynamique (configurable, défaut = 0.55)
-        - Persistance : une phase candidate doit apparaître plusieurs fois avant d'être validée
-        """
-        try:
-            memory = self.get_memory(asset_symbol)
-            last_phase = memory.last_phase
-
-            # Charger la config si dispo
-            threshold = 0.55
-            persistence_required = 2
-            if getattr(self, "config_manager", None):
-                try:
-                    threshold = float(
-                        self.config_manager.get(
-                            "phase_detection_defaults.memory.min_confidence_threshold",
-                            threshold,
-                        )
-                    )
-                    persistence_required = int(
-                        self.config_manager.get(
-                            "phase_detection_defaults.memory.persistence_cycles",
-                            persistence_required,
-                        )
-                    )
-                except Exception as e:
-                    self.logger.warning(f"[Memory] config_manager get failed: {e}")
-
-            # Cas 1: pas de phase précédente → init
-            if not last_phase:
-                self.update_memory(asset_symbol, current_phase)
-                return current_phase
-
-            # Cas 2: pas clair ou faible confiance → conserver la précédente
-            if current_phase == "no_clear_phase" or confidence < threshold:
-                return last_phase
-
-            # 🔥 Initialiser le compteur pour l’actif si manquant
-            if asset_symbol not in self._phase_counters:
-                self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
-
-            counters = self._phase_counters[asset_symbol]
-
-            # Cas 3: la phase candidate est identique à la dernière → reset
-            if current_phase == last_phase:
-                counters["candidate"] = None
-                counters["count"] = 0
-                return last_phase
-
-            # Cas 4: candidate différente → incrémentation du compteur
-            if counters["candidate"] == current_phase:
-                counters["count"] += 1
-            else:
-                counters["candidate"] = current_phase
-                counters["count"] = 1
-
-            # Valider transition seulement après persistance_required cycles
-            if counters["count"] >= persistence_required:
-                self.logger.info(
-                    f"[Memory] ✅ Transition confirmée: {last_phase} → {current_phase} "
-                    f"(confiance={confidence:.2f}, persistance={counters['count']})"
-                )
-                self.update_memory(asset_symbol, current_phase)
-                self._phase_counters[asset_symbol] = {"candidate": None, "count": 0}
-                return current_phase
-            else:
-                self.logger.debug(
-                    f"[Memory] ⏳ Transition en attente: {last_phase} → {current_phase} "
-                    f"(confiance={confidence:.2f}, tentative {counters['count']}/{persistence_required})"
-                )
-                return last_phase
-
-        except Exception as e:
-            self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
+        # 🔹 Pas de mémoire disponible
+        if memory is None:
+            memory = PhaseMemory(
+                last_phase=current_phase,
+                confidence=confidence,
+                persistence=1,
+            )
+            self.save_memory(asset_symbol, memory.to_dict())
             return current_phase
 
+        last_phase = memory.last_phase
 
-    def reset_memory(memory: PhaseMemory) -> None:
-        """Purge la mémoire en douceur (sans recréer l’objet)."""
-        try:
-            memory.recent_signals.clear()
-            memory.caches.clear()
-            memory.last_snapshot = None
-            memory.last_update = None
-        except Exception:
-            logger.debug(
-                "reset_memory: nettoyage partiel (forme inattendue de memory)."
-            )
+        # Charger config si dispo
+        threshold = 0.55
+        persistence_required = 2
+        if getattr(self, "config_manager", None):
+            try:
+                threshold = float(
+                    self.config_manager.get(
+                        "phase_observer.memory_threshold", default=0.55
+                    )
+                )
+                persistence_required = int(
+                    self.config_manager.get(
+                        "phase_observer.persistence_required", default=2
+                    )
+                )
+            except Exception as cfg_err:
+                self.logger.warning(f"[Memory] Erreur chargement config: {cfg_err}")
+
+        # 🔹 Si la phase est identique → renforcer persistance
+        if current_phase == last_phase:
+            memory.persistence += 1
+            memory.confidence = max(memory.confidence, confidence)
+        else:
+            # 🔹 Nouvelle phase mais confiance insuffisante → attendre
+            if confidence < threshold or memory.persistence < persistence_required:
+                memory.persistence += 1
+                self.save_memory(asset_symbol, memory.to_dict())
+                return last_phase
+            # 🔹 Changement validé
+            memory.last_phase = current_phase
+            memory.persistence = 1
+            memory.confidence = confidence
+
+        # Sauvegarder la mémoire mise à jour
+        self.save_memory(asset_symbol, memory.to_dict())
+        return memory.last_phase
+
+    except Exception as e:
+        self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
+        return current_phase
+
+
+def reset_memory(memory: PhaseMemory) -> None:
+    """Purge la mémoire en douceur (sans recréer l’objet)."""
+    try:
+        memory.recent_signals.clear()
+        memory.caches.clear()
+        memory.last_snapshot = None
+        memory.last_update = None
+    except Exception:
+        logger.debug("reset_memory: nettoyage partiel (forme inattendue de memory).")
