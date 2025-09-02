@@ -2154,278 +2154,273 @@ class DecisionPipeline:
         )
         return trade_decision
 
-    def _core_evaluate_signals(
-        self,
-        context: Dict[str, Any],
-        config: Dict[str, Any],
-        signals: Dict[str, Any],
-        strategy_name: str,
-    ) -> Dict[str, Any]:
-        """
-        Évalue les signaux et choisit l'actif à trader avec une logique permissive.
-        - Pas de paramètres bloquants : tout est converti en scoring "soft".
-        - Seul filtre dur conservé : confiance minimale (faible par défaut).
-        - Les critères (BOS/MSS, OB, FVG, break M1, MTF, spread, etc.) influencent le score sans bloquer.
-        ➕ Biais 'Katana Midline Scalp' :
-        * Bonus si (is_range==True) & (is_expansion==False) & mid_entry ∈ {buy,sell} avec mid_entry_score élevé
-        * Pénalité si expansion (chaos) ou bandes mal exploitées (touch répété sans revert)
-        * Passe les méta-infos Bollinger au package décisionnel pour l’étape suivante
-        """
-        self.logger.info(
-            f"🔍 CORE analyse {len(signals)} assets | strategy={strategy_name}"
+   def _core_evaluate_signals(
+    self,
+    context: Dict[str, Any],
+    config: Dict[str, Any],
+    signals: Dict[str, Any],
+    strategy_name: str,
+) -> Dict[str, Any]:
+    """
+    Évalue les signaux et choisit l'actif à trader avec une logique permissive.
+    - Pas de paramètres bloquants : tout est converti en scoring "soft".
+    - Seul filtre dur conservé : confiance minimale (faible par défaut).
+    - Les critères (BOS/MSS, OB, FVG, break M1, MTF, spread, etc.) influencent le score sans bloquer.
+    ➕ Biais 'Katana Midline Scalp' :
+    * Bonus si (is_range==True) & (is_expansion==False) & mid_entry ∈ {buy,sell} avec mid_entry_score élevé
+    * Pénalité si expansion (chaos) ou bandes mal exploitées (touch répété sans revert)
+    * Passe les méta-infos Bollinger au package décisionnel pour l’étape suivante
+    """
+    self.logger.info(
+        f"🔍 CORE analyse {len(signals)} assets | strategy={strategy_name}"
+    )
+
+    strat = str(strategy_name or "").lower()
+    is_scalping = "scalping" in strat
+
+    # --- Seuils généraux (non stricts) ---
+    min_confidence = float(config.get("min_confidence", 0.30))
+
+    # Distances FVG / OB (proximité "soft")
+    fvg_max = float(
+        self.config_manager.get("entry_rules.scalping.fvg_max_distance_pips", 2.0)
+        or 2.0
+    )
+    ob_max = float(
+        self.config_manager.get("entry_rules.scalping.ob_max_distance_pips", 2.0)
+        or 2.0
+    )
+    soft_mult = float(
+        self.config_manager.get(
+            "entry_rules.scalping.soft_distance_multiplier", 1.25
+        )
+        or 1.25
+    )
+    fvg_soft = fvg_max * soft_mult
+    ob_soft = ob_max * soft_mult
+
+    # Paramètres qualité (toujours SOFT)
+    max_spread_pts = float(
+        self.config_manager.get("entry_rules.scalping.max_spread_points", 50) or 50
+    )
+
+    # Pondérations (soft scoring)
+    W_CONF = 1.00
+    W_BOS = 0.15
+    W_OB = 0.10
+    W_FVG = 0.08
+    W_M1_BREAK = 0.12
+    W_MTF_HIT = 0.10
+    PEN_SPREAD = -0.10
+    PEN_LOW_VOL = -0.20
+    BASE_BIAS = float(
+        (config.get("decision_engine") or {})
+        .get("scoring", {})
+        .get("strategy_bias", 0.30)
+        or 0.30
+    )
+
+    # ➕ Pondérations 'Katana Midline'
+    W_BOLL_MID_OK = 0.18
+    W_MID_SCORE_K = 0.20
+    W_MEANREV_K = 0.08
+    W_BREAK_PENALTY = -0.06
+    PEN_EXPANSION = -0.25
+    PEN_TOUCH_ONLY = -0.05
+
+    best_asset, best_score, best_signals = None, float("-inf"), None
+
+    for asset, s in (signals or {}).items():
+        if not isinstance(s, dict) or not s:
+            continue
+
+        # --- Phase & confiance : priorité aux valeurs stabilisées par la mémoire ---
+        raw_phase = (
+            s.get("phase_memory_stabilized")
+            or s.get("phase")
+            or s.get("last_phase")       # 🔥 fallback depuis la mémoire persistante
+            or "UNKNOWN"                 # 🔒 jamais None
+        )
+        phase = str(raw_phase)
+
+        confidence = float(
+            s.get(
+                "confidence_stabilized",
+                s.get("confidence_score", s.get("confidence", 0.0)),
+            )
+            or 0.0
         )
 
-        strat = str(strategy_name or "").lower()
-        is_scalping = "scalping" in strat
-
-        # --- Seuils généraux (non stricts) ---
-        min_confidence = float(config.get("min_confidence", 0.30))
-
-        # Distances FVG / OB (proximité "soft")
-        fvg_max = float(
-            self.config_manager.get("entry_rules.scalping.fvg_max_distance_pips", 2.0)
-            or 2.0
-        )
-        ob_max = float(
-            self.config_manager.get("entry_rules.scalping.ob_max_distance_pips", 2.0)
-            or 2.0
-        )
-        soft_mult = float(
-            self.config_manager.get(
-                "entry_rules.scalping.soft_distance_multiplier", 1.25
-            )
-            or 1.25
-        )
-        fvg_soft = fvg_max * soft_mult
-        ob_soft = ob_max * soft_mult
-
-        # Paramètres qualité (toujours SOFT)
-        max_spread_pts = float(
-            self.config_manager.get("entry_rules.scalping.max_spread_points", 50) or 50
-        )
-
-        # Pondérations (soft scoring)
-        W_CONF = 1.00
-        W_BOS = 0.15
-        W_OB = 0.10
-        W_FVG = 0.08
-        W_M1_BREAK = 0.12
-        W_MTF_HIT = 0.10
-        PEN_SPREAD = -0.10
-        PEN_LOW_VOL = -0.20
-        BASE_BIAS = float(
-            (config.get("decision_engine") or {})
-            .get("scoring", {})
-            .get("strategy_bias", 0.30)
-            or 0.30
-        )
-
-        # ➕ Pondérations 'Katana Midline'
-        W_BOLL_MID_OK = 0.18  # is_range & !expansion & mid_entry présent
-        W_MID_SCORE_K = 0.20  # contribution de mid_entry_score (0..1) * K
-        W_MEANREV_K = 0.08  # bonus mean_revert (range)
-        W_BREAK_PENALTY = (
-            -0.06
-        )  # petite pénalité breakout score en régime range (évite poursuites)
-        PEN_EXPANSION = (
-            -0.25
-        )  # blocage soft si expansion (sera dur dans le gate suivant)
-        PEN_TOUCH_ONLY = -0.05  # si touch bande sans signal exploitable
-
-        best_asset, best_score, best_signals = None, float("-inf"), None
-
-        for asset, s in (signals or {}).items():
-            if not isinstance(s, dict) or not s:
-                continue
-
-           # --- Phase & confiance : priorité aux valeurs stabilisées par la mémoire ---
-            phase = str(
-                s.get("phase_memory_stabilized", s.get("phase", "no_clear_phase"))
-            )
-            confidence = float(
-                s.get("confidence_stabilized", s.get("confidence_score", s.get("confidence", 0.0))) or 0.0
-            )
-
-            if confidence < min_confidence:
-                self.logger.debug(
-                    "Asset %s ignoré: confidence %.3f < %.3f (phase=%s)",
-                    asset,
-                    confidence,
-                    min_confidence,
-                    phase,
-                )
-                continue
-
-
-            # Composantes de confluence (SOFT)
-            bos_ok = bool(
-                s.get("bos_mss_detected")
-                or (s.get("bos_mss_details") or {}).get("confirmed")
-                or (s.get("bos_mss_details") or {}).get("is_confirmed")
-            )
-            ob_det = bool(
-                s.get("ob_detected")
-                or s.get("order_block")
-                or s.get("order_block_ml_enhanced")
-            )
-            fvg_det = bool(s.get("fvg_detected") or s.get("fvg_enhanced"))
-
-            fvg_dist = float(
-                (s.get("fvg_details") or {}).get(
-                    "distance_pips", s.get("fvg_distance_pips", 1e9)
-                )
-                or 1e9
-            )
-            ob_dist = float(
-                (s.get("ob_details") or {}).get(
-                    "distance_pips", s.get("ob_distance_pips", 1e9)
-                )
-                or 1e9
-            )
-            fvg_close_soft = fvg_det and (fvg_dist <= fvg_soft)
-            ob_close_soft = (ob_dist <= ob_soft) and (ob_det or ob_dist <= ob_max)
-
-            # Break M1 aligné MTF (SOFT)
-            mtf_direction = str(s.get("mtf_direction", "none")).lower()
-            m1_hh_break = bool(s.get("m1_last_hh_break", False))
-            m1_ll_break = bool(s.get("m1_last_ll_break", False))
-            if mtf_direction == "up":
-                m1_break = m1_hh_break
-            elif mtf_direction == "down":
-                m1_break = m1_ll_break
-            else:
-                m1_break = bool(
-                    s.get("m1_break", False) or s.get("bos_mss_enhanced", False)
-                )
-
-            # MTF hits (SOFT)
-            mtf_hits = 0
-            for k in ("mtf_hits", "mtf_agreements", "mtf_confluence"):
-                try:
-                    mtf_hits = max(mtf_hits, int(s.get(k, 0)))
-                except Exception:
-                    pass
-            for k in ("m1_align", "m5_align", "m15_align"):
-                if bool(s.get(k, False)):
-                    mtf_hits += 1
-
-            # Qualité marché (pénalités soft)
-            try:
-                spread_points = float(
-                    s.get("current_spread_points", s.get("spread", float("inf")))
-                    or float("inf")
-                )
-            except Exception:
-                spread_points = float("inf")
-            try:
-                vol_z = float(s.get("volume_zscore", 0.0) or 0.0)
-            except Exception:
-                vol_z = 0.0
-
-            # --------- BOLLINGER midline (multi-sources tolérantes) ---------
-            boll = (
-                s.get("boll")
-                or s.get("bollinger")
-                or s.get("boll_micro")
-                or (s.get("signals") or {}).get("micro_phase_hint")
-                or {}
-            )
-
-            is_range = bool(boll.get("is_range", False))
-            is_expansion = bool(boll.get("is_expansion", False))
-            band_touch = boll.get("band_touch")  # 'upper'/'lower'/None
-            mid_entry = (str(boll.get("mid_entry", "")) or "").lower()
-            mid_score = float(boll.get("mid_entry_score", 0.0) or 0.0)
-            mr_score = float(boll.get("mean_revert_score", 0.0) or 0.0)
-            br_score = float(boll.get("breakout_score", 0.0) or 0.0)
-
-            # --- Scoring permissif global ---
-            score = 0.0
-            score += W_CONF * confidence
-            score += BASE_BIAS
-            if bos_ok:
-                score += W_BOS
-            if ob_close_soft:
-                score += W_OB
-            if fvg_close_soft:
-                score += W_FVG
-            if m1_break:
-                score += W_M1_BREAK
-            score += mtf_hits * W_MTF_HIT
-
-            if spread_points > max_spread_pts:
-                score += PEN_SPREAD
-            if vol_z < 0.0:
-                score += PEN_LOW_VOL
-
-            # --- Biais Katana Midline (SOFT dans le score; le vrai gate est plus loin) ---
-            if is_scalping:
-                if is_expansion:
-                    score += PEN_EXPANSION  # chaos
-                if is_range and not is_expansion:
-                    # mid_entry présent → bonus
-                    if mid_entry in ("buy", "sell"):
-                        score += W_BOLL_MID_OK
-                    # contribution continue du mid_entry_score (plus il est haut, mieux c'est)
-                    score += mid_score * W_MID_SCORE_K
-                    # Encourager mean-revert en range, décourager breakout chasing
-                    score += mr_score * W_MEANREV_K
-                    score += br_score * W_BREAK_PENALTY
-                # petite pénalité si on touche une bande sans vraie structure
-                if (
-                    band_touch in ("upper", "lower")
-                    and mid_score < 0.4
-                    and mr_score < 0.5
-                    and br_score < 0.5
-                ):
-                    score += PEN_TOUCH_ONLY
-
+        if confidence < min_confidence:
             self.logger.debug(
-                "CORE score %s -> %.4f | conf=%.3f bos=%s ob_soft=%s fvg_soft=%s m1_break=%s mtf=%d "
-                "spread=%.1f volZ=%.2f | boll: range=%s exp=%s mid=%s(%.2f) mr=%.2f br=%.2f",
+                "Asset %s ignoré: confidence %.3f < %.3f (phase=%s)",
                 asset,
-                score,
                 confidence,
-                bos_ok,
-                ob_close_soft,
-                fvg_close_soft,
-                m1_break,
-                mtf_hits,
-                spread_points,
-                vol_z,
-                is_range,
-                is_expansion,
-                mid_entry,
-                mid_score,
-                mr_score,
-                br_score,
+                min_confidence,
+                phase,
             )
+            continue
 
-            if score > best_score:
-                best_asset, best_score, best_signals = asset, score, s
-                # s contient peut-être déjà 'boll' → on s’assure d’unifier la clé
-                if isinstance(boll, dict) and boll:
-                    best_signals.setdefault("boll", boll)
-                    # expose aussi quelques alias plats (exploités par d’autres briques)
-                    best_signals.setdefault("bb_mid", boll.get("bb_mid"))
-                    best_signals.setdefault("bb_upper", boll.get("bb_upper"))
-                    best_signals.setdefault("bb_lower", boll.get("bb_lower"))
-                    best_signals.setdefault("mid_entry", mid_entry)
-                    best_signals.setdefault("mid_entry_score", mid_score)
-                    best_signals.setdefault("boll_mean_revert_score", mr_score)
-                    best_signals.setdefault("boll_breakout_score", br_score)
-                    best_signals.setdefault("boll_signal", boll.get("signal"))
-
-        if not best_asset:
-            self.logger.info(
-                "CORE: aucun actif au-dessus du seuil de confiance minimal."
-            )
-            return {}
-
-        self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-        return self._core_build_trade_decision(
-            best_asset, best_signals, config, context
+        # --- Confluence BOS / OB / FVG (SOFT) ---
+        bos_ok = bool(
+            s.get("bos_mss_detected")
+            or (s.get("bos_mss_details") or {}).get("confirmed")
+            or (s.get("bos_mss_details") or {}).get("is_confirmed")
         )
+        ob_det = bool(
+            s.get("ob_detected")
+            or s.get("order_block")
+            or s.get("order_block_ml_enhanced")
+        )
+        fvg_det = bool(s.get("fvg_detected") or s.get("fvg_enhanced"))
+
+        fvg_dist = float(
+            (s.get("fvg_details") or {}).get(
+                "distance_pips", s.get("fvg_distance_pips", 1e9)
+            )
+            or 1e9
+        )
+        ob_dist = float(
+            (s.get("ob_details") or {}).get(
+                "distance_pips", s.get("ob_distance_pips", 1e9)
+            )
+            or 1e9
+        )
+        fvg_close_soft = fvg_det and (fvg_dist <= fvg_soft)
+        ob_close_soft = (ob_dist <= ob_soft) and (ob_det or ob_dist <= ob_max)
+
+        # --- Break M1 aligné MTF (SOFT) ---
+        mtf_direction = str(s.get("mtf_direction", "none")).lower()
+        m1_hh_break = bool(s.get("m1_last_hh_break", False))
+        m1_ll_break = bool(s.get("m1_last_ll_break", False))
+        if mtf_direction == "up":
+            m1_break = m1_hh_break
+        elif mtf_direction == "down":
+            m1_break = m1_ll_break
+        else:
+            m1_break = bool(
+                s.get("m1_break", False) or s.get("bos_mss_enhanced", False)
+            )
+
+        # --- MTF hits (SOFT) ---
+        mtf_hits = 0
+        for k in ("mtf_hits", "mtf_agreements", "mtf_confluence"):
+            try:
+                mtf_hits = max(mtf_hits, int(s.get(k, 0)))
+            except Exception:
+                pass
+        for k in ("m1_align", "m5_align", "m15_align"):
+            if bool(s.get(k, False)):
+                mtf_hits += 1
+
+        # --- Qualité marché ---
+        try:
+            spread_points = float(
+                s.get("current_spread_points", s.get("spread", float("inf")))
+                or float("inf")
+            )
+        except Exception:
+            spread_points = float("inf")
+        try:
+            vol_z = float(s.get("volume_zscore", 0.0) or 0.0)
+        except Exception:
+            vol_z = 0.0
+
+        # --------- BOLLINGER midline ---------
+        boll = (
+            s.get("boll")
+            or s.get("bollinger")
+            or s.get("boll_micro")
+            or (s.get("signals") or {}).get("micro_phase_hint")
+            or {}
+        )
+
+        is_range = bool(boll.get("is_range", False))
+        is_expansion = bool(boll.get("is_expansion", False))
+        band_touch = boll.get("band_touch")
+        mid_entry = (str(boll.get("mid_entry", "")) or "").lower()
+        mid_score = float(boll.get("mid_entry_score", 0.0) or 0.0)
+        mr_score = float(boll.get("mean_revert_score", 0.0) or 0.0)
+        br_score = float(boll.get("breakout_score", 0.0) or 0.0)
+
+        # --- Scoring permissif global ---
+        score = 0.0
+        score += W_CONF * confidence
+        score += BASE_BIAS
+        if bos_ok:
+            score += W_BOS
+        if ob_close_soft:
+            score += W_OB
+        if fvg_close_soft:
+            score += W_FVG
+        if m1_break:
+            score += W_M1_BREAK
+        score += mtf_hits * W_MTF_HIT
+
+        if spread_points > max_spread_pts:
+            score += PEN_SPREAD
+        if vol_z < 0.0:
+            score += PEN_LOW_VOL
+
+        # --- Biais Katana Midline ---
+        if is_scalping:
+            if is_expansion:
+                score += PEN_EXPANSION
+            if is_range and not is_expansion:
+                if mid_entry in ("buy", "sell"):
+                    score += W_BOLL_MID_OK
+                score += mid_score * W_MID_SCORE_K
+                score += mr_score * W_MEANREV_K
+                score += br_score * W_BREAK_PENALTY
+            if (
+                band_touch in ("upper", "lower")
+                and mid_score < 0.4
+                and mr_score < 0.5
+                and br_score < 0.5
+            ):
+                score += PEN_TOUCH_ONLY
+
+        self.logger.debug(
+            "CORE score %s -> %.4f | conf=%.3f bos=%s ob_soft=%s fvg_soft=%s m1_break=%s mtf=%d "
+            "spread=%.1f volZ=%.2f | phase=%s | boll: range=%s exp=%s mid=%s(%.2f) mr=%.2f br=%.2f",
+            asset,
+            score,
+            confidence,
+            bos_ok,
+            ob_close_soft,
+            fvg_close_soft,
+            m1_break,
+            mtf_hits,
+            spread_points,
+            vol_z,
+            phase,
+            is_range,
+            is_expansion,
+            mid_entry,
+            mid_score,
+            mr_score,
+            br_score,
+        )
+
+        if score > best_score:
+            best_asset, best_score, best_signals = asset, score, s
+            if isinstance(boll, dict) and boll:
+                best_signals.setdefault("boll", boll)
+                best_signals.setdefault("bb_mid", boll.get("bb_mid"))
+                best_signals.setdefault("bb_upper", boll.get("bb_upper"))
+                best_signals.setdefault("bb_lower", boll.get("bb_lower"))
+                best_signals.setdefault("mid_entry", mid_entry)
+                best_signals.setdefault("mid_entry_score", mid_score)
+                best_signals.setdefault("boll_mean_revert_score", mr_score)
+                best_signals.setdefault("boll_breakout_score", br_score)
+                best_signals.setdefault("boll_signal", boll.get("signal"))
+
+    if not best_asset:
+        self.logger.info("CORE: aucun actif au-dessus du seuil de confiance minimal.")
+        return {}
+
+    self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
+    return self._core_build_trade_decision(best_asset, best_signals, config, context)
 
     def _core_build_trade_decision(
         self,

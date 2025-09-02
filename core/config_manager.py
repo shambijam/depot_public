@@ -571,13 +571,11 @@ class ConfigManager:
                         {
                             "symbol": asset_symbol,
                             "phase": last_row.get("phase", "neutral"),
-                            "confidence": last_row.get(
-                                "confidence_score", 0.0
-                            ),  # Garder la confiance ici pour l'analyse du régime
+                            "confidence": last_row.get("confidence_score", 0.0),
                             "trend": last_row.get("trend", "neutral"),
                             "volume_momentum": last_row.get("volume_momentum", 0.0),
                             "bos_mss_detected": last_row.get("bos_mss_detected", False),
-                            "df": df,  # Garder le DataFrame pour le calcul de volatilité
+                            "df": df,
                         }
                     )
 
@@ -588,7 +586,15 @@ class ConfigManager:
             return "uncertain_no_valid_data"
 
         try:
-            phase_votes = [insight["phase"].split("_")[0] for insight in asset_insights]
+            # 🔥 Extraction robuste des phases pour vote
+            phase_votes = []
+            for insight in asset_insights:
+                raw_phase = insight.get("phase")
+                if raw_phase and isinstance(raw_phase, str):
+                    phase_votes.append(raw_phase.split("_")[0])
+                else:
+                    phase_votes.append("neutral")  # fallback si None ou invalide
+
             if not phase_votes:
                 return "uncertain_calculation_failed"
 
@@ -636,7 +642,8 @@ class ConfigManager:
             detected_regime = f"{dominant_phase}_{volatility_level}"
 
             self.logger.info(
-                f"Régime de marché par consensus : {detected_regime} (basé sur {len(asset_insights)} actifs, Volatilité moyenne: {avg_volatility_percent:.2f}%)"
+                f"Régime de marché par consensus : {detected_regime} "
+                f"(basé sur {len(asset_insights)} actifs, Volatilité moyenne: {avg_volatility_percent:.2f}%)"
             )
 
             if (
@@ -1555,10 +1562,8 @@ class ConfigManager:
             self.strategy_manager.strategy_registry
         )
 
-        optimal_config_content = (
-            self.decision_pipeline.select_optimal_config(
-                analyzed_context, config_knowledge_base_from_strategy_manager
-            )
+        optimal_config_content = self.decision_pipeline.select_optimal_config(
+            analyzed_context, config_knowledge_base_from_strategy_manager
         )
         if not optimal_config_content:
             self.logger.warning(
@@ -1677,18 +1682,20 @@ class ConfigManager:
             f"LOG DÉCISION: {reason} | Actif: {trade_decision.get('asset', 'N/A')} | Action: {trade_decision.get('action', 'N/A')}"
         )
         # CORRECTION : Déléguer l'enregistrement à l'AuditLogger
-        if hasattr(self, 'audit_logger') and self.audit_logger is not None:
-            self.audit_logger.log_config_change( # Cette méthode log_config_change prend un change_info, une source et un snapshot.
-                                                # Elle est utilisée pour les changements de config, mais peut être adaptée ou
-                                                # une nouvelle méthode 'log_decision_event' pourrait être créée dans AuditLogger.
-                                                # Pour l'instant, nous l'adaptons pour utiliser log_config_change.
-                change_info=decision_log_entry, # On passe toute l'entrée comme 'change_info'
+        if hasattr(self, "audit_logger") and self.audit_logger is not None:
+            self.audit_logger.log_config_change(  # Cette méthode log_config_change prend un change_info, une source et un snapshot.
+                # Elle est utilisée pour les changements de config, mais peut être adaptée ou
+                # une nouvelle méthode 'log_decision_event' pourrait être créée dans AuditLogger.
+                # Pour l'instant, nous l'adaptons pour utiliser log_config_change.
+                change_info=decision_log_entry,  # On passe toute l'entrée comme 'change_info'
                 source="decision_pipeline_log",
-                dynamic_config_snapshot=config.copy() # Le snapshot de la config au moment de la décision
+                dynamic_config_snapshot=config.copy(),  # Le snapshot de la config au moment de la décision
             )
             self.logger.debug("Décision de trade transmise à l'AuditLogger.")
         else:
-            self.logger.critical("ConfigManager ne peut pas loguer la décision : AuditLogger non initialisé. La décision n'est pas enregistrée dans l'audit trail.")
+            self.logger.critical(
+                "ConfigManager ne peut pas loguer la décision : AuditLogger non initialisé. La décision n'est pas enregistrée dans l'audit trail."
+            )
 
     def send_alert(self, message: str, alert_type: str = "telegram_critical") -> None:
         """
@@ -1702,17 +1709,19 @@ class ConfigManager:
                             Utilisé pour déterminer le canal ou le traitement spécifique.
         """
         # Vérifier si Telegram est globalement activé avant de loguer la tentative d'envoi.
-        telegram_globally_enabled = self.get("telegram.enabled", False) #
-        
+        telegram_globally_enabled = self.get("telegram.enabled", False)  #
+
         if not telegram_globally_enabled:
             # Si Telegram est désactivé, ne pas loguer la tentative d'envoi et s'arrêter là.
-            self.logger.debug(f"Alerte de type '{alert_type}' ignorée : Telegram est globalement désactivé dans la configuration.")
+            self.logger.debug(
+                f"Alerte de type '{alert_type}' ignorée : Telegram est globalement désactivé dans la configuration."
+            )
             return
 
         # Si Telegram est activé, alors loguer la tentative d'envoi.
         self.logger.info(
             f"Tentative d'envoi d'alerte de type '{alert_type}' : {message[:100]}..."
-        ) # Log les 100 premiers caractères
+        )  # Log les 100 premiers caractères
 
         if hasattr(self, "audit_logger") and self.audit_logger is not None:
             try:

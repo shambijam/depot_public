@@ -29,13 +29,11 @@ class PhaseMemoryManager:
         """Retourne (ou initialise) la mémoire de phase pour un actif."""
         memory = self._phase_counters.get(asset_symbol)
 
-        # 🔹 Si aucune mémoire → initialiser
         if memory is None:
             memory = PhaseMemory()
             self._phase_counters[asset_symbol] = memory
             return memory
 
-        # 🔹 Si jamais un dict a été stocké par erreur → convertir
         if isinstance(memory, dict):
             try:
                 memory = PhaseMemory.from_dict(memory)
@@ -55,10 +53,7 @@ class PhaseMemoryManager:
     def save_memory(
         self, asset_symbol: str, memory: Dict[str, Any] | PhaseMemory
     ) -> None:
-        """
-        Sauvegarde la mémoire pour un actif donné.
-        Accepte soit un objet PhaseMemory, soit un dict issu de to_dict().
-        """
+        """Sauvegarde la mémoire pour un actif donné."""
         if isinstance(memory, dict):
             try:
                 memory = PhaseMemory.from_dict(memory)
@@ -78,14 +73,10 @@ class PhaseMemoryManager:
         hysteresis: float = 0.1,
         ema_alpha: float = 0.4,
     ) -> List[PhaseSignal]:
-        """
-        Lisse et stabilise les signaux (persistance, hystérèse, EMA de qualité).
-        N'élimine pas les signaux : ajuste `quality` et ajoute des métadonnées.
-        """
+        """Stabilise les signaux via persistance et hystérèse."""
         if not signals:
             return signals
 
-        # Prépare les caches dans memory
         memory.caches.setdefault("persist_counts", {})
         memory.caches.setdefault("ema_quality", {})
 
@@ -99,11 +90,8 @@ class PhaseMemoryManager:
 
         for sig in signals:
             key = (sig.kind, sig.label, str(getattr(sig, "direction", "NEUTRAL")))
-
-            # Persistance
             persist_counts[key] = int(persist_counts.get(key, 0)) + 1
 
-            # EMA sur quality
             prev_ema = float(ema_quality.get(key, sig.quality))
             new_ema = (ema_alpha * float(sig.quality)) + ((1.0 - ema_alpha) * prev_ema)
             ema_quality[key] = new_ema
@@ -194,9 +182,7 @@ class PhaseMemoryManager:
     def apply_phase_memory(
         self, asset_symbol: str, current_phase: str, confidence: float
     ) -> str:
-        """
-        📌 Stabilisation de phase via mémoire améliorée
-        """
+        """Stabilisation de phase via mémoire améliorée."""
         try:
             memory = self.get_memory(asset_symbol)
 
@@ -235,17 +221,23 @@ class PhaseMemoryManager:
                 if confidence < threshold or memory.persistence < persistence_required:
                     memory.persistence += 1
                     self.save_memory(asset_symbol, memory)
-                    return last_phase
+                    # 🔥 On reste sur la dernière phase connue
+                    return memory.last_phase
                 memory.last_phase = current_phase
                 memory.persistence = 1
                 memory.confidence = confidence
+
+            # 🔥 Toujours garantir une phase valide
+            if not memory.last_phase:
+                memory.last_phase = current_phase
 
             self.save_memory(asset_symbol, memory)
             return memory.last_phase
 
         except Exception as e:
             self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
-            return current_phase
+            # 🔥 fallback : jamais None
+            return current_phase or self.get_last_phase(asset_symbol) or "UNKNOWN"
 
 
 def reset_memory(memory: PhaseMemory) -> None:
