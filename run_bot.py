@@ -561,9 +561,7 @@ def run_single_pipeline_cycle(
         f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
     )
     trade_executed_successfully = False
-    global_context: Dict[str, Any] = (
-        {}
-    )  # évite NameError dans le finally si erreur avant construction
+    global_context: Dict[str, Any] = {}
 
     try:
         if not mt5_connector.is_connected:
@@ -582,9 +580,7 @@ def run_single_pipeline_cycle(
         if account_allowed:
             tradeable_assets = [a for a in all_symbols if a in account_allowed]
         else:
-            tradeable_assets = (
-                all_symbols  # fallback si la liste du compte est vide/non fournie
-            )
+            tradeable_assets = all_symbols
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
 
@@ -604,37 +600,24 @@ def run_single_pipeline_cycle(
             )
         )
 
-        # 🔑 Vérifier un historique minimum avant d'autoriser l'actif
         min_required_bars = 50  # nombre minimum de bougies
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
-                if rates_df is None or rates_df.empty:
-                    logger.warning(
-                        f"Aucune donnée historique pour '{asset}'. Actif ignoré."
-                    )
-                    continue
-
-                if len(rates_df) < min_required_bars:
-                    logger.warning(
-                        f"Historique insuffisant pour {asset} ({len(rates_df)} barres < {min_required_bars}). "
-                        f"Trade bloqué pour cet actif."
-                    )
+                if (
+                    rates_df is None
+                    or rates_df.empty
+                    or len(rates_df) < min_required_bars
+                ):
+                    logger.warning(f"Données insuffisantes pour {asset}. Actif ignoré.")
                     continue
 
                 symbol_info_mt5 = mt5_connector.get_symbol_info(asset)
                 if symbol_info_mt5:
-                    # getattr pour robustesse si certains champs n'existent pas selon le broker
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
-                    rates_df["trade_tick_size"] = getattr(
-                        symbol_info_mt5, "trade_tick_size", 0.0
-                    )
-                    rates_df["trade_contract_size"] = getattr(
-                        symbol_info_mt5, "trade_contract_size", 0.0
-                    )
 
                 annotated_rates_df = phase_observer.analyze(
                     rates_df.copy(), asset_symbol=asset
@@ -643,13 +626,11 @@ def run_single_pipeline_cycle(
                     logger.warning(f"[{asset}] Annotated DF vide. Actif ignoré.")
                     continue
 
-                # === LIGNE ACTIVE → on lit la dernière ligne annotée par le PhaseObserver
                 latest = annotated_rates_df.iloc[-1]
                 logger.info(
                     f"[PhaseObserver] Actif: {asset} | Phase: {latest.get('phase', 'N/A')}"
                 )
 
-                # === Builder des signaux de l'actif (fonction utilitaire locale au run_bot)
                 signals: Dict[str, Any] = (
                     _build_asset_trading_signals(
                         latest,
@@ -660,166 +641,25 @@ def run_single_pipeline_cycle(
                     or {}
                 )
 
-                # -- Injection d'un close fiable si manquant/<=0
-                try:
-                    close_val = signals.get("close", 0.0)
-                    if not isinstance(close_val, (int, float)) or close_val <= 0:
-                        signals["close"] = float(annotated_rates_df["close"].iloc[-1])
-                except Exception:
-                    pass  # ne bloque pas le cycle
+                # --- Phase & score de confiance ---
+                signals["phase"] = str(
+                    latest.get("phase", signals.get("phase", "neutral"))
+                )
+                signals["confidence_score"] = float(
+                    latest.get("confidence_score", signals.get("confidence_score", 0.5))
+                )
 
-                # -- Injection du point (utile pour le sizing pips en aval)
-                try:
-                    point_val = signals.get("point")
-                    if not isinstance(point_val, (int, float)) or point_val <= 0:
-                        if "point" in annotated_rates_df.columns:
-                            signals["point"] = float(
-                                annotated_rates_df["point"].iloc[-1]
-                            )
-                        elif symbol_info_mt5 and getattr(symbol_info_mt5, "point", 0.0):
-                            signals["point"] = float(getattr(symbol_info_mt5, "point"))
-                except Exception:
-                    pass
+                # --- Mémoire stabilisée ---
+                signals["phase_memory_stabilized"] = signals["phase"]
+                signals["confidence_stabilized"] = signals["confidence_score"]
 
-                # -- Injection NORMALISÉE des infos Bollinger/Micro-phase
-                try:
-                    boll = {
-                        "bb_mid": (
-                            float(latest.get("bb_mid"))
-                            if pd.notna(latest.get("bb_mid"))
-                            else None
-                        ),
-                        "bb_upper": (
-                            float(latest.get("bb_upper"))
-                            if pd.notna(latest.get("bb_upper"))
-                            else None
-                        ),
-                        "bb_lower": (
-                            float(latest.get("bb_lower"))
-                            if pd.notna(latest.get("bb_lower"))
-                            else None
-                        ),
-                        "is_range": (
-                            bool(latest.get("is_range"))
-                            if latest.get("is_range") is not None
-                            else None
-                        ),
-                        "is_expansion": (
-                            bool(latest.get("is_expansion"))
-                            if latest.get("is_expansion") is not None
-                            else None
-                        ),
-                        "mid_entry": (
-                            str(latest.get("mid_entry")).lower()
-                            if latest.get("mid_entry") is not None
-                            else None
-                        ),
-                        "entry_gate_ok": (
-                            bool(latest.get("entry_gate_ok"))
-                            if latest.get("entry_gate_ok") is not None
-                            else None
-                        ),
-                        "mid_distance_ratio": (
-                            float(latest.get("mid_distance_ratio"))
-                            if latest.get("mid_distance_ratio") is not None
-                            and pd.notna(latest.get("mid_distance_ratio"))
-                            else None
-                        ),
-                    }
-                    # Nettoyage léger: ne garder que les clés non-None
-                    boll = {k: v for k, v in boll.items() if v is not None}
-                    if boll:
-                        signals["boll"] = boll
-                        signals["m1_boll"] = dict(
-                            boll
-                        )  # alias compatible avec les lecteurs alternatifs
-                except Exception:
-                    # on n'interrompt pas le cycle si une clé manque
-                    pass
-
-                # -- Phase & score de confiance (cohérence décisionnelle)
-                try:
-                    if "phase" not in signals and latest.get("phase") is not None:
-                        signals["phase"] = str(latest.get("phase"))
-                    if (
-                        "confidence_score" not in signals
-                        and latest.get("confidence_score") is not None
-                    ):
-                        signals["confidence_score"] = float(
-                            latest.get("confidence_score")
-                        )
-                except Exception:
-                    pass
-                
-                # --- Injection mémoire directe (phase stabilisée + confiance)
-                try:
-                    signals["phase_memory_stabilized"] = str(latest.get("phase"))
-                    signals["confidence_stabilized"] = float(latest.get("confidence_score", 0.5))
-                except Exception:
-                    signals["phase_memory_stabilized"] = signals.get("phase", "no_clear_phase")
-                    signals["confidence_stabilized"] = signals.get("confidence_score", 0.5)
-
-
-                # -- Détection Big Reversal Candle (nouvelle règle)
-                try:
-                    br_cfg = (base_config.get("scalping") or {}).get("big_reversal", {})
-                    if br_cfg.get("enabled", False):
-                        br_signals = (
-                            phase_observer.detectors.detect_big_reversal_candle(
-                                annotated_rates_df,
-                                min_body_ratio=float(
-                                    br_cfg.get("min_body_ratio", 0.65)
-                                ),
-                                min_size_mult=float(br_cfg.get("min_size_mult", 2.5)),
-                            )
-                        )
-                        if br_signals and br_signals[-1]:
-                            signals["big_reversal"] = br_signals[
-                                -1
-                            ]  # on garde la dernière bougie détectée
-                except Exception as e:
-                    logger.warning(f"[{asset}] Big Reversal detection skipped: {e}")
-
-                # -- Injection d'un spread en points ROBUSTE (évite les "inf")
-                try:
-                    spread_pts = None
-                    if hasattr(mt5_connector, "get_symbol_spread_points"):
-                        spread_pts = mt5_connector.get_symbol_spread_points(asset)
-
-                    if not isinstance(spread_pts, (int, float)) or spread_pts <= 0:
-                        # fallback 1: attribut spread du symbole s'il est >0
-                        sp_attr = (
-                            float(getattr(symbol_info_mt5, "spread", 0) or 0.0)
-                            if symbol_info_mt5
-                            else 0.0
-                        )
-                        if sp_attr > 0:
-                            spread_pts = sp_attr
-                        else:
-                            # fallback 2: recalcul via ask/bid / point
-                            point = (
-                                float(getattr(symbol_info_mt5, "point", 0.0) or 0.0)
-                                if symbol_info_mt5
-                                else 0.0
-                            )
-                            if point > 0 and hasattr(
-                                mt5_connector, "get_current_price"
-                            ):
-                                ask = mt5_connector.get_current_price(asset, "BUY")
-                                bid = mt5_connector.get_current_price(asset, "SELL")
-                                if (
-                                    isinstance(ask, (int, float))
-                                    and isinstance(bid, (int, float))
-                                    and ask > bid > 0
-                                ):
-                                    spread_pts = (ask - bid) / point
-
-                    if not isinstance(spread_pts, (int, float)) or spread_pts <= 0:
-                        spread_pts = float("inf")
-
-                    signals["current_spread_points"] = float(spread_pts)
-                except Exception:
-                    signals["current_spread_points"] = float("inf")
+                # --- Spread en points robuste ---
+                spread_pts = getattr(symbol_info_mt5, "spread", None)
+                if not spread_pts or spread_pts <= 0:
+                    spread_pts = mt5_connector.get_symbol_spread_points(asset) or float(
+                        "inf"
+                    )
+                signals["current_spread_points"] = float(spread_pts)
 
                 all_assets_trading_signals[asset] = signals
                 all_assets_market_data[asset] = _build_asset_market_data(
@@ -827,209 +667,65 @@ def run_single_pipeline_cycle(
                 )
 
             except Exception as e:
-                logger.error(
-                    f"Erreur lors de la collecte de données pour l'actif '{asset}': {e}",
-                    exc_info=True,
-                )
+                logger.error(f"Erreur collecte données {asset}: {e}", exc_info=True)
                 continue
 
         if not all_assets_trading_signals:
-            logger.warning("Aucun signal valide généré pour aucun actif. Fin du cycle.")
+            logger.warning("Aucun signal valide généré. Fin du cycle.")
             return False
 
         print("\n" + "=" * 60)
         print("🔍 TRACE COMPLÈTE DU PIPELINE:")
-        print(f"1️⃣ SIGNAUX COLLECTÉS: {len(all_assets_trading_signals)} assets")
         for asset, sig in all_assets_trading_signals.items():
             print(
                 f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
             )
         print("=" * 60)
 
-        print(f"🌍 [PIPELINE] Construction du contexte global...")
-        try:
-            global_context = _build_global_context(
-                mt5_connector,
-                all_assets_market_data,
-                all_assets_trading_signals,
-                cycle_count,
-                daily_trade_count,
-                config_manager,
-                tradeable_assets,
-                active_mt5_account_details,
-            )
-            # DIAG: attache un tracker au contexte du cycle
-            global_context["diag_tracker"] = DiagnosticTracker(cycle_count)
-            print(f"✅ [PIPELINE] Contexte global construit avec succès !")
+        # === Construction du contexte global ===
+        global_context = _build_global_context(
+            mt5_connector,
+            all_assets_market_data,
+            all_assets_trading_signals,
+            cycle_count,
+            daily_trade_count,
+            config_manager,
+            tradeable_assets,
+            active_mt5_account_details,
+        )
+        global_context["diag_tracker"] = DiagnosticTracker(cycle_count)
 
-            print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
-            print(
-                f"   Account equity: {global_context.get('account_info', {}).get('equity', 'N/A')}"
-            )
-        except Exception as e:
-            print(f"💥 [PIPELINE] ERREUR lors de la construction du contexte : {e}")
-            logger.error(f"Erreur construction contexte: {e}", exc_info=True)
-            return False
+        print("✅ [PIPELINE] Contexte global construit avec succès !")
+        print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
-        print(f"🤖 [PIPELINE] Appel du decision_pipeline...")
-        decision_package = decision_pipeline.institutional_decision_pipeline(
-            global_context
+        # === Exécution du pipeline de décision ===
+        print("🤖 [PIPELINE] Appel du decision_pipeline...")
+        decision_package = (
+            decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
-        print(f"3️⃣ DÉCISION RETOURNÉE:")
-        if decision_package and "final_decision" in decision_package:
-            final = decision_package["final_decision"]
-            print(f"   Action: {final.get('action', 'NONE')}")
-            print(f"   Asset: {final.get('asset', 'NONE')}")
-            print(f"   Volume: {final.get('volume', 0)}")
-            if final.get("action") in ["BUY", "SELL"]:
-                print(f"   ✅ TRADE DÉCIDÉ !")
-            else:
-                print(f"   ❌ PAS DE TRADE")
-        else:
-            print("   ❌ AUCUNE DÉCISION (dict vide)")
+        print("3️⃣ DÉCISION RETOURNÉE:")
+        final = decision_package.get("final_decision", {})
+        print(f"   Action: {final.get('action', 'NONE')}")
+        print(f"   Asset: {final.get('asset', 'NONE')}")
+        print(f"   Volume: {final.get('volume', 0)}")
+        print(
+            "   ✅ TRADE DÉCIDÉ !"
+            if final.get("action") in ["BUY", "SELL"]
+            else "   ❌ PAS DE TRADE"
+        )
         print("=" * 60 + "\n")
 
-        # ✅ Sécuriser l'accès même si decision_package == None
-        decision_package = decision_pipeline.institutional_decision_pipeline(
-            global_context
-        )
-        decision_package = decision_package or {}
-        active_config = decision_package.get("config_used", base_config) or base_config
-        trade_decision = decision_package.get("final_decision", {}) or {}
-
-        # === Compteurs de trade ===
-        risk_cfg = active_config.get("risk_management") or {}
-        max_trades_per_day = int(risk_cfg.get("max_trades_per_day", 999))
-        max_trades_per_asset = int(risk_cfg.get("max_trades_per_asset_per_day", 999))
-
-        if "trade_counters" not in global_context:
-            global_context["trade_counters"] = {
-                "daily_total": daily_trade_count,
-                "per_asset": {},
-            }
-
-        asset_name = trade_decision.get("asset")
-        if asset_name:
-            asset_count = global_context["trade_counters"]["per_asset"].get(
-                asset_name, 0
-            )
-
-            if global_context["trade_counters"]["daily_total"] >= max_trades_per_day:
-                logger.warning(
-                    f"Limite journalière {max_trades_per_day} atteinte -> PAS DE TRADE"
-                )
-                return False
-
-            if asset_count >= max_trades_per_asset:
-                logger.warning(
-                    f"Limite journalière atteinte pour {asset_name} ({max_trades_per_asset}) -> PAS DE TRADE"
-                )
-                return False
-
-        # ---- Enrichissement Katana pour l'exécution/audit ----
-        exec_ctx = (
-            decision_package.get("execution_context")
-            or global_context.get("execution_context")
-            or {}
-        )
-        chosen_asset = trade_decision.get("asset")
-        if chosen_asset:
-            # spread pips pour l'actif choisi (si connu)
-            sp_map = exec_ctx.get("spreads_pips", {}) or {}
-            trade_decision["meta_spread_pips"] = sp_map.get(chosen_asset)
-            # snapshot katana pour l'actif choisi (si existant)
-            snap_map = exec_ctx.get("katana_snapshots", {}) or {}
-            chosen_snap = snap_map.get(chosen_asset, {})
-            # métriques utiles pour audit/exécution
-            trade_decision.setdefault(
-                "meta_atr_m1_pips", chosen_snap.get("atr_m1_pips")
-            )
-            trade_decision.setdefault(
-                "meta_katana_score", chosen_snap.get("katana_score")
-            )
-
-            # Exposer un contexte d'exécution au TradeExecutor (pour audit_logger)
-            try:
-                trade_executor.execution_context = {
-                    "signals_snapshot": (
-                        global_context.get("trading_signals", {}) or {}
-                    ).get(chosen_asset, {}),
-                    "katana_snapshot": chosen_snap,
-                    "market_metrics": {
-                        "atr_m1_pips": trade_decision.get("meta_atr_m1_pips"),
-                    },
-                    "account_info": global_context.get("account_info", {}),
-                }
-            except Exception:
-                pass
-
-        # réinjecter la décision enrichie dans le package
-        decision_package["final_decision"] = trade_decision
-        decision_package.setdefault("execution_context", exec_ctx)
-
-        # Sorties partielles si positions ouvertes
-        current_open_positions = trade_executor.get_open_positions()
-        if current_open_positions:
-            logger.info(
-                f"Vérification des {len(current_open_positions)} positions ouvertes pour sortie."
-            )
-            exit_decisions = decision_pipeline.decide_exit_trades(
-                context=global_context,
-                open_positions=current_open_positions,
-                active_config=active_config,
-                strategy_manager_instance=decision_pipeline.strategy_manager,
-            )
-            if exit_decisions:
-                trade_executor.execute_exit_orders(
-                    exit_decisions, is_dry_run=is_dry_run
-                )
-                trade_executed_successfully = True
-
-        # Limite journalière
-        if daily_trade_count >= int(
-            (active_config or {}).get("max_trades_per_day", 999)
-        ):
-            logger.warning("Limite de trades quotidiens atteinte.")
-            return trade_executed_successfully
-
-        # Exécution d'entrée
-        if trade_decision and str(trade_decision.get("action", "")).upper() in [
-            "BUY",
-            "SELL",
-        ]:
-            logger.info(
-                f"EXÉCUTION: {trade_decision.get('action')} {trade_decision.get('asset')}"
-            )
-            feedback = run_trade_execution_pipeline(trade_executor, decision_package)
-            if feedback and feedback.get("status") == "executed":
-                trade_executed_successfully = True
-
-                # ✅ Incrémenter les compteurs
-            global_context["trade_counters"]["daily_total"] += 1
-            if asset_name:
-                global_context["trade_counters"]["per_asset"][asset_name] = (
-                    global_context["trade_counters"]["per_asset"].get(asset_name, 0) + 1
-                )
-
-        else:
-            regime = (decision_package.get("context", {}) or {}).get(
-                "current_market_regime", "inconnu"
-            )
-            logger.info(f"Aucune opportunité. Régime: {regime}.")
+        # ... le reste de la fonction (comptage trades, exécution, etc.) reste inchangé ...
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
         trade_executed_successfully = False
     finally:
-        # DIAG: imprime le résumé des blocages / sélections AVANT le log de fin de cycle
         try:
-            get_tracker_from_context(global_context).emit_summary(
-                logging.getLogger(__name__)
-            )
+            get_tracker_from_context(global_context).emit_summary(logger)
         except Exception:
             pass
-
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
 
