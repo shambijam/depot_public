@@ -9,7 +9,7 @@ from .types import PhaseSignal, PhaseMemory, PhaseSnapshot, Direction
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["stability_filter", "update_memory", "reset_memory", "apply_phase_memory"]
+__all__ = ["PhaseMemoryManager", "reset_memory"]
 
 
 class PhaseMemoryManager:
@@ -52,7 +52,25 @@ class PhaseMemoryManager:
 
         return memory
 
+    def save_memory(
+        self, asset_symbol: str, memory: Dict[str, Any] | PhaseMemory
+    ) -> None:
+        """
+        Sauvegarde la mémoire pour un actif donné.
+        Accepte soit un objet PhaseMemory, soit un dict issu de to_dict().
+        """
+        if isinstance(memory, dict):
+            try:
+                memory = PhaseMemory.from_dict(memory)
+            except Exception as e:
+                self.logger.error(
+                    f"[Memory] save_memory: conversion dict->PhaseMemory échouée: {e}"
+                )
+                memory = PhaseMemory()
+        self._phase_counters[asset_symbol] = memory
+
     def stability_filter(
+        self,
         signals: List[PhaseSignal],
         memory: PhaseMemory,
         *,
@@ -74,7 +92,6 @@ class PhaseMemoryManager:
         persist_counts: Dict[tuple, int] = memory.caches["persist_counts"]
         ema_quality: Dict[tuple, float] = memory.caches["ema_quality"]
 
-        # Contexte pour l’hystérèse
         last_bias = getattr(memory.last_snapshot, "bias", None)
         last_phase = getattr(memory.last_snapshot, "phase", None)
 
@@ -91,7 +108,6 @@ class PhaseMemoryManager:
             new_ema = (ema_alpha * float(sig.quality)) + ((1.0 - ema_alpha) * prev_ema)
             ema_quality[key] = new_ema
 
-            # Hystérèse si contradiction avec le biais précédent
             q = float(sig.quality)
             stability_note: List[str] = []
 
@@ -102,7 +118,6 @@ class PhaseMemoryManager:
                     q = max(0.0, q - float(hysteresis))
                     stability_note.append("hysteresis_penalty")
 
-            # Renforcement si le signal a persistance suffisante
             pc = persist_counts[key]
             if pc < int(min_persist_bars):
                 q *= 0.8
@@ -111,7 +126,6 @@ class PhaseMemoryManager:
                 q = (q + new_ema) * 0.5
                 stability_note.append("ema_blend")
 
-            # Mise à jour du signal (non destructif)
             sig.meta = dict(sig.meta or {})
             sig.meta.update(
                 {
@@ -125,7 +139,6 @@ class PhaseMemoryManager:
             sig.quality = max(0.0, min(1.0, q))
             adjusted.append(sig)
 
-        # Maj mémoire
         memory.caches["persist_counts"] = persist_counts
         memory.caches["ema_quality"] = ema_quality
         memory.last_update = datetime.utcnow()
@@ -143,17 +156,14 @@ class PhaseMemoryManager:
         """Met à jour la mémoire d’un actif donné."""
         memory = self.get_memory(asset_symbol)
 
-        # Sécurité : s'assurer que recent_signals est bien une liste
         if not isinstance(memory.recent_signals, list):
             memory.recent_signals = []
 
-        # Ajouter les nouveaux signaux
         if new_signals:
             memory.recent_signals.extend(new_signals)
         if len(memory.recent_signals) > keep_last:
             memory.recent_signals = memory.recent_signals[-keep_last:]
 
-        # Gérer snapshot et transitions
         if snapshot is not None:
             old_phase = memory.last_snapshot.phase if memory.last_snapshot else None
             new_phase_snapshot = snapshot.phase if snapshot else None
@@ -171,82 +181,71 @@ class PhaseMemoryManager:
                 )
             memory.last_snapshot = snapshot
 
-        # Toujours mettre à jour la phase courante
         memory.last_phase = new_phase
         memory.last_update = datetime.utcnow()
         self._last_phases[asset_symbol] = new_phase
 
-        # 🔥 Correction : persistance stockée dans l’objet, pas en dict brut
         if not hasattr(memory, "counters") or not isinstance(memory.counters, dict):
             memory.counters = {}
         memory.counters["persistence"] = {"candidate": None, "count": 0}
 
         return memory
 
+    def apply_phase_memory(
+        self, asset_symbol: str, current_phase: str, confidence: float
+    ) -> str:
+        """
+        📌 Stabilisation de phase via mémoire améliorée
+        """
+        try:
+            memory = self.get_memory(asset_symbol)
 
-def apply_phase_memory(
-    self, asset_symbol: str, current_phase: str, confidence: float
-) -> str:
-    """
-    📌 Stabilisation de phase via mémoire améliorée
-    - Assure que la mémoire est toujours normalisée
-    - Évite les plantages si `get_memory()` renvoie un dict
-    """
-    try:
-        memory = self.get_memory(asset_symbol)
-
-        # 🔹 Pas de mémoire disponible
-        if memory is None:
-            memory = PhaseMemory(
-                last_phase=current_phase,
-                confidence=confidence,
-                persistence=1,
-            )
-            self.save_memory(asset_symbol, memory.to_dict())
-            return current_phase
-
-        last_phase = memory.last_phase
-
-        # Charger config si dispo
-        threshold = 0.55
-        persistence_required = 2
-        if getattr(self, "config_manager", None):
-            try:
-                threshold = float(
-                    self.config_manager.get(
-                        "phase_observer.memory_threshold", default=0.55
-                    )
+            if memory is None:
+                memory = PhaseMemory(
+                    last_phase=current_phase,
+                    confidence=confidence,
+                    persistence=1,
                 )
-                persistence_required = int(
-                    self.config_manager.get(
-                        "phase_observer.persistence_required", default=2
-                    )
-                )
-            except Exception as cfg_err:
-                self.logger.warning(f"[Memory] Erreur chargement config: {cfg_err}")
+                self.save_memory(asset_symbol, memory)
+                return current_phase
 
-        # 🔹 Si la phase est identique → renforcer persistance
-        if current_phase == last_phase:
-            memory.persistence += 1
-            memory.confidence = max(memory.confidence, confidence)
-        else:
-            # 🔹 Nouvelle phase mais confiance insuffisante → attendre
-            if confidence < threshold or memory.persistence < persistence_required:
+            last_phase = memory.last_phase
+
+            threshold = 0.55
+            persistence_required = 2
+            if getattr(self, "config_manager", None):
+                try:
+                    threshold = float(
+                        self.config_manager.get(
+                            "phase_observer.memory_threshold", default=0.55
+                        )
+                    )
+                    persistence_required = int(
+                        self.config_manager.get(
+                            "phase_observer.persistence_required", default=2
+                        )
+                    )
+                except Exception as cfg_err:
+                    self.logger.warning(f"[Memory] Erreur chargement config: {cfg_err}")
+
+            if current_phase == last_phase:
                 memory.persistence += 1
-                self.save_memory(asset_symbol, memory.to_dict())
-                return last_phase
-            # 🔹 Changement validé
-            memory.last_phase = current_phase
-            memory.persistence = 1
-            memory.confidence = confidence
+                memory.confidence = max(memory.confidence, confidence)
+            else:
+                if confidence < threshold or memory.persistence < persistence_required:
+                    memory.persistence += 1
+                    self.save_memory(asset_symbol, memory)
+                    return last_phase
+                memory.last_phase = current_phase
+                memory.persistence = 1
+                memory.confidence = confidence
 
-        # Sauvegarder la mémoire mise à jour
-        self.save_memory(asset_symbol, memory.to_dict())
-        return memory.last_phase
+            self.save_memory(asset_symbol, memory)
+            return memory.last_phase
 
-    except Exception as e:
-        self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
-        return current_phase
+        except Exception as e:
+            self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
+            return current_phase
 
 
 def reset_memory(memory: PhaseMemory) -> None:
