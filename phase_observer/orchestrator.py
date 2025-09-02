@@ -519,6 +519,28 @@ class PhaseObserver:
             else:
                 df_an["bos_mss_details"] = [None] * len(df_an)
                 df_an["bos_mss_detected"] = False
+                
+                # === (NOUVEAU) CANDLE PATTERNS ===
+            if toggles.get("detect_candles", True):
+                try:
+                    candle_signals = self.detectors.detect_candle_patterns(df_an)
+                    if candle_signals and isinstance(candle_signals, list):
+                        df_an["candle_pattern"] = [
+                            c.get("pattern") if c else None for c in candle_signals
+                        ]
+                        df_an["candle_pattern_strength"] = [
+                            c.get("strength_score") if c else 0.0 for c in candle_signals
+                        ]
+                    else:
+                        df_an["candle_pattern"] = None
+                        df_an["candle_pattern_strength"] = 0.0
+                except Exception as e:
+                    self.logger.warning(
+                        f"[{current_asset_symbol}] Erreur detect_candle_patterns: {e}"
+                    )
+                    df_an["candle_pattern"] = None
+                    df_an["candle_pattern_strength"] = 0.0
+
 
             # === (NOUVEAU) MICROPHASES BOLLINGER ===
             if toggles.get("detect_bollinger", True):
