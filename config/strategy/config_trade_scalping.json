@@ -19,7 +19,7 @@
     "impulse_threshold": 0,
     "use_phase_observer": true,
     "overrides": {
-      "require_range_detection": false,
+      "require_range_detection": true,
       "min_lookback_bars": 300,
       "use_bollinger_microphase": true
     },
@@ -105,7 +105,7 @@
         "tp_halfband_k": 1.0,
         "buffer_pips_min": 0.8,
         "min_mid_distance_ratio": 0.06,
-        "require_range_regime": false,
+        "require_range_regime": true,
         "block_on_expansion": false,
         "min_confidence": 0.3,
         "katana_min_confidence": 0.3,
@@ -164,7 +164,7 @@
   },
   "execution_quality_filters": {
     "atr_volatility_filter": {
-      "enabled": false,
+      "enabled": true,
       "period": 14,
       "min_atr": 0.0,
       "max_atr": 1000000000.0

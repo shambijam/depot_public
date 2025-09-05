@@ -1505,144 +1505,7 @@ class DecisionPipeline:
         Fallback: None si impossible.
         """
         df = mkt.get
-
-    def calculate_risk_parameters(
-        self, context: dict, current_config: dict, trade_decision: dict
-    ) -> dict:
-        """
-        Calcule un dimensionnement 'risk-based' (lots), le RR, et applique des gardes simples.
-        Signature alignée à l'appel existant: (context, current_config, trade_decision).
-        Retour: dict { ok, volume, rr, risk_amount, notes, reason, entry_price, sl_price, tp_price }
-
-        Hypothèses:
-        - context["account_info"] contient equity/balance
-        - context["market_data"][asset]["symbol_info"] contient trade_contract_size, point, digits, volume_* (MT5 SymbolInfo asdict)
-        - trade_decision peut inclure entry_price/sl_price/tp_price (ex: via snapshot katana)
-        """
-        notes = []
-
-        # --- 1) Entrées de base ---
-        action = str(trade_decision.get("action", "")).upper()
-        asset = str(trade_decision.get("asset", "")).upper()
-
-        if action not in {"BUY", "SELL"} or not asset:
-            return {"ok": False, "reason": "invalid_action_or_asset"}
-
-        md = (context.get("market_data") or {}).get(asset, {}) or {}
-        symbol_info = (
-            md.get("symbol_info", {}) or {}
-        )  # dict (MT5 SymbolInfo -> _asdict())
-        account_info = context.get("account_info", {}) or {}
-
-        # entry/sl/tp: idéalement fournis par la décision; sinon entry=prix courant
-        entry = trade_decision.get("entry_price", md.get("current_price"))
-        sl = trade_decision.get("sl_price")
-        tp = trade_decision.get("tp_price")
-
-        # Casting robustes
-        try:
-            if entry is None:
-                return {"ok": False, "reason": "missing_entry_price"}
-            entry = float(entry)
-            sl = None if sl is None else float(sl)
-            tp = None if tp is None else float(tp)
-        except (TypeError, ValueError):
-            return {"ok": False, "reason": "invalid_level_types"}
-
-        # --- 2) Paramètres broker/symbole (avec defaults sûrs) ---
-        contract = float(symbol_info.get("trade_contract_size", 100000.0)) or 100000.0
-        point = float(symbol_info.get("point", 0.00001)) or 0.00001
-        digits = int(symbol_info.get("digits", 5))
-        vol_min = float(symbol_info.get("volume_min", 0.01)) or 0.01
-        vol_max = float(symbol_info.get("volume_max", 100.0)) or 100.0
-        vol_step = float(symbol_info.get("volume_step", 0.01)) or 0.01
-        spread_pts = float(md.get("current_spread_points", 0.0)) or 0.0
-
-        # --- 3) Paramètres de risque (config) ---
-        rm_cfg = (current_config or {}).get("risk_management", {}) or {}
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.5))  # % de l'equity
-        min_rr = float(rm_cfg.get("min_rr", 1.2))
-        max_spread_pips = float(
-            rm_cfg.get("max_spread_pips", 2.0)
-        )  # garde simple (scalping)
-        fixed_volume_lots = rm_cfg.get("fixed_volume_lots")  # fallback si pas de SL/TP
-
-        equity = float(
-            account_info.get("equity", account_info.get("balance", 0.0)) or 0.0
-        )
-        if equity <= 0:
-            return {"ok": False, "reason": "no_equity"}
-
-        # --- 4) Conversion spread points -> pips (approx) ---
-        # MT5: 'spread' exprimé en points (unités de 'point').
-        # Convention simple: pour 5/3 digits => 1 pip = 10 points; sinon ~1 point = 1 pip (fallback).
-        pip_points = 10.0 if digits in (3, 5) else 1.0
-        spread_pips = spread_pts / pip_points
-
-        # --- 5) Pas de niveaux -> fallback volume fixe (ou min) ---
-        if sl is None or tp is None or sl == entry:
-            if fixed_volume_lots is None:
-                fixed_volume_lots = max(vol_min, vol_step)
-                notes.append("fallback_fixed_volume_min")
-            else:
-                try:
-                    fixed_volume_lots = float(fixed_volume_lots)
-                except (TypeError, ValueError):
-                    fixed_volume_lots = max(vol_min, vol_step)
-                    notes.append("fallback_fixed_volume_min_parse_error")
-
-            if spread_pips > max_spread_pips:
-                return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
-
-            return {
-                "ok": True,
-                "volume": self._quantize_volume(
-                    fixed_volume_lots, vol_min, vol_max, vol_step
-                ),
-                "rr": None,
-                "risk_amount": equity * (risk_pct / 100.0),
-                "notes": ["no_levels_for_risk_sizing"] + notes,
-                "entry_price": entry,
-                "sl_price": sl,
-                "tp_price": tp,
-            }
-
-        # --- 6) Sizing au risque (avec niveaux valides) ---
-        sl_dist = abs(entry - sl)
-        if sl_dist <= 0:
-            return {"ok": False, "reason": "invalid_sl_distance"}
-
-        risk_amount = equity * (risk_pct / 100.0)
-
-        # Perte par lot à SL ≈ sl_dist * contract  (voir commentaire dans ta version)
-        try:
-            raw_volume = risk_amount / (sl_dist * contract)
-        except ZeroDivisionError:
-            return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
-
-        volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
-
-        # --- 7) RR & gardes simples ---
-        rr = (abs(tp - entry) / sl_dist) if sl_dist > 0 else 0.0
-        if rr < min_rr:
-            rr_fmt = f"{rr:.2f}"
-            min_rr_fmt = f"{min_rr:.2f}"
-            return {"ok": False, "reason": f"rr_below_min_{rr_fmt}_<{min_rr_fmt}"}
-
-        if spread_pips > max_spread_pips:
-            return {"ok": False, "reason": f"spread_too_wide_{spread_pips:.2f}p"}
-
-        return {
-            "ok": True,
-            "volume": volume,
-            "rr": rr,
-            "risk_amount": risk_amount,
-            "notes": notes,
-            "entry_price": entry,
-            "sl_price": sl,
-            "tp_price": tp,
-        }
-
+   
     def _quantize_volume(
         self, vol: float, vmin: float, vmax: float, vstep: float
     ) -> float:
@@ -3864,6 +3727,14 @@ class DecisionPipeline:
             return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
 
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
+
+        # 🚑 Sécurisation anti-volume nul
+        if not isinstance(volume, (int, float)) or volume <= 0:
+            self.logger.warning(
+                f"⚠️ Volume calculé nul ou invalide (raw={raw_volume:.6f}) → fallback min_lot_size."
+            )
+            volume = max(vol_min, float(current_config.get("min_lot_size", 0.01)))
+
 
         # ✅ Sécurité : jamais en dessous du volume minimum
         if not isinstance(volume, (int, float)) or volume <= 0:
