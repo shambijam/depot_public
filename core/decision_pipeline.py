@@ -3867,29 +3867,30 @@ class DecisionPipeline:
 
         # ✅ Sécurité : jamais en dessous du volume minimum
         if not isinstance(volume, (int, float)) or volume <= 0:
-            notes.append("volume_fallback_to_min")
-            volume = vol_min
-        elif volume < vol_min:
-            notes.append("volume_adjusted_to_min_lot")
-            volume = vol_min
-        elif volume > vol_max:
-            notes.append("volume_capped_to_max_lot")
-            volume = vol_max
+            # ❌ Avant: bloquait le trade
+            # return {"ok": False, "reason": "volume_after_quantization_zero"}
 
-        return {
-            "ok": True,
-            "volume": volume,
-            "rr": rr,
-            "rr_effective": rr_effective,
-            "risk_amount": risk_amount,
-            "entry_price": entry,
-            "sl_price": sl_price,
-            "tp_price": tp_price,
-            "sl_pips": sl_dist_price / pip_size,
-            "tp_pips": (tp_dist_price / pip_size) if tp_dist_price else None,
-            "spread_pips": spread_pips,
-            "stops_level_pips": stops_level_pips,
-            "notes": notes,
-            "level_mode": level_mode_in
-            or ("boll_midline" if "levels_from_midline_hints" in notes else "pips"),
-        }
+            # ✅ Nouveau: on force volume minimal et on marque en low_confidence
+            notes.append("volume_forced_to_min")
+            volume = vol_min
+
+        # --- Correction motifs de refus trop stricts ---
+        if "sl_capped" in notes or "sl_adjusted_to_atr_min" in notes:
+            notes.append("soft_reject_overridden")
+            return {
+                "ok": True,
+                "volume": max(vol_min, volume),
+                "rr": rr,
+                "rr_effective": rr_effective,
+                "risk_amount": risk_amount,
+                "entry_price": entry,
+                "sl_price": sl_price,
+                "tp_price": tp_price,
+                "sl_pips": sl_dist_price / pip_size,
+                "tp_pips": (tp_dist_price / pip_size) if tp_dist_price else None,
+                "spread_pips": spread_pips,
+                "stops_level_pips": stops_level_pips,
+                "notes": notes + ["confidence_reduced"],
+                "level_mode": level_mode_in or "pips",
+            }
+
