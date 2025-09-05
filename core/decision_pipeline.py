@@ -2275,18 +2275,27 @@ class DecisionPipeline:
             }
             _diag_size(asset_raw, reason, extras)
             self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
-            return {}
-
-        if not (risk_params.get("volume", 0.0) > 0):
-            _diag_size(
-                asset_raw,
-                "sizing_volume_zero_or_missing",
-                {"ok": True, "volume": risk_params.get("volume")},
+            # ⚠️ Correction : ne pas bloquer totalement → trade en low confidence
+            trade_decision["confidence"] = (
+                float(trade_decision.get("confidence", 0.5)) * 0.7
             )
-            self.logger.warning(
-                "Calcul de risque valide mais volume nul/invalide. Trade annulé."
-            )
-            return {}
+            trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
+        else:
+            # ✅ Si ok mais volume nul → fallback sur lot minimal
+            if not (risk_params.get("volume", 0.0) > 0):
+                _diag_size(
+                    asset_raw,
+                    "sizing_volume_zero_or_missing",
+                    {"ok": True, "volume": risk_params.get("volume")},
+                )
+                self.logger.warning(
+                    "⚠️ Calcul de risque valide mais volume nul/invalide → fallback min_lot_size"
+                )
+                trade_decision["volume"] = float(
+                    current_config.get("min_lot_size", 0.01)
+                )
+            else:
+                trade_decision["volume"] = float(risk_params.get("volume"))
 
             # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
         try:
