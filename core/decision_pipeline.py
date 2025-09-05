@@ -2286,24 +2286,26 @@ class DecisionPipeline:
             )
             return {}
 
-        # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
+               # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
         try:
             if normalized_action in {"BUY", "SELL"}:
-                trail_cfg = (current_config.get("scalping") or {}).get(
-                    "trailing_stop", {}
-                )
+                trail_cfg = (current_config.get("scalping") or {}).get("trailing_stop", {}) or {}
                 enable_trail = bool(trail_cfg.get("enabled", True))
                 trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
 
+                # 🔑 Sécurisation du point (taille du tick)
+                point = (
+                    _num(signals.get("point"))
+                    or _num(trade_decision.get("point"))
+                    or (getattr(self.symbol_info, "point", None) if hasattr(self, "symbol_info") else None)
+                    or 0.0001
+                )
+
                 if enable_trail and isinstance(price, float) and math.isfinite(price):
                     if normalized_action == "BUY":
-                        trade_decision["trailing_stop"] = price - (
-                            trail_distance_pips * point
-                        )
+                        trade_decision["trailing_stop"] = price - (trail_distance_pips * point)
                     elif normalized_action == "SELL":
-                        trade_decision["trailing_stop"] = price + (
-                            trail_distance_pips * point
-                        )
+                        trade_decision["trailing_stop"] = price + (trail_distance_pips * point)
 
                     trade_decision["rule_name"] = (
                         trade_decision.get("rule_name", "") + "+trailing"
@@ -2313,6 +2315,7 @@ class DecisionPipeline:
                     )
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
+
 
         # Log final
         self.config_manager.log_decision(
