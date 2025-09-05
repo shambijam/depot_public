@@ -3865,8 +3865,16 @@ class DecisionPipeline:
 
         volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
 
-        if is_midline_strict and (not isinstance(volume, (int, float)) or volume <= 0):
-            return {"ok": False, "reason": "volume_after_quantization_zero"}
+        # ✅ Sécurité : jamais en dessous du volume minimum
+        if not isinstance(volume, (int, float)) or volume <= 0:
+            notes.append("volume_fallback_to_min")
+            volume = vol_min
+        elif volume < vol_min:
+            notes.append("volume_adjusted_to_min_lot")
+            volume = vol_min
+        elif volume > vol_max:
+            notes.append("volume_capped_to_max_lot")
+            volume = vol_max
 
         return {
             "ok": True,
