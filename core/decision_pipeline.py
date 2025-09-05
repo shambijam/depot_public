@@ -2280,22 +2280,18 @@ class DecisionPipeline:
                 float(trade_decision.get("confidence", 0.5)) * 0.7
             )
             trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
-        else:
-            # ✅ Si ok mais volume nul → fallback sur lot minimal
-            if not (risk_params.get("volume", 0.0) > 0):
-                _diag_size(
-                    asset_raw,
-                    "sizing_volume_zero_or_missing",
-                    {"ok": True, "volume": risk_params.get("volume")},
+
+            # ✅ Ajustements spécifiques
+            if reason == "sl_capped" and "stops_level_pips" in extras:
+                trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
+                self.logger.info(
+                    f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
                 )
+            if reason == "soft_atr_m1_low":
                 self.logger.warning(
-                    "⚠️ Calcul de risque valide mais volume nul/invalide → fallback min_lot_size"
+                    f"⚠️ ATR trop faible sur {asset_raw} — trade maintenu en mode ultra low confidence."
                 )
-                trade_decision["volume"] = float(
-                    current_config.get("min_lot_size", 0.01)
-                )
-            else:
-                trade_decision["volume"] = float(risk_params.get("volume"))
+                trade_decision["confidence"] *= 0.5
 
             # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
         try:
