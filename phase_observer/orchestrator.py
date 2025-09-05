@@ -218,42 +218,47 @@ class PhaseObserver:
             else:
                 score += base_bonus  # par défaut
 
-        # --- 6) Bollinger ---
+        # --- 6) Bollinger (corrigé & enrichi) ---
         try:
             boll_revert = float(row.get("boll_mean_revert_score", 0.0) or 0.0)
             boll_break = float(row.get("boll_breakout_score", 0.0) or 0.0)
             boll_sig = (row.get("boll_signal") or "").strip().lower()
             is_squeeze = bool(row.get("boll_is_squeeze", False))
             is_expansion = bool(row.get("boll_is_expansion", False))
+            mid_dist = float(row.get("boll_mid_distance_ratio", 0.0) or 0.0)
 
             regime = str(row.get("regime", "unknown") or "unknown").lower()
             in_range_regime = ("range_" in regime) or ("low_volatility" in regime)
+            in_trend_regime = ("trending" in regime) or ("impulse" in regime)
 
+            # 🎯 Revert (retour vers la médiane)
             if boll_revert > 0:
-                local_w = boll_mean_revert_w * (1.15 if in_range_regime else 1.0)
+                local_w = boll_mean_revert_w * (1.2 if in_range_regime else 0.9)
                 score += local_w * min(1.0, boll_revert)
 
+            # 🎯 Breakout (sortie des bandes)
             if boll_break > 0:
-                in_high_vol = "high_volatility" in regime
-                local_w = boll_breakout_w * (
-                    1.15 if (is_expansion or in_high_vol) else 1.0
-                )
+                local_w = boll_breakout_w * (1.3 if in_trend_regime else 1.0)
                 score += local_w * min(1.0, boll_break)
 
+            # 🔒 Distance midline : si trop proche → moins fiable
+            if mid_dist < 0.1:
+                score *= 0.9
+            elif mid_dist > 0.4:
+                score *= 1.05
+
+            # ⚡ Bonus squeeze (range actif prêt à exploser)
             if is_squeeze and in_range_regime:
                 score += boll_squeeze_bonus
-            if is_expansion and "high_volatility" in regime:
+
+            # ⚡ Bonus expansion (confirmation d’impulsion)
+            if is_expansion and in_trend_regime:
                 score += boll_expansion_bonus
 
-            if boll_sig in {"buy_breakout", "sell_breakout"} and (
-                is_expansion or "high_volatility" in regime
-            ):
+            # Signal explicite
+            if boll_sig in {"buy_breakout", "sell_breakout"} and in_trend_regime:
                 score += min(0.05, boll_break * 0.05)
-            if (
-                boll_sig in {"buy_revert", "sell_revert"}
-                and in_range_regime
-                and is_squeeze
-            ):
+            elif boll_sig in {"buy_revert", "sell_revert"} and in_range_regime:
                 score += min(0.05, boll_revert * 0.05)
         except Exception:
             pass
@@ -550,26 +555,26 @@ class PhaseObserver:
                 df_an["bos_mss_detected"] = False
 
                 # === (NOUVEAU) CANDLE PATTERNS ===
-            if toggles.get("detect_candles", True):
-                try:
-                    candle_signals = self.detectors.detect_candle_patterns(df_an)
-                    if candle_signals and isinstance(candle_signals, list):
-                        df_an["candle_pattern"] = [
-                            c.get("pattern") if c else None for c in candle_signals
-                        ]
-                        df_an["candle_pattern_strength"] = [
-                            c.get("strength_score") if c else 0.0
-                            for c in candle_signals
-                        ]
-                    else:
+                if toggles.get("detect_candles", True):
+                    try:
+                        candle_signals = self.detectors.detect_candle_patterns(df_an)
+                        if candle_signals and isinstance(candle_signals, list):
+                            df_an["candle_pattern"] = [
+                                c.get("pattern") if c else None for c in candle_signals
+                            ]
+                            df_an["candle_pattern_score"] = [  # ✅ nouveau nom
+                                c.get("strength_score") if c else 0.0
+                                for c in candle_signals
+                            ]
+                        else:
+                            df_an["candle_pattern"] = None
+                            df_an["candle_pattern_score"] = 0.0
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[{current_asset_symbol}] Erreur detect_candle_patterns: {e}"
+                        )
                         df_an["candle_pattern"] = None
-                        df_an["candle_pattern_strength"] = 0.0
-                except Exception as e:
-                    self.logger.warning(
-                        f"[{current_asset_symbol}] Erreur detect_candle_patterns: {e}"
-                    )
-                    df_an["candle_pattern"] = None
-                    df_an["candle_pattern_strength"] = 0.0
+                        df_an["candle_pattern_score"] = 0.0
 
             # === (NOUVEAU) MICROPHASES BOLLINGER ===
             if toggles.get("detect_bollinger", True):
@@ -871,6 +876,18 @@ class PhaseObserver:
                     f"Régime={last_regime}, Signaux totaux={int(total_signals)}, "
                     f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
                 )
+
+                # 🔍 Bougies (nouveau log)
+                if "candle_pattern" in df_an.columns:
+                    last_candle = str(df_an["candle_pattern"].iloc[-1])
+                    last_candle_strength = float(
+                        df_an.get("candle_pattern_strength", [0.0])[-1]
+                    )
+                    if last_candle and last_candle != "None":
+                        self.logger.info(
+                            f"🕯️ [{current_asset_symbol}] Dernier pattern détecté: {last_candle} "
+                            f"(strength={last_candle_strength:.2f})"
+                        )
 
                 if last_phase == "no_clear_phase":
                     self.logger.info(
