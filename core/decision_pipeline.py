@@ -2132,11 +2132,17 @@ class DecisionPipeline:
 
             if normalized_action == "BUY" and not (in_buy_zone and mid_entry == "buy"):
                 self.logger.warning("⚠️ BUY hors zone midline — confiance réduite.")
-                trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.8
+                trade_decision["confidence"] = (
+                    float(trade_decision.get("confidence", 0.5)) * 0.8
+                )
 
-            elif normalized_action == "SELL" and not (in_sell_zone and mid_entry == "sell"):
+            elif normalized_action == "SELL" and not (
+                in_sell_zone and mid_entry == "sell"
+            ):
                 self.logger.warning("⚠️ SELL hors zone midline — confiance réduite.")
-                trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.8
+                trade_decision["confidence"] = (
+                    float(trade_decision.get("confidence", 0.5)) * 0.8
+                )
 
             elif normalized_action == "CLOSE":
                 pass  # fermeture autorisée
@@ -2282,22 +2288,34 @@ class DecisionPipeline:
             )
             return {}
 
-               # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
+            # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
         try:
             if normalized_action in {"BUY", "SELL"}:
-                trail_cfg = (current_config.get("scalping") or {}).get("trailing_stop", {}) or {}
+                trail_cfg = (current_config.get("scalping") or {}).get(
+                    "trailing_stop", {}
+                ) or {}
                 enable_trail = bool(trail_cfg.get("enabled", True))
                 trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
 
-                # ✅ Version simplifiée sans garde-fou
-                point = getattr(self.symbol_info, "point", None) or 0.0001
-
+                # ✅ Récupération robuste du point (tick size)
+                point = (
+                    float(signals.get("point") or 0.0)
+                    or float(trade_decision.get("point") or 0.0)
+                    or float(
+                        (current_config.get("symbol_info", {}) or {}).get("point", 0.0)
+                    )
+                    or 0.0001
+                )
 
                 if enable_trail and isinstance(price, float) and math.isfinite(price):
                     if normalized_action == "BUY":
-                        trade_decision["trailing_stop"] = price - (trail_distance_pips * point)
+                        trade_decision["trailing_stop"] = price - (
+                            trail_distance_pips * point
+                        )
                     elif normalized_action == "SELL":
-                        trade_decision["trailing_stop"] = price + (trail_distance_pips * point)
+                        trade_decision["trailing_stop"] = price + (
+                            trail_distance_pips * point
+                        )
 
                     trade_decision["rule_name"] = (
                         trade_decision.get("rule_name", "") + "+trailing"
@@ -2307,7 +2325,6 @@ class DecisionPipeline:
                     )
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
-
 
         # Log final
         self.config_manager.log_decision(
