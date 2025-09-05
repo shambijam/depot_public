@@ -2034,28 +2034,40 @@ class DecisionPipeline:
                 np.nan,
             )
 
-            # ❌ NO FALLBACK: données Bollinger/price + gate micro-phase doivent être valides
-            if any(
-                not (isinstance(x, float) and math.isfinite(x))
-                for x in (bb_mid, bb_up, bb_lo, price)
-            ):
-                self.logger.info(
-                    "Rejet: données Bollinger/price invalides pour midline scalp (mode strict)."
-                )
-                return {}
+           # ✅ Tolérance : si une des valeurs est NaN/inf, on essaie de la réparer
+        def _safe_val(val, fallback=None):
+            try:
+                return float(val) if (val is not None and math.isfinite(val)) else fallback
+            except Exception:
+                return fallback
+
+        bb_mid = _safe_val(bb_mid, trade_decision.get("boll", {}).get("bb_mid"))
+        bb_up  = _safe_val(bb_up, trade_decision.get("boll", {}).get("bb_upper"))
+        bb_lo  = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
+        price  = _safe_val(price, signals.get("close"))
+
+        # Si après réparation, il en manque encore → log warning mais trade pas bloqué
+        if None in (bb_mid, bb_up, bb_lo, price):
+            self.logger.warning("⚠️ Données Bollinger partielles — trade accepté mais en mode 'low_confidence'")
+            trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.6
+
             if not entry_gate_ok:
                 self.logger.info(
                     "Rejet: entry_gate_ok=False depuis micro-phase (mode strict)."
                 )
                 return {}
+            
             if isinstance(mid_distance_ratio, float) and math.isfinite(
                 mid_distance_ratio
             ):
                 if mid_distance_ratio < min_mid_ratio:
                     self.logger.info(
-                        f"Rejet: distance à la médiane insuffisante ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f})."
+                        f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — trade accepté mais confiance réduite."
                     )
-                    return {}
+                    # Réduction de la confiance au lieu d’un rejet
+                    trade_decision["confidence"] = (
+                        float(trade_decision.get("confidence", 0.5)) * 0.7
+                    )
 
             # pip_size
             pip_size = None
