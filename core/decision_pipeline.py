@@ -192,6 +192,30 @@ class DecisionPipeline:
             optimal_config = self.select_optimal_config(
                 analyzed_context, config_knowledge_base
             )
+
+            # --- PATCH: Override par phase (supprime dépendance au scoring bloquant) ---
+            try:
+                signals = analyzed_context.get("trading_signals", {}) or {}
+                override = None
+
+                for asset, sig in signals.items():
+                    phase = str(sig.get("phase", "")).lower()
+                    if "range" in phase:
+                        override = "scalping"
+                        break
+                    elif "impulsion" in phase:
+                        override = "liquidity"
+                        break
+
+                if override:
+                    self.logger.info(
+                        f"⚡ Strategy override forcé par phase détectée: {override} "
+                        f"(ignore scoring, phase={phase})"
+                    )
+                    optimal_config["strategy_name"] = override
+            except Exception as e:
+                self.logger.warning(f"Erreur lecture phase override: {e}")
+
             if not optimal_config:
                 self.logger.warning(
                     "Aucune stratégie optimale sélectionnée pour ce cycle. Pipeline arrêté."
@@ -383,6 +407,24 @@ class DecisionPipeline:
         print(f"🎯 [SCORING] Signaux disponibles: {list(trading_signals.keys())}")
 
         for path, data in eligible_configs.items():
+            actual_config = data["config"] if "config" in data else data
+            strategy_name = str(actual_config.get("strategy_name", "")).lower()
+            strategy_tags = actual_config.get("strategy_tags", [])
+
+            # === OVERRIDE DIRECT PAR RÉGIME ===
+            if "range" in market_regime and strategy_name == "scalping":
+                self.logger.info(
+                    f"[SCORING] Forcé: régime {market_regime} → scalping=1.0"
+                )
+                config_scores[path] = 1.0
+                continue
+            if "impulsion" in market_regime and strategy_name == "liquidity":
+                self.logger.info(
+                    f"[SCORING] Forcé: régime {market_regime} → liquidity=1.0"
+                )
+                config_scores[path] = 1.0
+                continue
+
             # === DEBUG STRUCTURE DES DONNÉES ===
             print(f"🔍 [DEBUG] Path: {path}")
             print(f"🔍 [DEBUG] Data keys: {list(data.keys())}")
@@ -417,6 +459,12 @@ class DecisionPipeline:
                     actual_config, context, trading_signals, strategy_weights
                 )
                 print(f"🗡️ [SCALPING] Score final: {score:.3f}")
+
+            elif strategy_name == "liquidity":
+                score = self._calculate_liquidity_score(
+                    actual_config, context, trading_signals, strategy_weights
+                )
+                print(f"💧 [LIQUIDITY] Score final: {score:.3f}")
 
             # === LOGIQUE STANDARD POUR AUTRES STRATÉGIES ===
             else:
@@ -709,57 +757,39 @@ class DecisionPipeline:
         self, config: Dict, context: Dict, trading_signals: Dict, strategy_weights: Dict
     ) -> float:
         """
-        🗡️ SCORING INTELLIGENT SCALPING - Reconnaissance des conditions KATANA
-
-        Utilise votre configuration sophistiquée et vos signaux PhaseObserver
-        pour détecter les opportunités scalping optimales
+        🗡️ SCALPING KATANA - Simplifié
+        ✅ Plus de scoring bloquant : si on est en range → score = 1.0
         """
-        # Score de base
-        base_score = self.config_manager.get("scoring_rules.base_score", 0.5)
-        scalping_weight = strategy_weights.get("scalping", 0.2)
-        score = base_score + scalping_weight
+        # Vérifie si au moins un actif est en range
+        for asset, sig in trading_signals.items():
+            phase = str(sig.get("phase", "")).lower()
+            if "range" in phase:
+                print(f"✅ [SCALPING] {asset} en range → score=1.0 (aucun blocage)")
+                return 1.0
 
-        print(
-            f"🗡️ [SCALPING] Score base: {score:.3f} ({base_score} + {scalping_weight})"
-        )
+        # Si aucun actif en range → fallback neutre
+        print("⚠️ [SCALPING] Aucun actif en range → score=0.0")
+        return 0.0
 
-        # Analyser TOUS les assets pour trouver les meilleures conditions
-        best_asset_score = 0.0
-        best_asset = None
-        scalping_opportunities = 0
+    def _calculate_liquidity_score(
+        self, config: Dict, context: Dict, trading_signals: Dict, strategy_weights: Dict
+    ) -> float:
+        """
+        💧 LIQUIDITY KATANA - Simplifié
+        ✅ Plus de scoring bloquant : si impulsion détectée → score=1.0
+        """
+        for asset, sig in trading_signals.items():
+            regime = str(sig.get("regime", "")).lower()
+            phase = str(sig.get("phase", "")).lower()
 
-        for asset, signals in trading_signals.items():
-            asset_score = self._evaluate_scalping_asset_conditions(
-                asset, signals, config
-            )
-            if asset_score > best_asset_score:
-                best_asset_score = asset_score
-                best_asset = asset
-            if asset_score > 0.6:  # Seuil d'opportunité
-                scalping_opportunities += 1
+            if "impulse" in regime or "impulsion" in phase or "sweep" in phase:
+                print(
+                    f"✅ [LIQUIDITY] {asset} en impulsion/sweep → score=1.0 (aucun blocage)"
+                )
+                return 1.0
 
-        # Bonus basé sur la meilleure opportunité trouvée
-        if best_asset_score > 0:
-            score += best_asset_score * 0.5  # Multiplicateur d'impact
-            print(
-                f"🎯 [SCALPING] Meilleure opportunité: {best_asset} (score: {best_asset_score:.3f}) -> +{best_asset_score * 0.5:.3f}"
-            )
-
-        # Bonus pour multiple opportunités
-        if scalping_opportunities > 1:
-            multi_opportunity_bonus = min(0.2, scalping_opportunities * 0.05)
-            score += multi_opportunity_bonus
-            print(
-                f"📊 [SCALPING] {scalping_opportunities} opportunités détectées -> +{multi_opportunity_bonus:.3f}"
-            )
-
-        # Pénalités si conditions globales défavorables
-        penalty = self._calculate_scalping_penalties(context)
-        score -= penalty
-        if penalty > 0:
-            print(f"⚠️ [SCALPING] Pénalités appliquées: -{penalty:.3f}")
-
-            return score
+        print("⚠️ [LIQUIDITY] Aucun actif en impulsion → score=0.0")
+        return 0.0
 
     def _evaluate_scalping_asset_conditions(
         self, asset: str, signals: Dict, config: Dict
@@ -2034,40 +2064,45 @@ class DecisionPipeline:
                 np.nan,
             )
 
-           # ✅ Tolérance : si une des valeurs est NaN/inf, on essaie de la réparer
         def _safe_val(val, fallback=None):
             try:
-                return float(val) if (val is not None and math.isfinite(val)) else fallback
+                return (
+                    float(val) if (val is not None and math.isfinite(val)) else fallback
+                )
             except Exception:
                 return fallback
 
         bb_mid = _safe_val(bb_mid, trade_decision.get("boll", {}).get("bb_mid"))
-        bb_up  = _safe_val(bb_up, trade_decision.get("boll", {}).get("bb_upper"))
-        bb_lo  = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
-        price  = _safe_val(price, signals.get("close"))
+        bb_up = _safe_val(bb_up, trade_decision.get("boll", {}).get("bb_upper"))
+        bb_lo = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
+        price = _safe_val(price, signals.get("close"))
 
-        # Si après réparation, il en manque encore → log warning mais trade pas bloqué
+        # ⚠️ Nouveau comportement : pas de rejet si données incomplètes
         if None in (bb_mid, bb_up, bb_lo, price):
-            self.logger.warning("⚠️ Données Bollinger partielles — trade accepté mais en mode 'low_confidence'")
-            trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.6
+            self.logger.warning(
+                "⚠️ Données Bollinger incomplètes — trade maintenu en mode 'low_confidence'"
+            )
+            trade_decision["confidence"] = (
+                float(trade_decision.get("confidence", 0.5)) * 0.6
+            )
 
-            if not entry_gate_ok:
-                self.logger.info(
-                    "Rejet: entry_gate_ok=False depuis micro-phase (mode strict)."
+        # ⚠️ Si gate ou distance trop faible → on réduit confiance, pas de rejet
+        if not entry_gate_ok:
+            self.logger.warning(
+                "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
+            )
+            trade_decision["confidence"] = (
+                float(trade_decision.get("confidence", 0.5)) * 0.7
+            )
+
+        if isinstance(mid_distance_ratio, float) and math.isfinite(mid_distance_ratio):
+            if mid_distance_ratio < min_mid_ratio:
+                self.logger.warning(
+                    f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — confiance réduite."
                 )
-                return {}
-            
-            if isinstance(mid_distance_ratio, float) and math.isfinite(
-                mid_distance_ratio
-            ):
-                if mid_distance_ratio < min_mid_ratio:
-                    self.logger.info(
-                        f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — trade accepté mais confiance réduite."
-                    )
-                    # Réduction de la confiance au lieu d’un rejet
-                    trade_decision["confidence"] = (
-                        float(trade_decision.get("confidence", 0.5)) * 0.7
-                    )
+                trade_decision["confidence"] = (
+                    float(trade_decision.get("confidence", 0.5)) * 0.8
+                )
 
             # pip_size
             pip_size = None
