@@ -12,8 +12,6 @@ from core.utils import ConfigValidationError, TradeStatus  # NOUVEL IMPORT DEPUI
 from typing import Any, Dict, List, Optional, Tuple
 
 
-
-
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
     from core.config_manager import (
@@ -210,6 +208,22 @@ class DecisionPipeline:
             print(
                 f"🤖 [DECISION] ✅ Stratégie optimale: {optimal_config.get('strategy_name', 'Unknown')}"
             )
+
+            # === PATCH: Strategy override depuis les signaux ===
+            try:
+                override = None
+                signals = analyzed_context.get("trading_signals", {}) or {}
+                for asset, sig in signals.items():
+                    if isinstance(sig, dict) and sig.get("strategy_override"):
+                        override = sig["strategy_override"]
+                        break  # on prend le premier override trouvé
+                if override:
+                    self.logger.info(
+                        f"⚡ Strategy override détecté: {override} → remplace {optimal_config.get('strategy_name')}"
+                    )
+                    optimal_config["strategy_name"] = override
+            except Exception as e:
+                self.logger.warning(f"Erreur lecture strategy_override: {e}")
 
             # 4) Adaptation de la configuration pour le cycle actuel
             print(f"🤖 [DECISION] Étape 4: Adaptation de configuration...")
@@ -924,11 +938,11 @@ class DecisionPipeline:
             f"    🔄 Conditions MTF: {mtf_conditions_met}/{mtf_total_conditions} -> +{mtf_score:.3f}"
         )
 
-       # === 3) PHASES SCALPING (corrigé) ===
+        # === 3) PHASES SCALPING (corrigé) ===
         raw_phase = (
             signals.get("phase")
             or signals.get("phase_memory_stabilized")
-            or signals.get("last_phase")   # 🔥 fallback depuis la mémoire persistante
+            or signals.get("last_phase")  # 🔥 fallback depuis la mémoire persistante
             or ""
         )
         current_phase = str(raw_phase)
@@ -951,7 +965,6 @@ class DecisionPipeline:
                 break
 
         condition_score += phase_score
-
 
         # === 4) QUALITÉ & CONFIANCE (inchangé) ===
         confidence = signals.get("confidence_score", 0.0)
@@ -1700,6 +1713,44 @@ class DecisionPipeline:
             self.logger.info(
                 f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
             )
+            # === RÈGLE 1 : Scalping Bollinger (range plat uniquement) ===
+            for asset, sig in signals.items():
+                boll = sig.get("boll", {})
+                phase = sig.get("phase")
+                conf = float(sig.get("confidence_score", 0.0))
+                price = sig.get("close")
+                point = sig.get("point", 0.0001)
+
+                if boll and phase and "range" in str(phase).lower():
+                    bb_mid = boll.get("bb_mid")
+                    bb_upper = boll.get("bb_upper")
+                    bb_lower = boll.get("bb_lower")
+
+                    if all(
+                        isinstance(x, (int, float))
+                        for x in [price, bb_mid, bb_upper, bb_lower]
+                    ):
+                        if price < bb_mid:  # BUY si prix sous la médiane
+                            return {
+                                "action": "BUY",
+                                "asset": asset,
+                                "volume": 1.0,  # TODO: sizing dynamique
+                                "target_tp_pips": (bb_upper - price) / point,
+                                "target_sl_pips": (price - bb_lower) / point,
+                                "rule_name": "scalping_bollinger_range",
+                                "confidence": conf,
+                            }
+                        elif price > bb_mid:  # SELL si prix au-dessus de la médiane
+                            return {
+                                "action": "SELL",
+                                "asset": asset,
+                                "volume": 1.0,
+                                "target_tp_pips": (price - bb_lower) / point,
+                                "target_sl_pips": (bb_upper - price) / point,
+                                "rule_name": "scalping_bollinger_range",
+                                "confidence": conf,
+                            }
+
             return {}
 
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
@@ -2047,6 +2098,41 @@ class DecisionPipeline:
             elif normalized_action == "CLOSE":
                 pass  # fermeture autorisée
 
+            # ==========================================================
+            # ✅ RÈGLE 3 : Liquidity Sweep
+            # ==========================================================
+            if strategy_name.lower() == "scalping":
+                sweep_cfg = (current_config.get("scalping") or {}).get(
+                    "liquidity_sweep", {}
+                ) or {}
+                lookback_bars = int(sweep_cfg.get("lookback_bars", 20))
+
+                md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+                df_ls = md.get("annotated_rates_df")
+
+                if isinstance(df_ls, pd.DataFrame) and len(df_ls) >= lookback_bars:
+                    recent_high = df_ls["high"].tail(lookback_bars).max()
+                    recent_low = df_ls["low"].tail(lookback_bars).min()
+
+                    if price >= recent_high:  # Sweep vers le haut
+                        trade_decision = {
+                            "action": "SELL",
+                            "asset": asset_raw,
+                            "order_type": "MARKET",
+                            "entry_price": price,
+                            "rule_name": "liquidity_sweep_high",
+                            "level_mode": "sweep",
+                        }
+                    elif price <= recent_low:  # Sweep vers le bas
+                        trade_decision = {
+                            "action": "BUY",
+                            "asset": asset_raw,
+                            "order_type": "MARKET",
+                            "entry_price": price,
+                            "rule_name": "liquidity_sweep_low",
+                            "level_mode": "sweep",
+                        }
+
             # --- TPSL serrés (en pips) ---
             if normalized_action in {"BUY", "SELL"}:
                 if not (pip_size and pip_size > 0):
@@ -2153,7 +2239,33 @@ class DecisionPipeline:
             )
             return {}
 
-        trade_decision.update(risk_params)
+        # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger) ===
+        try:
+            if normalized_action in {"BUY", "SELL"}:
+                trail_cfg = (current_config.get("scalping") or {}).get(
+                    "trailing_stop", {}
+                )
+                enable_trail = bool(trail_cfg.get("enabled", True))
+                trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
+
+                if enable_trail and isinstance(price, float) and math.isfinite(price):
+                    if normalized_action == "BUY":
+                        trade_decision["trailing_stop"] = price - (
+                            trail_distance_pips * point
+                        )
+                    elif normalized_action == "SELL":
+                        trade_decision["trailing_stop"] = price + (
+                            trail_distance_pips * point
+                        )
+
+                    trade_decision["rule_name"] = (
+                        trade_decision.get("rule_name", "") + "+trailing"
+                    )
+                    self.logger.info(
+                        f"Trailing Stop appliqué ({trail_distance_pips} pips) pour {asset_raw}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Erreur application Trailing Stop: {e}")
 
         # Log final
         self.config_manager.log_decision(
@@ -2248,8 +2360,8 @@ class DecisionPipeline:
             raw_phase = (
                 s.get("phase_memory_stabilized")
                 or s.get("phase")
-                or s.get("last_phase")       # 🔥 fallback depuis la mémoire persistante
-                or "UNKNOWN"                 # 🔒 jamais None
+                or s.get("last_phase")  # 🔥 fallback depuis la mémoire persistante
+                or "UNKNOWN"  # 🔒 jamais None
             )
             phase = str(raw_phase)
 
@@ -2426,11 +2538,15 @@ class DecisionPipeline:
                     best_signals.setdefault("boll_signal", boll.get("signal"))
 
         if not best_asset:
-            self.logger.info("CORE: aucun actif au-dessus du seuil de confiance minimal.")
+            self.logger.info(
+                "CORE: aucun actif au-dessus du seuil de confiance minimal."
+            )
             return {}
 
         self.logger.info(f"🎯 CORE sélectionne: {best_asset} (score: {best_score:.3f})")
-        return self._core_build_trade_decision(best_asset, best_signals, config, context)
+        return self._core_build_trade_decision(
+            best_asset, best_signals, config, context
+        )
 
     def _core_build_trade_decision(
         self,
@@ -2473,9 +2589,11 @@ class DecisionPipeline:
             def _diag_selected(*a, **k):
                 pass
 
-       # Phase stabilisée par mémoire prioritaire
+        # Phase stabilisée par mémoire prioritaire
         phase = str(
-            signals.get("phase_memory_stabilized", signals.get("phase", "no_clear_phase"))
+            signals.get(
+                "phase_memory_stabilized", signals.get("phase", "no_clear_phase")
+            )
         ).lower()
         # Prix (tolérant multi-sources)
         current_price = None
@@ -2778,7 +2896,9 @@ class DecisionPipeline:
             "target_tp_pips": float(round(tp_pips, 3)),
             "rule_name": rule_name,
             "confidence": float(
-                signals.get("confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0)
+                signals.get(
+                    "confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0
+                )
             ),
             "timestamp": timestamp,
             "magic_number": int(config.get("magic_number", 999_999)),

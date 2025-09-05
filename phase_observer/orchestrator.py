@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from .memory import PhaseMemoryManager
 
 
-
 # Alias UTC
 UTC = timezone.utc
 
@@ -100,12 +99,12 @@ class PhaseObserver:
 
         # === Ajout mémoire des phases ===
         from .memory import PhaseMemoryManager
+
         self.memory = PhaseMemoryManager()
 
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
-
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + Bollinger + bougies + qualité + lissage mémoire)."""
@@ -184,10 +183,40 @@ class PhaseObserver:
         if bool(row.get("institutional_setup", False)):
             score += confluence_bonus.get("full_confluence_bonus", 0.20)
 
-        # --- 5) Bougies (nouveau) ---
-        candle_score = float(row.get("candle_pattern_score", 0.0) or 0.0)
+        # --- 5) Bougies (corrigé & enrichi) ---
+        candle_type = str(row.get("candle_pattern", "")).lower()
+        candle_score = float(row.get("candle_pattern_strength", 0.0) or 0.0)
+
         if candle_score > 0:
-            score += signal_weights.get("candle_pattern", 0.15) * min(1.0, candle_score)
+            # Bonus de base
+            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(
+                1.0, candle_score
+            )
+
+            # Pondération selon le type de pattern
+            if candle_type in {
+                "bullish_engulfing",
+                "morning_star",
+                "three_white_soldiers",
+            }:
+                score += base_bonus * 1.3  # patterns haussiers forts
+            elif candle_type in {
+                "bearish_engulfing",
+                "evening_star",
+                "three_black_crows",
+            }:
+                score += base_bonus * 1.3  # patterns baissiers forts
+            elif candle_type in {"doji", "doji_cluster_consolidation"}:
+                score += base_bonus * 0.7  # neutre ou incertain
+            elif candle_type in {
+                "hammer",
+                "shooting_star",
+                "bullish_pinbar",
+                "bearish_pinbar",
+            }:
+                score += base_bonus * 1.0  # patterns de retournement modérés
+            else:
+                score += base_bonus  # par défaut
 
         # --- 6) Bollinger ---
         try:
@@ -519,7 +548,7 @@ class PhaseObserver:
             else:
                 df_an["bos_mss_details"] = [None] * len(df_an)
                 df_an["bos_mss_detected"] = False
-                
+
                 # === (NOUVEAU) CANDLE PATTERNS ===
             if toggles.get("detect_candles", True):
                 try:
@@ -529,7 +558,8 @@ class PhaseObserver:
                             c.get("pattern") if c else None for c in candle_signals
                         ]
                         df_an["candle_pattern_strength"] = [
-                            c.get("strength_score") if c else 0.0 for c in candle_signals
+                            c.get("strength_score") if c else 0.0
+                            for c in candle_signals
                         ]
                     else:
                         df_an["candle_pattern"] = None
@@ -540,7 +570,6 @@ class PhaseObserver:
                     )
                     df_an["candle_pattern"] = None
                     df_an["candle_pattern_strength"] = 0.0
-
 
             # === (NOUVEAU) MICROPHASES BOLLINGER ===
             if toggles.get("detect_bollinger", True):
@@ -759,6 +788,49 @@ class PhaseObserver:
             )
             df_an["phase_rule"] = "primary"
             df_an["phase_is_uncertain"] = df_an["phase"] == "no_clear_phase"
+
+            # === PHASE 7bis: STRATEGY FLAGS ===
+            try:
+                last_boll_range = bool(
+                    df_an["boll_is_squeeze"].iloc[-1] == 0
+                    and df_an["boll_is_expansion"].iloc[-1] == 0
+                )
+                last_phase = str(df_an["phase"].iloc[-1])
+                last_vol = float(df_an["volatility_pct"].iloc[-1])
+
+                # 1️⃣ Flag SCALPING_OK : uniquement en range plat
+                df_an["scalping_ok"] = (
+                    (df_an["boll_is_expansion"] == 0)
+                    & (df_an["boll_is_squeeze"] == 0)
+                    & (df_an["volatility_pct"] < 0.1)  # bornes à calibrer
+                )
+
+                # 2️⃣ Flag SWITCH_TO_LIQUIDITY : impulsion détectée
+                df_an["switch_to_liquidity"] = (
+                    (df_an["boll_is_expansion"] == 1)
+                    | (
+                        df_an["regime"]
+                        .astype(str)
+                        .str.contains("impulsion", case=False)
+                    )
+                    | (df_an["volatility_pct"] > 0.5)  # bornes à calibrer
+                )
+
+                # Log explicite
+                if bool(df_an["scalping_ok"].iloc[-1]):
+                    self.logger.info(
+                        f"[{current_asset_symbol}] ✅ Scalping activé (range plat détecté)."
+                    )
+                if bool(df_an["switch_to_liquidity"].iloc[-1]):
+                    self.logger.info(
+                        f"[{current_asset_symbol}] ⚡ Impulsion détectée → Switch Liquidity."
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"[{current_asset_symbol}] Impossible de poser les flags scalping/liquidity: {e}"
+                )
+                df_an["scalping_ok"] = False
+                df_an["switch_to_liquidity"] = False
 
             # === PHASE 8: LOG FINAL ===
             if not df_an.empty:
@@ -1029,8 +1101,38 @@ class PhaseObserver:
                 analyzed_data = self.analyze(tf_data, asset_symbol=asset)
                 if analyzed_data is None or analyzed_data.empty:
                     raise ValueError(f"Analyse {tf} vide")
-                last_signals = self._extract_last_bar_signals(analyzed_data, tf)
+
+                # 🔥 Enrichissement Candle Patterns
+                try:
+                    candle_signals = self.detectors.detect_candle_patterns(
+                        analyzed_data
+                    )
+                    if candle_signals and isinstance(candle_signals, list):
+                        last_candle = candle_signals[-1] if candle_signals else None
+                        if last_candle:
+                            last_signals = self._extract_last_bar_signals(
+                                analyzed_data, tf
+                            )
+                            last_signals.update(
+                                {
+                                    "candle_pattern": last_candle.get("pattern"),
+                                    "candle_strength": last_candle.get(
+                                        "strength_score"
+                                    ),
+                                }
+                            )
+                        else:
+                            last_signals = self._extract_last_bar_signals(
+                                analyzed_data, tf
+                            )
+                    else:
+                        last_signals = self._extract_last_bar_signals(analyzed_data, tf)
+                except Exception as e:
+                    self.logger.warning(f"[{asset}] Erreur candle_patterns {tf}: {e}")
+                    last_signals = self._extract_last_bar_signals(analyzed_data, tf)
+
                 tf_analyses[tf] = last_signals
+
                 self.logger.debug(
                     f"✅ [{asset}] {tf} analysé: Phase={last_signals.get('phase')}"
                 )

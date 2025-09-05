@@ -256,6 +256,25 @@ class TradeExecutor:
             self.logger.info(
                 f"Réconciliation terminée. {len(self._open_positions)} positions actives synchronisées."
             )
+            
+            # 3. Remplacer l'ancien état par le nouvel état réconcilié
+            self._open_positions = reconciled_positions
+            self._last_reconciliation_time = datetime.now(UTC)
+            self.logger.info(
+                f"Réconciliation terminée. {len(self._open_positions)} positions actives synchronisées."
+            )
+
+            # ✅ Application du trailing stop dynamique sur toutes les positions synchronisées
+            for ticket, pos in self._open_positions.items():
+                try:
+                    symbol = pos.get("symbol")
+                    sl_pips = pos.get("sl_pips", 6.0)       # fallback par défaut si absent
+                    atr_pips = pos.get("atr_pips", 3.0)     # fallback par défaut si absent
+                    self.apply_dynamic_trailing(symbol, ticket, sl_pips, atr_pips)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Trailing stop non appliqué sur {pos.get('symbol')} (ticket {ticket}): {e}"
+                    )
 
         except Exception as e:
             self.logger.error(
@@ -2538,6 +2557,56 @@ class TradeExecutor:
         self.logger.debug(
             f"État interne mis à jour pour la nouvelle position #{mt5_result.deal}."
         )
+        
+    def apply_dynamic_trailing(self, ticket: int, trailing_cfg: dict, current_price: float):
+        """
+        Applique un trailing stop dynamique sur une position existante.
+        - trailing_cfg peut définir 'atr_mult', 'lock_pips', 'step_pips'
+        - Déplace le SL uniquement dans le sens du trade et jamais en arrière
+        """
+        try:
+            pos = self._open_positions.get(ticket)
+            if not pos:
+                return
+
+            entry_price = float(pos.get("entry_price", 0))
+            sl_price = float(pos.get("sl", 0))
+            symbol = pos.get("symbol")
+
+            if not symbol or entry_price <= 0 or current_price <= 0:
+                return
+
+            # BUY → SL doit monter / SELL → SL doit descendre
+            if pos["type"] == self.POSITION_TYPE_BUY:
+                new_sl = max(sl_price, current_price - trailing_cfg.get("lock_pips", 5) * self.mt5_connector.get_point(symbol))
+                if new_sl > sl_price:
+                    self._modify_sl(ticket, new_sl)
+            else:  # SELL
+                new_sl = min(sl_price, current_price + trailing_cfg.get("lock_pips", 5) * self.mt5_connector.get_point(symbol))
+                if new_sl < sl_price:
+                    self._modify_sl(ticket, new_sl)
+
+        except Exception as e:
+            self.logger.error(f"Erreur trailing stop dynamique: {e}", exc_info=True)
+            
+    def _modify_sl(self, ticket: int, new_sl: float):
+        """Envoie une requête de modification de SL au broker."""
+        try:
+            request = {
+                "action": self.TRADE_ACTION_MODIFY,
+                "position": ticket,
+                "sl": new_sl,
+            }
+            result = self.mt5_connector.order_send(request)
+            if result and result.retcode == self.TRADE_RETCODE_DONE:
+                self.logger.info(f"Trailing SL modifié pour pos#{ticket} -> {new_sl}")
+                self._open_positions[ticket]["sl"] = new_sl
+            else:
+                self.logger.warning(f"Échec modif trailing SL pour pos#{ticket}")
+        except Exception as e:
+            self.logger.error(f"Erreur _modify_sl: {e}", exc_info=True)
+
+
 
     def execute_order(self, request: dict) -> dict:
         """

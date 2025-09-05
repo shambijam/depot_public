@@ -665,7 +665,7 @@ class Detectors:
         min_long_mult: float = 2.5,
         min_body_ratio: float = 0.65,
         small_body_ratio: float = 0.2,
-        wick_ratio: float = 2.0
+        wick_ratio: float = 2.0,
     ) -> List[Optional[Dict[str, Any]]]:
         """
         🔮 Détection avancée des chandeliers et patterns multi-bougies.
@@ -716,7 +716,10 @@ class Detectors:
                 elif low_wick > wick_ratio * body and up_wick < body:
                     signal, score = ("hammer" if is_bull else "bullish_pinbar", 0.7)
                 elif up_wick > wick_ratio * body and low_wick < body:
-                    signal, score = ("shooting_star" if not is_bull else "bearish_pinbar", 0.7)
+                    signal, score = (
+                        "shooting_star" if not is_bull else "bearish_pinbar",
+                        0.7,
+                    )
 
                 # Engulfing
                 if i > 0 and body > df["body_size"].iloc[i - 1]:
@@ -727,20 +730,35 @@ class Detectors:
 
                 # Marubozu
                 if body_r > 0.95 and up_wick < 0.05 * size and low_wick < 0.05 * size:
-                    signal, score = ("marubozu_bull" if is_bull else "marubozu_bear", 1.0)
+                    signal, score = (
+                        "marubozu_bull" if is_bull else "marubozu_bear",
+                        1.0,
+                    )
 
                 # === Séquences dynamiques ===
                 if i >= 2:
                     last_patterns = [s["pattern"] if s else None for s in signals[-2:]]
                     if last_patterns.count("doji") == 2 and signal == "doji":
                         signal, score = ("doji_cluster_consolidation", 0.7)
-                    if last_patterns.count("long_bullish") == 2 and signal == "long_bullish":
+                    if (
+                        last_patterns.count("long_bullish") == 2
+                        and signal == "long_bullish"
+                    ):
                         signal, score = ("bullish_momentum_run", 1.0)
-                    if last_patterns.count("long_bearish") == 2 and signal == "long_bearish":
+                    if (
+                        last_patterns.count("long_bearish") == 2
+                        and signal == "long_bearish"
+                    ):
                         signal, score = ("bearish_momentum_run", 1.0)
-                    if "bullish_engulfing" in last_patterns and signal == "marubozu_bull":
+                    if (
+                        "bullish_engulfing" in last_patterns
+                        and signal == "marubozu_bull"
+                    ):
                         signal, score = ("confirmed_bullish_reversal", 1.2)
-                    if "bearish_engulfing" in last_patterns and signal == "marubozu_bear":
+                    if (
+                        "bearish_engulfing" in last_patterns
+                        and signal == "marubozu_bear"
+                    ):
                         signal, score = ("confirmed_bearish_reversal", 1.2)
 
                 # === Patterns multi-bougies ===
@@ -750,47 +768,150 @@ class Detectors:
                     o3, c3 = df["open"].iloc[i], df["close"].iloc[i]
 
                     # Morning Star
-                    if (c1 < o1 and abs(c2 - o2) < 0.3 * avg and c3 > o3 and c3 > (o1 + c1) / 2):
+                    if (
+                        c1 < o1
+                        and abs(c2 - o2) < 0.3 * avg
+                        and c3 > o3
+                        and c3 > (o1 + c1) / 2
+                    ):
                         signal, score = ("morning_star", 1.2)
 
                     # Evening Star
-                    if (c1 > o1 and abs(c2 - o2) < 0.3 * avg and c3 < o3 and c3 < (o1 + c1) / 2):
+                    if (
+                        c1 > o1
+                        and abs(c2 - o2) < 0.3 * avg
+                        and c3 < o3
+                        and c3 < (o1 + c1) / 2
+                    ):
                         signal, score = ("evening_star", 1.2)
 
                     # Three White Soldiers
-                    if all(df["close"].iloc[j] > df["open"].iloc[j] for j in [i - 2, i - 1, i]):
+                    if all(
+                        df["close"].iloc[j] > df["open"].iloc[j]
+                        for j in [i - 2, i - 1, i]
+                    ):
                         signal, score = ("three_white_soldiers", 1.3)
 
                     # Three Black Crows
-                    if all(df["close"].iloc[j] < df["open"].iloc[j] for j in [i - 2, i - 1, i]):
+                    if all(
+                        df["close"].iloc[j] < df["open"].iloc[j]
+                        for j in [i - 2, i - 1, i]
+                    ):
                         signal, score = ("three_black_crows", 1.3)
 
                     # Harami
-                    if (c1 > o1 and c2 < o2 and o2 < c1 and c2 > o1):
+                    if c1 > o1 and c2 < o2 and o2 < c1 and c2 > o1:
                         signal, score = ("bearish_harami", 0.9)
-                    if (c1 < o1 and c2 > o2 and o2 > c1 and c2 < o1):
+                    if c1 < o1 and c2 > o2 and o2 > c1 and c2 < o1:
                         signal, score = ("bullish_harami", 0.9)
 
                     # Tweezer Top/Bottom
                     if abs(df["high"].iloc[i] - df["high"].iloc[i - 1]) < 0.1 * avg:
-                        signal, score = ("tweezer_top", 0.8) if not is_bull else ("tweezer_bottom", 0.8)
+                        signal, score = (
+                            ("tweezer_top", 0.8)
+                            if not is_bull
+                            else ("tweezer_bottom", 0.8)
+                        )
 
                 # Enrichissement
                 if signal:
-                    signals.append({
-                        "index": i,
-                        "timestamp": str(df.index[i]),
-                        "pattern": signal,
-                        "strength_score": score,
-                        "body_ratio": round(body_r, 3),
-                        "candle_size": round(size, 5),
-                        "avg_size": round(avg, 5),
-                        "upper_wick": round(up_wick, 5),
-                        "lower_wick": round(low_wick, 5),
-                        "near_ob": bool("ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])),
-                        "near_fvg": bool("fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])),
-                        "near_bos": bool("bos" in df.columns and not pd.isna(df["bos"].iloc[i])),
-                    })
+                    signals.append(
+                        {
+                            "index": i,
+                            "timestamp": str(df.index[i]),
+                            "pattern": signal,
+                            "strength_score": score,
+                            "body_ratio": round(body_r, 3),
+                            "candle_size": round(size, 5),
+                            "avg_size": round(avg, 5),
+                            "upper_wick": round(up_wick, 5),
+                            "lower_wick": round(low_wick, 5),
+                            "near_ob": bool(
+                                "ob_zone" in df.columns
+                                and not pd.isna(df["ob_zone"].iloc[i])
+                            ),
+                            "near_fvg": bool(
+                                "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])
+                            ),
+                            "near_bos": bool(
+                                "bos" in df.columns and not pd.isna(df["bos"].iloc[i])
+                            ),
+                        }
+                    )
+
+                    # === ENRICHISSEMENT AVANCÉ (ajout par-dessus la logique existante) ===
+                    enriched_signals = []
+                    for i, sig in enumerate(signals):
+                        if not sig:
+                            enriched_signals.append(None)
+                            continue
+
+                        enriched = sig.copy()
+
+                        # 1) PhaseObserver si dispo
+                        phase = df.iloc[i]["phase"] if "phase" in df.columns else None
+                        if phase:
+                            enriched["context_phase"] = str(phase)
+                            if "impulsion" in str(phase):
+                                enriched["strength_score"] = round(
+                                    enriched["strength_score"] * 1.2, 3
+                                )
+                            elif "range" in str(phase):
+                                enriched["strength_score"] = round(
+                                    enriched["strength_score"] * 0.9, 3
+                                )
+
+                        # 2) Volatilité / Volume
+                        vol = (
+                            df.iloc[i]["volatility_pct"]
+                            if "volatility_pct" in df.columns
+                            else None
+                        )
+                        if vol is not None:
+                            enriched["volatility"] = float(vol)
+                            if vol < 0.005:  # marché trop plat
+                                enriched["strength_score"] *= 0.8
+                            elif vol > 0.05:  # marché trop violent
+                                enriched["strength_score"] *= 0.9
+
+                        if "volume_zscore" in df.columns:
+                            vz = df.iloc[i]["volume_zscore"]
+                            enriched["volume_zscore"] = float(vz)
+                            if vz > 2:
+                                enriched["strength_score"] *= 1.1
+
+                        # 3) Confluence structurelle (OB/FVG/BOS déjà présents)
+                        if (
+                            enriched.get("near_ob")
+                            or enriched.get("near_fvg")
+                            or enriched.get("near_bos")
+                        ):
+                            enriched["strength_score"] *= 1.15
+                            enriched["confluence"] = True
+                        else:
+                            enriched["confluence"] = False
+
+                        # 4) Multi-timeframe confirmation (si colonnes M5/M15 présentes dans df)
+                        confirmed_tf = []
+                        for tf in ["pattern_m5", "pattern_m15"]:
+                            if (
+                                tf in df.columns
+                                and df[tf].iloc[i] == enriched["pattern"]
+                            ):
+                                confirmed_tf.append(tf.upper())
+                        if confirmed_tf:
+                            enriched["strength_score"] *= 1.2
+                            enriched["confirmed_tf"] = confirmed_tf
+
+                        # 5) Normalisation finale du score
+                        enriched["strength_score"] = round(
+                            min(2.0, enriched["strength_score"]), 3
+                        )
+
+                        enriched_signals.append(enriched)
+
+                    return enriched_signals
+
                 else:
                     signals.append(None)
 
@@ -799,7 +920,6 @@ class Detectors:
                 signals.append(None)
 
         return signals
-
 
     def compute_bollinger_microphase_signals(
         self,
