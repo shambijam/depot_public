@@ -2289,13 +2289,9 @@ class DecisionPipeline:
                 enable_trail = bool(trail_cfg.get("enabled", True))
                 trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
 
-                # 🔑 Sécurisation du point (taille du tick)
-                point = (
-                    _num(signals.get("point"))
-                    or _num(trade_decision.get("point"))
-                    or (getattr(self.symbol_info, "point", None) if hasattr(self, "symbol_info") else None)
-                    or 0.0001
-                )
+                # ✅ Version simplifiée sans garde-fou
+                point = getattr(self.symbol_info, "point", None) or 0.0001
+
 
                 if enable_trail and isinstance(price, float) and math.isfinite(price):
                     if normalized_action == "BUY":
