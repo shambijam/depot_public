@@ -2130,18 +2130,14 @@ class DecisionPipeline:
                 self.logger.info("Rejet: régime non-range pour midline scalp.")
                 return {}
 
-            if normalized_action == "BUY":
-                if not (in_buy_zone and mid_entry == "buy"):
-                    self.logger.info(
-                        "Rejet BUY: condition midline non satisfaite (zone ou mid_entry)."
-                    )
-                    return {}
-            elif normalized_action == "SELL":
-                if not (in_sell_zone and mid_entry == "sell"):
-                    self.logger.info(
-                        "Rejet SELL: condition midline non satisfaite (zone ou mid_entry)."
-                    )
-                    return {}
+            if normalized_action == "BUY" and not (in_buy_zone and mid_entry == "buy"):
+                self.logger.warning("⚠️ BUY hors zone midline — confiance réduite.")
+                trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.8
+
+            elif normalized_action == "SELL" and not (in_sell_zone and mid_entry == "sell"):
+                self.logger.warning("⚠️ SELL hors zone midline — confiance réduite.")
+                trade_decision["confidence"] = float(trade_decision.get("confidence", 0.5)) * 0.8
+
             elif normalized_action == "CLOSE":
                 pass  # fermeture autorisée
 
