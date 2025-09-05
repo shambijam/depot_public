@@ -249,7 +249,7 @@
         "rr_min": 0.5
       },
       "bollinger_overrides": {
-        "enabled": false,
+        "enabled": true,
         "min_bars": 200,
         "period": 20,
         "std_mult": 2.0,
@@ -377,7 +377,7 @@
       "close_percent": 50
     },
     "trailing": {
-      "enabled": false,
+      "enabled": true,
       "type": "chandelier",
       "atr_period": 14,
       "atr_multiplier": 1.2
