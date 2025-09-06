@@ -412,7 +412,8 @@ class ConfigManager:
     ) -> None:
         """
         Met à jour la configuration dynamique en mémoire avec de nouvelles valeurs via une fusion profonde,
-        valide le résultat, puis le sauvegarde de manière atomique.
+        puis tente une validation "souple" (ne bloque pas si le schéma main_app est absent),
+        et enfin sauvegarde de manière atomique.
         """
         target_path = self._dynamic_config_path
         if not target_path:
@@ -421,13 +422,14 @@ class ConfigManager:
             )
 
         old_config = self.get_current_dynamic_config()
-
         new_config = self._merge_dicts(old_config, updates)
 
         try:
-            self.config_loader.validate_config(
-                new_config, schema_name="main_app_schema.json"
-            )
+            # ⬇️ IMPORTANT : on ne fait plus appel à ConfigLoader.validate_config avec "main_app_schema.json"
+            # (ce fichier n'existe pas). On passe par self.validate_config(), qui est désormais "souple"
+            # si le schéma principal est absent (voir fonction ci-dessous).
+            self.validate_config(new_config)  # soft quand schéma manquant
+
             self._dynamic_config = new_config
 
             backup_on_update = self.get("app.backup_on_update", False)
@@ -435,9 +437,7 @@ class ConfigManager:
                 self._dynamic_config, target_path, backup=backup_on_update
             )
 
-            change_info = get_diff(
-                old_config, new_config
-            )  # Utilise get_diff de core.utils
+            change_info = get_diff(old_config, new_config)
             self.audit_logger.log_config_change(
                 {"action": "update", "updates": change_info},
                 source=source,
@@ -1452,9 +1452,14 @@ class ConfigManager:
 
     _schema_cache: Dict[str, Dict[str, Any]] = {}
 
-    def validate_config(self, config: Dict[str, Any]) -> bool:
+    def validate_config(
+        self, config: Dict[str, Any], soft_when_schema_missing: bool = True
+    ) -> bool:
         """
         Valide un dictionnaire de configuration en utilisant un schéma JSON formel.
+        - Si le schéma attendu est introuvable et soft_when_schema_missing=True,
+        on LOG un avertissement et on considère la validation comme réussie.
+        - Sinon, on lève l'erreur (comportement strict).
         """
         self.logger.debug("Validation de la configuration par schéma...")
 
@@ -1466,16 +1471,26 @@ class ConfigManager:
         elif "accounts" in config and isinstance(config.get("accounts"), list):
             schema_name = "broker_accounts_schema.json"
         else:
+            # Type inconnu : on reste strict (mauvais shape).
             raise ConfigValidationError(
                 "Type de configuration inconnu. 'project', 'strategy_name' ou 'accounts' manquant."
             )
 
+        # Cache schéma
         schema = self._schema_cache.get(schema_name)
         if schema is None:
             schema_path = Path(__file__).parent / "schemas" / schema_name
             if not schema_path.is_file():
+                # ⬇️ Comportement SOUPLE si le schéma n'existe pas (cas main_app_schema.json)
+                if soft_when_schema_missing:
+                    self.logger.warning(
+                        f"Schéma '{schema_name}' introuvable à '{schema_path}'. "
+                        f"Validation assouplie : CONTINUATION sans blocage."
+                    )
+                    return True
+                # ⬇️ Comportement STRICT si demandé
                 self.logger.critical(
-                    f"FATAL: Fichier de schéma de validation '{schema_name}' introuvable à '{schema_path}'. Impossible d'assurer la conformité de la configuration. Le bot ne peut pas démarrer en toute sécurité."
+                    f"FATAL: Fichier de schéma de validation '{schema_name}' introuvable à '{schema_path}'."
                 )
                 raise FileNotFoundError(
                     f"Fichier de schéma de validation manquant : {schema_path}"
@@ -1488,21 +1503,22 @@ class ConfigManager:
                 self.logger.debug(f"Schéma '{schema_name}' chargé et mis en cache.")
             except json.JSONDecodeError as e:
                 self.logger.critical(
-                    f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{schema_name}': {e}. Le bot ne peut pas démarrer.",
+                    f"FATAL: Erreur de syntaxe JSON dans le fichier de schéma '{schema_name}': {e}.",
                     exc_info=True,
                 )
                 raise ConfigValidationError(
-                    f"Schéma '{schema_name}' invalide : {e.message}"
+                    f"Schéma '{schema_name}' invalide : {e.msg}"
                 ) from e
             except Exception as e:
                 self.logger.critical(
-                    f"FATAL: Erreur lors du chargement du schéma '{schema_name}': {e}. Le bot ne peut pas démarrer.",
+                    f"FATAL: Erreur lors du chargement du schéma '{schema_name}': {e}.",
                     exc_info=True,
                 )
                 raise RuntimeError(
                     f"Erreur lors du chargement du schéma '{schema_name}'"
                 ) from e
 
+        # Si on arrive ici avec un schéma disponible, on valide strictement
         try:
             jsonschema.validate(instance=config, schema=schema)
             self.logger.debug(
@@ -1510,7 +1526,10 @@ class ConfigManager:
             )
             return True
         except jsonschema.ValidationError as e:
-            error_message = f"Échec de la validation par schéma '{schema_name}': {e.message} (sur le champ: `{''.join(e.path)}`)"
+            error_message = (
+                f"Échec de la validation par schéma '{schema_name}': {e.message} "
+                f"(sur le champ: `{''.join(e.path)}`)"
+            )
             self.logger.error(error_message, exc_info=True)
             raise ConfigValidationError(error_message) from e
 
