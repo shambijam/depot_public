@@ -331,16 +331,10 @@
     }
   },
   "risk_management": {
-    "risk_per_trade_pct": 5.0,
     "max_daily_drawdown_pct": 8.0,
     "max_consecutive_losses": 5,
     "kill_switch_enabled": true,
-    "halt_minutes_after_kill": 180,
-    "lot_size": {
-      "min_lot": 0.01,
-      "max_lot": 0.5,
-      "step": 0.01
-    }
+    "halt_minutes_after_kill": 180
   },
   "adaptation_settings": {
     "ema_rsi_atr_trail": {

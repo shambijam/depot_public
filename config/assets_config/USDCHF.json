@@ -48,10 +48,6 @@
       "description": "Taille de lot de base suggérée pour cet actif, avant tout ajustement de risque dynamique.",
       "value": 1.0
     },
-    "max_risk_per_trade_percent": {
-      "description": "Pourcentage maximum du capital du compte à risquer par trade pour cet actif.",
-      "value": 0.5
-    },
     "daily_loss_limit_percent": {
       "description": "Pourcentage de perte maximale du capital du compte autorisé par jour pour cet actif. Le trading peut être suspendu si cette limite est atteinte.",
       "value": 1.5
@@ -77,78 +73,38 @@
     },
     "auto_blacklist_high_spread_assets": {
       "description": "Si activé, l'actif sera automatiquement blacklisté pour une période si son spread dépasse les seuils définis.",
-      "value": false
+      "value": true
     }
   },
   "smart_targets": {
-    "description": "Multiplicateurs et seuils pour le calcul dynamique des Take Profit et Stop Loss (SL/TP). Utilisés pour adapter les cibles en fonction de la volatilité ou du setup.",
-    "take_profit_multiplier": {
-      "description": "Multiplicateur appliqué à la distance du Stop Loss pour calculer la cible du Take Profit (basé sur le ratio Risque/Récompense).",
-      "value": 1.2
-    },
-    "stop_loss_multiplier": {
-      "description": "Multiplicateur ou ajustement appliqué au Stop Loss calculé (par exemple, pour ajouter un buffer).",
-      "value": 1.0
-    },
-    "trailing_stop_start_after_percent": {
-      "description": "Pourcentage de profit (par rapport au prix d'entrée) après lequel le trailing stop est activé pour cet actif.",
-      "value": 0.4
-    },
-    "trailing_step_points": {
-      "description": "Nombre de points MT5 par lesquels le trailing stop se déplacera pour cet actif.",
-      "value": 5
+    "description": "Cibles intelligentes basées sur ATR et contexte de marché pour améliorer le ratio rendement/risque.",
+    "tp_sl_basis": "atr14",
+    "atr_period": 14,
+    "profiles": {
+      "default": {
+        "tp_multiple": 1.0,
+        "sl_multiple": 1.0
+      },
+      "scalp": {
+        "tp_multiple": 1.2,
+        "sl_multiple": 1.0
+      }
     }
   },
   "institutional_bias": {
-    "description": "Préférences ou biais de trading institutionnels spécifiques à cet actif, influençant la détection de setups et la décision du ConfigManager.",
-    "favor_fake_breakouts": {
-      "description": "Si activé, la stratégie favorisera les trades basés sur des faux breakouts (mouvements inverses après une cassure apparente).",
-      "value": false
-    },
-    "watch_liquidity_zones": {
-      "description": "Si activé, la stratégie accordera une attention particulière aux zones de liquidité (EQH/EQL, Order Blocks) pour les entrées et sorties.",
-      "value": true
-    },
-    "aggressive_entry_in_expansion": {
-      "description": "Si activé, la stratégie adoptera une approche plus agressive pour les entrées pendant les phases d'expansion rapide.",
-      "value": false
-    },
-    "conservative_entry_in_compression": {
-      "description": "Si activé, la stratégie sera plus prudente pour les entrées pendant les phases de compression/consolidation.",
-      "value": true
-    }
+    "description": "Biais ou préférences institutionnels, par ex. respect des gros chiffres (00, 50).",
+    "respect_round_numbers": true
   },
   "temporal_context": {
-    "description": "Paramètres liés aux heures et jours de trading spécifiques à cet actif. Ces règles sont appliquées en complément des règles globales.",
+    "description": "Contexte temporel déterminant les heures ou sessions à privilégier/éviter pour le trading.",
     "avoid_trading_hours": {
-      "description": "Liste d'heures (format 'HH:MM' en UTC) pendant lesquelles le trading de cet actif est à éviter (par exemple, faible liquidité ou spreads élevés).",
-      "list": []
-    },
-    "monitor_hours": {
-      "description": "Heures (format 'HH:MM' en UTC) où l'actif doit être activement surveillé pour des opportunités (par exemple, ouverture de sessions importantes).",
-      "list": [
-        "08:00",
-        "10:00",
-        "14:30",
-        "16:00"
-      ]
-    },
-    "high_risk_news_days": {
-      "description": "Jours de la semaine (format 'Monday', 'Tuesday', etc.) où des annonces de nouvelles à fort impact sont fréquemment attendues pour cet actif.",
-      "list": [
-        "Wednesday",
-        "Friday"
-      ]
+      "enabled": false
     }
   },
   "weighting": {
-    "description": "Poids attribués aux différents signaux détectés par le PhaseObserver pour cet actif. Utilisés par le ConfigManager pour le scoring des opportunités ou la décision de confluence des règles de stratégie.",
-    "breaker_block": 1.0,
-    "liquidity_zone": 1.0,
-    "fvg_zone": 1.0,
-    "micro_phase_signal": 1.0,
-    "market_structure_shift": 1.0,
-    "volume_spike": 1.0,
-    "smart_spread_indicator": 1.0
+    "description": "Pondération des signaux/indicateurs utilisés par la stratégie pour cet actif.",
+    "liquidity": 1.0,
+    "mtf_alignment": 1.0,
+    "order_blocks": 1.0
   }
 }

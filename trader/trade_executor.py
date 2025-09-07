@@ -256,7 +256,7 @@ class TradeExecutor:
             self.logger.info(
                 f"Réconciliation terminée. {len(self._open_positions)} positions actives synchronisées."
             )
-            
+
             # 3. Remplacer l'ancien état par le nouvel état réconcilié
             self._open_positions = reconciled_positions
             self._last_reconciliation_time = datetime.now(UTC)
@@ -268,8 +268,8 @@ class TradeExecutor:
             for ticket, pos in self._open_positions.items():
                 try:
                     symbol = pos.get("symbol")
-                    sl_pips = pos.get("sl_pips", 6.0)       # fallback par défaut si absent
-                    atr_pips = pos.get("atr_pips", 3.0)     # fallback par défaut si absent
+                    sl_pips = pos.get("sl_pips", 6.0)  # fallback par défaut si absent
+                    atr_pips = pos.get("atr_pips", 3.0)  # fallback par défaut si absent
                     self.apply_dynamic_trailing(symbol, ticket, sl_pips, atr_pips)
                 except Exception as e:
                     self.logger.warning(
@@ -1021,6 +1021,10 @@ class TradeExecutor:
         - Consomme les hints : sl_pips_hint / tp_pips_hint (ou target_sl_pips / target_tp_pips)
         - Propage les infos Bollinger (bb_mid/upper/lower, level_mode) à _calculate_sl_tp_prices
         - Garde-fous spread / fenêtre / RR (inchangé, permissif)
+
+        ✅ Décision unique du volume
+        - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
+        Tout volume présent dans la décision est ignoré.
         """
         import math
 
@@ -1224,21 +1228,20 @@ class TradeExecutor:
                     trigger_price = entry_price_market
 
             # ---------- 8) SL/TP (avec overrides en pips) ----------
-            # Supporte désormais sl/tp "hint" pour la stratégie midline
+            # Supporte sl/tp "hint" pour la stratégie midline
             sl_pips_override = (
                 trade_decision.get("target_sl_pips")
                 if trade_decision.get("target_sl_pips") is not None
-                else trade_decision.get("sl_pips_hint")  # <- nouveau
+                else trade_decision.get("sl_pips_hint")
             )
             tp_pips_override = (
                 trade_decision.get("target_tp_pips")
                 if trade_decision.get("target_tp_pips") is not None
-                else trade_decision.get("tp_pips_hint")  # <- nouveau
+                else trade_decision.get("tp_pips_hint")
             )
 
             # Infos Bollinger/midline (si présentes) à propager au calculateur de niveaux
             boll = trade_decision.get("boll") or market_context.get("boll") or {}
-            # compat: champs à plat
             for k in ("bb_mid", "bb_upper", "bb_lower"):
                 if k in trade_decision and k not in boll:
                     try:
@@ -1254,7 +1257,6 @@ class TradeExecutor:
                 "target_tp_pips": tp_pips_override,
                 "spread_pips": spread_pips,
                 "entry_price_ref": entry_price_hint,
-                # --- midline mode / boll info pour _calculate_sl_tp_prices ---
                 "level_mode": trade_decision.get(
                     "level_mode", None
                 ),  # ex: "boll_midline"
@@ -1311,48 +1313,41 @@ class TradeExecutor:
                         f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                     )
 
-            # ---------- 9) Volume ----------
-            use_decision_vol = bool(
-                self.config_manager.get(
-                    "risk_management.use_decision_volume_if_present", False
-                )
-            )
-            decision_volume = trade_decision.get("volume") or trade_decision.get(
-                "target_volume"
-            )
-
-            volume_final = None
-            if (
-                use_decision_vol
-                and isinstance(decision_volume, (int, float))
-                and float(decision_volume) > 0
-            ):
-                volume_final = float(decision_volume)
-                self.logger.info(
-                    f"[VOLUME] utilisation du volume de décision: {volume_final}"
-                )
-            else:
-                account_trade_settings = market_context.get(
-                    "active_broker_account", {}
-                ).get("trade_settings", {})
-                volume_final = float(
-                    self._calculate_risk_based_volume(
-                        {
-                            "action": action,
-                            "asset": broker_symbol,
-                            "order_type": order_type,
-                        },
-                        active_config,
-                        market_context,
-                        symbol_info,
-                        entry_price_market,
-                        sl_price,
-                        account_trade_settings,
+            # ---------- 9) Volume (uniquement via risk sizer) ----------
+            # Note: on ignore explicitement tout volume fourni par la décision.
+            if any(k in trade_decision for k in ("volume", "target_volume")):
+                try:
+                    self.logger.info(
+                        f"[VOLUME] volume fourni par la décision ignoré: "
+                        f"{trade_decision.get('volume') or trade_decision.get('target_volume')}"
                     )
+                except Exception:
+                    pass
+
+            account_trade_settings = (
+                market_context.get("active_broker_account", {}).get(
+                    "trade_settings", {}
                 )
-                self.logger.info(
-                    f"[VOLUME] volume calculé par risk sizer: {volume_final}"
+                or {}
+            )
+            volume_final = float(
+                self._calculate_risk_based_volume(
+                    {
+                        "action": action,
+                        "asset": broker_symbol,
+                        "order_type": order_type,
+                    },
+                    active_config,
+                    market_context,
+                    symbol_info,
+                    entry_price_market,
+                    sl_price,
+                    account_trade_settings,
                 )
+            )
+            self.logger.info(
+                f"[VOLUME] volume calculé par risk sizer (unique): {volume_final}"
+            )
 
             if not isinstance(volume_final, (int, float)) or volume_final <= 0:
                 raise TradeExecutionError(
@@ -1472,10 +1467,7 @@ class TradeExecutor:
         (appliqués uniquement si les seuils entry_bias sont satisfaits).
         - ➕ Consomme (si présents) : 'entry_gate_ok', 'half_band_pips', 'mid_distance_ratio'
         """
-        import pandas as pd
-        import numpy as np
-        import math
-
+       
         self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
 
         # --- Normalisation action ---
@@ -1489,7 +1481,9 @@ class TradeExecutor:
         if point <= 0:
             raise TradeExecutionError("symbol_info.point invalide (<=0).")
         digits = int(getattr(symbol_info, "digits", 0) or 0)
-        min_stop_distance_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
+        min_stop_distance_points = int(
+            getattr(symbol_info, "trade_stops_level", 0) or 0
+        )
         min_stop_distance_price = min_stop_distance_points * point
 
         # --- Heuristique pip-size: 1 pip = 10 points (FX majeurs / JPY / XAU) ---
@@ -1503,15 +1497,19 @@ class TradeExecutor:
 
         # --- 🔁 Overrides Bollinger (Katana) conditionnels (si config les active) ---
         try:
-            de = (config.get("decision_engine") or {})
-            kat = (de.get("katana") or {})
-            boll_ov = (kat.get("bollinger_overrides") or {})
-            tp_sl_map = (boll_ov.get("tp_sl_overrides") or {})
-            entry_bias = (boll_ov.get("entry_bias") or {})
+            de = config.get("decision_engine") or {}
+            kat = de.get("katana") or {}
+            boll_ov = kat.get("bollinger_overrides") or {}
+            tp_sl_map = boll_ov.get("tp_sl_overrides") or {}
+            entry_bias = boll_ov.get("entry_bias") or {}
 
             boll_signal = str(trade_decision.get("boll_signal", "") or "").strip()
-            breakout_score = float(trade_decision.get("boll_breakout_score", 0.0) or 0.0)
-            revert_score = float(trade_decision.get("boll_mean_revert_score", 0.0) or 0.0)
+            breakout_score = float(
+                trade_decision.get("boll_breakout_score", 0.0) or 0.0
+            )
+            revert_score = float(
+                trade_decision.get("boll_mean_revert_score", 0.0) or 0.0
+            )
 
             bb_buy_min = float(entry_bias.get("breakout_buy_min", 0.55) or 0.55)
             bb_sell_min = float(entry_bias.get("breakout_sell_min", 0.55) or 0.55)
@@ -1541,24 +1539,36 @@ class TradeExecutor:
 
         # --- Paramètres SL/TP standards ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
-        sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()      # PIPS|SWING|ATR
-        tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()        # RR|ATR_MULTIPLE|PIPS
+        sl_method = str(
+            prod_st.get("sl_placement_method", "PIPS")
+        ).upper()  # PIPS|SWING|ATR
+        tp_method = str(
+            prod_st.get("tp_placement_method", "RR")
+        ).upper()  # RR|ATR_MULTIPLE|PIPS
         rr_ratio = float(prod_st.get("tp_rr_ratio", 1.5) or 1.5)
 
-        strat_st = (config.get("smart_targets") or {})
-        st_sl = (strat_st.get("stop_loss") or {})
-        st_tp = (strat_st.get("take_profit") or {})
+        strat_st = config.get("smart_targets") or {}
+        st_sl = strat_st.get("stop_loss") or {}
+        st_tp = strat_st.get("take_profit") or {}
 
         sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
-        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
-        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
+        sl_hard_max_points = float(
+            st_sl.get("hard_max_points", float("inf")) or float("inf")
+        )
+        tp_hard_max_points = float(
+            st_tp.get("hard_max_points", float("inf")) or float("inf")
+        )
 
         # --- Règles scalping (caps/guards Katana) ---
-        entry_rules_scalp = ((config.get("entry_rules") or {}).get("scalping") or {})
-        reject_if_sl_over_cap = bool(entry_rules_scalp.get("reject_if_sl_over_cap", False))
+        entry_rules_scalp = (config.get("entry_rules") or {}).get("scalping") or {}
+        reject_if_sl_over_cap = bool(
+            entry_rules_scalp.get("reject_if_sl_over_cap", False)
+        )
         max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")
         min_atr_m1_pips = float(entry_rules_scalp.get("min_atr_m1_pips", 0.0) or 0.0)
-        hard_min_atr_m1_pips = float(entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0)
+        hard_min_atr_m1_pips = float(
+            entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0
+        )
 
         # --- Market data pour SWING/ATR ---
         symbol = str(trade_decision.get("asset", "")).upper()
@@ -1574,7 +1584,11 @@ class TradeExecutor:
             close = df["close"].astype(float)
             prev_close = close.shift(1)
             tr = np.maximum.reduce(
-                [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()]
+                [
+                    (high - low).abs(),
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs(),
+                ]
             )
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
@@ -1587,48 +1601,92 @@ class TradeExecutor:
 
         try:
             level_mode = str(trade_decision.get("level_mode") or "").lower()
-            strict_mode = (level_mode == "boll_midline_strict")
+            strict_mode = level_mode == "boll_midline_strict"
 
-            boll = trade_decision.get("boll") if isinstance(trade_decision.get("boll"), dict) else {}
-            bb_mid = float(boll.get("bb_mid")) if boll.get("bb_mid") is not None else float("nan")
-            bb_up  = float(boll.get("bb_upper")) if boll.get("bb_upper") is not None else float("nan")
-            bb_lo  = float(boll.get("bb_lower")) if boll.get("bb_lower") is not None else float("nan")
+            boll = (
+                trade_decision.get("boll")
+                if isinstance(trade_decision.get("boll"), dict)
+                else {}
+            )
+            bb_mid = (
+                float(boll.get("bb_mid"))
+                if boll.get("bb_mid") is not None
+                else float("nan")
+            )
+            bb_up = (
+                float(boll.get("bb_upper"))
+                if boll.get("bb_upper") is not None
+                else float("nan")
+            )
+            bb_lo = (
+                float(boll.get("bb_lower"))
+                if boll.get("bb_lower") is not None
+                else float("nan")
+            )
 
             entry_gate_ok = bool(trade_decision.get("entry_gate_ok", True))
             half_band_pips_hint = trade_decision.get("half_band_pips")
             mid_dist_ratio = float(trade_decision.get("mid_distance_ratio", 0.0) or 0.0)
 
             # Config midline spécifique (scalping)
-            mid_cfg = (((config.get("entry_rules") or {}).get("scalping") or {}).get("boll_midline") or {})
+            mid_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get(
+                "boll_midline"
+            ) or {}
             rr_min_mid = float(mid_cfg.get("min_rr", 1.1) or 1.1)
             k_halfband_tp = float(mid_cfg.get("tp_halfband_k", 0.6) or 0.6)
             buffer_pips_min = float(mid_cfg.get("buffer_pips_min", 1.5) or 1.5)
-            mid_overshoot_k = float(mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05)      # 5% demi-canal
-            min_mid_ratio   = float(mid_cfg.get("min_mid_distance_ratio", 0.12) or 0.12)  # distance mini à la médiane
+            mid_overshoot_k = float(
+                mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05
+            )  # 5% demi-canal
+            min_mid_ratio = float(
+                mid_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
+            )  # distance mini à la médiane
 
-            valid_boll = all(isinstance(x, (int, float)) and math.isfinite(x) for x in (bb_mid, bb_up, bb_lo))
-            can_apply_midline = (level_mode in {"boll_midline", "boll_midline_strict"}) and valid_boll and isinstance(entry_price, (int, float)) and entry_price > 0 and (sl_pips_override is None) and (tp_pips_override is None)
+            valid_boll = all(
+                isinstance(x, (int, float)) and math.isfinite(x)
+                for x in (bb_mid, bb_up, bb_lo)
+            )
+            can_apply_midline = (
+                (level_mode in {"boll_midline", "boll_midline_strict"})
+                and valid_boll
+                and isinstance(entry_price, (int, float))
+                and entry_price > 0
+                and (sl_pips_override is None)
+                and (tp_pips_override is None)
+            )
 
             # En mode STRICT, tout manque → REJET immédiat (aucun fallback)
             if strict_mode:
                 if not can_apply_midline:
-                    raise TradeExecutionError("Mode strict: niveaux Bollinger/entry/overrides invalides.")
+                    raise TradeExecutionError(
+                        "Mode strict: niveaux Bollinger/entry/overrides invalides."
+                    )
                 if not entry_gate_ok:
-                    raise TradeExecutionError("Mode strict: entry_gate_ok=False (gate médiane refusé).")
+                    raise TradeExecutionError(
+                        "Mode strict: entry_gate_ok=False (gate médiane refusé)."
+                    )
                 if not (pip_size and pip_size > 0):
                     raise TradeExecutionError("Mode strict: pip_size indisponible.")
             # En mode non-strict : si on ne peut pas appliquer midline, on laissera les méthodes standards plus bas
 
             if can_apply_midline:
                 half_band_price = (bb_up - bb_lo) / 2.0
-                if isinstance(half_band_pips_hint, (int, float)) and half_band_pips_hint > 0 and pip_size > 0:
+                if (
+                    isinstance(half_band_pips_hint, (int, float))
+                    and half_band_pips_hint > 0
+                    and pip_size > 0
+                ):
                     half_band_price = float(half_band_pips_hint) * pip_size
 
                 if not (half_band_price and half_band_price > 0):
                     if strict_mode:
-                        raise TradeExecutionError("Mode strict: half_band nul/invalide.")
+                        raise TradeExecutionError(
+                            "Mode strict: half_band nul/invalide."
+                        )
                     else:
-                        raise Exception("half_band invalide, on laissera les méthodes standards.")
+                        raise Exception(
+                            "half_band invalide, on laissera les méthodes standards."
+                        )
 
                 # Ajustement prudence si trop proche de la médiane
                 if mid_dist_ratio < min_mid_ratio:
@@ -1636,7 +1694,11 @@ class TradeExecutor:
 
                 buffer_price = max(
                     min_stop_distance_price,
-                    (buffer_pips_min * pip_size) if pip_size and pip_size > 0 else min_stop_distance_price,
+                    (
+                        (buffer_pips_min * pip_size)
+                        if pip_size and pip_size > 0
+                        else min_stop_distance_price
+                    ),
                 )
 
                 if action == "BUY":
@@ -1649,10 +1711,14 @@ class TradeExecutor:
                     fallback_tp = max(0.0, k_halfband_tp * half_band_price)
                     tp_distance_price = max(direct_tp, fallback_tp)
                     take_profit_price = float(entry_price + tp_distance_price)
-                    take_profit_price = min(take_profit_price, bb_up - buffer_price * 0.25)
+                    take_profit_price = min(
+                        take_profit_price, bb_up - buffer_price * 0.25
+                    )
 
                     if entry_price >= bb_mid:
-                        take_profit_price = min(take_profit_price, bb_mid + 0.15 * half_band_price)
+                        take_profit_price = min(
+                            take_profit_price, bb_mid + 0.15 * half_band_price
+                        )
 
                 else:  # SELL
                     # SL au-dessus de la bande haute + buffer
@@ -1664,22 +1730,38 @@ class TradeExecutor:
                     fallback_tp = max(0.0, k_halfband_tp * half_band_price)
                     tp_distance_price = max(direct_tp, fallback_tp)
                     take_profit_price = float(entry_price - tp_distance_price)
-                    take_profit_price = max(take_profit_price, bb_lo + buffer_price * 0.25)
+                    take_profit_price = max(
+                        take_profit_price, bb_lo + buffer_price * 0.25
+                    )
 
                     if entry_price <= bb_mid:
-                        take_profit_price = max(take_profit_price, bb_mid - 0.15 * half_band_price)
+                        take_profit_price = max(
+                            take_profit_price, bb_mid - 0.15 * half_band_price
+                        )
 
                 # RR contrôle
-                risk = (entry_price - stop_loss_price) if action == "BUY" else (stop_loss_price - entry_price)
-                reward = (take_profit_price - entry_price) if action == "BUY" else (entry_price - take_profit_price)
+                risk = (
+                    (entry_price - stop_loss_price)
+                    if action == "BUY"
+                    else (stop_loss_price - entry_price)
+                )
+                reward = (
+                    (take_profit_price - entry_price)
+                    if action == "BUY"
+                    else (entry_price - take_profit_price)
+                )
 
                 if not (risk > 0 and reward > 0):
                     if strict_mode:
-                        raise TradeExecutionError("Mode strict: distances risk/reward invalides.")
+                        raise TradeExecutionError(
+                            "Mode strict: distances risk/reward invalides."
+                        )
                 else:
                     rr_val = reward / risk
                     if strict_mode and (rr_val < rr_min_mid):
-                        raise TradeExecutionError(f"Mode strict: RR {rr_val:.2f} < min_rr {rr_min_mid:.2f}.")
+                        raise TradeExecutionError(
+                            f"Mode strict: RR {rr_val:.2f} < min_rr {rr_min_mid:.2f}."
+                        )
                     # en non-strict, on laisse le reste du pipeline s’occuper d’un éventuel ajustement plus loin
 
         except TradeExecutionError:
@@ -1692,15 +1774,26 @@ class TradeExecutor:
         # ========================= SL (standards si non fixé) =========================
         if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
             sl_distance = float(sl_pips_override) * pip_size
-            stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
-            self.logger.debug(f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}")
+            stop_loss_price = (
+                entry_price - sl_distance
+                if action == "BUY"
+                else entry_price + sl_distance
+            )
+            self.logger.debug(
+                f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}"
+            )
         else:
             if stop_loss_price == 0.0:  # non fixé par 'boll_midline'
                 if sl_method == "SWING":
                     lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
                     buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-                    if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
-                        self.logger.warning(f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS.")
+                    if (
+                        not isinstance(rates_df, pd.DataFrame)
+                        or len(rates_df) < lookback
+                    ):
+                        self.logger.warning(
+                            f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
+                        )
                         sl_method = "ATR"
                     else:
                         recent = rates_df.tail(lookback)
@@ -1713,7 +1806,13 @@ class TradeExecutor:
                             stop_loss_price = swing_high + buffer_price
 
                 if sl_method == "ATR" and stop_loss_price == 0.0:
-                    atr_period = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
+                    atr_period = int(
+                        prod_st.get(
+                            "sl_atr_period",
+                            prod_st.get("atr_settings", {}).get("period", 14),
+                        )
+                        or 14
+                    )
                     atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
                     atr = _compute_atr(rates_df, atr_period)
                     if not (atr == atr and atr > 0):
@@ -1721,31 +1820,54 @@ class TradeExecutor:
                         sl_method = "PIPS"
                     else:
                         sl_distance = atr_mult * atr
-                        stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
+                        stop_loss_price = (
+                            entry_price - sl_distance
+                            if action == "BUY"
+                            else entry_price + sl_distance
+                        )
 
                 if sl_method == "PIPS" and stop_loss_price == 0.0:
                     sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
                     sl_distance = sl_pips * pip_size
-                    stop_loss_price = entry_price - sl_distance if action == "BUY" else entry_price + sl_distance
+                    stop_loss_price = (
+                        entry_price - sl_distance
+                        if action == "BUY"
+                        else entry_price + sl_distance
+                    )
 
         # ========================= TP (standards si non fixé) =========================
         if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
             tp_distance = float(tp_pips_override) * pip_size
-            take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
-            self.logger.debug(f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}")
+            take_profit_price = (
+                entry_price + tp_distance
+                if action == "BUY"
+                else entry_price - tp_distance
+            )
+            self.logger.debug(
+                f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}"
+            )
         else:
             if take_profit_price == 0.0:  # non fixé par 'boll_midline'
                 if tp_method == "RR":
                     risk_distance_price = abs(entry_price - stop_loss_price)
                     if risk_distance_price <= 0:
-                        self.logger.warning("Distance de risque nulle pour TP RR. Fallback PIPS.")
+                        self.logger.warning(
+                            "Distance de risque nulle pour TP RR. Fallback PIPS."
+                        )
                         tp_method = "PIPS"
                     else:
                         tp_distance = risk_distance_price * rr_ratio
-                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+                        take_profit_price = (
+                            entry_price + tp_distance
+                            if action == "BUY"
+                            else entry_price - tp_distance
+                        )
 
                 if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
-                    atr_period = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
+                    atr_period = int(
+                        prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14))
+                        or 14
+                    )
                     atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
                     atr = _compute_atr(rates_df, atr_period)
                     if not (atr == atr and atr > 0):
@@ -1753,12 +1875,20 @@ class TradeExecutor:
                         tp_method = "PIPS"
                     else:
                         tp_distance = atr_mult * atr
-                        take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+                        take_profit_price = (
+                            entry_price + tp_distance
+                            if action == "BUY"
+                            else entry_price - tp_distance
+                        )
 
                 if tp_method == "PIPS" and take_profit_price == 0.0:
                     tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
                     tp_distance = tp_pips * pip_size
-                    take_profit_price = entry_price + tp_distance if action == "BUY" else entry_price - tp_distance
+                    take_profit_price = (
+                        entry_price + tp_distance
+                        if action == "BUY"
+                        else entry_price - tp_distance
+                    )
 
         # ========================= Validations Katana & ajustements de sécurité =========================
         if entry_price <= 0:
@@ -1785,7 +1915,11 @@ class TradeExecutor:
         sl_dist_points = sl_dist_price / point
         tp_dist_points = tp_dist_price / point
 
-        if math.isfinite(sl_hard_min_points) and sl_hard_min_points > 0 and sl_dist_points < sl_hard_min_points:
+        if (
+            math.isfinite(sl_hard_min_points)
+            and sl_hard_min_points > 0
+            and sl_dist_points < sl_hard_min_points
+        ):
             sl_dist_points = sl_hard_min_points
         if math.isfinite(sl_hard_max_points) and sl_dist_points > sl_hard_max_points:
             if reject_if_sl_over_cap:
@@ -1808,8 +1942,14 @@ class TradeExecutor:
 
         # C) ATR M1 minimal (si dispo)
         try:
-            atr_df = (market_context.get("market_data_m1") or {}).get(symbol) or rates_df
-            atr_m1 = _compute_atr(atr_df, period=14) if isinstance(atr_df, pd.DataFrame) else float("nan")
+            atr_df = (market_context.get("market_data_m1") or {}).get(
+                symbol
+            ) or rates_df
+            atr_m1 = (
+                _compute_atr(atr_df, period=14)
+                if isinstance(atr_df, pd.DataFrame)
+                else float("nan")
+            )
             if atr_m1 == atr_m1 and atr_m1 > 0:
                 atr_m1_pips = atr_m1 / pip_size
                 if hard_min_atr_m1_pips > 0 and atr_m1_pips < hard_min_atr_m1_pips:
@@ -1832,8 +1972,16 @@ class TradeExecutor:
         # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
         tp_dist_price = tp_dist_points * point
-        stop_loss_price = (entry_price - sl_dist_price) if action == "BUY" else (entry_price + sl_dist_price)
-        take_profit_price = (entry_price + tp_dist_price) if action == "BUY" else (entry_price - tp_dist_price)
+        stop_loss_price = (
+            (entry_price - sl_dist_price)
+            if action == "BUY"
+            else (entry_price + sl_dist_price)
+        )
+        take_profit_price = (
+            (entry_price + tp_dist_price)
+            if action == "BUY"
+            else (entry_price - tp_dist_price)
+        )
 
         if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
             raise TradeExecutionError("SL et TP trop proches après ajustements Katana.")
@@ -1841,7 +1989,6 @@ class TradeExecutor:
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
-
 
     def _calculate_loss_per_lot_fallback(
         self, symbol_info: Any, sl_distance_price: float, current_price: float
@@ -1917,15 +2064,13 @@ class TradeExecutor:
         account_trade_settings: Dict[str, Any],
     ) -> float:
         """
-        Sizing par risque $ (compat Katana : SL très serrés) :
-        - essaie mt5.order_calc_profit (retourne un float 'profit' dans l'API MT5 Python) -> précis
-        - sinon tick_value/tick_size, sinon heuristique pip-value
-        - clamps symbole/compte/stratégie (+ caps volume uniquement si activés)
-        - contrôle de marge (order_calc_margin retourne un float 'margin') pour éviter 10019
-        - plancher de risque par lot pour éviter un sur-sizing quand SL est microscopique
+        Sizing par risque $ (source unique = broker_accounts.trade_settings.risk_per_trade_percent)
+        ------------------------------------------------------------------------------------------------
+        - Priorité du risk% : compte (broker_accounts) -> fallback global (prod_config) -> (legacy compat log only)
+        - Perte/lot : order_calc_profit (MT5) -> tick_value/tick_size (trade_* ou valeurs standard) -> pip value (FX/JPY) -> contrat*distance
+        - Contraintes : min/max/step (symbole & compte), caps optionnels, contrôle de marge, floor sur step (ne dépasse jamais le risque visé)
         """
-        import math
-
+      
         # --- Action ---
         action = str(trade_decision.get("action", "")).upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
@@ -1938,16 +2083,48 @@ class TradeExecutor:
         if not isinstance(equity, (int, float)) or equity <= 0:
             raise TradeExecutionError("Équité du compte non positive ou manquante.")
 
-        # --- Risque % (ordre de priorité : compte -> stratégie -> global) ---
-        risk_pct = (
-            account_trade_settings.get("risk_per_trade_percent")
-            or config.get("risk_per_trade_percent")
-            or self.config_manager.get("risk_management.risk_per_trade_pct", 0.25)
+        # --- Risque % : COMPTE -> GLOBAL ; legacy: log de dépréciation si présent ailleurs ---
+        def _try_float(x, default=None):
+            try:
+                return float(x)
+            except Exception:
+                return default
+
+        # 1) Compte (passé à la fonction) — source de vérité
+        risk_pct = _try_float(
+            (account_trade_settings or {}).get("risk_per_trade_percent")
         )
-        try:
-            risk_pct = float(risk_pct)
-        except Exception:
-            risk_pct = 0.25
+
+        # 1.b) (ceinture + bretelles) Compte dans context.active_broker_account si non passé
+        if risk_pct is None:
+            aba = (context.get("active_broker_account") or {}).get(
+                "trade_settings", {}
+            ) or {}
+            risk_pct = _try_float(aba.get("risk_per_trade_percent"))
+
+        # 2) Fallback global (prod_config)
+        if risk_pct is None:
+            risk_pct = _try_float(
+                self.config_manager.get("risk_management.risk_per_trade_pct", 0.25),
+                0.25,
+            )
+
+        # 3) Legacy (stratégie/actif) : on NE L'UTILISE PAS, on log seulement si détecté
+        legacy_risk_local = config.get("risk_per_trade_percent") or (
+            (config.get("risk_management") or {}).get("risk_per_trade_pct")
+        )
+        if legacy_risk_local is not None:
+            self.logger.warning(
+                "Legacy key détectée pour le risque (%s) dans la stratégie/actif — ignorée. "
+                "Utiliser broker_accounts.trade_settings.risk_per_trade_percent.",
+                legacy_risk_local,
+            )
+
+        if risk_pct is None or risk_pct <= 0:
+            raise TradeExecutionError(
+                "Risque en % manquant/invalide (compte + fallback global)."
+            )
+
         max_dollar_risk = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk <= 0:
             raise TradeExecutionError("Risque en $ nul/invalide pour le sizing.")
@@ -1956,6 +2133,27 @@ class TradeExecutor:
         price_diff = abs(float(entry_price) - float(sl_price))
         if price_diff <= 0:
             raise TradeExecutionError("Distance Entry-SL nulle pour sizing.")
+
+        # --- Récup symbol_info robuste (attributs ou dict) ---
+        def _sget(obj, *names, default=None):
+            for n in names:
+                if hasattr(obj, n):
+                    v = getattr(obj, n)
+                    if v is not None:
+                        return v
+                if isinstance(obj, dict) and n in obj and obj[n] is not None:
+                    return obj[n]
+            return default
+
+        sym_name = _sget(
+            symbol_info, "name", default=str(trade_decision.get("asset", "")).upper()
+        )
+        point = float(_sget(symbol_info, "point", default=0.00001) or 0.00001)
+        digits = int(_sget(symbol_info, "digits", default=5) or 5)
+        contract = float(
+            _sget(symbol_info, "trade_contract_size", "contract_size", default=100000.0)
+            or 100000.0
+        )
 
         # --- Estimation perte par 1 lot ---
         per_lot_loss_usd = None
@@ -1967,10 +2165,9 @@ class TradeExecutor:
                     if action == "BUY"
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
-                # API python MT5 retourne directement un float 'profit'
                 profit = mt5_mod.order_calc_profit(
-                    order_type, symbol_info.name, 1.0, entry_price, sl_price
-                )
+                    order_type, sym_name, 1.0, entry_price, sl_price
+                )  # float
                 per_lot_loss_usd = abs(float(profit))
                 if not math.isfinite(per_lot_loss_usd) or per_lot_loss_usd <= 0:
                     per_lot_loss_usd = None
@@ -1980,34 +2177,61 @@ class TradeExecutor:
                 )
                 per_lot_loss_usd = None
 
+        # Tick-based
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
-            point = float(getattr(symbol_info, "point", 0.0) or 0.0)
-            tick_value = float(getattr(symbol_info, "tick_value", 0.0) or 0.0)
-            tick_size = float(getattr(symbol_info, "tick_size", 0.0) or 0.0)
-            # Heuristique pip-size (FX majeurs/JPY/Gold) : 1 pip = 10 points
-            points_per_pip = 10.0 if point > 0 else 1.0
-            pip_size = point * points_per_pip if point > 0 else 0.0001
+            tick_value = _sget(
+                symbol_info, "trade_tick_value", "tick_value", default=0.0
+            )
+            tick_size = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
+            try:
+                tick_value = float(tick_value or 0.0)
+                tick_size = float(tick_size or 0.0)
+            except Exception:
+                tick_value, tick_size = 0.0, 0.0
 
-            if tick_size > 0 and tick_value > 0:
+            if tick_value > 0 and tick_size > 0:
                 nb_ticks = price_diff / tick_size
                 per_lot_loss_usd = nb_ticks * tick_value
-            elif point > 0 and tick_value > 0:
-                nb_points = price_diff / point
-                per_lot_loss_usd = nb_points * tick_value
+
+        # Pip-based (FX majors/JPY)
+        if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
+            points_per_pip = 10.0 if digits in (3, 5) else 1.0
+            pip_size = point * points_per_pip
+            quote = ""
+            if isinstance(sym_name, str) and len(sym_name) >= 6:
+                quote = sym_name[-3:].upper()
+
+            if quote == "USD":
+                # ≈ 10$ par pip par lot pour la plupart des majors FX
+                pip_value_per_lot_usd = contract * pip_size
+                per_lot_loss_usd = max(
+                    1e-12, (price_diff / pip_size) * pip_value_per_lot_usd
+                )
+            elif quote == "JPY":
+                # pip en JPY = contract * 0.01 ; conversion en USD ≈ / entry
+                pip_value_jpy = contract * 0.01
+                pip_value_usd = pip_value_jpy / max(1e-12, float(entry_price))
+                per_lot_loss_usd = max(1e-12, (price_diff / pip_size) * pip_value_usd)
             else:
-                # Fallback pip-value connu (10$/pip par lot en FX par défaut)
+                # Fallback pip-value générique
                 pip_value_default = float(
                     self.config_manager.get(
                         "risk_management_settings.default_pip_value_per_lot", 10.0
                     )
                 )
-                per_lot_loss_usd = (price_diff / pip_size) * pip_value_default
+                per_lot_loss_usd = max(
+                    1e-12, (price_diff / pip_size) * pip_value_default
+                )
                 self.logger.warning(
-                    "tick_value/tick_size absents -> heuristique pip-value."
+                    "tick_value/tick_size insuffisants -> heuristique pip-value utilisée."
                 )
 
-        if per_lot_loss_usd <= 0:
-            raise TradeExecutionError("Perte par lot invalide pour sizing.")
+        if per_lot_loss_usd <= 0 or not math.isfinite(per_lot_loss_usd):
+            # Dernier secours : contrat * distance prix
+            per_lot_loss_usd = max(1e-12, contract * price_diff)
+            self.logger.warning(
+                "Perte/lot approximée via contrat*distance (dernier secours)."
+            )
 
         # --- Plancher de perte par lot (évite oversize si SL micro) ---
         min_dlr_per_lot = float(
@@ -2017,7 +2241,7 @@ class TradeExecutor:
         )
         if per_lot_loss_usd < min_dlr_per_lot:
             self.logger.debug(
-                f"Perte/lot trop faible ({per_lot_loss_usd:.4f}$) -> plancher {min_dlr_per_lot:.4f}$ appliqué."
+                f"Perte/lot trop faible ({per_lot_loss_usd:.6f}$) -> plancher {min_dlr_per_lot:.6f}$ appliqué."
             )
             per_lot_loss_usd = min_dlr_per_lot
 
@@ -2025,18 +2249,18 @@ class TradeExecutor:
         raw_volume = max_dollar_risk / per_lot_loss_usd
 
         # --- Contraintes symbole/compte ---
-        vol_min_sym = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-        vol_max_sym = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
-        vol_step_sym = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+        vol_min_sym = float(_sget(symbol_info, "volume_min", default=0.01) or 0.01)
+        vol_max_sym = float(_sget(symbol_info, "volume_max", default=100.0) or 100.0)
+        vol_step_sym = float(_sget(symbol_info, "volume_step", default=0.01) or 0.01)
 
         min_lot_account = float(
-            account_trade_settings.get("min_lot", vol_min_sym) or vol_min_sym
+            (account_trade_settings or {}).get("min_lot", vol_min_sym) or vol_min_sym
         )
         max_lot_account = float(
-            account_trade_settings.get("max_lot", vol_max_sym) or vol_max_sym
+            (account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym
         )
         lot_step_account = float(
-            account_trade_settings.get("lot_step", vol_step_sym) or vol_step_sym
+            (account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym
         )
 
         # --- Cap stratégie (ex: scalping.max_lot_size) ---
@@ -2102,7 +2326,9 @@ class TradeExecutor:
         effective_step = max(lot_step_account, vol_step_sym)
         if effective_step <= 0:
             effective_step = 0.01
-        steps = math.floor(volume / effective_step)
+        steps = math.floor(
+            volume / effective_step
+        )  # floor => ne dépasse pas le risque visé
         volume = round(steps * effective_step, 8)
         volume = max(min_lot_account, volume)
         volume = min(max_lot_account, volume)
@@ -2118,7 +2344,7 @@ class TradeExecutor:
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
                 margin_required = mt5_mod.order_calc_margin(
-                    order_type, symbol_info.name, volume, entry_price
+                    order_type, sym_name, volume, entry_price
                 )
                 free_margin = acct_info.get("margin_free")
                 if (
@@ -2157,14 +2383,12 @@ class TradeExecutor:
 
         # Log de diagnostics + contraintes symbole
         self.logger.info(
-            f"Sizing {symbol_info.name}: equity={equity:.2f}, risk%={risk_pct:.2f}, "
-            f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.4f} -> vol={volume:.4f} "
+            f"Sizing {sym_name}: equity={equity:.2f}, risk%={risk_pct:.4f}, "
+            f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.6f} -> vol={volume:.4f} "
             f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
             f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym})."
         )
         return float(volume)
-
-        # --- Throttle anti-rafale: simple, stateless entre runs ---
 
     def _cooldown_guard(
         self,
@@ -2262,6 +2486,7 @@ class TradeExecutor:
         mt5 = None
         try:
             import MetaTrader5 as _mt5  # type: ignore
+
             mt5 = _mt5
         except Exception:
             # tente via le connector (certains wrappers exposent mt5 dedans)
@@ -2274,7 +2499,9 @@ class TradeExecutor:
         expected_symbol = str(trade_decision.get("asset", "") or "N/A")
 
         if action_str not in ("BUY", "SELL"):
-            raise TradeExecutionError(f"Action invalide: '{action_str}' (attendu BUY/SELL).")
+            raise TradeExecutionError(
+                f"Action invalide: '{action_str}' (attendu BUY/SELL)."
+            )
 
         if (
             (not symbol_info)
@@ -2347,31 +2574,52 @@ class TradeExecutor:
         ORDER_TYPE_BUY = getattr(mt5, "ORDER_TYPE_BUY", None)
         ORDER_TYPE_SELL = getattr(mt5, "ORDER_TYPE_SELL", None)
         if ORDER_TYPE_BUY is None or ORDER_TYPE_SELL is None:
-            raise TradeExecutionError("Constantes MT5 ORDER_TYPE BUY/SELL introuvables.")
+            raise TradeExecutionError(
+                "Constantes MT5 ORDER_TYPE BUY/SELL introuvables."
+            )
 
         # Mapping custom (facultatif)
-        order_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_types", {}) or {}
-        fill_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_filling_policies", {}) or {}
-        time_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_time_flags", {}) or {}
+        order_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+            "order_types", {}
+        ) or {}
+        fill_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+            "order_filling_policies", {}
+        ) or {}
+        time_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+            "order_time_flags", {}
+        ) or {}
 
         # Time flags
         ORDER_TIME_GTC = getattr(mt5, "ORDER_TIME_GTC", None)
-        ORDER_TIME_DAY = getattr(mt5, time_map.get("DAY", "ORDER_TIME_DAY"), getattr(mt5, "ORDER_TIME_DAY", None))
+        ORDER_TIME_DAY = getattr(
+            mt5,
+            time_map.get("DAY", "ORDER_TIME_DAY"),
+            getattr(mt5, "ORDER_TIME_DAY", None),
+        )
         ORDER_TIME_SPECIFIED = getattr(
-            mt5, time_map.get("SPECIFIED", "ORDER_TIME_SPECIFIED"), getattr(mt5, "ORDER_TIME_SPECIFIED", None)
+            mt5,
+            time_map.get("SPECIFIED", "ORDER_TIME_SPECIFIED"),
+            getattr(mt5, "ORDER_TIME_SPECIFIED", None),
         )
         if ORDER_TIME_GTC is None:
             raise TradeExecutionError("Constante MT5 ORDER_TIME_GTC introuvable.")
 
         # Filling policy
-        filling_policy_str = str(config.get("execution_policy", {}).get("type_filling", "FOK")).upper()
-        mt5_filling_policy = getattr(mt5, fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
-                                    getattr(mt5, "ORDER_FILLING_FOK", None))
+        filling_policy_str = str(
+            config.get("execution_policy", {}).get("type_filling", "FOK")
+        ).upper()
+        mt5_filling_policy = getattr(
+            mt5,
+            fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
+            getattr(mt5, "ORDER_FILLING_FOK", None),
+        )
         if mt5_filling_policy is None:
             raise TradeExecutionError("Constante MT5 filling policy introuvable.")
 
         # Déviation (points)
-        deviation_points = int(config.get("execution_policy", {}).get("max_deviation_points", 20) or 20)
+        deviation_points = int(
+            config.get("execution_policy", {}).get("max_deviation_points", 20) or 20
+        )
         if deviation_points < 0:
             deviation_points = 0
 
@@ -2400,11 +2648,17 @@ class TradeExecutor:
             mapped = order_map.get(order_type_str, f"ORDER_TYPE_{order_type_str}")
             order_type_const = getattr(mt5, mapped, None)
             if order_type_const is None:
-                raise TradeExecutionError(f"Type d'ordre différé non supporté: '{order_type_str}'.")
+                raise TradeExecutionError(
+                    f"Type d'ordre différé non supporté: '{order_type_str}'."
+                )
             request["type"] = order_type_const
 
             # Trigger proposé ou fallback sur marché (mais on vérifie les distances ensuite)
-            trig = trigger_price if isinstance(trigger_price, (int, float)) and trigger_price > 0 else entry_price_market
+            trig = (
+                trigger_price
+                if isinstance(trigger_price, (int, float)) and trigger_price > 0
+                else entry_price_market
+            )
             trig = round(float(trig), digits)
 
             # Lecture du tick pour validations côté bid/ask
@@ -2414,14 +2668,28 @@ class TradeExecutor:
             ask = float(getattr(tick, "ask") or 0.0)
             bid = float(getattr(tick, "bid") or 0.0)
             if not (ask > 0 and bid > 0 and ask > bid):
-                raise TradeExecutionError(f"Prix marché invalides (ask/bid) pour {symbol_info.name}.")
+                raise TradeExecutionError(
+                    f"Prix marché invalides (ask/bid) pour {symbol_info.name}."
+                )
 
             # Règles MT5: distances min par type, côté BID/ASK
             too_close = (
-                (order_type_str == "BUY_LIMIT" and not (trig < ask - min_stop_distance_price))
-                or (order_type_str == "SELL_LIMIT" and not (trig > bid + min_stop_distance_price))
-                or (order_type_str == "BUY_STOP"  and not (trig > ask + min_stop_distance_price))
-                or (order_type_str == "SELL_STOP" and not (trig < bid - min_stop_distance_price))
+                (
+                    order_type_str == "BUY_LIMIT"
+                    and not (trig < ask - min_stop_distance_price)
+                )
+                or (
+                    order_type_str == "SELL_LIMIT"
+                    and not (trig > bid + min_stop_distance_price)
+                )
+                or (
+                    order_type_str == "BUY_STOP"
+                    and not (trig > ask + min_stop_distance_price)
+                )
+                or (
+                    order_type_str == "SELL_STOP"
+                    and not (trig < bid - min_stop_distance_price)
+                )
             )
             if too_close:
                 raise TradeExecutionError(
@@ -2433,13 +2701,16 @@ class TradeExecutor:
             price_ref = float(trig)
 
             # Expiration
-            expiration_policy = str((config.get("order_expiration_policy") or {}).get("type", "GTC")).upper()
+            expiration_policy = str(
+                (config.get("order_expiration_policy") or {}).get("type", "GTC")
+            ).upper()
             if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
                 request["type_time"] = ORDER_TIME_DAY
             elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
                 request["type_time"] = ORDER_TIME_SPECIFIED
                 exp_str = (config.get("order_expiration_policy") or {}).get(
-                    "datetime", (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+                    "datetime",
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
                 )
                 try:
                     if isinstance(exp_str, (int, float)):
@@ -2490,12 +2761,18 @@ class TradeExecutor:
                     )
 
         # --- Commentaire & tags succincts ---
-        comment_tpl = self.config_manager.get("trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}")
+        comment_tpl = self.config_manager.get(
+            "trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}"
+        )
         max_len = int(self.config_manager.get("trading.comment_max_length", 31) or 31)
         strategy_tag = str(config.get("strategy_name", "N/A"))
         rule_name = str(trade_decision.get("rule_name", "") or "")
         level_mode = str(trade_decision.get("level_mode", "") or "")
-        rr_proj = trade_decision.get("meta_rr_projected") or trade_decision.get("rr") or trade_decision.get("rr_effective")
+        rr_proj = (
+            trade_decision.get("meta_rr_projected")
+            or trade_decision.get("rr")
+            or trade_decision.get("rr_effective")
+        )
 
         extra_tag_parts = []
         if "katana" in rule_name.lower():
@@ -2511,7 +2788,10 @@ class TradeExecutor:
         request["comment"] = comment[:max_len]
 
         # --- Defaults ---
-        request.setdefault("action", mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending)
+        request.setdefault(
+            "action",
+            mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending,
+        )
         request.setdefault("type_time", ORDER_TIME_GTC)
 
         # --- Compliance & audit (pour nos logs, ignoré par MT5) ---
@@ -2557,8 +2837,10 @@ class TradeExecutor:
         self.logger.debug(
             f"État interne mis à jour pour la nouvelle position #{mt5_result.deal}."
         )
-        
-    def apply_dynamic_trailing(self, ticket: int, trailing_cfg: dict, current_price: float):
+
+    def apply_dynamic_trailing(
+        self, ticket: int, trailing_cfg: dict, current_price: float
+    ):
         """
         Applique un trailing stop dynamique sur une position existante.
         - trailing_cfg peut définir 'atr_mult', 'lock_pips', 'step_pips'
@@ -2578,17 +2860,27 @@ class TradeExecutor:
 
             # BUY → SL doit monter / SELL → SL doit descendre
             if pos["type"] == self.POSITION_TYPE_BUY:
-                new_sl = max(sl_price, current_price - trailing_cfg.get("lock_pips", 5) * self.mt5_connector.get_point(symbol))
+                new_sl = max(
+                    sl_price,
+                    current_price
+                    - trailing_cfg.get("lock_pips", 5)
+                    * self.mt5_connector.get_point(symbol),
+                )
                 if new_sl > sl_price:
                     self._modify_sl(ticket, new_sl)
             else:  # SELL
-                new_sl = min(sl_price, current_price + trailing_cfg.get("lock_pips", 5) * self.mt5_connector.get_point(symbol))
+                new_sl = min(
+                    sl_price,
+                    current_price
+                    + trailing_cfg.get("lock_pips", 5)
+                    * self.mt5_connector.get_point(symbol),
+                )
                 if new_sl < sl_price:
                     self._modify_sl(ticket, new_sl)
 
         except Exception as e:
             self.logger.error(f"Erreur trailing stop dynamique: {e}", exc_info=True)
-            
+
     def _modify_sl(self, ticket: int, new_sl: float):
         """Envoie une requête de modification de SL au broker."""
         try:
@@ -2605,8 +2897,6 @@ class TradeExecutor:
                 self.logger.warning(f"Échec modif trailing SL pour pos#{ticket}")
         except Exception as e:
             self.logger.error(f"Erreur _modify_sl: {e}", exc_info=True)
-
-
 
     def execute_order(self, request: dict) -> dict:
         """

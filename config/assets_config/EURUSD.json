@@ -30,12 +30,6 @@
   },
   "risk_management": {
     "base_lot_size": 1.0,
-    "max_risk_per_trade_percent": {
-      "base": 0.8,
-      "scalping_mode": 0.5,
-      "high_conviction_setups": 1.2,
-      "adaptive_based_on_performance": true
-    },
     "daily_loss_limit_percent": {
       "base": 2.0,
       "aggressive_mode": 2.5,
@@ -95,106 +89,6 @@
       "adaptive_to_atr": true,
       "minimum": 3,
       "maximum": 12
-    }
-  },
-  "temporal_context": {
-    "avoid_trading_hours": {
-      "list": [],
-      "dynamic_detection": {
-        "low_liquidity_threshold": 0.3,
-        "high_spread_multiplier": 2.0
-      }
-    },
-    "monitor_hours": {
-      "list": [
-        "08:00",
-        "09:30",
-        "14:30",
-        "16:00"
-      ],
-      "priority_levels": {
-        "08:00": "high",
-        "09:30": "medium",
-        "14:30": "high",
-        "16:00": "medium"
-      }
-    },
-    "session_preferences": {
-      "london": {
-        "priority": "high",
-        "risk_multiplier": 1.0
-      },
-      "new_york": {
-        "priority": "high",
-        "risk_multiplier": 1.0
-      },
-      "asian": {
-        "priority": "medium",
-        "risk_multiplier": 0.7
-      }
-    }
-  },
-  "institutional_bias": {
-    "favor_fake_breakouts": {
-      "value": true,
-      "confidence_threshold": 0.7
-    },
-    "watch_liquidity_zones": {
-      "value": true,
-      "priority_weight": 1.2
-    },
-    "aggressive_entry_in_expansion": {
-      "value": false,
-      "override_conditions": {
-        "high_volume_confirmation": true,
-        "multi_timeframe_alignment": true
-      }
-    },
-    "conservative_entry_in_compression": {
-      "value": true,
-      "patience_multiplier": 1.5
-    }
-  },
-  "adaptive_features": {
-    "market_regime_detection": {
-      "enabled": true,
-      "regimes": [
-        "trending",
-        "ranging",
-        "volatile",
-        "quiet"
-      ],
-      "lookback_periods": [
-        20,
-        50,
-        200
-      ]
-    },
-    "performance_feedback_loop": {
-      "enabled": true,
-      "adjustment_frequency": "weekly",
-      "parameters_to_adjust": [
-        "risk_per_trade",
-        "take_profit_multiplier",
-        "trailing_parameters"
-      ]
-    }
-  },
-  "weighting": {
-    "base_weights": {
-      "breaker_block": 0.65,
-      "liquidity_zone": 0.9,
-      "fvg_zone": 0.55,
-      "micro_phase_signal": 0.6,
-      "market_structure_shift": 1.0,
-      "volume_spike": 0.7,
-      "smart_spread_indicator": 0.4
-    },
-    "adaptive_weighting": {
-      "enabled": true,
-      "based_on_performance": true,
-      "learning_rate": 0.05,
-      "minimum_sample_size": 50
     }
   }
 }

@@ -472,7 +472,8 @@
     "max_risk_deviation_multiplier": 1.05,
     "report_float_format_csv": "%.5f",
     "report_title_template": "# Rapport Quotidien des Trades - {date}",
-    "default_slippage": 20
+    "default_slippage": 20,
+    "use_decision_volume_if_present": false
   },
   "news_settings": {
     "detection_window": {
