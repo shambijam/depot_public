@@ -2201,6 +2201,47 @@ class DecisionPipeline:
                 trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
             if risk_params.get("tp_pips") is not None:
                 trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
+                
+            # === PATCH 2 : si ok mais raison soft_atr_m1_low → on ne bloque pas, on log & on pénalise doucement
+            if str(risk_params.get("reason", "")).lower() == "soft_atr_m1_low":
+                self.logger.warning(
+                    f"⚠️ ATR M1 faible sur {trade_decision['asset']} — CONTINUATION (soft), "
+                    f"atr={risk_params.get('atr_m1_pips'):.3f} < min={risk_params.get('min_atr_m1_pips'):.3f}"
+                )
+                flags = trade_decision.setdefault("flags", {})
+                flags["soft_atr_m1_low"] = True
+
+                # pénalité douce de confiance (bornée)
+                penalty = float(current_config.get("risk_management", {}).get("atr_penalty_factor", 0.85))
+                floor = float(current_config.get("risk_management", {}).get("atr_confidence_floor", 0.35))
+                current_conf = float(trade_decision.get("confidence", 0.5))
+                trade_decision["confidence"] = max(current_conf * penalty, floor)
+
+                # (optionnel) petit plancher de volume quand soft ATR
+                try:
+                    min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
+                    md_asset = (context.get("market_data", {}) or {}).get(trade_decision["asset"], {}) or {}
+                    si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
+                    def _g(d,k,default=0.0):
+                        try:
+                            v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
+                            v = float(v) if v is not None else default
+                            return v if math.isfinite(v) else default
+                        except Exception:
+                            return default
+                    vol_min_broker = _g(si, "volume_min", 0.0)
+                    vol_step_broker = _g(si, "volume_step", 0.0)
+                    min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker>0 else 0.0)
+                    vol = float(trade_decision.get("volume", 0.0))
+                    vol = max(vol, min_lot_soft) if vol>0 else min_lot_soft
+                    if vol_step_broker and vol_step_broker>0:
+                        steps = math.ceil(vol / vol_step_broker)
+                        vol = steps * vol_step_broker
+                    trade_decision["volume"] = float(vol)
+                    self.logger.info(f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})")
+                except Exception as e:
+                    self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
+
 
         if not risk_params or not bool(risk_params.get("ok", False)):
             reason = (risk_params or {}).get("reason", "risk_calc_failed")
@@ -3673,6 +3714,33 @@ class DecisionPipeline:
         if operator == "==":
             return actual_value == expected_value
         return False
+    
+    def _pip_size_from(si: dict, signals: dict) -> float:
+     
+        try:
+            point = float( (si.get("point") if isinstance(si, dict) else getattr(si, "point", 0.0)) or signals.get("point") or 0.0 )
+            digits = int( (si.get("digits") if isinstance(si, dict) else getattr(si, "digits", 5)) or 5 )
+            pip_points = 10.0 if digits in (3, 5) else 1.0
+            pip_size = point * pip_points
+            return pip_size if math.isfinite(pip_size) and pip_size > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    def _atr_pips_from_df(df_m1, window: int, pip_size: float) -> float:
+      
+        if df_m1 is None or df_m1.empty or pip_size <= 0:
+            return float("nan")
+        # TR = max( high-low, abs(high-prev_close), abs(low-prev_close) )
+        h = df_m1["high"].values
+        l = df_m1["low"].values
+        c = df_m1["close"].values
+        prev_c = np.roll(c, 1)
+        prev_c[0] = c[0]
+        tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+        w = max(int(window), 1)
+        atr_points = np.mean(tr[-w:])  # EMA pas indispensable ici pour le contrôle soft
+        atr_pips = atr_points / pip_size
+        return float(atr_pips)
     
     def calculate_risk_parameters(
         self, context: dict, current_config: dict, trade_decision: dict
