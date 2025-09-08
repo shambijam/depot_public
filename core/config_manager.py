@@ -36,13 +36,12 @@ from core.utils import (
     get_diff,
     ConfigValidationError,
     TradeStatus,
-)  # NOUVEL IMPORT DEPUIS UTILS
+)  
 
-# Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
     from core.config_manager import (
         ConfigManager,
-    )  # Importation uniquement pour les hints de type
+    )  
 
 logger = logging.getLogger(__name__)
 

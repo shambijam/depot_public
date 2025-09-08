@@ -8,7 +8,7 @@ from datetime import datetime, UTC
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from core.ai_interface import AIInterface
-from core.utils import ConfigValidationError, TradeStatus  # NOUVEL IMPORT DEPUIS UTILS
+from core.utils import ConfigValidationError, TradeStatus  
 from typing import Any, Dict, List, Optional, Tuple
 from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
 
@@ -3621,13 +3621,15 @@ class DecisionPipeline:
         if operator == "==":
             return actual_value == expected_value
         return False
-
+    
     def calculate_risk_parameters(
         self, context: dict, current_config: dict, trade_decision: dict
     ) -> dict:
         """
-        Sizing au risque — version STRICT-AWARE (midline strict) & safe par défaut
-        -------------------------------------------------------------------------
+        Évalue les niveaux de risque/targets (SL/TP) et la cohérence du trade.
+        ❗️Le SIZING (volume) est désormais DÉLÉGUÉ au TradeExecutor._calculate_risk_based_volume.
+        -> Ici : on NE calcule plus le volume. On renvoie 'volume': None.
+        
         Priorités des niveaux (de la plus forte à la plus faible):
         1) Hints midline (sl_pips_hint/tp_pips_hint) — si level_mode == "boll_midline" / "boll_midline_strict"
         2) target_sl_pips / target_tp_pips        — décision de base
@@ -3641,11 +3643,10 @@ class DecisionPipeline:
         - contraintes BROKER (stops_level) impossibles à satisfaire
         - (STRICT midline) spread au-delà du cap
         - (STRICT midline) RR_effectif < min_rr (pas d’étirement “TP pour atteindre RR”)
-        - (STRICT midline) volume quantifié ≤ 0
 
         Ajustements permissifs (non stricts / legacy):
         - SL borné dans [min_k*ATR ; max_k*ATR] (si ATR dispo)
-        - Spread noté ; on peut étirer TP pour RR_effectif ≥ min_rr (capé à max_tp_to_sl_ratio)
+        - Spread noté ; on peut étirer TP pour RR_effectif ≥ min_rr (capé à max_tp_to_sl_ratio)  [info seulement]
         - Rounding aux `digits` après ajustements
         """
         notes = []
@@ -3679,9 +3680,6 @@ class DecisionPipeline:
         contract = float(symbol_info.get("trade_contract_size", 100000.0) or 100000.0)
         point = float(symbol_info.get("point", 0.00001) or 0.00001)
         digits = int(symbol_info.get("digits", 5) or 5)
-        vol_min = float(symbol_info.get("volume_min", 0.01) or 0.01)
-        vol_max = float(symbol_info.get("volume_max", 100.0) or 100.0)
-        vol_step = float(symbol_info.get("volume_step", 0.01) or 0.01)
 
         # Stops level (robuste aux variations de clé)
         stops_lvl_points = (
@@ -3700,50 +3698,30 @@ class DecisionPipeline:
         stops_level_pips = stops_lvl_points / pip_points
         min_stop_price_dist = stops_lvl_points * point
 
-        # --- 3) Risque (config) & adaptation ---
+        # --- 3) Risque (config) & adaptation (⚠️ volume délégué, ces valeurs servent à la validation) ---
         rm_cfg = (current_config or {}).get("risk_management", {}) or {}
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))
+        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))  # utilisé uniquement pour info/notes
         min_rr = float(rm_cfg.get("min_rr", 1.8))
         max_spread_pips_cfg = float(rm_cfg.get("max_spread_pips", 1.2))
         max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 3.5))
-        default_sl_pips = float(rm_cfg.get("default_sl_pips", 10.0))  # ✅ ajout
+        default_sl_pips = float(rm_cfg.get("default_sl_pips", 10.0))
 
         # Mode strict pour midline ?
         level_mode_in = str(trade_decision.get("level_mode", "")).lower()
         strict_cfg = (current_config or {}).get("strict_modes", {}) or {}
-        strict_for_midline = bool(
-            strict_cfg.get("midline", True)
-        )  # default True: strict sur midline
+        strict_for_midline = bool(strict_cfg.get("midline", True))
         is_midline_strict = level_mode_in in {"boll_midline_strict"} or (
             level_mode_in == "boll_midline" and strict_for_midline
         )
 
-        # Adaptation high_vol (si meta/regime_tag fourni)
+        # Adaptation high_vol (si meta/regime_tag fourni) — note informative
         meta = trade_decision.get("meta", {}) or {}
         regime_tag = str(meta.get("regime_tag", "")).lower()
-        adapt_risk = (current_config or {}).get("adaptation_settings", {}).get(
-            "risk_adjustment", {}
-        ) or {}
         if regime_tag == "high_vol":
-            mult = float(
-                adapt_risk.get("risk_reduction_multiplier_high_vol", 1.0) or 1.0
-            )
-            min_after = float(
-                adapt_risk.get("min_risk_percent_after_adjustment", 0.01) or 0.01
-            )
-            risk_pct = max(min_after, risk_pct * mult)
+            notes.append("regime_high_vol")
 
-        # Cap global
-        global_cap_pct = float(
-            self.config_manager.get("global_safety.max_risk_per_trade_percent", 2.0)
-            or 2.0
-        )
-        risk_pct = min(risk_pct, global_cap_pct)
-
-        # Equity
-        equity = float(
-            account_info.get("equity", account_info.get("balance", 0.0)) or 0.0
-        )
+        # Equity (uniquement pour information/diagnostic ici)
+        equity = float(account_info.get("equity", account_info.get("balance", 0.0)) or 0.0)
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
@@ -3770,9 +3748,7 @@ class DecisionPipeline:
             sl_pips_val = float(sl_hint)
             tp_pips_val = float(tp_hint)
             notes.append("levels_from_midline_hints")
-        elif isinstance(sl_pips_target, (int, float)) and isinstance(
-            tp_pips_target, (int, float)
-        ):
+        elif isinstance(sl_pips_target, (int, float)) and isinstance(tp_pips_target, (int, float)):
             sl_pips_val = float(sl_pips_target)
             tp_pips_val = float(tp_pips_target)
             notes.append("levels_from_target_pips")
@@ -3786,7 +3762,7 @@ class DecisionPipeline:
             tp_pips_val = abs(tp_price_in - entry) / pip_size if tp_price_in else None
             notes.append("levels_from_price")
         else:
-            # ✅ Nouveau : fallback dynamique si SL absent
+            # Fallback dynamique si SL absent
             sl_pips_val = default_sl_pips
             tp_pips_val = None
             notes.append(f"used_default_sl:{default_sl_pips}p")
@@ -3840,20 +3816,12 @@ class DecisionPipeline:
             if sl_dist_price < sl_min:
                 sl_dist_price = sl_min
                 sl_pips_val = sl_dist_price / pip_size
-                sl_price = (
-                    (entry - sl_dist_price)
-                    if action == "BUY"
-                    else (entry + sl_dist_price)
-                )
+                sl_price = (entry - sl_dist_price) if action == "BUY" else (entry + sl_dist_price)
                 notes.append(f"sl_adjusted_to_atr_min:{sl_pips_val:.2f}p")
             elif sl_dist_price > sl_max:
                 sl_dist_price = sl_max
                 sl_pips_val = sl_dist_price / pip_size
-                sl_price = (
-                    (entry - sl_dist_price)
-                    if action == "BUY"
-                    else (entry + sl_dist_price)
-                )
+                sl_price = (entry - sl_dist_price) if action == "BUY" else (entry + sl_dist_price)
                 notes.append(f"sl_capped_to_atr_max:{sl_pips_val:.2f}p")
 
         # --- 6) Stops level broker (hard) ---
@@ -3861,20 +3829,12 @@ class DecisionPipeline:
             if sl_dist_price < min_stop_price_dist:
                 sl_dist_price = min_stop_price_dist
                 sl_pips_val = sl_dist_price / pip_size
-                sl_price = (
-                    (entry - sl_dist_price)
-                    if action == "BUY"
-                    else (entry + sl_dist_price)
-                )
+                sl_price = (entry - sl_dist_price) if action == "BUY" else (entry + sl_dist_price)
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
             if tp_dist_price and tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
-                tp_price = (
-                    (entry + tp_dist_price)
-                    if action == "BUY"
-                    else (entry - tp_dist_price)
-                )
+                tp_price = (entry + tp_dist_price) if action == "BUY" else (entry - tp_dist_price)
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
 
         # --- Rounding prix ---
@@ -3884,68 +3844,37 @@ class DecisionPipeline:
                 tp_price = round(tp_price, digits)
 
         # --- 7) Spread & RR ---
-        rr = (
-            (tp_dist_price / sl_dist_price)
-            if (tp_dist_price and sl_dist_price > 0)
-            else None
-        )
+        rr = (tp_dist_price / sl_dist_price) if (tp_dist_price and sl_dist_price > 0) else None
         spread_comp_price = spread_pts * point
         effective_tp_dist = max(0.0, (tp_dist_price or 0.0) - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
         if is_midline_strict:
             if spread_pips > max_spread_pips_cfg:
-                return {
-                    "ok": False,
-                    "reason": f"spread_too_high_{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p",
-                }
+                return {"ok": False, "reason": f"spread_too_high_{spread_pips:.2f}p>{max_spread_pips_cfg:.2f}p"}
             if rr is not None and rr_effective < min_rr:
-                return {
-                    "ok": False,
-                    "reason": f"rr_effective_below_min_{rr_effective:.2f}<{min_rr:.2f}",
-                }
+                return {"ok": False, "reason": f"rr_effective_below_min_{rr_effective:.2f}<{min_rr:.2f}"}
 
-        # --- 8) Sizing au risque ---
-        risk_amount = equity * (risk_pct / 100.0)
-        try:
-            raw_volume = risk_amount / (sl_dist_price * contract)
-        except ZeroDivisionError:
-            return {"ok": False, "reason": "invalid_contract_or_sl_dist"}
+        # --- 8) (SUPPRIMÉ) Sizing au risque ---
+        # ❌ On ne calcule plus le volume ici pour éviter les divergences et les cycles d'import.
+        # ✅ Le volume sera calculé par TradeExecutor._calculate_risk_based_volume.
+        notes.append("volume_delegated_to_executor")
 
-        volume = self._quantize_volume(raw_volume, vol_min, vol_max, vol_step)
-
-        # 🚑 Sécurisation anti-volume nul
-        if not isinstance(volume, (int, float)) or volume <= 0:
-            self.logger.warning(
-                f"⚠️ Volume calculé nul ou invalide (raw={raw_volume:.6f}) → fallback min_lot_size."
-            )
-            volume = max(vol_min, float(current_config.get("min_lot_size", 0.01)))
-
-        # ✅ Sécurité : jamais en dessous du volume minimum
-        if not isinstance(volume, (int, float)) or volume <= 0:
-            # ❌ Avant: bloquait le trade
-            # return {"ok": False, "reason": "volume_after_quantization_zero"}
-
-            # ✅ Nouveau: on force volume minimal et on marque en low_confidence
-            notes.append("volume_forced_to_min")
-            volume = vol_min
-
-        # --- Correction motifs de refus trop stricts ---
-        if "sl_capped" in notes or "sl_adjusted_to_atr_min" in notes:
-            notes.append("soft_reject_overridden")
-            return {
-                "ok": True,
-                "volume": max(vol_min, volume),
-                "rr": rr,
-                "rr_effective": rr_effective,
-                "risk_amount": risk_amount,
-                "entry_price": entry,
-                "sl_price": sl_price,
-                "tp_price": tp_price,
-                "sl_pips": sl_dist_price / pip_size,
-                "tp_pips": (tp_dist_price / pip_size) if tp_dist_price else None,
-                "spread_pips": spread_pips,
-                "stops_level_pips": stops_level_pips,
-                "notes": notes + ["confidence_reduced"],
-                "level_mode": level_mode_in or "pips",
-            }
+        # --- 9) Sortie (sans volume) ---
+        return {
+            "ok": True,
+            "volume": None,  # sizing délégué au TradeExecutor
+            "rr": rr,
+            "rr_effective": rr_effective,
+            "entry_price": entry,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "sl_pips": sl_dist_price / pip_size,
+            "tp_pips": (tp_dist_price / pip_size) if tp_dist_price else None,
+            "spread_pips": spread_pips,
+            "stops_level_pips": stops_level_pips,
+            "notes": notes,
+            "level_mode": level_mode_in or "pips",
+            "risk_pct_info": risk_pct,  # info/diagnostic uniquement
+            "contract_info": contract,  # info/diagnostic uniquement
+        }

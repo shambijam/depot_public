@@ -10,11 +10,15 @@ import pandas as pd
 import numpy as np
 import math
 import jsonschema
-from core.config_manager import ConfigManager, CustomJSONEncoder
 from datetime import datetime, UTC  # AMÉLIORATION: Import explicite de UTC
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, UTC
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from core.config_manager import ConfigManager
+from core.utils import CustomJSONEncoder
+
 
 try:
     # TODO: Remplacer l'import direct par une classe de base abstraite (ABC) pour le connecteur
