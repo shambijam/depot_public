@@ -812,6 +812,22 @@ def run_single_pipeline_cycle(
                     order_request = trade_executor.prepare_order(
                         decision_package_for_executor
                     )
+                    
+                    # --- safety: always set a valid MT5 magic number (int) ---
+                    try:
+                        if not order_request.get("magic"):
+                            # 1) priorité au magic_number de la stratégie active
+                            magic_cfg = (decision_package.get("active_config", {}) or {}).get("magic_number")
+                            # 2) fallback: prod_config.json → strategy.default_magic_number (si tu as ça)
+                            if not magic_cfg:
+                                magic_cfg = (base_config.get("strategy", {}) or {}).get("magic_number", 51001)
+                            order_request["magic"] = int(magic_cfg)
+                        else:
+                            order_request["magic"] = int(order_request["magic"])
+                    except Exception:
+                        # dernier filet de sécurité
+                        order_request["magic"] = 51001
+
                 except Exception as e:
                     logger.error(f"[EXECUTOR] Échec prepare_order: {e}", exc_info=True)
                     trade_executed_successfully = False
@@ -819,35 +835,24 @@ def run_single_pipeline_cycle(
                     # 3) Envoi réel ou simulation selon le mode
                     try:
                         if is_dry_run or execution_mode == "DEMO":
-                            # DEMO/DRY: pas d'appel MT5, log simulé
+                            # DEMO/DRY: ne JAMAIS appeler execute_order ici
                             if hasattr(trade_executor, "log_simulated_order"):
                                 trade_executor.log_simulated_order(order_request)
                             else:
-                                logger.info(
-                                    f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
-                                )
+                                logger.info(f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}")
                             trade_executed_successfully = True
                         else:
-                            # LIVE: utiliser execute_order (ta méthode)
+                            # LIVE uniquement
                             exec_res = trade_executor.execute_order(order_request)
-                            # On considère succès si status ∈ {filled, placed}
-                            status_ok = str(exec_res.get("status", "")).lower() in {
-                                "filled",
-                                "placed",
-                            }
+                            status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
                             if not status_ok:
-                                raise RuntimeError(
-                                    f"Statut exécution inattendu: {exec_res.get('status')}"
-                                )
-                            logger.info(
-                                f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}"
-                            )
+                                raise RuntimeError(f"Statut exécution inattendu: {exec_res.get('status')}")
+                            logger.info(f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}")
                             trade_executed_successfully = True
                     except Exception as e:
-                        logger.error(
-                            f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True
-                        )
+                        logger.error(f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True)
                         trade_executed_successfully = False
+
 
             # Paquet attendu par TradeExecutor.prepare_order
             decision_package_for_executor: Dict[str, Any] = {
@@ -881,7 +886,8 @@ def run_single_pipeline_cycle(
                     if hasattr(trade_executor, "send_order"):
                         ticket = trade_executor.send_order(order_request)
                     elif hasattr(trade_executor, "execute_order"):
-                        ticket = trade_executor.execute_order(order_request)
+                        if not (is_dry_run or execution_mode == "DEMO"):
+                            ticket = trade_executor.execute_order(order_request)
                     elif hasattr(trade_executor, "place_order"):
                         ticket = trade_executor.place_order(order_request)
                     else:
