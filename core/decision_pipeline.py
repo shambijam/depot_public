@@ -2284,7 +2284,7 @@ class DecisionPipeline:
                 self.logger.warning(
                     f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
                 )
-                )
+                
             # ✅ Ajustements spécifiques
             if reason == "sl_capped" and "stops_level_pips" in extras:
                 trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
