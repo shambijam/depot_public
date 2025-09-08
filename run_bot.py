@@ -426,7 +426,9 @@ def _mtf_readiness_gate(
     """
     logger = logging.getLogger(__name__)
     try:
-        po_cfg = _load_po_config_safe(config_manager)  # phase_observer_config.json (souple)
+        po_cfg = _load_po_config_safe(
+            config_manager
+        )  # phase_observer_config.json (souple)
 
         gate_cfg = po_cfg.get("readiness_gate") or {}
         mtf_cfg = po_cfg.get("multi_timeframe_settings") or {}
@@ -450,7 +452,9 @@ def _mtf_readiness_gate(
             return True  # gate désactivé globalement
 
         # timeframes requis
-        required_tfs = [str(tf).upper() for tf in mtf_cfg.get("timeframes", ["M1", "M5", "M15"])]
+        required_tfs = [
+            str(tf).upper() for tf in mtf_cfg.get("timeframes", ["M1", "M5", "M15"])
+        ]
         confluence_required = int(mtf_cfg.get("confluence_required", 2))
 
         # N cycles de blocage (override par prod_config.runtime_flags.startup_skip_cycles si présent)
@@ -475,13 +479,19 @@ def _mtf_readiness_gate(
 
         # (1) Gate de démarrage
         if cycle_count <= block_first_cycles:
-            logger.info(f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})")
+            logger.info(
+                f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})"
+            )
             return False
 
         # (2) Construire le min bars par TF en combinant config PhaseObserver + prod_config.timeframe_mapping.bars_min
         min_bars_by_tf = {
             k.upper(): int(v)
-            for k, v in (data_req.get("min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}).items())
+            for k, v in (
+                data_req.get(
+                    "min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}
+                ).items()
+            )
         }
         try:
             tf_map = config_manager.get("timeframe_mapping", {}) or {}
@@ -524,11 +534,18 @@ def _mtf_readiness_gate(
                 df = mt5_connector.get_rates(asset, tf, need)
                 have = len(df) if df is not None else 0
                 if have < need:
-                    logger.info(f"[READINESS] skip -> {asset} {tf}={have}/{need} (historique insuffisant)")
+                    logger.info(
+                        f"[READINESS] skip -> {asset} {tf}={have}/{need} (historique insuffisant)"
+                    )
                     return False
 
                 # Fraîcheur des données (optionnelle)
-                if max_age_sec > 0 and df is not None and not df.empty and "time" in df.columns:
+                if (
+                    max_age_sec > 0
+                    and df is not None
+                    and not df.empty
+                    and "time" in df.columns
+                ):
                     try:
                         last_ts = df["time"].iloc[-1]
                         last_dt = _to_utc_dt(last_ts)
@@ -545,7 +562,9 @@ def _mtf_readiness_gate(
 
         # (4) Confluence via PhaseObserver (si dispo)
         if hasattr(phase_observer, "ready_and_confluence_ok"):
-            ok, reason = phase_observer.ready_and_confluence_ok(confluence_required=confluence_required)
+            ok, reason = phase_observer.ready_and_confluence_ok(
+                confluence_required=confluence_required
+            )
             if not ok:
                 logger.info(f"[READINESS] skip -> {reason}")
                 return False
@@ -556,7 +575,6 @@ def _mtf_readiness_gate(
         # Ne jamais bloquer si une erreur inattendue survient
         logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
         return True
-
 
 
 def run_single_pipeline_cycle(
@@ -587,9 +605,11 @@ def run_single_pipeline_cycle(
     try:
         from core.diagnostics import get_tracker_from_context
     except Exception:
+
         def get_tracker_from_context(_):  # no-op fallback
             class _N:
                 def emit_summary(self, *_args, **_kwargs): ...
+
             return _N()
 
     logger = logging.getLogger(__name__)
@@ -757,12 +777,77 @@ def run_single_pipeline_cycle(
         # === NOUVEAU : Exécution via TradeExecutor (réelle ou simulée) ===
         action = str(final.get("action", "")).upper()
         if action in ("BUY", "SELL"):
-            # Vérifs de présence d'instances
+            # 0) Sanity: ne PAS sortir brutalement si les instances manquent (on laisse passer le finally/diag)
             if trade_executor is None or mt5_connector is None:
                 logger.warning(
                     "[EXECUTOR] Aucune instance TradeExecutor/MT5Connector disponible → envoi MT5 ignoré ce cycle."
                 )
-                return False
+                trade_executed_successfully = False
+            else:
+                # 1) Fournir au TradeExecutor tout ce dont il a besoin
+                #    - lui injecter le mt5_connector si pas déjà présent
+                if (
+                    not hasattr(trade_executor, "mt5_connector")
+                    or trade_executor.mt5_connector is None
+                ):
+                    trade_executor.mt5_connector = mt5_connector
+                #    - passer un contexte d’exécution (utile pour l’audit/trace)
+                try:
+                    trade_executor.execution_context = {
+                        "cycle_count": cycle_count,
+                        "daily_trade_count": daily_trade_count,
+                        "mode": execution_mode,
+                    }
+                except Exception:
+                    pass
+
+                # 2) Construire la requête MT5 via prepare_order (SL/TP/volume sizing faits ici)
+                decision_package_for_executor: Dict[str, Any] = {
+                    "trade_decision": final,
+                    "active_config": decision_package.get("active_config", {}) or {},
+                    "market_context": global_context,
+                }
+
+                try:
+                    order_request = trade_executor.prepare_order(
+                        decision_package_for_executor
+                    )
+                except Exception as e:
+                    logger.error(f"[EXECUTOR] Échec prepare_order: {e}", exc_info=True)
+                    trade_executed_successfully = False
+                else:
+                    # 3) Envoi réel ou simulation selon le mode
+                    try:
+                        if is_dry_run or execution_mode == "DEMO":
+                            # DEMO/DRY: pas d'appel MT5, log simulé
+                            if hasattr(trade_executor, "log_simulated_order"):
+                                trade_executor.log_simulated_order(order_request)
+                            else:
+                                logger.info(
+                                    f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
+                                )
+                            trade_executed_successfully = True
+                        else:
+                            # LIVE: utiliser execute_order (ta méthode)
+                            exec_res = trade_executor.execute_order(order_request)
+                            # On considère succès si status ∈ {filled, placed}
+                            status_ok = str(exec_res.get("status", "")).lower() in {
+                                "filled",
+                                "placed",
+                            }
+                            if not status_ok:
+                                raise RuntimeError(
+                                    f"Statut exécution inattendu: {exec_res.get('status')}"
+                                )
+                            logger.info(
+                                f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}"
+                            )
+                            trade_executed_successfully = True
+                    except Exception as e:
+                        logger.error(
+                            f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True
+                        )
+                        trade_executed_successfully = False
 
             # Paquet attendu par TradeExecutor.prepare_order
             decision_package_for_executor: Dict[str, Any] = {
@@ -773,10 +858,16 @@ def run_single_pipeline_cycle(
 
             try:
                 # 1) Construction requête MT5 (SL/TP/volume sizing interne)
-                order_request = trade_executor.prepare_order(decision_package_for_executor)
+                order_request = trade_executor.prepare_order(
+                    decision_package_for_executor
+                )
 
                 # 2) Envoi réel ou simulé
-                if is_dry_run or execution_mode == "DEMO":
+                allow_demo_send = bool(
+                    config_manager.get("execution.allow_demo_send", True)
+                )
+                if is_dry_run or (execution_mode == "DEMO" and not allow_demo_send):
+
                     # Simulation/DEMO : log dédié si dispo, sinon simple info
                     if hasattr(trade_executor, "log_simulated_order"):
                         trade_executor.log_simulated_order(order_request)
@@ -799,13 +890,17 @@ def run_single_pipeline_cycle(
                         )
 
                     if ticket is None or ticket == 0:
-                        raise RuntimeError("Envoi d'ordre MT5 non confirmé (ticket nul).")
+                        raise RuntimeError(
+                            "Envoi d'ordre MT5 non confirmé (ticket nul)."
+                        )
 
                     logger.info(f"[EXECUTOR] Ordre envoyé avec succès, ticket={ticket}")
                     trade_executed_successfully = True
 
             except Exception as e:
-                logger.error(f"[EXECUTOR] Échec préparation/envoi ordre: {e}", exc_info=True)
+                logger.error(
+                    f"[EXECUTOR] Échec préparation/envoi ordre: {e}", exc_info=True
+                )
                 trade_executed_successfully = False
 
         # ... le reste de la fonction (comptage trades, etc.) reste inchangé ...
@@ -820,7 +915,6 @@ def run_single_pipeline_cycle(
             pass
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
 
 
 def main(args: argparse.Namespace) -> None:

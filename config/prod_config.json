@@ -454,7 +454,12 @@
     "daily_report_format": "md",
     "smart_spread_check": {
       "enabled": true,
-      "max_multiplier": 2.5
+      "max_multiplier": 2.5,
+      "dry_run": false,
+      "slippage_points": 20
+    },
+    "execution": {
+      "allow_demo_send": true
     },
     "fat_finger_check": {
       "enabled": false,
