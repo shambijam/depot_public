@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from core.config_manager import ConfigManager
 from core.utils import CustomJSONEncoder
@@ -409,6 +410,12 @@ class TradeExecutor:
         )
 
     def _log_audit_trail(self, entry: dict) -> None:
+        import json
+        from core.config_manager import CustomJSONEncoder  # import tardif, propre
+
+        with self.audit_trail_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, cls=CustomJSONEncoder) + "\n")
+
         """
         Enregistre une entrée dans le journal d'audit de manière atomique et sécurisée.
 
@@ -1471,7 +1478,7 @@ class TradeExecutor:
         (appliqués uniquement si les seuils entry_bias sont satisfaits).
         - ➕ Consomme (si présents) : 'entry_gate_ok', 'half_band_pips', 'mid_distance_ratio'
         """
-       
+
         self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
 
         # --- Normalisation action ---
@@ -2074,7 +2081,7 @@ class TradeExecutor:
         - Perte/lot : order_calc_profit (MT5) -> tick_value/tick_size (trade_* ou valeurs standard) -> pip value (FX/JPY) -> contrat*distance
         - Contraintes : min/max/step (symbole & compte), caps optionnels, contrôle de marge, floor sur step (ne dépasse jamais le risque visé)
         """
-      
+
         # --- Action ---
         action = str(trade_decision.get("action", "")).upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)

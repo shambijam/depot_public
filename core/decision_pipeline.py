@@ -10,7 +10,8 @@ from pathlib import Path
 from core.ai_interface import AIInterface
 from core.utils import ConfigValidationError, TradeStatus  
 from typing import Any, Dict, List, Optional, Tuple
-from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
+
+
 
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
