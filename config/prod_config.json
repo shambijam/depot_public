@@ -598,6 +598,9 @@
   },
   "runtime_flags": {
     "gating_removed": true,
-    "fallbacks_removed": true
+    "fallbacks_removed": true,
+    "readiness_gate_enabled": true,
+    "startup_skip_cycles": 8,
+    "max_allowed_data_age_seconds": 0
   }
 }

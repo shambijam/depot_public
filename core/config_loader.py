@@ -284,11 +284,14 @@ class ConfigLoader:
     ) -> bool:
         """
         Valide un dictionnaire de configuration à l'aide d'un schéma JSON.
-        - Si `schema_name` est None, on essaie de le déduire du contenu.
-        - Si le schéma déduit est `main_app_schema.json` mais que le fichier est introuvable
-        ET `soft_when_schema_missing=True`, on LOG un warning et on considère la validation comme OK
-        (pour éviter le blocage historique dû à un schéma inexistant).
-        - Si un schéma existe réellement (ex: strategy_schema.json), la validation est STRICTE.
+
+        Règles :
+        - project/strategy/accounts : validation STRICTE si le schéma existe ; 'main_app_schema.json' reste SOFT si manquant.
+        - asset : support explicite. Si 'asset_schema.json' existe => validation STRICTE ; sinon SOFT (warning, acceptée).
+        - schema_name=None : on tente de déduire (project/strategy/accounts). Si inconnu => SOFT (warning, acceptée).
+
+        Retourne True si la validation est considérée OK (même en SOFT).
+        Lève ConfigValidationError sur échec STRICT.
         """
         import jsonschema  # import local pour limiter le scope
 
@@ -296,85 +299,116 @@ class ConfigLoader:
             "Validation de la configuration (ConfigLoader.validate_config)..."
         )
 
-        # 1) Déterminer le nom du schéma si non fourni
-        determined_schema_name = schema_name
-        if determined_schema_name is None:
+        # --- 1) Déterminer le nom de fichier de schéma à utiliser ---
+        # Map symbolique -> nom de fichier de schéma
+        schema_filename: Optional[str] = None
+        if schema_name is None:
+            # Déduction automatique
             if "project" in config and config.get("project") == "SNIPER_X":
-                # Ancien dev: 'main_app_schema.json' n'existe pas dans le repo.
-                # On NE FORCE PAS ce schéma ; on laissera la branche 'schéma manquant' gérer cela en mode soft.
-                determined_schema_name = "main_app_schema.json"
+                schema_filename = "main_app_schema.json"
             elif "strategy_name" in config:
-                determined_schema_name = "strategy_schema.json"
+                schema_filename = "strategy_schema.json"
             elif "accounts" in config and isinstance(config.get("accounts"), list):
-                determined_schema_name = "broker_accounts_schema.json"
+                schema_filename = "broker_accounts_schema.json"
             else:
-                # Type inconnu — rester strict (c'est probablement une mauvaise structure)
+                # Type non reconnu -> SOFT (on accepte avec warning)
+                if soft_when_schema_missing:
+                    self.logger.warning(
+                        "Validation SOFT: type de configuration non reconnu en déduction automatique — "
+                        "acceptée sans schéma strict."
+                    )
+                    return True
+                # mode strict demandé sans schéma : on lève (comportement antérieur)
                 raise ConfigValidationError(
                     "Type de configuration inconnu: attendu 'project' (SNIPER_X) ou 'strategy_name' ou 'accounts'."
                 )
+        else:
+            # Schéma explicite demandé
+            name = str(schema_name).strip().lower()
+            if name in {"project", "main_app", "main", "app"}:
+                schema_filename = "main_app_schema.json"
+            elif name in {"strategy", "strategy_schema.json"}:
+                schema_filename = "strategy_schema.json"
+            elif name in {"accounts", "broker_accounts", "broker_accounts_schema.json"}:
+                schema_filename = "broker_accounts_schema.json"
+            elif name in {"asset", "asset_schema.json"}:
+                # ✅ support explicite des fichiers d'actifs
+                schema_filename = "asset_schema.json"
+            else:
+                # Autres noms arbitraires : on considère que c'est déjà un nom de fichier
+                # si ça finit par _schema.json, sinon on ajoute le suffixe
+                schema_filename = (
+                    name if name.endswith("_schema.json") else f"{name}_schema.json"
+                )
 
-        # 2) Charger le schéma (avec cache). Gestion SOUPLE si introuvable et flag soft_when_schema_missing=True.
-        schema = getattr(self, "_schema_cache", {}).get(determined_schema_name)
-        if schema is None:
-            schema_path = (
-                Path(__file__).parent.parent
-                / "config"
-                / "schemas"
-                / determined_schema_name
-            )
+        # --- 2) Charger le schéma (avec cache) ---
+        schema = getattr(self, "_schema_cache", {}).get(schema_filename or "")
+        schema_path = (
+            Path(__file__).parent.parent
+            / "config"
+            / "schemas"
+            / (schema_filename or "")
+        )
+
+        if not schema:
             if not schema_path.is_file():
+                # Cas particulier historique : main_app_schema.json manquant => SOFT si autorisé
                 if (
                     soft_when_schema_missing
-                    and determined_schema_name == "main_app_schema.json"
+                    and schema_filename == "main_app_schema.json"
                 ):
                     self.logger.warning(
-                        f"Schéma '{determined_schema_name}' introuvable à '{schema_path}'. "
-                        f"Validation assouplie (soft) activée — CONTINUATION sans blocage."
+                        f"Schéma '{schema_filename}' introuvable à '{schema_path}'. "
+                        f"Validation assouplie (soft) — CONTINUATION sans blocage."
                     )
                     return True
-                # Si on arrive ici pour un autre schéma, c'est bloquant
+
+                # ✅ Cas 'asset' : SOFT si le schéma n'existe pas (on accepte les assets sans schéma dédié)
+                if soft_when_schema_missing and schema_filename == "asset_schema.json":
+                    self.logger.warning(
+                        f"Schéma 'asset' introuvable à '{schema_path}'. "
+                        f"Validation SOFT — asset accepté sans schéma strict."
+                    )
+                    return True
+
+                # Autres schémas : si introuvables et pas en mode soft -> bloquant
                 self.logger.critical(
-                    f"FATAL: Fichier de schéma de validation '{determined_schema_name}' introuvable à '{schema_path}'."
+                    f"FATAL: Fichier de schéma de validation '{schema_filename}' introuvable à '{schema_path}'."
                 )
                 raise FileNotFoundError(f"Schéma manquant: {schema_path}")
 
             try:
                 with open(schema_path, "r", encoding="utf-8") as f:
                     schema = json.load(f)
-                # Mémorise en cache sur l'instance
                 if not hasattr(self, "_schema_cache"):
                     self._schema_cache: Dict[str, Dict[str, Any]] = {}
-                self._schema_cache[determined_schema_name] = schema
-                self.logger.debug(
-                    f"Schéma '{determined_schema_name}' chargé et mis en cache."
-                )
+                self._schema_cache[schema_filename] = schema
+                self.logger.debug(f"Schéma '{schema_filename}' chargé et mis en cache.")
             except json.JSONDecodeError as e:
                 self.logger.critical(
-                    f"FATAL: Schéma '{determined_schema_name}' invalide (JSON): {e}.",
+                    f"FATAL: Schéma '{schema_filename}' invalide (JSON): {e}.",
                     exc_info=True,
                 )
                 raise ConfigValidationError(
-                    f"Schéma '{determined_schema_name}' invalide: {e.msg}"
+                    f"Schéma '{schema_filename}' invalide: {e.msg}"
                 ) from e
             except Exception as e:
                 self.logger.critical(
-                    f"FATAL: Erreur lors du chargement du schéma '{determined_schema_name}': {e}.",
+                    f"FATAL: Erreur lors du chargement du schéma '{schema_filename}': {e}.",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"Erreur lors du chargement du schéma '{determined_schema_name}'"
+                    f"Erreur lors du chargement du schéma '{schema_filename}'"
                 ) from e
 
-        # 3) Valider STRICTEMENT si un schéma a été chargé
+        # --- 3) Valider STRICTEMENT si un schéma a été chargé ---
         try:
             jsonschema.validate(instance=config, schema=schema)
-            self.logger.debug(
-                f"Validation OK avec le schéma '{determined_schema_name}'."
-            )
+            self.logger.debug(f"Validation OK avec le schéma '{schema_filename}'.")
             return True
         except jsonschema.ValidationError as e:
             error_message = (
-                f"Échec de la validation '{determined_schema_name}': {e.message} "
+                f"Échec de la validation '{schema_filename}': {e.message} "
                 f"(chemin: `{'.'.join(map(str, e.path))}`)"
             )
             self.logger.error(error_message, exc_info=True)
@@ -420,6 +454,10 @@ class ConfigLoader:
         """
         Charge la configuration spécifique à un actif (symbol) depuis le dossier `config/assets_config/`.
 
+        - Tente d'abord un chargement + validation "asset" via load_dynamic_config(..., schema_name="asset").
+        - Si la validation échoue parce que le validateur ne connaît pas ce type (message "Type de configuration inconnu"),
+        on applique un fallback SOFT : lecture JSON directe (sans schéma strict) avec un WARNING.
+
         Args:
             asset_symbol (str): Le symbole de l'actif (ex: "EURUSD", "BTCUSD").
 
@@ -430,6 +468,9 @@ class ConfigLoader:
             FileNotFoundError: Si le fichier de configuration de l'actif n'est pas trouvé.
             IOError: Pour d'autres erreurs de lecture ou de parsing.
         """
+        import json
+        from pathlib import Path
+
         if not self.config_manager:
             self.logger.error(
                 "ConfigManager non disponible dans ConfigLoader. Impossible de charger les chemins d'actifs."
@@ -442,6 +483,7 @@ class ConfigLoader:
         )
 
         # Construire le chemin complet du fichier de configuration de l'actif
+        asset_symbol = str(asset_symbol or "").upper().strip()
         asset_config_path = asset_configs_dir / f"{asset_symbol}.json"
 
         self.logger.info(
@@ -456,20 +498,44 @@ class ConfigLoader:
                 f"Fichier de configuration d'actif manquant pour '{asset_symbol}': {asset_config_path}"
             )
 
+        # 1) Tentative avec schéma explicite "asset"
         try:
-            # Utiliser la méthode générique load_dynamic_config pour charger et valider le JSON
-            # Note: Il n'y a pas de schéma spécifique pour les configs d'actifs dans la structure fournie.
-            # La validation sera donc ignorée (log WARNING dans validate_config) si aucun schéma n'est trouvé.
-            config = self.load_dynamic_config(str(asset_config_path))
+            config = self.load_dynamic_config(
+                str(asset_config_path), schema_name="asset"
+            )
             self.logger.info(
-                f"Configuration pour l'actif '{asset_symbol}' chargée avec succès."
+                f"Configuration pour l'actif '{asset_symbol}' chargée avec succès (validation 'asset')."
             )
             return config
         except ConfigValidationError as e:
+            msg = str(e) if e else ""
+            # 2) Fallback SOFT si le validateur ne connaît pas le type (cas actuel)
+            if "Type de configuration inconnu" in msg or "introuvable" in msg.lower():
+                self.logger.warning(
+                    f"Validation stricte non appliquée pour l'actif '{asset_symbol}' "
+                    f"(raison: {msg}). Passage en lecture SOFT sans schéma."
+                )
+                try:
+                    with asset_config_path.open("r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    # Invariants minimaux
+                    if "symbol" not in config:
+                        config["symbol"] = asset_symbol
+                    self.logger.info(
+                        f"Configuration pour l'actif '{asset_symbol}' chargée en mode SOFT."
+                    )
+                    return config
+                except Exception as inner:
+                    self.logger.error(
+                        f"Échec de lecture SOFT pour l'actif '{asset_symbol}': {inner}",
+                        exc_info=True,
+                    )
+                    raise
+            # 3) Autre erreur de validation -> on propage
             self.logger.error(
                 f"Validation de la configuration de l'actif '{asset_symbol}' échouée: {e}"
             )
-            raise  # Propage l'exception de validation
+            raise
         except Exception as e:
             self.logger.error(
                 f"Erreur inattendue lors du chargement de la configuration pour l'actif '{asset_symbol}': {e}",

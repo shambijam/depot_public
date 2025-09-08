@@ -413,6 +413,10 @@ def _mtf_readiness_gate(
     """
     Gate MTF BLOQUANT… mais *gracieux* :
     - Si 'readiness_gate.enabled' est False (ou absent) -> ON LAISSE PASSER.
+    - Overrides possibles via prod_config.runtime_flags :
+        * readiness_gate_enabled (bool)       : force on/off global
+        * startup_skip_cycles (int >= 0)      : remplace block_signals_first_n_cycles
+        * max_allowed_data_age_seconds (int)  : remplace la fraîcheur de gate_cfg
     - Si une erreur survient (lecture config, etc.) -> ON LAISSE PASSER.
     - Sinon on vérifie:
         * N premiers cycles bloqués,
@@ -422,39 +426,62 @@ def _mtf_readiness_gate(
     """
     logger = logging.getLogger(__name__)
     try:
-        po_cfg = _load_po_config_safe(config_manager)
+        po_cfg = _load_po_config_safe(config_manager)  # phase_observer_config.json (souple)
 
         gate_cfg = po_cfg.get("readiness_gate") or {}
-        if not gate_cfg.get("enabled", False):
-            return True  # gate désactivé
-
         mtf_cfg = po_cfg.get("multi_timeframe_settings") or {}
         data_req = po_cfg.get("data_requirements") or {}
 
-        required_tfs = [
-            str(tf).upper() for tf in mtf_cfg.get("timeframes", ["M1", "M5", "M15"])
-        ]
+        # ---------- Overrides prod_config ----------
+        rf = {}
+        try:
+            rf = config_manager.get("runtime_flags", {}) or {}
+        except Exception:
+            rf = {}
+
+        # enabled: prod_config override > phase_observer config > default True
+        rf_enabled = rf.get("readiness_gate_enabled")
+        if rf_enabled is not None:
+            gate_enabled = bool(rf_enabled)
+        else:
+            gate_enabled = bool(gate_cfg.get("enabled", False))
+
+        if not gate_enabled:
+            return True  # gate désactivé globalement
+
+        # timeframes requis
+        required_tfs = [str(tf).upper() for tf in mtf_cfg.get("timeframes", ["M1", "M5", "M15"])]
         confluence_required = int(mtf_cfg.get("confluence_required", 2))
+
+        # N cycles de blocage (override par prod_config.runtime_flags.startup_skip_cycles si présent)
         block_first_cycles = int(gate_cfg.get("block_signals_first_n_cycles", 12))
-        max_age_sec = int(
-            gate_cfg.get("max_allowed_data_age_seconds", 0) or 0
-        )  # 0 = pas de check fraîcheur
+        if isinstance(rf.get("startup_skip_cycles"), (int, float)):
+            try:
+                rf_skip = int(rf.get("startup_skip_cycles"))
+                if rf_skip >= 0:
+                    block_first_cycles = rf_skip
+            except Exception:
+                pass
+
+        # Fraîcheur (override par prod_config.runtime_flags.max_allowed_data_age_seconds si présent)
+        max_age_sec = int(gate_cfg.get("max_allowed_data_age_seconds", 0) or 0)
+        if isinstance(rf.get("max_allowed_data_age_seconds"), (int, float)):
+            try:
+                rf_age = int(rf.get("max_allowed_data_age_seconds"))
+                if rf_age >= 0:
+                    max_age_sec = rf_age
+            except Exception:
+                pass
 
         # (1) Gate de démarrage
         if cycle_count <= block_first_cycles:
-            logger.info(
-                f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})"
-            )
+            logger.info(f"[READINESS] skip -> startup gate ({cycle_count}/{block_first_cycles})")
             return False
 
         # (2) Construire le min bars par TF en combinant config PhaseObserver + prod_config.timeframe_mapping.bars_min
         min_bars_by_tf = {
             k.upper(): int(v)
-            for k, v in (
-                data_req.get(
-                    "min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}
-                ).items()
-            )
+            for k, v in (data_req.get("min_bars_by_timeframe", {"M1": 500, "M5": 300, "M15": 200}).items())
         }
         try:
             tf_map = config_manager.get("timeframe_mapping", {}) or {}
@@ -466,8 +493,30 @@ def _mtf_readiness_gate(
         except Exception:
             pass  # on ignore si non présent
 
+        # Si pas d'actifs, ne pas bloquer
+        if not tradeable_assets:
+            return True
+
         # (3) Historique minimum + fraîcheur par TF / actif
         from datetime import datetime, timezone
+
+        def _to_utc_dt(ts_val):
+            """Convertit de manière robuste le dernier 'time' en datetime UTC."""
+            try:
+                # Pandas Timestamp
+                if hasattr(ts_val, "to_pydatetime"):
+                    dt = ts_val.to_pydatetime()
+                else:
+                    dt = ts_val
+                # Numérique epoch (sec)
+                if isinstance(dt, (int, float)):
+                    dt = datetime.utcfromtimestamp(int(dt))
+                # datetime naïf -> UTC
+                if isinstance(dt, datetime) and dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except Exception:
+                return None
 
         for asset in tradeable_assets:
             for tf in required_tfs:
@@ -475,40 +524,28 @@ def _mtf_readiness_gate(
                 df = mt5_connector.get_rates(asset, tf, need)
                 have = len(df) if df is not None else 0
                 if have < need:
-                    logger.info(
-                        f"[READINESS] skip -> {asset} {tf}={have}/{need} (historique insuffisant)"
-                    )
+                    logger.info(f"[READINESS] skip -> {asset} {tf}={have}/{need} (historique insuffisant)")
                     return False
 
                 # Fraîcheur des données (optionnelle)
-                if (
-                    max_age_sec > 0
-                    and df is not None
-                    and not df.empty
-                    and "time" in df.columns
-                ):
+                if max_age_sec > 0 and df is not None and not df.empty and "time" in df.columns:
                     try:
                         last_ts = df["time"].iloc[-1]
-                        if not getattr(last_ts, "tzinfo", None):
-                            # sécurité: on force UTC si la colonne n’est pas timezone-aware
-                            last_ts = last_ts.tz_localize("UTC")
-                        age = (
-                            datetime.now(timezone.utc) - last_ts.to_pydatetime()
-                        ).total_seconds()
-                        if age > max_age_sec:
-                            logger.info(
-                                f"[READINESS] skip -> {asset} {tf} data too old ({int(age)}s > {max_age_sec}s)"
-                            )
-                            return False
+                        last_dt = _to_utc_dt(last_ts)
+                        if last_dt is not None:
+                            age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                            if age > max_age_sec:
+                                logger.info(
+                                    f"[READINESS] skip -> {asset} {tf} data too old ({int(age)}s > {max_age_sec}s)"
+                                )
+                                return False
                     except Exception:
                         # on reste permissif si le parse de temps pose souci
                         pass
 
         # (4) Confluence via PhaseObserver (si dispo)
         if hasattr(phase_observer, "ready_and_confluence_ok"):
-            ok, reason = phase_observer.ready_and_confluence_ok(
-                confluence_required=confluence_required
-            )
+            ok, reason = phase_observer.ready_and_confluence_ok(confluence_required=confluence_required)
             if not ok:
                 logger.info(f"[READINESS] skip -> {reason}")
                 return False
@@ -519,6 +556,7 @@ def _mtf_readiness_gate(
         # Ne jamais bloquer si une erreur inattendue survient
         logger.warning(f"[READINESS] erreur inattendue -> passage permissif: {e}")
         return True
+
 
 
 def run_single_pipeline_cycle(

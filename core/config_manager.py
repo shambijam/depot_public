@@ -72,40 +72,41 @@ class ConfigManager:
 
         self.logger = logging.getLogger(__name__)
 
-        # Initialisation des attributs de l'état de session qui ne sont pas gérés par les sous-modules
+        # État de session
         self._reset_session_state()
 
-        # Instanciation des dépendances. ConfigManager les orchestre.
+        # Dépendances principales
         self.config_loader = ConfigLoader(config_manager_instance=self)
         self.audit_logger = AuditLogger(config_manager_instance=self)
-        self.ai_interface = AIInterface(
-            config_manager_instance=self
-        )  # AIDecision sera injecté plus tard
+        self.ai_interface = AIInterface(config_manager_instance=self)
         self.strategy_manager = StrategyManager(
             config_loader_instance=self.config_loader, config_manager_instance=self
         )
+
+        # ⬇️ IMPORT LOCAL pour casser la boucle d’import
+        from core.decision_pipeline import DecisionPipeline
+
         self.decision_pipeline = DecisionPipeline(
             config_manager_instance=self,
             ai_interface_instance=self.ai_interface,
             strategy_manager_instance=self.strategy_manager,
         )
 
-        # Chargement des configurations de base immuables (variables d'environnement et comptes brokers)
+        # Chargement base_configs
         base_configs = self.config_loader.load_base_configs()
         self._config = base_configs
-        self._broker_accounts_config = base_configs.get(
-            "_broker_accounts_config", {"accounts": []}
-        )
+        self._broker_accounts_config = base_configs.get("_broker_accounts_config", {"accounts": []})
 
-        # --- Définir le niveau du logger du ConfigManager (sera affiné après initialize_dynamic_config) ---
+        # Logger level
         log_level_str = self.get("log_level", "INFO").upper()
         self.logger.setLevel(getattr(logging, log_level_str, logging.INFO))
 
-        # L'instance réelle d'AIDecision sera injectée par main.py
+        # sera injecté par main.py
         self.ai_decision_instance: Optional[Any] = None
 
         self._initialized = True
         self.logger.info("ConfigManager initialisé avec succès (Singleton).")
+
 
     def _reset_session_state(self) -> None:
         """
