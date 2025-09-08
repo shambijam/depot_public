@@ -1,4 +1,5 @@
 # trade_executor.py - Module Central d'Exécution des Trades pour le Bot SNIPER_X
+from __future__ import annotations
 
 import logging
 import os
