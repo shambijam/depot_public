@@ -591,14 +591,14 @@ def run_single_pipeline_cycle(
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique).
 
-    Corrections & améliorations intégrées dans CE BLOC :
-    - ✅ SUPPRIME la duplication du bloc (bug: le code recommençait après le `return`).
-    - ✅ Import local sécurisé de `get_tracker_from_context` pour éviter NameError au `finally`.
-    - ✅ Injection NORMALISÉE des infos Bollinger/Micro-phase dans `signals["boll"]` + alias `signals["m1_boll"]`.
-    - ✅ Injection robuste de `signals["point"]` et `signals["close"]` (fallbacks) pour le calcul de pips en aval.
-    - ✅ Injection de `signals["phase"]` et `signals["confidence_score"]` depuis l’annotated DF (cohérence décisionnelle).
-    - ✅ Calcul du spread en points consolidé (déjà présent) conservé, avec fallback infini en cas d’échec.
-    - ✅ NOUVEAU : Raccordement décision → TradeExecutor (prepare_order + envoi réel/simulé) avec logs propres.
+    Corrections & améliorations incluses :
+    - ✅ Pas de double envoi : bloc d’exécution unique (suppression du “2e appel”).
+    - ✅ DEMO/DRY: simulation pure, aucun appel réel à MT5 → return immédiat depuis le bloc DEMO/DRY.
+    - ✅ LIVE: un seul appel à TradeExecutor.execute_order() + contrôle par 'status' (filled/placed).
+    - ✅ Normalisation robuste du 'magic' (entier non nul ; défaut 51001).
+    - ✅ Pas de raise "ticket nul".
+    - ✅ Import local protégé de get_tracker_from_context pour le finally.
+    - ✅ Signals consolidés (phase/confidence/point/spread) + logs pipeline.
     """
 
     # import DIAG local (sécurisé)
@@ -617,48 +617,45 @@ def run_single_pipeline_cycle(
     logger.info(
         f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
     )
+
     trade_executed_successfully = False
     global_context: Dict[str, Any] = {}
 
     try:
-        if not mt5_connector.is_connected:
+        # Connexion MT5 persistante requise
+        if not getattr(mt5_connector, "is_connected", False):
             raise RuntimeError("MT5 a perdu la connexion persistante.")
 
+        # Configs globales
         base_config = config_manager.get_current_dynamic_config()
         execution_mode = str(base_config.get("mode_execution", "DEMO")).upper()
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
 
-        # === Construction de la liste des actifs tradables (crypto retiré) ===
+        # Liste des symboles tradables (filtrage par compte si nécessaire)
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
-
         account_allowed = set(active_mt5_account_details.get("allowed_symbols", []))
-        if account_allowed:
-            tradeable_assets = [a for a in all_symbols if a in account_allowed]
-        else:
-            tradeable_assets = all_symbols
+        tradeable_assets = (
+            [a for a in all_symbols if a in account_allowed]
+            if account_allowed
+            else all_symbols
+        )
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
-
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
             return False
 
+        # Récupération données & signaux par actif
         all_assets_market_data: Dict[str, pd.DataFrame] = {}
         all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
 
-        timeframe_str = (base_config.get("data_collection", {}) or {}).get(
-            "default_timeframe", "M1"
-        )
-        bars_to_fetch = int(
-            (base_config.get("data_collection", {}) or {}).get(
-                "default_bars_count", 500
-            )
-        )
-
-        min_required_bars = 50  # nombre minimum de bougies
+        dcfg = base_config.get("data_collection", {}) or {}
+        timeframe_str = dcfg.get("default_timeframe", "M1")
+        bars_to_fetch = int(dcfg.get("default_bars_count", 500))
+        min_required_bars = 50
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
@@ -699,20 +696,22 @@ def run_single_pipeline_cycle(
                     or {}
                 )
 
-                # --- Phase & score de confiance ---
+                # Phase & score (avec fallbacks)
                 signals["phase"] = str(
                     latest.get("phase", signals.get("phase", "neutral"))
                 )
                 signals["confidence_score"] = float(
                     latest.get("confidence_score", signals.get("confidence_score", 0.5))
                 )
-
-                # --- Mémoire stabilisée ---
                 signals["phase_memory_stabilized"] = signals["phase"]
                 signals["confidence_stabilized"] = signals["confidence_score"]
 
-                # --- Spread en points robuste ---
-                spread_pts = getattr(symbol_info_mt5, "spread", None)
+                # Spread robuste
+                spread_pts = (
+                    getattr(symbol_info_mt5, "spread", None)
+                    if symbol_info_mt5
+                    else None
+                )
                 if not spread_pts or spread_pts <= 0:
                     spread_pts = mt5_connector.get_symbol_spread_points(asset) or float(
                         "inf"
@@ -732,6 +731,7 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun signal valide généré. Fin du cycle.")
             return False
 
+        # Trace pipeline synthétique
         print("\n" + "=" * 60)
         print("🔍 TRACE COMPLÈTE DU PIPELINE:")
         for asset, sig in all_assets_trading_signals.items():
@@ -740,7 +740,7 @@ def run_single_pipeline_cycle(
             )
         print("=" * 60)
 
-        # === Construction du contexte global ===
+        # Contexte global
         global_context = _build_global_context(
             mt5_connector,
             all_assets_market_data,
@@ -752,16 +752,16 @@ def run_single_pipeline_cycle(
             active_mt5_account_details,
         )
         global_context["diag_tracker"] = DiagnosticTracker(cycle_count)
-
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
-        # === Exécution du pipeline de décision ===
+        # Appel pipeline de décision
         print("🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = (
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
+        # Log décision
         print("3️⃣ DÉCISION RETOURNÉE:")
         final = decision_package.get("final_decision", {}) or {}
         print(f"   Action: {final.get('action', 'NONE')}")
@@ -774,24 +774,27 @@ def run_single_pipeline_cycle(
         )
         print("=" * 60 + "\n")
 
-        # === NOUVEAU : Exécution via TradeExecutor (réelle ou simulée) ===
+        # Exécution décision → TradeExecutor
         action = str(final.get("action", "")).upper()
         if action in ("BUY", "SELL"):
-            # 0) Sanity: ne PAS sortir brutalement si les instances manquent (on laisse passer le finally/diag)
+            # Sanity: ne pas stopper brutalement si instances manquent
             if trade_executor is None or mt5_connector is None:
                 logger.warning(
                     "[EXECUTOR] Aucune instance TradeExecutor/MT5Connector disponible → envoi MT5 ignoré ce cycle."
                 )
                 trade_executed_successfully = False
             else:
-                # 1) Fournir au TradeExecutor tout ce dont il a besoin
-                #    - lui injecter le mt5_connector si pas déjà présent
-                if (
-                    not hasattr(trade_executor, "mt5_connector")
-                    or trade_executor.mt5_connector is None
-                ):
-                    trade_executor.mt5_connector = mt5_connector
-                #    - passer un contexte d’exécution (utile pour l’audit/trace)
+                # Injecter le mt5_connector si nécessaire
+                try:
+                    if (
+                        not hasattr(trade_executor, "mt5_connector")
+                        or trade_executor.mt5_connector is None
+                    ):
+                        trade_executor.mt5_connector = mt5_connector
+                except Exception:
+                    pass
+
+                # Contexte d’exécution (utile à l’audit)
                 try:
                     trade_executor.execution_context = {
                         "cycle_count": cycle_count,
@@ -801,7 +804,7 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-                # 2) Construire la requête MT5 via prepare_order (SL/TP/volume sizing faits ici)
+                # Construire la requête via prepare_order
                 decision_package_for_executor: Dict[str, Any] = {
                     "trade_decision": final,
                     "active_config": decision_package.get("active_config", {}) or {},
@@ -812,104 +815,60 @@ def run_single_pipeline_cycle(
                     order_request = trade_executor.prepare_order(
                         decision_package_for_executor
                     )
-                    
-                    # --- safety: always set a valid MT5 magic number (int) ---
+
+                    # Normalisation du magic (entier non nul)
                     try:
                         if not order_request.get("magic"):
-                            # 1) priorité au magic_number de la stratégie active
-                            magic_cfg = (decision_package.get("active_config", {}) or {}).get("magic_number")
-                            # 2) fallback: prod_config.json → strategy.default_magic_number (si tu as ça)
+                            magic_cfg = (
+                                decision_package.get("active_config", {}) or {}
+                            ).get("magic_number")
                             if not magic_cfg:
-                                magic_cfg = (base_config.get("strategy", {}) or {}).get("magic_number", 51001)
+                                magic_cfg = (base_config.get("strategy", {}) or {}).get(
+                                    "magic_number", 51001
+                                )
                             order_request["magic"] = int(magic_cfg)
                         else:
                             order_request["magic"] = int(order_request["magic"])
                     except Exception:
-                        # dernier filet de sécurité
                         order_request["magic"] = 51001
 
                 except Exception as e:
                     logger.error(f"[EXECUTOR] Échec prepare_order: {e}", exc_info=True)
                     trade_executed_successfully = False
                 else:
-                    # 3) Envoi réel ou simulation selon le mode
-                    try:
-                        if is_dry_run or execution_mode == "DEMO":
-                            # DEMO/DRY: ne JAMAIS appeler execute_order ici
-                            if hasattr(trade_executor, "log_simulated_order"):
-                                trade_executor.log_simulated_order(order_request)
-                            else:
-                                logger.info(f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}")
-                            trade_executed_successfully = True
+                    # DEMO/DRY : simulation pure + return immédiat
+                    if is_dry_run or execution_mode == "DEMO":
+                        if hasattr(trade_executor, "log_simulated_order"):
+                            trade_executor.log_simulated_order(order_request)
                         else:
-                            # LIVE uniquement
-                            exec_res = trade_executor.execute_order(order_request)
-                            status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
-                            if not status_ok:
-                                raise RuntimeError(f"Statut exécution inattendu: {exec_res.get('status')}")
-                            logger.info(f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}")
-                            trade_executed_successfully = True
+                            logger.info(
+                                f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
+                            )
+                        trade_executed_successfully = True
+                        return trade_executed_successfully  # le finally s'exécutera quand même
+
+                    # LIVE seulement
+                    try:
+                        exec_res = trade_executor.execute_order(order_request)
+                        status_ok = str(exec_res.get("status", "")).lower() in {
+                            "filled",
+                            "placed",
+                        }
+                        if not status_ok:
+                            raise RuntimeError(
+                                f"Statut exécution inattendu: {exec_res.get('status')}"
+                            )
+                        logger.info(
+                            f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}"
+                        )
+                        trade_executed_successfully = True
                     except Exception as e:
-                        logger.error(f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True)
+                        logger.error(
+                            f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True
+                        )
                         trade_executed_successfully = False
 
-
-            # Paquet attendu par TradeExecutor.prepare_order
-            decision_package_for_executor: Dict[str, Any] = {
-                "trade_decision": final,
-                "active_config": decision_package.get("active_config", {}) or {},
-                "market_context": global_context,
-            }
-
-            try:
-                # 1) Construction requête MT5 (SL/TP/volume sizing interne)
-                order_request = trade_executor.prepare_order(
-                    decision_package_for_executor
-                )
-
-                # 2) Envoi réel ou simulé
-                allow_demo_send = bool(
-                    config_manager.get("execution.allow_demo_send", True)
-                )
-                if is_dry_run or (execution_mode == "DEMO" and not allow_demo_send):
-
-                    # Simulation/DEMO : log dédié si dispo, sinon simple info
-                    if hasattr(trade_executor, "log_simulated_order"):
-                        trade_executor.log_simulated_order(order_request)
-                    else:
-                        logger.info(
-                            f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
-                        )
-                    trade_executed_successfully = True
-                else:
-                    ticket = None
-                    if hasattr(trade_executor, "send_order"):
-                        ticket = trade_executor.send_order(order_request)
-                    elif hasattr(trade_executor, "execute_order"):
-                        if not (is_dry_run or execution_mode == "DEMO"):
-                            ticket = trade_executor.execute_order(order_request)
-                    elif hasattr(trade_executor, "place_order"):
-                        ticket = trade_executor.place_order(order_request)
-                    else:
-                        raise RuntimeError(
-                            "TradeExecutor ne fournit pas de méthode d'envoi (send_order/execute_order/place_order)."
-                        )
-
-                    if ticket is None or ticket == 0:
-                        raise RuntimeError(
-                            "Envoi d'ordre MT5 non confirmé (ticket nul)."
-                        )
-
-                    logger.info(f"[EXECUTOR] Ordre envoyé avec succès, ticket={ticket}")
-                    trade_executed_successfully = True
-
-            except Exception as e:
-                logger.error(
-                    f"[EXECUTOR] Échec préparation/envoi ordre: {e}", exc_info=True
-                )
-                trade_executed_successfully = False
-
-        # ... le reste de la fonction (comptage trades, etc.) reste inchangé ...
+        # (autres mises à jour de compteurs si besoin...)
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
