@@ -2284,19 +2284,70 @@ class DecisionPipeline:
                 self.logger.warning(
                     f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
                 )
-
+                )
             # ✅ Ajustements spécifiques
             if reason == "sl_capped" and "stops_level_pips" in extras:
                 trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
                 self.logger.info(
                     f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
                 )
+
+            # === PATCH SOFT ATR (remplace l'ancien bloc) ===
             if reason == "soft_atr_m1_low":
                 self.logger.warning(
-                    f"⚠️ ATR trop faible sur {asset_raw} — trade maintenu en mode ultra low confidence."
+                    f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence' (pénalité adoucie)."
                 )
-                trade_decision["confidence"] *= 0.5
+                # 1) Marqueur de diag non-bloquant
+                flags = trade_decision.setdefault("flags", {})
+                flags["soft_atr_m1_low"] = True
 
+                # 2) Pénalité bornée plutôt qu’un /2 brutal
+                penalty = float(self.active_config.get("soft_atr_penalty_factor", 0.85))
+                floor = float(self.active_config.get("soft_atr_confidence_floor", 0.35))
+                current_conf = float(trade_decision.get("confidence", 0.5))
+                trade_decision["confidence"] = max(current_conf * penalty, floor)
+                        # === PATCH: plancher de volume en cas de soft ATR (à placer juste après le bloc SOFT ATR) ===
+        try:
+            flags = trade_decision.get("flags", {})
+            if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {"BUY", "SELL"}:
+                # 1) récup min lot “stratégie” + min lot broker si dispo
+                min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
+
+                md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+                si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
+
+                def _get_num(d, k, default=0.0):
+                    try:
+                        v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
+                        v = float(v) if v is not None else default
+                        return v if math.isfinite(v) else default
+                    except Exception:
+                        return default
+
+                vol_min_broker = _get_num(si, "volume_min", 0.0)
+                vol_step_broker = _get_num(si, "volume_step", 0.0)
+
+                min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0)
+
+                # 2) applique le plancher sur la variable de volume “source de vérité”
+                vol = float(trade_decision.get("volume", 0.0))
+                if vol <= 0.0:
+                    vol = min_lot_soft
+                else:
+                    vol = max(vol, min_lot_soft)
+
+                # 3) aligne au pas broker si connu
+                if vol_step_broker and vol_step_broker > 0:
+                    steps = math.ceil(vol / vol_step_broker)
+                    vol = steps * vol_step_broker
+
+                trade_decision["volume"] = float(vol)
+                self.logger.info(f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})")
+        except Exception as e:
+            self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
+            
+
+   
         # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger)
         try:
             if normalized_action in {"BUY", "SELL"}:
