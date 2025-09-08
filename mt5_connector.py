@@ -1080,18 +1080,18 @@ class MT5Connector:
     def order_send(self, request: Dict[str, Any]) -> Optional[Any]:
         """
         Envoie un ordre de trading (achat, vente, modification, clôture) au terminal MetaTrader 5.
-        Utilise les constantes MT5 mappées du ConfigManager et assure une journalisation détaillée
-        et des alertes en cas d'erreur.
+        Durci pour accepter des requêtes partielles (prix/comment/magic) et normaliser les champs
+        selon les mappings MT5 présents dans le ConfigManager.
 
         Args:
-            request (Dict[str, Any]): Le dictionnaire de la requête d'ordre MT5, conforme à la structure
-                                    attendue par `mt5.order_send()`.
+            request (Dict[str, Any]): Dictionnaire conforme à mt5.order_send() (action, type, symbol, volume, price, etc.)
 
         Returns:
-            Optional[Any]: L'objet `MetaTrader5.TradeResult` (NamedTuple) si l'ordre est envoyé et une réponse est reçue,
-                        `None` si l'envoi échoue ou si le connecteur n'est pas connecté.
+            Optional[Any]: MetaTrader5.TradeResult si succès, None sinon.
         """
-        # Vérifier la connexion
+        import math
+
+        # --- 0) Connexion ---
         if not self.is_connected:
             self.logger.error("MT5: Non connecté. Impossible d'envoyer l'ordre.")
             self.config_manager.send_alert(
@@ -1099,60 +1099,144 @@ class MT5Connector:
             )
             return None
 
-        # Vérification des clés essentielles dans la requête
-        required_keys = [
-            "action",
-            "symbol",
-            "volume",
-            "type",
-            "price",
-            "magic",
-            "comment",
-        ]
-        if not all(key in request for key in required_keys):
-            missing_keys = sorted(set(required_keys) - set(request.keys()))
-            self.logger.error(
-                f"MT5: Requête d'ordre invalide. Clés manquantes: {missing_keys}. Requête: {request}"
-            )
-            self.config_manager.send_alert(
-                f"MT5: Requête d'ordre invalide. Clés manquantes: {missing_keys}.",
-                "telegram_critical",
-            )
+        mt5 = self.mt5  # alias
+        maps = self.mt5_mappings or {}
+
+        # --- 1) Aides de normalisation ---
+        def _mt5_const(group: str, key: str, default_name: str):
+            """Récupère une constante MT5 via les mappings (ex: order_types/BUY -> mt5.ORDER_TYPE_BUY)."""
+            try:
+                name = (maps.get(group, {}) or {}).get(key, default_name)
+                return getattr(mt5, name)
+            except Exception:
+                return getattr(mt5, default_name, None)
+
+        def _resolve_order_type(t):
+            """Accepte int déjà MT5, ou str ('BUY','SELL','BUY_LIMIT','SELL_LIMIT', etc.)."""
+            if isinstance(t, (int, float)):
+                return int(t)
+            if isinstance(t, str):
+                s = t.strip().upper()
+                # market buy/sell
+                if s == "BUY":
+                    return _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY")
+                if s == "SELL":
+                    return _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL")
+                # pendings
+                if s == "BUY_LIMIT":
+                    return _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT")
+                if s == "SELL_LIMIT":
+                    return _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT")
+                if s == "BUY_STOP":
+                    return _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP")
+                if s == "SELL_STOP":
+                    return _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
             return None
 
-        # Déterminer l'action pour le log
-        action_type_numeric = request.get("type")
-        if action_type_numeric == self.ORDER_TYPE_BUY:
-            action_str = "ACHAT"
-        elif action_type_numeric == self.ORDER_TYPE_SELL:
-            action_str = "VENTE"
-        elif action_type_numeric == getattr(
-            self.mt5,
-            self.mt5_mappings.get("order_types", {}).get(
-                "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"
-            ),
-            None,
-        ):
-            action_str = "BUY_LIMIT"
-        elif action_type_numeric == getattr(
-            self.mt5,
-            self.mt5_mappings.get("order_types", {}).get(
-                "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
-            ),
-            None,
-        ):
-            action_str = "SELL_LIMIT"
-        else:
-            action_str = f"TypeOrdre_{action_type_numeric}"
+        def _resolve_action(a):
+            """Accepte int déjà MT5, ou str ('MARKET','DEAL','PENDING','MODIFY','CLOSE')."""
+            if isinstance(a, (int, float)):
+                return int(a)
+            if isinstance(a, str):
+                s = a.strip().upper()
+                if s in ("MARKET", "DEAL"):
+                    return _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
+                if s in ("PENDING", "ORDER"):
+                    return _mt5_const("trade_actions", "PENDING", "TRADE_ACTION_PENDING")
+                if s in ("MODIFY", "SLTP"):
+                    return _mt5_const("trade_actions", "SLTP", "TRADE_ACTION_SLTP")
+                if s in ("CLOSE", "DEAL_CLOSE"):
+                    return _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")  # close via DEAL inverse
+            return None
 
+        # --- 2) Champs requis minimaux (on tolère les manquants et on tente de compléter) ---
+        symbol = request.get("symbol")
+        volume = request.get("volume")
+        order_type = _resolve_order_type(request.get("type"))
+        action = _resolve_action(request.get("action"))
+
+        # Normalise action/type si fournis en clair dans d'autres clés
+        if order_type is None and isinstance(request.get("order_type"), (str, int)):
+            order_type = _resolve_order_type(request.get("order_type"))
+        if action is None and isinstance(request.get("order_action"), (str, int)):
+            action = _resolve_action(request.get("order_action"))
+
+        # Sanity checks de base
+        if not symbol or not isinstance(symbol, str):
+            self.logger.error(f"MT5: Requête invalide — 'symbol' manquant ou invalide. Req={request}")
+            return None
+        try:
+            volume = float(volume)
+        except Exception:
+            volume = 0.0
+        if not (volume > 0):
+            self.logger.error(f"MT5: Requête invalide — 'volume' <= 0 pour {symbol}. Req={request}")
+            return None
+        if order_type is None:
+            self.logger.error(f"MT5: Requête invalide — 'type' (ORDER_TYPE_*) manquant/illégal. Req={request}")
+            return None
+        if action is None:
+            # Par défaut, si type = BUY/SELL on force un DEAL
+            action = _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
+
+        # --- 3) Defaults pratiques (comment, magic, deviation, filling, time) ---
+        request.setdefault("comment", "SNIPER_X")
+        if "magic" not in request:
+            # fallback safe ; la vraie valeur doit venir de la stratégie/TradeExecutor
+            request["magic"] = int(self.config_manager.get("defaults.magic_number", 0) or 0)
+
+        if "deviation" not in request:
+            request["deviation"] = int(
+                self.config_manager.get("trade_executor_settings.slippage_points", 5) or 5
+            )
+
+        if "type_filling" not in request:
+            # IOC par défaut (plus permissif pour les brokers qui refusent FOK)
+            request["type_filling"] = _mt5_const("type_filling", "IOC", "ORDER_FILLING_IOC")
+
+        if "type_time" not in request:
+            request["type_time"] = getattr(mt5, "ORDER_TIME_GTC", None)
+
+        # --- 4) Prix : auto-fill pour le MARKET si absent/0 ---
+        price = request.get("price")
+        try:
+            price = float(price)
+        except Exception:
+            price = 0.0
+
+        is_market_action = action == _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
+        if is_market_action and (not price or not math.isfinite(price) or price <= 0):
+            # Déduire BUY/SELL depuis order_type
+            side = "BUY" if order_type == _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY") else "SELL"
+            try:
+                px = self.get_current_price(symbol, side)
+                if isinstance(px, (int, float)) and px > 0:
+                    request["price"] = float(px)
+                else:
+                    self.logger.error(f"MT5: Prix market indisponible pour {symbol} ({side}).")
+                    return None
+            except Exception as ex:
+                self.logger.exception(f"MT5: Exception get_current_price({symbol},{side}): {ex}")
+                return None
+
+        # --- 5) Log action lisible ---
+        type_name_map = {
+            _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY"): "BUY",
+            _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL"): "SELL",
+            _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"): "BUY_LIMIT",
+            _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"): "SELL_LIMIT",
+            _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP"): "BUY_STOP",
+            _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"): "SELL_STOP",
+        }
+        action_str = type_name_map.get(order_type, f"TypeOrdre_{order_type}")
         self.logger.info(
-            f"MT5: Envoi de l'ordre: {action_str} {request.get('volume')} {request.get('symbol')} "
+            f"MT5: Envoi de l'ordre: {action_str} {request.get('volume')} {symbol} "
             f"@ {request.get('price')} (ID Interne: {request.get('order_id', 'N/A')})..."
         )
 
-        # Envoyer l'ordre
+        # --- 6) Envoi MT5 ---
         try:
-            result = self.mt5.order_send(request)
+            result = mt5.order_send(request)
         except Exception as ex:
             self.logger.exception(f"MT5: Exception lors de order_send(): {ex}")
             self.config_manager.send_alert(
@@ -1160,48 +1244,47 @@ class MT5Connector:
             )
             return None
 
-        # Gérer la réponse de l'API
+        # --- 7) Gestion de la réponse ---
         if result is not None:
+            retcode_val = getattr(result, "retcode", None)
+            comment_val = getattr(result, "comment", "N/A")
+            deal_val = getattr(result, "deal", "N/A")
+            order_id_val = getattr(result, "order", "N/A")
+
             self.logger.info(
-                f"MT5: Réponse API. Retcode: {getattr(result, 'retcode', 'N/A')}, "
-                f"Commentaire: {getattr(result, 'comment', 'N/A')}, "
-                f"Deal: {getattr(result, 'deal', 'N/A')}, Ordre: {getattr(result, 'order', 'N/A')}"
+                f"MT5: Réponse API. Retcode: {retcode_val}, Commentaire: {comment_val}, "
+                f"Deal: {deal_val}, Ordre: {order_id_val}"
             )
 
-            if getattr(result, "retcode", None) == self.TRADE_RETCODE_DONE:
+            if retcode_val == getattr(mt5, maps.get("trade_retcodes", {}).get("DONE", "TRADE_RETCODE_DONE"), None):
                 self.logger.info(
-                    f"MT5: Ordre exécuté avec succès ! "
-                    f"Deal #{getattr(result, 'deal', 'N/A')}, "
-                    f"Ordre #{getattr(result, 'order', 'N/A')} pour {request.get('symbol')}."
+                    f"MT5: Ordre exécuté avec succès ! Deal #{deal_val}, Ordre #{order_id_val} pour {symbol}."
                 )
             else:
-                retcode_val = getattr(result, "retcode", None)
+                # Retcode → libellé humain
                 retcode_str = ""
-                for k, v in self.mt5_mappings.get("trade_retcodes", {}).items():
-                    if getattr(self.mt5, v, None) == retcode_val:
+                for k, v in (maps.get("trade_retcodes", {}) or {}).items():
+                    if getattr(mt5, v, None) == retcode_val:
                         retcode_str = k
                         break
                 self.logger.warning(
                     f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str}), "
-                    f"Commentaire: {getattr(result, 'comment', 'N/A')}. "
-                    f"Erreur système: {self.mt5.last_error()}."
+                    f"Commentaire: {comment_val}. Erreur système: {mt5.last_error()}."
                 )
                 self.config_manager.send_alert(
-                    f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). "
-                    f"Commentaire: {getattr(result, 'comment', 'N/A')}",
+                    f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). Commentaire: {comment_val}",
                     "telegram_critical",
                 )
             return result
 
-        # Aucun résultat
-        self.logger.error(
-            f"MT5: order_send a échoué. Aucune réponse. Erreur système: {self.mt5.last_error()}."
-        )
+        # --- 8) Aucun résultat ---
+        self.logger.error(f"MT5: order_send a échoué. Aucune réponse. Erreur système: {mt5.last_error()}.")
         self.config_manager.send_alert(
-            f"MT5: Échec envoi ordre: Aucune réponse. {self.mt5.last_error()}",
+            f"MT5: Échec envoi ordre: Aucune réponse. {mt5.last_error()}",
             "telegram_critical",
         )
         return None
+
 
     def get_trade_history(self) -> pd.DataFrame:
         """
