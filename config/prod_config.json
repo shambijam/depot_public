@@ -256,11 +256,11 @@
       },
       "volatility_thresholds": {
         "high": 0.8,
-        "low": 0.3
+        "low": 0.2
       },
       "volatility_weights": {
         "high_volatility": 0.3,
-        "low_volatility": 0.3,
+        "low_volatility": 0.2,
         "normal_volatility": 0.1
       },
       "signal_confidence_weight": 0.2,
@@ -277,7 +277,7 @@
       "mtf": {
         "min_volatility_pct": 0.01,
         "max_spread_points": 50,
-        "min_volume_zscore": 0.5
+        "min_volume_zscore": 0.31
       }
     },
     "risk_appetite_drawdown_thresholds": {
@@ -347,7 +347,7 @@
   },
   "adaptation_settings": {
     "volatility_thresholds": {
-      "high": 0.5,
+      "high": 0.7,
       "low": 0.05
     },
     "scalping": {
@@ -404,7 +404,7 @@
   "execution_quality_filters": {
     "blocked_phases": [],
     "atr_volatility_filter": {
-      "enabled": false,
+      "enabled": true,
       "period": 14,
       "min_atr": 0.0,
       "max_atr": 1000000.0
@@ -441,7 +441,7 @@
     "avoid_low_liquidity_hours": true,
     "news_blackout_minutes_before": 15,
     "news_blackout_minutes_after": 15,
-    "min_tick_volume_m1": 200
+    "min_tick_volume_m1": 80
   },
   "trade_executor_settings": {
     "audit_trail_file_name": "trade_audit_trail.log",

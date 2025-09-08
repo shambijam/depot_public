@@ -226,7 +226,14 @@
       "avoid_major_news": false,
       "disable_on_weekends": true,
       "min_account_equity": 0,
-      "allow_only_whitelist_assets": true
+      "allow_only_whitelist_assets": true,
+      "volatility": {
+        "min_atr_pips_m1": 0.35
+      },
+      "volume": {
+        "min_tick_volume_zscore": -1.0
+      },
+      "enable_soft_atr_continuation": false
     },
     "risk": {
       "max_trades_per_day": 20,
@@ -248,7 +255,7 @@
       "ob_entry_requires": {
         "spread_ok": true,
         "mtf_alignment_min": 0,
-        "rr_min": 0.5
+        "rr_min": 0.3
       },
       "bollinger_overrides": {
         "enabled": true,
