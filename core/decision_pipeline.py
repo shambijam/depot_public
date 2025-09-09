@@ -161,69 +161,73 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         Orchestre le pipeline de décision de haut niveau pour un cycle de trading.
-        Version enrichie (Katana) : construit un execution_context (spreads, snapshots Katana, métriques)
+        Version Katana : enrichit le contexte d'exécution (spreads, snapshots Katana, métriques)
         pour l'exécuteur & l'audit.
         """
+        from datetime import datetime, timezone as _tz
+
+        UTC = _tz.utc  # évite l'import global si manquant
+
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
-        print(f"🤖 [DECISION] Début du pipeline institutionnel")
+        print("🤖 [DECISION] Début du pipeline institutionnel")
 
         try:
             # 1) Analyse et enrichissement du contexte
-            print(f"🤖 [DECISION] Étape 1: Analyse du contexte...")
+            print("🤖 [DECISION] Étape 1: Analyse du contexte...")
             analyzed_context = self.config_manager.analyze_context(context)
-            print(f"🤖 [DECISION] Contexte analysé avec succès")
+            print("🤖 [DECISION] Contexte analysé avec succès")
 
             # 2) (IA désactivée ici – audit asynchrone ailleurs)
-            print(f"🤖 [DECISION] Étape 2: Vérification IA...")
-            print(f"🤖 [DECISION] IA désactivée")
+            print("🤖 [DECISION] Étape 2: Vérification IA...")
+            print("🤖 [DECISION] IA désactivée")
 
             # 3) Sélection de la stratégie optimale
-            print(f"🤖 [DECISION] Étape 3: Sélection de stratégie...")
-            if not self.strategy_manager:
+            print("🤖 [DECISION] Étape 3: Sélection de stratégie...")
+            if not getattr(self, "strategy_manager", None):
                 self.logger.critical(
                     "ERREUR ARCHITECTURALE: StrategyManager non disponible dans DecisionPipeline."
                 )
                 raise RuntimeError("StrategyManager non initialisé.")
-            config_knowledge_base = self.strategy_manager.strategy_registry
+
+            config_knowledge_base = self.strategy_manager.strategy_registry or {}
             print(
                 f"🤖 [DECISION] Base de connaissances: {len(config_knowledge_base)} stratégies disponibles"
             )
 
-            optimal_config = self.select_optimal_config(
-                analyzed_context, config_knowledge_base
+            optimal_config = (
+                self.select_optimal_config(analyzed_context, config_knowledge_base)
+                or {}
             )
 
-            # --- PATCH: Override par phase (supprime dépendance au scoring bloquant) ---
+            # --- Override par phase (réduit le risque de blocage par scoring neutre) ---
             try:
                 signals = analyzed_context.get("trading_signals", {}) or {}
                 override = None
                 phase_val = "n/a"
-
-                for asset, sig in signals.items():
-                    phase = str(sig.get("phase", "")).lower()
+                for _, sig in signals.items():
+                    phase = str((sig or {}).get("phase", "")).lower()
                     if "range" in phase:
                         override = "scalping"
                         phase_val = phase
                         break
-                    elif "impulsion" in phase:
+                    if "impulsion" in phase:
                         override = "liquidity"
                         phase_val = phase
                         break
-
                 if override:
                     self.logger.info(
-                        f"⚡ Strategy override forcé par phase détectée: {override} "
-                        f"(ignore scoring, phase={phase_val})"
+                        f"⚡ Strategy override forcé par phase détectée: {override} (ignore scoring, phase={phase_val})"
                     )
                     optimal_config["strategy_name"] = override
             except Exception as e:
                 self.logger.warning(f"Erreur lecture phase override: {e}")
 
             if not optimal_config:
+                # pas de stratégie → sortie propre et explicite
                 self.logger.warning(
                     "Aucune stratégie optimale sélectionnée pour ce cycle. Pipeline arrêté."
                 )
-                print(f"🤖 [DECISION] ❌ Aucune stratégie optimale trouvée")
+                print("🤖 [DECISION] ❌ Aucune stratégie optimale trouvée")
                 return {
                     "timestamp_utc": datetime.now(UTC).isoformat(),
                     "context": analyzed_context,
@@ -236,52 +240,52 @@ class DecisionPipeline:
                 f"🤖 [DECISION] ✅ Stratégie optimale: {optimal_config.get('strategy_name', 'Unknown')}"
             )
 
-            # === PATCH: Strategy override depuis les signaux ===
+            # Override direct depuis les signaux (si présent)
             try:
-                override = None
                 signals = analyzed_context.get("trading_signals", {}) or {}
-                for asset, sig in signals.items():
-                    if isinstance(sig, dict) and sig.get("strategy_override"):
-                        override = sig["strategy_override"]
-                        break  # on prend le premier override trouvé
-                if override:
-                    self.logger.info(
-                        f"⚡ Strategy override détecté: {override} → remplace {optimal_config.get('strategy_name')}"
-                    )
-                    optimal_config["strategy_name"] = override
+                for _, sig in signals.items():
+                    so = (sig or {}).get("strategy_override")
+                    if so:
+                        self.logger.info(
+                            f"⚡ Strategy override détecté: {so} → remplace {optimal_config.get('strategy_name')}"
+                        )
+                        optimal_config["strategy_name"] = so
+                        break
             except Exception as e:
                 self.logger.warning(f"Erreur lecture strategy_override: {e}")
 
             # 4) Adaptation de la configuration pour le cycle actuel
-            print(f"🤖 [DECISION] Étape 4: Adaptation de configuration...")
-            base_cfg = self.config_manager.get_current_dynamic_config()
-            config_for_this_cycle = self.config_manager._merge_dicts(
-                base_cfg, optimal_config
+            print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
+            base_cfg = self.config_manager.get_current_dynamic_config() or {}
+            config_for_this_cycle = (
+                self.config_manager._merge_dicts(base_cfg, optimal_config) or {}
             )
-            adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context)
-            print(f"🤖 [DECISION] Configuration adaptée avec succès")
+            adapted_config = (
+                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            )
+            print("🤖 [DECISION] Configuration adaptée avec succès")
 
             # 4bis) Execution context (spreads, katana snapshots, métriques)
-            print(f"🤖 [DECISION] Étape 4bis: Construction execution_context...")
+            print("🤖 [DECISION] Étape 4bis: Construction execution_context...")
             tradeables = adapted_config.get("tradeable_assets", []) or []
             spreads_pips: Dict[str, float] = {}
             katana_snapshots: Dict[str, Dict[str, Any]] = {}
             katana_ready_assets: List[str] = []
 
             # spreads par actif (robuste)
-            if hasattr(self, "mt5_connector"):
+            if hasattr(self, "mt5_connector") and self.mt5_connector:
                 for a in tradeables:
                     try:
-                        sp = self.mt5_connector.get_spread_pips(
-                            self.config_manager.get("asset_symbol_mapping", {}).get(
-                                a, a
-                            )
+                        sym = self.config_manager.get("asset_symbol_mapping", {}).get(
+                            a, a
                         )
+                        sp = self.mt5_connector.get_spread_pips(sym)
                     except Exception:
                         sp = float("inf")
-                    spreads_pips[a] = (
-                        float(sp) if isinstance(sp, (int, float)) else float("inf")
-                    )
+                    try:
+                        spreads_pips[a] = float(sp)
+                    except Exception:
+                        spreads_pips[a] = float("inf")
 
             # snapshots Katana (si PhaseObserver expose la méthode)
             if hasattr(self, "phase_observer") and hasattr(
@@ -309,35 +313,43 @@ class DecisionPipeline:
             )
 
             # 5) Décision de trade finale
-            print(f"🤖 [DECISION] Étape 5: Décision de trade finale...")
+            print("🤖 [DECISION] Étape 5: Décision de trade finale...")
             signals = analyzed_context.get("trading_signals", {}) or {}
             print(f"🤖 [DECISION] Signaux disponibles: {list(signals.keys())}")
+
             trade_decision = self.decide_trade_to_execute(
-                analyzed_context,
-                adapted_config,
-                signals,
+                analyzed_context, adapted_config, signals
             )
 
-            # --- LOG FINAL SÉCURISÉ (avec statut d’exécution) ---
-            td = trade_decision or {}
-            st = str(td.get("execution_status", "")).lower()
+            # --- Normalisation & statut d’affichage (jamais None) ---
+            td = (trade_decision or {}).copy()
+            # statut par défaut s'il n'est pas remonté (ex: exécution déléguée async)
+            td.setdefault("execution_status", "decided")
+
+            # libellé lisible
+            st = str(td.get("execution_status") or "").lower()
             if st in {"filled", "placed"}:
                 label = "TRADE EXÉCUTÉ"
             elif st == "pending_manual_approval":
                 label = "EN ATTENTE VALIDATION"
             elif st == "ready":
                 label = "PRÊT (DRY RUN)"
+            elif st == "decided":
+                label = "TRADE DÉCIDÉ"
             else:
                 label = "AUCUN"
 
-            print(
-                f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')} | {label}"
-            )
+            # sécurité d’affichage
+            action_disp = td.get("action", "AUCUNE")
+            asset_disp = td.get("asset", "NONE")
+            vol_disp = td.get("volume", 0)
+
+            print(f"🤖 [DECISION] Décision finale: {action_disp} | {label}")
             self.logger.info(
-                f"3️⃣ DÉCISION RETOURNÉE:\n"
-                f"   Action: {td.get('action','NONE')}\n"
-                f"   Asset: {td.get('asset','NONE')}\n"
-                f"   Volume: {td.get('volume', 0)}\n"
+                "3️⃣ DÉCISION RETOURNÉE:\n"
+                f"   Action: {action_disp}\n"
+                f"   Asset: {asset_disp}\n"
+                f"   Volume: {vol_disp}\n"
                 f"   Statut: {label}"
             )
 
@@ -357,12 +369,14 @@ class DecisionPipeline:
 
             # Marquer les métas utiles à l'exécuteur/audit
             td["meta_rr_projected"] = rr_projected
-            # Si l’actif choisi a un snapshot, passer quelques métas utiles (ex: atr_m1_pips)
             chosen_asset = td.get("asset")
             if chosen_asset and chosen_asset in katana_snapshots:
-                snap = katana_snapshots[chosen_asset] or {}
+                snap = katana_snapshots.get(chosen_asset) or {}
                 td["meta_atr_m1_pips"] = snap.get("atr_m1_pips")
                 td["meta_katana_score"] = snap.get("katana_score")
+
+            # marqueur interne pour éviter les doubles prints par un runner externe
+            analyzed_context["__decision_printed"] = True
 
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),
@@ -2660,6 +2674,26 @@ class DecisionPipeline:
                     te, decision_package, is_dry_run=False
                 )
                 self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
+
+                # --- Enrichir la décision avec le résultat d'exécution ---
+                try:
+                    status = str(exec_res.get("status", "")).lower()
+                    trade_decision["execution_status"] = status
+                    if status in {"filled", "placed"}:
+                        trade_decision["executed"] = True
+                        trade_decision["order_id"] = exec_res.get("order")
+                        trade_decision["deal_id"] = exec_res.get("deal")
+                        trade_decision["execution_price"] = exec_res.get("price")
+                        # si le volume retourné est renseigné, on l’utilise (sinon on garde celui calculé)
+                        if (
+                            isinstance(exec_res.get("volume"), (int, float))
+                            and exec_res["volume"] > 0
+                        ):
+                            trade_decision["volume"] = exec_res["volume"]
+                    else:
+                        trade_decision["executed"] = False
+                except Exception:
+                    pass
 
                 # Affichage console clair du résultat API
                 try:
