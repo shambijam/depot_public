@@ -614,13 +614,13 @@
     "volatility": {
       "enabled": true,
       "atr_period": 14,
-      "min_atr_m1_pips": 0.5,
+      "min_atr_m1_pips": 0.45,
       "soft_mode": false,
-      "soft_floor_rr": 0.9
+      "soft_floor_rr": 0.85
     },
     "volume": {
       "enabled": true,
-      "min_tick_volume_m1": 80,
+      "min_tick_volume_m1": 70,
       "min_volume_zscore": -1.0
     },
     "spread": {

@@ -323,27 +323,32 @@ class DecisionPipeline:
 
             # --- Normalisation & statut d’affichage (jamais None) ---
             td = (trade_decision or {}).copy()
-            # statut par défaut s'il n'est pas remonté (ex: exécution déléguée async)
-            td.setdefault("execution_status", "decided")
 
-            # libellé lisible
+            # Y a-t-il vraiment une action de trade ?
+            action_raw = (td.get("action") or "").strip().upper()
+            has_action = action_raw in {"BUY", "SELL", "CLOSE"}
+
+            # Statut renvoyé par l'exécution (si présent)
             st = str(td.get("execution_status") or "").lower()
-            if st in {"filled", "placed"}:
-                label = "TRADE EXÉCUTÉ"
-            elif st == "pending_manual_approval":
-                label = "EN ATTENTE VALIDATION"
-            elif st == "ready":
-                label = "PRÊT (DRY RUN)"
-            elif st == "decided":
-                label = "TRADE DÉCIDÉ"
-            else:
-                label = "AUCUN"
 
-            # sécurité d’affichage
-            action_disp = td.get("action", "AUCUNE")
+            # Libellé humain
+            if not has_action:
+                label = "AUCUN"
+            else:
+                if st in {"filled", "placed"}:
+                    label = "TRADE EXÉCUTÉ"
+                elif st == "pending_manual_approval":
+                    label = "EN ATTENTE VALIDATION"
+                elif st == "ready":
+                    label = "PRÊT (DRY RUN)"
+                else:
+                    label = "TRADE DÉCIDÉ"
+
+            action_disp = action_raw if action_raw else "AUCUNE"
             asset_disp = td.get("asset", "NONE")
             vol_disp = td.get("volume", 0)
 
+            # Affichage UNIQUE ici
             print(f"🤖 [DECISION] Décision finale: {action_disp} | {label}")
             self.logger.info(
                 "3️⃣ DÉCISION RETOURNÉE:\n"
@@ -352,6 +357,9 @@ class DecisionPipeline:
                 f"   Volume: {vol_disp}\n"
                 f"   Statut: {label}"
             )
+
+            # Flag pour empêcher un 2e récap ailleurs
+            analyzed_context["__decision_logged"] = True
 
             # 5bis) RR projeté simple si overrides pips présents (utile pour audit)
             tp_pips = td.get("target_tp_pips")
@@ -370,13 +378,14 @@ class DecisionPipeline:
             # Marquer les métas utiles à l'exécuteur/audit
             td["meta_rr_projected"] = rr_projected
             chosen_asset = td.get("asset")
-            if chosen_asset and chosen_asset in katana_snapshots:
-                snap = katana_snapshots.get(chosen_asset) or {}
+            if chosen_asset and "katana_snapshots" in locals():
+                snap = (
+                    (katana_snapshots.get(chosen_asset) or {})
+                    if isinstance(katana_snapshots, dict)
+                    else {}
+                )
                 td["meta_atr_m1_pips"] = snap.get("atr_m1_pips")
                 td["meta_katana_score"] = snap.get("katana_score")
-
-            # marqueur interne pour éviter les doubles prints par un runner externe
-            analyzed_context["__decision_printed"] = True
 
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),

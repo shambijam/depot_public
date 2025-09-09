@@ -761,18 +761,23 @@ def run_single_pipeline_cycle(
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
-        # Log décision
-        print("3️⃣ DÉCISION RETOURNÉE:")
+        # ====== LOG DÉCISION (anti-doublon) ======
         final = decision_package.get("final_decision", {}) or {}
-        print(f"   Action: {final.get('action', 'NONE')}")
-        print(f"   Asset: {final.get('asset', 'NONE')}")
-        print(f"   Volume: {final.get('volume', 0)}")
-        print(
-            "   ✅ TRADE DÉCIDÉ !"
-            if final.get("action") in ["BUY", "SELL"]
-            else "   ❌ PAS DE TRADE"
-        )
-        print("=" * 60 + "\n")
+        ctx_out = decision_package.get("context", {}) or {}
+
+        # Seulement si la pipeline n'a PAS déjà loggué elle-même
+        if not ctx_out.get("__decision_logged"):
+            print("3️⃣ DÉCISION RETOURNÉE:")
+            print(f"   Action: {final.get('action', 'NONE')}")
+            print(f"   Asset: {final.get('asset', 'NONE')}")
+            print(f"   Volume: {final.get('volume', 0)}")
+            print(
+                "   ✅ TRADE DÉCIDÉ !"
+                if str(final.get("action", "")).upper() in {"BUY", "SELL"}
+                else "   ❌ PAS DE TRADE"
+            )
+            print("=" * 60 + "\n")
+        # ====== FIN LOG DÉCISION ======
 
         # Exécution décision → TradeExecutor
         action = str(final.get("action", "")).upper()
