@@ -372,7 +372,7 @@
         "take_profit_pips": 60,
         "stop_loss_pips": 20,
         "enable_trailing_stop": true,
-        "risk_per_trade_percent": 3.0
+        "risk_per_trade_percent": 5.0
       }
     },
     "phase_detection": {
@@ -642,7 +642,7 @@
       "require_range_regime": true,
       "block_on_expansion": true,
       "entry_gate_ok_required": true,
-      "min_mid_distance_ratio": 0.12
+      "min_mid_distance_ratio": 0.15
     },
     "trailing_stop": {
       "enabled": true,
