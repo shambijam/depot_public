@@ -2919,39 +2919,75 @@ class TradeExecutor:
         - Tolère les variations de champs dans OrderSendResult.
         - Journalise l'exécution via AuditLogger si disponible.
         """
-        # --- Sécurité connexion ---
+        # --- Sécurité connexion (aucun fallback "simulation") ---
         try:
             connected = getattr(self.mt5_connector, "is_connected", False)
             if callable(connected):
                 connected = connected()
             if not connected and hasattr(self.mt5_connector, "connect"):
                 self.mt5_connector.connect()
+                connected = self.mt5_connector.is_connected() if callable(getattr(self.mt5_connector, "is_connected", None)) else bool(getattr(self.mt5_connector, "is_connected", False))
         except Exception:
-            # On ne bloque pas ici, l'envoi lèvera si non connecté
-            pass
+            connected = False
 
+        if not connected:
+            raise TradeExecutionError("MT5 non connecté: envoi interdit.")
+
+        # --- Requêtes minimales ---
         symbol = request.get("symbol")
         if not symbol:
             raise TradeExecutionError("Requête MT5 invalide: 'symbol' manquant.")
-        if request.get("volume", 0) <= 0:
+        try:
+            vol = float(request.get("volume", 0))
+        except Exception:
+            vol = 0.0
+        if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
 
-        # Déterminer l'action attendue à partir du type (utile pour l'audit)
+        # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
+        mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
+        if mt5 is None:
+            raise TradeExecutionError("MT5 API indisponible sur le connecteur.")
+
+        def _const(group: str, key: str, default_name: str):
+            try:
+                mapping = (self.mt5_mappings.get(group, {}) if isinstance(getattr(self, "mt5_mappings", None), dict) else {}) or {}
+                name = mapping.get(key, default_name)
+                return getattr(mt5, name)
+            except Exception:
+                return getattr(mt5, default_name, None)
+
+        # --- Déterminer l'action attendue (BUY/SELL) à partir du type ---
         order_type = request.get("type")
+        ORDER_TYPE_BUY = _const("order_types", "BUY", "ORDER_TYPE_BUY")
+        ORDER_TYPE_SELL = _const("order_types", "SELL", "ORDER_TYPE_SELL")
+        ORDER_TYPE_SELL_LIMIT = _const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT")
+        ORDER_TYPE_SELL_STOP = _const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
+
+        try:
+            ot_int = int(order_type)
+        except Exception:
+            ot_int = None
+
         action = "BUY"
-        if order_type in (
-            getattr(self, "ORDER_TYPE_SELL", -1),
-            getattr(self, "ORDER_TYPE_SELL_LIMIT", -2),
-            getattr(self, "ORDER_TYPE_SELL_STOP", -3),
-        ):
+        if ot_int in (ORDER_TYPE_SELL, ORDER_TYPE_SELL_LIMIT, ORDER_TYPE_SELL_STOP):
             action = "SELL"
 
-        # Contexte exécution (pour audit si dispo)
+        # --- Contexte exécution (pour audit si dispo) ---
         audit_ctx = getattr(self, "execution_context", {}) or {}
 
         try:
-            # --- Envoi via le connecteur ---
+            # --- Envoi via le connecteur (aucune simulation) ---
             result = self.mt5_connector.order_send(request)
+
+            if result is None:
+                # Aucun retour → échec franc
+                last_err = None
+                try:
+                    last_err = mt5.last_error()
+                except Exception:
+                    pass
+                raise TradeExecutionError(f"order_send() n'a retourné aucun résultat. last_error={last_err}")
 
             # --- Récupération sûre des champs renvoyés ---
             retcode = getattr(result, "retcode", None)
@@ -2963,16 +2999,25 @@ class TradeExecutor:
             request_id = getattr(result, "request_id", None)
 
             # --- Normalisation retcode / succès ---
-            ok_codes = {
-                getattr(self, "TRADE_RETCODE_DONE", 10009),
-                getattr(self, "TRADE_RETCODE_PLACED", 10008),
-            }
-            retcode_str = self.mt5_mappings.get("trade_retcodes", {}).get(
-                str(retcode), str(retcode)
-            )
+            RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")
+            RET_PLACED = _const("trade_retcodes", "PLACED", "TRADE_RETCODE_PLACED")
+            RET_DONE_PARTIAL = _const("trade_retcodes", "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL")
+            ok_codes = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
+
+            # Libellé humain (reverse mapping si possible)
+            retcode_str = ""
+            try:
+                for k, v in ((self.mt5_mappings.get("trade_retcodes", {}) or {}).items()):
+                    if getattr(mt5, v, None) == retcode:
+                        retcode_str = k
+                        break
+                if not retcode_str:
+                    retcode_str = str(retcode)
+            except Exception:
+                retcode_str = str(retcode)
 
             if retcode not in ok_codes:
-                # Échec -> audit puis lever
+                # Audit refus
                 if hasattr(self, "audit_logger"):
                     try:
                         self.audit_logger.log_trade_execution(
@@ -2998,18 +3043,23 @@ class TradeExecutor:
                         )
                     except Exception:
                         pass
+
+                # last_error lisible
+                try:
+                    last_err = mt5.last_error()
+                    last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+                except Exception:
+                    last_err_str = "N/A"
+
                 raise TradeExecutionError(
                     f"Envoi MT5 échoué (retcode={retcode} - {retcode_str}) | "
-                    f"order={order_id} deal={deal_id} | comment='{comment}'"
+                    f"order={order_id} deal={deal_id} | comment='{comment}' | last_error={last_err_str}"
                 )
 
             # --- Construction du résumé d'exécution ---
+            status = "filled" if retcode == RET_DONE else ("partially_filled" if retcode == RET_DONE_PARTIAL else "placed")
             execution_summary = {
-                "status": (
-                    "filled"
-                    if retcode == getattr(self, "TRADE_RETCODE_DONE", 10009)
-                    else "placed"
-                ),
+                "status": status,
                 "retcode": retcode,
                 "retcode_str": retcode_str,
                 "order": order_id,
@@ -3033,26 +3083,18 @@ class TradeExecutor:
 
             # (Optionnel) réconciliation post-trade: relire la position pour confirmer SL/TP réellement enregistrés
             try:
-                positions = (
-                    self.mt5.positions_get(symbol=symbol)
-                    if hasattr(self, "mt5")
-                    else None
-                )
+                positions = None
+                if hasattr(self, "mt5") and self.mt5:
+                    positions = self.mt5.positions_get(symbol=symbol)
                 if not positions and hasattr(self.mt5_connector, "mt5"):
                     positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
                 if positions:
                     try:
-                        pos = sorted(
-                            positions, key=lambda p: getattr(p, "time_update", 0)
-                        )[-1]
+                        pos = sorted(positions, key=lambda p: getattr(p, "time_update", 0))[-1]
                     except Exception:
                         pos = positions[-1]
-                    execution_summary["sl"] = getattr(
-                        pos, "sl", execution_summary["sl"]
-                    )
-                    execution_summary["tp"] = getattr(
-                        pos, "tp", execution_summary["tp"]
-                    )
+                    execution_summary["sl"] = getattr(pos, "sl", execution_summary["sl"])
+                    execution_summary["tp"] = getattr(pos, "tp", execution_summary["tp"])
             except Exception:
                 pass
 
@@ -3074,8 +3116,7 @@ class TradeExecutor:
                             "strategy_type": request.get("strategy_type"),
                             "rule_name": request.get("rule_name"),
                             "magic_number": request.get("magic"),
-                            "ticket": execution_summary.get("order")
-                            or execution_summary.get("deal"),
+                            "ticket": execution_summary.get("order") or execution_summary.get("deal"),
                             "request": request,
                             "response": {
                                 "retcode": retcode,
@@ -3094,6 +3135,7 @@ class TradeExecutor:
             return execution_summary
 
         except TradeExecutionError:
+            # Re-propage, déjà message clair
             raise
         except Exception as e:
             # Audit exception inattendue
@@ -3122,12 +3164,9 @@ class TradeExecutor:
                     )
                 except Exception:
                     pass
-            self.logger.error(
-                f"Erreur inattendue execute_order {symbol}: {e}", exc_info=True
-            )
-            raise TradeExecutionError(
-                f"Échec inattendu execute_order {symbol}: {e}"
-            ) from e
+            self.logger.error(f"Erreur inattendue execute_order {symbol}: {e}", exc_info=True)
+            raise TradeExecutionError(f"Échec inattendu execute_order {symbol}: {e}") from e
+
 
     def _send_close_order_with_retries(self, request: dict) -> Optional[Any]:
         """
@@ -3880,7 +3919,6 @@ class TradeExecutor:
         # TODO: Utiliser un moteur de templates (ex: Jinja2) pour des rapports Markdown/HTML plus riches. (TODO maintenu)
         return None
 
-
 def run_trade_execution_pipeline(
     trade_executor, decision_package: dict, is_dry_run: bool = False
 ) -> dict:
@@ -4091,21 +4129,8 @@ def run_trade_execution_pipeline(
         )
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
-
-    # ----------- 7) Human-in-the-loop / dry-run -----------
-    if not trade_executor.manual_override_if_needed(mt5_request):
-        feedback = trade_executor.feedback_pipeline(
-            order_id=final_decision.get("order_id", "N/A"),
-            status="pending_manual_approval",
-            reason="Manual override requested.",
-        )
-        trade_executor._feedback_safe(trade_decision, feedback)
-        return {"status": "pending_manual_approval"}
-
-    if is_dry_run:
-        logger.info("[DRY RUN] Requête MT5 prête mais non envoyée.")
-        return {"status": "ready", "mt5_request": mt5_request}
-
-    # ----------- 8) Exécution -----------
+ 
+        # ----------- 7) Exécution -----------
     execution_result = trade_executor.execute_order(mt5_request)
     return execution_result
+

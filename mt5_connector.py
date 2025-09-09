@@ -1092,7 +1092,11 @@ class MT5Connector:
         import math
 
         # --- 0) Connexion ---
-        if not self.is_connected:
+        try:
+            connected = bool(self.is_connected if isinstance(self.is_connected, bool) else self.is_connected())  # support prop/fn
+        except TypeError:
+            connected = bool(getattr(self, "is_connected", False))
+        if not connected:
             self.logger.error("MT5: Non connecté. Impossible d'envoyer l'ordre.")
             self.config_manager.send_alert(
                 "MT5 Non Connecté: Échec Envoi Ordre.", "telegram_critical"
@@ -1146,7 +1150,8 @@ class MT5Connector:
                 if s in ("MODIFY", "SLTP"):
                     return _mt5_const("trade_actions", "SLTP", "TRADE_ACTION_SLTP")
                 if s in ("CLOSE", "DEAL_CLOSE"):
-                    return _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")  # close via DEAL inverse
+                    # close se fait via DEAL inverse; on laisse DEAL ici
+                    return _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
             return None
 
         # --- 2) Champs requis minimaux (on tolère les manquants et on tente de compléter) ---
@@ -1183,12 +1188,16 @@ class MT5Connector:
         request.setdefault("comment", "SNIPER_X")
         if "magic" not in request:
             # fallback safe ; la vraie valeur doit venir de la stratégie/TradeExecutor
-            request["magic"] = int(self.config_manager.get("defaults.magic_number", 0) or 0)
+            try:
+                request["magic"] = int(self.config_manager.get("defaults.magic_number", 0) or 0)
+            except Exception:
+                request["magic"] = 0
 
         if "deviation" not in request:
-            request["deviation"] = int(
-                self.config_manager.get("trade_executor_settings.slippage_points", 5) or 5
-            )
+            try:
+                request["deviation"] = int(self.config_manager.get("trade_executor_settings.slippage_points", 5) or 5)
+            except Exception:
+                request["deviation"] = 5
 
         if "type_filling" not in request:
             # IOC par défaut (plus permissif pour les brokers qui refusent FOK)
@@ -1197,12 +1206,30 @@ class MT5Connector:
         if "type_time" not in request:
             request["type_time"] = getattr(mt5, "ORDER_TIME_GTC", None)
 
-        # --- 4) Prix : auto-fill pour le MARKET si absent/0 ---
+        # Toujours s'assurer que le symbole est sélectionné
+        try:
+            mt5.symbol_select(symbol, True)
+        except Exception:
+            pass
+
+        # --- 4) Prix : auto-fill pour le MARKET si absent/0 + arrondi digits ---
         price = request.get("price")
         try:
             price = float(price)
         except Exception:
             price = 0.0
+
+        # récupérer digits pour arrondis éventuels
+        try:
+            si = self.symbol_info(symbol) if callable(getattr(self, "symbol_info", None)) else None
+        except Exception:
+            si = None
+        digits = 5
+        try:
+            if si is not None:
+                digits = int(getattr(si, "digits", getattr(si, "Digits", 5)) or 5)
+        except Exception:
+            digits = 5
 
         is_market_action = action == _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
         if is_market_action and (not price or not math.isfinite(price) or price <= 0):
@@ -1211,13 +1238,20 @@ class MT5Connector:
             try:
                 px = self.get_current_price(symbol, side)
                 if isinstance(px, (int, float)) and px > 0:
-                    request["price"] = float(px)
+                    request["price"] = round(float(px), digits)
                 else:
                     self.logger.error(f"MT5: Prix market indisponible pour {symbol} ({side}).")
                     return None
             except Exception as ex:
                 self.logger.exception(f"MT5: Exception get_current_price({symbol},{side}): {ex}")
                 return None
+        elif is_market_action and price > 0:
+            request["price"] = round(float(price), digits)
+
+        # SL/TP présents -> arrondi aux digits
+        for k in ("sl", "tp", "stoplimit", "price"):
+            if k in request and isinstance(request[k], (int, float)):
+                request[k] = round(float(request[k]), digits)
 
         # --- 5) Log action lisible ---
         type_name_map = {
@@ -1256,20 +1290,32 @@ class MT5Connector:
                 f"Deal: {deal_val}, Ordre: {order_id_val}"
             )
 
-            if retcode_val == getattr(mt5, maps.get("trade_retcodes", {}).get("DONE", "TRADE_RETCODE_DONE"), None):
+            # Succès possibles: DONE (exécuté), PLACED (pending placé), PARTIAL (exécution partielle)
+            RET_DONE = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE", "TRADE_RETCODE_DONE"), None)
+            RET_PLACED = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("PLACED", "TRADE_RETCODE_PLACED"), None)
+            RET_DONE_PARTIAL = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"), None)
+
+            if retcode_val in (RET_DONE, RET_PLACED, RET_DONE_PARTIAL):
+                label = "exécuté" if retcode_val == RET_DONE else ("partiellement exécuté" if retcode_val == RET_DONE_PARTIAL else "placé")
                 self.logger.info(
-                    f"MT5: Ordre exécuté avec succès ! Deal #{deal_val}, Ordre #{order_id_val} pour {symbol}."
+                    f"MT5: Ordre {label} avec succès. Deal #{deal_val}, Ordre #{order_id_val} pour {symbol}."
                 )
             else:
                 # Retcode → libellé humain
                 retcode_str = ""
-                for k, v in (maps.get("trade_retcodes", {}) or {}).items():
+                for k, v in ((maps.get("trade_retcodes", {}) or {}).items()):
                     if getattr(mt5, v, None) == retcode_val:
                         retcode_str = k
                         break
+                # mt5.last_error() peut renvoyer tuple -> rendre lisible
+                try:
+                    last_err = mt5.last_error()
+                    last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+                except Exception:
+                    last_err_str = "N/A"
                 self.logger.warning(
-                    f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str}), "
-                    f"Commentaire: {comment_val}. Erreur système: {mt5.last_error()}."
+                    f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str or 'UNKNOWN'}), "
+                    f"Commentaire: {comment_val}. Erreur système: {last_err_str}."
                 )
                 self.config_manager.send_alert(
                     f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). Commentaire: {comment_val}",
@@ -1278,9 +1324,14 @@ class MT5Connector:
             return result
 
         # --- 8) Aucun résultat ---
-        self.logger.error(f"MT5: order_send a échoué. Aucune réponse. Erreur système: {mt5.last_error()}.")
+        try:
+            last_err = mt5.last_error()
+            last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+        except Exception:
+            last_err_str = "N/A"
+        self.logger.error(f"MT5: order_send a échoué. Aucune réponse. Erreur système: {last_err_str}.")
         self.config_manager.send_alert(
-            f"MT5: Échec envoi ordre: Aucune réponse. {mt5.last_error()}",
+            f"MT5: Échec envoi ordre: Aucune réponse. {last_err_str}",
             "telegram_critical",
         )
         return None

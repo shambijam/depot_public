@@ -1534,477 +1534,739 @@ class DecisionPipeline:
         return round(vol_q, 2)
 
     def decide_trade_to_execute(
-        self,
-        context: Dict[str, Any],
-        current_config: Dict[str, Any],
-        signals: Dict[str, Any],
-        strategy_manager_instance=None,
-    ) -> Dict[str, Any]:
-        """
-        Prend directement la décision de trade en utilisant les paramètres de stratégie
-        mais sans déléguer la décision finale aux instances de stratégie.
-        DecisionPipeline est le SEUL DÉCIDEUR.
+            self,
+            context: Dict[str, Any],
+            current_config: Dict[str, Any],
+            signals: Dict[str, Any],
+            strategy_manager_instance=None,
+        ) -> Dict[str, Any]:
+            """
+            Prend directement la décision de trade en utilisant les paramètres de stratégie
+            mais sans déléguer la décision finale aux instances de stratégie.
+            DecisionPipeline est le SEUL DÉCIDEUR.
 
-        ⚔️ Version STRICT 'katana midline scalp' (NO FALLBACK):
-        - Gate d’entrée Bollinger médiane obligatoire (BUY ∈ [lower, mid], SELL ∈ [mid, upper])
-        - 'entry_gate_ok' requis (depuis micro-phase Bollinger) + distance mini à la médiane
-        - Refus explicite si données Bollinger ou prix invalides
-        - Interdit en expansion/surge (anti-chaos) et hors range si requis
-        - TPSL serrés basés sur half-band & médiane, rejet si RR < min_rr (aucun ajustement soft)
-        - Attache systématique des niveaux Bollinger au package décisionnel
+            ⚔️ Version STRICT 'katana midline scalp' (NO FALLBACK):
+            - Gate d’entrée Bollinger médiane obligatoire (BUY ∈ [lower, mid], SELL ∈ [mid, upper])
+            - 'entry_gate_ok' requis (depuis micro-phase Bollinger) + distance mini à la médiane
+            - Refus explicite si données Bollinger ou prix invalides
+            - Interdit en expansion/surge (anti-chaos) et hors range si requis
+            - TPSL serrés basés sur half-band & médiane, rejet si RR < min_rr (aucun ajustement soft)
+            - Attache systématique des niveaux Bollinger au package décisionnel
 
-        ➕ Intégration optionnelle EMA/RSI/ATR Trailing (entrées uniquement)
-        - Si activé et qu’une entrée BUY/SELL est proposée, on construit SL/TP (TP via min_rr*SL)
-        et on bypass le gate Bollinger. La gestion des EXIT/UPDATE_TRAIL reste au position manager.
-        """
-        # DIAG local
-        try:
-            from core.diagnostics import get_tracker_from_context
-        except Exception:
-            get_tracker_from_context = None
-
-        def _diag_size(asset_sym: str, reason: str, extra: dict | None = None):
-            if not get_tracker_from_context:
-                return
+            ➕ Intégration optionnelle EMA/RSI/ATR Trailing (entrées uniquement)
+            - Si activé et qu’une entrée BUY/SELL est proposée, on construit SL/TP (TP via min_rr*SL)
+            et on bypass le gate Bollinger. La gestion des EXIT/UPDATE_TRAIL reste au position manager.
+            """
+            # DIAG local
             try:
-                get_tracker_from_context(context).note(
-                    asset_sym, "sizing", reason, extra or {}
-                )
+                from core.diagnostics import get_tracker_from_context
             except Exception:
-                pass
+                get_tracker_from_context = None
 
-        self.logger.info(
-            "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
-        )
-        self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
+            def _diag_size(asset_sym: str, reason: str, extra: dict | None = None):
+                if not get_tracker_from_context:
+                    return
+                try:
+                    get_tracker_from_context(context).note(
+                        asset_sym, "sizing", reason, extra or {}
+                    )
+                except Exception:
+                    pass
 
-        # 1) Filtres pré-décision critiques (sécurité globale)
-        if current_config.get(
-            "halt_on_major_news", True
-        ) and self.config_manager.check_news_schedule(
-            context, context.get("economic_calendar", [])
-        ):
-            self.logger.warning(
-                "Trade suspendu en raison d'un événement d'actualité majeur."
-            )
-            self.config_manager.log_decision(
-                current_config, {}, context, "Trade bloqué: Actualité majeure."
-            )
-            return {}
-
-        # 2) Récupérer le nom de stratégie
-        strategy_name = current_config.get("strategy_name", "unknown")
-        self.logger.info(
-            f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
-        )
-
-        # 3) CORE évalue directement les signaux (sans délégation)
-        trade_decision = self._core_evaluate_signals(
-            context, current_config, signals, strategy_name
-        )
-        if not trade_decision:
             self.logger.info(
-                f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
+                "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
             )
-            # === RÈGLE 1 : Scalping Bollinger (range plat uniquement) ===
-            for asset, sig in signals.items():
-                boll = sig.get("boll", {})
-                phase = sig.get("phase")
-                conf = float(sig.get("confidence_score", 0.0))
-                price = sig.get("close")
-                point = sig.get("point", 0.0001)
+            self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
 
-                if boll and phase and "range" in str(phase).lower():
-                    bb_mid = boll.get("bb_mid")
-                    bb_upper = boll.get("bb_upper")
-                    bb_lower = boll.get("bb_lower")
-
-                    if all(
-                        isinstance(x, (int, float))
-                        for x in [price, bb_mid, bb_upper, bb_lower]
-                    ):
-                        if price < bb_mid:  # BUY si prix sous la médiane
-                            return {
-                                "action": "BUY",
-                                "asset": asset,
-                                "volume": 1.0,  # TODO: sizing dynamique
-                                "target_tp_pips": (bb_upper - price) / point,
-                                "target_sl_pips": (price - bb_lower) / point,
-                                "rule_name": "scalping_bollinger_range",
-                                "confidence": conf,
-                            }
-                        elif price > bb_mid:  # SELL si prix au-dessus de la médiane
-                            return {
-                                "action": "SELL",
-                                "asset": asset,
-                                "volume": 1.0,
-                                "target_tp_pips": (price - bb_lower) / point,
-                                "target_sl_pips": (bb_upper - price) / point,
-                                "rule_name": "scalping_bollinger_range",
-                                "confidence": conf,
-                            }
-            return {}
-
-        # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
-        action_raw = str(trade_decision.get("action", "")).upper()
-        action_map = {
-            "LONG": "BUY",
-            "SHORT": "SELL",
-            "BUY": "BUY",
-            "SELL": "SELL",
-            "CLOSE": "CLOSE",
-        }
-        normalized_action = action_map.get(action_raw)
-
-        if not normalized_action:
-            self.logger.warning(
-                f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement."
-            )
-            self.config_manager.log_decision(
-                current_config,
-                {},
-                context,
-                f"Décision ignorée (action inconnue: {action_raw})",
-            )
-            return {}
-
-        asset_raw = str(trade_decision.get("asset", "")).upper().strip()
-        if not asset_raw:
-            self.logger.warning("Décision reçue sans 'asset' -> décision ignorée.")
-            self.config_manager.log_decision(
-                current_config, {}, context, "Décision ignorée (asset vide)."
-            )
-            return {}
-
-        allowed_assets = set(map(str.upper, current_config.get("tradeable_assets", [])))
-        if allowed_assets and asset_raw not in allowed_assets:
-            self.logger.warning(
-                f"Asset '{asset_raw}' non autorisé pour la stratégie '{strategy_name}'. Whitelist: {sorted(allowed_assets)}"
-            )
-            self.config_manager.log_decision(
-                current_config,
-                {},
-                context,
-                f"Décision ignorée (asset non autorisé: {asset_raw})",
-            )
-            return {}
-
-        order_type = str(trade_decision.get("order_type", "MARKET")).upper()
-        if order_type not in {
-            "MARKET",
-            "BUY_LIMIT",
-            "SELL_LIMIT",
-            "BUY_STOP",
-            "SELL_STOP",
-        }:
-            self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
-            order_type = "MARKET"
-
-        trade_decision["action"] = normalized_action
-        trade_decision["asset"] = asset_raw
-        trade_decision["order_type"] = order_type
-
-        # ==========================================================
-        # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
-        # ==========================================================
-        rm_cfg = current_config.get("risk_management") or {}
-        max_trades_total = int(rm_cfg.get("max_trades_per_day", 999))
-        max_trades_asset = int(rm_cfg.get("max_trades_per_asset_per_day", 999))
-
-        trades_today = int(context.get("daily_trade_count", 0))
-        trades_for_asset_today = int(
-            (context.get("trades_by_asset", {}) or {}).get(asset_raw, 0)
-        )
-
-        if trades_today >= max_trades_total:
-            self.logger.warning(
-                f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte."
-            )
-            return {}
-        if trades_for_asset_today >= max_trades_asset:
-            self.logger.warning(
-                f"🚫 Trade bloqué: limite {max_trades_asset} atteinte pour {asset_raw}."
-            )
-            return {}
-
-        # --- Prix courant (commun à tous les modules) ---
-        def _num(v, default=np.nan):
-            try:
-                x = float(v)
-                return x if math.isfinite(x) else default
-            except Exception:
-                return default
-
-        price = None
-        for key in ("entry_price", "current_price", "last_close", "close"):
-            if key in trade_decision and trade_decision.get(key) is not None:
-                price = trade_decision.get(key)
-                break
-            if (
-                isinstance(signals.get("M1"), dict)
-                and signals["M1"].get(key) is not None
+            # 1) Filtres pré-décision critiques (sécurité globale)
+            if current_config.get(
+                "halt_on_major_news", True
+            ) and self.config_manager.check_news_schedule(
+                context, context.get("economic_calendar", [])
             ):
-                price = signals["M1"].get(key)
-                break
-            if signals.get(key) is not None:
-                price = signals.get(key)
-                break
-        price = _num(price)
+                self.logger.warning(
+                    "Trade suspendu en raison d'un événement d'actualité majeur."
+                )
+                self.config_manager.log_decision(
+                    current_config, {}, context, "Trade bloqué: Actualité majeure."
+                )
+                return {}
 
-        # 👉 CORRECTION #2 : Assurer l'entry pour le risk engine
-        if isinstance(price, float) and math.isfinite(price):
-            trade_decision["entry_price"] = float(price)
-        else:
-            self.logger.warning(
-                "Aucun entry_price détecté → risque de risk_calc_failed."
+            # 2) Récupérer le nom de stratégie
+            strategy_name = current_config.get("strategy_name", "unknown")
+            self.logger.info(
+                f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
             )
 
-        # ==========================================================
-        # ➕ Option EMA/RSI/ATR Trailing — ENTRÉES UNIQUEMENT
-        # ==========================================================
-        used_ema_decision = False
-        if (
-            strategy_name.lower() == "scalping"
-            and current_config.get("use_ema_rsi_atr_trail", True)
-            and isinstance(price, float)
-            and math.isfinite(price)
-        ):
-            md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
-
-            # ⚠️ Correction anti-ambiguïté pandas (évite "truth value of a DataFrame is ambiguous")
-            df_ema = md.get("annotated_rates_df")
-            if not isinstance(df_ema, pd.DataFrame) or df_ema.empty:
-                df_ema = md.get("rates_df")
-            if not isinstance(df_ema, pd.DataFrame) or df_ema.empty:
-                df_ema = None
-
-            if isinstance(df_ema, pd.DataFrame) and not df_ema.empty:
-                account_equity = float(
-                    (context.get("account_info", {}) or {}).get("equity", 0.0) or 0.0
+            # 3) CORE évalue directement les signaux (sans délégation)
+            trade_decision = self._core_evaluate_signals(
+                context, current_config, signals, strategy_name
+            )
+            if not trade_decision:
+                self.logger.info(
+                    f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
                 )
-                ema_dec = self._build_decision_ema_rsi_atr_trail(
-                    asset_raw,
-                    df_ema,
-                    price,
-                    account_equity,
-                    context.get("current_position"),
-                    current_config,
-                )
-                # On ne traite ici que les entrées BUY/SELL (uppercase)
-                act = str((ema_dec or {}).get("action", "")).upper()
-                if act in {"BUY", "SELL"}:
-                    # fabrique TP via min_rr * distance_SL pour satisfaire calculate_risk_parameters
-                    try:
-                        sl_price = float(ema_dec["stop_loss"])
-                    except Exception:
-                        sl_price = float("nan")
+                # === RÈGLE 1 : Scalping Bollinger (range plat uniquement) ===
+                for asset, sig in signals.items():
+                    boll = sig.get("boll", {})
+                    phase = sig.get("phase")
+                    conf = float(sig.get("confidence_score", 0.0))
+                    price = sig.get("close")
+                    point = sig.get("point", 0.0001)
 
-                    if math.isfinite(sl_price):
-                        min_rr_local = float(
-                            (
-                                (current_config.get("risk_management", {}) or {}).get(
-                                    "min_rr", 1.5
-                                )
-                            )
-                            or 1.5
-                        )
-                        sl_dist = abs(price - sl_price)
-                        tp_price = (
-                            price + min_rr_local * sl_dist
-                            if act == "BUY"
-                            else price - min_rr_local * sl_dist
-                        )
+                    if boll and phase and "range" in str(phase).lower():
+                        bb_mid = boll.get("bb_mid")
+                        bb_upper = boll.get("bb_upper")
+                        bb_lower = boll.get("bb_lower")
 
-                        trade_decision = {
-                            "action": act,
-                            "asset": asset_raw,
-                            "order_type": "MARKET",
-                            "entry_price": price,
-                            "sl_price": float(round(sl_price, 10)),
-                            "tp_price": float(round(tp_price, 10)),
-                            "rule_name": "ema_rsi_atr_trail",
-                            "level_mode": "ema_rsi_atr",
-                        }
-                        used_ema_decision = True
-                    else:
-                        self.logger.info(
-                            "EMA/RSI/ATR: SL invalide -> on ignore l'entrée EMA et on continue."
-                        )
-                elif act in {"EXIT_LONG", "EXIT_SHORT", "UPDATE_TRAIL"}:
-                    # Gestion de position -> pas ici
-                    self.logger.debug(
-                        "EMA/RSI/ATR: action de gestion de position détectée (ignorée dans le decision engine)."
-                    )
-
-            # ➕ Gate "Big Reversal Candle" (OB/FVG/BOS confluence)
-            if not used_ema_decision:
-                try:
-                    df_rev = md.get("annotated_rates_df")
-                    if isinstance(df_rev, pd.DataFrame) and not df_rev.empty:
-                        from phase_observer.detectors import Detectors
-
-                        det = Detectors()
-                        rev_signals = det.detect_big_reversal_candle(df_rev)
-                        last_signal = rev_signals[-1] if rev_signals else None
-                        if last_signal and last_signal.get("type"):
-                            trade_decision.update(
-                                {
-                                    "rule_name": "big_reversal_candle",
-                                    "level_mode": "big_reversal",
-                                    "big_reversal": last_signal,
+                        if all(
+                            isinstance(x, (int, float))
+                            for x in [price, bb_mid, bb_upper, bb_lower]
+                        ):
+                            if price < bb_mid:  # BUY si prix sous la médiane
+                                return {
+                                    "action": "BUY",
+                                    "asset": asset,
+                                    "volume": 1.0,  # TODO: sizing dynamique
+                                    "target_tp_pips": (bb_upper - price) / point,
+                                    "target_sl_pips": (price - bb_lower) / point,
+                                    "rule_name": "scalping_bollinger_range",
+                                    "confidence": conf,
                                 }
-                            )
-                            self.logger.info(
-                                f"🎯 Signal Big Reversal validé ({last_signal['type']}) pour {asset_raw}"
-                            )
-                except Exception as e:
-                    self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
+                            elif price > bb_mid:  # SELL si prix au-dessus de la médiane
+                                return {
+                                    "action": "SELL",
+                                    "asset": asset,
+                                    "volume": 1.0,
+                                    "target_tp_pips": (price - bb_lower) / point,
+                                    "target_sl_pips": (bb_upper - price) / point,
+                                    "rule_name": "scalping_bollinger_range",
+                                    "confidence": conf,
+                                }
+                return {}
 
-        # ==========================================================
-        # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
-        #       exécuté uniquement si on n'a PAS utilisé l'alternative EMA
-        # ==========================================================
-        if not used_ema_decision:
-            scalp_cfg = (current_config.get("scalping") or {}).get(
-                "boll_midline", {}
-            ) or {}
-            rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
-            k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
-            buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
-            require_range = bool(scalp_cfg.get("require_range_regime", True))
-            block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
-            min_mid_ratio = float(
-                scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
-            )  # distance mini à la médiane
+            # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
+            action_raw = str(trade_decision.get("action", "")).upper()
+            action_map = {
+                "LONG": "BUY",
+                "SHORT": "SELL",
+                "BUY": "BUY",
+                "SELL": "SELL",
+                "CLOSE": "CLOSE",
+            }
+            normalized_action = action_map.get(action_raw)
 
-            def _get(path, default=None):
-                try:
-                    return path()  # lambda
-                except Exception:
-                    return default
-
-            def _to_bool(x, default=False) -> bool:
-                try:
-                    if isinstance(x, (int, float)):
-                        return bool(x)
-                    if isinstance(x, str):
-                        return x.strip().lower() in {"1", "true", "yes", "y", "on"}
-                    return bool(x)
-                except Exception:
-                    return default
-
-            boll = (
-                signals.get("boll")
-                or signals.get("bollinger")
-                or signals.get("boll_micro")
-                or signals.get("m1_boll")
-                or {}
-            )
-
-            bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
-            bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
-            bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
-            is_range = _to_bool(
-                _get(lambda: boll.get("is_range"), signals.get("is_range"))
-            )
-            is_exp = _to_bool(
-                _get(lambda: boll.get("is_expansion"), signals.get("is_expansion"))
-            )
-            mid_entry = (
-                str(
-                    _get(lambda: boll.get("mid_entry"), signals.get("mid_entry", ""))
-                    or ""
+            if not normalized_action:
+                self.logger.warning(
+                    f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement."
                 )
-            ).lower()
+                self.config_manager.log_decision(
+                    current_config,
+                    {},
+                    context,
+                    f"Décision ignorée (action inconnue: {action_raw})",
+                )
+                return {}
 
-            # ✅ micro-phase strict flags
-            entry_gate_ok = _to_bool(
-                _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
-                default=False,
-            )
-            mid_distance_ratio = _num(
-                _get(
-                    lambda: boll.get("mid_distance_ratio"),
-                    signals.get("mid_distance_ratio"),
-                ),
-                np.nan,
+            asset_raw = str(trade_decision.get("asset", "")).upper().strip()
+            if not asset_raw:
+                self.logger.warning("Décision reçue sans 'asset' -> décision ignorée.")
+                self.config_manager.log_decision(
+                    current_config, {}, context, "Décision ignorée (asset vide)."
+                )
+                return {}
+
+            allowed_assets = set(map(str.upper, current_config.get("tradeable_assets", [])))
+            if allowed_assets and asset_raw not in allowed_assets:
+                self.logger.warning(
+                    f"Asset '{asset_raw}' non autorisé pour la stratégie '{strategy_name}'. Whitelist: {sorted(allowed_assets)}"
+                )
+                self.config_manager.log_decision(
+                    current_config,
+                    {},
+                    context,
+                    f"Décision ignorée (asset non autorisé: {asset_raw})",
+                )
+                return {}
+
+            order_type = str(trade_decision.get("order_type", "MARKET")).upper()
+            if order_type not in {
+                "MARKET",
+                "BUY_LIMIT",
+                "SELL_LIMIT",
+                "BUY_STOP",
+                "SELL_STOP",
+            }:
+                self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
+                order_type = "MARKET"
+
+            trade_decision["action"] = normalized_action
+            trade_decision["asset"] = asset_raw
+            trade_decision["order_type"] = order_type
+
+            # ==========================================================
+            # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
+            # ==========================================================
+            rm_cfg = current_config.get("risk_management") or {}
+            max_trades_total = int(rm_cfg.get("max_trades_per_day", 999))
+            max_trades_asset = int(rm_cfg.get("max_trades_per_asset_per_day", 999))
+
+            trades_today = int(context.get("daily_trade_count", 0))
+            trades_for_asset_today = int(
+                (context.get("trades_by_asset", {}) or {}).get(asset_raw, 0)
             )
 
-            def _safe_val(val, fallback=None):
+            if trades_today >= max_trades_total:
+                self.logger.warning(
+                    f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte."
+                )
+                return {}
+            if trades_for_asset_today >= max_trades_asset:
+                self.logger.warning(
+                    f"🚫 Trade bloqué: limite {max_trades_asset} atteinte pour {asset_raw}."
+                )
+                return {}
+
+            # --- Prix courant (commun à tous les modules) ---
+            def _num(v, default=np.nan):
                 try:
-                    return (
-                        float(val)
-                        if (val is not None and math.isfinite(val))
-                        else fallback
+                    x = float(v)
+                    return x if math.isfinite(x) else default
+                except Exception:
+                    return default
+
+            price = None
+            for key in ("entry_price", "current_price", "last_close", "close"):
+                if key in trade_decision and trade_decision.get(key) is not None:
+                    price = trade_decision.get(key)
+                    break
+                if (
+                    isinstance(signals.get("M1"), dict)
+                    and signals["M1"].get(key) is not None
+                ):
+                    price = signals["M1"].get(key)
+                    break
+                if signals.get(key) is not None:
+                    price = signals.get(key)
+                    break
+            price = _num(price)
+
+            # 👉 CORRECTION #2 : Assurer l'entry pour le risk engine
+            if isinstance(price, float) and math.isfinite(price):
+                trade_decision["entry_price"] = float(price)
+            else:
+                self.logger.warning(
+                    "Aucun entry_price détecté → risque de risk_calc_failed."
+                )
+
+            # ==========================================================
+            # ➕ Option EMA/RSI/ATR Trailing — ENTRÉES UNIQUEMENT
+            # ==========================================================
+            used_ema_decision = False
+            if (
+                strategy_name.lower() == "scalping"
+                and current_config.get("use_ema_rsi_atr_trail", True)
+                and isinstance(price, float)
+                and math.isfinite(price)
+            ):
+                md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+
+                # ⚠️ Correction anti-ambiguïté pandas (évite "truth value of a DataFrame is ambiguous")
+                df_ema = md.get("annotated_rates_df")
+                if not isinstance(df_ema, pd.DataFrame) or df_ema.empty:
+                    df_ema = md.get("rates_df")
+                if not isinstance(df_ema, pd.DataFrame) or df_ema.empty:
+                    df_ema = None
+
+                if isinstance(df_ema, pd.DataFrame) and not df_ema.empty:
+                    account_equity = float(
+                        (context.get("account_info", {}) or {}).get("equity", 0.0) or 0.0
                     )
-                except Exception:
-                    return fallback
+                    ema_dec = self._build_decision_ema_rsi_atr_trail(
+                        asset_raw,
+                        df_ema,
+                        price,
+                        account_equity,
+                        context.get("current_position"),
+                        current_config,
+                    )
+                    # On ne traite ici que les entrées BUY/SELL (uppercase)
+                    act = str((ema_dec or {}).get("action", "")).upper()
+                    if act in {"BUY", "SELL"}:
+                        # fabrique TP via min_rr * distance_SL pour satisfaire calculate_risk_parameters
+                        try:
+                            sl_price = float(ema_dec["stop_loss"])
+                        except Exception:
+                            sl_price = float("nan")
 
-            bb_mid = _safe_val(bb_mid, trade_decision.get("boll", {}).get("bb_mid"))
-            bb_up = _safe_val(bb_up, trade_decision.get("boll", {}).get("bb_upper"))
-            bb_lo = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
-            price_local = _safe_val(price, signals.get("close"))
+                        if math.isfinite(sl_price):
+                            min_rr_local = float(
+                                (
+                                    (current_config.get("risk_management", {}) or {}).get(
+                                        "min_rr", 1.5
+                                    )
+                                )
+                                or 1.5
+                            )
+                            sl_dist = abs(price - sl_price)
+                            tp_price = (
+                                price + min_rr_local * sl_dist
+                                if act == "BUY"
+                                else price - min_rr_local * sl_dist
+                            )
 
-            # ⚠️ Nouveau comportement : pas de rejet si données incomplètes
-            if None in (bb_mid, bb_up, bb_lo, price_local):
+                            trade_decision = {
+                                "action": act,
+                                "asset": asset_raw,
+                                "order_type": "MARKET",
+                                "entry_price": price,
+                                "sl_price": float(round(sl_price, 10)),
+                                "tp_price": float(round(tp_price, 10)),
+                                "rule_name": "ema_rsi_atr_trail",
+                                "level_mode": "ema_rsi_atr",
+                            }
+                            used_ema_decision = True
+                        else:
+                            self.logger.info(
+                                "EMA/RSI/ATR: SL invalide -> on ignore l'entrée EMA et on continue."
+                            )
+                    elif act in {"EXIT_LONG", "EXIT_SHORT", "UPDATE_TRAIL"}:
+                        # Gestion de position -> pas ici
+                        self.logger.debug(
+                            "EMA/RSI/ATR: action de gestion de position détectée (ignorée dans le decision engine)."
+                        )
+
+                # ➕ Gate "Big Reversal Candle" (OB/FVG/BOS confluence)
+                if not used_ema_decision:
+                    try:
+                        df_rev = md.get("annotated_rates_df")
+                        if isinstance(df_rev, pd.DataFrame) and not df_rev.empty:
+                            from phase_observer.detectors import Detectors
+
+                            det = Detectors()
+                            rev_signals = det.detect_big_reversal_candle(df_rev)
+                            last_signal = rev_signals[-1] if rev_signals else None
+                            if last_signal and last_signal.get("type"):
+                                trade_decision.update(
+                                    {
+                                        "rule_name": "big_reversal_candle",
+                                        "level_mode": "big_reversal",
+                                        "big_reversal": last_signal,
+                                    }
+                                )
+                                self.logger.info(
+                                    f"🎯 Signal Big Reversal validé ({last_signal['type']}) pour {asset_raw}"
+                                )
+                    except Exception as e:
+                        self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
+
+            # ==========================================================
+            # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
+            #       exécuté uniquement si on n'a PAS utilisé l'alternative EMA
+            # ==========================================================
+            if not used_ema_decision:
+                scalp_cfg = (current_config.get("scalping") or {}).get(
+                    "boll_midline", {}
+                ) or {}
+                rr_min = float(scalp_cfg.get("min_rr", 1.1) or 1.1)
+                k_halfband_tp = float(scalp_cfg.get("tp_halfband_k", 0.6) or 0.6)
+                buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
+                require_range = bool(scalp_cfg.get("require_range_regime", True))
+                block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
+                min_mid_ratio = float(
+                    scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
+                )  # distance mini à la médiane
+
+                def _get(path, default=None):
+                    try:
+                        return path()  # lambda
+                    except Exception:
+                        return default
+
+                def _to_bool(x, default=False) -> bool:
+                    try:
+                        if isinstance(x, (int, float)):
+                            return bool(x)
+                        if isinstance(x, str):
+                            return x.strip().lower() in {"1", "true", "yes", "y", "on"}
+                        return bool(x)
+                    except Exception:
+                        return default
+
+                boll = (
+                    signals.get("boll")
+                    or signals.get("bollinger")
+                    or signals.get("boll_micro")
+                    or signals.get("m1_boll")
+                    or {}
+                )
+
+                bb_mid = _num(_get(lambda: boll.get("bb_mid"), signals.get("bb_mid")))
+                bb_up = _num(_get(lambda: boll.get("bb_upper"), signals.get("bb_upper")))
+                bb_lo = _num(_get(lambda: boll.get("bb_lower"), signals.get("bb_lower")))
+                is_range = _to_bool(
+                    _get(lambda: boll.get("is_range"), signals.get("is_range"))
+                )
+                is_exp = _to_bool(
+                    _get(lambda: boll.get("is_expansion"), signals.get("is_expansion"))
+                )
+                mid_entry = (
+                    str(
+                        _get(lambda: boll.get("mid_entry"), signals.get("mid_entry", ""))
+                        or ""
+                    )
+                ).lower()
+
+                # ✅ micro-phase strict flags
+                entry_gate_ok = _to_bool(
+                    _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
+                    default=False,
+                )
+                mid_distance_ratio = _num(
+                    _get(
+                        lambda: boll.get("mid_distance_ratio"),
+                        signals.get("mid_distance_ratio"),
+                    ),
+                    np.nan,
+                )
+
+                def _safe_val(val, fallback=None):
+                    try:
+                        return (
+                            float(val)
+                            if (val is not None and math.isfinite(val))
+                            else fallback
+                        )
+                    except Exception:
+                        return fallback
+
+                bb_mid = _safe_val(bb_mid, trade_decision.get("boll", {}).get("bb_mid"))
+                bb_up = _safe_val(bb_up, trade_decision.get("boll", {}).get("bb_upper"))
+                bb_lo = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
+                price_local = _safe_val(price, signals.get("close"))
+
+                # ⚠️ Nouveau comportement : pas de rejet si données incomplètes
+                if None in (bb_mid, bb_up, bb_lo, price_local):
+                    self.logger.warning(
+                        "⚠️ Données Bollinger incomplètes — trade maintenu en mode 'low_confidence'"
+                    )
+                    trade_decision["confidence"] = (
+                        float(trade_decision.get("confidence", 0.5)) * 0.6
+                    )
+
+                # ⚠️ Si gate ou distance trop faible → on réduit confiance, pas de rejet
+                if not entry_gate_ok:
+                    self.logger.warning(
+                        "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
+                    )
+                    trade_decision["confidence"] = (
+                        float(trade_decision.get("confidence", 0.5)) * 0.7
+                    )
+
+                if isinstance(mid_distance_ratio, float) and math.isfinite(
+                    mid_distance_ratio
+                ):
+                    if mid_distance_ratio < min_mid_ratio:
+                        self.logger.warning(
+                            f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — confiance réduite."
+                        )
+                        trade_decision["confidence"] = (
+                            float(trade_decision.get("confidence", 0.5)) * 0.8
+                        )
+
+                    # pip_size
+                    pip_size = None
+                    try:
+                        si_local = getattr(self, "symbol_info", None)
+                        point_local = 0.0
+                        if si_local is not None and hasattr(si_local, "point"):
+                            point_local = float(getattr(si_local, "point") or 0.0)
+                        elif isinstance(si_local, dict):
+                            point_local = float(si_local.get("point", 0.0) or 0.0)
+                        if point_local <= 0 and "point" in signals:
+                            point_local = _num(signals.get("point"), 0.0)
+                        pip_size = point_local * (
+                            10.0
+                            if (
+                                isinstance(
+                                    getattr(
+                                        si_local,
+                                        "digits",
+                                        getattr(si_local, "digits", None),
+                                    ),
+                                    (int, float),
+                                )
+                                and getattr(si_local, "digits", 5) in (3, 5)
+                            )
+                            else 1.0
+                        )
+                    except Exception:
+                        pip_size = None
+
+                    # Si pas récupéré via self.symbol_info, tente via market_data/config
+                    if not pip_size or pip_size <= 0:
+                        md_asset = (context.get("market_data", {}) or {}).get(
+                            asset_raw, {}
+                        ) or {}
+                        si = (
+                            md_asset.get("symbol_info")
+                            or current_config.get("symbol_info")
+                            or {}
+                        )
+                        try:
+                            point = float(si.get("point") or signals.get("point") or 0.0001)
+                            digits = int(si.get("digits") or 5)
+                            pip_points = 10.0 if digits in (3, 5) else 1.0
+                            pip_size = point * pip_points
+                        except Exception:
+                            pip_size = None
+
+                    half_band = (
+                        (bb_up - bb_lo) / 2.0
+                        if (bb_up is not None and bb_lo is not None)
+                        else None
+                    )
+                    in_buy_zone = (
+                        (price_local is not None)
+                        and (bb_mid is not None)
+                        and (bb_lo is not None)
+                        and ((price_local <= bb_mid) and (price_local >= bb_lo))
+                    )
+                    in_sell_zone = (
+                        (price_local is not None)
+                        and (bb_mid is not None)
+                        and (bb_up is not None)
+                        and ((price_local >= bb_mid) and (price_local <= bb_up))
+                    )
+
+                    if block_on_expansion and is_exp:
+                        self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
+                        return {}
+                    if require_range and not is_range:
+                        self.logger.info("Rejet: régime non-range pour midline scalp.")
+                        return {}
+
+                    if normalized_action == "BUY" and not (
+                        in_buy_zone and mid_entry == "buy"
+                    ):
+                        self.logger.warning("⚠️ BUY hors zone midline — confiance réduite.")
+                        trade_decision["confidence"] = (
+                            float(trade_decision.get("confidence", 0.5)) * 0.8
+                        )
+                    elif normalized_action == "SELL" and not (
+                        in_sell_zone and mid_entry == "sell"
+                    ):
+                        self.logger.warning("⚠️ SELL hors zone midline — confiance réduite.")
+                        trade_decision["confidence"] = (
+                            float(trade_decision.get("confidence", 0.5)) * 0.8
+                        )
+                    elif normalized_action == "CLOSE":
+                        pass  # fermeture autorisée
+
+                    # ✅ RÈGLE 3 : Liquidity Sweep
+                    if strategy_name.lower() == "scalping":
+                        sweep_cfg = (current_config.get("scalping") or {}).get(
+                            "liquidity_sweep", {}
+                        ) or {}
+                        lookback_bars = int(sweep_cfg.get("lookback_bars", 20))
+
+                        md2 = (context.get("market_data", {}) or {}).get(
+                            asset_raw, {}
+                        ) or {}
+                        df_ls = md2.get("annotated_rates_df")
+
+                        if isinstance(df_ls, pd.DataFrame) and len(df_ls) >= lookback_bars:
+                            recent_high = df_ls["high"].tail(lookback_bars).max()
+                            recent_low = df_ls["low"].tail(lookback_bars).min()
+
+                            if price_local >= recent_high:  # Sweep vers le haut
+                                trade_decision = {
+                                    "action": "SELL",
+                                    "asset": asset_raw,
+                                    "order_type": "MARKET",
+                                    "entry_price": price_local,
+                                    "rule_name": "liquidity_sweep_high",
+                                    "level_mode": "sweep",
+                                }
+                            elif price_local <= recent_low:  # Sweep vers le bas
+                                trade_decision = {
+                                    "action": "BUY",
+                                    "asset": asset_raw,
+                                    "order_type": "MARKET",
+                                    "entry_price": price_local,
+                                    "rule_name": "liquidity_sweep_low",
+                                    "level_mode": "sweep",
+                                }
+
+                    # --- TPSL serrés (en pips) ---
+                    if normalized_action in {"BUY", "SELL"}:
+                        if not (
+                            pip_size
+                            and pip_size > 0
+                            and half_band is not None
+                            and bb_mid is not None
+                            and price_local is not None
+                        ):
+                            self.logger.info(
+                                "Rejet: données/pip_size indisponibles (mode strict)."
+                            )
+                            return {}
+
+                        hb_pips = max(0.0, half_band / pip_size)
+
+                        if normalized_action == "BUY":
+                            tp_to_mid_pips = max(0.0, (bb_mid - price_local) / pip_size)
+                            fallback_tp = (
+                                (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                            )
+                            target_tp_pips = max(
+                                tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                            )
+                            target_sl_pips = max(
+                                buffer_pips_min,
+                                (price_local - bb_lo) / pip_size + buffer_pips_min,
+                            )
+                        else:  # SELL
+                            tp_to_mid_pips = max(0.0, (price_local - bb_mid) / pip_size)
+                            fallback_tp = (
+                                (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                            )
+                            target_tp_pips = max(
+                                tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
+                            )
+                            target_sl_pips = max(
+                                buffer_pips_min,
+                                (bb_up - price_local) / pip_size + buffer_pips_min,
+                            )
+
+                        # ❌ NO FALLBACK: RR doit respecter min_rr
+                        if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
+                            self.logger.info("Rejet: TPSL non calculables (mode strict).")
+                            return {}
+                        rr_est = float(target_tp_pips / target_sl_pips)
+                        if rr_est < rr_min:
+                            self.logger.info(
+                                f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
+                            )
+                            return {}
+
+                        # Injecter pour RiskEngine/Executor
+                        trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
+                        trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
+                        trade_decision["rule_name"] = "katana_midline_scalp_strict"
+                        trade_decision["level_mode"] = "boll_midline_strict"
+                        trade_decision["boll"] = {
+                            "bb_mid": bb_mid,
+                            "bb_upper": bb_up,
+                            "bb_lower": bb_lo,
+                        }
+
+            # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
+            active_broker_account = context.get("active_broker_account", {})
+            max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
+                "max_open_positions", 999
+            )
+            current_open_positions = context.get("open_positions", [])
+
+            self.logger.debug(
+                f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}"
+            )
+            if len(current_open_positions) >= max_positions_for_account:
                 self.logger.warning(
-                    "⚠️ Données Bollinger incomplètes — trade maintenu en mode 'low_confidence'"
+                    f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}."
                 )
-                trade_decision["confidence"] = (
-                    float(trade_decision.get("confidence", 0.5)) * 0.6
-                )
+                return {}
 
-            # ⚠️ Si gate ou distance trop faible → on réduit confiance, pas de rejet
-            if not entry_gate_ok:
-                self.logger.warning(
-                    "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
-                )
+            # 5) Sizing au risque — instrumenté DIAG
+            risk_params = self.calculate_risk_parameters(
+                context, current_config, trade_decision
+            )
+            self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
+
+            # -- MERGE quand OK --
+            if isinstance(risk_params, dict) and risk_params.get("ok"):
+                # volume depuis risk engine (prioritaire)
+                vol_ok = risk_params.get("volume")
+                if isinstance(vol_ok, (int, float)) and vol_ok > 0:
+                    trade_decision["volume"] = float(vol_ok)
+
+                # SL/TP en PRIX -> indispensables pour l'exécuteur
+                if risk_params.get("sl_price") is not None:
+                    trade_decision["sl_price"] = float(risk_params["sl_price"])
+                if risk_params.get("tp_price") is not None:
+                    trade_decision["tp_price"] = float(risk_params["tp_price"])
+
+                # garder aussi les pips (utile pour les logs/diag)
+                if risk_params.get("sl_pips") is not None:
+                    trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
+                if risk_params.get("tp_pips") is not None:
+                    trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
+                    
+                # === PATCH 2 : si ok mais raison soft_atr_m1_low → on ne bloque pas, on log & on pénalise doucement
+                if str(risk_params.get("reason", "")).lower() == "soft_atr_m1_low":
+                    self.logger.warning(
+                        f"⚠️ ATR M1 faible sur {trade_decision['asset']} — CONTINUATION (soft), "
+                        f"atr={risk_params.get('atr_m1_pips'):.3f} < min={risk_params.get('min_atr_m1_pips'):.3f}"
+                    )
+                    flags = trade_decision.setdefault("flags", {})
+                    flags["soft_atr_m1_low"] = True
+
+                    # pénalité douce de confiance (bornée)
+                    penalty = float(current_config.get("risk_management", {}).get("atr_penalty_factor", 0.85))
+                    floor = float(current_config.get("risk_management", {}).get("atr_confidence_floor", 0.35))
+                    current_conf = float(trade_decision.get("confidence", 0.5))
+                    trade_decision["confidence"] = max(current_conf * penalty, floor)
+
+                    # (optionnel) petit plancher de volume quand soft ATR
+                    try:
+                        min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
+                        md_asset = (context.get("market_data", {}) or {}).get(trade_decision["asset"], {}) or {}
+                        si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
+                        def _g(d,k,default=0.0):
+                            try:
+                                v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
+                                v = float(v) if v is not None else default
+                                return v if math.isfinite(v) else default
+                            except Exception:
+                                return default
+                        vol_min_broker = _g(si, "volume_min", 0.0)
+                        vol_step_broker = _g(si, "volume_step", 0.0)
+                        min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker>0 else 0.0)
+                        vol = float(trade_decision.get("volume", 0.0))
+                        vol = max(vol, min_lot_soft) if vol>0 else min_lot_soft
+                        if vol_step_broker and vol_step_broker>0:
+                            steps = math.ceil(vol / vol_step_broker)
+                            vol = steps * vol_step_broker
+                        trade_decision["volume"] = float(vol)
+                        self.logger.info(f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})")
+                    except Exception as e:
+                        self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
+
+
+            if not risk_params or not bool(risk_params.get("ok", False)):
+                reason = (risk_params or {}).get("reason", "risk_calc_failed")
+                extras = {
+                    k: risk_params.get(k)
+                    for k in (
+                        "sl_pips",
+                        "tp_pips",
+                        "spread_pips",
+                        "rr_effective",
+                        "stops_level_pips",
+                        "level_mode",
+                    )
+                    if isinstance(risk_params, dict) and k in risk_params
+                }
+                _diag_size(asset_raw, reason, extras)
+                self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
+                # ⚠️ Correction : ne pas bloquer totalement → trade en low confidence
                 trade_decision["confidence"] = (
                     float(trade_decision.get("confidence", 0.5)) * 0.7
                 )
+                trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
 
-            if isinstance(mid_distance_ratio, float) and math.isfinite(
-                mid_distance_ratio
-            ):
-                if mid_distance_ratio < min_mid_ratio:
-                    self.logger.warning(
-                        f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — confiance réduite."
-                    )
-                    trade_decision["confidence"] = (
-                        float(trade_decision.get("confidence", 0.5)) * 0.8
-                    )
-
-                # pip_size
-                pip_size = None
+                # --- [PATCH-EXEC] Toujours construire SL/TP en PRIX si risk engine refuse ---
                 try:
-                    si_local = getattr(self, "symbol_info", None)
-                    point_local = 0.0
-                    if si_local is not None and hasattr(si_local, "point"):
-                        point_local = float(getattr(si_local, "point") or 0.0)
-                    elif isinstance(si_local, dict):
-                        point_local = float(si_local.get("point", 0.0) or 0.0)
-                    if point_local <= 0 and "point" in signals:
-                        point_local = _num(signals.get("point"), 0.0)
-                    pip_size = point_local * (
-                        10.0
-                        if (
-                            isinstance(
-                                getattr(
-                                    si_local,
-                                    "digits",
-                                    getattr(si_local, "digits", None),
-                                ),
-                                (int, float),
-                            )
-                            and getattr(si_local, "digits", 5) in (3, 5)
-                        )
-                        else 1.0
-                    )
-                except Exception:
-                    pip_size = None
-
-                # Si pas récupéré via self.symbol_info, tente via market_data/config
-                if not pip_size or pip_size <= 0:
                     md_asset = (context.get("market_data", {}) or {}).get(
                         asset_raw, {}
                     ) or {}
@@ -2012,474 +2274,214 @@ class DecisionPipeline:
                         md_asset.get("symbol_info")
                         or current_config.get("symbol_info")
                         or {}
-                    )
-                    try:
-                        point = float(si.get("point") or signals.get("point") or 0.0001)
-                        digits = int(si.get("digits") or 5)
-                        pip_points = 10.0 if digits in (3, 5) else 1.0
-                        pip_size = point * pip_points
-                    except Exception:
-                        pip_size = None
-
-                half_band = (
-                    (bb_up - bb_lo) / 2.0
-                    if (bb_up is not None and bb_lo is not None)
-                    else None
-                )
-                in_buy_zone = (
-                    (price_local is not None)
-                    and (bb_mid is not None)
-                    and (bb_lo is not None)
-                    and ((price_local <= bb_mid) and (price_local >= bb_lo))
-                )
-                in_sell_zone = (
-                    (price_local is not None)
-                    and (bb_mid is not None)
-                    and (bb_up is not None)
-                    and ((price_local >= bb_mid) and (price_local <= bb_up))
-                )
-
-                if block_on_expansion and is_exp:
-                    self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
-                    return {}
-                if require_range and not is_range:
-                    self.logger.info("Rejet: régime non-range pour midline scalp.")
-                    return {}
-
-                if normalized_action == "BUY" and not (
-                    in_buy_zone and mid_entry == "buy"
-                ):
-                    self.logger.warning("⚠️ BUY hors zone midline — confiance réduite.")
-                    trade_decision["confidence"] = (
-                        float(trade_decision.get("confidence", 0.5)) * 0.8
-                    )
-                elif normalized_action == "SELL" and not (
-                    in_sell_zone and mid_entry == "sell"
-                ):
-                    self.logger.warning("⚠️ SELL hors zone midline — confiance réduite.")
-                    trade_decision["confidence"] = (
-                        float(trade_decision.get("confidence", 0.5)) * 0.8
-                    )
-                elif normalized_action == "CLOSE":
-                    pass  # fermeture autorisée
-
-                # ✅ RÈGLE 3 : Liquidity Sweep
-                if strategy_name.lower() == "scalping":
-                    sweep_cfg = (current_config.get("scalping") or {}).get(
-                        "liquidity_sweep", {}
                     ) or {}
-                    lookback_bars = int(sweep_cfg.get("lookback_bars", 20))
 
-                    md2 = (context.get("market_data", {}) or {}).get(
-                        asset_raw, {}
-                    ) or {}
-                    df_ls = md2.get("annotated_rates_df")
+                    # entry
+                    entry = trade_decision.get("entry_price") or md_asset.get(
+                        "current_price"
+                    )
+                    entry = float(entry) if entry is not None else None
 
-                    if isinstance(df_ls, pd.DataFrame) and len(df_ls) >= lookback_bars:
-                        recent_high = df_ls["high"].tail(lookback_bars).max()
-                        recent_low = df_ls["low"].tail(lookback_bars).min()
+                    # symbol units
+                    point = float(si.get("point") or signals.get("point") or 0.0001)
+                    digits = int(si.get("digits") or 5)
+                    pip_points = 10.0 if digits in (3, 5) else 1.0
+                    pip_size = point * pip_points
 
-                        if price_local >= recent_high:  # Sweep vers le haut
-                            trade_decision = {
-                                "action": "SELL",
-                                "asset": asset_raw,
-                                "order_type": "MARKET",
-                                "entry_price": price_local,
-                                "rule_name": "liquidity_sweep_high",
-                                "level_mode": "sweep",
-                            }
-                        elif price_local <= recent_low:  # Sweep vers le bas
-                            trade_decision = {
-                                "action": "BUY",
-                                "asset": asset_raw,
-                                "order_type": "MARKET",
-                                "entry_price": price_local,
-                                "rule_name": "liquidity_sweep_low",
-                                "level_mode": "sweep",
-                            }
+                    # pips cibles (déjà dans la décision, sinon fallback config)
+                    rm_cfg_local = current_config.get("risk_management") or {}
+                    min_rr_local = float(rm_cfg_local.get("min_rr", 1.5))
+                    sl_pips = float(
+                        trade_decision.get("target_sl_pips")
+                        or rm_cfg_local.get("default_sl_pips", 10.0)
+                    )
+                    tp_pips = float(
+                        trade_decision.get("target_tp_pips") or (min_rr_local * sl_pips)
+                    )
 
-                # --- TPSL serrés (en pips) ---
-                if normalized_action in {"BUY", "SELL"}:
-                    if not (
-                        pip_size
-                        and pip_size > 0
-                        and half_band is not None
-                        and bb_mid is not None
-                        and price_local is not None
-                    ):
+                    if entry and pip_size > 0 and sl_pips > 0 and tp_pips > 0:
+                        sl_dist = sl_pips * pip_size
+                        tp_dist = tp_pips * pip_size
+
+                        if normalized_action == "BUY":
+                            sl_price = round(entry - sl_dist, digits)
+                            tp_price = round(entry + tp_dist, digits)
+                        else:  # SELL
+                            sl_price = round(entry + sl_dist, digits)
+                            tp_price = round(entry - tp_dist, digits)
+
+                        # Ne pas écraser s'ils existent déjà
+                        trade_decision.setdefault("sl_price", float(sl_price))
+                        trade_decision.setdefault("tp_price", float(tp_price))
+
                         self.logger.info(
-                            "Rejet: données/pip_size indisponibles (mode strict)."
+                            f"[PATCH-EXEC] SL/TP prix posés (fallback): SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
                         )
-                        return {}
-
-                    hb_pips = max(0.0, half_band / pip_size)
-
-                    if normalized_action == "BUY":
-                        tp_to_mid_pips = max(0.0, (bb_mid - price_local) / pip_size)
-                        fallback_tp = (
-                            (k_halfband_tp * hb_pips) if hb_pips is not None else None
+                    else:
+                        self.logger.warning(
+                            "[PATCH-EXEC] Impossible de calculer SL/TP prix (entry/pip_size manquants)."
                         )
-                        target_tp_pips = max(
-                            tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
-                        )
-                        target_sl_pips = max(
-                            buffer_pips_min,
-                            (price_local - bb_lo) / pip_size + buffer_pips_min,
-                        )
-                    else:  # SELL
-                        tp_to_mid_pips = max(0.0, (price_local - bb_mid) / pip_size)
-                        fallback_tp = (
-                            (k_halfband_tp * hb_pips) if hb_pips is not None else None
-                        )
-                        target_tp_pips = max(
-                            tp_to_mid_pips, (fallback_tp or tp_to_mid_pips)
-                        )
-                        target_sl_pips = max(
-                            buffer_pips_min,
-                            (bb_up - price_local) / pip_size + buffer_pips_min,
-                        )
+                except Exception as e:
+                    self.logger.warning(
+                        f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
+                    )
+                    
+                # ✅ Ajustements spécifiques
+                if reason == "sl_capped" and "stops_level_pips" in extras:
+                    trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
+                    self.logger.info(
+                        f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
+                    )
 
-                    # ❌ NO FALLBACK: RR doit respecter min_rr
-                    if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
-                        self.logger.info("Rejet: TPSL non calculables (mode strict).")
-                        return {}
-                    rr_est = float(target_tp_pips / target_sl_pips)
-                    if rr_est < rr_min:
-                        self.logger.info(
-                            f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
-                        )
-                        return {}
+                # === PATCH SOFT ATR (remplace l'ancien bloc) ===
+                if reason == "soft_atr_m1_low":
+                    self.logger.warning(
+                        f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence' (pénalité adoucie)."
+                    )
+                    # 1) Marqueur de diag non-bloquant
+                    flags = trade_decision.setdefault("flags", {})
+                    flags["soft_atr_m1_low"] = True
 
-                    # Injecter pour RiskEngine/Executor
-                    trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
-                    trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
-                    trade_decision["rule_name"] = "katana_midline_scalp_strict"
-                    trade_decision["level_mode"] = "boll_midline_strict"
-                    trade_decision["boll"] = {
-                        "bb_mid": bb_mid,
-                        "bb_upper": bb_up,
-                        "bb_lower": bb_lo,
-                    }
-
-        # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
-        active_broker_account = context.get("active_broker_account", {})
-        max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
-            "max_open_positions", 999
-        )
-        current_open_positions = context.get("open_positions", [])
-
-        self.logger.debug(
-            f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}"
-        )
-        if len(current_open_positions) >= max_positions_for_account:
-            self.logger.warning(
-                f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}."
-            )
-            return {}
-
-        # 5) Sizing au risque — instrumenté DIAG
-        risk_params = self.calculate_risk_parameters(
-            context, current_config, trade_decision
-        )
-        self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
-
-        # -- MERGE quand OK --
-        if isinstance(risk_params, dict) and risk_params.get("ok"):
-            # volume depuis risk engine (prioritaire)
-            vol_ok = risk_params.get("volume")
-            if isinstance(vol_ok, (int, float)) and vol_ok > 0:
-                trade_decision["volume"] = float(vol_ok)
-
-            # SL/TP en PRIX -> indispensables pour l'exécuteur
-            if risk_params.get("sl_price") is not None:
-                trade_decision["sl_price"] = float(risk_params["sl_price"])
-            if risk_params.get("tp_price") is not None:
-                trade_decision["tp_price"] = float(risk_params["tp_price"])
-
-            # garder aussi les pips (utile pour les logs/diag)
-            if risk_params.get("sl_pips") is not None:
-                trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
-            if risk_params.get("tp_pips") is not None:
-                trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
-                
-            # === PATCH 2 : si ok mais raison soft_atr_m1_low → on ne bloque pas, on log & on pénalise doucement
-            if str(risk_params.get("reason", "")).lower() == "soft_atr_m1_low":
-                self.logger.warning(
-                    f"⚠️ ATR M1 faible sur {trade_decision['asset']} — CONTINUATION (soft), "
-                    f"atr={risk_params.get('atr_m1_pips'):.3f} < min={risk_params.get('min_atr_m1_pips'):.3f}"
-                )
-                flags = trade_decision.setdefault("flags", {})
-                flags["soft_atr_m1_low"] = True
-
-                # pénalité douce de confiance (bornée)
-                penalty = float(current_config.get("risk_management", {}).get("atr_penalty_factor", 0.85))
-                floor = float(current_config.get("risk_management", {}).get("atr_confidence_floor", 0.35))
-                current_conf = float(trade_decision.get("confidence", 0.5))
-                trade_decision["confidence"] = max(current_conf * penalty, floor)
-
-                # (optionnel) petit plancher de volume quand soft ATR
-                try:
+                    # 2) Pénalité bornée plutôt qu’un /2 brutal
+                    penalty = float(self.active_config.get("soft_atr_penalty_factor", 0.85))
+                    floor = float(self.active_config.get("soft_atr_confidence_floor", 0.35))
+                    current_conf = float(trade_decision.get("confidence", 0.5))
+                    trade_decision["confidence"] = max(current_conf * penalty, floor)
+                            # === PATCH: plancher de volume en cas de soft ATR (à placer juste après le bloc SOFT ATR) ===
+            try:
+                flags = trade_decision.get("flags", {})
+                if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {"BUY", "SELL"}:
+                    # 1) récup min lot “stratégie” + min lot broker si dispo
                     min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
-                    md_asset = (context.get("market_data", {}) or {}).get(trade_decision["asset"], {}) or {}
+
+                    md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
                     si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
-                    def _g(d,k,default=0.0):
+
+                    def _get_num(d, k, default=0.0):
                         try:
                             v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
                             v = float(v) if v is not None else default
                             return v if math.isfinite(v) else default
                         except Exception:
                             return default
-                    vol_min_broker = _g(si, "volume_min", 0.0)
-                    vol_step_broker = _g(si, "volume_step", 0.0)
-                    min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker>0 else 0.0)
+
+                    vol_min_broker = _get_num(si, "volume_min", 0.0)
+                    vol_step_broker = _get_num(si, "volume_step", 0.0)
+
+                    min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0)
+
+                    # 2) applique le plancher sur la variable de volume “source de vérité”
                     vol = float(trade_decision.get("volume", 0.0))
-                    vol = max(vol, min_lot_soft) if vol>0 else min_lot_soft
-                    if vol_step_broker and vol_step_broker>0:
+                    if vol <= 0.0:
+                        vol = min_lot_soft
+                    else:
+                        vol = max(vol, min_lot_soft)
+
+                    # 3) aligne au pas broker si connu
+                    if vol_step_broker and vol_step_broker > 0:
                         steps = math.ceil(vol / vol_step_broker)
                         vol = steps * vol_step_broker
+
                     trade_decision["volume"] = float(vol)
                     self.logger.info(f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})")
-                except Exception as e:
-                    self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
-
-
-        if not risk_params or not bool(risk_params.get("ok", False)):
-            reason = (risk_params or {}).get("reason", "risk_calc_failed")
-            extras = {
-                k: risk_params.get(k)
-                for k in (
-                    "sl_pips",
-                    "tp_pips",
-                    "spread_pips",
-                    "rr_effective",
-                    "stops_level_pips",
-                    "level_mode",
-                )
-                if isinstance(risk_params, dict) and k in risk_params
-            }
-            _diag_size(asset_raw, reason, extras)
-            self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
-            # ⚠️ Correction : ne pas bloquer totalement → trade en low confidence
-            trade_decision["confidence"] = (
-                float(trade_decision.get("confidence", 0.5)) * 0.7
-            )
-            trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
-
-            # --- [PATCH-EXEC] Toujours construire SL/TP en PRIX si risk engine refuse ---
-            try:
-                md_asset = (context.get("market_data", {}) or {}).get(
-                    asset_raw, {}
-                ) or {}
-                si = (
-                    md_asset.get("symbol_info")
-                    or current_config.get("symbol_info")
-                    or {}
-                ) or {}
-
-                # entry
-                entry = trade_decision.get("entry_price") or md_asset.get(
-                    "current_price"
-                )
-                entry = float(entry) if entry is not None else None
-
-                # symbol units
-                point = float(si.get("point") or signals.get("point") or 0.0001)
-                digits = int(si.get("digits") or 5)
-                pip_points = 10.0 if digits in (3, 5) else 1.0
-                pip_size = point * pip_points
-
-                # pips cibles (déjà dans la décision, sinon fallback config)
-                rm_cfg_local = current_config.get("risk_management") or {}
-                min_rr_local = float(rm_cfg_local.get("min_rr", 1.5))
-                sl_pips = float(
-                    trade_decision.get("target_sl_pips")
-                    or rm_cfg_local.get("default_sl_pips", 10.0)
-                )
-                tp_pips = float(
-                    trade_decision.get("target_tp_pips") or (min_rr_local * sl_pips)
-                )
-
-                if entry and pip_size > 0 and sl_pips > 0 and tp_pips > 0:
-                    sl_dist = sl_pips * pip_size
-                    tp_dist = tp_pips * pip_size
-
-                    if normalized_action == "BUY":
-                        sl_price = round(entry - sl_dist, digits)
-                        tp_price = round(entry + tp_dist, digits)
-                    else:  # SELL
-                        sl_price = round(entry + sl_dist, digits)
-                        tp_price = round(entry - tp_dist, digits)
-
-                    # Ne pas écraser s'ils existent déjà
-                    trade_decision.setdefault("sl_price", float(sl_price))
-                    trade_decision.setdefault("tp_price", float(tp_price))
-
-                    self.logger.info(
-                        f"[PATCH-EXEC] SL/TP prix posés (fallback): SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
-                    )
-                else:
-                    self.logger.warning(
-                        "[PATCH-EXEC] Impossible de calculer SL/TP prix (entry/pip_size manquants)."
-                    )
             except Exception as e:
-                self.logger.warning(
-                    f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
-                )
+                self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
                 
-            # ✅ Ajustements spécifiques
-            if reason == "sl_capped" and "stops_level_pips" in extras:
-                trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
-                self.logger.info(
-                    f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
-                )
 
-            # === PATCH SOFT ATR (remplace l'ancien bloc) ===
-            if reason == "soft_atr_m1_low":
-                self.logger.warning(
-                    f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence' (pénalité adoucie)."
-                )
-                # 1) Marqueur de diag non-bloquant
-                flags = trade_decision.setdefault("flags", {})
-                flags["soft_atr_m1_low"] = True
-
-                # 2) Pénalité bornée plutôt qu’un /2 brutal
-                penalty = float(self.active_config.get("soft_atr_penalty_factor", 0.85))
-                floor = float(self.active_config.get("soft_atr_confidence_floor", 0.35))
-                current_conf = float(trade_decision.get("confidence", 0.5))
-                trade_decision["confidence"] = max(current_conf * penalty, floor)
-                        # === PATCH: plancher de volume en cas de soft ATR (à placer juste après le bloc SOFT ATR) ===
-        try:
-            flags = trade_decision.get("flags", {})
-            if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {"BUY", "SELL"}:
-                # 1) récup min lot “stratégie” + min lot broker si dispo
-                min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
-
-                md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
-                si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
-
-                def _get_num(d, k, default=0.0):
-                    try:
-                        v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
-                        v = float(v) if v is not None else default
-                        return v if math.isfinite(v) else default
-                    except Exception:
-                        return default
-
-                vol_min_broker = _get_num(si, "volume_min", 0.0)
-                vol_step_broker = _get_num(si, "volume_step", 0.0)
-
-                min_lot_soft = max(min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0)
-
-                # 2) applique le plancher sur la variable de volume “source de vérité”
-                vol = float(trade_decision.get("volume", 0.0))
-                if vol <= 0.0:
-                    vol = min_lot_soft
-                else:
-                    vol = max(vol, min_lot_soft)
-
-                # 3) aligne au pas broker si connu
-                if vol_step_broker and vol_step_broker > 0:
-                    steps = math.ceil(vol / vol_step_broker)
-                    vol = steps * vol_step_broker
-
-                trade_decision["volume"] = float(vol)
-                self.logger.info(f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})")
-        except Exception as e:
-            self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
-            
-
-   
-        # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger)
-        try:
-            if normalized_action in {"BUY", "SELL"}:
-                trail_cfg = (current_config.get("scalping") or {}).get(
-                    "trailing_stop", {}
-                ) or {}
-                enable_trail = bool(trail_cfg.get("enabled", True))
-                trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
-
-                # ✅ CORRECTION #3 : calcul via pip_size (pas point)
-                md_asset = (context.get("market_data", {}) or {}).get(
-                    asset_raw, {}
-                ) or {}
-                si = (
-                    md_asset.get("symbol_info")
-                    or current_config.get("symbol_info")
-                    or {}
-                ) or {}
-                point = float(si.get("point") or signals.get("point") or 0.0001)
-                digits = int(si.get("digits") or 5)
-                pip_points = 10.0 if digits in (3, 5) else 1.0
-                pip_size = point * pip_points
-
-                if (
-                    enable_trail
-                    and isinstance(price, float)
-                    and math.isfinite(price)
-                    and pip_size > 0
-                ):
-                    if normalized_action == "BUY":
-                        trade_decision["trailing_stop"] = price - (
-                            trail_distance_pips * pip_size
-                        )
-                    else:  # SELL
-                        trade_decision["trailing_stop"] = price + (
-                            trail_distance_pips * pip_size
-                        )
-
-                    trade_decision["rule_name"] = (
-                        trade_decision.get("rule_name", "") + "+trailing"
-                    )
-                    self.logger.info(
-                        f"Trailing Stop appliqué ({trail_distance_pips} pips) pour {asset_raw}"
-                    )
-        except Exception as e:
-            self.logger.warning(f"Erreur application Trailing Stop: {e}")
-
-        # Log final
-        self.config_manager.log_decision(
-            current_config,
-            trade_decision,
-            context,
-            f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
-        )
-
-        # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
-        try:
-            # 1) import direct depuis le fichier fourni
-            from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
-        except Exception as e:
-            self.logger.exception(f"[EXECUTOR] Import trade_executor impossible: {e}")
-        else:
+    
+            # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger)
             try:
-                # 2) essayer de récupérer un exécuteur déjà prêt sur self
-                te = getattr(self, "trade_executor", None)
+                if normalized_action in {"BUY", "SELL"}:
+                    trail_cfg = (current_config.get("scalping") or {}).get(
+                        "trailing_stop", {}
+                    ) or {}
+                    enable_trail = bool(trail_cfg.get("enabled", True))
+                    trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
 
-                # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
-                mt5c = (
-                    getattr(self, "mt5_connector", None)
-                    or context.get("mt5_connector")
-                )
+                    # ✅ CORRECTION #3 : calcul via pip_size (pas point)
+                    md_asset = (context.get("market_data", {}) or {}).get(
+                        asset_raw, {}
+                    ) or {}
+                    si = (
+                        md_asset.get("symbol_info")
+                        or current_config.get("symbol_info")
+                        or {}
+                    ) or {}
+                    point = float(si.get("point") or signals.get("point") or 0.0001)
+                    digits = int(si.get("digits") or 5)
+                    pip_points = 10.0 if digits in (3, 5) else 1.0
+                    pip_size = point * pip_points
 
-                # 4) si pas d'exécuteur mais on a un connector, on instancie proprement
-                if te is None and mt5c is not None:
-                    te = TradeExecutor(self.config_manager, mt5c, logger=self.logger)
-                    setattr(self, "trade_executor", te)
+                    if (
+                        enable_trail
+                        and isinstance(price, float)
+                        and math.isfinite(price)
+                        and pip_size > 0
+                    ):
+                        if normalized_action == "BUY":
+                            trade_decision["trailing_stop"] = price - (
+                                trail_distance_pips * pip_size
+                            )
+                        else:  # SELL
+                            trade_decision["trailing_stop"] = price + (
+                                trail_distance_pips * pip_size
+                            )
 
-                if te is not None:
-                    decision_package = {
-                        "final_decision": trade_decision,  # ⚠️ clé attendue par run_trade_execution_pipeline
-                        "config_used": current_config,
-                        "context": context,
-                    }
-                    exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
-                    self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
-                else:
-                    self.logger.warning("[EXECUTOR] Aucune instance TradeExecutor/MT5Connector disponible → envoi MT5 ignoré ce cycle.")
+                        trade_decision["rule_name"] = (
+                            trade_decision.get("rule_name", "") + "+trailing"
+                        )
+                        self.logger.info(
+                            f"Trailing Stop appliqué ({trail_distance_pips} pips) pour {asset_raw}"
+                        )
             except Exception as e:
-                self.logger.exception(f"[EXECUTOR] Erreur d’exécution MT5: {e}")
+                self.logger.warning(f"Erreur application Trailing Stop: {e}")
 
-        return trade_decision
+            # Log final
+            self.config_manager.log_decision(
+                current_config,
+                trade_decision,
+                context,
+                f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
+            )
+
+            # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
+            try:
+                # 1) import direct depuis le fichier fourni (corrige le chemin)
+                from trade_executor import TradeExecutor, run_trade_execution_pipeline
+            except Exception as e:
+                self.logger.exception(f"[EXECUTOR] Import trade_executor impossible: {e}")
+            else:
+                try:
+                    # 2) essayer de récupérer un exécuteur déjà prêt sur self
+                    te = getattr(self, "trade_executor", None)
+
+                    # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
+                    mt5c = (
+                        getattr(self, "mt5_connector", None)
+                        or context.get("mt5_connector")
+                    )
+
+                    # 4) si pas d'exécuteur mais on a un connector, on instancie proprement
+                    if te is None and mt5c is not None:
+                        # ⚠️ signature correcte: pas de param logger; on laisse le mode géré par mt5c/config
+                        te = TradeExecutor(self.config_manager, mt5c)
+                        setattr(self, "trade_executor", te)
+
+                    if te is not None:
+                        decision_package = {
+                            "final_decision": trade_decision,  # ⚠️ clé attendue par run_trade_execution_pipeline
+                            "config_used": current_config,
+                            "context": context,
+                        }
+                        # 🚫 on force l'exécution réelle (aucune simulation)
+                        exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
+                        self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
+                    else:
+                        self.logger.error("[EXECUTOR] Pas d'Executor/MT5Connector → envoi BLOQUÉ (aucune simulation).")
+                except Exception as e:
+                    self.logger.exception(f"[EXECUTOR] Erreur d’exécution MT5: {e}")
+
+            return trade_decision
 
 
     def _core_evaluate_signals(
