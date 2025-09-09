@@ -197,20 +197,23 @@ class DecisionPipeline:
             try:
                 signals = analyzed_context.get("trading_signals", {}) or {}
                 override = None
+                phase_val = "n/a"
 
                 for asset, sig in signals.items():
                     phase = str(sig.get("phase", "")).lower()
                     if "range" in phase:
                         override = "scalping"
+                        phase_val = phase
                         break
                     elif "impulsion" in phase:
                         override = "liquidity"
+                        phase_val = phase
                         break
 
                 if override:
                     self.logger.info(
                         f"⚡ Strategy override forcé par phase détectée: {override} "
-                        f"(ignore scoring, phase={phase})"
+                        f"(ignore scoring, phase={phase_val})"
                     )
                     optimal_config["strategy_name"] = override
             except Exception as e:
@@ -270,9 +273,7 @@ class DecisionPipeline:
                 for a in tradeables:
                     try:
                         sp = self.mt5_connector.get_spread_pips(
-                            self.config_manager.get("asset_symbol_mapping", {}).get(
-                                a, a
-                            )
+                            self.config_manager.get("asset_symbol_mapping", {}).get(a, a)
                         )
                     except Exception:
                         sp = float("inf")
@@ -301,9 +302,7 @@ class DecisionPipeline:
                 "katana_snapshots": katana_snapshots,
                 "katana_ready_assets": katana_ready_assets,
             }
-            analyzed_context["execution_context"] = (
-                execution_context  # pour consommation ultérieure (mecano/audit)
-            )
+            analyzed_context["execution_context"] = execution_context  # pour audit/consommation ultérieure
 
             # 5) Décision de trade finale
             print(f"🤖 [DECISION] Étape 5: Décision de trade finale...")
@@ -314,13 +313,17 @@ class DecisionPipeline:
                 adapted_config,
                 signals,
             )
-            print(
-                f"🤖 [DECISION] Décision finale: {trade_decision.get('action', 'AUCUNE')}"
+
+            # --- LOG FINAL SÉCURISÉ (évite AttributeError si None) ---
+            td = trade_decision or {}
+            print(f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')}")
+            self.logger.info(
+                f"3️⃣ DÉCISION RETOURNÉE:\n   Action: {td.get('action','NONE')}\n   Asset: {td.get('asset','NONE')}\n   Volume: {td.get('volume', 0)}"
             )
 
             # 5bis) RR projeté simple si overrides pips présents (utile pour audit)
-            tp_pips = trade_decision.get("target_tp_pips")
-            sl_pips = trade_decision.get("target_sl_pips")
+            tp_pips = td.get("target_tp_pips")
+            sl_pips = td.get("target_sl_pips")
             rr_projected = None
             try:
                 if (
@@ -333,19 +336,19 @@ class DecisionPipeline:
                 rr_projected = None
 
             # Marquer les métas utiles à l'exécuteur/audit
-            trade_decision["meta_rr_projected"] = rr_projected
+            td["meta_rr_projected"] = rr_projected
             # Si l’actif choisi a un snapshot, passer quelques métas utiles (ex: atr_m1_pips)
-            chosen_asset = trade_decision.get("asset")
+            chosen_asset = td.get("asset")
             if chosen_asset and chosen_asset in katana_snapshots:
                 snap = katana_snapshots[chosen_asset] or {}
-                trade_decision["meta_atr_m1_pips"] = snap.get("atr_m1_pips")
-                trade_decision["meta_katana_score"] = snap.get("katana_score")
+                td["meta_atr_m1_pips"] = snap.get("atr_m1_pips")
+                td["meta_katana_score"] = snap.get("katana_score")
 
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
                 "config_used": adapted_config,
-                "final_decision": trade_decision,
+                "final_decision": td,  # jamais None
                 "execution_context": execution_context,
             }
 
@@ -363,6 +366,7 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
+
 
     def score_configs(
         self, context: Dict[str, Any], configs: Dict[str, Any]
