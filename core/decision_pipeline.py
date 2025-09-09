@@ -273,7 +273,9 @@ class DecisionPipeline:
                 for a in tradeables:
                     try:
                         sp = self.mt5_connector.get_spread_pips(
-                            self.config_manager.get("asset_symbol_mapping", {}).get(a, a)
+                            self.config_manager.get("asset_symbol_mapping", {}).get(
+                                a, a
+                            )
                         )
                     except Exception:
                         sp = float("inf")
@@ -302,7 +304,9 @@ class DecisionPipeline:
                 "katana_snapshots": katana_snapshots,
                 "katana_ready_assets": katana_ready_assets,
             }
-            analyzed_context["execution_context"] = execution_context  # pour audit/consommation ultérieure
+            analyzed_context["execution_context"] = (
+                execution_context  # pour audit/consommation ultérieure
+            )
 
             # 5) Décision de trade finale
             print(f"🤖 [DECISION] Étape 5: Décision de trade finale...")
@@ -314,7 +318,7 @@ class DecisionPipeline:
                 signals,
             )
 
-           # --- LOG FINAL SÉCURISÉ (avec statut d’exécution) ---
+            # --- LOG FINAL SÉCURISÉ (avec statut d’exécution) ---
             td = trade_decision or {}
             st = str(td.get("execution_status", "")).lower()
             if st in {"filled", "placed"}:
@@ -326,7 +330,9 @@ class DecisionPipeline:
             else:
                 label = "AUCUN"
 
-            print(f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')} | {label}")
+            print(
+                f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')} | {label}"
+            )
             self.logger.info(
                 f"3️⃣ DÉCISION RETOURNÉE:\n"
                 f"   Action: {td.get('action','NONE')}\n"
@@ -334,7 +340,6 @@ class DecisionPipeline:
                 f"   Volume: {td.get('volume', 0)}\n"
                 f"   Statut: {label}"
             )
-
 
             # 5bis) RR projeté simple si overrides pips présents (utile pour audit)
             tp_pips = td.get("target_tp_pips")
@@ -381,7 +386,6 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
-
 
     def score_configs(
         self, context: Dict[str, Any], configs: Dict[str, Any]
@@ -1594,6 +1598,7 @@ class DecisionPipeline:
             "CORE DECISION ENGINE - Prise de décision directe sans délégation..."
         )
         self.logger.debug(f"Signaux reçus pour évaluation: {signals}")
+        print("🧠 [CORE] Démarrage décision directe (sans délégation)")
 
         # 1) Filtres pré-décision critiques (sécurité globale)
         if current_config.get(
@@ -1601,9 +1606,9 @@ class DecisionPipeline:
         ) and self.config_manager.check_news_schedule(
             context, context.get("economic_calendar", [])
         ):
-            self.logger.warning(
-                "Trade suspendu en raison d'un événement d'actualité majeur."
-            )
+            msg = "Trade suspendu en raison d'un événement d'actualité majeur."
+            self.logger.warning(msg)
+            print(f"⛔ [CORE] {msg}")
             self.config_manager.log_decision(
                 current_config, {}, context, "Trade bloqué: Actualité majeure."
             )
@@ -1614,6 +1619,7 @@ class DecisionPipeline:
         self.logger.info(
             f"🎯 CORE prend la décision avec paramètres de stratégie: {strategy_name}"
         )
+        print(f"🎯 [CORE] Stratégie paramétrée: {strategy_name}")
 
         # 3) CORE évalue directement les signaux (sans délégation)
         trade_decision = self._core_evaluate_signals(
@@ -1622,6 +1628,9 @@ class DecisionPipeline:
         if not trade_decision:
             self.logger.info(
                 f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
+            )
+            print(
+                f"ℹ️ [CORE] Aucune entrée directe trouvée avec '{strategy_name}' — on teste la règle 'scalping_bollinger_range' si range."
             )
             # === RÈGLE 1 : Scalping Bollinger (range plat uniquement) ===
             for asset, sig in signals.items():
@@ -1641,7 +1650,7 @@ class DecisionPipeline:
                         for x in [price, bb_mid, bb_upper, bb_lower]
                     ):
                         if price < bb_mid:  # BUY si prix sous la médiane
-                            return {
+                            td = {
                                 "action": "BUY",
                                 "asset": asset,
                                 "volume": 1.0,  # TODO: sizing dynamique
@@ -1650,8 +1659,12 @@ class DecisionPipeline:
                                 "rule_name": "scalping_bollinger_range",
                                 "confidence": conf,
                             }
+                            print(
+                                f"✅ [CORE] Décision BOLL Range → BUY {asset} (TP/SL en pips: {td['target_tp_pips']:.2f}/{td['target_sl_pips']:.2f})"
+                            )
+                            return td
                         elif price > bb_mid:  # SELL si prix au-dessus de la médiane
-                            return {
+                            td = {
                                 "action": "SELL",
                                 "asset": asset,
                                 "volume": 1.0,
@@ -1660,6 +1673,11 @@ class DecisionPipeline:
                                 "rule_name": "scalping_bollinger_range",
                                 "confidence": conf,
                             }
+                            print(
+                                f"✅ [CORE] Décision BOLL Range → SELL {asset} (TP/SL en pips: {td['target_tp_pips']:.2f}/{td['target_sl_pips']:.2f})"
+                            )
+                            return td
+            print("🚫 [CORE] Aucun setup valable (même en range).")
             return {}
 
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
@@ -1677,6 +1695,7 @@ class DecisionPipeline:
             self.logger.warning(
                 f"Action inconnue '{action_raw}' depuis core_evaluate_signals -> décision ignorée proprement."
             )
+            print(f"⚠️ [CORE] Action inconnue '{action_raw}' → décision ignorée.")
             self.config_manager.log_decision(
                 current_config,
                 {},
@@ -1688,6 +1707,7 @@ class DecisionPipeline:
         asset_raw = str(trade_decision.get("asset", "")).upper().strip()
         if not asset_raw:
             self.logger.warning("Décision reçue sans 'asset' -> décision ignorée.")
+            print("⚠️ [CORE] Décision sans 'asset' → ignorée.")
             self.config_manager.log_decision(
                 current_config, {}, context, "Décision ignorée (asset vide)."
             )
@@ -1697,6 +1717,9 @@ class DecisionPipeline:
         if allowed_assets and asset_raw not in allowed_assets:
             self.logger.warning(
                 f"Asset '{asset_raw}' non autorisé pour la stratégie '{strategy_name}'. Whitelist: {sorted(allowed_assets)}"
+            )
+            print(
+                f"⚠️ [CORE] Asset '{asset_raw}' non autorisé pour '{strategy_name}' → ignoré."
             )
             self.config_manager.log_decision(
                 current_config,
@@ -1720,6 +1743,9 @@ class DecisionPipeline:
         trade_decision["action"] = normalized_action
         trade_decision["asset"] = asset_raw
         trade_decision["order_type"] = order_type
+        print(
+            f"📝 [CORE] Décision normalisée → {normalized_action} {asset_raw} | type={order_type}"
+        )
 
         # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
@@ -1734,14 +1760,17 @@ class DecisionPipeline:
         )
 
         if trades_today >= max_trades_total:
-            self.logger.warning(
-                f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte."
-            )
+            msg = f"🚫 Trade bloqué: limite journalière {max_trades_total} atteinte."
+            self.logger.warning(msg)
+            print(f"⛔ [CORE] {msg}")
             return {}
+
         if trades_for_asset_today >= max_trades_asset:
-            self.logger.warning(
+            msg = (
                 f"🚫 Trade bloqué: limite {max_trades_asset} atteinte pour {asset_raw}."
             )
+            self.logger.warning(msg)
+            print(f"⛔ [CORE] {msg}")
             return {}
 
         # --- Prix courant (commun à tous les modules) ---
@@ -1768,13 +1797,14 @@ class DecisionPipeline:
                 break
         price = _num(price)
 
-        # 👉 CORRECTION #2 : Assurer l'entry pour le risk engine
+        # 👉 Assurer l'entry pour le risk engine
         if isinstance(price, float) and math.isfinite(price):
             trade_decision["entry_price"] = float(price)
         else:
             self.logger.warning(
                 "Aucun entry_price détecté → risque de risk_calc_failed."
             )
+            print("⚠️ [CORE] entry_price manquant — le risk engine risque d'échouer.")
 
         # ==========================================================
         # ➕ Option EMA/RSI/ATR Trailing — ENTRÉES UNIQUEMENT
@@ -1788,7 +1818,7 @@ class DecisionPipeline:
         ):
             md = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
 
-            # ⚠️ Correction anti-ambiguïté pandas (évite "truth value of a DataFrame is ambiguous")
+            # ⚠️ Anti-ambiguïté pandas
             df_ema = md.get("annotated_rates_df")
             if not isinstance(df_ema, pd.DataFrame) or df_ema.empty:
                 df_ema = md.get("rates_df")
@@ -1807,10 +1837,8 @@ class DecisionPipeline:
                     context.get("current_position"),
                     current_config,
                 )
-                # On ne traite ici que les entrées BUY/SELL (uppercase)
                 act = str((ema_dec or {}).get("action", "")).upper()
                 if act in {"BUY", "SELL"}:
-                    # fabrique TP via min_rr * distance_SL pour satisfaire calculate_risk_parameters
                     try:
                         sl_price = float(ema_dec["stop_loss"])
                     except Exception:
@@ -1843,17 +1871,19 @@ class DecisionPipeline:
                             "level_mode": "ema_rsi_atr",
                         }
                         used_ema_decision = True
+                        print(
+                            f"✅ [CORE] Entrée EMA/RSI/ATR → {act} {asset_raw} (SL={sl_price}, TP={tp_price})"
+                        )
                     else:
                         self.logger.info(
                             "EMA/RSI/ATR: SL invalide -> on ignore l'entrée EMA et on continue."
                         )
                 elif act in {"EXIT_LONG", "EXIT_SHORT", "UPDATE_TRAIL"}:
-                    # Gestion de position -> pas ici
                     self.logger.debug(
-                        "EMA/RSI/ATR: action de gestion de position détectée (ignorée dans le decision engine)."
+                        "EMA/RSI/ATR: action de gestion de position détectée (ignorée ici)."
                     )
 
-            # ➕ Gate "Big Reversal Candle" (OB/FVG/BOS confluence)
+            # ➕ Gate "Big Reversal Candle"
             if not used_ema_decision:
                 try:
                     df_rev = md.get("annotated_rates_df")
@@ -1874,12 +1904,14 @@ class DecisionPipeline:
                             self.logger.info(
                                 f"🎯 Signal Big Reversal validé ({last_signal['type']}) pour {asset_raw}"
                             )
+                            print(
+                                f"🔎 [CORE] Confluence Big Reversal reconnue ({last_signal['type']})."
+                            )
                 except Exception as e:
                     self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
 
         # ==========================================================
-        # 3bis) ⚔️ Gate STRICT 'Katana Midline Scalp' (NO FALLBACK)
-        #       exécuté uniquement si on n'a PAS utilisé l'alternative EMA
+        # 3bis) Gate STRICT 'Katana Midline Scalp' si pas d'EMA
         # ==========================================================
         if not used_ema_decision:
             scalp_cfg = (current_config.get("scalping") or {}).get(
@@ -1890,9 +1922,7 @@ class DecisionPipeline:
             buffer_pips_min = float(scalp_cfg.get("buffer_pips_min", 1.5) or 1.5)
             require_range = bool(scalp_cfg.get("require_range_regime", True))
             block_on_expansion = bool(scalp_cfg.get("block_on_expansion", True))
-            min_mid_ratio = float(
-                scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
-            )  # distance mini à la médiane
+            min_mid_ratio = float(scalp_cfg.get("min_mid_distance_ratio", 0.12) or 0.12)
 
             def _get(path, default=None):
                 try:
@@ -1934,7 +1964,6 @@ class DecisionPipeline:
                 )
             ).lower()
 
-            # ✅ micro-phase strict flags
             entry_gate_ok = _to_bool(
                 _get(lambda: boll.get("entry_gate_ok"), signals.get("entry_gate_ok")),
                 default=False,
@@ -1962,19 +1991,22 @@ class DecisionPipeline:
             bb_lo = _safe_val(bb_lo, trade_decision.get("boll", {}).get("bb_lower"))
             price_local = _safe_val(price, signals.get("close"))
 
-            # ⚠️ Nouveau comportement : pas de rejet si données incomplètes
+            # Données BOLL incomplètes → pas d'arrêt, on pénalise la confiance
             if None in (bb_mid, bb_up, bb_lo, price_local):
                 self.logger.warning(
                     "⚠️ Données Bollinger incomplètes — trade maintenu en mode 'low_confidence'"
                 )
+                print("⚠️ [CORE] Bollinger incomplet — on poursuit (low_confidence).")
                 trade_decision["confidence"] = (
                     float(trade_decision.get("confidence", 0.5)) * 0.6
                 )
 
-            # ⚠️ Si gate ou distance trop faible → on réduit confiance, pas de rejet
             if not entry_gate_ok:
                 self.logger.warning(
                     "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
+                )
+                print(
+                    "⚠️ [CORE] entry_gate_ok=False — on pénalise la confiance, on n’arrête pas."
                 )
                 trade_decision["confidence"] = (
                     float(trade_decision.get("confidence", 0.5)) * 0.7
@@ -1986,6 +2018,9 @@ class DecisionPipeline:
                 if mid_distance_ratio < min_mid_ratio:
                     self.logger.warning(
                         f"⚠️ Distance à la médiane faible ({mid_distance_ratio:.3f} < {min_mid_ratio:.3f}) — confiance réduite."
+                    )
+                    print(
+                        f"⚠️ [CORE] Distance médiane faible ({mid_distance_ratio:.3f}) → pénalité confiance."
                     )
                     trade_decision["confidence"] = (
                         float(trade_decision.get("confidence", 0.5)) * 0.8
@@ -2020,7 +2055,6 @@ class DecisionPipeline:
                 except Exception:
                     pip_size = None
 
-                # Si pas récupéré via self.symbol_info, tente via market_data/config
                 if not pip_size or pip_size <= 0:
                     md_asset = (context.get("market_data", {}) or {}).get(
                         asset_raw, {}
@@ -2039,7 +2073,7 @@ class DecisionPipeline:
                         pip_size = None
 
                 half_band = (
-                    (bb_up - bb_lo) / 2.0
+                    ((bb_up - bb_lo) / 2.0)
                     if (bb_up is not None and bb_lo is not None)
                     else None
                 )
@@ -2058,9 +2092,11 @@ class DecisionPipeline:
 
                 if block_on_expansion and is_exp:
                     self.logger.info("Rejet: expansion Bollinger active (anti-chaos).")
+                    print("⛔ [CORE] Rejeté: expansion Bollinger active.")
                     return {}
                 if require_range and not is_range:
                     self.logger.info("Rejet: régime non-range pour midline scalp.")
+                    print("⛔ [CORE] Rejeté: régime non-range.")
                     return {}
 
                 if normalized_action == "BUY" and not (
@@ -2080,7 +2116,7 @@ class DecisionPipeline:
                 elif normalized_action == "CLOSE":
                     pass  # fermeture autorisée
 
-                # ✅ RÈGLE 3 : Liquidity Sweep
+                # ✅ Liquidity Sweep (optionnel)
                 if strategy_name.lower() == "scalping":
                     sweep_cfg = (current_config.get("scalping") or {}).get(
                         "liquidity_sweep", {}
@@ -2096,7 +2132,7 @@ class DecisionPipeline:
                         recent_high = df_ls["high"].tail(lookback_bars).max()
                         recent_low = df_ls["low"].tail(lookback_bars).min()
 
-                        if price_local >= recent_high:  # Sweep vers le haut
+                        if price_local >= recent_high:
                             trade_decision = {
                                 "action": "SELL",
                                 "asset": asset_raw,
@@ -2105,7 +2141,8 @@ class DecisionPipeline:
                                 "rule_name": "liquidity_sweep_high",
                                 "level_mode": "sweep",
                             }
-                        elif price_local <= recent_low:  # Sweep vers le bas
+                            print("💧 [CORE] Liquidity sweep HIGH → SELL.")
+                        elif price_local <= recent_low:
                             trade_decision = {
                                 "action": "BUY",
                                 "asset": asset_raw,
@@ -2114,8 +2151,9 @@ class DecisionPipeline:
                                 "rule_name": "liquidity_sweep_low",
                                 "level_mode": "sweep",
                             }
+                            print("💧 [CORE] Liquidity sweep LOW → BUY.")
 
-                # --- TPSL serrés (en pips) ---
+                # --- TPSL serrés (strict) ---
                 if normalized_action in {"BUY", "SELL"}:
                     if not (
                         pip_size
@@ -2126,6 +2164,9 @@ class DecisionPipeline:
                     ):
                         self.logger.info(
                             "Rejet: données/pip_size indisponibles (mode strict)."
+                        )
+                        print(
+                            "⛔ [CORE] Rejeté: pip_size/données Bollinger insuffisants."
                         )
                         return {}
 
@@ -2143,7 +2184,7 @@ class DecisionPipeline:
                             buffer_pips_min,
                             (price_local - bb_lo) / pip_size + buffer_pips_min,
                         )
-                    else:  # SELL
+                    else:
                         tp_to_mid_pips = max(0.0, (price_local - bb_mid) / pip_size)
                         fallback_tp = (
                             (k_halfband_tp * hb_pips) if hb_pips is not None else None
@@ -2156,18 +2197,20 @@ class DecisionPipeline:
                             (bb_up - price_local) / pip_size + buffer_pips_min,
                         )
 
-                    # ❌ NO FALLBACK: RR doit respecter min_rr
                     if not (target_tp_pips and target_sl_pips and target_sl_pips > 0):
                         self.logger.info("Rejet: TPSL non calculables (mode strict).")
+                        print("⛔ [CORE] Rejeté: TP/SL non calculables.")
                         return {}
                     rr_est = float(target_tp_pips / target_sl_pips)
                     if rr_est < rr_min:
                         self.logger.info(
                             f"Rejet: RR estimé {rr_est:.2f} < min_rr {rr_min:.2f} (mode strict)."
                         )
+                        print(
+                            f"⛔ [CORE] Rejeté: RR {rr_est:.2f} < min_rr {rr_min:.2f}."
+                        )
                         return {}
 
-                    # Injecter pour RiskEngine/Executor
                     trade_decision["target_tp_pips"] = float(round(target_tp_pips, 3))
                     trade_decision["target_sl_pips"] = float(round(target_sl_pips, 3))
                     trade_decision["rule_name"] = "katana_midline_scalp_strict"
@@ -2177,8 +2220,11 @@ class DecisionPipeline:
                         "bb_upper": bb_up,
                         "bb_lower": bb_lo,
                     }
+                    print(
+                        f"🎯 [CORE] Katana midline OK → TP={trade_decision['target_tp_pips']}p | SL={trade_decision['target_sl_pips']}p | RR≈{rr_est:.2f}"
+                    )
 
-        # 4) Contrôles compte/risque simples côté pipeline (pas d'exception)
+        # 4) Contrôles compte/risque simples
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
             "max_open_positions", 999
@@ -2189,37 +2235,30 @@ class DecisionPipeline:
             f"Positions ouvertes actuelles: {len(current_open_positions)} / Max: {max_positions_for_account}"
         )
         if len(current_open_positions) >= max_positions_for_account:
-            self.logger.warning(
-                f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}."
-            )
+            msg = f"Trade bloqué: Max positions ({max_positions_for_account}) atteint pour le compte {active_broker_account.get('account_id')}."
+            self.logger.warning(msg)
+            print(f"⛔ [CORE] {msg}")
             return {}
 
-        # 5) Sizing au risque — instrumenté DIAG
+        # 5) Sizing au risque
         risk_params = self.calculate_risk_parameters(
             context, current_config, trade_decision
         )
         self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
 
-        # -- MERGE quand OK --
         if isinstance(risk_params, dict) and risk_params.get("ok"):
-            # volume depuis risk engine (prioritaire)
             vol_ok = risk_params.get("volume")
             if isinstance(vol_ok, (int, float)) and vol_ok > 0:
                 trade_decision["volume"] = float(vol_ok)
-
-            # SL/TP en PRIX -> indispensables pour l'exécuteur
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
             if risk_params.get("tp_price") is not None:
                 trade_decision["tp_price"] = float(risk_params["tp_price"])
-
-            # garder aussi les pips (utile pour les logs/diag)
             if risk_params.get("sl_pips") is not None:
                 trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
             if risk_params.get("tp_pips") is not None:
                 trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
 
-            # === PATCH 2 : si ok mais raison soft_atr_m1_low → on ne bloque pas, on log & on pénalise doucement
             if str(risk_params.get("reason", "")).lower() == "soft_atr_m1_low":
                 self.logger.warning(
                     f"⚠️ ATR M1 faible sur {trade_decision['asset']} — CONTINUATION (soft), "
@@ -2228,7 +2267,6 @@ class DecisionPipeline:
                 flags = trade_decision.setdefault("flags", {})
                 flags["soft_atr_m1_low"] = True
 
-                # pénalité douce de confiance (bornée)
                 penalty = float(
                     current_config.get("risk_management", {}).get(
                         "atr_penalty_factor", 0.85
@@ -2242,7 +2280,7 @@ class DecisionPipeline:
                 current_conf = float(trade_decision.get("confidence", 0.5))
                 trade_decision["confidence"] = max(current_conf * penalty, floor)
 
-                # (optionnel) petit plancher de volume quand soft ATR
+                # plancher volume soft
                 try:
                     min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
                     md_asset = (context.get("market_data", {}) or {}).get(
@@ -2279,7 +2317,7 @@ class DecisionPipeline:
                 except Exception as e:
                     self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
 
-        if not risk_params or not bool(risk_params.get("ok", False)):
+        else:
             reason = (risk_params or {}).get("reason", "risk_calc_failed")
             extras = {
                 k: risk_params.get(k)
@@ -2295,13 +2333,15 @@ class DecisionPipeline:
             }
             _diag_size(asset_raw, reason, extras)
             self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
-            # ⚠️ Correction : ne pas bloquer totalement → trade en low confidence
+            print(
+                f"⚠️ [CORE] RiskEngine non OK ({reason}) — on continue en 'low_confidence' + min lot."
+            )
             trade_decision["confidence"] = (
                 float(trade_decision.get("confidence", 0.5)) * 0.7
             )
             trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
 
-            # --- [PATCH-EXEC] Toujours construire SL/TP en PRIX si risk engine refuse ---
+            # Fallback SL/TP prix si possible
             try:
                 md_asset = (context.get("market_data", {}) or {}).get(
                     asset_raw, {}
@@ -2312,19 +2352,16 @@ class DecisionPipeline:
                     or {}
                 ) or {}
 
-                # entry
                 entry = trade_decision.get("entry_price") or md_asset.get(
                     "current_price"
                 )
                 entry = float(entry) if entry is not None else None
 
-                # symbol units
                 point = float(si.get("point") or signals.get("point") or 0.0001)
                 digits = int(si.get("digits") or 5)
                 pip_points = 10.0 if digits in (3, 5) else 1.0
                 pip_size = point * pip_points
 
-                # pips cibles (déjà dans la décision, sinon fallback config)
                 rm_cfg_local = current_config.get("risk_management") or {}
                 min_rr_local = float(rm_cfg_local.get("min_rr", 1.5))
                 sl_pips = float(
@@ -2342,99 +2379,103 @@ class DecisionPipeline:
                     if normalized_action == "BUY":
                         sl_price = round(entry - sl_dist, digits)
                         tp_price = round(entry + tp_dist, digits)
-                    else:  # SELL
+                    else:
                         sl_price = round(entry + sl_dist, digits)
                         tp_price = round(entry - tp_dist, digits)
 
-                    # Ne pas écraser s'ils existent déjà
                     trade_decision.setdefault("sl_price", float(sl_price))
                     trade_decision.setdefault("tp_price", float(tp_price))
-
                     self.logger.info(
                         f"[PATCH-EXEC] SL/TP prix posés (fallback): SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
+                    )
+                    print(
+                        f"🔧 [CORE] SL/TP fallback posés → SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
                     )
                 else:
                     self.logger.warning(
                         "[PATCH-EXEC] Impossible de calculer SL/TP prix (entry/pip_size manquants)."
+                    )
+                    print(
+                        "⚠️ [CORE] Impossible de poser SL/TP fallback (entry/pip_size manquants)."
                     )
             except Exception as e:
                 self.logger.warning(
                     f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
                 )
 
-            # ✅ Ajustements spécifiques
             if reason == "sl_capped" and "stops_level_pips" in extras:
                 trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
                 self.logger.info(
                     f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
                 )
+                print(
+                    f"🔧 [CORE] SL ajusté au minimum broker → {extras['stops_level_pips']} pips"
+                )
 
-            # === PATCH SOFT ATR (remplace l'ancien bloc) ===
+            # marquage soft ATR
             if reason == "soft_atr_m1_low":
                 self.logger.warning(
-                    f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence' (pénalité adoucie)."
+                    f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence'."
                 )
-                # 1) Marqueur de diag non-bloquant
                 flags = trade_decision.setdefault("flags", {})
                 flags["soft_atr_m1_low"] = True
-
-                # 2) Pénalité bornée plutôt qu’un /2 brutal
-                penalty = float(self.active_config.get("soft_atr_penalty_factor", 0.85))
-                floor = float(self.active_config.get("soft_atr_confidence_floor", 0.35))
+                penalty = (
+                    float(self.active_config.get("soft_atr_penalty_factor", 0.85))
+                    if hasattr(self, "active_config")
+                    else 0.85
+                )
+                floor = (
+                    float(self.active_config.get("soft_atr_confidence_floor", 0.35))
+                    if hasattr(self, "active_config")
+                    else 0.35
+                )
                 current_conf = float(trade_decision.get("confidence", 0.5))
                 trade_decision["confidence"] = max(current_conf * penalty, floor)
-                # === PATCH: plancher de volume en cas de soft ATR (à placer juste après le bloc SOFT ATR) ===
-        try:
-            flags = trade_decision.get("flags", {})
-            if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {
-                "BUY",
-                "SELL",
-            }:
-                # 1) récup min lot “stratégie” + min lot broker si dispo
-                min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
 
-                md_asset = (context.get("market_data", {}) or {}).get(
-                    asset_raw, {}
-                ) or {}
-                si = (
-                    md_asset.get("symbol_info")
-                    or current_config.get("symbol_info")
-                    or {}
-                )
+            # plancher de volume en cas de soft ATR
+            try:
+                flags = trade_decision.get("flags", {})
+                if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {
+                    "BUY",
+                    "SELL",
+                }:
+                    min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
+                    md_asset = (context.get("market_data", {}) or {}).get(
+                        asset_raw, {}
+                    ) or {}
+                    si = (
+                        md_asset.get("symbol_info")
+                        or current_config.get("symbol_info")
+                        or {}
+                    )
 
-                def _get_num(d, k, default=0.0):
-                    try:
-                        v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
-                        v = float(v) if v is not None else default
-                        return v if math.isfinite(v) else default
-                    except Exception:
-                        return default
+                    def _get_num(d, k, default=0.0):
+                        try:
+                            v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
+                            v = float(v) if v is not None else default
+                            return v if math.isfinite(v) else default
+                        except Exception:
+                            return default
 
-                vol_min_broker = _get_num(si, "volume_min", 0.0)
-                vol_step_broker = _get_num(si, "volume_step", 0.0)
-
-                min_lot_soft = max(
-                    min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0
-                )
-
-                # 2) applique le plancher sur la variable de volume “source de vérité”
-                vol = float(trade_decision.get("volume", 0.0))
-                if vol <= 0.0:
-                    vol = min_lot_soft
-                else:
-                    vol = max(vol, min_lot_soft)
-
-                # 3) aligne au pas broker si connu
-                if vol_step_broker and vol_step_broker > 0:
-                    steps = math.ceil(vol / vol_step_broker)
-                    vol = steps * vol_step_broker
-
-                trade_decision["volume"] = float(vol)
-                self.logger.info(
-                    f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})"
-                )
-        except Exception as e:
-            self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
+                    vol_min_broker = _get_num(si, "volume_min", 0.0)
+                    vol_step_broker = _get_num(si, "volume_step", 0.0)
+                    min_lot_soft = max(
+                        min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0
+                    )
+                    vol = float(trade_decision.get("volume", 0.0))
+                    if vol <= 0.0:
+                        vol = min_lot_soft
+                    else:
+                        vol = max(vol, min_lot_soft)
+                    if vol_step_broker and vol_step_broker > 0:
+                        steps = math.ceil(vol / vol_step_broker)
+                        vol = steps * vol_step_broker
+                    trade_decision["volume"] = float(vol)
+                    self.logger.info(
+                        f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})"
+                    )
+            except Exception as e:
+                self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
 
         # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger)
         try:
@@ -2445,7 +2486,6 @@ class DecisionPipeline:
                 enable_trail = bool(trail_cfg.get("enabled", True))
                 trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
 
-                # ✅ CORRECTION #3 : calcul via pip_size (pas point)
                 md_asset = (context.get("market_data", {}) or {}).get(
                     asset_raw, {}
                 ) or {}
@@ -2469,7 +2509,7 @@ class DecisionPipeline:
                         trade_decision["trailing_stop"] = price - (
                             trail_distance_pips * pip_size
                         )
-                    else:  # SELL
+                    else:
                         trade_decision["trailing_stop"] = price + (
                             trail_distance_pips * pip_size
                         )
@@ -2480,159 +2520,207 @@ class DecisionPipeline:
                     self.logger.info(
                         f"Trailing Stop appliqué ({trail_distance_pips} pips) pour {asset_raw}"
                     )
+                    print(f"🪢 [CORE] Trailing appliqué ({trail_distance_pips} pips).")
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
+            print(f"⚠️ [CORE] Erreur trailing: {e}")
 
-        # Log final
+        # Log final (décision avant exécution)
         self.config_manager.log_decision(
             current_config,
             trade_decision,
             context,
             f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
+        print(
+            f"📦 [CORE] Décision finale prête → {trade_decision.get('action','?')} "
+            f"{trade_decision.get('asset','?')} | vol={trade_decision.get('volume','?')} | "
+            f"SL={trade_decision.get('sl_price','?')} | TP={trade_decision.get('tp_price','?')}"
+        )
+
         # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
         try:
-            # 1) import direct depuis le fichier fourni (chemin corrigé)
             from trader.trade_executor import (
                 TradeExecutor,
                 run_trade_execution_pipeline,
             )
         except Exception as e:
-            # ❌ Pas d'exécuteur chargé → on BLOQUE proprement (aucune simulation)
             self.logger.exception(f"[EXECUTOR] Import trade_executor impossible: {e}")
             self.logger.error(
                 "[EXECUTOR] Import échoué → exécution réelle impossible. Aucune voie de simulation n'est autorisée."
             )
+            print("⛔ [EXECUTOR] Import trade_executor impossible — exécution annulée.")
             return {}
-        else:
-            try:
-                # 2) essayer de récupérer un exécuteur déjà prêt sur self
-                te = getattr(self, "trade_executor", None)
 
-                # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
-                mt5c = getattr(self, "mt5_connector", None) or context.get(
-                    "mt5_connector"
-                )
+        try:
+            # 2) essayer de récupérer un exécuteur déjà prêt sur self
+            te = getattr(self, "trade_executor", None)
 
-                # 3a) fallback: créer le connecteur si toujours None (MT5Connector est dans le fichier général)
-                if mt5c is None:
+            # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
+            mt5c = getattr(self, "mt5_connector", None) or context.get("mt5_connector")
+
+            # 3a) fallback: créer le connecteur si toujours None (MT5Connector est dans le fichier général)
+            if mt5c is None:
+                try:
+                    from mt5_connector import (
+                        MT5Connector,
+                    )  # <- import unique depuis le fichier général
+
+                    mt5c = MT5Connector()  # __init__ sans argument
+
+                    # récupérer des identifiants valides
+                    account_id = (
+                        (context.get("active_broker_account", {}) or {}).get(
+                            "account_id"
+                        )
+                        or current_config.get("mt5_account_id")
+                        or "main_demo_broker_A"
+                    )
+                    run_mode = (
+                        context.get("run_mode") or current_config.get("mode") or "DEMO"
+                    )
+
                     try:
-                        from mt5_connector import (
-                            MT5Connector,
-                        )  # <- import unique depuis le fichier général
-
-                        mt5c = MT5Connector()  # ⚠️ __init__ sans argument
-
-                        # récupérer des identifiants valides
-                        account_id = (
+                        creds = self.config_manager.get_mt5_account_credentials(
+                            account_id=account_id, mode=run_mode
+                        )
+                    except Exception:
+                        creds = (
                             (context.get("active_broker_account", {}) or {}).get(
-                                "account_id"
+                                "credentials"
                             )
-                            or current_config.get("mt5_account_id")
-                            or "main_demo_broker_A"
-                        )
-                        run_mode = (
-                            context.get("run_mode")
-                            or current_config.get("mode")
-                            or "DEMO"
-                        )
+                        ) or {}
 
+                    ok = False
+                    if isinstance(creds, dict) and creds and hasattr(mt5c, "connect"):
                         try:
-                            creds = self.config_manager.get_mt5_account_credentials(
-                                account_id=account_id, mode=run_mode
-                            )
-                        except Exception:
-                            creds = (
-                                context.get("active_broker_account", {}) or {}
-                            ).get("credentials") or {}
-
-                        ok = False
-                        if (
-                            isinstance(creds, dict)
-                            and creds
-                            and hasattr(mt5c, "connect")
-                        ):
-                            try:
-                                ok = bool(mt5c.connect(creds))
-                            except Exception as ce:
-                                self.logger.error(
-                                    f"[EXECUTOR] Échec connect() MT5Connector: {ce}"
-                                )
-
-                        if ok:
-                            setattr(self, "mt5_connector", mt5c)
-                            try:
-                                context["mt5_connector"] = mt5c
-                            except Exception:
-                                pass
-                            self.logger.info(
-                                "[EXECUTOR] MT5Connector initialisé et connecté."
-                            )
-                        else:
+                            ok = bool(mt5c.connect(creds))
+                        except Exception as ce:
                             self.logger.error(
-                                "[EXECUTOR] Connexion MT5 impossible — envoi BLOQUÉ."
+                                f"[EXECUTOR] Échec connect() MT5Connector: {ce}"
                             )
-                            mt5c = None
 
-                    except Exception as e:
-                        self.logger.error(
-                            f"[EXECUTOR] Impossible d'obtenir un MT5Connector: {e}"
+                    if ok:
+                        setattr(self, "mt5_connector", mt5c)
+                        try:
+                            context["mt5_connector"] = mt5c
+                        except Exception:
+                            pass
+                        self.logger.info(
+                            "[EXECUTOR] MT5Connector initialisé et connecté."
                         )
+                        print("🔌 [EXECUTOR] MT5Connector connecté.")
+                    else:
+                        self.logger.error(
+                            "[EXECUTOR] Connexion MT5 impossible — envoi BLOQUÉ."
+                        )
+                        print("⛔ [EXECUTOR] Connexion MT5 impossible — envoi BLOQUÉ.")
                         mt5c = None
 
-                # 3bis) S'assurer que le connecteur est connecté si dispo
-                try:
-                    is_conn = getattr(mt5c, "is_connected", False)
-                    if callable(is_conn):
-                        is_conn = is_conn()
-                    if not is_conn and hasattr(mt5c, "connect"):
-                        creds_ctx = (
-                            context.get("active_broker_account", {}) or {}
-                        ).get("credentials") or {}
-                        if creds_ctx:
-                            mt5c.connect(creds_ctx)
-                except Exception:
-                    pass  # l'exécuteur gèrera l'erreur de connexion
-
-                # 4) si pas d'exécuteur mais on a un connecteur, on instancie proprement
-                if te is None and mt5c is not None:
-                    te = TradeExecutor(self.config_manager, mt5c)
-                    setattr(self, "trade_executor", te)
-
-                if te is not None:
-                    decision_package = {
-                        "final_decision": trade_decision,  # ⚠️ clé attendue par run_trade_execution_pipeline
-                        "config_used": current_config,
-                        "context": context,
-                    }
-                    # 🚫 on force l'exécution réelle (aucune simulation)
-                    exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
-                    self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
-
-                    # ⛳ Marquer explicitement le statut d'exécution dans la décision (pour l'affichage console)
-                    try:
-                        status = str((exec_res or {}).get("status", "")).lower()
-                        trade_decision["execution_status"] = status
-                        trade_decision["executed"] = status in {"filled", "placed"}
-                        # garder une trace minimale du résultat pour audit/console
-                        meta = trade_decision.setdefault("meta", {})
-                        meta["execution_result"] = {
-                            k: exec_res.get(k)
-                            for k in ("status", "order", "deal", "retcode", "comment", "price", "volume")
-                            if isinstance(exec_res, dict) and k in exec_res
-                        }
-                    except Exception:
-                        pass
-
-                else:
-                    # ❌ Pas d'exécuteur ni de connecteur → on BLOQUE proprement (aucune simulation)
+                except Exception as e:
                     self.logger.error(
-                        "[EXECUTOR] Pas d'Executor/MT5Connector → envoi BLOQUÉ (aucune simulation)."
+                        f"[EXECUTOR] Impossible d'obtenir un MT5Connector: {e}"
                     )
-                    return {}
-            except Exception as e:
-                self.logger.exception(f"[EXECUTOR] Erreur d’exécution MT5: {e}")
+                    print(f"⛔ [EXECUTOR] Création MT5Connector échouée: {e}")
+                    mt5c = None
+
+            # 3bis) S'assurer que le connecteur est connecté si dispo
+            try:
+                is_conn = getattr(mt5c, "is_connected", False)
+                if callable(is_conn):
+                    is_conn = is_conn()
+                if not is_conn and hasattr(mt5c, "connect"):
+                    creds_ctx = (
+                        (context.get("active_broker_account", {}) or {}).get(
+                            "credentials"
+                        )
+                    ) or {}
+                    if creds_ctx:
+                        mt5c.connect(creds_ctx)
+            except Exception:
+                pass  # l'exécuteur gèrera l'erreur de connexion
+
+            # 4) si pas d'exécuteur mais on a un connecteur, on instancie proprement
+            if te is None and mt5c is not None:
+                te = TradeExecutor(self.config_manager, mt5c)
+                setattr(self, "trade_executor", te)
+
+            if te is not None:
+                decision_package = {
+                    "final_decision": trade_decision,  # ⚠️ clé attendue par run_trade_execution_pipeline
+                    "config_used": current_config,
+                    "context": context,
+                }
+
+                print(
+                    f"🚀 [EXECUTOR] Envoi ordre → {trade_decision.get('action')} {trade_decision.get('asset')} "
+                    f"| vol={trade_decision.get('volume')} | SL={trade_decision.get('sl_price')} | TP={trade_decision.get('tp_price')}"
+                )
+                exec_res = run_trade_execution_pipeline(
+                    te, decision_package, is_dry_run=False
+                )
+                self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
+
+                # Affichage console clair du résultat API
+                try:
+                    status = str((exec_res or {}).get("status", "")).lower()
+                    order = (exec_res or {}).get("order")
+                    deal = (exec_res or {}).get("deal")
+                    retcode = (exec_res or {}).get("retcode")
+                    price_ex = (exec_res or {}).get("price")
+                    vol_ex = (exec_res or {}).get("volume")
+
+                    print(
+                        f"✅ [EXECUTOR] Résultat MT5 → status={status} | order={order} | deal={deal} | retcode={retcode} | "
+                        f"price={price_ex} | volume={vol_ex}"
+                    )
+
+                    trade_decision["execution_status"] = status
+                    trade_decision["executed"] = status in {"filled", "placed"}
+                    meta = trade_decision.setdefault("meta", {})
+                    meta["execution_result"] = {
+                        k: exec_res.get(k)
+                        for k in (
+                            "status",
+                            "order",
+                            "deal",
+                            "retcode",
+                            "comment",
+                            "price",
+                            "volume",
+                        )
+                        if isinstance(exec_res, dict) and k in exec_res
+                    }
+
+                    # LOG FINAL HUMAIN-READABLE
+                    if trade_decision["executed"]:
+                        print(
+                            f"🎉 [EXECUTOR] TRADE EXÉCUTÉ → {trade_decision.get('action')} {trade_decision.get('asset')} "
+                            f"@{price_ex} (vol={vol_ex}) | SL={trade_decision.get('sl_price')} | TP={trade_decision.get('tp_price')}"
+                        )
+                    else:
+                        print(
+                            "⚠️ [EXECUTOR] Trade non exécuté (status différent de filled/placed)."
+                        )
+
+                except Exception:
+                    # même si l'affichage échoue, on ne casse pas la fonction
+                    pass
+
+            else:
+                self.logger.error(
+                    "[EXECUTOR] Pas d'Executor/MT5Connector → envoi BLOQUÉ (aucune simulation)."
+                )
+                print("⛔ [EXECUTOR] Pas d'Executor/MT5Connector — envoi annulé.")
                 return {}
+
+        except Exception as e:
+            self.logger.exception(f"[EXECUTOR] Erreur d’exécution MT5: {e}")
+            print(f"💥 [EXECUTOR] Erreur d’exécution: {e}")
+            return {}
+
+        # Toujours retourner la décision (enrichie du statut d’exécution)
+        return trade_decision
 
     def _core_evaluate_signals(
         self,
