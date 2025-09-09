@@ -619,7 +619,7 @@
       "soft_floor_rr": 0.8
     },
     "volume": {
-      "enabled": true,
+      "enabled": false,
       "min_tick_volume_m1": 50,
       "min_volume_zscore": -1.0
     },
