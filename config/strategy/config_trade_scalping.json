@@ -89,21 +89,20 @@
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
-        "min_rr": 0.73,
-        "tp_halfband_k": 1.0,
-        "buffer_pips_min": 0.8,
-        "min_mid_distance_ratio": 0.06,
+        "min_rr": 0.85,
+        "tp_halfband_k": 0.65,
+        "buffer_pips_min": 0.5,
+        "min_mid_distance_ratio": 0.04,
         "require_range_regime": true,
         "block_on_expansion": false,
         "min_confidence": 0.3,
         "fvg_max_distance_pips": 2.0,
         "ob_max_distance_pips": 2.0,
         "katana_soft_distance_mult": 1.25,
-        "min_atr_m1_pips": 0.2,
+        "min_atr_m1_pips": 0.15,
         "max_spread_pips": 3.0,
-        "ultra_near_pips": 0.6,
-        "max_stop_pips_scalp": 15.0,
-        "reject_if_sl_over_cap": false,
+        "max_stop_pips_scalp": 8.0,
+        "reject_if_sl_over_cap": true,
         "m1_break_bonus": 0.12,
         "only_trade_at_range_edges": false,
         "allow_midline_entries": true,
@@ -239,7 +238,7 @@
       "max_trades_per_day": 20,
       "cooldown_seconds_after_trade": 0,
       "skip_asset_if_spread_over_pips": 20,
-      "max_lot_size": 3.0
+      "max_lot_size": 2.5
     },
     "execution": {
       "order_type": "MARKET",

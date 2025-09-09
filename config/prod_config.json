@@ -646,7 +646,7 @@
     },
     "trailing_stop": {
       "enabled": true,
-      "distance_pips": 5.0
+      "distance_pips": 2.5
     },
     "risk_caps": {
       "enabled": true,
