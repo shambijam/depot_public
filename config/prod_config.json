@@ -642,7 +642,7 @@
       "require_range_regime": true,
       "block_on_expansion": true,
       "entry_gate_ok_required": true,
-      "min_mid_distance_ratio": 0.15
+      "min_mid_distance_ratio": 0.08
     },
     "trailing_stop": {
       "enabled": true,
