@@ -2443,23 +2443,32 @@ class DecisionPipeline:
                 context,
                 f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
             )
-
             # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
             try:
                 # 1) import direct depuis le fichier fourni (corrige le chemin)
-                from trade_executor import TradeExecutor, run_trade_execution_pipeline
+                from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
             except Exception as e:
+                # ❌ Pas d'exécuteur chargé → on BLOQUE proprement (aucune simulation)
                 self.logger.exception(f"[EXECUTOR] Import trade_executor impossible: {e}")
+                self.logger.error("[EXECUTOR] Import échoué → exécution réelle impossible. Aucune voie de simulation n'est autorisée.")
+                return {}
             else:
                 try:
                     # 2) essayer de récupérer un exécuteur déjà prêt sur self
                     te = getattr(self, "trade_executor", None)
 
                     # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
-                    mt5c = (
-                        getattr(self, "mt5_connector", None)
-                        or context.get("mt5_connector")
-                    )
+                    mt5c = getattr(self, "mt5_connector", None) or context.get("mt5_connector")
+
+                    # 3bis) S'assurer que le connecteur est connecté si dispo
+                    try:
+                        is_conn = getattr(mt5c, "is_connected", False)
+                        if callable(is_conn):
+                            is_conn = is_conn()
+                        if not is_conn and hasattr(mt5c, "connect"):
+                            mt5c.connect()
+                    except Exception:
+                        pass  # on laisse l'exécuteur gérer l'erreur de connexion
 
                     # 4) si pas d'exécuteur mais on a un connector, on instancie proprement
                     if te is None and mt5c is not None:
@@ -2477,11 +2486,15 @@ class DecisionPipeline:
                         exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
                         self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
                     else:
+                        # ❌ Pas d'exécuteur ni de connecteur → on BLOQUE proprement (aucune simulation)
                         self.logger.error("[EXECUTOR] Pas d'Executor/MT5Connector → envoi BLOQUÉ (aucune simulation).")
+                        return {}
                 except Exception as e:
                     self.logger.exception(f"[EXECUTOR] Erreur d’exécution MT5: {e}")
+                    return {}
 
             return trade_decision
+
 
 
     def _core_evaluate_signals(
