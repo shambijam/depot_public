@@ -2457,8 +2457,42 @@ class DecisionPipeline:
                     # 2) essayer de récupérer un exécuteur déjà prêt sur self
                     te = getattr(self, "trade_executor", None)
 
-                    # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
+                   # 3) si absent, essayer de récupérer/instancier un MT5Connector existant
                     mt5c = getattr(self, "mt5_connector", None) or context.get("mt5_connector")
+
+                    # 3a) fallback: créer/récupérer un connecteur si toujours None
+                    if mt5c is None:
+                        try:
+                            # ⚠️ adapte l’import selon ton arborescence (ex: trader.mt5_connector ou core.mt5_connector)
+                            from mt5_connector import MT5Connector
+
+                            # si la classe propose un singleton, on l’utilise
+                            get_shared = getattr(MT5Connector, "get_shared", None)
+                            if callable(get_shared):
+                                mt5c = get_shared(self.config_manager)
+                            else:
+                                mt5c = MT5Connector(self.config_manager)
+
+                            # tenter la connexion (non bloquant si déjà connecté)
+                            try:
+                                is_conn = getattr(mt5c, "is_connected", False)
+                                if callable(is_conn):
+                                    is_conn = is_conn()
+                                if not is_conn and hasattr(mt5c, "connect"):
+                                    mt5c.connect()
+                            except Exception:
+                                pass
+
+                            # mémoriser pour les prochains cycles
+                            setattr(self, "mt5_connector", mt5c)
+                            try:
+                                context["mt5_connector"] = mt5c
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            self.logger.error(f"[EXECUTOR] Impossible d'obtenir un MT5Connector: {e}")
+                            mt5c = None
+
 
                     # 3bis) S'assurer que le connecteur est connecté si dispo
                     try:

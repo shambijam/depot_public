@@ -204,7 +204,7 @@
     "readiness_gate": {
         "description": "Garde-fou de démarrage pour éviter les trades sans historique suffisant (durci)",
         "enabled": true,
-        "block_signals_first_n_cycles": 12,
+        "block_signals_first_n_cycles": 8,
         "max_allowed_data_age_seconds": 90
     },
     "strategy_profiles": {
