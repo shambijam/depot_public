@@ -612,14 +612,14 @@
     "enabled": true,
     "allow_fallbacks": false,
     "volatility": {
-      "enabled": false,
+      "enabled": true,
       "atr_period": 14,
       "min_atr_m1_pips": 0.4,
       "soft_mode": false,
       "soft_floor_rr": 0.8
     },
     "volume": {
-      "enabled": false,
+      "enabled": true,
       "min_tick_volume_m1": 50,
       "min_volume_zscore": -1.0
     },

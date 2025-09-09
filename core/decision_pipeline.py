@@ -314,12 +314,27 @@ class DecisionPipeline:
                 signals,
             )
 
-            # --- LOG FINAL SÉCURISÉ (évite AttributeError si None) ---
+           # --- LOG FINAL SÉCURISÉ (avec statut d’exécution) ---
             td = trade_decision or {}
-            print(f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')}")
+            st = str(td.get("execution_status", "")).lower()
+            if st in {"filled", "placed"}:
+                label = "TRADE EXÉCUTÉ"
+            elif st == "pending_manual_approval":
+                label = "EN ATTENTE VALIDATION"
+            elif st == "ready":
+                label = "PRÊT (DRY RUN)"
+            else:
+                label = "AUCUN"
+
+            print(f"🤖 [DECISION] Décision finale: {td.get('action', 'AUCUNE')} | {label}")
             self.logger.info(
-                f"3️⃣ DÉCISION RETOURNÉE:\n   Action: {td.get('action','NONE')}\n   Asset: {td.get('asset','NONE')}\n   Volume: {td.get('volume', 0)}"
+                f"3️⃣ DÉCISION RETOURNÉE:\n"
+                f"   Action: {td.get('action','NONE')}\n"
+                f"   Asset: {td.get('asset','NONE')}\n"
+                f"   Volume: {td.get('volume', 0)}\n"
+                f"   Statut: {label}"
             )
+
 
             # 5bis) RR projeté simple si overrides pips présents (utile pour audit)
             tp_pips = td.get("target_tp_pips")
@@ -2591,10 +2606,24 @@ class DecisionPipeline:
                         "context": context,
                     }
                     # 🚫 on force l'exécution réelle (aucune simulation)
-                    exec_res = run_trade_execution_pipeline(
-                        te, decision_package, is_dry_run=False
-                    )
+                    exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
                     self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
+
+                    # ⛳ Marquer explicitement le statut d'exécution dans la décision (pour l'affichage console)
+                    try:
+                        status = str((exec_res or {}).get("status", "")).lower()
+                        trade_decision["execution_status"] = status
+                        trade_decision["executed"] = status in {"filled", "placed"}
+                        # garder une trace minimale du résultat pour audit/console
+                        meta = trade_decision.setdefault("meta", {})
+                        meta["execution_result"] = {
+                            k: exec_res.get(k)
+                            for k in ("status", "order", "deal", "retcode", "comment", "price", "volume")
+                            if isinstance(exec_res, dict) and k in exec_res
+                        }
+                    except Exception:
+                        pass
+
                 else:
                     # ❌ Pas d'exécuteur ni de connecteur → on BLOQUE proprement (aucune simulation)
                     self.logger.error(
