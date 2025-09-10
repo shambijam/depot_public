@@ -1276,6 +1276,27 @@ class TradeExecutor:
                 self.logger.info(
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
+                # --- Vérification stops_level broker ---
+            try:
+                min_distance = getattr(symbol_info, "stops_level", 0) * getattr(
+                    symbol_info, "point", 0.0001
+                )
+                if min_distance and min_distance > 0:
+                    if action == "BUY":
+                        if abs(entry_price_market - sl_price) < min_distance:
+                            sl_price = entry_price_market - min_distance
+                        if abs(tp_price - entry_price_market) < min_distance:
+                            tp_price = entry_price_market + min_distance
+                    elif action == "SELL":
+                        if abs(sl_price - entry_price_market) < min_distance:
+                            sl_price = entry_price_market + min_distance
+                        if abs(entry_price_market - tp_price) < min_distance:
+                            tp_price = entry_price_market - min_distance
+                    self.logger.info(
+                        f"[SAFETY] SL/TP ajustés au min_distance={min_distance:.5f}"
+                    )
+            except Exception as e:
+                self.logger.warning(f"[SAFETY] Vérif stops_level échouée: {e}")
 
             # --- 8a) PATCH sécurité : forcer un écart minimal entre Price et SL/TP ---
             try:
