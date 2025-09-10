@@ -1253,11 +1253,11 @@ class TradeExecutor:
                 self.logger.warning(f"[TPSL] Smart scalping SL/TP échoué: {e}")
 
             if smart_sl_tp.get("valid"):
-                sl_price = smart_sl_tp["sl_price"]
-                tp_price = smart_sl_tp["tp_price"]
+                sl_price = float(smart_sl_tp["sl_price"])
+                tp_price = float(smart_sl_tp["tp_price"])
                 self.logger.info(
                     f"[TPSL] Smart scalping utilisé ({smart_sl_tp['method']}) "
-                    f"→ SL={sl_price}, TP={tp_price}, RR={smart_sl_tp['rr']:.2f}"
+                    f"→ SL={sl_price}, TP={tp_price}, RR={smart_sl_tp.get('rr', 0):.2f}"
                 )
             else:
                 sl_price, tp_price = self._calculate_sl_tp_prices(
@@ -1276,46 +1276,110 @@ class TradeExecutor:
                 self.logger.info(
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
-            # --- Sécurité broker : respecter stops_level ---
+
+            # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
-                min_distance = getattr(symbol_info, "stops_level", 0) * getattr(
-                    symbol_info, "point", 0.0001
+                import math
+
+                point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
+                tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
+                digits = int(
+                    getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
                 )
-                if min_distance and min_distance > 0:
-                    if action == "BUY":
-                        if (entry_price_market - sl_price) < min_distance:
-                            sl_price = entry_price_market - min_distance
-                        if (tp_price - entry_price_market) < min_distance:
-                            tp_price = entry_price_market + min_distance
-                    elif action == "SELL":
-                        if (sl_price - entry_price_market) < min_distance:
-                            sl_price = entry_price_market + min_distance
-                        if (entry_price_market - tp_price) < min_distance:
-                            tp_price = entry_price_market - min_distance
-                    self.logger.info(
-                        f"[SAFETY] SL/TP ajustés au min_distance={min_distance:.5f} ({symbol_info.name})"
+
+                # MetaTrader: stops_level / freeze_level en "points" (multiples de 'point')
+                stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
+                freeze_level_pts = int(getattr(symbol_info, "freeze_level", 0) or 0)
+                broker_min = max(stops_level_pts, freeze_level_pts) * point  # en prix
+
+                # Option: distance min configurable (en pips). 1 pip ~ 10 * point sur FX (5/3 digits)
+                cfg_min_pips = None
+                try:
+                    cfg_min_pips = (active_config.get("execution", {}) or {}).get(
+                        "min_sl_tp_distance_pips", None
+                    ) or (active_config.get("scalping", {}) or {}).get(
+                        "min_sl_tp_distance_pips", None
                     )
-            except Exception as e:
-                self.logger.warning(f"[SAFETY] Ajustement stops_level échoué: {e}")
+                except Exception:
+                    cfg_min_pips = None
 
-            # --- 8a) PATCH sécurité : forcer un écart minimal entre Price et SL/TP ---
-            try:
-                point = getattr(symbol_info, "point", 0.0001)
-                stops_level = getattr(symbol_info, "stops_level", 0) or 0
-                min_gap = max(3 * point, stops_level * point)
+                pip_size = 10.0 * point
+                cfg_min_price = (
+                    float(cfg_min_pips) * pip_size
+                    if isinstance(cfg_min_pips, (int, float))
+                    else 0.0
+                )
 
+                # Gap minimal final en PRIX
+                # - au moins 3 * point pour éviter l'arrondi collé au prix
+                # - au moins broker_min (stops/freeze)
+                # - au moins cfg_min_price si défini
+                min_gap_price = max(3.0 * point, broker_min, cfg_min_price)
+
+                def _ceil_to_tick(x: float) -> float:
+                    return round(math.ceil(x / tick) * tick, digits)
+
+                def _floor_to_tick(x: float) -> float:
+                    return round(math.floor(x / tick) * tick, digits)
+
+                # 1) Imposer les distances minimales (en prix) selon le sens du trade
                 if action == "BUY":
-                    if sl_price >= entry_price_market - min_gap:
-                        sl_price = entry_price_market - min_gap
-                    if tp_price <= entry_price_market + min_gap:
-                        tp_price = entry_price_market + min_gap
+                    # SL en-dessous, TP au-dessus
+                    if (entry_price_market - sl_price) < min_gap_price:
+                        sl_price = entry_price_market - min_gap_price
+                    if (tp_price - entry_price_market) < min_gap_price:
+                        tp_price = entry_price_market + min_gap_price
+
+                    # 2) Aligner sur la grille de tick (côté "sûr")
+                    sl_price = _floor_to_tick(sl_price)  # plus bas ou égal
+                    tp_price = _ceil_to_tick(tp_price)  # plus haut ou égal
+
+                    # 3) Cohérence finale
+                    if not (sl_price < entry_price_market < tp_price):
+                        # Pousse encore d’un tick si collision
+                        if not sl_price < entry_price_market:
+                            sl_price = _floor_to_tick(
+                                entry_price_market - min_gap_price
+                            )
+                        if not tp_price > entry_price_market:
+                            tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
+
                 elif action == "SELL":
-                    if sl_price <= entry_price_market + min_gap:
-                        sl_price = entry_price_market + min_gap
-                    if tp_price >= entry_price_market - min_gap:
-                        tp_price = entry_price_market - min_gap
+                    # SL au-dessus, TP en-dessous
+                    if (sl_price - entry_price_market) < min_gap_price:
+                        sl_price = entry_price_market + min_gap_price
+                    if (entry_price_market - tp_price) < min_gap_price:
+                        tp_price = entry_price_market - min_gap_price
+
+                    # 2) Aligner sur la grille de tick (côté "sûr")
+                    sl_price = _ceil_to_tick(sl_price)  # plus haut ou égal
+                    tp_price = _floor_to_tick(tp_price)  # plus bas ou égal
+
+                    # 3) Cohérence finale
+                    if not (tp_price < entry_price_market < sl_price):
+                        if not sl_price > entry_price_market:
+                            sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                        if not tp_price < entry_price_market:
+                            tp_price = _floor_to_tick(
+                                entry_price_market - min_gap_price
+                            )
+
+                # Log détaillé pour diagnostiquer 10016
+                self.logger.info(
+                    "[SAFETY] Distances SL/TP normalisées "
+                    f"(symbol={broker_symbol}, point={point}, tick={tick}, digits={digits}, "
+                    f"stops_level_pts={stops_level_pts}, freeze_level_pts={freeze_level_pts}, "
+                    f"min_gap_price={min_gap_price:.{digits}f}) | "
+                    f"entry={entry_price_market:.{digits}f} SL={sl_price:.{digits}f} "
+                    f"TP={tp_price:.{digits}f} "
+                    f"| dist_SL={abs(sl_price-entry_price_market):.{digits}f} "
+                    f"dist_TP={abs(tp_price-entry_price_market):.{digits}f}"
+                )
+
             except Exception as e:
-                self.logger.warning(f"[SAFETY] Ajustement SL/TP échoué: {e}")
+                self.logger.warning(
+                    f"[SAFETY] Normalisation SL/TP (stops_level/freeze/tick) échouée: {e}"
+                )
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
