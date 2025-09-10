@@ -80,6 +80,9 @@
         "enabled": true,
         "distance_pips": 5.0
       },
+      "execution": {
+        "min_sl_tp_distance_pips": 15
+      },
       "risk_filters": {
         "cooldown": {
           "enabled": true,

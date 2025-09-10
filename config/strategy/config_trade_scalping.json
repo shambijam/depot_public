@@ -244,6 +244,7 @@
       "order_type": "MARKET",
       "slippage_points": 5,
       "max_parallel_positions": 2,
+      "min_sl_tp_distance_pips": 15,
       "entry_on_close_only": false,
       "confirm_spread_at_entry": false,
       "cooldown_bars_after_miss": 1

@@ -76,6 +76,9 @@
       "liquidity_sweep": {
         "lookback_bars": 20
       },
+      "execution": {
+        "min_sl_tp_distance_pips": 15
+      },
       "trailing_stop": {
         "enabled": true,
         "distance_pips": 5.0
