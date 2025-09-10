@@ -1277,6 +1277,25 @@ class TradeExecutor:
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
 
+            # --- 8a) PATCH sécurité : forcer un écart minimal entre Price et SL/TP ---
+            try:
+                point = getattr(symbol_info, "point", 0.0001)
+                stops_level = getattr(symbol_info, "stops_level", 0) or 0
+                min_gap = max(3 * point, stops_level * point)
+
+                if action == "BUY":
+                    if sl_price >= entry_price_market - min_gap:
+                        sl_price = entry_price_market - min_gap
+                    if tp_price <= entry_price_market + min_gap:
+                        tp_price = entry_price_market + min_gap
+                elif action == "SELL":
+                    if sl_price <= entry_price_market + min_gap:
+                        sl_price = entry_price_market + min_gap
+                    if tp_price >= entry_price_market - min_gap:
+                        tp_price = entry_price_market - min_gap
+            except Exception as e:
+                self.logger.warning(f"[SAFETY] Ajustement SL/TP échoué: {e}")
+
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
                 min_rr = float(
