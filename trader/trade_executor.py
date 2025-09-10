@@ -1277,20 +1277,26 @@ class TradeExecutor:
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
 
-            # ---------- 8a) Sécurité broker & normalisation prix ----------
+           # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
                 import math
 
                 point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
                 tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
-                digits = int(
-                    getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
-                )
+                digits = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
 
                 # MetaTrader: stops_level / freeze_level en "points" (multiples de 'point')
                 stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
                 freeze_level_pts = int(getattr(symbol_info, "freeze_level", 0) or 0)
                 broker_min = max(stops_level_pts, freeze_level_pts) * point  # en prix
+
+                # 🔍 DEBUG broker constraints
+                self.logger.info(
+                    f"[DEBUG] Broker constraints for {broker_symbol} → "
+                    f"stops_level={stops_level_pts} pts ({stops_level_pts*point:.5f}), "
+                    f"freeze_level={freeze_level_pts} pts ({freeze_level_pts*point:.5f}), "
+                    f"point={point}, tick={tick}, digits={digits}"
+                )
 
                 # Option: distance min configurable (en pips). 1 pip ~ 10 * point sur FX (5/3 digits)
                 cfg_min_pips = None
@@ -1311,9 +1317,6 @@ class TradeExecutor:
                 )
 
                 # Gap minimal final en PRIX
-                # - au moins 3 * point pour éviter l'arrondi collé au prix
-                # - au moins broker_min (stops/freeze)
-                # - au moins cfg_min_price si défini
                 min_gap_price = max(3.0 * point, broker_min, cfg_min_price)
 
                 def _ceil_to_tick(x: float) -> float:
@@ -1332,15 +1335,12 @@ class TradeExecutor:
 
                     # 2) Aligner sur la grille de tick (côté "sûr")
                     sl_price = _floor_to_tick(sl_price)  # plus bas ou égal
-                    tp_price = _ceil_to_tick(tp_price)  # plus haut ou égal
+                    tp_price = _ceil_to_tick(tp_price)   # plus haut ou égal
 
                     # 3) Cohérence finale
                     if not (sl_price < entry_price_market < tp_price):
-                        # Pousse encore d’un tick si collision
                         if not sl_price < entry_price_market:
-                            sl_price = _floor_to_tick(
-                                entry_price_market - min_gap_price
-                            )
+                            sl_price = _floor_to_tick(entry_price_market - min_gap_price)
                         if not tp_price > entry_price_market:
                             tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
 
@@ -1352,7 +1352,7 @@ class TradeExecutor:
                         tp_price = entry_price_market - min_gap_price
 
                     # 2) Aligner sur la grille de tick (côté "sûr")
-                    sl_price = _ceil_to_tick(sl_price)  # plus haut ou égal
+                    sl_price = _ceil_to_tick(sl_price)   # plus haut ou égal
                     tp_price = _floor_to_tick(tp_price)  # plus bas ou égal
 
                     # 3) Cohérence finale
@@ -1360,11 +1360,9 @@ class TradeExecutor:
                         if not sl_price > entry_price_market:
                             sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
                         if not tp_price < entry_price_market:
-                            tp_price = _floor_to_tick(
-                                entry_price_market - min_gap_price
-                            )
+                            tp_price = _floor_to_tick(entry_price_market - min_gap_price)
 
-                # Log détaillé pour diagnostiquer 10016
+                # 🔍 Log détaillé pour diagnostiquer erreurs type 10016
                 self.logger.info(
                     "[SAFETY] Distances SL/TP normalisées "
                     f"(symbol={broker_symbol}, point={point}, tick={tick}, digits={digits}, "
@@ -1380,6 +1378,7 @@ class TradeExecutor:
                 self.logger.warning(
                     f"[SAFETY] Normalisation SL/TP (stops_level/freeze/tick) échouée: {e}"
                 )
+
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
