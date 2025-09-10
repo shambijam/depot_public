@@ -1239,62 +1239,42 @@ class TradeExecutor:
                 else:
                     trigger_price = entry_price_market
 
-            # ---------- 8) SL/TP (avec overrides en pips) ----------
-            # Supporte sl/tp "hint" pour la stratégie midline
-            sl_pips_override = (
-                trade_decision.get("target_sl_pips")
-                if trade_decision.get("target_sl_pips") is not None
-                else trade_decision.get("sl_pips_hint")
-            )
-            tp_pips_override = (
-                trade_decision.get("target_tp_pips")
-                if trade_decision.get("target_tp_pips") is not None
-                else trade_decision.get("tp_pips_hint")
-            )
-
-            # Infos Bollinger/midline (si présentes) à propager au calculateur de niveaux
-            boll = trade_decision.get("boll") or market_context.get("boll") or {}
-            for k in ("bb_mid", "bb_upper", "bb_lower"):
-                if k in trade_decision and k not in boll:
-                    try:
-                        boll[k] = float(trade_decision.get(k))
-                    except Exception:
-                        pass
-
-            order_ctx = {
-                "action": action,
-                "asset": broker_symbol,
-                "order_type": order_type,
-                "target_sl_pips": sl_pips_override,
-                "target_tp_pips": tp_pips_override,
-                "spread_pips": spread_pips,
-                "entry_price_ref": entry_price_hint,
-                "level_mode": trade_decision.get(
-                    "level_mode", None
-                ),  # ex: "boll_midline"
-                "boll": {
-                    "bb_mid": boll.get("bb_mid"),
-                    "bb_upper": boll.get("bb_upper"),
-                    "bb_lower": boll.get("bb_lower"),
-                },
-            }
-
-            sl_price, tp_price = self._calculate_sl_tp_prices(
-                order_ctx,
-                active_config,
-                symbol_info,
-                entry_price_market,
-                market_context,
-            )
-
-            # Validations SL/TP
-            if not isinstance(sl_price, (int, float)) or sl_price <= 0:
-                raise TradeExecutionError(
-                    f"SL calculé invalide ({sl_price}) pour {broker_symbol}."
+            # ---------- 8) SL/TP (smart scalping + fallback) ----------
+            smart_sl_tp = {}
+            try:
+                smart_sl_tp = self.smart_scalping_tp_sl(
+                    symbol=broker_symbol,
+                    entry_price=entry_price_market,
+                    action=action,
+                    config=active_config.get("scalping", {}) or active_config,
+                    market_context=market_context,
                 )
-            if not isinstance(tp_price, (int, float)) or tp_price <= 0:
-                raise TradeExecutionError(
-                    f"TP calculé invalide ({tp_price}) pour {broker_symbol}."
+            except Exception as e:
+                self.logger.warning(f"[TPSL] Smart scalping SL/TP échoué: {e}")
+
+            if smart_sl_tp.get("valid"):
+                sl_price = smart_sl_tp["sl_price"]
+                tp_price = smart_sl_tp["tp_price"]
+                self.logger.info(
+                    f"[TPSL] Smart scalping utilisé ({smart_sl_tp['method']}) "
+                    f"→ SL={sl_price}, TP={tp_price}, RR={smart_sl_tp['rr']:.2f}"
+                )
+            else:
+                sl_price, tp_price = self._calculate_sl_tp_prices(
+                    {
+                        "action": action,
+                        "asset": broker_symbol,
+                        "order_type": order_type,
+                        "target_sl_pips": trade_decision.get("target_sl_pips"),
+                        "target_tp_pips": trade_decision.get("target_tp_pips"),
+                    },
+                    active_config,
+                    symbol_info,
+                    entry_price_market,
+                    market_context,
+                )
+                self.logger.info(
+                    f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
@@ -1454,6 +1434,130 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
+
+    def smart_scalping_tp_sl(
+        self,
+        symbol: str,
+        entry_price: float,
+        action: str,
+        config: dict,
+        market_context: dict,
+    ) -> dict:
+        """
+        Calcule des niveaux TP/SL intelligents pour scalping institutionnel.
+        Combine ATR, swings, FVG, et fallback pips fixes avec garde-fous robustes.
+
+        Args:
+        symbol (str): Actif (ex: 'EURUSD')
+        entry_price (float): Prix d'entrée
+        action (str): 'BUY' ou 'SELL'
+        config (dict): Configuration de la stratégie/actif
+        market_context (dict): Contexte marché enrichi (ATR, swings, spreads, etc.)
+
+        Returns:
+        dict: {
+            "sl_price": float,
+            "tp_price": float,
+            "method": str,
+            "rr": float,
+            "valid": bool
+        }
+        """
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            # 1️⃣ Config locale
+            rr_min = float(config.get("min_rr", 1.2))
+            atr_mult_sl = float(config.get("atr_multiplier_sl", 1.0))
+            atr_mult_tp = float(config.get("atr_multiplier_tp", 1.5))
+            sl_fixed = float(config.get("target_sl_pips", 5))
+            tp_fixed = float(config.get("target_tp_pips", 8))
+            max_sl = float(config.get("max_sl_pips", 20))
+            min_sl = float(config.get("min_sl_pips", 2))
+
+            point = market_context.get("point", 0.0001)
+            atr = float(market_context.get("atr_m5", 0) or 0)
+            last_swings = market_context.get("swings", {}) or {}
+            fvg_levels = market_context.get("fvg_levels", {}) or {}
+
+            # 2️⃣ SL initial : priorité swings > ATR > fixe
+            if action == "BUY":
+                sl_price = last_swings.get("last_swing_low")
+                if sl_price and sl_price < entry_price:
+                    method = "swing_low"
+                elif atr > 0:
+                    sl_price = entry_price - atr * atr_mult_sl * point
+                    method = "ATR"
+                else:
+                    sl_price = entry_price - sl_fixed * point
+                    method = "fixed"
+            else:  # SELL
+                sl_price = last_swings.get("last_swing_high")
+                if sl_price and sl_price > entry_price:
+                    method = "swing_high"
+                elif atr > 0:
+                    sl_price = entry_price + atr * atr_mult_sl * point
+                    method = "ATR"
+                else:
+                    sl_price = entry_price + sl_fixed * point
+                    method = "fixed"
+
+            # 3️⃣ TP initial : RR basé ou FVG
+            if action == "BUY":
+                if "upside_fvg" in fvg_levels:
+                    tp_price = fvg_levels["upside_fvg"]
+                    method += "+FVG"
+                else:
+                    tp_price = entry_price + (abs(entry_price - sl_price) * atr_mult_tp)
+            else:
+                if "downside_fvg" in fvg_levels:
+                    tp_price = fvg_levels["downside_fvg"]
+                    method += "+FVG"
+                else:
+                    tp_price = entry_price - (abs(entry_price - sl_price) * atr_mult_tp)
+
+            # 4️⃣ Vérification RR
+            rr = abs(tp_price - entry_price) / max(abs(entry_price - sl_price), 1e-6)
+            if rr < rr_min:
+                adj = rr_min / rr
+                if action == "BUY":
+                    tp_price = entry_price + (tp_price - entry_price) * adj
+                else:
+                    tp_price = entry_price - (entry_price - tp_price) * adj
+                method += "+RRfix"
+
+            # 5️⃣ Garde-fous broker
+            sl_pips = abs(entry_price - sl_price) / point
+            if sl_pips < min_sl or sl_pips > max_sl:
+                logger.warning(
+                    f"[{symbol}] SL {sl_pips:.1f} pips hors bornes [{min_sl}-{max_sl}]."
+                )
+                return {
+                    "sl_price": None,
+                    "tp_price": None,
+                    "method": method,
+                    "rr": rr,
+                    "valid": False,
+                }
+
+            return {
+                "sl_price": round(sl_price, 5),
+                "tp_price": round(tp_price, 5),
+                "method": method,
+                "rr": rr,
+                "valid": True,
+            }
+
+        except Exception as e:
+            logger.error(f"Erreur smart_scalping_tp_sl: {e}", exc_info=True)
+            return {
+                "sl_price": None,
+                "tp_price": None,
+                "method": "error",
+                "rr": 0,
+                "valid": False,
+            }
 
     def _calculate_sl_tp_prices(
         self,
@@ -2926,7 +3030,11 @@ class TradeExecutor:
                 connected = connected()
             if not connected and hasattr(self.mt5_connector, "connect"):
                 self.mt5_connector.connect()
-                connected = self.mt5_connector.is_connected() if callable(getattr(self.mt5_connector, "is_connected", None)) else bool(getattr(self.mt5_connector, "is_connected", False))
+                connected = (
+                    self.mt5_connector.is_connected()
+                    if callable(getattr(self.mt5_connector, "is_connected", None))
+                    else bool(getattr(self.mt5_connector, "is_connected", False))
+                )
         except Exception:
             connected = False
 
@@ -2951,7 +3059,11 @@ class TradeExecutor:
 
         def _const(group: str, key: str, default_name: str):
             try:
-                mapping = (self.mt5_mappings.get(group, {}) if isinstance(getattr(self, "mt5_mappings", None), dict) else {}) or {}
+                mapping = (
+                    self.mt5_mappings.get(group, {})
+                    if isinstance(getattr(self, "mt5_mappings", None), dict)
+                    else {}
+                ) or {}
                 name = mapping.get(key, default_name)
                 return getattr(mt5, name)
             except Exception:
@@ -2961,8 +3073,12 @@ class TradeExecutor:
         order_type = request.get("type")
         ORDER_TYPE_BUY = _const("order_types", "BUY", "ORDER_TYPE_BUY")
         ORDER_TYPE_SELL = _const("order_types", "SELL", "ORDER_TYPE_SELL")
-        ORDER_TYPE_SELL_LIMIT = _const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT")
-        ORDER_TYPE_SELL_STOP = _const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
+        ORDER_TYPE_SELL_LIMIT = _const(
+            "order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
+        )
+        ORDER_TYPE_SELL_STOP = _const(
+            "order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"
+        )
 
         try:
             ot_int = int(order_type)
@@ -2987,7 +3103,9 @@ class TradeExecutor:
                     last_err = mt5.last_error()
                 except Exception:
                     pass
-                raise TradeExecutionError(f"order_send() n'a retourné aucun résultat. last_error={last_err}")
+                raise TradeExecutionError(
+                    f"order_send() n'a retourné aucun résultat. last_error={last_err}"
+                )
 
             # --- Récupération sûre des champs renvoyés ---
             retcode = getattr(result, "retcode", None)
@@ -3001,13 +3119,15 @@ class TradeExecutor:
             # --- Normalisation retcode / succès ---
             RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")
             RET_PLACED = _const("trade_retcodes", "PLACED", "TRADE_RETCODE_PLACED")
-            RET_DONE_PARTIAL = _const("trade_retcodes", "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL")
+            RET_DONE_PARTIAL = _const(
+                "trade_retcodes", "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"
+            )
             ok_codes = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
 
             # Libellé humain (reverse mapping si possible)
             retcode_str = ""
             try:
-                for k, v in ((self.mt5_mappings.get("trade_retcodes", {}) or {}).items()):
+                for k, v in (self.mt5_mappings.get("trade_retcodes", {}) or {}).items():
                     if getattr(mt5, v, None) == retcode:
                         retcode_str = k
                         break
@@ -3047,7 +3167,11 @@ class TradeExecutor:
                 # last_error lisible
                 try:
                     last_err = mt5.last_error()
-                    last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+                    last_err_str = (
+                        f"{last_err}"
+                        if not isinstance(last_err, (tuple, list))
+                        else " | ".join(map(str, last_err))
+                    )
                 except Exception:
                     last_err_str = "N/A"
 
@@ -3057,7 +3181,11 @@ class TradeExecutor:
                 )
 
             # --- Construction du résumé d'exécution ---
-            status = "filled" if retcode == RET_DONE else ("partially_filled" if retcode == RET_DONE_PARTIAL else "placed")
+            status = (
+                "filled"
+                if retcode == RET_DONE
+                else ("partially_filled" if retcode == RET_DONE_PARTIAL else "placed")
+            )
             execution_summary = {
                 "status": status,
                 "retcode": retcode,
@@ -3090,11 +3218,17 @@ class TradeExecutor:
                     positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
                 if positions:
                     try:
-                        pos = sorted(positions, key=lambda p: getattr(p, "time_update", 0))[-1]
+                        pos = sorted(
+                            positions, key=lambda p: getattr(p, "time_update", 0)
+                        )[-1]
                     except Exception:
                         pos = positions[-1]
-                    execution_summary["sl"] = getattr(pos, "sl", execution_summary["sl"])
-                    execution_summary["tp"] = getattr(pos, "tp", execution_summary["tp"])
+                    execution_summary["sl"] = getattr(
+                        pos, "sl", execution_summary["sl"]
+                    )
+                    execution_summary["tp"] = getattr(
+                        pos, "tp", execution_summary["tp"]
+                    )
             except Exception:
                 pass
 
@@ -3116,7 +3250,8 @@ class TradeExecutor:
                             "strategy_type": request.get("strategy_type"),
                             "rule_name": request.get("rule_name"),
                             "magic_number": request.get("magic"),
-                            "ticket": execution_summary.get("order") or execution_summary.get("deal"),
+                            "ticket": execution_summary.get("order")
+                            or execution_summary.get("deal"),
                             "request": request,
                             "response": {
                                 "retcode": retcode,
@@ -3164,9 +3299,12 @@ class TradeExecutor:
                     )
                 except Exception:
                     pass
-            self.logger.error(f"Erreur inattendue execute_order {symbol}: {e}", exc_info=True)
-            raise TradeExecutionError(f"Échec inattendu execute_order {symbol}: {e}") from e
-
+            self.logger.error(
+                f"Erreur inattendue execute_order {symbol}: {e}", exc_info=True
+            )
+            raise TradeExecutionError(
+                f"Échec inattendu execute_order {symbol}: {e}"
+            ) from e
 
     def _send_close_order_with_retries(self, request: dict) -> Optional[Any]:
         """
@@ -3919,6 +4057,7 @@ class TradeExecutor:
         # TODO: Utiliser un moteur de templates (ex: Jinja2) pour des rapports Markdown/HTML plus riches. (TODO maintenu)
         return None
 
+
 def run_trade_execution_pipeline(
     trade_executor, decision_package: dict, is_dry_run: bool = False
 ) -> dict:
@@ -4129,8 +4268,7 @@ def run_trade_execution_pipeline(
         )
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
- 
+
         # ----------- 7) Exécution -----------
     execution_result = trade_executor.execute_order(mt5_request)
     return execution_result
-

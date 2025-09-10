@@ -115,7 +115,7 @@
       },
       "trade_frequency": {
         "enabled": true,
-        "min_bars_between_trades": 5
+        "min_bars_between_trades": 3
       }
     }
   }

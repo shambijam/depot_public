@@ -111,6 +111,10 @@
           "adaptive_to_atr": true,
           "minimum": 3,
           "maximum": 12
+        },
+        "trade_frequency": {
+          "enabled": true,
+          "min_bars_between_trades": 3
         }
       }
     }
