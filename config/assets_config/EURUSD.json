@@ -65,30 +65,54 @@
       "threshold_multiplier": 2.0,
       "blacklist_duration_minutes": 15
     },
-    "adaptive_lot_sizing": {
-      "enabled": true,
-      "based_on_volatility": true,
-      "based_on_account_performance": true
-    }
-  },
-  "smart_targets": {
-    "take_profit_multiplier": {
-      "base": 1.3,
-      "range_market": 1.0,
-      "trending_market": 1.8,
-      "high_volatility": 2.0
-    },
-    "stop_loss_multiplier": 1.0,
-    "trailing_stop_start_after_percent": {
-      "base": 0.4,
-      "adaptive": true,
-      "high_volatility": 0.6
-    },
-    "trailing_step_points": {
-      "base": 5,
-      "adaptive_to_atr": true,
-      "minimum": 3,
-      "maximum": 12
+    "scalping": {
+      "bollinger_midline_gate": {
+        "enabled": true,
+        "require_range_regime": true,
+        "block_on_expansion": true,
+        "entry_gate_ok_required": true,
+        "min_mid_distance_ratio": 0.12
+      },
+      "liquidity_sweep": {
+        "lookback_bars": 20
+      },
+      "trailing_stop": {
+        "enabled": true,
+        "distance_pips": 5.0
+      },
+      "risk_filters": {
+        "cooldown": {
+          "enabled": true,
+          "mode": "bars",
+          "min_bars_between_trades": 15,
+          "min_cycles_between_trades": 0
+        },
+        "adaptive_lot_sizing": {
+          "enabled": true,
+          "based_on_volatility": true,
+          "based_on_account_performance": true
+        }
+      },
+      "smart_targets": {
+        "take_profit_multiplier": {
+          "base": 1.3,
+          "range_market": 1.0,
+          "trending_market": 1.8,
+          "high_volatility": 2.0
+        },
+        "stop_loss_multiplier": 1.0,
+        "trailing_stop_start_after_percent": {
+          "base": 0.4,
+          "adaptive": true,
+          "high_volatility": 0.6
+        },
+        "trailing_step_points": {
+          "base": 5,
+          "adaptive_to_atr": true,
+          "minimum": 3,
+          "maximum": 12
+        }
+      }
     }
   }
 }

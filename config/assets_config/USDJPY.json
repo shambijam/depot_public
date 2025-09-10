@@ -1,20 +1,9 @@
 {
-    "description": "Configuration USDJPY — corrigée et optimisée pour scalping et range à faible volatilité",
+    "description": "Configuration optimisée USDJPY avec flexibilité adaptative",
     "symbol": "USDJPY",
     "type": "forex",
     "profile": "institutionnel",
-    "schema_version": "2.2",
-    "compatible_with": [
-        "SNIPER_X >=2.0"
-    ],
-    "last_updated": "2025-08-22",
-    "market_specs": {
-        "digits": 3,
-        "point": 0.001,
-        "pip": 0.01,
-        "pip_in_points": 10,
-        "units_per_lot": 100000
-    },
+    "last_updated": "2025-07-30",
     "volatility": {
         "expected_daily_range_percent": {
             "value": 0.7,
@@ -22,39 +11,38 @@
                 "min": 0.5,
                 "max": 1.0,
                 "adjustment_period_days": 7
-            },
-            "source": "ATR14"
+            }
         },
         "max_allowed_spread_points": {
-            "base": 10,
-            "session_caps": {
-                "london_ny": 10,
-                "asian": 12,
-                "weekend": 15
+            "base": 8,
+            "session_multipliers": {
+                "london_ny": 1.0,
+                "asian": 1.3,
+                "weekend": 1.8
             },
-            "news_spike_tolerance": 18,
+            "news_spike_tolerance": 20,
             "volatility_adjustment": true
         },
         "min_tradable_range_points": {
-            "value": 10,
+            "value": 9,
             "dynamic_adjustment": true
         }
     },
     "risk_management": {
         "base_lot_size": 1.0,
         "daily_loss_limit_percent": {
-            "base": 1.8,
-            "aggressive_mode": 2.2,
-            "conservative_mode": 1.3,
+            "base": 2.0,
+            "aggressive_mode": 2.5,
+            "conservative_mode": 1.5,
             "dynamic_adjustment": true
         },
         "weekly_loss_limit_percent": {
-            "base": 4.5,
-            "max_escalation": 5.5
+            "base": 5.0,
+            "max_escalation": 6.0
         },
         "performance_based_adjustments": {
-            "winning_streak_bonus": 0.15,
-            "losing_streak_reduction": 0.25,
+            "winning_streak_bonus": 0.2,
+            "losing_streak_reduction": 0.3,
             "streak_threshold": 3
         }
     },
@@ -62,14 +50,14 @@
         "enable_scalping_mode": {
             "value": true,
             "time_conditions": [
-                "08:30-10:30",
-                "14:00-16:00"
+                "07:00-09:00",
+                "13:00-15:00"
             ],
-            "volatility_threshold": 0.5
+            "volatility_threshold": 0.6
         },
         "enable_trailing_stop": {
             "value": true,
-            "minimum_profit_threshold": 0.25
+            "minimum_profit_threshold": 0.3
         },
         "enable_grid_in_range_only": true,
         "auto_blacklist_high_spread_assets": {
@@ -77,60 +65,58 @@
             "threshold_multiplier": 2.0,
             "blacklist_duration_minutes": 15
         },
-        "adaptive_lot_sizing": {
-            "enabled": true,
-            "based_on_volatility": true,
-            "based_on_account_performance": true
-        }
-    },
-    "entry_rules": {
         "scalping": {
-            "require_mtf_alignment": [
-                "M5",
-                "M15"
-            ],
-            "min_confidence": 0.45,
-            "min_atr_points": 8,
-            "bollinger": {
+            "bollinger_midline_gate": {
                 "enabled": true,
-                "midline_strict": true
-            }
-        }
-    },
-    "smart_targets": {
-        "tp_sl_basis": "atr14",
-        "atr_period": 14,
-        "profiles": {
-            "default": {
-                "tp_multiple": 1.0,
-                "sl_multiple": 1.0
+                "require_range_regime": true,
+                "block_on_expansion": true,
+                "entry_gate_ok_required": true,
+                "min_mid_distance_ratio": 0.12
             },
-            "scalp": {
-                "tp_multiple": 1.2,
-                "sl_multiple": 1.0
+            "liquidity_sweep": {
+                "lookback_bars": 20
+            },
+            "trailing_stop": {
+                "enabled": true,
+                "distance_pips": 5.0
+            },
+            "risk_filters": {
+                "cooldown": {
+                    "enabled": true,
+                    "mode": "bars",
+                    "min_bars_between_trades": 5,
+                    "min_cycles_between_trades": 0
+                },
+                "adaptive_lot_sizing": {
+                    "enabled": true,
+                    "based_on_volatility": true,
+                    "based_on_account_performance": true
+                }
+            },
+            "smart_targets": {
+                "take_profit_multiplier": {
+                    "base": 1.3,
+                    "range_market": 1.0,
+                    "trending_market": 1.8,
+                    "high_volatility": 2.0
+                },
+                "stop_loss_multiplier": 1.0,
+                "trailing_stop_start_after_percent": {
+                    "base": 0.4,
+                    "adaptive": true,
+                    "high_volatility": 0.6
+                },
+                "trailing_step_points": {
+                    "base": 5,
+                    "adaptive_to_atr": true,
+                    "minimum": 3,
+                    "maximum": 12
+                }
+            },
+            "trade_frequency": {
+                "enabled": true,
+                "min_bars_between_trades": 5
             }
         }
-    },
-    "temporal_context": {
-        "avoid_trading_hours": {
-            "enabled": true,
-            "asian_session": {
-                "start": "00:00",
-                "end": "07:00"
-            }
-        },
-        "session_preferences": {
-            "london": 1.0,
-            "new_york": 1.0,
-            "asian": 0.8
-        }
-    },
-    "economic_news_filter": {
-        "enabled": true,
-        "blacklist_high_impact": [
-            "NFP",
-            "FOMC",
-            "CPI_US"
-        ]
     }
 }

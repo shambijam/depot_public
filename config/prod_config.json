@@ -292,7 +292,7 @@
   "risk_management": {
     "max_consecutive_losses_before_pause": 2,
     "pause_minutes_after_streak": 20,
-    "risk_per_trade_pct": 0.73,
+    "risk_per_trade_pct": 1.0,
     "max_trades_per_day": 80,
     "max_trades_per_symbol_per_day": 20,
     "fixed_volume_lots": 0.01,
@@ -620,7 +620,7 @@
     },
     "volume": {
       "enabled": true,
-      "min_tick_volume_m1": 70,
+      "min_tick_volume_m1": 80,
       "min_volume_zscore": -1.0
     },
     "spread": {
@@ -642,7 +642,7 @@
       "require_range_regime": true,
       "block_on_expansion": true,
       "entry_gate_ok_required": true,
-      "min_mid_distance_ratio": 0.08
+      "min_mid_distance_ratio": 0.11
     },
     "trailing_stop": {
       "enabled": true,
@@ -657,8 +657,8 @@
     },
     "cooldowns": {
       "enabled": true,
-      "trade_cooldown_seconds": 30,
-      "per_symbol_cooldown_candles": 1
+      "trade_cooldown_seconds": 120,
+      "per_symbol_cooldown_candles": 5
     },
     "logging": {
       "note_only": true
