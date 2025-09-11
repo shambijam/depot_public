@@ -11,7 +11,6 @@
     "use_phase_observer": true,
     "lookback_window": 300,
     "volatility_threshold": 0.004,
-    "volume_zscore": 0.35,
     "overrides": {
       "require_range_detection": false,
       "prefer_accumulation_distribution": true,
@@ -141,6 +140,12 @@
       "enabled": true,
       "minutes_before": 2,
       "minutes_after": 2
+    },
+    "volume_zscore": {
+      "enabled": true,
+      "min_zscore": 1.2,
+      "max_zscore": 3.5,
+      "lookback": 50
     }
   }
 }
