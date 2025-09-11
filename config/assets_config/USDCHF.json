@@ -81,7 +81,7 @@
         "distance_pips": 5.0
       },
       "execution": {
-        "min_sl_tp_distance_pips": 15
+        "min_sl_tp_distance_pips": 8.0
       },
       "risk_filters": {
         "cooldown": {

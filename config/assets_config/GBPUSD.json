@@ -77,7 +77,7 @@
         "lookback_bars": 20
       },
       "execution": {
-        "min_sl_tp_distance_pips": 15
+        "min_sl_tp_distance_pips": 8.0
       },
       "trailing_stop": {
         "enabled": true,
