@@ -277,7 +277,7 @@
             "period": 20,
             "std_mult": 2.2
           },
-          "USDJPY": {
+          "USDCAD": {
             "period": 20,
             "std_mult": 2.0
           },

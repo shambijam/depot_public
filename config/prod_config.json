@@ -200,7 +200,7 @@
       "major_fx_pairs_for_correlation": [
         "EURUSD",
         "GBPUSD",
-        "USDJPY",
+        "USDCAD",
         "USDCHF"
       ],
       "min_signal_confidence": 0.01
