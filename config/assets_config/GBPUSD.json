@@ -101,24 +101,29 @@
           "base": 1.3,
           "range_market": 1.0,
           "trending_market": 1.8,
-          "high_volatility": 2.0
+          "high_volatility": 2.0,
+          "default": {
+            "tp_multiple": 0.6,
+            "sl_multiple": 0.8,
+            "hard_min_points": 8
+          },
+          "stop_loss_multiplier": 1.0,
+          "trailing_stop_start_after_percent": {
+            "base": 0.4,
+            "adaptive": true,
+            "high_volatility": 0.6
+          },
+          "trailing_step_points": {
+            "base": 5,
+            "adaptive_to_atr": true,
+            "minimum": 3,
+            "maximum": 12
+          }
         },
-        "stop_loss_multiplier": 1.0,
-        "trailing_stop_start_after_percent": {
-          "base": 0.4,
-          "adaptive": true,
-          "high_volatility": 0.6
-        },
-        "trailing_step_points": {
-          "base": 5,
-          "adaptive_to_atr": true,
-          "minimum": 3,
-          "maximum": 12
+        "trade_frequency": {
+          "enabled": true,
+          "min_bars_between_trades": 8
         }
-      },
-      "trade_frequency": {
-        "enabled": true,
-        "min_bars_between_trades": 8
       }
     }
   }
