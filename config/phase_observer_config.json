@@ -2,9 +2,9 @@
     "core_parameters": {
         "description": "Paramètres de base optimisés pour détection de signaux",
         "lookback_window": 12,
-        "volatility_threshold": 0.0001,
-        "volume_zscore": 0.0,
-        "impulse_threshold": 0.00015,
+        "volatility_threshold": 0.0002,
+        "volume_zscore": 1.2,
+        "impulse_threshold": 0.0002,
         "min_window_order_block": 3,
         "min_window_fvg": 2,
         "min_window_liquidity_grab": 6,
@@ -39,8 +39,8 @@
     },
     "fvg_enhanced_settings": {
         "description": "FVG avec magnitude et tracking de remplissage",
-        "min_gap_magnitude_percent": 0.08,
-        "gap_fill_threshold": 0.6,
+        "min_gap_magnitude_percent": 0.12,
+        "gap_fill_threshold": 0.73,
         "enable_gap_tracking": true,
         "max_gap_age_bars": 50
     },
@@ -48,7 +48,7 @@
         "description": "Order Blocks avec scoring ML et confluence (resserré)",
         "enable_ml_scoring": true,
         "confluence_requirements": {
-            "min_confluence_score": 0.5,
+            "min_confluence_score": 0.73,
             "require_volume_confirmation": true,
             "require_trend_alignment": true,
             "require_fvg_presence": true
@@ -67,11 +67,11 @@
                 "min_swing_distance": 0.0008
             },
             "normal_vol": {
-                "swing_order": 3,
+                "swing_order": 4,
                 "min_swing_distance": 0.0005
             },
             "low_vol": {
-                "swing_order": 2,
+                "swing_order": 3,
                 "min_swing_distance": 0.0003
             }
         },
@@ -95,7 +95,7 @@
             "price_change_period": 1
         },
         "structure_validation": {
-            "min_break_distance": 0.0001,
+            "min_break_distance": 0.0002,
             "require_close_beyond": true
         }
     },
@@ -121,7 +121,7 @@
         "description": "Pondération des signaux et bonus de confluence (resserré)",
         "base_confidence": 0.25,
         "signal_weights": {
-            "fvg_detected": 0.20,
+            "fvg_detected": 0.15,
             "ob_detected": 0.30,
             "bos_mss_detected": 0.20,
             "liquidity_grab_detected": 0.15,
@@ -132,7 +132,7 @@
         },
         "confluence_bonus": {
             "multiple_signals_bonus": 0.15,
-            "min_signals_for_bonus": 3,
+            "min_signals_for_bonus": 4,
             "fvg_ob_confluence": 0.10,
             "ob_bos_confluence": 0.08,
             "full_confluence_bonus": 0.15,

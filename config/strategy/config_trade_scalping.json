@@ -18,8 +18,13 @@
     "squeeze_window": 100,
     "squeeze_percentile": 0.15,
     "lookback_window": 200,
-    "volatility_threshold": 0.0001,
-    "volume_zscore": 1.0
+    "volatility_threshold": 0.0001
+  },
+  "volume_zscore": {
+    "enabled": true,
+    "min_zscore": 1.2,
+    "max_zscore": 3.5,
+    "lookback": 50
   },
   "decision_rules": [
     {
@@ -183,7 +188,7 @@
       "min_volatility": 0.0004,
       "max_spread_pips": 6,
       "per_symbol_overrides": {
-        "USDJPY": {
+        "USDCAD": {
           "min_volatility": 0.0007,
           "max_spread_pips": 12,
           "max_lot_size": 0.08
@@ -259,7 +264,7 @@
       "ob_entry_requires": {
         "spread_ok": true,
         "mtf_alignment_min": 0,
-        "rr_min": 0.3
+        "rr_min": 1.2
       },
       "bollinger_overrides": {
         "enabled": true,
@@ -441,7 +446,7 @@
     "entry_rules": {
       "scalping": {
         "boll_midline": {
-          "katana_min_confidence": 0.3
+          "katana_min_confidence": 0.5
         }
       }
     },
