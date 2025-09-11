@@ -89,7 +89,7 @@
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
-        "min_rr": 0.85,
+        "min_rr": 1.2,
         "tp_halfband_k": 0.65,
         "buffer_pips_min": 0.5,
         "min_mid_distance_ratio": 0.04,

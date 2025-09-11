@@ -54,6 +54,9 @@
       "global_low_vol_penalty": -0.10,
       "high_spread_penalty": -0.20
     },
+    "risk_filters": {
+      "min_rr": 1.2
+    },
     "filters": {
       "avoid_major_news": true,
       "disable_on_weekends": true,
