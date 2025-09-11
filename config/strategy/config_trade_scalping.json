@@ -18,7 +18,8 @@
     "squeeze_window": 100,
     "squeeze_percentile": 0.15,
     "lookback_window": 200,
-    "volatility_threshold": 0.0001
+    "volatility_threshold": 0.0001,
+    "volume_zscore": 1.2
   },
   "decision_rules": [
     {
@@ -447,11 +448,5 @@
     "risk_per_trade_percent": 5.0,
     "stop_loss_pips": 6,
     "take_profit_pips": 10
-  },
-  "volume_zscore": {
-    "enabled": true,
-    "min_zscore": 1.2,
-    "max_zscore": 3.5,
-    "lookback": 50
   }
 }

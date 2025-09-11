@@ -71,13 +71,13 @@
         "require_range_regime": true,
         "block_on_expansion": true,
         "entry_gate_ok_required": true,
-        "min_mid_distance_ratio": 0.12
+        "min_mid_distance_ratio": 0.15
       },
       "liquidity_sweep": {
         "lookback_bars": 20
       },
       "execution": {
-        "min_sl_tp_distance_pips": 8.0
+        "min_sl_tp_distance_pips": 7.0
       },
       "trailing_stop": {
         "enabled": true,

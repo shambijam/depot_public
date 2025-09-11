@@ -8,7 +8,7 @@
     "expected_daily_range_percent": {
       "value": 0.8,
       "adaptive_range": {
-        "min": 0.6,
+        "min": 0.7,
         "max": 1.2,
         "adjustment_period_days": 7
       }
@@ -71,13 +71,13 @@
         "require_range_regime": true,
         "block_on_expansion": true,
         "entry_gate_ok_required": true,
-        "min_mid_distance_ratio": 0.12
+        "min_mid_distance_ratio": 0.15
       },
       "liquidity_sweep": {
         "lookback_bars": 20
       },
       "execution": {
-        "min_sl_tp_distance_pips": 8.0
+        "min_sl_tp_distance_pips": 7.0
       },
       "trailing_stop": {
         "enabled": true,
@@ -87,8 +87,8 @@
         "cooldown": {
           "enabled": true,
           "mode": "bars",
-          "min_bars_between_trades": 5,
-          "min_cycles_between_trades": 0
+          "min_bars_between_trades": 8,
+          "min_cycles_between_trades": 5
         },
         "adaptive_lot_sizing": {
           "enabled": true,
@@ -118,7 +118,7 @@
       },
       "trade_frequency": {
         "enabled": true,
-        "min_bars_between_trades": 3
+        "min_bars_between_trades": 8
       }
     }
   }
