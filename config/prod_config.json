@@ -335,7 +335,7 @@
       "reject_if_sl_over_cap": false,
       "max_spread_points": 12.0,
       "min_m1_ema_spread": 0.0,
-      "min_confidence": 0.3,
+      "min_confidence": 0.5,
       "min_rr_at_entry": 1.2,
       "adx_period": 14,
       "adx_trend_min": 18,
