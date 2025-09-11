@@ -4,7 +4,7 @@
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
-    "USDJPY",
+    "USDCAD",
     "USDCHF"
   ],
   "phase_detection": {
