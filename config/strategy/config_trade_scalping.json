@@ -323,12 +323,14 @@
     "atr_period": 14,
     "profiles": {
       "default": {
-        "tp_multiple": 1.0,
-        "sl_multiple": 1.0
+        "tp_multiple": 0.8,
+        "sl_multiple": 0.8,
+        "hard_min_points": 8
       },
       "scalp": {
-        "tp_multiple": 1.2,
-        "sl_multiple": 1.0
+        "tp_multiple": 0.8,
+        "sl_multiple": 0.8,
+        "hard_min_points": 8
       }
     }
   },
