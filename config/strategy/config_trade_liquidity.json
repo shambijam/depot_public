@@ -89,7 +89,7 @@
           "range_accumulation",
           "trend"
         ],
-        "min_confidence": 0.50
+        "min_confidence": 0.60
       },
       "order_type": "LIMIT",
       "action_logic": {

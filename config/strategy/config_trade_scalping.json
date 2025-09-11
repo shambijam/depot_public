@@ -34,7 +34,7 @@
           "range_retail",
           "range_low_volatility"
         ],
-        "min_confidence": 0.50
+        "min_confidence": 0.60
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -89,10 +89,10 @@
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
-        "min_rr": 1.2,
+        "min_rr": 1.3,
         "tp_halfband_k": 0.65,
         "buffer_pips_min": 0.5,
-        "min_mid_distance_ratio": 0.04,
+        "min_mid_distance_ratio": 0.15,
         "require_range_regime": true,
         "block_on_expansion": false,
         "min_confidence": 0.3,
@@ -109,6 +109,10 @@
         "mid_entry_score_min": 0.55,
         "range_score_min": 0.62,
         "range_debounce_bars": 3
+      },
+      "atr_filter": {
+        "enabled": true,
+        "min_atr_pips": 4.0
       },
       "liquidity_sweep": {
         "independent": true,
