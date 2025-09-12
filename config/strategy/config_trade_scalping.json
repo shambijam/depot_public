@@ -260,7 +260,7 @@
         "spread_ok": true,
         "mtf_alignment_min": 0,
         "rr_min": 1.5,
-        "min_katana_score": 0.55,
+        "min_katana_score": 0.60,
         "mtf": {
           "required_hits": 2,
           "timeframes": [
@@ -451,7 +451,7 @@
       "entry_rules": {
         "scalping": {
           "boll_midline": {
-            "katana_min_confidence": 0.5
+            "katana_min_confidence": 0.55
           }
         }
       },
