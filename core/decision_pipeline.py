@@ -1648,61 +1648,7 @@ class DecisionPipeline:
         trade_decision = self._core_evaluate_signals(
             context, current_config, signals, strategy_name
         )
-        if not trade_decision:
-            self.logger.info(
-                f"CORE n'a trouvé aucune opportunité d'entrée ce cycle avec les paramètres '{strategy_name}'."
-            )
-            print(
-                f"ℹ️ [CORE] Aucune entrée directe trouvée avec '{strategy_name}' — on teste la règle 'scalping_bollinger_range' si range."
-            )
-            # === RÈGLE 1 : Scalping Bollinger (range plat uniquement) ===
-            for asset, sig in signals.items():
-                boll = sig.get("boll", {})
-                phase = sig.get("phase")
-                conf = float(sig.get("confidence_score", 0.0))
-                price = sig.get("close")
-                point = sig.get("point", 0.0001)
-
-                if boll and phase and "range" in str(phase).lower():
-                    bb_mid = boll.get("bb_mid")
-                    bb_upper = boll.get("bb_upper")
-                    bb_lower = boll.get("bb_lower")
-
-                    if all(
-                        isinstance(x, (int, float))
-                        for x in [price, bb_mid, bb_upper, bb_lower]
-                    ):
-                        if price < bb_mid:  # BUY si prix sous la médiane
-                            td = {
-                                "action": "BUY",
-                                "asset": asset,
-                                "volume": 1.0,  # TODO: sizing dynamique
-                                "target_tp_pips": (bb_upper - price) / point,
-                                "target_sl_pips": (price - bb_lower) / point,
-                                "rule_name": "scalping_bollinger_range",
-                                "confidence": conf,
-                            }
-                            print(
-                                f"✅ [CORE] Décision BOLL Range → BUY {asset} (TP/SL en pips: {td['target_tp_pips']:.2f}/{td['target_sl_pips']:.2f})"
-                            )
-                            return td
-                        elif price > bb_mid:  # SELL si prix au-dessus de la médiane
-                            td = {
-                                "action": "SELL",
-                                "asset": asset,
-                                "volume": 1.0,
-                                "target_tp_pips": (price - bb_lower) / point,
-                                "target_sl_pips": (bb_upper - price) / point,
-                                "rule_name": "scalping_bollinger_range",
-                                "confidence": conf,
-                            }
-                            print(
-                                f"✅ [CORE] Décision BOLL Range → SELL {asset} (TP/SL en pips: {td['target_tp_pips']:.2f}/{td['target_sl_pips']:.2f})"
-                            )
-                            return td
-            print("🚫 [CORE] Aucun setup valable (même en range).")
-            return {}
-
+       
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
         action_raw = str(trade_decision.get("action", "")).upper()
         action_map = {

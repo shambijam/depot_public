@@ -409,16 +409,15 @@ class ScalpingStrategy(BaseStrategy):
         self, context: Dict[str, Any], signals: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Logique d'entrée Scalping:
-        - Utilise seulement les règles explicites (liquidity_sweep, midline_bollinger) si enable_fallbacks = false
-        - Katana scoring uniquement si enable_fallbacks = true
+        Logique d'entrée Scalping STRICTE + filtres intelligents :
+        - Liquidity Sweep
+        - Midline Bollinger
+        - Lecture chandeliers + EMA + séquence de bougies
+        - PAS de fallback Katana : pas de signal => pas de trade
         """
-        self.logger.debug("ScalpingStrategy: évaluation d'entrée...")
+        self.logger.debug("ScalpingStrategy: évaluation d'entrée (STRICTE + filtres)...")
 
         cfg = self.strategy_config or {}
-        debug_cfg = (cfg.get("debug") or {})
-        enable_fallbacks = bool(debug_cfg.get("enable_fallbacks", False))
-
         rules_cfg = (cfg.get("entry_rules") or {}).get("scalping") or {}
         ls_cfg = (rules_cfg.get("liquidity_sweep") or {})
         mb_cfg = (rules_cfg.get("midline_bollinger") or {})
@@ -426,134 +425,84 @@ class ScalpingStrategy(BaseStrategy):
         candidates = []
         market_data = context.get("market_data") or {}
 
-        # === 1) Règles strictes ===
-        for asset, df in market_data.items():
-            if df is None or not hasattr(df, "iloc"):
-                continue
-            try:
-                if ls_cfg.get("enabled", True):
+        # === Liquidity Sweep ===
+        if ls_cfg.get("enabled", True):
+            for asset, df in market_data.items():
+                if df is None or not hasattr(df, "iloc"):
+                    continue
+                try:
                     order = self._rule_liquidity_sweep(asset, df, ls_cfg, context)
                     if order:
                         candidates.append(order)
-                if mb_cfg.get("enabled", True):
+                except Exception as e:
+                    self.logger.debug(f"Erreur liquidity_sweep {asset}: {e}")
+
+        # === Midline Bollinger ===
+        if mb_cfg.get("enabled", True):
+            for asset, df in market_data.items():
+                if df is None or not hasattr(df, "iloc"):
+                    continue
+                try:
                     order = self._rule_midline_bollinger(asset, df, mb_cfg, context)
                     if order:
                         candidates.append(order)
-            except Exception as e:
-                self.logger.debug(f"Erreur sur {asset} règle stricte: {e}")
+                except Exception as e:
+                    self.logger.debug(f"Erreur midline_bollinger {asset}: {e}")
 
-        if candidates:
-            best_cand = sorted(
-                candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
-            )[0]
-            self.logger.info(
-                "Signal strict trouvé: %s | conf=%.3f | side=%s",
-                best_cand["asset"],
-                best_cand["confidence"],
-                best_cand.get("side"),
-            )
-            return best_cand
-
-        # === 2) Pas de signal strict ===
-        if not enable_fallbacks:
-            self.logger.info("Aucun signal strict trouvé, pas de trade (fallbacks désactivés).")
+        if not candidates:
+            self.logger.info("Aucun signal strict trouvé → pas de trade.")
             return None
 
-        # === 3) Fallback Katana (optionnel, uniquement si activé) ===
-        self.logger.info("Aucun signal strict trouvé → fallback Katana activé.")
-        dec_eng = cfg.get("decision_engine") or {}
-        scoring_cfg = dec_eng.get("scoring") or {}
-        entry_rules = (cfg.get("entry_rules") or {}).get("scalping") or {}
+        # === Sélection du meilleur signal ===
+        best_cand = sorted(
+            candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
+        )[0]
 
-        min_conf = float(entry_rules.get("min_confidence", 0.45) or 0.45)
+        # === Application des filtres intelligents ===
+        df = market_data.get(best_cand["asset"])
+        if df is not None and hasattr(df, "iloc") and len(df) > 20:
+            close = df["close"]
+            ema_fast = close.ewm(span=20).mean().iloc[-1]
+            ema_slow = close.ewm(span=50).mean().iloc[-1]
+            last_close = close.iloc[-1]
 
-        mtf_bonus_per_hit = float(scoring_cfg.get("mtf_bonus_per_hit", 0.10) or 0.10)
-        liquidity_bonus = float(scoring_cfg.get("liquidity_bonus", 0.10) or 0.10)
-        ob_conf_bonus = float(scoring_cfg.get("ob_conf_bonus", 0.25) or 0.25)
-        base_bias = float(scoring_cfg.get("strategy_bias", 0.30) or 0.30)
-        high_spread_penalty = float(scoring_cfg.get("high_spread_penalty", -0.10) or -0.10)
-        low_vol_penalty = float(scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20)
-        m1_break_bonus = float(entry_rules.get("m1_break_bonus", 0.12) or 0.12)
-        mtf_min_hits_target = int((dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1)
-        mtf_shortfall_penalty = float(scoring_cfg.get("mtf_shortfall_penalty", -0.08) or -0.08)
+            # Filtre tendance
+            if best_cand["side"] == "BUY" and not (last_close > ema_fast > ema_slow):
+                self.logger.info("Signal rejeté: BUY mais tendance pas confirmée (EMA).")
+                return None
+            if best_cand["side"] == "SELL" and not (last_close < ema_fast < ema_slow):
+                self.logger.info("Signal rejeté: SELL mais tendance pas confirmée (EMA).")
+                return None
 
-        spreads = context.get("spreads_pips") or {}
+            # Séquence bougies
+            last3 = close.iloc[-3:]
+            if best_cand["side"] == "BUY" and not all(x < y for x, y in zip(last3, last3[1:])):
+                self.logger.info("Signal rejeté: BUY sans séquence haussière claire.")
+                return None
+            if best_cand["side"] == "SELL" and not all(x > y for x, y in zip(last3, last3[1:])):
+                self.logger.info("Signal rejeté: SELL sans séquence baissière claire.")
+                return None
 
-        best_asset: Optional[str] = None
-        best_score: float = float("-inf")
-        best_debug: Dict[str, Any] = {}
-
-        for asset in self.tradeable_assets:
-            s = signals.get(asset) or {}
-            if not s:
-                continue
-
-            confidence = float(s.get("confidence", 0.0))
-            if confidence < min_conf:
-                continue
-
-            spread_pips = float(spreads.get(asset, 0.0) or 0.0)
-            vol_z = float(s.get("volume_zscore", 0.0))
-            low_vol = vol_z < 0.0
-
-            score = 0.0
-            score += confidence + base_bias
-
-            if s.get("ob_detected") or s.get("order_block") or s.get("order_block_ml_enhanced"):
-                score += ob_conf_bonus
-            if s.get("fvg_detected") or s.get("fvg_enhanced"):
-                score += ob_conf_bonus * 0.6
-            if s.get("m1_break") or s.get("bos_mss_enhanced"):
-                score += m1_break_bonus
-
-            mtf_hits = int(s.get("mtf_hits", 0))
-            score += mtf_hits * mtf_bonus_per_hit
-            if mtf_hits < mtf_min_hits_target:
-                score += mtf_shortfall_penalty
-
-            if s.get("liquidity_ok") or s.get("liquidity_grab_detected"):
-                score += liquidity_bonus
-            if spread_pips > float(entry_rules.get("max_spread_pips", 2.0)):
-                score += high_spread_penalty
-            if low_vol:
-                score += low_vol_penalty
-
-            if score > best_score:
-                best_score = score
-                best_asset = asset
-                best_debug = {
-                    "confidence": confidence,
-                    "spread_pips": spread_pips,
-                    "volume_zscore": vol_z,
-                    "score": score,
-                }
-
-        if not best_asset:
-            return None
-
-        action = self._infer_action_from_signals(signals.get(best_asset, {}) or {})
-        if action is None:
-            return None
+            # Chandeliers (engulfing, pinbar, doji)
+            if best_cand["side"] == "BUY":
+                if self._is_engulfing(df, bullish=False) or self._is_pinbar(df, bullish=False):
+                    self.logger.info("Signal rejeté: pattern baissier contre BUY.")
+                    return None
+            if best_cand["side"] == "SELL":
+                if self._is_engulfing(df, bullish=True) or self._is_pinbar(df, bullish=True):
+                    self.logger.info("Signal rejeté: pattern haussier contre SELL.")
+                    return None
+            if self._is_doji(df):
+                self.logger.info("Signal rejeté: doji détecté (indécision).")
+                return None
 
         self.logger.info(
-            "MEILLEUR CANDIDAT KATANA (fallback): %s | score=%.3f | action=%s | debug=%s",
-            best_asset,
-            best_score,
-            action,
-            best_debug,
+            "Signal retenu: %s | conf=%.3f | side=%s",
+            best_cand["asset"],
+            best_cand["confidence"],
+            best_cand.get("side"),
         )
-
-        return {
-            "action": action,
-            "asset": best_asset,
-            "order_type": "MARKET",
-            "strategy_type": cfg.get("strategy_name", "scalping"),
-            "rule_name": f"scalping:katana:{best_asset}",
-            "magic_number": self.magic_number,
-            "target_tp_pips": self.take_profit_pips,
-            "target_sl_pips": self.stop_loss_pips,
-            "comment": "SNIPER_X:scalping_katana_fallback",
-        }
+        return best_cand
 
 
     def get_parameters(self) -> Dict[str, Any]:
