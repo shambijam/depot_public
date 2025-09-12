@@ -397,17 +397,13 @@
       ]
     },
     "tp_sl_profiles": {
-      "default": {
-        "tp_pips": 10,
-        "sl_pips": 10
+      "scalp": {
+        "tp_pips": 6,
+        "sl_pips": 6
       },
-      "tight": {
+      "default": {
         "tp_pips": 8,
         "sl_pips": 8
-      },
-      "wide": {
-        "tp_pips": 14,
-        "sl_pips": 14
       }
     },
     "scoring_preferences": {
