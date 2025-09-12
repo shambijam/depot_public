@@ -409,124 +409,73 @@ class ScalpingStrategy(BaseStrategy):
         self, context: Dict[str, Any], signals: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Logique d'entrée Katana (micro-phase, SL/TP serrés) — SANS GATING DUR.
-        - Sélectionne le meilleur actif parmi self.tradeable_assets
-        - Scoring purement soft (OB/FVG/MTF/break M1 en BONUS/PÉNALITÉ), pas de hard-block
-        - Ne refait PAS les vérifications de marché (spread, horaires) ici
+        Logique d'entrée Scalping:
+        - Utilise seulement les règles explicites (liquidity_sweep, midline_bollinger) si enable_fallbacks = false
+        - Katana scoring uniquement si enable_fallbacks = true
         """
-        self.logger.debug(
-            "ScalpingStrategy: évaluation d'entrée (Katana, no-gating)..."
-        )
+        self.logger.debug("ScalpingStrategy: évaluation d'entrée...")
 
-        # === NEW MULTI-RULE PRECHECKS ===
-        rules_cfg = (self.strategy_config or {}).get("entry_rules") or {}
-        ls_cfg = (
-            (rules_cfg.get("liquidity_sweep") or {})
-            if isinstance(rules_cfg, dict)
-            else {}
-        )
-        mb_cfg = (
-            (rules_cfg.get("midline_bollinger") or {})
-            if isinstance(rules_cfg, dict)
-            else {}
-        )
+        cfg = self.strategy_config or {}
+        debug_cfg = (cfg.get("debug") or {})
+        enable_fallbacks = bool(debug_cfg.get("enable_fallbacks", False))
+
+        rules_cfg = (cfg.get("entry_rules") or {}).get("scalping") or {}
+        ls_cfg = (rules_cfg.get("liquidity_sweep") or {})
+        mb_cfg = (rules_cfg.get("midline_bollinger") or {})
 
         candidates = []
-
-        # 🔧 Correction : définir market_data à partir du context
         market_data = context.get("market_data") or {}
 
-        def try_rule_over_assets(rule_fn, rcfg, rule_name_hint):
-            best = None
-            for asset, df in market_data.items():
-                if df is None or not hasattr(df, "iloc"):
-                    continue
-                try:
-                    order = rule_fn(asset, df, rcfg, context)
+        # === 1) Règles strictes ===
+        for asset, df in market_data.items():
+            if df is None or not hasattr(df, "iloc"):
+                continue
+            try:
+                if ls_cfg.get("enabled", True):
+                    order = self._rule_liquidity_sweep(asset, df, ls_cfg, context)
                     if order:
-                        if (best is None) or (
-                            order.get("confidence", 0.0) > best.get("confidence", 0.0)
-                        ):
-                            best = order
-                except Exception:
-                    pass
-            if best:
-                candidates.append(best)
-
-        if bool(ls_cfg.get("enabled", True)):
-            try_rule_over_assets(self._rule_liquidity_sweep, ls_cfg, "liquidity_sweep")
-
-        if bool(mb_cfg.get("enabled", True)):
-            try_rule_over_assets(
-                self._rule_midline_bollinger, mb_cfg, "midline_bollinger"
-            )
+                        candidates.append(order)
+                if mb_cfg.get("enabled", True):
+                    order = self._rule_midline_bollinger(asset, df, mb_cfg, context)
+                    if order:
+                        candidates.append(order)
+            except Exception as e:
+                self.logger.debug(f"Erreur sur {asset} règle stricte: {e}")
 
         if candidates:
             best_cand = sorted(
                 candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
             )[0]
-            best_cand["action"] = "OPEN"
+            self.logger.info(
+                "Signal strict trouvé: %s | conf=%.3f | side=%s",
+                best_cand["asset"],
+                best_cand["confidence"],
+                best_cand.get("side"),
+            )
             return best_cand
-        # === END MULTI-RULE PRECHECKS ===
 
-        # --- Raccourcis config ---
-        cfg = self.strategy_config or {}
-        entry_rules = (cfg.get("entry_rules") or {}).get("scalping") or {}
+        # === 2) Pas de signal strict ===
+        if not enable_fallbacks:
+            self.logger.info("Aucun signal strict trouvé, pas de trade (fallbacks désactivés).")
+            return None
+
+        # === 3) Fallback Katana (optionnel, uniquement si activé) ===
+        self.logger.info("Aucun signal strict trouvé → fallback Katana activé.")
         dec_eng = cfg.get("decision_engine") or {}
         scoring_cfg = dec_eng.get("scoring") or {}
+        entry_rules = (cfg.get("entry_rules") or {}).get("scalping") or {}
 
-        min_conf = float(entry_rules.get("min_confidence", 0.30) or 0.30)
+        min_conf = float(entry_rules.get("min_confidence", 0.45) or 0.45)
 
         mtf_bonus_per_hit = float(scoring_cfg.get("mtf_bonus_per_hit", 0.10) or 0.10)
         liquidity_bonus = float(scoring_cfg.get("liquidity_bonus", 0.10) or 0.10)
         ob_conf_bonus = float(scoring_cfg.get("ob_conf_bonus", 0.25) or 0.25)
         base_bias = float(scoring_cfg.get("strategy_bias", 0.30) or 0.30)
-        high_spread_penalty = float(
-            scoring_cfg.get("high_spread_penalty", -0.10) or -0.10
-        )
-        low_vol_penalty = float(
-            scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20
-        )
-
+        high_spread_penalty = float(scoring_cfg.get("high_spread_penalty", -0.10) or -0.10)
+        low_vol_penalty = float(scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20)
         m1_break_bonus = float(entry_rules.get("m1_break_bonus", 0.12) or 0.12)
-        mtf_min_hits_target = int(
-            (dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1
-        )
-        mtf_shortfall_penalty = float(
-            scoring_cfg.get("mtf_shortfall_penalty", -0.08) or -0.08
-        )
-
-        def _bool(x, key: str) -> bool:
-            v = (x or {}).get(key)
-            return bool(v is True or str(v).lower() in ("true", "1", "yes"))
-
-        def _float(x, key: str, default: float = 0.0) -> float:
-            try:
-                return float((x or {}).get(key, default))
-            except Exception:
-                return float(default)
-
-        def _get_confidence(s: Dict[str, Any]) -> float:
-            for k in ("confidence", "confidence_score", "score", "final_confidence"):
-                v = s.get(k)
-                if isinstance(v, (int, float)):
-                    return float(v)
-            return 0.0
-
-        def _get_mtf_hits(s: Dict[str, Any]) -> int:
-            for k in ("mtf_hits", "mtf_agreements", "mtf_confluence"):
-                v = s.get(k)
-                try:
-                    iv = int(v)
-                    if iv >= 0:
-                        return iv
-                except Exception:
-                    pass
-            hits = 0
-            for k in ("m1_align", "m5_align", "m15_align"):
-                if _bool(s, k):
-                    hits += 1
-            return hits
+        mtf_min_hits_target = int((dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1)
+        mtf_shortfall_penalty = float(scoring_cfg.get("mtf_shortfall_penalty", -0.08) or -0.08)
 
         spreads = context.get("spreads_pips") or {}
 
@@ -539,71 +488,41 @@ class ScalpingStrategy(BaseStrategy):
             if not s:
                 continue
 
-            confidence = _get_confidence(s)
+            confidence = float(s.get("confidence", 0.0))
             if confidence < min_conf:
                 continue
 
-            ob = (
-                _bool(s, "ob_detected")
-                or _bool(s, "order_block")
-                or _bool(s, "order_block_ml_enhanced")
-            )
-            fvg = _bool(s, "fvg_detected") or _bool(s, "fvg_enhanced")
-            m1_break = _bool(s, "m1_break") or _bool(s, "bos_mss_enhanced")
-
-            mtf_hits = _get_mtf_hits(s)
-
-            spread_pips = (
-                float(spreads.get(asset, 0.0))
-                if isinstance(spreads.get(asset), (int, float))
-                else 0.0
-            )
-            vol_z = _float(s, "volume_zscore", 0.0)
+            spread_pips = float(spreads.get(asset, 0.0) or 0.0)
+            vol_z = float(s.get("volume_zscore", 0.0))
             low_vol = vol_z < 0.0
 
             score = 0.0
-            score += confidence
-            score += base_bias
-            if ob:
+            score += confidence + base_bias
+
+            if s.get("ob_detected") or s.get("order_block") or s.get("order_block_ml_enhanced"):
                 score += ob_conf_bonus
-            if fvg:
+            if s.get("fvg_detected") or s.get("fvg_enhanced"):
                 score += ob_conf_bonus * 0.6
-            if m1_break:
+            if s.get("m1_break") or s.get("bos_mss_enhanced"):
                 score += m1_break_bonus
 
+            mtf_hits = int(s.get("mtf_hits", 0))
             score += mtf_hits * mtf_bonus_per_hit
             if mtf_hits < mtf_min_hits_target:
                 score += mtf_shortfall_penalty
 
-            if _bool(s, "liquidity_ok") or _bool(s, "liquidity_grab_detected"):
+            if s.get("liquidity_ok") or s.get("liquidity_grab_detected"):
                 score += liquidity_bonus
-
-            if spread_pips and spread_pips > _float(
-                entry_rules, "max_spread_pips", 2.0
-            ):
+            if spread_pips > float(entry_rules.get("max_spread_pips", 2.0)):
                 score += high_spread_penalty
             if low_vol:
                 score += low_vol_penalty
-
-            # 🔎 Lecture chandeliers
-            df = market_data.get(asset)
-            if df is not None and hasattr(df, "iloc") and len(df) > 2:
-                if self._is_engulfing(df, bullish=(confidence >= 0.5)):
-                    score += 0.15
-                if self._is_pinbar(df, bullish=(confidence >= 0.5)):
-                    score += 0.10
-                if self._is_doji(df):
-                    score -= 0.20
 
             if score > best_score:
                 best_score = score
                 best_asset = asset
                 best_debug = {
                     "confidence": confidence,
-                    "ob": ob,
-                    "fvg": fvg,
-                    "m1_break": m1_break,
-                    "mtf_hits": mtf_hits,
                     "spread_pips": spread_pips,
                     "volume_zscore": vol_z,
                     "score": score,
@@ -616,7 +535,15 @@ class ScalpingStrategy(BaseStrategy):
         if action is None:
             return None
 
-        order = {
+        self.logger.info(
+            "MEILLEUR CANDIDAT KATANA (fallback): %s | score=%.3f | action=%s | debug=%s",
+            best_asset,
+            best_score,
+            action,
+            best_debug,
+        )
+
+        return {
             "action": action,
             "asset": best_asset,
             "order_type": "MARKET",
@@ -625,229 +552,9 @@ class ScalpingStrategy(BaseStrategy):
             "magic_number": self.magic_number,
             "target_tp_pips": self.take_profit_pips,
             "target_sl_pips": self.stop_loss_pips,
-            "comment": "SNIPER_X:scalping_katana_no_gating",
+            "comment": "SNIPER_X:scalping_katana_fallback",
         }
-        return order
 
-        # ---------------------------------------------------------------------
-
-    # Sorties Katana (micro-phase, serrées) — pas de momentum fade
-    # ---------------------------------------------------------------------
-    def _pips_between(self, a: float, b: float, point: float, digits: int) -> float:
-        """Calcule |a-b| en pips selon digits (3/5 -> 10 points = 1 pip)."""
-        pip_points = 10.0 if digits in (3, 5) else 1.0
-        try:
-            return abs(float(a) - float(b)) / (float(point) * pip_points)
-        except Exception:
-            return 0.0
-
-    def evaluate_exit(
-        self,
-        context: Dict[str, Any],
-        position: Dict[str, Any],
-        latest_signals: Dict[str, Any] | None = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Propose une sortie partielle/totale pour une position ouverte (ou un ajustement de SL) selon des règles Katana + chandeliers.
-        - Retourne:
-            • {"action":"ADJUST_SL", "asset":..., "new_sl_price":...} OU
-            • {"action":"CLOSE", "asset":..., "reason": "..."} OU
-            • None si aucune action.
-        """
-        cfg = self.strategy_config or {}
-        exit_cfg = (cfg.get("exit_rules") or {}).get("scalping") or {}
-
-        asset = str(position.get("symbol") or position.get("asset") or "").upper()
-        if not asset:
-            return None
-
-        md = (context.get("market_data") or {}).get(asset, {}) or {}
-        symbol_info = md.get("symbol_info", {}) or {}
-        point = float(symbol_info.get("point", 0.00001) or 0.00001)
-        digits = int(symbol_info.get("digits", 5))
-
-        side = str(
-            position.get("action") or position.get("type") or position.get("side") or ""
-        ).upper()
-        if side not in ("BUY", "SELL"):
-            return None
-
-        entry_price = float(
-            position.get("entry_price") or position.get("price_open") or 0.0
-        )
-        sl_price = float(position.get("sl") or 0.0) or None
-        tp_price = float(position.get("tp") or 0.0) or None
-        cur_price = float(
-            md.get("current_price") or position.get("price_current") or 0.0
-        )
-        if entry_price <= 0 or cur_price <= 0 or point <= 0:
-            return None
-
-        # --- PnL courant en pips (non signé et signé) ---
-        pnl_pips_abs = self._pips_between(cur_price, entry_price, point, digits)
-        if side == "BUY":
-            pnl_pips_signed = (cur_price - entry_price) / (
-                point * (10.0 if digits in (3, 5) else 1.0)
-            )
-        else:
-            pnl_pips_signed = (entry_price - cur_price) / (
-                point * (10.0 if digits in (3, 5) else 1.0)
-            )
-
-        # --- Paramètres de sortie (avec defaults conservateurs) ---
-        breakeven_trigger = float(exit_cfg.get("breakeven_trigger_pips", 3.0))
-        trailing_start = float(exit_cfg.get("trailing_start_pips", 5.0))
-        trailing_step = float(exit_cfg.get("trailing_step_pips", 1.0))
-        max_hold_seconds = int(exit_cfg.get("max_hold_seconds", 0))  # 0 = désactivé
-        exit_on_m1_flip = bool(exit_cfg.get("exit_on_m1_phase_flip", True))
-
-        # Derniers signaux/phase pour l’asset
-        s = (latest_signals or {}).get(asset, {}) if latest_signals else {}
-        phase_m1 = str(s.get("phase_m1") or s.get("phase") or "").lower()
-
-        # --- 1) Break-even auto ---
-        if breakeven_trigger > 0 and pnl_pips_signed >= breakeven_trigger:
-            be_pad = float(exit_cfg.get("breakeven_pad_pips", 0.1))
-            new_sl = entry_price
-            if side == "BUY":
-                new_sl = min(
-                    cur_price,
-                    entry_price + be_pad * point * (10.0 if digits in (3, 5) else 1.0),
-                )
-                if not sl_price or new_sl > sl_price:
-                    return {
-                        "action": "ADJUST_SL",
-                        "asset": asset,
-                        "new_sl_price": new_sl,
-                        "reason": "breakeven",
-                    }
-            else:
-                new_sl = max(
-                    cur_price,
-                    entry_price - be_pad * point * (10.0 if digits in (3, 5) else 1.0),
-                )
-                if not sl_price or new_sl < sl_price:
-                    return {
-                        "action": "ADJUST_SL",
-                        "asset": asset,
-                        "new_sl_price": new_sl,
-                        "reason": "breakeven",
-                    }
-
-        # --- 2) Trailing léger par pas ---
-        if (
-            trailing_start > 0
-            and trailing_step > 0
-            and pnl_pips_signed >= trailing_start
-        ):
-            step_buffer = float(exit_cfg.get("trailing_buffer_pips", trailing_step))
-            target_lock = max(0.0, pnl_pips_signed - step_buffer)
-            lock_dist_price = target_lock * point * (10.0 if digits in (3, 5) else 1.0)
-            new_sl = (
-                entry_price + lock_dist_price
-                if side == "BUY"
-                else entry_price - lock_dist_price
-            )
-            if side == "BUY":
-                if not sl_price or new_sl > sl_price:
-                    new_sl = min(new_sl, cur_price)
-                    return {
-                        "action": "ADJUST_SL",
-                        "asset": asset,
-                        "new_sl_price": new_sl,
-                        "reason": "trail",
-                    }
-            else:
-                if not sl_price or new_sl < sl_price:
-                    new_sl = max(new_sl, cur_price)
-                    return {
-                        "action": "ADJUST_SL",
-                        "asset": asset,
-                        "new_sl_price": new_sl,
-                        "reason": "trail",
-                    }
-
-        # --- 3) Flip micro-phase M1 (optionnel, sortie totale) ---
-        if exit_on_m1_flip and phase_m1:
-            if side == "BUY" and any(
-                k in phase_m1
-                for k in ("down", "bear", "expansion_down", "distribution")
-            ):
-                return {
-                    "action": "CLOSE",
-                    "asset": asset,
-                    "reason": "m1_phase_flip_against",
-                }
-            if side == "SELL" and any(
-                k in phase_m1 for k in ("up", "bull", "expansion_up", "accumulation")
-            ):
-                return {
-                    "action": "CLOSE",
-                    "asset": asset,
-                    "reason": "m1_phase_flip_against",
-                }
-
-        # --- 4) Durée max (optionnel) ---
-        if max_hold_seconds and max_hold_seconds > 0:
-            import datetime as _dt
-
-            opened_at = (
-                position.get("time")
-                or position.get("time_open")
-                or position.get("open_time")
-            )
-            try:
-                if isinstance(opened_at, (int, float)):
-                    open_dt = _dt.datetime.utcfromtimestamp(opened_at)
-                else:
-                    open_dt = _dt.datetime.fromisoformat(
-                        str(opened_at).replace("Z", "+00:00")
-                    ).astimezone(_dt.timezone.utc)
-                now_utc = _dt.datetime.fromisoformat(
-                    str(context.get("current_time_utc"))
-                ).astimezone(_dt.timezone.utc)
-                held = (now_utc - open_dt).total_seconds()
-                if held >= max_hold_seconds:
-                    return {
-                        "action": "CLOSE",
-                        "asset": asset,
-                        "reason": "max_hold_time",
-                    }
-            except Exception:
-                pass
-
-        # --- 5) Sortie technique par chandeliers ---
-        df = (context.get("market_data") or {}).get(asset, {}).get("annotated_rates_df")
-        if df is not None and hasattr(df, "iloc") and len(df) > 2:
-            if side == "BUY":
-                if self._is_engulfing(df, bullish=False) or self._is_pinbar(
-                    df, bullish=False
-                ):
-                    return {
-                        "action": "CLOSE",
-                        "asset": asset,
-                        "reason": "bearish_candle_pattern",
-                    }
-            elif side == "SELL":
-                if self._is_engulfing(df, bullish=True) or self._is_pinbar(
-                    df, bullish=True
-                ):
-                    return {
-                        "action": "CLOSE",
-                        "asset": asset,
-                        "reason": "bullish_candle_pattern",
-                    }
-
-            # Doji en profit = sécuriser
-            if self._is_doji(df) and pnl_pips_signed > breakeven_trigger:
-                return {
-                    "action": "ADJUST_SL",
-                    "asset": asset,
-                    "new_sl_price": entry_price,
-                    "reason": "doji_uncertainty",
-                }
-
-        return None
 
     def get_parameters(self) -> Dict[str, Any]:
         """Retourne une copie des paramètres de configuration de la stratégie."""
