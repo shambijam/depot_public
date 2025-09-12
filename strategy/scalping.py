@@ -110,167 +110,220 @@ class ScalpingStrategy(BaseStrategy):
                 pass
             return None
 
-
-def _rule_midline_bollinger(self, asset, df, cfg_rule, context):
-    """Independent entry rule: mean-revert vs Bollinger midline.
-    Config keys (with defaults if missing):
-      length: 20, k: 2.0, mode: 'mean_revert'|'momentum', epsilon_band_frac: 0.15,
-      min_body_frac: 0.20, allow_counter_mtf: True, min_confidence: 0.35,
-      sl_pips: 6, tp_pips: 8.1
-    """
-    try:
-        if df is None or len(df) < max(30, int(cfg_rule.get("length", 20)) + 5):
-            return None
-        close = df["close"]
-        open_ = df["open"]
-        high = df["high"]
-        low = df["low"]
-        length = int(cfg_rule.get("length", 20))
-        k = float(cfg_rule.get("k", 2.0))
-        mode = (cfg_rule.get("mode") or "mean_revert").lower()
-        eps_band = float(cfg_rule.get("epsilon_band_frac", 0.15))
-        min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
-        min_conf = float(cfg_rule.get("min_confidence", 0.35))
-        sl_pips = float(cfg_rule.get("sl_pips", 6.0))
-        tp_pips = float(cfg_rule.get("tp_pips", 8.1))
-
-        mid = self._sma(close, length)
-        std = self._std(close, length)
-        if mid is None or std is None:
-            return None
-        bw = std * k  # half-band "strength"
-        last_mid = mid.iloc[-1]
-        last_bw = float(bw.iloc[-1] or 0.0)
-        last_close = float(close.iloc[-1])
-        last_open = float(open_.iloc[-1])
-        last_high = float(high.iloc[-1])
-        last_low = float(low.iloc[-1])
-        rng = max(1e-12, last_high - last_low)
-        body = abs(last_close - last_open)
-        body_frac = body / rng if rng > 0 else 0.0
-
-        if last_bw <= 0:
-            return None
-
-        # Distance to midline, normalized by band width
-        dist_norm = (last_close - last_mid) / last_bw
-
-        side = None
-        # Mean-revert: trade back toward the midline when price is outside/near bands
-        if mode.startswith("mean"):
-            # If price is below midline (negative dist), prefer BUY; above -> SELL.
-            if dist_norm <= -eps_band:
-                side = "BUY"
-            elif dist_norm >= eps_band:
-                side = "SELL"
-        else:
-            # Momentum: follow direction away from midline with body confirmation
-            if dist_norm >= eps_band and last_close > last_open:
-                side = "BUY"
-            elif dist_norm <= -eps_band and last_close < last_open:
-                side = "SELL"
-
-        if not side:
-            return None
-
-        # Confidence: combine distance & body quality
-        conf = min(
-            1.0,
-            max(
-                0.0,
-                0.5 * min(1.0, abs(dist_norm))
-                + 0.5 * min(1.0, body_frac / max(1e-6, min_body_frac)),
-            ),
-        )
-        if conf < min_conf:
-            return None
-
-        # Build order
-        meta = self._safe_asset_meta(context, asset)
-        order = {
-            "action": "OPEN",
-            "asset": asset,
-            "side": side,
-            "sl_pips": sl_pips,
-            "tp_pips": tp_pips,
-            "volume": cfg_rule.get("volume")
-            or (self.strategy_config or {}).get("default_volume")
-            or 0.01,
-            "rule_name": f"scalping:midline_bollinger:{asset}",
-            "confidence": conf,
-            "meta": {
-                "dist_norm": float(dist_norm),
-                "band_width": float(last_bw),
-                "body_frac": float(body_frac),
-                "length": length,
-                "k": k,
-            },
-        }
-        return order
-    except Exception as e:
+    def _rule_midline_bollinger(self, asset, df, cfg_rule, context):
+        """Independent entry rule: mean-revert vs Bollinger midline.
+        Config keys (with defaults if missing):
+        length: 20, k: 2.0, mode: 'mean_revert'|'momentum', epsilon_band_frac: 0.15,
+        min_body_frac: 0.20, allow_counter_mtf: True, min_confidence: 0.35,
+        sl_pips: 6, tp_pips: 8.1
+        """
         try:
-            self.logger.exception(f"Midline rule failed for {asset}: {e}")
+            if df is None or len(df) < max(30, int(cfg_rule.get("length", 20)) + 5):
+                return None
+            close = df["close"]
+            open_ = df["open"]
+            high = df["high"]
+            low = df["low"]
+            length = int(cfg_rule.get("length", 20))
+            k = float(cfg_rule.get("k", 2.0))
+            mode = (cfg_rule.get("mode") or "mean_revert").lower()
+            eps_band = float(cfg_rule.get("epsilon_band_frac", 0.15))
+            min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
+            min_conf = float(cfg_rule.get("min_confidence", 0.35))
+            sl_pips = float(cfg_rule.get("sl_pips", 6.0))
+            tp_pips = float(cfg_rule.get("tp_pips", 8.1))
+
+            mid = self._sma(close, length)
+            std = self._std(close, length)
+            if mid is None or std is None:
+                return None
+            bw = std * k  # half-band "strength"
+            last_mid = mid.iloc[-1]
+            last_bw = float(bw.iloc[-1] or 0.0)
+            last_close = float(close.iloc[-1])
+            last_open = float(open_.iloc[-1])
+            last_high = float(high.iloc[-1])
+            last_low = float(low.iloc[-1])
+            rng = max(1e-12, last_high - last_low)
+            body = abs(last_close - last_open)
+            body_frac = body / rng if rng > 0 else 0.0
+
+            if last_bw <= 0:
+                return None
+
+            # Distance to midline, normalized by band width
+            dist_norm = (last_close - last_mid) / last_bw
+
+            side = None
+            # Mean-revert: trade back toward the midline when price is outside/near bands
+            if mode.startswith("mean"):
+                # If price is below midline (negative dist), prefer BUY; above -> SELL.
+                if dist_norm <= -eps_band:
+                    side = "BUY"
+                elif dist_norm >= eps_band:
+                    side = "SELL"
+            else:
+                # Momentum: follow direction away from midline with body confirmation
+                if dist_norm >= eps_band and last_close > last_open:
+                    side = "BUY"
+                elif dist_norm <= -eps_band and last_close < last_open:
+                    side = "SELL"
+
+            if not side:
+                return None
+
+            # Confidence: combine distance & body quality
+            conf = min(
+                1.0,
+                max(
+                    0.0,
+                    0.5 * min(1.0, abs(dist_norm))
+                    + 0.5 * min(1.0, body_frac / max(1e-6, min_body_frac)),
+                ),
+            )
+            if conf < min_conf:
+                return None
+
+            # Build order
+            meta = self._safe_asset_meta(context, asset)
+            order = {
+                "action": "OPEN",
+                "asset": asset,
+                "side": side,
+                "sl_pips": sl_pips,
+                "tp_pips": tp_pips,
+                "volume": cfg_rule.get("volume")
+                or (self.strategy_config or {}).get("default_volume")
+                or 0.01,
+                "rule_name": f"scalping:midline_bollinger:{asset}",
+                "confidence": conf,
+                "meta": {
+                    "dist_norm": float(dist_norm),
+                    "band_width": float(last_bw),
+                    "body_frac": float(body_frac),
+                    "length": length,
+                    "k": k,
+                },
+            }
+            return order
+        except Exception as e:
+            try:
+                self.logger.exception(f"Midline rule failed for {asset}: {e}")
+            except Exception:
+                pass
+            return None
+
+    def _atr(self, df, length: int = 14):
+        try:
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+            prev_close = close.shift(1)
+            tr = (high - low).abs()
+            tr = tr.combine((high - prev_close).abs(), max)
+            tr = tr.combine((low - prev_close).abs(), max)
+            return tr.rolling(int(length)).mean()
+        except Exception:
+            return None
+
+    def _std(self, series, length: int):
+        try:
+            return series.rolling(int(length)).std(ddof=0)
+        except Exception:
+            return None
+
+    def _sma(self, series, length: int):
+        try:
+            return series.rolling(int(length)).mean()
+        except Exception:
+            return None
+
+    def _safe_asset_meta(self, context, asset):
+        meta = {}
+        try:
+            # Try from context.asset_configs first
+            acfg = ((context or {}).get("asset_configs") or {}).get(asset) or {}
+            if isinstance(acfg, dict):
+                meta["digits"] = acfg.get("digits")
+                meta["point"] = acfg.get("point")
+            # Try open_positions meta if available
+            pos = ((context or {}).get("open_positions") or {}).get(asset) or {}
+            meta["digits"] = meta.get("digits") or pos.get("digits")
+            meta["point"] = meta.get("point") or pos.get("point")
         except Exception:
             pass
-        return None
+        # Fallbacks
+        if not meta.get("digits"):
+            meta["digits"] = 5 if asset.endswith(("USD", "CHF")) else 3
+        if not meta.get("point"):
+            # default MetaTrader 'point' for 5-digit FX pairs
+            meta["point"] = 1e-5 if meta["digits"] >= 5 else 0.001
+        return meta
 
+        # ------------------------------
+        # 🔎 Lecture de chandeliers
+        # ------------------------------
 
-def _atr(self, df, length: int = 14):
-    try:
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        prev_close = close.shift(1)
-        tr = (high - low).abs()
-        tr = tr.combine((high - prev_close).abs(), max)
-        tr = tr.combine((low - prev_close).abs(), max)
-        return tr.rolling(int(length)).mean()
-    except Exception:
-        return None
+    def _is_engulfing(self, df, bullish=True):
+        """Détecte un avalement haussier ou baissier (engulfing)."""
+        if len(df) < 2:
+            return False
+        prev_o, prev_c = df["open"].iloc[-2], df["close"].iloc[-2]
+        last_o, last_c = df["open"].iloc[-1], df["close"].iloc[-1]
 
+        if bullish:
+            return (
+                prev_c < prev_o
+                and last_c > last_o
+                and last_c > prev_o
+                and last_o < prev_c
+            )
+        else:
+            return (
+                prev_c > prev_o
+                and last_c < last_o
+                and last_c < prev_o
+                and last_o > prev_c
+            )
 
-def _std(self, series, length: int):
-    try:
-        return series.rolling(int(length)).std(ddof=0)
-    except Exception:
-        return None
+    def _is_pinbar(self, df, bullish=True, min_wick_ratio=2.0):
+        """Détecte un pin bar (longue mèche rejet)."""
+        if len(df) < 1:
+            return False
+        o, c, h, l = (
+            df["open"].iloc[-1],
+            df["close"].iloc[-1],
+            df["high"].iloc[-1],
+            df["low"].iloc[-1],
+        )
+        body = abs(c - o)
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+        if bullish:
+            return lower_wick > body * min_wick_ratio
+        else:
+            return upper_wick > body * min_wick_ratio
 
+    def _is_doji(self, df, max_body_frac=0.1):
+        """Détecte un doji (indécision)."""
+        if len(df) < 1:
+            return False
+        o, c, h, l = (
+            df["open"].iloc[-1],
+            df["close"].iloc[-1],
+            df["high"].iloc[-1],
+            df["low"].iloc[-1],
+        )
+        rng = h - l
+        body = abs(c - o)
+        return rng > 0 and (body / rng) < max_body_frac
 
-def _sma(self, series, length: int):
-    try:
-        return series.rolling(int(length)).mean()
-    except Exception:
-        return None
-
-
-def _safe_asset_meta(self, context, asset):
-    meta = {}
-    try:
-        # Try from context.asset_configs first
-        acfg = ((context or {}).get("asset_configs") or {}).get(asset) or {}
-        if isinstance(acfg, dict):
-            meta["digits"] = acfg.get("digits")
-            meta["point"] = acfg.get("point")
-        # Try open_positions meta if available
-        pos = ((context or {}).get("open_positions") or {}).get(asset) or {}
-        meta["digits"] = meta.get("digits") or pos.get("digits")
-        meta["point"] = meta.get("point") or pos.get("point")
-    except Exception:
-        pass
-    # Fallbacks
-    if not meta.get("digits"):
-        meta["digits"] = 5 if asset.endswith(("USD", "CHF")) else 3
-    if not meta.get("point"):
-        # default MetaTrader 'point' for 5-digit FX pairs
-        meta["point"] = 1e-5 if meta["digits"] >= 5 else 0.001
-    return meta
-
-    """
-    Stratégie de Scalping pour SNIPER_X.
-    - Choisit le meilleur actif parmi les signaux fournis par le DecisionPipeline
-      sans re-filtrer les conditions déjà validées en amont.
-    - Gère la sortie de position de façon proactive lorsque le momentum s'estompe.
-    """
+        """
+        Stratégie de Scalping pour SNIPER_X.
+        - Choisit le meilleur actif parmi les signaux fournis par le DecisionPipeline
+        sans re-filtrer les conditions déjà validées en amont.
+        - Gère la sortie de position de façon proactive lorsque le momentum s'estompe.
+        """
 
     # ---------------------------------------------------------------------
     # Initialisation & utilitaires
@@ -309,48 +362,48 @@ def _safe_asset_meta(self, context, asset):
         except Exception:
             self.stop_loss_pips = 8.0
 
-        def _infer_action_from_signals(
-            self, asset_signals: Dict[str, Any]
-        ) -> Optional[str]:
-            """
-            Détermine l'action BUY/SELL à partir de différentes clés communes.
-            Ordre de priorité :
-            1) 'action' déjà normalisé (BUY/SELL)
-            2) 'direction' ou 'trend' (up/down, bullish/bearish)
-            3) signe de 'volume_momentum' (>0 => BUY, <0 => SELL)
-            """
-            # 1) Action explicite
-            action = (asset_signals.get("action") or "").upper()
-            if action in {"BUY", "SELL"}:
-                return action
+    def _infer_action_from_signals(
+        self, asset_signals: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        Détermine l'action BUY/SELL à partir de différentes clés communes.
+        Ordre de priorité :
+        1) 'action' déjà normalisé (BUY/SELL)
+        2) 'direction' ou 'trend' (up/down, bullish/bearish)
+        3) signe de 'volume_momentum' (>0 => BUY, <0 => SELL)
+        """
+        # 1) Action explicite
+        action = (asset_signals.get("action") or "").upper()
+        if action in {"BUY", "SELL"}:
+            return action
 
-            # 2) Direction textuelle
-            direction = (
-                asset_signals.get("direction") or asset_signals.get("trend") or ""
-            ).lower()
-            if any(k in direction for k in ("up", "bull", "bullish", "long")):
+        # 2) Direction textuelle
+        direction = (
+            asset_signals.get("direction") or asset_signals.get("trend") or ""
+        ).lower()
+        if any(k in direction for k in ("up", "bull", "bullish", "long")):
+            return "BUY"
+        if any(k in direction for k in ("down", "bear", "bearish", "short")):
+            return "SELL"
+
+        # 3) Momentum signé
+        try:
+            vm = float(asset_signals.get("volume_momentum", 0.0))
+            if vm > 0:
                 return "BUY"
-            if any(k in direction for k in ("down", "bear", "bearish", "short")):
+            if vm < 0:
                 return "SELL"
+        except Exception:
+            pass
 
-            # 3) Momentum signé
-            try:
-                vm = float(asset_signals.get("volume_momentum", 0.0))
-                if vm > 0:
-                    return "BUY"
-                if vm < 0:
-                    return "SELL"
-            except Exception:
-                pass
+        # 4) Phase (moins fiable car souvent neutre)
+        phase = (asset_signals.get("phase") or "").lower()
+        if any(k in phase for k in ("expansion_up", "up", "bull")):
+            return "BUY"
+        if any(k in phase for k in ("expansion_down", "down", "bear")):
+            return "SELL"
 
-            # 4) Phase (moins fiable car souvent neutre)
-            phase = (asset_signals.get("phase") or "").lower()
-            if any(k in phase for k in ("expansion_up", "up", "bull")):
-                return "BUY"
-            if any(k in phase for k in ("expansion_down", "down", "bear")):
-                return "SELL"
-
-            return None
+        return None
 
     def evaluate_entry(
         self, context: Dict[str, Any], signals: Dict[str, Any]
@@ -366,10 +419,6 @@ def _safe_asset_meta(self, context, asset):
         )
 
         # === NEW MULTI-RULE PRECHECKS ===
-        # We evaluate independent rules in this priority:
-        #   1) Liquidity sweep
-        #   2) Midline Bollinger
-        #   3) Katana (existing fallback/no-gate)
         rules_cfg = (self.strategy_config or {}).get("entry_rules") or {}
         ls_cfg = (
             (rules_cfg.get("liquidity_sweep") or {})
@@ -384,7 +433,9 @@ def _safe_asset_meta(self, context, asset):
 
         candidates = []
 
-        # Helper to try a rule over all assets and collect best candidate by confidence
+        # 🔧 Correction : définir market_data à partir du context
+        market_data = context.get("market_data") or {}
+
         def try_rule_over_assets(rule_fn, rcfg, rule_name_hint):
             best = None
             for asset, df in market_data.items():
@@ -402,22 +453,18 @@ def _safe_asset_meta(self, context, asset):
             if best:
                 candidates.append(best)
 
-        # Apply Liquidity Sweep first if enabled (default True)
         if bool(ls_cfg.get("enabled", True)):
             try_rule_over_assets(self._rule_liquidity_sweep, ls_cfg, "liquidity_sweep")
 
-        # Apply Midline Bollinger if enabled (default True)
         if bool(mb_cfg.get("enabled", True)):
             try_rule_over_assets(
                 self._rule_midline_bollinger, mb_cfg, "midline_bollinger"
             )
 
-        # If any candidate beat the minimal confidence, return the best
         if candidates:
             best_cand = sorted(
                 candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
             )[0]
-            # Ensure we've set action field
             best_cand["action"] = "OPEN"
             return best_cand
         # === END MULTI-RULE PRECHECKS ===
@@ -428,10 +475,8 @@ def _safe_asset_meta(self, context, asset):
         dec_eng = cfg.get("decision_engine") or {}
         scoring_cfg = dec_eng.get("scoring") or {}
 
-        # Seul seuil "dur" conservé : confiance minimale
         min_conf = float(entry_rules.get("min_confidence", 0.30) or 0.30)
 
-        # poids/bonus par défaut (fallback si absents de la config)
         mtf_bonus_per_hit = float(scoring_cfg.get("mtf_bonus_per_hit", 0.10) or 0.10)
         liquidity_bonus = float(scoring_cfg.get("liquidity_bonus", 0.10) or 0.10)
         ob_conf_bonus = float(scoring_cfg.get("ob_conf_bonus", 0.25) or 0.25)
@@ -443,7 +488,6 @@ def _safe_asset_meta(self, context, asset):
             scoring_cfg.get("global_low_vol_penalty", -0.20) or -0.20
         )
 
-        # bonus soft spécifiques (remplacent l'ancien gating)
         m1_break_bonus = float(entry_rules.get("m1_break_bonus", 0.12) or 0.12)
         mtf_min_hits_target = int(
             (dec_eng.get("mtf") or {}).get("required_agreements", 1) or 1
@@ -495,18 +539,10 @@ def _safe_asset_meta(self, context, asset):
             if not s:
                 continue
 
-            # 1) Seuil de confiance (unique filtre dur)
             confidence = _get_confidence(s)
             if confidence < min_conf:
-                self.logger.debug(
-                    "Asset %s rejeté (confidence %.3f < %.3f).",
-                    asset,
-                    confidence,
-                    min_conf,
-                )
                 continue
 
-            # 2) Indices de confluence (SOFT)
             ob = (
                 _bool(s, "ob_detected")
                 or _bool(s, "order_block")
@@ -517,7 +553,6 @@ def _safe_asset_meta(self, context, asset):
 
             mtf_hits = _get_mtf_hits(s)
 
-            # 3) Features marché (SOFT)
             spread_pips = (
                 float(spreads.get(asset, 0.0))
                 if isinstance(spreads.get(asset), (int, float))
@@ -526,18 +561,16 @@ def _safe_asset_meta(self, context, asset):
             vol_z = _float(s, "volume_zscore", 0.0)
             low_vol = vol_z < 0.0
 
-            # 4) Scoring Katana (100% soft)
             score = 0.0
             score += confidence
             score += base_bias
             if ob:
                 score += ob_conf_bonus
             if fvg:
-                score += ob_conf_bonus * 0.6  # FVG un peu moins pondéré que OB
+                score += ob_conf_bonus * 0.6
             if m1_break:
                 score += m1_break_bonus
 
-            # MTF : bonus par hit, petite pénalité si en-dessous du "cible" mais jamais bloquant
             score += mtf_hits * mtf_bonus_per_hit
             if mtf_hits < mtf_min_hits_target:
                 score += mtf_shortfall_penalty
@@ -545,25 +578,22 @@ def _safe_asset_meta(self, context, asset):
             if _bool(s, "liquidity_ok") or _bool(s, "liquidity_grab_detected"):
                 score += liquidity_bonus
 
-            # pénalités douces
-            max_spread_pips_soft = _float(entry_rules, "max_spread_pips", 2.0)
-            if spread_pips and spread_pips > max_spread_pips_soft:
+            if spread_pips and spread_pips > _float(
+                entry_rules, "max_spread_pips", 2.0
+            ):
                 score += high_spread_penalty
             if low_vol:
                 score += low_vol_penalty
 
-            self.logger.debug(
-                "Katana scoring (no-gating) %s -> score=%.4f | conf=%.3f ob=%s fvg=%s m1_break=%s mtf=%d spread=%.2f volZ=%.2f",
-                asset,
-                score,
-                confidence,
-                ob,
-                fvg,
-                m1_break,
-                mtf_hits,
-                spread_pips,
-                vol_z,
-            )
+            # 🔎 Lecture chandeliers
+            df = market_data.get(asset)
+            if df is not None and hasattr(df, "iloc") and len(df) > 2:
+                if self._is_engulfing(df, bullish=(confidence >= 0.5)):
+                    score += 0.15
+                if self._is_pinbar(df, bullish=(confidence >= 0.5)):
+                    score += 0.10
+                if self._is_doji(df):
+                    score -= 0.20
 
             if score > best_score:
                 best_score = score
@@ -580,27 +610,11 @@ def _safe_asset_meta(self, context, asset):
                 }
 
         if not best_asset:
-            self.logger.info(
-                "Aucun actif ne dépasse le seuil minimal de confiance (no-gating)."
-            )
             return None
 
         action = self._infer_action_from_signals(signals.get(best_asset, {}) or {})
         if action is None:
-            self.logger.warning(
-                "Direction non déterminée pour %s. Trade annulé. (debug=%s)",
-                best_asset,
-                best_debug,
-            )
             return None
-
-        self.logger.info(
-            "MEILLEUR CANDIDAT KATANA (no-gating): %s | score=%.3f | action=%s | debug=%s",
-            best_asset,
-            best_score,
-            action,
-            best_debug,
-        )
 
         order = {
             "action": action,
@@ -634,7 +648,7 @@ def _safe_asset_meta(self, context, asset):
         latest_signals: Dict[str, Any] | None = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Propose une sortie partielle/totale pour une position ouverte (ou un ajustement de SL) selon des règles Katana.
+        Propose une sortie partielle/totale pour une position ouverte (ou un ajustement de SL) selon des règles Katana + chandeliers.
         - Retourne:
             • {"action":"ADJUST_SL", "asset":..., "new_sl_price":...} OU
             • {"action":"CLOSE", "asset":..., "reason": "..."} OU
@@ -693,7 +707,6 @@ def _safe_asset_meta(self, context, asset):
 
         # --- 1) Break-even auto ---
         if breakeven_trigger > 0 and pnl_pips_signed >= breakeven_trigger:
-            # Calcule un SL = entry (ou légèrement positif: +0.1 pip) sans dépasser le prix courant
             be_pad = float(exit_cfg.get("breakeven_pad_pips", 0.1))
             new_sl = entry_price
             if side == "BUY":
@@ -727,20 +740,16 @@ def _safe_asset_meta(self, context, asset):
             and trailing_step > 0
             and pnl_pips_signed >= trailing_start
         ):
-            # SL cible = (entrée ± (pnl - step_buffer))
             step_buffer = float(exit_cfg.get("trailing_buffer_pips", trailing_step))
-            target_lock = max(0.0, pnl_pips_signed - step_buffer)  # pips à "locker"
-            # Convertit en prix
+            target_lock = max(0.0, pnl_pips_signed - step_buffer)
             lock_dist_price = target_lock * point * (10.0 if digits in (3, 5) else 1.0)
             new_sl = (
                 entry_price + lock_dist_price
                 if side == "BUY"
                 else entry_price - lock_dist_price
             )
-            # Ne resserre que si c’est favorable (jamais élargir)
             if side == "BUY":
                 if not sl_price or new_sl > sl_price:
-                    # borne pour ne pas dépasser le prix courant
                     new_sl = min(new_sl, cur_price)
                     return {
                         "action": "ADJUST_SL",
@@ -758,7 +767,7 @@ def _safe_asset_meta(self, context, asset):
                         "reason": "trail",
                     }
 
-        # --- 3) Flip micro‑phase M1 (optionnel, sortie totale) ---
+        # --- 3) Flip micro-phase M1 (optionnel, sortie totale) ---
         if exit_on_m1_flip and phase_m1:
             if side == "BUY" and any(
                 k in phase_m1
@@ -780,7 +789,6 @@ def _safe_asset_meta(self, context, asset):
 
         # --- 4) Durée max (optionnel) ---
         if max_hold_seconds and max_hold_seconds > 0:
-            # on accepte plusieurs formats d’horodatage en entrée
             import datetime as _dt
 
             opened_at = (
@@ -792,7 +800,6 @@ def _safe_asset_meta(self, context, asset):
                 if isinstance(opened_at, (int, float)):
                     open_dt = _dt.datetime.utcfromtimestamp(opened_at)
                 else:
-                    # iso8601 string
                     open_dt = _dt.datetime.fromisoformat(
                         str(opened_at).replace("Z", "+00:00")
                     ).astimezone(_dt.timezone.utc)
@@ -808,6 +815,37 @@ def _safe_asset_meta(self, context, asset):
                     }
             except Exception:
                 pass
+
+        # --- 5) Sortie technique par chandeliers ---
+        df = (context.get("market_data") or {}).get(asset, {}).get("annotated_rates_df")
+        if df is not None and hasattr(df, "iloc") and len(df) > 2:
+            if side == "BUY":
+                if self._is_engulfing(df, bullish=False) or self._is_pinbar(
+                    df, bullish=False
+                ):
+                    return {
+                        "action": "CLOSE",
+                        "asset": asset,
+                        "reason": "bearish_candle_pattern",
+                    }
+            elif side == "SELL":
+                if self._is_engulfing(df, bullish=True) or self._is_pinbar(
+                    df, bullish=True
+                ):
+                    return {
+                        "action": "CLOSE",
+                        "asset": asset,
+                        "reason": "bullish_candle_pattern",
+                    }
+
+            # Doji en profit = sécuriser
+            if self._is_doji(df) and pnl_pips_signed > breakeven_trigger:
+                return {
+                    "action": "ADJUST_SL",
+                    "asset": asset,
+                    "new_sl_price": entry_price,
+                    "reason": "doji_uncertainty",
+                }
 
         return None
 
