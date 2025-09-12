@@ -2192,69 +2192,6 @@ class TradeExecutor:
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
 
-    def _calculate_loss_per_lot_fallback(
-        self, symbol_info: Any, sl_distance_price: float, current_price: float
-    ) -> float:
-        """
-        Calcule la perte par lot via un modèle mathématique interne.
-        Sert de fallback si order_calc_profit de MT5 échoue.
-        Prend en compte la conversion de devise si possible.
-
-        Args:
-            symbol_info (Any): Les informations du symbole de MT5 (MetaTrader5.SymbolInfo NamedTuple).
-            sl_distance_price (float): La distance du stop loss en termes de prix (valeur absolue).
-            current_price (float): Le prix actuel de l'actif.
-
-        Returns:
-            float: La perte estimée pour un lot en devise du compte.
-        """
-        contract_size = symbol_info.trade_contract_size
-        currency_profit = (
-            symbol_info.currency_profit
-        )  # Devise de profit de l'actif (ex: USD pour EURUSD)
-        account_currency = self.config_manager.get(
-            "account_settings.currency", "USD"
-        )  # Devise du compte (ConfigManager)
-
-        # Implémenter une conversion de devise pour une précision universelle. (TODO implémenté - conceptuel)
-        # Cela nécessiterait de récupérer le taux de change entre la devise de profit de l'actif
-        # et la devise du compte (ex: USDJPY pour un compte en USD tradant l'EURJPY).
-        # Pour l'instant, on simule un appel à un convertisseur de taux.
-
-        exchange_rate_to_account_currency = (
-            1.0  # Par défaut, si les devises sont les mêmes
-        )
-        if currency_profit != account_currency:
-            # Ici, on ferait un appel à un service de taux de change ou on lirait une valeur
-            # du `market_context` si elle y est présente (ex: {'USDJPY': 140.0})
-            # Pour l'exemple, nous allons simuler un taux pour EUR converti en USD
-            if currency_profit == "EUR" and account_currency == "USD":
-                # Ceci serait un VRAI taux EURUSD, pas un hardcoding.
-                exchange_rate_to_account_currency = (
-                    current_price  # Si la paire est EURUSD, le prix est le taux
-                )
-            elif currency_profit == "JPY" and account_currency == "USD":
-                # Si par exemple on trade USDJPY, et le compte est en USD, la conversion est 1/prix
-                exchange_rate_to_account_currency = (
-                    1 / current_price
-                )  # Ou un autre taux si la paire n'est pas directe
-            # TODO: Implémenter un service de taux de change dans `MT5Connector` ou `ConfigManager`
-            #       pour récupérer les taux de conversion précis entre les devises.
-            self.logger.warning(
-                f"Utilisation d'une approximation pour la conversion de devise {currency_profit} -> {account_currency}. Précision peut varier."
-            )
-
-        # Perte par lot = (distance SL en prix) * (taille du contrat) * (taux de conversion)
-        loss_per_lot_usd = (
-            sl_distance_price * contract_size * exchange_rate_to_account_currency
-        )
-
-        self.logger.warning(
-            f"Utilisation du modèle de calcul de risque interne (fallback). Perte par lot estimée: {loss_per_lot_usd:.2f} {account_currency}."
-        )
-
-        return loss_per_lot_usd
-
     def _calculate_risk_based_volume(
         self,
         trade_decision: dict,
@@ -2268,9 +2205,7 @@ class TradeExecutor:
         """
         Sizing par risque $ (source unique = broker_accounts.trade_settings.risk_per_trade_percent)
         ------------------------------------------------------------------------------------------------
-        - Priorité du risk% : compte (broker_accounts) -> fallback global (prod_config) -> (legacy compat log only)
-        - Perte/lot : order_calc_profit (MT5) -> tick_value/tick_size (trade_* ou valeurs standard) -> pip value (FX/JPY) -> contrat*distance
-        - Contraintes : min/max/step (symbole & compte), caps optionnels, contrôle de marge, floor sur step (ne dépasse jamais le risque visé)
+        - Pas de fallback approximatif : si le calcul échoue -> TradeExecutionError
         """
 
         # --- Action ---
@@ -2292,26 +2227,17 @@ class TradeExecutor:
             except Exception:
                 return default
 
-        # 1) Compte (passé à la fonction) — source de vérité
-        risk_pct = _try_float(
-            (account_trade_settings or {}).get("risk_per_trade_percent")
-        )
-
-        # 1.b) (ceinture + bretelles) Compte dans context.active_broker_account si non passé
+        risk_pct = _try_float((account_trade_settings or {}).get("risk_per_trade_percent"))
         if risk_pct is None:
-            aba = (context.get("active_broker_account") or {}).get(
-                "trade_settings", {}
-            ) or {}
+            aba = (context.get("active_broker_account") or {}).get("trade_settings", {}) or {}
             risk_pct = _try_float(aba.get("risk_per_trade_percent"))
 
-        # 2) Fallback global (prod_config)
         if risk_pct is None:
             risk_pct = _try_float(
                 self.config_manager.get("risk_management.risk_per_trade_pct", 0.25),
                 0.25,
             )
 
-        # 3) Legacy (stratégie/actif) : on NE L'UTILISE PAS, on log seulement si détecté
         legacy_risk_local = config.get("risk_per_trade_percent") or (
             (config.get("risk_management") or {}).get("risk_per_trade_pct")
         )
@@ -2323,9 +2249,7 @@ class TradeExecutor:
             )
 
         if risk_pct is None or risk_pct <= 0:
-            raise TradeExecutionError(
-                "Risque en % manquant/invalide (compte + fallback global)."
-            )
+            raise TradeExecutionError("Risque en % manquant/invalide (compte + config).")
 
         max_dollar_risk = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk <= 0:
@@ -2336,7 +2260,7 @@ class TradeExecutor:
         if price_diff <= 0:
             raise TradeExecutionError("Distance Entry-SL nulle pour sizing.")
 
-        # --- Récup symbol_info robuste (attributs ou dict) ---
+        # --- Récup symbol_info robuste ---
         def _sget(obj, *names, default=None):
             for n in names:
                 if hasattr(obj, n):
@@ -2347,9 +2271,7 @@ class TradeExecutor:
                     return obj[n]
             return default
 
-        sym_name = _sget(
-            symbol_info, "name", default=str(trade_decision.get("asset", "")).upper()
-        )
+        sym_name = _sget(symbol_info, "name", default=str(trade_decision.get("asset", "")).upper())
         point = float(_sget(symbol_info, "point", default=0.00001) or 0.00001)
         digits = int(_sget(symbol_info, "digits", default=5) or 5)
         contract = float(
@@ -2367,23 +2289,16 @@ class TradeExecutor:
                     if action == "BUY"
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
-                profit = mt5_mod.order_calc_profit(
-                    order_type, sym_name, 1.0, entry_price, sl_price
-                )  # float
+                profit = mt5_mod.order_calc_profit(order_type, sym_name, 1.0, entry_price, sl_price)
                 per_lot_loss_usd = abs(float(profit))
                 if not math.isfinite(per_lot_loss_usd) or per_lot_loss_usd <= 0:
                     per_lot_loss_usd = None
             except Exception as e:
-                self.logger.warning(
-                    f"mt5.order_calc_profit indisponible: {e}. Fallback interne."
-                )
+                self.logger.warning(f"mt5.order_calc_profit indisponible: {e}.")
                 per_lot_loss_usd = None
 
-        # Tick-based
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
-            tick_value = _sget(
-                symbol_info, "trade_tick_value", "tick_value", default=0.0
-            )
+            tick_value = _sget(symbol_info, "trade_tick_value", "tick_value", default=0.0)
             tick_size = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
             try:
                 tick_value = float(tick_value or 0.0)
@@ -2395,51 +2310,32 @@ class TradeExecutor:
                 nb_ticks = price_diff / tick_size
                 per_lot_loss_usd = nb_ticks * tick_value
 
-        # Pip-based (FX majors/JPY)
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
             points_per_pip = 10.0 if digits in (3, 5) else 1.0
             pip_size = point * points_per_pip
-            quote = ""
-            if isinstance(sym_name, str) and len(sym_name) >= 6:
-                quote = sym_name[-3:].upper()
+            quote = sym_name[-3:].upper() if isinstance(sym_name, str) and len(sym_name) >= 6 else ""
 
             if quote == "USD":
-                # ≈ 10$ par pip par lot pour la plupart des majors FX
                 pip_value_per_lot_usd = contract * pip_size
-                per_lot_loss_usd = max(
-                    1e-12, (price_diff / pip_size) * pip_value_per_lot_usd
-                )
+                per_lot_loss_usd = (price_diff / pip_size) * pip_value_per_lot_usd
             elif quote == "JPY":
-                # pip en JPY = contract * 0.01 ; conversion en USD ≈ / entry
                 pip_value_jpy = contract * 0.01
                 pip_value_usd = pip_value_jpy / max(1e-12, float(entry_price))
-                per_lot_loss_usd = max(1e-12, (price_diff / pip_size) * pip_value_usd)
+                per_lot_loss_usd = (price_diff / pip_size) * pip_value_usd
             else:
-                # Fallback pip-value générique
                 pip_value_default = float(
-                    self.config_manager.get(
-                        "risk_management_settings.default_pip_value_per_lot", 10.0
-                    )
+                    self.config_manager.get("risk_management_settings.default_pip_value_per_lot", 10.0)
                 )
-                per_lot_loss_usd = max(
-                    1e-12, (price_diff / pip_size) * pip_value_default
-                )
-                self.logger.warning(
-                    "tick_value/tick_size insuffisants -> heuristique pip-value utilisée."
-                )
+                per_lot_loss_usd = (price_diff / pip_size) * pip_value_default
+                self.logger.warning("tick_value/tick_size insuffisants -> heuristique pip-value utilisée.")
 
-        if per_lot_loss_usd <= 0 or not math.isfinite(per_lot_loss_usd):
-            # Dernier secours : contrat * distance prix
-            per_lot_loss_usd = max(1e-12, contract * price_diff)
-            self.logger.warning(
-                "Perte/lot approximée via contrat*distance (dernier secours)."
-            )
+        # --- Ici : plus de fallback "contrat*distance" ---
+        if per_lot_loss_usd is None or per_lot_loss_usd <= 0 or not math.isfinite(per_lot_loss_usd):
+            raise TradeExecutionError("Impossible de calculer la perte par lot.")
 
-        # --- Plancher de perte par lot (évite oversize si SL micro) ---
+        # --- Plancher de perte par lot ---
         min_dlr_per_lot = float(
-            self.config_manager.get(
-                "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
-            )
+            self.config_manager.get("risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0)
         )
         if per_lot_loss_usd < min_dlr_per_lot:
             self.logger.debug(
@@ -2447,7 +2343,7 @@ class TradeExecutor:
             )
             per_lot_loss_usd = min_dlr_per_lot
 
-        # --- Volume brut (non normalisé) ---
+        # --- Volume brut ---
         raw_volume = max_dollar_risk / per_lot_loss_usd
 
         # --- Contraintes symbole/compte ---
@@ -2455,30 +2351,22 @@ class TradeExecutor:
         vol_max_sym = float(_sget(symbol_info, "volume_max", default=100.0) or 100.0)
         vol_step_sym = float(_sget(symbol_info, "volume_step", default=0.01) or 0.01)
 
-        min_lot_account = float(
-            (account_trade_settings or {}).get("min_lot", vol_min_sym) or vol_min_sym
-        )
-        max_lot_account = float(
-            (account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym
-        )
-        lot_step_account = float(
-            (account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym
-        )
+        min_lot_account = float((account_trade_settings or {}).get("min_lot", vol_min_sym) or vol_min_sym)
+        max_lot_account = float((account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym)
+        lot_step_account = float((account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym)
 
-        # --- Cap stratégie (ex: scalping.max_lot_size) ---
+        # --- Cap stratégie ---
         de = config.get("decision_engine") or {}
         de_risk = de.get("risk") or {}
         strat_max_lot = de_risk.get("max_lot_size")
         if isinstance(strat_max_lot, (int, float)) and strat_max_lot > 0:
             max_lot_account = min(max_lot_account, float(strat_max_lot))
 
-        # --- Caps volume globaux : seulement si explicitement activés ---
+        # --- Caps volume globaux ---
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
             ff_cfg = tes.get("fat_finger_check", {}) or {}
-            safety_enabled = bool(
-                ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False)
-            )
+            safety_enabled = bool(ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False))
             max_volume_safety = tes.get("max_absolute_volume_safety", None)
             if (
                 safety_enabled
@@ -2493,22 +2381,16 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Lecture caps volume sécurité échouée: {e}")
 
-        # --- Fat-finger dynamique (moyenne récente * multiplicateur) - seulement si activé ---
+        # --- Fat-finger dynamique ---
         try:
-            if bool(ff_cfg.get("enabled", False)) and bool(
-                ff_cfg.get("enable_dynamic_check", False)
-            ):
+            if bool(ff_cfg.get("enabled", False)) and bool(ff_cfg.get("enable_dynamic_check", False)):
                 lookback = int(ff_cfg.get("avg_volume_lookback", 20) or 20)
                 mult = float(ff_cfg.get("max_volume_multiplier_from_avg", 5.0) or 5.0)
                 recent = []
                 for k in ("recent_executed_trades", "recent_volumes", "volume_history"):
                     seq = context.get(k)
                     if isinstance(seq, list):
-                        recent = [
-                            float(x)
-                            for x in seq[-lookback:]
-                            if isinstance(x, (int, float))
-                        ]
+                        recent = [float(x) for x in seq[-lookback:] if isinstance(x, (int, float))]
                         if recent:
                             break
                 if recent:
@@ -2522,22 +2404,20 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Vérif fat-finger dynamique non appliquée: {e}")
 
-        # --- Arrondi & clamps finaux (priorité au respect du risque -> floor) ---
+        # --- Arrondi & clamps finaux ---
         volume = max(min_lot_account, vol_min_sym, raw_volume)
         volume = min(max_lot_account, vol_max_sym, volume)
         effective_step = max(lot_step_account, vol_step_sym)
         if effective_step <= 0:
             effective_step = 0.01
-        steps = math.floor(
-            volume / effective_step
-        )  # floor => ne dépasse pas le risque visé
+        steps = math.floor(volume / effective_step)
         volume = round(steps * effective_step, 8)
         volume = max(min_lot_account, volume)
         volume = min(max_lot_account, volume)
         if volume <= 0:
             raise TradeExecutionError(f"Volume calculé invalide ({volume}).")
 
-        # --- Contrôle de marge (API Python MT5 renvoie un float 'margin') ---
+        # --- Contrôle de marge ---
         try:
             if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
                 order_type = (
@@ -2545,9 +2425,7 @@ class TradeExecutor:
                     if action == "BUY"
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
-                margin_required = mt5_mod.order_calc_margin(
-                    order_type, sym_name, volume, entry_price
-                )
+                margin_required = mt5_mod.order_calc_margin(order_type, sym_name, volume, entry_price)
                 free_margin = acct_info.get("margin_free")
                 if (
                     margin_required is not None
@@ -2560,9 +2438,7 @@ class TradeExecutor:
                     steps = math.floor(reduced / effective_step)
                     reduced = round(steps * effective_step, 8)
                     if reduced < min_lot_account:
-                        raise TradeExecutionError(
-                            "Marge libre insuffisante pour le volume minimum."
-                        )
+                        raise TradeExecutionError("Marge libre insuffisante pour le volume minimum.")
                     self.logger.warning(
                         f"Marge insuffisante: besoin ~{margin_required:.2f}, libre {free_margin:.2f}. "
                         f"Volume réduit {volume:.4f} -> {reduced:.4f}"
@@ -2571,19 +2447,15 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Contrôle marge non appliqué: {e}")
 
-        # --- Vérification écart de risque vs. cible ---
+        # --- Vérification écart de risque ---
         actual_risk_dollars = volume * per_lot_loss_usd
-        tol = float(
-            self.config_manager.get(
-                "trade_executor_settings.max_risk_deviation_multiplier", 1.05
-            )
-        )
+        tol = float(self.config_manager.get("trade_executor_settings.max_risk_deviation_multiplier", 1.05))
         if actual_risk_dollars > max_dollar_risk * tol:
             self.logger.warning(
                 f"Risque réel {actual_risk_dollars:.2f}$ > max {max_dollar_risk:.2f}$ (tol {tol:.2f})."
             )
 
-        # Log de diagnostics + contraintes symbole
+        # Log final
         self.logger.info(
             f"Sizing {sym_name}: equity={equity:.2f}, risk%={risk_pct:.4f}, "
             f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.6f} -> vol={volume:.4f} "
