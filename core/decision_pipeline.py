@@ -91,71 +91,6 @@ class DecisionPipeline:
         # Autorise un dict par symbole, sinon valeur unique
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
 
-    def _demo_unleash_override(
-        self, asset_symbol: str, context: dict | None = None
-    ) -> tuple[bool | None, str]:
-        """
-        Unleash DEMO: si activé dans la config, on bypass le gate Katana en mode DEMO.
-        - Retourne (True, "demo_unleash") pour forcer l'entrée.
-        - Retourne (None, "") pour ne rien faire (continuer le gate normal).
-        Clés de config utilisées:
-        - debug.unleash.allow_all_entries_demo: bool (False par défaut)
-        - debug.unleash.max_spread_points: int | None (optionnel, None = aucune limite)
-        - debug.unleash.max_positions: int | None (optionnel, None = pas de limite)
-        """
-        try:
-            # 1) Flag principal
-            allow_unleash = bool(
-                self.config_manager.get("debug.unleash.allow_all_entries_demo", False)
-            )
-            if not allow_unleash:
-                return (None, "")
-            # 2) Mode: uniquement en DEMO
-            mode = str(self.config_manager.get("mode_execution", "DEMO")).upper()
-            if mode != "DEMO":
-                return (None, "")
-
-            # 3) Garde-fous optionnels pour éviter des situations absurdes même en unleash
-            #    a) Spread max
-            try:
-                max_spread_pts = self.config_manager.get(
-                    "debug.unleash.max_spread_points", None
-                )
-            except Exception:
-                max_spread_pts = None
-            if max_spread_pts is not None:
-                try:
-                    last_spread = float(
-                        context.get("market_data", {}).get(
-                            "spread_points", float("inf")
-                        )
-                    )
-                except Exception:
-                    last_spread = float("inf")
-                if not (last_spread <= float(max_spread_pts)):
-                    return (None, "")
-
-            #    b) Limite positions ouvertes
-            try:
-                max_pos = self.config_manager.get("debug.unleash.max_positions", None)
-            except Exception:
-                max_pos = None
-            if max_pos is not None:
-                try:
-                    open_pos_count = int(
-                        context.get("account_state", {}).get("open_positions_count", 0)
-                    )
-                except Exception:
-                    open_pos_count = 0
-                if open_pos_count >= int(max_pos):
-                    return (None, "")
-
-            # OK: bypass
-            return (True, "demo_unleash")
-        except Exception:
-            # En cas d’erreur, ne pas bloquer le flux normal — on laisse le gate standard décider.
-            return (None, "")
-
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -1648,7 +1583,7 @@ class DecisionPipeline:
         trade_decision = self._core_evaluate_signals(
             context, current_config, signals, strategy_name
         )
-       
+
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
         action_raw = str(trade_decision.get("action", "")).upper()
         action_map = {
@@ -2285,121 +2220,6 @@ class DecisionPipeline:
                     )
                 except Exception as e:
                     self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
-
-        else:
-            reason = (risk_params or {}).get("reason", "risk_calc_failed")
-            extras = {
-                k: risk_params.get(k)
-                for k in (
-                    "sl_pips",
-                    "tp_pips",
-                    "spread_pips",
-                    "rr_effective",
-                    "stops_level_pips",
-                    "level_mode",
-                )
-                if isinstance(risk_params, dict) and k in risk_params
-            }
-            _diag_size(asset_raw, reason, extras)
-            self.logger.warning(f"Calcul de risque refusé pour {asset_raw}: {reason}")
-            print(
-                f"⚠️ [CORE] RiskEngine non OK ({reason}) — on continue en 'low_confidence' + min lot."
-            )
-            trade_decision["confidence"] = (
-                float(trade_decision.get("confidence", 0.5)) * 0.7
-            )
-            trade_decision["volume"] = float(current_config.get("min_lot_size", 0.01))
-
-            # Fallback SL/TP prix si possible
-            try:
-                md_asset = (context.get("market_data", {}) or {}).get(
-                    asset_raw, {}
-                ) or {}
-                si = (
-                    md_asset.get("symbol_info")
-                    or current_config.get("symbol_info")
-                    or {}
-                ) or {}
-
-                entry = trade_decision.get("entry_price") or md_asset.get(
-                    "current_price"
-                )
-                entry = float(entry) if entry is not None else None
-
-                point = float(si.get("point") or signals.get("point") or 0.0001)
-                digits = int(si.get("digits") or 5)
-                pip_points = 10.0 if digits in (3, 5) else 1.0
-                pip_size = point * pip_points
-
-                rm_cfg_local = current_config.get("risk_management") or {}
-                min_rr_local = float(rm_cfg_local.get("min_rr", 1.5))
-                sl_pips = float(
-                    trade_decision.get("target_sl_pips")
-                    or rm_cfg_local.get("default_sl_pips", 10.0)
-                )
-                tp_pips = float(
-                    trade_decision.get("target_tp_pips") or (min_rr_local * sl_pips)
-                )
-
-                if entry and pip_size > 0 and sl_pips > 0 and tp_pips > 0:
-                    sl_dist = sl_pips * pip_size
-                    tp_dist = tp_pips * pip_size
-
-                    if normalized_action == "BUY":
-                        sl_price = round(entry - sl_dist, digits)
-                        tp_price = round(entry + tp_dist, digits)
-                    else:
-                        sl_price = round(entry + sl_dist, digits)
-                        tp_price = round(entry - tp_dist, digits)
-
-                    trade_decision.setdefault("sl_price", float(sl_price))
-                    trade_decision.setdefault("tp_price", float(tp_price))
-                    self.logger.info(
-                        f"[PATCH-EXEC] SL/TP prix posés (fallback): SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
-                    )
-                    print(
-                        f"🔧 [CORE] SL/TP fallback posés → SL={trade_decision['sl_price']} | TP={trade_decision['tp_price']}"
-                    )
-                else:
-                    self.logger.warning(
-                        "[PATCH-EXEC] Impossible de calculer SL/TP prix (entry/pip_size manquants)."
-                    )
-                    print(
-                        "⚠️ [CORE] Impossible de poser SL/TP fallback (entry/pip_size manquants)."
-                    )
-            except Exception as e:
-                self.logger.warning(
-                    f"[PATCH-EXEC] Erreur calc SL/TP prix fallback: {e}"
-                )
-
-            if reason == "sl_capped" and "stops_level_pips" in extras:
-                trade_decision["target_sl_pips"] = float(extras["stops_level_pips"])
-                self.logger.info(
-                    f"🔧 SL ajusté automatiquement au minimum autorisé ({extras['stops_level_pips']} pips) pour {asset_raw}"
-                )
-                print(
-                    f"🔧 [CORE] SL ajusté au minimum broker → {extras['stops_level_pips']} pips"
-                )
-
-            # marquage soft ATR
-            if reason == "soft_atr_m1_low":
-                self.logger.warning(
-                    f"⚠️ ATR M1 faible sur {asset_raw} — on conserve le trade en 'low_confidence'."
-                )
-                flags = trade_decision.setdefault("flags", {})
-                flags["soft_atr_m1_low"] = True
-                penalty = (
-                    float(self.active_config.get("soft_atr_penalty_factor", 0.85))
-                    if hasattr(self, "active_config")
-                    else 0.85
-                )
-                floor = (
-                    float(self.active_config.get("soft_atr_confidence_floor", 0.35))
-                    if hasattr(self, "active_config")
-                    else 0.35
-                )
-                current_conf = float(trade_decision.get("confidence", 0.5))
-                trade_decision["confidence"] = max(current_conf * penalty, floor)
 
             # plancher de volume en cas de soft ATR
             try:
