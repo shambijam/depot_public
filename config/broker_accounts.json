@@ -68,5 +68,47 @@
         }
     ],
     "default_live_account": "main_live_broker_A",
-    "default_demo_account": "main_demo_broker_A"
+    "default_demo_account": "main_demo_broker_A",
+    "symbols": {
+        "EURUSD": {
+            "enabled": true,
+            "digits": 5,
+            "point": 0.00001,
+            "contract_size": 100000,
+            "min_lot": 0.01,
+            "max_lot": 100.0,
+            "lot_step": 0.01,
+            "spread_points": 15
+        },
+        "GBPUSD": {
+            "enabled": true,
+            "digits": 5,
+            "point": 0.00001,
+            "contract_size": 100000,
+            "min_lot": 0.01,
+            "max_lot": 100.0,
+            "lot_step": 0.01,
+            "spread_points": 20
+        },
+        "USDCHF": {
+            "enabled": true,
+            "digits": 5,
+            "point": 0.00001,
+            "contract_size": 100000,
+            "min_lot": 0.01,
+            "max_lot": 100.0,
+            "lot_step": 0.01,
+            "spread_points": 20
+        },
+        "USDCAD": {
+            "enabled": true,
+            "digits": 5,
+            "point": 0.00001,
+            "contract_size": 100000,
+            "min_lot": 0.01,
+            "max_lot": 100.0,
+            "lot_step": 0.01,
+            "spread_points": 25
+        }
+    }
 }
