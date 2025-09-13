@@ -89,13 +89,14 @@
     "scalping": {
       "boll_midline": {
         "strict_mode": false,
+        "require_entry_gate_ok": true,
         "min_rr": 1.5,
         "tp_halfband_k": 0.60,
         "buffer_pips_min": 0.65,
         "min_mid_distance_ratio": 0.15,
         "require_range_regime": true,
         "block_on_expansion": false,
-        "min_confidence": 0.45,
+        "min_confidence": 0.55,
         "fvg_max_distance_pips": 1.8,
         "ob_max_distance_pips": 1.8,
         "katana_soft_distance_mult": 1.25,
@@ -442,13 +443,6 @@
         },
         "risk": {
           "skip_asset_if_spread_over_points": 200
-        }
-      },
-      "entry_rules": {
-        "scalping": {
-          "boll_midline": {
-            "katana_min_confidence": 0.55
-          }
         }
       },
       "risk_per_trade_percent": 5.0,

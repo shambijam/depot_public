@@ -1904,17 +1904,20 @@ class DecisionPipeline:
                 trade_decision["confidence"] = (
                     float(trade_decision.get("confidence", 0.5)) * 0.6
                 )
-
             if not entry_gate_ok:
-                self.logger.warning(
-                    "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
-                )
-                print(
-                    "⚠️ [CORE] entry_gate_ok=False — on pénalise la confiance, on n’arrête pas."
-                )
-                trade_decision["confidence"] = (
-                    float(trade_decision.get("confidence", 0.5)) * 0.7
-                )
+                if scalp_cfg.get("require_entry_gate_ok", True):
+                    # 🔒 Mode strict : rejet complet si gate fermé
+                    self.logger.info("Rejet strict: entry_gate_ok=False (Bollinger Gate fermé).")
+                    return {}
+                else:
+                    # 🎛 Mode permissif : simple pénalité de confiance
+                    self.logger.warning(
+                        "⚠️ entry_gate_ok=False — trade accepté mais confiance réduite."
+                    )
+                    trade_decision["confidence"] = (
+                        float(trade_decision.get("confidence", 0.5)) * 0.7
+                    )
+
 
             if isinstance(mid_distance_ratio, float) and math.isfinite(
                 mid_distance_ratio
