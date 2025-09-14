@@ -90,17 +90,17 @@
       "boll_midline": {
         "strict_mode": false,
         "require_entry_gate_ok": true,
-        "min_rr": 1.5,
+        "min_rr": 1.7,
         "tp_halfband_k": 0.60,
-        "buffer_pips_min": 0.65,
-        "min_mid_distance_ratio": 0.15,
+        "buffer_pips_min": 1.0,
+        "min_mid_distance_ratio": 0.20,
         "require_range_regime": true,
-        "block_on_expansion": false,
-        "min_confidence": 0.55,
+        "block_on_expansion": true,
+        "min_confidence": 0.60,
         "fvg_max_distance_pips": 1.8,
         "ob_max_distance_pips": 1.8,
         "katana_soft_distance_mult": 1.25,
-        "min_atr_m1_pips": 0.15,
+        "min_atr_m1_pips": 0.25,
         "max_spread_pips": 2.2,
         "max_stop_pips_scalp": 8.0,
         "reject_if_sl_over_cap": true,
@@ -115,41 +115,24 @@
         "enabled": true,
         "min_atr_pips": 4.0
       },
-      "liquidity_sweep": {
-        "independent": true,
-        "ignore_bollinger": true,
-        "max_spread_pips": 5.0,
-        "min_atr_m1_pips": 0.04,
-        "lookback_bars": 30,
-        "sweep": {
-          "use_swings": true,
-          "swing_window": 5,
-          "reference": "recent_high_low",
-          "wick_to_body_min_ratio": 1.8,
-          "wick_size_min_pips": 2.0,
-          "close_back_inside_range": true,
-          "volume_spike_sigma": 1.0,
-          "allow_gap_sweep": false
-        },
-        "absorption": {
-          "confirm_candle_required": true,
-          "confirm_timeframe": "M1",
-          "confirm_max_latency_bars": 2,
-          "body_to_range_min": 0.45,
-          "closes_through_mid_of_sweep": true
-        },
-        "entry_logic": {
-          "direction": "opposite_of_sweep",
-          "trigger": "break_of_absorption_extreme",
-          "buffer_pips": 0.4,
-          "timeout_bars": 3
-        },
-        "risk_filters": {
-          "mtf_bias_timeframe": "M5",
-          "align_with_mtf_bias": true,
-          "max_consecutive_signals": 2,
-          "min_distance_to_round_number_pips": 1.5
-        }
+      "absorption": {
+        "confirm_candle_required": true,
+        "confirm_timeframe": "M1",
+        "confirm_max_latency_bars": 2,
+        "body_to_range_min": 0.45,
+        "closes_through_mid_of_sweep": true
+      },
+      "entry_logic": {
+        "direction": "opposite_of_sweep",
+        "trigger": "break_of_absorption_extreme",
+        "buffer_pips": 0.4,
+        "timeout_bars": 3
+      },
+      "risk_filters": {
+        "mtf_bias_timeframe": "M5",
+        "align_with_mtf_bias": true,
+        "max_consecutive_signals": 2,
+        "min_distance_to_round_number_pips": 1.5
       }
     }
   },

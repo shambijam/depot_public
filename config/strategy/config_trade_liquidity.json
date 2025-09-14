@@ -1,32 +1,68 @@
 {
   "strategy_name": "liquidity",
-  "version": "2.0-compat",
+  "version": "2.1",
   "tradeable_assets": [
     "EURUSD",
     "GBPUSD",
     "USDCAD",
     "USDCHF"
   ],
+  "magic_number": 51002,
+  "risk_per_trade_percent": 0.4,
   "phase_detection": {
     "use_phase_observer": true,
     "lookback_window": 300,
     "volatility_threshold": 0.004,
-    "volume_zscore": 1.2,
-    "overrides": {
-      "require_range_detection": false,
-      "prefer_accumulation_distribution": true,
-      "min_lookback_bars": 500
+    "volume_zscore": 1.2
+  },
+  "liquidity_sweep": {
+    "enabled": true,
+    "independent": true,
+    "ignore_bollinger": true,
+    "lookback_bars": 30,
+    "max_spread_pips": 5.0,
+    "min_atr_m1_pips": 0.25,
+    "sweep": {
+      "use_swings": true,
+      "swing_window": 5,
+      "reference": "recent_high_low",
+      "wick_to_body_min_ratio": 1.8,
+      "wick_size_min_pips": 2.0,
+      "close_back_inside_range": true,
+      "volume_spike_sigma": 1.0,
+      "allow_gap_sweep": false,
+      "min_distance_pips": 1.5
+    },
+    "absorption": {
+      "confirm_candle_required": true,
+      "confirm_timeframe": "M1",
+      "confirm_max_latency_bars": 2,
+      "body_to_range_min": 0.45,
+      "closes_through_mid_of_sweep": true
+    },
+    "entry_logic": {
+      "direction": "opposite_of_sweep",
+      "trigger": "break_of_absorption_extreme",
+      "buffer_pips": 0.4,
+      "timeout_bars": 3,
+      "prefer_confluent_zone": true,
+      "use_wick_fill": false,
+      "wick_fill_ratio": 0.5,
+      "use_mtf_zone": false,
+      "retracement_tolerance_pips": 3.0
+    },
+    "risk_filters": {
+      "mtf_bias_timeframe": "M5",
+      "align_with_mtf_bias": true,
+      "max_consecutive_signals": 2,
+      "min_distance_to_round_number_pips": 1.5
     }
   },
-  "magic_number": 51002,
-  "risk_per_trade_percent": 0.4,
-  "stop_loss_pips": 25,
-  "take_profit_pips": 40,
   "decision_engine": {
     "thresholds": {
       "min_volatility": 0.004,
       "max_spread_points": 80,
-      "min_volume_score": 0.30
+      "min_volume_score": 0.3
     },
     "mtf": {
       "timeframes": [
@@ -35,98 +71,70 @@
         "H1"
       ],
       "required_agreements": 2
-    },
-    "liquidity_signals": {
-      "require_sweep_context": false,
-      "min_sweep_strength": 0.50,
-      "min_displacement_factor": 1.05,
-      "min_fvg_size_points": 3,
-      "allow_mitigation_entries": true,
-      "mitigation_offset_points": 2,
-      "invalidate_on_structure_break_against": true
-    },
-    "scoring": {
-      "base_score": 0.80,
-      "liquidity_edge_bonus": 0.15,
-      "fvg_confluence_bonus": 0.10,
-      "mtf_bonus_per_hit": 0.10,
-      "best_opportunity_bonus": 0.10,
-      "global_low_vol_penalty": -0.10,
-      "high_spread_penalty": -0.20
-    },
-    "risk_filters": {
-      "min_rr": 1.2
-    },
-    "filters": {
-      "avoid_major_news": true,
-      "disable_on_weekends": true,
-      "min_account_equity": 0,
-      "allow_only_whitelist_assets": true
-    },
-    "risk": {
-      "max_trades_per_day": 4,
-      "cooldown_seconds_after_trade": 90,
-      "skip_asset_if_spread_over_points": 80
-    },
-    "execution": {
-      "order_type": "limit",
-      "limit_use_mitigation": true,
-      "slippage_points": 4,
-      "max_parallel_positions": 1,
-      "fallback_to_market_if_missed": true
     }
   },
-  "decision_rules": [
-    {
-      "name": "baseline_liquidity",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "fvg_detected"
-        ],
-        "phase_must_contain": [
-          "range_retail",
-          "range_accumulation",
-          "trend"
-        ],
-        "min_confidence": 0.60
-      },
-      "order_type": "LIMIT",
-      "action_logic": {
-        "BUY": "place limit at mitigation zone if bullish sweep confirmed",
-        "SELL": "place limit at mitigation zone if bearish sweep confirmed"
-      }
-    }
-  ],
-  "smart_targets": {
-    "take_profit": {
-      "type": "atr",
-      "atr_period": 14,
-      "atr_multiplier": 2.0,
-      "fallback_rr": 1.5
+  "mtf": {
+    "timeframes": [
+      "M5",
+      "M15",
+      "H1"
+    ],
+    "required_agreements": 2
+  },
+  "scoring": {
+    "base_score": 0.8,
+    "liquidity_edge_bonus": 0.15,
+    "fvg_confluence_bonus": 0.1,
+    "mtf_bonus_per_hit": 0.1,
+    "global_low_vol_penalty": -0.1,
+    "high_spread_penalty": -0.2
+  },
+  "filters": {
+    "avoid_major_news": true,
+    "disable_on_weekends": true,
+    "allow_only_whitelist_assets": true
+  },
+  "risk": {
+    "max_trades_per_day": 4,
+    "cooldown_seconds_after_trade": 90
+  },
+  "execution": {
+    "order_type": "limit",
+    "limit_use_mitigation": true,
+    "slippage_points": 4,
+    "max_parallel_positions": 1
+  },
+  "confidence_score_calculation": {
+    "liquidity_weights": {
+      "sweep_detected": 0.35,
+      "absorption_confirmed": 0.25,
+      "eqh_eql_detected": 0.20
     },
-    "stop_loss": {
-      "type": "atr",
-      "atr_period": 14,
-      "atr_multiplier": 1.2,
-      "hard_min_points": 35
+    "signal_weights": {
+      "fvg_detected": 0.25,
+      "ob_detected": 0.35,
+      "bos_mss_detected": 0.25,
+      "regime_alignment": 0.15,
+      "candle_pattern": 0.15
     },
-    "breakeven": {
-      "enabled": true,
-      "trigger_rr": 1.0,
-      "lock_points": 3
+    "confluence_bonus": {
+      "fvg_ob_confluence": 0.15,
+      "ob_bos_confluence": 0.10,
+      "full_confluence_bonus": 0.20
     },
-    "partial_take_profit": {
-      "enabled": true,
-      "at_rr": 1.0,
-      "close_percent": 50
+    "quality_factors": {
+      "tight_spread": 1.05,
+      "regime_strength": 1.10,
+      "high_volume_confirmation": 1.15
     },
-    "trailing": {
-      "enabled": false,
-      "type": "chandelier",
-      "atr_period": 14,
-      "atr_multiplier": 2.5
-    }
+    "bollinger_weights": {
+      "mean_revert_score": 0.10,
+      "breakout_score": 0.10,
+      "squeeze_bonus": 0.05,
+      "expansion_bonus": 0.05
+    },
+    "base_confidence": 0.2,
+    "max_confidence_cap": 0.95
   },
   "exit_rules": {
     "time_based": {
@@ -142,11 +150,12 @@
       "minutes_before": 2,
       "minutes_after": 2
     },
-    "volume_zscore": {
-      "enabled": true,
-      "min_zscore": 1.2,
-      "max_zscore": 3.5,
-      "lookback": 50
+    "liquidity_exit": {
+      "max_bars_in_trade": 50,
+      "volume_exit_threshold": 3.0,
+      "trailing_structure": {
+        "enabled": true
+      }
     }
   }
 }

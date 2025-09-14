@@ -173,6 +173,18 @@ class PhaseObserver:
         if regime_strength > 0.7:
             score += signal_weights.get("regime_alignment", 0.15)
 
+        # --- 3bis) Liquidity-specific signals ---
+        if bool(row.get("sweep_detected", False)):
+            score += float(cfg.get("liquidity_weights", {}).get("sweep_detected", 0.35))
+        if bool(row.get("absorption_confirmed", False)):
+            score += float(
+                cfg.get("liquidity_weights", {}).get("absorption_confirmed", 0.25)
+            )
+        if bool(row.get("eqh_eql_detected", False)):
+            score += float(
+                cfg.get("liquidity_weights", {}).get("eqh_eql_detected", 0.20)
+            )
+
         # --- 4) Bonus confluence ---
         if bool(row.get("fvg_ob_confluence", False)):
             score += confluence_bonus.get("fvg_ob_confluence", 0.15)
@@ -758,6 +770,142 @@ class PhaseObserver:
                 last_volume >= min_volume
             )
 
+            # --- LIQUIDITY: sweep & absorption (détection légère, vectorisée) ---
+            try:
+                # paramètres (valeurs par défaut si non définies)
+                lookback_sweep = (
+                    int(
+                        self.config_manager.get(
+                            "liquidity_sweep.sweep.lookback_bars", 20
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else 20
+                )
+                wick_to_body_min = (
+                    float(
+                        self.config_manager.get(
+                            "liquidity_sweep.sweep.wick_to_body_min_ratio", 1.5
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else 1.5
+                )
+                min_distance_pips = (
+                    float(
+                        self.config_manager.get(
+                            "liquidity_sweep.sweep.min_distance_pips", 3.0
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else 3.0
+                )
+                volume_spike_sigma = (
+                    float(
+                        self.config_manager.get(
+                            "liquidity_sweep.sweep.volume_spike_sigma", 1.5
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else 1.5
+                )
+
+                body_to_range_min = (
+                    float(
+                        self.config_manager.get(
+                            "liquidity_sweep.absorption.body_to_range_min", 0.5
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else 0.5
+                )
+                closes_through_mid = (
+                    bool(
+                        self.config_manager.get(
+                            "liquidity_sweep.absorption.closes_through_mid_of_sweep",
+                            True,
+                        )
+                    )
+                    if getattr(self, "config_manager", None)
+                    else True
+                )
+
+                # tailles
+                eps = 1e-12
+                pip_size = None
+                try:
+                    point_val = float(df_an["point"].iloc[-1])
+                    pip_size = point_val * 10.0 if point_val > 0 else None
+                except Exception:
+                    pip_size = None
+                pip_size = (
+                    pip_size or 1.0
+                )  # fallback numérique pour les ratios (pas logique de trading)
+
+                # composantes bougies
+                oc_max = df_an[["open", "close"]].max(axis=1)
+                oc_min = df_an[["open", "close"]].min(axis=1)
+                up_wick = (df_an["high"] - oc_max).clip(lower=0.0)
+                dn_wick = (oc_min - df_an["low"]).clip(lower=0.0)
+                body = (df_an["close"] - df_an["open"]).abs()
+                full_range = (df_an["high"] - df_an["low"]).clip(lower=eps)
+
+                # ratios
+                up_wr = up_wick / (body.replace(0, eps))
+                dn_wr = dn_wick / (body.replace(0, eps))
+                body_ratio = body / full_range
+
+                # niveaux HH/LL récents (exclusifs, décalés d'une barre)
+                hh_prev = df_an["high"].rolling(lookback_sweep).max().shift(1)
+                ll_prev = df_an["low"].rolling(lookback_sweep).min().shift(1)
+
+                # distances franchies en pips
+                dist_up_pips = ((df_an["high"] - hh_prev).clip(lower=0.0)) / pip_size
+                dist_dn_pips = ((ll_prev - df_an["low"]).clip(lower=0.0)) / pip_size
+
+                # volume spike (z-score déjà calculé plus haut)
+                vol_z = pd.to_numeric(
+                    df_an.get("volume_zscore", 0.0), errors="coerce"
+                ).fillna(0.0)
+
+                # conditions sweep (mèche > corps, dépassement HH/LL, distance min, volume anormal)
+                sweep_up = (
+                    (df_an["high"] > hh_prev)
+                    & (up_wr >= wick_to_body_min)
+                    & (dist_up_pips >= min_distance_pips)
+                    & (vol_z >= volume_spike_sigma)
+                )
+                sweep_dn = (
+                    (df_an["low"] < ll_prev)
+                    & (dn_wr >= wick_to_body_min)
+                    & (dist_dn_pips >= min_distance_pips)
+                    & (vol_z >= volume_spike_sigma)
+                )
+                df_an["sweep_detected"] = (sweep_up | sweep_dn).fillna(False)
+
+                # absorption : clôture qui réintègre/avale la mèche (signal opposé au sweep), corps "suffisant"
+                mid_range = (df_an["high"] + df_an["low"]) / 2.0
+                absorb_up = (
+                    sweep_up
+                    & (df_an["close"] < df_an["open"])
+                    & (body_ratio >= body_to_range_min)
+                    & ((~closes_through_mid) | (df_an["close"] <= mid_range))
+                )
+                absorb_dn = (
+                    sweep_dn
+                    & (df_an["close"] > df_an["open"])
+                    & (body_ratio >= body_to_range_min)
+                    & ((~closes_through_mid) | (df_an["close"] >= mid_range))
+                )
+                df_an["absorption_confirmed"] = (absorb_up | absorb_dn).fillna(False)
+
+            except Exception as e:
+                self.logger.warning(
+                    f"[{current_asset_symbol}] Sweep/Absorption light detection failed: {e}"
+                )
+                df_an["sweep_detected"] = False
+                df_an["absorption_confirmed"] = False
+
             # === PHASE 4: CONFLUENCE ===
             df_an["fvg_ob_confluence"] = df_an["fvg_detected"] & df_an["ob_detected"]
             df_an["high_quality_ob"] = df_an["ob_details"].apply(
@@ -770,6 +918,27 @@ class PhaseObserver:
             df_an["institutional_setup"] = df_an["regime"].astype(str).str.contains(
                 "institutional", na=False
             ) & (df_an["ob_detected"] | df_an["bos_mss_detected"])
+
+            # --- LIQUIDITY: Equal Highs / Equal Lows ---
+            try:
+                eqh_cfg = (
+                    self.config_manager.get("eqh_eql_settings", {})
+                    if getattr(self, "config_manager", None)
+                    else {}
+                )
+                eqh_signals = self.detectors.detect_eqh_eql(df_an, eqh_cfg)
+                if eqh_signals:
+                    df_an["eqh_eql_details"] = eqh_signals
+                    df_an["eqh_eql_detected"] = [s is not None for s in eqh_signals]
+                else:
+                    df_an["eqh_eql_details"] = None
+                    df_an["eqh_eql_detected"] = False
+            except Exception as e:
+                self.logger.warning(
+                    f"[{current_asset_symbol}] Erreur detect_eqh_eql: {e}"
+                )
+                df_an["eqh_eql_details"] = None
+                df_an["eqh_eql_detected"] = False
 
             # === PHASE 5: PHASE PRIMAIRE ===
             df_an["phase_primary"] = df_an.apply(
@@ -796,46 +965,71 @@ class PhaseObserver:
 
             # === PHASE 7bis: STRATEGY FLAGS ===
             try:
-                last_boll_range = bool(
-                    df_an["boll_is_squeeze"].iloc[-1] == 0
-                    and df_an["boll_is_expansion"].iloc[-1] == 0
-                )
-                last_phase = str(df_an["phase"].iloc[-1])
-                last_vol = float(df_an["volatility_pct"].iloc[-1])
-
-                # 1️⃣ Flag SCALPING_OK : uniquement en range plat
+                # 1) Scalping OK si range plat (inchangé)
                 df_an["scalping_ok"] = (
-                    (df_an["boll_is_expansion"] == 0)
-                    & (df_an["boll_is_squeeze"] == 0)
-                    & (df_an["volatility_pct"] < 0.1)  # bornes à calibrer
-                )
-
-                # 2️⃣ Flag SWITCH_TO_LIQUIDITY : impulsion détectée
-                df_an["switch_to_liquidity"] = (
-                    (df_an["boll_is_expansion"] == 1)
-                    | (
-                        df_an["regime"]
-                        .astype(str)
-                        .str.contains("impulsion", case=False)
+                    (
+                        (df_an["boll_is_expansion"] == 0)
+                        & (df_an["boll_is_squeeze"] == 0)
+                        & (df_an["volatility_pct"] < 0.1)
                     )
-                    | (df_an["volatility_pct"] > 0.5)  # bornes à calibrer
+                    if (
+                        "boll_is_expansion" in df_an
+                        and "boll_is_squeeze" in df_an
+                        and "volatility_pct" in df_an
+                    )
+                    else False
                 )
 
-                # Log explicite
+                # 2) Switch Liquidity dès qu'une zone est identifiée (sweep ou absorption)
+                has_sweep = (
+                    bool(df_an["sweep_detected"].iloc[-1])
+                    if "sweep_detected" in df_an
+                    else False
+                )
+                has_absorb = (
+                    bool(df_an["absorption_confirmed"].iloc[-1])
+                    if "absorption_confirmed" in df_an
+                    else False
+                )
+
+                # Confluence minimale : BOS/MSS ou FVG/OB aide aussi à prioriser Liquidity
+                has_bos = (
+                    bool(df_an["bos_mss_detected"].iloc[-1])
+                    if "bos_mss_detected" in df_an
+                    else False
+                )
+                has_confluence = (
+                    bool(df_an["fvg_ob_confluence"].iloc[-1])
+                    if "fvg_ob_confluence" in df_an
+                    else False
+                )
+
+                df_an["switch_to_liquidity"] = (
+                    has_sweep or has_absorb or has_bos or has_confluence
+                )
+
+                # 3) MTF bias (placeholder: sera renseigné par l'analyse MTF ; on met False par défaut pour éviter KeyError)
+                if "mtf_bias_aligned" not in df_an.columns:
+                    df_an["mtf_bias_aligned"] = False
+
+                # Logs explicites
                 if bool(df_an["scalping_ok"].iloc[-1]):
                     self.logger.info(
-                        f"[{current_asset_symbol}] ✅ Scalping activé (range plat détecté)."
+                        f"[{current_asset_symbol}] ✅ Scalping activé (range plat)."
                     )
                 if bool(df_an["switch_to_liquidity"].iloc[-1]):
                     self.logger.info(
-                        f"[{current_asset_symbol}] ⚡ Impulsion détectée → Switch Liquidity."
+                        f"[{current_asset_symbol}] ⚡ Zone de liquidité détectée → Switch Liquidity."
                     )
+
             except Exception as e:
                 self.logger.warning(
                     f"[{current_asset_symbol}] Impossible de poser les flags scalping/liquidity: {e}"
                 )
                 df_an["scalping_ok"] = False
                 df_an["switch_to_liquidity"] = False
+                if "mtf_bias_aligned" not in df_an.columns:
+                    df_an["mtf_bias_aligned"] = False
 
             # === PHASE 8: LOG FINAL ===
             if not df_an.empty:
@@ -1150,9 +1344,32 @@ class PhaseObserver:
 
                 tf_analyses[tf] = last_signals
 
+                # 🔥 Sauvegarde des zones HTF (OB/FVG) pour usage Liquidity
+                try:
+                    if tf in (
+                        "M15",
+                        "H1",
+                    ):  # tu peux adapter selon ce que tu veux comme HTF
+                        if "ob_details" in last_signals and last_signals["ob_details"]:
+                            last_signals[f"ob_details_{tf}"] = last_signals[
+                                "ob_details"
+                            ]
+                        if (
+                            "fvg_details" in last_signals
+                            and last_signals["fvg_details"]
+                        ):
+                            last_signals[f"fvg_details_{tf}"] = last_signals[
+                                "fvg_details"
+                            ]
+                except Exception as e:
+                    self.logger.warning(
+                        f"[{asset}] Erreur stockage zones HTF {tf}: {e}"
+                    )
+
                 self.logger.debug(
                     f"✅ [{asset}] {tf} analysé: Phase={last_signals.get('phase')}"
                 )
+
             except Exception as e:
                 analysis_errors.append(f"{tf}: {str(e)}")
                 self.logger.error(

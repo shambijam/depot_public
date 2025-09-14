@@ -873,7 +873,36 @@ def run_single_pipeline_cycle(
                         )
                         trade_executed_successfully = False
 
-        # (autres mises à jour de compteurs si besoin...)
+                    # (autres mises à jour de compteurs si besoin...)
+
+                    # ==========================================================
+                    # 🔻 Vérification des EXIT Liquidity
+                    # ==========================================================
+                    try:
+                        current_positions = mt5_connector.get_open_positions()
+                        if current_positions:
+                            from strategy.liquidity import LiquidityStrategy
+
+                            liqui = LiquidityStrategy(config_manager)
+                            exit_decisions = liqui.evaluate_exit(
+                                global_context, current_positions
+                            )
+
+                            if exit_decisions:
+                                trade_executor.execute_exit_orders(
+                                    exit_decisions, is_dry_run=is_dry_run
+                                )
+                                logger.info(
+                                    f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
+                                )
+                                print(
+                                    f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
+                                )
+
+                    except Exception as e:
+                        logger.error(
+                            f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True
+                        )
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
@@ -1082,6 +1111,19 @@ def main(args: argparse.Namespace) -> None:
 
             if trade_executed_in_cycle:
                 daily_trade_count += 1
+
+                # === Surveillance des ordres LIMIT Liquidity ===
+            try:
+                trade_executor.monitor_pending_orders()
+            except Exception as e:
+                logger.warning(
+                    f"[LIQUIDITY] Erreur lors du monitor_pending_orders: {e}"
+                )
+
+            cycle_duration = time.time() - cycle_start_time
+            logger.info(
+                f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f}s."
+            )
 
             cycle_duration = time.time() - cycle_start_time
             logger.info(

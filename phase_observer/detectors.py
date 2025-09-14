@@ -659,6 +659,180 @@ class Detectors:
 
         return results
 
+    def detect_liquidity_sweeps(
+        self, df: pd.DataFrame, sweep_config: Optional[Dict[str, Any]] = None
+    ) -> List[Optional[Dict[str, Any]]]:
+        """
+        💧 Détection Liquidity Sweeps (stop hunts institutionnels).
+        Retourne une liste alignée sur df avec détails ou None.
+        """
+
+        if df is None or df.empty:
+            return []
+
+        cfg = sweep_config or {}
+        lookback = int(cfg.get("sweep", {}).get("lookback_bars", 20))
+        wick_min = float(cfg.get("sweep", {}).get("wick_to_body_min_ratio", 1.5))
+        min_dist = float(cfg.get("sweep", {}).get("min_distance_pips", 3.0))
+        vol_sigma = float(cfg.get("sweep", {}).get("volume_spike_sigma", 1.5))
+
+        eps = 1e-12
+        pip_size = None
+        try:
+            point_val = float(df["point"].iloc[-1])
+            pip_size = point_val * 10.0 if point_val > 0 else None
+        except Exception:
+            pip_size = None
+        pip_size = pip_size or 1.0
+
+        oc_max = df[["open", "close"]].max(axis=1)
+        oc_min = df[["open", "close"]].min(axis=1)
+        up_wick = (df["high"] - oc_max).clip(lower=0.0)
+        dn_wick = (oc_min - df["low"]).clip(lower=0.0)
+        body = (df["close"] - df["open"]).abs().replace(0, eps)
+
+        up_wr = up_wick / body
+        dn_wr = dn_wick / body
+
+        hh_prev = df["high"].rolling(lookback).max().shift(1)
+        ll_prev = df["low"].rolling(lookback).min().shift(1)
+
+        dist_up = ((df["high"] - hh_prev).clip(lower=0.0)) / pip_size
+        dist_dn = ((ll_prev - df["low"]).clip(lower=0.0)) / pip_size
+
+        vol_z = pd.to_numeric(df.get("volume_zscore", 0.0), errors="coerce").fillna(0.0)
+
+        sweep_up = (
+            (df["high"] > hh_prev)
+            & (up_wr >= wick_min)
+            & (dist_up >= min_dist)
+            & (vol_z >= vol_sigma)
+        )
+        sweep_dn = (
+            (df["low"] < ll_prev)
+            & (dn_wr >= wick_min)
+            & (dist_dn >= min_dist)
+            & (vol_z >= vol_sigma)
+        )
+
+        results: List[Optional[Dict[str, Any]]] = []
+        for i in range(len(df)):
+            info = None
+            if sweep_up.iloc[i] or sweep_dn.iloc[i]:
+                info = {
+                    "index": i,
+                    "timestamp": str(df.index[i]),
+                    "side": "sell" if sweep_up.iloc[i] else "buy",
+                    "wick_ratio": float(
+                        up_wr.iloc[i] if sweep_up.iloc[i] else dn_wr.iloc[i]
+                    ),
+                    "dist_pips": float(
+                        dist_up.iloc[i] if sweep_up.iloc[i] else dist_dn.iloc[i]
+                    ),
+                    "volume_z": float(vol_z.iloc[i]),
+                    "present": True,
+                }
+            results.append(info)
+        return results
+
+    def detect_absorption(
+        self, df: pd.DataFrame, abs_config: Optional[Dict[str, Any]] = None
+    ) -> List[Optional[Dict[str, Any]]]:
+        """
+        🛡️ Détection Absorption institutionnelle après sweep.
+        Retourne une liste alignée sur df avec détails ou None.
+        """
+
+        if df is None or df.empty:
+            return []
+
+        cfg = abs_config or {}
+        body_min = float(cfg.get("body_to_range_min", 0.5))
+        closes_mid = bool(cfg.get("closes_through_mid_of_sweep", True))
+        eps = 1e-12
+
+        body = (df["close"] - df["open"]).abs()
+        full_range = (df["high"] - df["low"]).replace(0, eps)
+        body_ratio = body / full_range
+        mid_range = (df["high"] + df["low"]) / 2.0
+
+        absorb_up = (
+            (df["close"] < df["open"])
+            & (body_ratio >= body_min)
+            & ((not closes_mid) | (df["close"] <= mid_range))
+        )
+        absorb_dn = (
+            (df["close"] > df["open"])
+            & (body_ratio >= body_min)
+            & ((not closes_mid) | (df["close"] >= mid_range))
+        )
+
+        results: List[Optional[Dict[str, Any]]] = []
+        for i in range(len(df)):
+            info = None
+            if absorb_up.iloc[i] or absorb_dn.iloc[i]:
+                info = {
+                    "index": i,
+                    "timestamp": str(df.index[i]),
+                    "confirmed": True,
+                    "side": "buy" if absorb_dn.iloc[i] else "sell",
+                    "body_ratio": float(body_ratio.iloc[i]),
+                }
+            results.append(info)
+        return results
+
+    def detect_eqh_eql(
+        self, df: pd.DataFrame, eqh_config: Optional[Dict[str, Any]] = None
+    ) -> List[Optional[Dict[str, Any]]]:
+        """
+        🎯 Détection Equal Highs / Equal Lows (EQH/EQL).
+        Retourne une liste alignée sur df avec détails ou None.
+        """
+
+        if df is None or len(df) < 5:
+            return []
+
+        cfg = eqh_config or {}
+        tolerance_pips = float(cfg.get("tolerance_pips", 2.0))
+        min_touches = int(cfg.get("min_touches", 2))
+
+        pip_size = None
+        try:
+            point_val = float(df["point"].iloc[-1])
+            pip_size = point_val * 10.0 if point_val > 0 else None
+        except Exception:
+            pip_size = None
+        pip_size = pip_size or 1.0
+
+        results: List[Optional[Dict[str, Any]]] = []
+        highs = df["high"].round(5)
+        lows = df["low"].round(5)
+
+        for i in range(2, len(df)):
+            info = None
+            # Equal Highs
+            recent_highs = highs.iloc[i - min_touches + 1 : i + 1]
+            if recent_highs.max() - recent_highs.min() <= tolerance_pips * pip_size:
+                info = {
+                    "index": i,
+                    "timestamp": str(df.index[i]),
+                    "type": "eqh",
+                    "level": float(recent_highs.mean()),
+                    "touches": len(recent_highs),
+                }
+            # Equal Lows
+            recent_lows = lows.iloc[i - min_touches + 1 : i + 1]
+            if recent_lows.max() - recent_lows.min() <= tolerance_pips * pip_size:
+                info = {
+                    "index": i,
+                    "timestamp": str(df.index[i]),
+                    "type": "eql",
+                    "level": float(recent_lows.mean()),
+                    "touches": len(recent_lows),
+                }
+            results.append(info)
+        return results
+
     def detect_candle_patterns(
         self,
         df: pd.DataFrame,

@@ -756,21 +756,66 @@ class DecisionPipeline:
         self, config: Dict, context: Dict, trading_signals: Dict, strategy_weights: Dict
     ) -> float:
         """
-        💧 LIQUIDITY KATANA - Simplifié
-        ✅ Plus de scoring bloquant : si impulsion détectée → score=1.0
+        💧 LIQUIDITY KATANA - Institutionnel
+        Calcul du score Liquidity basé sur :
+        - Sweep détecté
+        - Absorption confirmée
+        - Confluence (OB/FVG/BOS)
+        - MTF bias (si dispo)
         """
+
+        best_score = 0.0
+
         for asset, sig in trading_signals.items():
             regime = str(sig.get("regime", "")).lower()
             phase = str(sig.get("phase", "")).lower()
 
-            if "impulse" in regime or "impulsion" in phase or "sweep" in phase:
-                print(
-                    f"✅ [LIQUIDITY] {asset} en impulsion/sweep → score=1.0 (aucun blocage)"
-                )
-                return 1.0
+            # --- Détection brute : sweep/impulse ---
+            sweep_detected = bool(sig.get("sweep_detected", False))
+            absorption_ok = bool(sig.get("absorption_confirmed", False))
 
-        print("⚠️ [LIQUIDITY] Aucun actif en impulsion → score=0.0")
-        return 0.0
+            # --- Confluence (bonus) ---
+            fvg = bool(sig.get("fvg_detected", False))
+            ob = bool(sig.get("ob_detected", False))
+            bos = bool(sig.get("bos_mss_detected", False))
+            confluence_hits = sum([fvg, ob, bos])
+
+            # --- MTF bias ---
+            mtf_ok = bool(sig.get("mtf_bias_aligned", False))
+
+            # --- Score de base ---
+            score = 0.0
+            if (
+                sweep_detected
+                or "sweep" in phase
+                or "impulse" in regime
+                or "impulsion" in phase
+            ):
+                score = 0.6  # sweep trouvé = base solide
+
+            if absorption_ok:
+                score += 0.25
+
+            if confluence_hits > 0:
+                score += 0.05 * confluence_hits  # +0.05 par confluence
+
+            if mtf_ok:
+                score += 0.1
+
+            # --- Cap max ---
+            score = min(1.0, score)
+
+            if score > best_score:
+                best_score = score
+                print(
+                    f"✅ [LIQUIDITY] {asset} sweep={sweep_detected}, absorption={absorption_ok}, "
+                    f"confluence={confluence_hits}, mtf={mtf_ok} → score={score:.2f}"
+                )
+
+        if best_score == 0.0:
+            print("⚠️ [LIQUIDITY] Aucun signal de sweep/impulsion détecté → score=0.0")
+
+        return best_score
 
     def _evaluate_scalping_asset_conditions(
         self, asset: str, signals: Dict, config: Dict
@@ -1355,28 +1400,29 @@ class DecisionPipeline:
         strategy_manager_instance,
     ) -> List[Dict[str, Any]]:
         """
-        Orchestrateur des sorties:
-        1) Délègue aux stratégies actives (via magic number).
-        2) Fallback générique si aucune stratégie n'est trouvée ou silencieuse:
-            - Breakeven (SL -> entry +/- 0.1 pip) si PnL latent >= X*R
-            - Trailing structurel sur dernier swing M1 en faveur
-            - Time-stop après N bougies M1
-
-        context['market_data'][symbol] DOIT contenir:
-        - current_price (float) ou annotated_rates_df (DataFrame) pour récupérer last close
-        - annotated_rates_df pour détecter swings/time-stop (si dispo)
-        - symbol_info (digits/point)
-
-        Sortie (liste de décisions génériques):
-        - {"action": "MODIFY_SL", "position_id": ..., "symbol": ..., "new_sl": float, "reason": "breakeven|trail"}
-        - {"action": "CLOSE", "position_id": ..., "symbol": ..., "close_volume": float, "reason": "time_stop"}
+        Décide des exits basés uniquement sur la logique des stratégies.
+        ❌ Aucun fallback générique (breakeven, trailing, time-stop).
         """
-        self.logger.info("Orchestration des sorties (stratégies + fallback)...")
-
         exit_decisions: List[Dict[str, Any]] = []
-        if not open_positions:
-            self.logger.debug("Aucune position ouverte.")
-            return exit_decisions
+
+        for pos in open_positions:
+            magic = self._pos_magic(pos)
+            if magic is None:
+                continue
+
+            # Récupérer la stratégie associée
+            strat = strategy_manager_instance.get_strategy_by_magic(magic)
+            if strat and hasattr(strat, "evaluate_exit"):
+                try:
+                    strat_exit = strat.evaluate_exit(context, [pos])
+                    if strat_exit:
+                        exit_decisions.extend(strat_exit)
+                except Exception as e:
+                    self.logger.error(
+                        f"[EXIT] Erreur dans evaluate_exit de {strat}: {e}"
+                    )
+
+        return exit_decisions
 
     # ---- Helpers locaux robustes ----
     def _pos_id(p: Dict[str, Any]) -> Any:
@@ -1907,7 +1953,9 @@ class DecisionPipeline:
             if not entry_gate_ok:
                 if scalp_cfg.get("require_entry_gate_ok", True):
                     # 🔒 Mode strict : rejet complet si gate fermé
-                    self.logger.info("Rejet strict: entry_gate_ok=False (Bollinger Gate fermé).")
+                    self.logger.info(
+                        "Rejet strict: entry_gate_ok=False (Bollinger Gate fermé)."
+                    )
                     return {}
                 else:
                     # 🎛 Mode permissif : simple pénalité de confiance
@@ -1917,7 +1965,6 @@ class DecisionPipeline:
                     trade_decision["confidence"] = (
                         float(trade_decision.get("confidence", 0.5)) * 0.7
                     )
-
 
             if isinstance(mid_distance_ratio, float) and math.isfinite(
                 mid_distance_ratio
@@ -2438,6 +2485,29 @@ class DecisionPipeline:
                 setattr(self, "trade_executor", te)
 
             if te is not None:
+
+                # === Gestion Multi-TP ===
+                tp_prices = trade_decision.get("tp_prices")
+                if isinstance(tp_prices, list) and len(tp_prices) > 1:
+                    try:
+                        requests = te._split_multi_tp_orders(
+                            trade_decision,
+                            current_config,
+                            trade_decision["volume"],
+                            trade_decision["entry_price"],
+                            trade_decision["sl_price"],
+                            tp_prices,
+                            context.get("market_data", {})
+                            .get(asset_raw, {})
+                            .get("symbol_info", {}),
+                        )
+                        trade_decision["multi_tp_requests"] = requests
+                        self.logger.info(
+                            f"Multi-TP activé: {len(requests)} ordres générés."
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Erreur génération Multi-TP: {e}")
+
                 decision_package = {
                     "final_decision": trade_decision,  # ⚠️ clé attendue par run_trade_execution_pipeline
                     "config_used": current_config,

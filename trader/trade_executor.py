@@ -159,6 +159,15 @@ class TradeExecutor:
                 if close_result.get("success"):
                     self.logger.info(f"Position #{ticket} clôturée avec succès.")
                     success_count += 1
+
+                    # === LOG SPÉCIAL LIQUIDITY EXIT ===
+                    if "liquidity" in str(reason).lower():
+                        self.logger.info(
+                            f"[LIQUIDITY EXIT] ⛔ Ticket={ticket} | Reason={reason} "
+                            f"| ClosedPrice={close_result.get('price', 'N/A')} "
+                            f"| Volume={close_result.get('volume', 'N/A')}"
+                        )
+
                 else:
                     self.logger.error(
                         f"Échec de la clôture de la position #{ticket}. Message: {close_result.get('message', 'N/A')}"
@@ -1277,13 +1286,15 @@ class TradeExecutor:
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
 
-          # ---------- 8a) Sécurité broker & normalisation prix ----------
+            # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
                 import math
 
                 point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
                 tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
-                digits = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
+                digits = int(
+                    getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
+                )
 
                 # MetaTrader: stops_level / freeze_level en "points"
                 stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
@@ -1360,8 +1371,6 @@ class TradeExecutor:
 
             except Exception as e:
                 self.logger.warning(f"[SAFETY] Normalisation SL/TP échouée: {e}")
-
-
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
@@ -2227,9 +2236,13 @@ class TradeExecutor:
             except Exception:
                 return default
 
-        risk_pct = _try_float((account_trade_settings or {}).get("risk_per_trade_percent"))
+        risk_pct = _try_float(
+            (account_trade_settings or {}).get("risk_per_trade_percent")
+        )
         if risk_pct is None:
-            aba = (context.get("active_broker_account") or {}).get("trade_settings", {}) or {}
+            aba = (context.get("active_broker_account") or {}).get(
+                "trade_settings", {}
+            ) or {}
             risk_pct = _try_float(aba.get("risk_per_trade_percent"))
 
         if risk_pct is None:
@@ -2249,7 +2262,9 @@ class TradeExecutor:
             )
 
         if risk_pct is None or risk_pct <= 0:
-            raise TradeExecutionError("Risque en % manquant/invalide (compte + config).")
+            raise TradeExecutionError(
+                "Risque en % manquant/invalide (compte + config)."
+            )
 
         max_dollar_risk = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk <= 0:
@@ -2271,7 +2286,9 @@ class TradeExecutor:
                     return obj[n]
             return default
 
-        sym_name = _sget(symbol_info, "name", default=str(trade_decision.get("asset", "")).upper())
+        sym_name = _sget(
+            symbol_info, "name", default=str(trade_decision.get("asset", "")).upper()
+        )
         point = float(_sget(symbol_info, "point", default=0.00001) or 0.00001)
         digits = int(_sget(symbol_info, "digits", default=5) or 5)
         contract = float(
@@ -2289,7 +2306,9 @@ class TradeExecutor:
                     if action == "BUY"
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
-                profit = mt5_mod.order_calc_profit(order_type, sym_name, 1.0, entry_price, sl_price)
+                profit = mt5_mod.order_calc_profit(
+                    order_type, sym_name, 1.0, entry_price, sl_price
+                )
                 per_lot_loss_usd = abs(float(profit))
                 if not math.isfinite(per_lot_loss_usd) or per_lot_loss_usd <= 0:
                     per_lot_loss_usd = None
@@ -2297,8 +2316,11 @@ class TradeExecutor:
                 self.logger.warning(f"mt5.order_calc_profit indisponible: {e}.")
                 per_lot_loss_usd = None
 
+        # 1️⃣ fallback tick_value / tick_size
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
-            tick_value = _sget(symbol_info, "trade_tick_value", "tick_value", default=0.0)
+            tick_value = _sget(
+                symbol_info, "trade_tick_value", "tick_value", default=0.0
+            )
             tick_size = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
             try:
                 tick_value = float(tick_value or 0.0)
@@ -2310,10 +2332,15 @@ class TradeExecutor:
                 nb_ticks = price_diff / tick_size
                 per_lot_loss_usd = nb_ticks * tick_value
 
+        # 2️⃣ fallback pip_value heuristique
         if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
             points_per_pip = 10.0 if digits in (3, 5) else 1.0
             pip_size = point * points_per_pip
-            quote = sym_name[-3:].upper() if isinstance(sym_name, str) and len(sym_name) >= 6 else ""
+            quote = (
+                sym_name[-3:].upper()
+                if isinstance(sym_name, str) and len(sym_name) >= 6
+                else ""
+            )
 
             if quote == "USD":
                 pip_value_per_lot_usd = contract * pip_size
@@ -2324,18 +2351,28 @@ class TradeExecutor:
                 per_lot_loss_usd = (price_diff / pip_size) * pip_value_usd
             else:
                 pip_value_default = float(
-                    self.config_manager.get("risk_management_settings.default_pip_value_per_lot", 10.0)
+                    self.config_manager.get(
+                        "risk_management_settings.default_pip_value_per_lot", 10.0
+                    )
                 )
                 per_lot_loss_usd = (price_diff / pip_size) * pip_value_default
-                self.logger.warning("tick_value/tick_size insuffisants -> heuristique pip-value utilisée.")
+                self.logger.warning(
+                    f"[{sym_name}] tick_value/tick_size insuffisants -> heuristique pip-value appliquée."
+                )
 
-        # --- Ici : plus de fallback "contrat*distance" ---
-        if per_lot_loss_usd is None or per_lot_loss_usd <= 0 or not math.isfinite(per_lot_loss_usd):
+        # ❌ aucun fallback supplémentaire → trade interdit
+        if (
+            per_lot_loss_usd is None
+            or per_lot_loss_usd <= 0
+            or not math.isfinite(per_lot_loss_usd)
+        ):
             raise TradeExecutionError("Impossible de calculer la perte par lot.")
 
         # --- Plancher de perte par lot ---
         min_dlr_per_lot = float(
-            self.config_manager.get("risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0)
+            self.config_manager.get(
+                "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
+            )
         )
         if per_lot_loss_usd < min_dlr_per_lot:
             self.logger.debug(
@@ -2351,9 +2388,15 @@ class TradeExecutor:
         vol_max_sym = float(_sget(symbol_info, "volume_max", default=100.0) or 100.0)
         vol_step_sym = float(_sget(symbol_info, "volume_step", default=0.01) or 0.01)
 
-        min_lot_account = float((account_trade_settings or {}).get("min_lot", vol_min_sym) or vol_min_sym)
-        max_lot_account = float((account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym)
-        lot_step_account = float((account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym)
+        min_lot_account = float(
+            (account_trade_settings or {}).get("min_lot", vol_min_sym) or vol_min_sym
+        )
+        max_lot_account = float(
+            (account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym
+        )
+        lot_step_account = float(
+            (account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym
+        )
 
         # --- Cap stratégie ---
         de = config.get("decision_engine") or {}
@@ -2366,7 +2409,9 @@ class TradeExecutor:
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
             ff_cfg = tes.get("fat_finger_check", {}) or {}
-            safety_enabled = bool(ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False))
+            safety_enabled = bool(
+                ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False)
+            )
             max_volume_safety = tes.get("max_absolute_volume_safety", None)
             if (
                 safety_enabled
@@ -2383,14 +2428,20 @@ class TradeExecutor:
 
         # --- Fat-finger dynamique ---
         try:
-            if bool(ff_cfg.get("enabled", False)) and bool(ff_cfg.get("enable_dynamic_check", False)):
+            if bool(ff_cfg.get("enabled", False)) and bool(
+                ff_cfg.get("enable_dynamic_check", False)
+            ):
                 lookback = int(ff_cfg.get("avg_volume_lookback", 20) or 20)
                 mult = float(ff_cfg.get("max_volume_multiplier_from_avg", 5.0) or 5.0)
                 recent = []
                 for k in ("recent_executed_trades", "recent_volumes", "volume_history"):
                     seq = context.get(k)
                     if isinstance(seq, list):
-                        recent = [float(x) for x in seq[-lookback:] if isinstance(x, (int, float))]
+                        recent = [
+                            float(x)
+                            for x in seq[-lookback:]
+                            if isinstance(x, (int, float))
+                        ]
                         if recent:
                             break
                 if recent:
@@ -2425,7 +2476,9 @@ class TradeExecutor:
                     if action == "BUY"
                     else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 )
-                margin_required = mt5_mod.order_calc_margin(order_type, sym_name, volume, entry_price)
+                margin_required = mt5_mod.order_calc_margin(
+                    order_type, sym_name, volume, entry_price
+                )
                 free_margin = acct_info.get("margin_free")
                 if (
                     margin_required is not None
@@ -2438,7 +2491,9 @@ class TradeExecutor:
                     steps = math.floor(reduced / effective_step)
                     reduced = round(steps * effective_step, 8)
                     if reduced < min_lot_account:
-                        raise TradeExecutionError("Marge libre insuffisante pour le volume minimum.")
+                        raise TradeExecutionError(
+                            "Marge libre insuffisante pour le volume minimum."
+                        )
                     self.logger.warning(
                         f"Marge insuffisante: besoin ~{margin_required:.2f}, libre {free_margin:.2f}. "
                         f"Volume réduit {volume:.4f} -> {reduced:.4f}"
@@ -2449,7 +2504,11 @@ class TradeExecutor:
 
         # --- Vérification écart de risque ---
         actual_risk_dollars = volume * per_lot_loss_usd
-        tol = float(self.config_manager.get("trade_executor_settings.max_risk_deviation_multiplier", 1.05))
+        tol = float(
+            self.config_manager.get(
+                "trade_executor_settings.max_risk_deviation_multiplier", 1.05
+            )
+        )
         if actual_risk_dollars > max_dollar_risk * tol:
             self.logger.warning(
                 f"Risque réel {actual_risk_dollars:.2f}$ > max {max_dollar_risk:.2f}$ (tol {tol:.2f})."
@@ -2527,6 +2586,63 @@ class TradeExecutor:
         self._last_trade_ts_by_asset[asset] = now_ts
         self._last_any_trade_ts = now_ts
         self._cycle_new_trades += 1
+
+    def _split_multi_tp_orders(
+        self,
+        trade_decision: dict,
+        config: dict,
+        volume: float,
+        entry_price_market: float,
+        sl_price: float,
+        tp_prices: list,
+        symbol_info: Any,
+        trigger_price: Optional[float] = None,
+        order_type_str: str = "MARKET",
+    ) -> list[dict]:
+        """
+        Si la stratégie fournit plusieurs TP (ex: [tp1, tp2]),
+        on split le volume en plusieurs ordres (50/50 par défaut).
+        Chaque ordre est construit via _build_mt5_request.
+        """
+        if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
+            # un seul TP → on passe par _build_mt5_request classique
+            return [
+                self._build_mt5_request(
+                    trade_decision,
+                    config,
+                    volume,
+                    entry_price_market,
+                    sl_price,
+                    tp_prices[0] if tp_prices else 0.0,
+                    symbol_info,
+                    trigger_price,
+                    order_type_str,
+                )
+            ]
+
+        # === Split volume en parts égales ===
+        sub_vol = round(volume / len(tp_prices), 2)
+        requests = []
+
+        for tp in tp_prices:
+            if not tp or tp <= 0:
+                continue
+            req = self._build_mt5_request(
+                trade_decision,
+                config,
+                sub_vol,
+                entry_price_market,
+                sl_price,
+                tp,
+                symbol_info,
+                trigger_price,
+                order_type_str,
+            )
+            # On marque le TP spécifique dans le commentaire
+            req["comment"] = f"{req.get('comment','')}|TP@{tp:.5f}"
+            requests.append(req)
+
+        return requests
 
     def _build_mt5_request(
         self,
@@ -2633,6 +2749,26 @@ class TradeExecutor:
             tp_price = round(float(tp_price), digits)
         except Exception:
             raise TradeExecutionError("SL/TP non numériques.")
+
+        # --- Override LiquidityStrategy: utiliser prix absolus si fournis ---
+        if (
+            "entry_price" in trade_decision
+            and float(trade_decision["entry_price"] or 0) > 0
+        ):
+            entry_price_market = round(float(trade_decision["entry_price"]), digits)
+
+        if "sl_price" in trade_decision and float(trade_decision["sl_price"] or 0) > 0:
+            sl_price = round(float(trade_decision["sl_price"]), digits)
+
+        if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
+            tp_price = round(float(trade_decision["tp_price"]), digits)
+
+        # Timeout bars & mitigation (meta only, pour exécutions différées)
+        timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
+        use_mitigation = bool(trade_decision.get("use_mitigation", False))
+
+        request["_meta_timeout_bars"] = timeout_bars
+        request["_meta_use_mitigation"] = use_mitigation
 
         # --- Mapping constantes MT5 (tolérant) ---
         if mt5 is None:
@@ -2912,6 +3048,70 @@ class TradeExecutor:
             f"État interne mis à jour pour la nouvelle position #{mt5_result.deal}."
         )
 
+    def monitor_pending_orders(self) -> None:
+        """
+        Surveille les ordres LIMIT Liquidity et annule ceux qui dépassent le timeout_bars.
+        À appeler à chaque cycle du pipeline.
+        """
+
+        to_remove = []
+
+        for order_id, order_data in list(self._open_positions.items()):
+            try:
+                timeout_bars = int(order_data.get("_meta_timeout_bars", 0) or 0)
+
+                if timeout_bars > 0 and order_data.get("type") in (
+                    mt5.ORDER_TYPE_BUY_LIMIT,
+                    mt5.ORDER_TYPE_SELL_LIMIT,
+                ):
+                    opened_at = order_data.get("open_time")
+                    bars_elapsed = self._bars_since(opened_at)
+
+                    if bars_elapsed >= timeout_bars:
+                        self.logger.info(
+                            f"[LIQUIDITY] ⏱ Timeout {timeout_bars} barres atteint → annulation de l’ordre LIMIT #{order_id}."
+                        )
+                        cancel_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order_id,
+                            "symbol": order_data["symbol"],
+                        }
+                        result = self.mt5_connector.mt5.order_send(cancel_request)
+
+                        if not result or result.retcode != mt5.TRADE_RETCODE_DONE:
+                            self.logger.warning(
+                                f"[LIQUIDITY] ❌ Échec annulation ordre LIMIT #{order_id}, retcode={getattr(result,'retcode','N/A')}."
+                            )
+                        else:
+                            self.logger.info(
+                                f"[LIQUIDITY] ✅ Ordre LIMIT #{order_id} annulé."
+                            )
+                            to_remove.append(order_id)
+
+            except Exception as e:
+                self.logger.warning(f"[LIQUIDITY] Erreur monitor_pending_orders: {e}")
+
+        # Nettoyage des ordres annulés
+        for oid in to_remove:
+            self._open_positions.pop(oid, None)
+
+    def _bars_since(self, open_time_str: str) -> int:
+        """
+        Retourne le nombre de barres écoulées depuis open_time.
+        Basé sur timeframe en minutes (configurable: execution.bar_size_minutes).
+        """
+
+        try:
+            if not open_time_str:
+                return 0
+            open_time = datetime.fromisoformat(str(open_time_str))
+            now = datetime.utcnow()
+            elapsed_minutes = (now - open_time).total_seconds() / 60.0
+            bar_size_min = int(self.config_manager.get("execution.bar_size_minutes", 1))
+            return int(elapsed_minutes // bar_size_min)
+        except Exception:
+            return 0
+
     def apply_dynamic_trailing(
         self, ticket: int, trailing_cfg: dict, current_price: float
     ):
@@ -3190,7 +3390,7 @@ class TradeExecutor:
             except Exception:
                 pass
 
-            # --- Audit succès ---
+                # --- Audit succès ---
             if hasattr(self, "audit_logger"):
                 try:
                     self.audit_logger.log_trade_execution(
@@ -3224,7 +3424,18 @@ class TradeExecutor:
                 except Exception:
                     pass
 
+            # === Log standard + Liquidity ===
             self.logger.info(f"Exécution OK: {execution_summary}")
+
+            if request.get("strategy_type") == "liquidity":
+                self.logger.info(
+                    f"[LIQUIDITY TRADE] ✅ {symbol} | action={action} "
+                    f"| entry={execution_summary['price']} "
+                    f"| sl={execution_summary['sl']} "
+                    f"| tp={execution_summary['tp']} "
+                    f"| rr={request.get('meta_rr_projected', 'N/A')}"
+                )
+
             return execution_summary
 
         except TradeExecutionError:
