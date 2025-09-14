@@ -6,19 +6,30 @@ import inspect
 from pathlib import Path
 from typing import Dict, Any, Optional, Type, TYPE_CHECKING
 from core.config_loader import ConfigLoader, ConfigValidationError
-import sys # Nécessaire pour StreamHandler
+import sys  # Nécessaire pour StreamHandler
+import traceback  # Import local nécessaire pour capturer les traces d'erreur
+from datetime import (
+    datetime,
+    UTC,
+)  # Imports locaux pour les timestamps dans le log de debug
+from pathlib import Path  # Import local pour manipuler les chemins de fichiers
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
-    from core.config_manager import ConfigManager # Importation uniquement pour les hints de type
+    from core.config_manager import (
+        ConfigManager,
+    )  # Importation uniquement pour les hints de type
 
 # Importer BaseStrategy depuis la structure du projet
 try:
     from strategy.base_strategy import BaseStrategy
 except ImportError:
     # Si BaseStrategy n'est pas trouvée, c'est une erreur critique
-    logging.critical("FATAL: BaseStrategy introuvable. Vérifiez que le module 'strategy.base_strategy' existe et est accessible.")
+    logging.critical(
+        "FATAL: BaseStrategy introuvable. Vérifiez que le module 'strategy.base_strategy' existe et est accessible."
+    )
     raise ImportError("BaseStrategy introuvable. Le système ne peut pas démarrer.")
+
 
 class StrategyManager:
     """
@@ -27,7 +38,11 @@ class StrategyManager:
     Implémente un cache persistant pour les configurations et les classes de stratégies.
     """
 
-    def __init__(self, config_loader_instance: ConfigLoader, config_manager_instance: 'ConfigManager'):
+    def __init__(
+        self,
+        config_loader_instance: ConfigLoader,
+        config_manager_instance: "ConfigManager",
+    ):
         """
         Initialise le StrategyManager.
 
@@ -49,45 +64,58 @@ class StrategyManager:
             self.logger.handlers.clear()
         # Ajouter un StreamHandler pour envoyer les logs à la console.
         console_handler = logging.StreamHandler(sys.stdout)
-        formatter = logging.Formatter('%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
+        formatter = logging.Formatter(
+            "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s"
+        )
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
-        self.logger.propagate = False # Empêche la double propagation au logger racine.
+        self.logger.propagate = False  # Empêche la double propagation au logger racine.
 
-
-        self.strategy_registry: Dict[str, Dict[str, Any]] = {} 
-        self._config_knowledge_base: Dict[str, Dict[str, Any]] = {} 
+        self.strategy_registry: Dict[str, Dict[str, Any]] = {}
+        self._config_knowledge_base: Dict[str, Dict[str, Any]] = {}
 
         # self.load_all_strategies() # RETIRÉ : L'appel est prématuré et cause l'erreur de chargement.
 
-        self.logger.info("StrategyManager initialisé (les stratégies ne sont pas encore chargées).")
-        
+        self.logger.info(
+            "StrategyManager initialisé (les stratégies ne sont pas encore chargées)."
+        )
+
     def initialize_strategies(self) -> None:
         """
         Charge toutes les stratégies après que la configuration principale ait été initialisée.
         Cette méthode sert de point d'entrée pour le chargement post-initialisation.
         """
         self.load_all_strategies()
-        self.logger.info("StrategyManager a maintenant chargé toutes les stratégies disponibles.")
+        self.logger.info(
+            "StrategyManager a maintenant chargé toutes les stratégies disponibles."
+        )
 
     def load_all_strategies(self) -> None:
         """
         Charge toutes les stratégies définies dans le mapping de configuration au démarrage
         et les met en cache dans `strategy_registry`.
         """
-        self.logger.info("Chargement de toutes les stratégies définies dans le mapping...")
-        config_dir_path = Path(self.config_manager.get("paths.strategy_configs", "config/strategy/"))
+        self.logger.info(
+            "Chargement de toutes les stratégies définies dans le mapping..."
+        )
+        config_dir_path = Path(
+            self.config_manager.get("paths.strategy_configs", "config/strategy/")
+        )
         config_mapping = self.config_manager.get("strategies.config_mapping", {})
 
         if not config_dir_path.is_dir():
-            self.logger.warning(f"[load_all_strategies] Le répertoire '{config_dir_path}' n'existe pas. Aucune stratégie à charger.")
+            self.logger.warning(
+                f"[load_all_strategies] Le répertoire '{config_dir_path}' n'existe pas. Aucune stratégie à charger."
+            )
             return
 
         loaded_count = 0
         for strategy_key, config_file in config_mapping.items():
             config_path = config_dir_path / config_file
             if not config_path.is_file():
-                self.logger.warning(f"[load_all_strategies] Fichier de configuration '{config_path}' manquant pour '{strategy_key}'.")
+                self.logger.warning(
+                    f"[load_all_strategies] Fichier de configuration '{config_path}' manquant pour '{strategy_key}'."
+                )
                 continue
 
             try:
@@ -95,42 +123,61 @@ class StrategyManager:
                     str(config_path), schema_name="strategy_schema.json"
                 )
 
-                self.logger.debug(f"[load_all_strategies] Tente de charger la classe Python pour la clé '{strategy_key}' associée au fichier '{config_file}'.")
+                self.logger.debug(
+                    f"[load_all_strategies] Tente de charger la classe Python pour la clé '{strategy_key}' associée au fichier '{config_file}'."
+                )
 
                 strategy_class = self._load_strategy_class(strategy_key)
                 if strategy_class is None:
-                    self.logger.error(f"[load_all_strategies] Impossible de charger la classe pour '{strategy_key}'. Stratégie ignorée.")
+                    self.logger.error(
+                        f"[load_all_strategies] Impossible de charger la classe pour '{strategy_key}'. Stratégie ignorée."
+                    )
                     continue
 
                 strategy_name_from_config = config.get("strategy_name")
                 if not strategy_name_from_config:
-                    self.logger.error(f"[load_all_strategies] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre.")
+                    self.logger.error(
+                        f"[load_all_strategies] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre."
+                    )
                     continue
 
                 if strategy_name_from_config in self.strategy_registry:
-                    self.logger.warning(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' déjà présente dans le registre. Mise à jour forcée.")
+                    self.logger.warning(
+                        f"[load_all_strategies] Stratégie '{strategy_name_from_config}' déjà présente dans le registre. Mise à jour forcée."
+                    )
 
-                self.strategy_registry[strategy_name_from_config] = { 
-                    "config": config,
-                    "class": strategy_class, 
-                    "last_modified": config_path.stat().st_mtime,
-                }
-                self._config_knowledge_base[strategy_name_from_config] = { 
+                self.strategy_registry[strategy_name_from_config] = {
                     "config": config,
                     "class": strategy_class,
-                    "version": str(config_path.stat().st_mtime)
+                    "last_modified": config_path.stat().st_mtime,
                 }
-                self.logger.debug(f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}.")
+                self._config_knowledge_base[strategy_name_from_config] = {
+                    "config": config,
+                    "class": strategy_class,
+                    "version": str(config_path.stat().st_mtime),
+                }
+                self.logger.debug(
+                    f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}."
+                )
                 loaded_count += 1
 
             except ConfigValidationError as e:
-                self.logger.error(f"[load_all_strategies] Erreur de validation pour la stratégie '{strategy_key}' : {str(e)}")
+                self.logger.error(
+                    f"[load_all_strategies] Erreur de validation pour la stratégie '{strategy_key}' : {str(e)}"
+                )
             except FileNotFoundError:
-                self.logger.error(f"[load_all_strategies] Fichier de configuration introuvable : {config_path}")
+                self.logger.error(
+                    f"[load_all_strategies] Fichier de configuration introuvable : {config_path}"
+                )
             except Exception as e:
-                self.logger.error(f"[load_all_strategies] Erreur lors du chargement de '{strategy_key}' : {str(e)}", exc_info=True)
+                self.logger.error(
+                    f"[load_all_strategies] Erreur lors du chargement de '{strategy_key}' : {str(e)}",
+                    exc_info=True,
+                )
 
-        self.logger.info(f"[load_all_strategies] {loaded_count} stratégies chargées avec succès sur {len(config_mapping)} mappées.")
+        self.logger.info(
+            f"[load_all_strategies] {loaded_count} stratégies chargées avec succès sur {len(config_mapping)} mappées."
+        )
 
     def _load_strategy_class(self, strategy_key: str) -> Optional[Type]:
         """
@@ -142,13 +189,10 @@ class StrategyManager:
         Returns:
             Optional[Type]: La classe Python de la stratégie, ou None si introuvable.
         """
-        import traceback # Import local nécessaire pour capturer les traces d'erreur
-        from datetime import datetime, UTC # Imports locaux pour les timestamps dans le log de debug
-        from pathlib import Path # Import local pour manipuler les chemins de fichiers
-        
+
         # Chemin du fichier de log temporaire pour le diagnostic
         debug_log_file_path = Path("logs/strategy_manager_debug.log")
-        
+
         # Assurez-vous que le répertoire 'logs' existe
         debug_log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,79 +202,140 @@ class StrategyManager:
             """Écrit un message de débogage directement dans le fichier temporaire."""
             try:
                 with open(debug_log_file_path, "a", encoding="utf-8") as f:
-                    f.write(f"[{datetime.now(UTC).isoformat()}] [{strategy_key}] {message}\n")
+                    f.write(
+                        f"[{datetime.now(UTC).isoformat()}] [{strategy_key}] {message}\n"
+                    )
             except Exception as e:
                 # Fallback pour logger en console si l'écriture fichier échoue (problème de permissions, etc.)
-                self.logger.error(f"Échec de l'écriture dans le fichier de debug de stratégie : {e}. Message : {message}")
+                self.logger.error(
+                    f"Échec de l'écriture dans le fichier de debug de stratégie : {e}. Message : {message}"
+                )
 
         write_debug_log(f"Début _load_strategy_class pour clé '{strategy_key}'.")
 
         try:
             python_module_name = strategy_key.lower().replace(" ", "_")
-            module_path = Path(__file__).parent.parent / "strategy" / f"{python_module_name}.py"
-            
-            self.logger.debug(f"[_load_strategy_class] Recherche du module Python pour la clé '{strategy_key}'. Chemin attendu: '{module_path}'.")
-            write_debug_log(f"Recherche du module Python. Chemin attendu: '{module_path}'.")
+            module_path = (
+                Path(__file__).parent.parent / "strategy" / f"{python_module_name}.py"
+            )
+
+            self.logger.debug(
+                f"[_load_strategy_class] Recherche du module Python pour la clé '{strategy_key}'. Chemin attendu: '{module_path}'."
+            )
+            write_debug_log(
+                f"Recherche du module Python. Chemin attendu: '{module_path}'."
+            )
 
             if not module_path.is_file():
-                self.logger.warning(f"[_load_strategy_class] Module Python '{python_module_name}.py' introuvable à '{module_path}' pour la stratégie '{strategy_key}'.")
-                write_debug_log(f"Module Python '{python_module_name}.py' introuvable à '{module_path}'.")
+                self.logger.warning(
+                    f"[_load_strategy_class] Module Python '{python_module_name}.py' introuvable à '{module_path}' pour la stratégie '{strategy_key}'."
+                )
+                write_debug_log(
+                    f"Module Python '{python_module_name}.py' introuvable à '{module_path}'."
+                )
                 return None
 
             module_name = f"strategy.{python_module_name}"
             spec = importlib.util.find_spec(module_name)
-            
+
             if spec is None or spec.loader is None:
-                self.logger.error(f"[_load_strategy_class] Spécification ou chargeur de module introuvable pour '{module_name}'. Impossible d'importer la stratégie '{strategy_key}'.")
-                write_debug_log(f"Spécification ou chargeur de module introuvable pour '{module_name}'.")
+                self.logger.error(
+                    f"[_load_strategy_class] Spécification ou chargeur de module introuvable pour '{module_name}'. Impossible d'importer la stratégie '{strategy_key}'."
+                )
+                write_debug_log(
+                    f"Spécification ou chargeur de module introuvable pour '{module_name}'."
+                )
                 return None
 
             module = importlib.util.module_from_spec(spec)
-            
+
             try:
                 spec.loader.exec_module(module)
-                self.logger.debug(f"[_load_strategy_class] Module '{module_name}' exécuté avec succès.")
+                self.logger.debug(
+                    f"[_load_strategy_class] Module '{module_name}' exécuté avec succès."
+                )
                 write_debug_log(f"Module '{module_name}' exécuté avec succès.")
             except Exception as module_exec_e:
                 error_trace = traceback.format_exc()
-                self.logger.error(f"[_load_strategy_class] Erreur lors de l'exécution du module '{module_name}' pour la stratégie '{strategy_key}': {module_exec_e}", exc_info=True)
-                write_debug_log(f"ERREUR lors de l'exécution du module '{module_name}': {module_exec_e}. Trace: {error_trace}")
+                self.logger.error(
+                    f"[_load_strategy_class] Erreur lors de l'exécution du module '{module_name}' pour la stratégie '{strategy_key}': {module_exec_e}",
+                    exc_info=True,
+                )
+                write_debug_log(
+                    f"ERREUR lors de l'exécution du module '{module_name}': {module_exec_e}. Trace: {error_trace}"
+                )
                 if self.config_manager:
-                    self.config_manager.send_alert(f"CRITIQUE: Erreur chargement module stratégie '{strategy_key}': {module_exec_e}", "telegram_critical")
+                    self.config_manager.send_alert(
+                        f"CRITIQUE: Erreur chargement module stratégie '{strategy_key}': {module_exec_e}",
+                        "telegram_critical",
+                    )
                 return None
 
-            strategy_class_name = "".join([s.capitalize() for s in python_module_name.split("_")]) + "Strategy"
+            strategy_class_name = (
+                "".join([s.capitalize() for s in python_module_name.split("_")])
+                + "Strategy"
+            )
             strategy_class = getattr(module, strategy_class_name, None)
 
-            self.logger.debug(f"[_load_strategy_class] Nom de classe attendu pour '{strategy_key}': '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'")
-            write_debug_log(f"Nom de classe attendu: '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'")
+            self.logger.debug(
+                f"[_load_strategy_class] Nom de classe attendu pour '{strategy_key}': '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'"
+            )
+            write_debug_log(
+                f"Nom de classe attendu: '{strategy_class_name}'. Classe trouvée via getattr: '{strategy_class}'"
+            )
 
-            if strategy_class and issubclass(strategy_class, BaseStrategy) and strategy_class is not BaseStrategy:
-                self.logger.debug(f"[_load_strategy_class] Classe '{strategy_class_name}' chargée et validée avec succès pour '{strategy_key}'.")
-                write_debug_log(f"Classe '{strategy_class_name}' chargée et validée avec succès.")
+            if (
+                strategy_class
+                and issubclass(strategy_class, BaseStrategy)
+                and strategy_class is not BaseStrategy
+            ):
+                self.logger.debug(
+                    f"[_load_strategy_class] Classe '{strategy_class_name}' chargée et validée avec succès pour '{strategy_key}'."
+                )
+                write_debug_log(
+                    f"Classe '{strategy_class_name}' chargée et validée avec succès."
+                )
                 return strategy_class
             else:
                 if strategy_class is None:
-                    self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' introuvable dans le module '{module_name}' pour la stratégie '{strategy_key}'. Vérifiez le nom de la classe dans le fichier Python ou si elle est bien exportée dans __init__.py du package 'strategy'.")
-                    write_debug_log(f"Classe '{strategy_class_name}' introuvable dans le module '{module_name}'.")
+                    self.logger.error(
+                        f"[_load_strategy_class] Classe '{strategy_class_name}' introuvable dans le module '{module_name}' pour la stratégie '{strategy_key}'. Vérifiez le nom de la classe dans le fichier Python ou si elle est bien exportée dans __init__.py du package 'strategy'."
+                    )
+                    write_debug_log(
+                        f"Classe '{strategy_class_name}' introuvable dans le module '{module_name}'."
+                    )
                 elif not issubclass(strategy_class, BaseStrategy):
-                    self.logger.error(f"[_load_strategy_class] Classe '{strategy_class_name}' trouvée pour '{strategy_key}' mais elle n'est pas une sous-classe de BaseStrategy. Impossible de l'utiliser.")
-                    write_debug_log(f"Classe '{strategy_class_name}' trouvée mais n'est PAS une sous-classe de BaseStrategy.")
+                    self.logger.error(
+                        f"[_load_strategy_class] Classe '{strategy_class_name}' trouvée pour '{strategy_key}' mais elle n'est pas une sous-classe de BaseStrategy. Impossible de l'utiliser."
+                    )
+                    write_debug_log(
+                        f"Classe '{strategy_class_name}' trouvée mais n'est PAS une sous-classe de BaseStrategy."
+                    )
                 elif strategy_class is BaseStrategy:
-                    self.logger.error(f"[_load_strategy_class] La classe trouvée pour '{strategy_key}' est BaseStrategy elle-même. Ceci n'est pas une stratégie implémentée.")
-                    write_debug_log(f"La classe trouvée est BaseStrategy elle-même (non implémentée).")
+                    self.logger.error(
+                        f"[_load_strategy_class] La classe trouvée pour '{strategy_key}' est BaseStrategy elle-même. Ceci n'est pas une stratégie implémentée."
+                    )
+                    write_debug_log(
+                        f"La classe trouvée est BaseStrategy elle-même (non implémentée)."
+                    )
                 return None
         except ImportError as e:
             error_trace = traceback.format_exc()
-            self.logger.error(f"[_load_strategy_class] Erreur d'importation générale pour la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"[_load_strategy_class] Erreur d'importation générale pour la stratégie '{strategy_key}' : {str(e)}",
+                exc_info=True,
+            )
             write_debug_log(f"ERREUR ImportError: {e}. Trace: {error_trace}")
             return None
         except Exception as e:
             error_trace = traceback.format_exc()
-            self.logger.error(f"[_load_strategy_class] Erreur inattendue lors du chargement de la stratégie '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"[_load_strategy_class] Erreur inattendue lors du chargement de la stratégie '{strategy_key}' : {str(e)}",
+                exc_info=True,
+            )
             write_debug_log(f"ERREUR INATTENDUE: {e}. Trace: {error_trace}")
             return None
-        
+
     def load_strategy(self, strategy_key: str) -> bool:
         """
         Charge une stratégie spécifique dans la configuration dynamique.
@@ -248,7 +353,9 @@ class StrategyManager:
             self.logger.error(f"Aucun fichier mappé pour '{strategy_key}'.")
             return False
 
-        config_dir_path = self.config_manager.get("paths.strategy_configs", "config/strategy/")
+        config_dir_path = self.config_manager.get(
+            "paths.strategy_configs", "config/strategy/"
+        )
         config_path = Path(config_dir_path) / config_file
         if not config_path.is_file():
             self.logger.error(f"Fichier '{config_path}' introuvable.")
@@ -256,38 +363,54 @@ class StrategyManager:
 
         if strategy_key in self.strategy_registry:
             try:
-                current_strategy_config = self.config_loader.load_dynamic_config(str(config_path), schema_name="strategy_schema.json")
+                current_strategy_config = self.config_loader.load_dynamic_config(
+                    str(config_path), schema_name="strategy_schema.json"
+                )
                 current_strategy_name = current_strategy_config.get("strategy_name")
 
-                if current_strategy_name in self.strategy_registry and \
-                   config_path.stat().st_mtime <= self.strategy_registry[current_strategy_name]["last_modified"]:
-                    self.logger.debug(f"Stratégie '{strategy_key}' (nom: '{current_strategy_name}') utilisée depuis le cache.")
+                if (
+                    current_strategy_name in self.strategy_registry
+                    and config_path.stat().st_mtime
+                    <= self.strategy_registry[current_strategy_name]["last_modified"]
+                ):
+                    self.logger.debug(
+                        f"Stratégie '{strategy_key}' (nom: '{current_strategy_name}') utilisée depuis le cache."
+                    )
                     return True
             except FileNotFoundError:
-                self.logger.warning(f"Fichier '{config_path}' introuvable. Rechargement forcé.")
-                pass 
+                self.logger.warning(
+                    f"Fichier '{config_path}' introuvable. Rechargement forcé."
+                )
+                pass
             except Exception as e:
-                self.logger.error(f"Erreur de vérification pour '{strategy_key}' : {str(e)}", exc_info=True)
-                pass 
+                self.logger.error(
+                    f"Erreur de vérification pour '{strategy_key}' : {str(e)}",
+                    exc_info=True,
+                )
+                pass
 
         try:
-            config = self.config_loader.load_dynamic_config(str(config_path), schema_name="strategy_schema.json")
+            config = self.config_loader.load_dynamic_config(
+                str(config_path), schema_name="strategy_schema.json"
+            )
             strategy_class = self._load_strategy_class(strategy_key)
 
             strategy_name_from_config = config.get("strategy_name")
             if strategy_name_from_config:
-                self.strategy_registry[strategy_name_from_config] = { 
+                self.strategy_registry[strategy_name_from_config] = {
                     "config": config,
                     "class": strategy_class,
                     "last_modified": config_path.stat().st_mtime,
                 }
-                self._config_knowledge_base[strategy_name_from_config] = { 
+                self._config_knowledge_base[strategy_name_from_config] = {
                     "config": config,
                     "class": strategy_class,
-                    "version": str(config_path.stat().st_mtime)
+                    "version": str(config_path.stat().st_mtime),
                 }
             else:
-                self.logger.error(f"[load_strategy] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre.")
+                self.logger.error(
+                    f"[load_strategy] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre."
+                )
                 return False
 
             self.config_manager.update_dynamic_config(config, source="strategy_load")
@@ -302,14 +425,16 @@ class StrategyManager:
                         "class_loaded": strategy_class is not None,
                     },
                     source="system_load_strategy",
-                    dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy()
+                    dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy(),
                 )
             return True
         except ConfigValidationError as e:
             self.logger.error(f"Erreur de validation pour '{strategy_key}' : {str(e)}")
             return False
         except Exception as e:
-            self.logger.error(f"Échec du chargement de '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"Échec du chargement de '{strategy_key}' : {str(e)}", exc_info=True
+            )
             return False
 
     def select_strategy(self, context: Dict[str, Any]) -> str:
@@ -331,20 +456,45 @@ class StrategyManager:
 
         # Si phase de stabilisation Katana → forcer scalping si dispo
         if sel_mode == "scalping_only":
-            if "scalping" in self.strategy_registry and (self.strategy_registry["scalping"]["config"].get("enabled", True)):
-                self.logger.info("Mode 'scalping_only' actif → stratégie 'scalping' sélectionnée.")
+            if "scalping" in self.strategy_registry and (
+                self.strategy_registry["scalping"]["config"].get("enabled", True)
+            ):
+                self.logger.info(
+                    "Mode 'scalping_only' actif → stratégie 'scalping' sélectionnée."
+                )
                 return "scalping"
             # fallback si désactivée
-            self.logger.warning("Mode 'scalping_only' actif mais 'scalping' indisponible. Bascule en 'auto'.")
+            self.logger.warning(
+                "Mode 'scalping_only' actif mais 'scalping' indisponible. Bascule en 'auto'."
+            )
 
         market_regime = context.get("current_market_regime", "unknown")
         volatility = context.get("market_volatility_percentage", 0.0)
         signals = context.get("trading_signals", {})
-        strategy_scoring_rules = self.config_manager.get("scoring_rules.strategy_selection", {})
+        strategy_scoring_rules = self.config_manager.get(
+            "scoring_rules.strategy_selection", {}
+        )
+
+        # ----- 1) Vérification mapping market_regimes (prioritaire) -----
+        try:
+            market_regimes = self.config_manager.get("market_regimes", {})
+            if market_regimes and market_regime != "unknown":
+                for strat, regimes in market_regimes.items():
+                    if market_regime in regimes:
+                        self.logger.info(
+                            f"[STRATEGY_MANAGER] Régime '{market_regime}' → stratégie '{strat}' (mapping market_regimes)."
+                        )
+                        return strat
+        except Exception as e:
+            self.logger.warning(
+                f"[STRATEGY_MANAGER] Mapping market_regimes non appliqué: {e}"
+            )
 
         # Surpondérations contextuelles (blended/auto)
         katana_ready_assets = set(context.get("katana_ready_assets", []) or [])
-        strategy_readiness = (context.get("strategy_readiness") or {})  # ex: {"scalping": True, "liquidity": False}
+        strategy_readiness = (
+            context.get("strategy_readiness") or {}
+        )  # ex: {"scalping": True, "liquidity": False}
 
         strategy_scores: Dict[str, float] = {}
         for strategy_name_in_reg, strategy_info in self.strategy_registry.items():
@@ -355,33 +505,55 @@ class StrategyManager:
             tags = config.get("strategy_tags", [])
             score = 0.0
 
-            # 1) Regime fit
-            if market_regime != "unknown" and market_regime in strategy_scoring_rules.get("regime_weights", {}):
+            # 1) Regime fit (fallback scoring)
+            if (
+                market_regime != "unknown"
+                and market_regime in strategy_scoring_rules.get("regime_weights", {})
+            ):
                 regime_tags = market_regime.split("_")
                 for tag in tags:
                     if tag in regime_tags:
                         score += strategy_scoring_rules["regime_weights"].get(tag, 0.0)
 
             # 2) Volatility fit
-            if "high_volatility" in tags and volatility > strategy_scoring_rules.get("volatility_thresholds.high", 0.8):
-                score += strategy_scoring_rules.get("volatility_weights.high_volatility", 0.3)
-            if "low_volatility" in tags and volatility < strategy_scoring_rules.get("volatility_thresholds.low", 0.3):
-                score += strategy_scoring_rules.get("volatility_weights.low_volatility", 0.3)
+            if "high_volatility" in tags and volatility > strategy_scoring_rules.get(
+                "volatility_thresholds.high", 0.8
+            ):
+                score += strategy_scoring_rules.get(
+                    "volatility_weights.high_volatility", 0.3
+                )
+            if "low_volatility" in tags and volatility < strategy_scoring_rules.get(
+                "volatility_thresholds.low", 0.3
+            ):
+                score += strategy_scoring_rules.get(
+                    "volatility_weights.low_volatility", 0.3
+                )
 
             # 3) Signal confidence (moyenne cross-assets)
             if signals:
                 try:
-                    total_confidence = sum(float(asset_signal.get("confidence_score", 0.0)) for asset_signal in signals.values())
+                    total_confidence = sum(
+                        float(asset_signal.get("confidence_score", 0.0))
+                        for asset_signal in signals.values()
+                    )
                     avg_confidence = total_confidence / max(len(signals), 1)
                 except Exception:
                     avg_confidence = 0.0
-                score += avg_confidence * strategy_scoring_rules.get("signal_confidence_weight", 0.2)
+                score += avg_confidence * strategy_scoring_rules.get(
+                    "signal_confidence_weight", 0.2
+                )
 
             # 4) AI advisor (si activé)
             if self.config_manager.get("ai.enabled", False):
                 ai_scores = context.get("ai_recommendation_score", {}) or {}
-                ai_weight = float(self.config_manager.get("ai.strategy_selection_weight", 0.1) or 0.1)
-                tradeables = set(self.config_manager.get_current_dynamic_config().get("tradeable_assets", []))
+                ai_weight = float(
+                    self.config_manager.get("ai.strategy_selection_weight", 0.1) or 0.1
+                )
+                tradeables = set(
+                    self.config_manager.get_current_dynamic_config().get(
+                        "tradeable_assets", []
+                    )
+                )
                 relevant = [float(v) for k, v in ai_scores.items() if k in tradeables]
                 if relevant:
                     score += max(relevant) * ai_weight
@@ -389,50 +561,85 @@ class StrategyManager:
             # 5) Performance historique
             historical_performance = strategy_info.get("performance", {}) or {}
             sharpe_ratio = float(historical_performance.get("sharpe_ratio", 0.0) or 0.0)
-            if sharpe_ratio > strategy_scoring_rules.get("performance_thresholds.good_sharpe", 1.0):
-                score += strategy_scoring_rules.get("performance_weights.good_sharpe_boost", 0.1)
-            elif sharpe_ratio < strategy_scoring_rules.get("performance_thresholds.poor_sharpe", 0.5):
-                score -= strategy_scoring_rules.get("performance_weights.poor_sharpe_penalty", 0.1)
+            if sharpe_ratio > strategy_scoring_rules.get(
+                "performance_thresholds.good_sharpe", 1.0
+            ):
+                score += strategy_scoring_rules.get(
+                    "performance_weights.good_sharpe_boost", 0.1
+                )
+            elif sharpe_ratio < strategy_scoring_rules.get(
+                "performance_thresholds.poor_sharpe", 0.5
+            ):
+                score -= strategy_scoring_rules.get(
+                    "performance_weights.poor_sharpe_penalty", 0.1
+                )
 
             # 6) Blended/Readiness boosts
             if sel_mode == "blended":
-                # boost si la stratégie est marquée "ready" dans le contexte
                 if strategy_readiness.get(strategy_name_in_reg) is True:
                     score += 0.25
-                # boost léger pour scalping si au moins un asset est "katana_ready"
                 if strategy_name_in_reg == "scalping" and katana_ready_assets:
                     score += 0.20
 
-            # 7) Priorité Katana douce en mode auto (si actifs prêts)
-            if sel_mode == "auto" and strategy_name_in_reg == "scalping" and katana_ready_assets:
+            # 7) Priorité Katana douce en mode auto
+            if (
+                sel_mode == "auto"
+                and strategy_name_in_reg == "scalping"
+                and katana_ready_assets
+            ):
                 score += 0.10
 
             strategy_scores[strategy_name_in_reg] = score
 
         if not strategy_scores:
             self.logger.warning("Aucune stratégie disponible.")
-            default_strategy_key_from_config = self.config_manager.get("strategies.default_strategy", "scalping")
-            default_strategy_config_file = self.config_manager.get("strategies.config_mapping", {}).get(default_strategy_key_from_config)
+            default_strategy_key_from_config = self.config_manager.get(
+                "strategies.default_strategy", "scalping"
+            )
+            default_strategy_config_file = self.config_manager.get(
+                "strategies.config_mapping", {}
+            ).get(default_strategy_key_from_config)
             if default_strategy_config_file:
                 try:
-                    default_config_path = Path(self.config_manager.get("paths.strategy_configs", "config/strategy/")) / default_strategy_config_file
-                    default_strategy_content = self.config_loader.load_dynamic_config(str(default_config_path))
-                    default_strategy_name = default_strategy_content.get("strategy_name", default_strategy_key_from_config)
-                    self.logger.info(f"Retour de la stratégie par défaut '{default_strategy_name}'.")
+                    default_config_path = (
+                        Path(
+                            self.config_manager.get(
+                                "paths.strategy_configs", "config/strategy/"
+                            )
+                        )
+                        / default_strategy_config_file
+                    )
+                    default_strategy_content = self.config_loader.load_dynamic_config(
+                        str(default_config_path)
+                    )
+                    default_strategy_name = default_strategy_content.get(
+                        "strategy_name", default_strategy_key_from_config
+                    )
+                    self.logger.info(
+                        f"Retour de la stratégie par défaut '{default_strategy_name}'."
+                    )
                     return default_strategy_name
                 except Exception as e:
-                    self.logger.error(f"Impossible de charger la config de la stratégie par défaut '{default_strategy_key_from_config}': {e}", exc_info=True)
+                    self.logger.error(
+                        f"Impossible de charger la config de la stratégie par défaut '{default_strategy_key_from_config}': {e}",
+                        exc_info=True,
+                    )
                     return ""
             else:
-                self.logger.error("Aucune stratégie par défaut définie ou mappée. Impossible de sélectionner une stratégie.")
+                self.logger.error(
+                    "Aucune stratégie par défaut définie ou mappée. Impossible de sélectionner une stratégie."
+                )
                 return ""
 
         best_strategy = max(strategy_scores, key=strategy_scores.get)
-        self.logger.info(f"Stratégie sélectionnée : '{best_strategy}' (score: {strategy_scores[best_strategy]:.2f}).")
+        self.logger.info(
+            f"Stratégie sélectionnée : '{best_strategy}' (score: {strategy_scores[best_strategy]:.2f})."
+        )
         return best_strategy
 
-
-    def redefine_strategy(self, strategy_key: str, config_path: str, python_module: Optional[str] = None) -> bool:
+    def redefine_strategy(
+        self, strategy_key: str, config_path: str, python_module: Optional[str] = None
+    ) -> bool:
         """
         Redéfinit une stratégie dynamiquement avec un nouveau fichier de configuration.
 
@@ -451,30 +658,42 @@ class StrategyManager:
             return False
 
         try:
-            config = self.config_loader.load_dynamic_config(str(config_path_obj), schema_name="strategy_schema.json")
-            strategy_class = self._load_strategy_class(strategy_key) if python_module is None else self._load_custom_python_module(python_module)
+            config = self.config_loader.load_dynamic_config(
+                str(config_path_obj), schema_name="strategy_schema.json"
+            )
+            strategy_class = (
+                self._load_strategy_class(strategy_key)
+                if python_module is None
+                else self._load_custom_python_module(python_module)
+            )
             if strategy_class is None:
                 self.logger.warning(f"Classe Python non chargée pour '{strategy_key}'.")
 
             strategy_name_from_config = config.get("strategy_name")
             if strategy_name_from_config:
-                self.strategy_registry[strategy_name_from_config] = { 
+                self.strategy_registry[strategy_name_from_config] = {
                     "config": config,
                     "class": strategy_class,
                     "last_modified": config_path_obj.stat().st_mtime,
                 }
-                self._config_knowledge_base[strategy_name_from_config] = { 
+                self._config_knowledge_base[strategy_name_from_config] = {
                     "config": config,
                     "class": strategy_class,
-                    "version": str(config_path_obj.stat().st_mtime)
+                    "version": str(config_path_obj.stat().st_mtime),
                 }
             else:
-                self.logger.error(f"[redefine_strategy] La configuration '{config_path_obj.name}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. La redéfinition échoue.")
+                self.logger.error(
+                    f"[redefine_strategy] La configuration '{config_path_obj.name}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. La redéfinition échoue."
+                )
                 return False
 
             self.config_manager.update_dynamic_config(
-                {"strategies": {"config_mapping": {strategy_key: config_path_obj.name}}},
-                source="strategy_redefinition"
+                {
+                    "strategies": {
+                        "config_mapping": {strategy_key: config_path_obj.name}
+                    }
+                },
+                source="strategy_redefinition",
             )
             self.logger.info(f"Stratégie '{strategy_key}' redéfinie avec succès.")
 
@@ -488,14 +707,17 @@ class StrategyManager:
                         "class_loaded": strategy_class is not None,
                     },
                     source="manual_redefinition",
-                    dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy()
+                    dynamic_config_snapshot=self.config_manager.get_current_dynamic_config().copy(),
                 )
             return True
         except ConfigValidationError as e:
             self.logger.error(f"Erreur de validation pour '{strategy_key}' : {str(e)}")
             return False
         except Exception as e:
-            self.logger.error(f"Échec de la redéfinition de '{strategy_key}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"Échec de la redéfinition de '{strategy_key}' : {str(e)}",
+                exc_info=True,
+            )
             return False
 
     def _load_custom_python_module(self, module_path: str) -> Optional[Type]:
@@ -530,26 +752,43 @@ class StrategyManager:
             if class_name:
                 strategy_class = getattr(module, class_name, None)
             else:
-                deduced_class_name = "".join([s.capitalize() for s in module_name.split(".")[-1].split("_")]) + "Strategy"
+                deduced_class_name = (
+                    "".join(
+                        [s.capitalize() for s in module_name.split(".")[-1].split("_")]
+                    )
+                    + "Strategy"
+                )
                 strategy_class = getattr(module, deduced_class_name, None)
                 if strategy_class is None:
                     for name, obj in inspect.getmembers(module, inspect.isclass):
                         if issubclass(obj, BaseStrategy) and obj is not BaseStrategy:
                             strategy_class = obj
-                            self.logger.info(f"Classe '{name}' trouvée dans '{module_name}'.")
+                            self.logger.info(
+                                f"Classe '{name}' trouvée dans '{module_name}'."
+                            )
                             break
 
-            if strategy_class and issubclass(strategy_class, BaseStrategy) and strategy_class is not BaseStrategy:
-                self.logger.debug(f"Classe '{strategy_class.__name__}' chargée depuis '{module_name}'.")
+            if (
+                strategy_class
+                and issubclass(strategy_class, BaseStrategy)
+                and strategy_class is not BaseStrategy
+            ):
+                self.logger.debug(
+                    f"Classe '{strategy_class.__name__}' chargée depuis '{module_name}'."
+                )
                 return strategy_class
             else:
                 self.logger.error(f"Classe invalide dans '{module_path}'.")
                 return None
         except ImportError as e:
-            self.logger.error(f"Erreur d'importation pour '{module_path}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"Erreur d'importation pour '{module_path}' : {str(e)}", exc_info=True
+            )
             return None
         except Exception as e:
-            self.logger.error(f"Erreur inattendue pour '{module_path}' : {str(e)}", exc_info=True)
+            self.logger.error(
+                f"Erreur inattendue pour '{module_path}' : {str(e)}", exc_info=True
+            )
             return None
 
     def get_magic_to_strategy_map(self) -> Dict[int, Dict[str, Any]]:
@@ -565,7 +804,7 @@ class StrategyManager:
             if magic_number is not None:
                 magic_map[magic_number] = {
                     "class": strategy_info["class"],
-                    "config": strategy_info["config"]
+                    "config": strategy_info["config"],
                 }
         return magic_map
 
@@ -598,7 +837,9 @@ class StrategyManager:
         for strategy_key, strategy_info in self.strategy_registry.items():
             if strategy_info["config"].get("strategy_name", "") == strategy_name:
                 return strategy_info["config"]
-        self.logger.warning(f"Configuration introuvable pour la stratégie '{strategy_name}'.")
+        self.logger.warning(
+            f"Configuration introuvable pour la stratégie '{strategy_name}'."
+        )
         return None
 
     def get_strategy_by_key(self, strategy_key: str) -> Optional[Dict[str, Any]]:

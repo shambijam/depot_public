@@ -130,13 +130,21 @@
       "scalping": "config_trade_scalping.json"
     },
     "selection_policy": {
-      "winner_takes_all": false,
+      "winner_takes_all": true,
       "blend_in_range": {
         "enabled": true,
-        "market_regimes": [
-          "range_low_volatility",
-          "range_retail"
-        ],
+        "market_regimes": {
+          "scalping": [
+            "range",
+            "low_vol",
+            "neutral"
+          ],
+          "liquidity": [
+            "impulse",
+            "sweep",
+            "breakout"
+          ]
+        },
         "primary": "scalping",
         "secondary": "liquidity",
         "weight_primary": 0.7,
