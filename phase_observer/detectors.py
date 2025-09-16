@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 from .features import (
     _get_swing_points,
-    _get_adaptive_swing_points,
     _get_trend,
 )
 
