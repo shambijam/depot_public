@@ -24,10 +24,7 @@ class FeaturesExtractor:
 
     def get_swing_points(self, df: pd.DataFrame, order: Optional[int] = None):
         return _get_swing_points(self, df, order)
-
-    def get_adaptive_swing_points(self, df: pd.DataFrame):
-        return _get_adaptive_swing_points(self, df)
-
+   
     def calculate_volatility_regime(self, df: pd.DataFrame) -> str:
         return _calculate_volatility_regime(self, df)
 
@@ -129,8 +126,9 @@ def _get_swing_points(
     self, df: pd.DataFrame, order: Optional[int] = None
 ) -> Tuple[pd.Series, pd.Series]:
     """
-    Rétrocompatibilité : avec 'order' → fenêtre fixe, sinon délègue à _get_adaptive_swing_points.
-    Retourne deux Series indexées (swing_highs, swing_lows).
+    Swing Points simplifiés pour Burst Scalping.
+    - Avec 'order' → calcule les swings fixes.
+    - Sans 'order' → retourne vide (on ne délègue plus à l'adaptatif).
     """
     if df is None or df.empty:
         return pd.Series([], dtype=float), pd.Series([], dtype=float)
@@ -151,148 +149,94 @@ def _get_swing_points(
         swing_lows = df.loc[lows_condition, "low"]
         return swing_highs, swing_lows
 
-    # Par défaut : version adaptative
-    return _get_adaptive_swing_points(self, df)
+    # Si aucun paramètre 'order' n'est fourni → pas de calcul swing en mode Burst
+    return pd.Series([], dtype=float), pd.Series([], dtype=float)
 
 
-def _get_adaptive_swing_points(self, df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-    """
-    🎯 Adaptive Swing Points – s'adapte au régime de volatilité
-    - Détection automatique du régime de volatilité (Garman–Klass par défaut)
-    - Paramètres adaptatifs selon le régime
-    - Filtrage par distance minimale (évite le bruit)
-    """
-    self.logger.debug("Calcul des Swing Points adaptatifs...")
-
-    if df is None or df.empty:
-        return pd.Series([], dtype=float), pd.Series([], dtype=float)
-
-    swing_config = {}
-    try:
-        swing_config = self.config_manager.get("phase_detection_defaults.adaptive_swing_settings", {}) or {}
-    except Exception:
-        swing_config = {}
-
-    volatility_regimes = swing_config.get("volatility_regimes", {}) or {}
-    vol_config = swing_config.get("volatility_calculation", {}) or {}
-
-    # === 1) CALCUL RÉGIME DE VOLATILITÉ ===
-    vol_method = str(vol_config.get("method", "garman_klass")).lower()
-    vol_period = int(vol_config.get("period", 20))
-    high_threshold = float(vol_config.get("high_threshold", 75))
-    low_threshold = float(vol_config.get("low_threshold", 25))
-
-    if vol_method == "garman_klass":
-        # Garman–Klass (plus précis que close-to-close)
-        try:
-            ln_high_low = np.log((df["high"] / df["low"]).clip(lower=1e-12))
-            ln_close_open = np.log((df["close"] / df["open"]).clip(lower=1e-12))
-            gk_vol = 0.5 * ln_high_low**2 - (2 * np.log(2) - 1) * ln_close_open**2
-            volatility_series = np.sqrt(gk_vol.rolling(window=vol_period).mean())
-        except Exception:
-            returns = df["close"].pct_change()
-            volatility_series = returns.rolling(window=vol_period).std()
-    else:
-        returns = df["close"].pct_change()
-        volatility_series = returns.rolling(window=vol_period).std()
-
-    # Classification par percentiles
-    if len(volatility_series.dropna()) < vol_period:
-        self.logger.warning("Données insuffisantes pour la vol adaptative. Mode 'normal_vol'.")
-        current_regime = "normal_vol"
-    else:
-        current_vol = float(volatility_series.iloc[-1])
-        vol_percentile = float((volatility_series <= current_vol).mean() * 100)
-        if vol_percentile >= high_threshold:
-            current_regime = "high_vol"
-        elif vol_percentile <= low_threshold:
-            current_regime = "low_vol"
-        else:
-            current_regime = "normal_vol"
-
-    self.logger.debug(f"Régime de volatilité détecté: {current_regime}")
-
-    # === 2) PARAMÈTRES ADAPTATIFS ===
-    regime_params = volatility_regimes.get(current_regime, {}) or {}
-    swing_order = int(regime_params.get("swing_order", 3))
-    min_swing_distance = float(regime_params.get("min_swing_distance", 0.0005))
-
-    # === 3) DÉTECTION SWING POINTS ===
-    window_size = 2 * swing_order + 1
-    if len(df) < window_size:
-        self.logger.warning(f"DataFrame trop petit ({len(df)}) pour fenêtre swing {window_size}")
-        return pd.Series([], dtype=float), pd.Series([], dtype=float)
-
-    highs_condition = (
-        df["high"] == df["high"].rolling(window=window_size, center=True, min_periods=window_size).max()
-    )
-    lows_condition = (
-        df["low"] == df["low"].rolling(window=window_size, center=True, min_periods=window_size).min()
-    )
-
-    swing_highs = df.loc[highs_condition, "high"]
-    swing_lows = df.loc[lows_condition, "low"]
-
-    # === 4) FILTRAGE PAR DISTANCE MINIMALE (évite le bruit) ===
-    def _filter_by_distance(series: pd.Series, min_dist: float, kind: str) -> pd.Series:
-        if series.empty:
-            return series
-        kept_idx = []
-        last_price = None
-        for idx, price in series.items():
-            if last_price is None or abs(float(price) - float(last_price)) >= min_dist:
-                kept_idx.append(idx)
-                last_price = float(price)
-        filtered = series.loc[kept_idx]
-        if len(filtered) != len(series):
-            self.logger.debug(f"Swing {kind}: {len(series) - len(filtered)} points filtrés (< min_dist).")
-        return filtered
-
-    swing_highs = _filter_by_distance(swing_highs, min_swing_distance, "high")
-    swing_lows = _filter_by_distance(swing_lows, min_swing_distance, "low")
-
-    return swing_highs, swing_lows
 
 
 def _calculate_volatility_regime(self, df: pd.DataFrame) -> str:
     """
-    Calcule le régime de volatilité actuel (low/normal/high) pour usage dans d'autres fonctions.
-    Méthode Garman–Klass par défaut, fallback sur std des returns.
+    ⚡ Version avancée pour Burst Scalping & Liquidity
+    Calcule le régime de volatilité actuel (low/normal/high) pour adapter la stratégie :
+    - Utilise ATR + retour log-normalisé (robuste aux outliers)
+    - Combine un score relatif (percentiles) et absolu (seuils dynamiques)
+    - Peut être enrichi par config (phase_detection_defaults.volatility_regime)
     """
-    if df is None or df.empty:
+    if df is None or df.empty or len(df) < 20:
         return "normal_vol"
 
     try:
-        swing_config = self.config_manager.get("phase_detection_defaults.adaptive_swing_settings", {}) or {}
-    except Exception:
-        swing_config = {}
+        # --- 1) Config flexible ------------------------------------------------
+        cfg = {}
+        try:
+            cfg = self.config_manager.get("phase_detection_defaults.volatility_regime", {}) or {}
+        except Exception:
+            pass
 
-    vol_config = swing_config.get("volatility_calculation", {}) or {}
-    vol_period = int(vol_config.get("period", 20))
-    high_threshold = float(vol_config.get("high_threshold", 75))
-    low_threshold = float(vol_config.get("low_threshold", 25))
+        atr_period   = int(cfg.get("atr_period", 14))
+        lookback     = int(cfg.get("lookback", 100))
+        high_pct     = float(cfg.get("high_percentile", 75))   # top 25%
+        low_pct      = float(cfg.get("low_percentile", 25))    # bottom 25%
+        min_samples  = max(atr_period * 2, lookback // 2)
 
-    try:
-        ln_high_low = np.log((df["high"] / df["low"]).clip(lower=1e-12))
-        ln_close_open = np.log((df["close"] / df["open"]).clip(lower=1e-12))
-        gk_vol = 0.5 * ln_high_low**2 - (2 * np.log(2) - 1) * ln_close_open**2
-        volatility_series = np.sqrt(gk_vol.rolling(window=vol_period).mean())
-    except Exception:
-        returns = df["close"].pct_change()
-        volatility_series = returns.rolling(window=vol_period).std()
+        if len(df) < min_samples:
+            self.logger.warning("Pas assez de données pour calcul volatilité → normal_vol")
+            return "normal_vol"
 
-    if len(volatility_series.dropna()) < vol_period:
+        # --- 2) ATR (Average True Range) --------------------------------------
+        high, low, close = df["high"], df["low"], df["close"]
+        prev_close = close.shift(1)
+
+        tr_components = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1)
+
+        true_range = tr_components.max(axis=1)
+        atr = true_range.rolling(window=atr_period, min_periods=1).mean()
+
+        # --- 3) Log returns vol (complément) ----------------------------------
+        returns = close.pct_change().apply(lambda x: np.log(1 + x) if pd.notna(x) else 0.0)
+        ret_vol = returns.rolling(window=atr_period, min_periods=1).std()
+
+        # --- 4) Score composite -----------------------------------------------
+        vol_series = (atr / close) + ret_vol  # normalisé
+        vol_series = vol_series.dropna().tail(lookback)
+
+        if vol_series.empty:
+            return "normal_vol"
+
+        current = float(vol_series.iloc[-1])
+        pct_rank = float((vol_series <= current).mean() * 100)  # position percentile
+
+        # --- 5) Classification -----------------------------------------------
+        if pct_rank >= high_pct:
+            regime = "high_vol"
+        elif pct_rank <= low_pct:
+            regime = "low_vol"
+        else:
+            regime = "normal_vol"
+
+        # --- 6) Debug optionnel -----------------------------------------------
+        if getattr(self, "debug_volatility_logging", False):
+            try:
+                self.logger.debug(
+                    f"[VOL] current={current:.6f} pct={pct_rank:.1f} "
+                    f"thr=({low_pct}..{high_pct}) regime={regime}"
+                )
+            except Exception:
+                pass
+
+        return regime
+
+    except Exception as e:
+        self.logger.error(f"[VOL] Erreur calcul régime: {e}", exc_info=True)
         return "normal_vol"
 
-    current_vol = float(volatility_series.iloc[-1])
-    vol_percentile = float((volatility_series <= current_vol).mean() * 100)
 
-    if vol_percentile >= high_threshold:
-        return "high_vol"
-    elif vol_percentile <= low_threshold:
-        return "low_vol"
-    else:
-        return "normal_vol"
+        
 
 
 def _get_trend(self, df: pd.DataFrame) -> pd.Series:

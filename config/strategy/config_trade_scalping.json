@@ -34,7 +34,7 @@
           "range_retail",
           "range_low_volatility"
         ],
-        "min_confidence": 0.60
+        "min_confidence": 0.6
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -87,30 +87,6 @@
   ],
   "entry_rules": {
     "scalping": {
-      "boll_midline": {
-        "strict_mode": false,
-        "require_entry_gate_ok": true,
-        "min_rr": 1.7,
-        "tp_halfband_k": 0.60,
-        "buffer_pips_min": 1.0,
-        "min_mid_distance_ratio": 0.20,
-        "require_range_regime": true,
-        "block_on_expansion": true,
-        "min_confidence": 0.60,
-        "fvg_max_distance_pips": 1.8,
-        "ob_max_distance_pips": 1.8,
-        "katana_soft_distance_mult": 1.25,
-        "min_atr_m1_pips": 0.25,
-        "max_spread_pips": 2.2,
-        "max_stop_pips_scalp": 8.0,
-        "reject_if_sl_over_cap": true,
-        "m1_break_bonus": 0.12,
-        "only_trade_at_range_edges": false,
-        "allow_midline_entries": true,
-        "mid_entry_score_min": 0.55,
-        "range_score_min": 0.62,
-        "range_debounce_bars": 3
-      },
       "atr_filter": {
         "enabled": true,
         "min_atr_pips": 4.0
@@ -162,7 +138,7 @@
     }
   },
   "decision_engine": {
-    "min_decision_score": 0.30,
+    "min_decision_score": 0.3,
     "thresholds": {
       "min_volatility": 0.0004,
       "max_spread_pips": 6,
@@ -236,78 +212,6 @@
       "entry_on_close_only": false,
       "confirm_spread_at_entry": false,
       "cooldown_bars_after_miss": 1
-    },
-    "katana": {
-      "use_order_blocks": true,
-      "ob_entry_override_enabled": true,
-      "ob_entry_requires": {
-        "spread_ok": true,
-        "mtf_alignment_min": 0,
-        "rr_min": 1.5,
-        "min_katana_score": 0.60,
-        "mtf": {
-          "required_hits": 2,
-          "timeframes": [
-            "M1",
-            "M5",
-            "M15"
-          ]
-        },
-        "bollinger_overrides": {
-          "enabled": true,
-          "min_bars": 200,
-          "period": 20,
-          "std_mult": 2.0,
-          "squeeze_window": 100,
-          "squeeze_percentile": 0.15,
-          "atr_period": 14,
-          "mode": "permissive",
-          "per_symbol": {
-            "EURUSD": {
-              "period": 18,
-              "std_mult": 2.1,
-              "squeeze_window": 120,
-              "squeeze_percentile": 0.12
-            },
-            "GBPUSD": {
-              "period": 20,
-              "std_mult": 2.2
-            },
-            "USDCAD": {
-              "period": 20,
-              "std_mult": 2.0
-            },
-            "USDCHF": {
-              "period": 22,
-              "std_mult": 2.0
-            }
-          },
-          "entry_bias": {
-            "breakout_buy_min": 0.11,
-            "breakout_sell_min": 0.11,
-            "revert_buy_min": 0.11,
-            "revert_sell_min": 0.11
-          },
-          "tp_sl_overrides": {
-            "on_buy_breakout": {
-              "tp_pips": 14,
-              "sl_pips": 10
-            },
-            "on_sell_breakout": {
-              "tp_pips": 14,
-              "sl_pips": 10
-            },
-            "on_buy_revert": {
-              "tp_pips": 10,
-              "sl_pips": 10
-            },
-            "on_sell_revert": {
-              "tp_pips": 10,
-              "sl_pips": 10
-            }
-          }
-        }
-      }
     },
     "smart_targets": {
       "enabled": true,
@@ -402,7 +306,7 @@
       "mtf_confirm": false
     },
     "__compat__": {
-      "notes": "Anciennes clés conservées pour compatibilité. Le code doit d’abord lire les clés canoniques (p.ex. risk_limits / *_pips) puis retomber sur ces clés si nécessaire.",
+      "notes": "Anciennes cl\u00e9s conserv\u00e9es pour compatibilit\u00e9. Le code doit d\u2019abord lire les cl\u00e9s canoniques (p.ex. risk_limits / *_pips) puis retomber sur ces cl\u00e9s si n\u00e9cessaire.",
       "execution_policy": {
         "max_spread_points": null
       },
@@ -432,5 +336,14 @@
       "stop_loss_pips": 6,
       "take_profit_pips": 10
     }
+  },
+  "burst_scalping": {
+    "enabled": true,
+    "burst_size": 5,
+    "sl_pips": 6.0,
+    "tp_pips": 10.0,
+    "max_loss_pips": 15.0,
+    "trail_trigger": 8.0,
+    "trail_step": 3.0
   }
 }

@@ -1,529 +1,383 @@
-# strategy/scalping.py
+# scalping.py — version Burst-Only (no Bollinger / no Katana)
+from __future__ import annotations
 
-from typing import Dict, Any, List, Optional
-from .base_strategy import BaseStrategy
+from typing import Any, Dict, List, Optional, Tuple
 import math
+import time
+import uuid
+
+import numpy as np
+import pandas as pd
 
 
-class ScalpingStrategy(BaseStrategy):
+class ScalpingStrategy:
+    """
+    Stratégie SCALPING focalisée sur :
+      1) Burst Scalping (basket d’ordres simultanés) — priorité
+      2) Liquidity Sweep (cassures HH/LL récentes) — optionnel
 
-    def _rule_liquidity_sweep(self, asset, df, cfg_rule, context):
-        """Independent entry rule: sweep of prior swing + absorption.
-        Detects if the latest candle swept above/below the recent extremes and closed back inside.
-        Config keys (defaults):
-        lookback: 30, min_wick_frac: 0.55, min_body_frac: 0.20, absorb_close_back_in: True,
-        prefer_direction: 'auto', min_confidence: 0.40, sl_pips: 6, tp_pips: 8.1
-        """
-        try:
-            if df is None or len(df) < max(40, int(cfg_rule.get("lookback", 30)) + 3):
-                return None
-            lookback = int(cfg_rule.get("lookback", 30))
-            min_wick_frac = float(cfg_rule.get("min_wick_frac", 0.55))
-            min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
-            min_conf = float(cfg_rule.get("min_confidence", 0.40))
-            sl_pips = float(cfg_rule.get("sl_pips", 6.0))
-            tp_pips = float(cfg_rule.get("tp_pips", 8.1))
+    ➤ Zéro dépendance Bollinger/midline/Katana.
+    ➤ Les tailles (volume) sont déléguées au TradeExecutor (risk-based).
+    ➤ Les SL/TP peuvent être fournis en pips (convertis en prix) ou
+       laissés au moteur de SL/TP du TradeExecutor (_calculate_sl_tp_prices).
+    """
 
-            high = df["high"]
-            low = df["low"]
-            close = df["close"]
-            open_ = df["open"]
-            prev_high = high.iloc[-(lookback + 1) : -1].max()
-            prev_low = low.iloc[-(lookback + 1) : -1].min()
+    def __init__(self, logger, config_manager):
+        self.logger = logger
+        self.config_manager = config_manager
 
-            h = float(high.iloc[-1])
-            l = float(low.iloc[-1])
-            c = float(close.iloc[-1])
-            o = float(open_.iloc[-1])
-            rng = max(1e-12, h - l)
-            body = abs(c - o)
-            body_frac = body / rng if rng > 0 else 0.0
-            upper_wick = max(0.0, h - max(c, o))
-            lower_wick = max(0.0, min(c, o) - l)
-            uw_frac = upper_wick / rng
-            lw_frac = lower_wick / rng
-
-            side = None
-            conf = 0.0
-            # Bearish sweep: take liquidity above previous highs, then close back below that level with strong upper wick
-            if (
-                h > prev_high
-                and c < prev_high
-                and uw_frac >= min_wick_frac
-                and body_frac >= min_body_frac
-            ):
-                side = "SELL"
-                # Confidence boosts with how far swept and wick/body quality
-                sweep_amp = (h - prev_high) / max(1e-12, rng)
-                conf = min(
-                    1.0,
-                    0.35
-                    + 0.35 * min(1.0, sweep_amp)
-                    + 0.15 * min(1.0, uw_frac)
-                    + 0.15 * min(1.0, body_frac / min_body_frac),
-                )
-            # Bullish sweep: take liquidity below previous lows, then close back above that level with strong lower wick
-            elif (
-                l < prev_low
-                and c > prev_low
-                and lw_frac >= min_wick_frac
-                and body_frac >= min_body_frac
-            ):
-                side = "BUY"
-                sweep_amp = (prev_low - l) / max(1e-12, rng)
-                conf = min(
-                    1.0,
-                    0.35
-                    + 0.35 * min(1.0, sweep_amp)
-                    + 0.15 * min(1.0, lw_frac)
-                    + 0.15 * min(1.0, body_frac / min_body_frac),
-                )
-
-            if not side or conf < min_conf:
-                return None
-
-            order = {
-                "action": "OPEN",
-                "asset": asset,
-                "side": side,
-                "sl_pips": sl_pips,
-                "tp_pips": tp_pips,
-                "volume": cfg_rule.get("volume")
-                or (self.strategy_config or {}).get("default_volume")
-                or 0.01,
-                "rule_name": f"scalping:liquidity_sweep:{asset}",
-                "confidence": conf,
-                "meta": {
-                    "prev_high": float(prev_high),
-                    "prev_low": float(prev_low),
-                    "uw_frac": float(uw_frac),
-                    "lw_frac": float(lw_frac),
-                    "body_frac": float(body_frac),
-                    "lookback": lookback,
-                },
-            }
-            return order
-        except Exception as e:
-            try:
-                self.logger.exception(f"Liquidity sweep rule failed for {asset}: {e}")
-            except Exception:
-                pass
-            return None
-
-    def _rule_midline_bollinger(self, asset, df, cfg_rule, context):
-        """Independent entry rule: mean-revert vs Bollinger midline.
-        Config keys (with defaults if missing):
-        length: 20, k: 2.0, mode: 'mean_revert'|'momentum', epsilon_band_frac: 0.15,
-        min_body_frac: 0.20, allow_counter_mtf: True, min_confidence: 0.35,
-        sl_pips: 6, tp_pips: 8.1
-        """
-        try:
-            if df is None or len(df) < max(30, int(cfg_rule.get("length", 20)) + 5):
-                return None
-            close = df["close"]
-            open_ = df["open"]
-            high = df["high"]
-            low = df["low"]
-            length = int(cfg_rule.get("length", 20))
-            k = float(cfg_rule.get("k", 2.0))
-            mode = (cfg_rule.get("mode") or "mean_revert").lower()
-            eps_band = float(cfg_rule.get("epsilon_band_frac", 0.15))
-            min_body_frac = float(cfg_rule.get("min_body_frac", 0.20))
-            min_conf = float(cfg_rule.get("min_confidence", 0.35))
-            sl_pips = float(cfg_rule.get("sl_pips", 6.0))
-            tp_pips = float(cfg_rule.get("tp_pips", 8.1))
-
-            mid = self._sma(close, length)
-            std = self._std(close, length)
-            if mid is None or std is None:
-                return None
-            bw = std * k  # half-band "strength"
-            last_mid = mid.iloc[-1]
-            last_bw = float(bw.iloc[-1] or 0.0)
-            last_close = float(close.iloc[-1])
-            last_open = float(open_.iloc[-1])
-            last_high = float(high.iloc[-1])
-            last_low = float(low.iloc[-1])
-            rng = max(1e-12, last_high - last_low)
-            body = abs(last_close - last_open)
-            body_frac = body / rng if rng > 0 else 0.0
-
-            if last_bw <= 0:
-                return None
-
-            # Distance to midline, normalized by band width
-            dist_norm = (last_close - last_mid) / last_bw
-
-            side = None
-            # Mean-revert: trade back toward the midline when price is outside/near bands
-            if mode.startswith("mean"):
-                # If price is below midline (negative dist), prefer BUY; above -> SELL.
-                if dist_norm <= -eps_band:
-                    side = "BUY"
-                elif dist_norm >= eps_band:
-                    side = "SELL"
-            else:
-                # Momentum: follow direction away from midline with body confirmation
-                if dist_norm >= eps_band and last_close > last_open:
-                    side = "BUY"
-                elif dist_norm <= -eps_band and last_close < last_open:
-                    side = "SELL"
-
-            if not side:
-                return None
-
-            # Confidence: combine distance & body quality
-            conf = min(
-                1.0,
-                max(
-                    0.0,
-                    0.5 * min(1.0, abs(dist_norm))
-                    + 0.5 * min(1.0, body_frac / max(1e-6, min_body_frac)),
-                ),
-            )
-            if conf < min_conf:
-                return None
-
-            # Build order
-            meta = self._safe_asset_meta(context, asset)
-            order = {
-                "action": "OPEN",
-                "asset": asset,
-                "side": side,
-                "sl_pips": sl_pips,
-                "tp_pips": tp_pips,
-                "volume": cfg_rule.get("volume")
-                or (self.strategy_config or {}).get("default_volume")
-                or 0.01,
-                "rule_name": f"scalping:midline_bollinger:{asset}",
-                "confidence": conf,
-                "meta": {
-                    "dist_norm": float(dist_norm),
-                    "band_width": float(last_bw),
-                    "body_frac": float(body_frac),
-                    "length": length,
-                    "k": k,
-                },
-            }
-            return order
-        except Exception as e:
-            try:
-                self.logger.exception(f"Midline rule failed for {asset}: {e}")
-            except Exception:
-                pass
-            return None
-
-    def _atr(self, df, length: int = 14):
-        try:
-            high = df["high"]
-            low = df["low"]
-            close = df["close"]
-            prev_close = close.shift(1)
-            tr = (high - low).abs()
-            tr = tr.combine((high - prev_close).abs(), max)
-            tr = tr.combine((low - prev_close).abs(), max)
-            return tr.rolling(int(length)).mean()
-        except Exception:
-            return None
-
-    def _std(self, series, length: int):
-        try:
-            return series.rolling(int(length)).std(ddof=0)
-        except Exception:
-            return None
-
-    def _sma(self, series, length: int):
-        try:
-            return series.rolling(int(length)).mean()
-        except Exception:
-            return None
-
-    def _safe_asset_meta(self, context, asset):
-        meta = {}
-        try:
-            # Try from context.asset_configs first
-            acfg = ((context or {}).get("asset_configs") or {}).get(asset) or {}
-            if isinstance(acfg, dict):
-                meta["digits"] = acfg.get("digits")
-                meta["point"] = acfg.get("point")
-            # Try open_positions meta if available
-            pos = ((context or {}).get("open_positions") or {}).get(asset) or {}
-            meta["digits"] = meta.get("digits") or pos.get("digits")
-            meta["point"] = meta.get("point") or pos.get("point")
-        except Exception:
-            pass
-        # Fallbacks
-        if not meta.get("digits"):
-            meta["digits"] = 5 if asset.endswith(("USD", "CHF")) else 3
-        if not meta.get("point"):
-            # default MetaTrader 'point' for 5-digit FX pairs
-            meta["point"] = 1e-5 if meta["digits"] >= 5 else 0.001
-        return meta
-
-        # ------------------------------
-        # 🔎 Lecture de chandeliers
-        # ------------------------------
-
-    def _is_engulfing(self, df, bullish=True):
-        """Détecte un avalement haussier ou baissier (engulfing)."""
-        if len(df) < 2:
-            return False
-        prev_o, prev_c = df["open"].iloc[-2], df["close"].iloc[-2]
-        last_o, last_c = df["open"].iloc[-1], df["close"].iloc[-1]
-
-        if bullish:
-            return (
-                prev_c < prev_o
-                and last_c > last_o
-                and last_c > prev_o
-                and last_o < prev_c
-            )
-        else:
-            return (
-                prev_c > prev_o
-                and last_c < last_o
-                and last_c < prev_o
-                and last_o > prev_c
-            )
-
-    def _is_pinbar(self, df, bullish=True, min_wick_ratio=2.0):
-        """Détecte un pin bar (longue mèche rejet)."""
-        if len(df) < 1:
-            return False
-        o, c, h, l = (
-            df["open"].iloc[-1],
-            df["close"].iloc[-1],
-            df["high"].iloc[-1],
-            df["low"].iloc[-1],
-        )
-        body = abs(c - o)
-        upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
-        if bullish:
-            return lower_wick > body * min_wick_ratio
-        else:
-            return upper_wick > body * min_wick_ratio
-
-    def _is_doji(self, df, max_body_frac=0.1):
-        """Détecte un doji (indécision)."""
-        if len(df) < 1:
-            return False
-        o, c, h, l = (
-            df["open"].iloc[-1],
-            df["close"].iloc[-1],
-            df["high"].iloc[-1],
-            df["low"].iloc[-1],
-        )
-        rng = h - l
-        body = abs(c - o)
-        return rng > 0 and (body / rng) < max_body_frac
-
-        """
-        Stratégie de Scalping pour SNIPER_X.
-        - Choisit le meilleur actif parmi les signaux fournis par le DecisionPipeline
-        sans re-filtrer les conditions déjà validées en amont.
-        - Gère la sortie de position de façon proactive lorsque le momentum s'estompe.
-        """
-
-    # ---------------------------------------------------------------------
-    # Initialisation & utilitaires
-    # ---------------------------------------------------------------------
-    def __init__(self, config_manager_instance: Any, strategy_config: Dict[str, Any]):
-        """Initialise la stratégie en chargeant les paramètres clés."""
-        super().__init__(config_manager_instance, strategy_config)
-        self._refresh_from_config()
-        # Log neutre (suppression de toute référence au momentum fade)
-        self.logger.info(
-            "ScalpingStrategy initialisée | magic=%s | assets=%d | TP=%.2f pips | SL=%.2f pips",
-            self.magic_number,
-            len(self.tradeable_assets or []),
-            getattr(self, "take_profit_pips", float("nan")),
-            getattr(self, "stop_loss_pips", float("nan")),
-        )
-
-    def _refresh_from_config(self) -> None:
-        """Recharge les attributs dérivés de la configuration courante (sans momentum fade)."""
-        # --- Paramètres essentiels ---
-        self.tradeable_assets: List[str] = list(
-            self.strategy_config.get("tradeable_assets", [])
-        )
-        self.magic_number = self.strategy_config.get("magic_number")
-
-        # Valeurs par défaut raisonnables si absentes
-        try:
-            self.take_profit_pips = float(
-                self.strategy_config.get("take_profit_pips", 10)
-            )
-        except Exception:
-            self.take_profit_pips = 10.0
-
-        try:
-            self.stop_loss_pips = float(self.strategy_config.get("stop_loss_pips", 8))
-        except Exception:
-            self.stop_loss_pips = 8.0
-
-    def _infer_action_from_signals(
-        self, asset_signals: Dict[str, Any]
-    ) -> Optional[str]:
-        """
-        Détermine l'action BUY/SELL à partir de différentes clés communes.
-        Ordre de priorité :
-        1) 'action' déjà normalisé (BUY/SELL)
-        2) 'direction' ou 'trend' (up/down, bullish/bearish)
-        3) signe de 'volume_momentum' (>0 => BUY, <0 => SELL)
-        """
-        # 1) Action explicite
-        action = (asset_signals.get("action") or "").upper()
-        if action in {"BUY", "SELL"}:
-            return action
-
-        # 2) Direction textuelle
-        direction = (
-            asset_signals.get("direction") or asset_signals.get("trend") or ""
-        ).lower()
-        if any(k in direction for k in ("up", "bull", "bullish", "long")):
-            return "BUY"
-        if any(k in direction for k in ("down", "bear", "bearish", "short")):
-            return "SELL"
-
-        # 3) Momentum signé
-        try:
-            vm = float(asset_signals.get("volume_momentum", 0.0))
-            if vm > 0:
-                return "BUY"
-            if vm < 0:
-                return "SELL"
-        except Exception:
-            pass
-
-        # 4) Phase (moins fiable car souvent neutre)
-        phase = (asset_signals.get("phase") or "").lower()
-        if any(k in phase for k in ("expansion_up", "up", "bull")):
-            return "BUY"
-        if any(k in phase for k in ("expansion_down", "down", "bear")):
-            return "SELL"
-
-        return None
-
+    # ==========================================================
+    # =============   API PRINCIPALE (ENTRÉE)   ================
+    # ==========================================================
     def evaluate_entry(
-        self, context: Dict[str, Any], signals: Dict[str, Any]
+        self,
+        asset: str,
+        market_df: Optional[pd.DataFrame],
+        signals: Dict[str, Any],
+        context: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Décide d’une entrée scalping.
+        Retourne soit un trade unique, soit un panier 'burst_decisions' prêt pour l’exécution.
+
+        Signature attendue par le StrategyManager / DecisionPipeline :
+          - "action": "BUY"/"SELL"
+          - "asset": str
+          - "entry_price": float
+          - (optionnel) "sl_price"/"tp_price" OU "target_sl_pips"/"target_tp_pips"
+          - (burst) {"burst_decisions": [ ... ]} avec un "basket_id"
+        """
+        # 0) Garde globales simples (news, disponibilité prix, spread)
+        if config.get("halt_on_major_news", True) and self._has_blocking_news(context):
+            self.logger.info(f"[{asset}] Halt: actualité majeure.")
+            return {}
+
+        price = self._safe_price_from_signals(signals)
+        if not price:
+            self.logger.warning(f"[{asset}] Prix invalide/absent pour evaluate_entry.")
+            return {}
+
+        # Symbol meta (robuste)
+        meta = self._safe_asset_meta(asset, signals, context, config)
+        pip_size = meta["pip_size"]
+        if pip_size <= 0:
+            self.logger.warning(f"[{asset}] pip_size invalide.")
+            return {}
+
+        spread_pips = meta["spread_pips"]
+        max_spread = float(config.get("entry_rules", {}).get("scalping", {}).get("max_spread_pips", 999))
+        if spread_pips > max_spread:
+            self.logger.info(f"[{asset}] Spread trop élevé ({spread_pips:.2f}p > {max_spread:.2f}p).")
+            return {}
+
+        # 1) Direction de base : MTF > Phase
+        action = self._infer_action_from_signals(signals)
+        if action is None:
+            self.logger.info(f"[{asset}] Aucune direction claire (MTF/phase).")
+            return {}
+
+        # 2) Option: déclencheur Liquidity Sweep → peut forcer une action
+        liq_cfg = (config.get("scalping") or {}).get("liquidity_sweep", {}) or {}
+        if liq_cfg.get("enabled", True) and isinstance(market_df, pd.DataFrame) and len(market_df) >= int(liq_cfg.get("lookback_bars", 20)):
+            liq_action = self._rule_liquidity_sweep(market_df, meta, lookback=int(liq_cfg.get("lookback_bars", 20)))
+            if liq_action in {"BUY", "SELL"}:
+                action = liq_action
+                self.logger.info(f"[{asset}] Liquidity Sweep → action forcée = {action}")
+
+        # 3) Mode BURST prioritaire
+        burst_cfg = (config.get("burst_scalping") or {})
+        if bool(burst_cfg.get("enabled", True)):
+            burst = self._rule_burst_scalping(asset, action, price, meta, signals, burst_cfg, context)
+            if burst:
+                return burst
+
+        # 4) Sinon, entrée simple (fallback propre sans Bollinger)
+        #    -> On propose des cibles en pips (TP/SL) dynamiques (adaptées vol/ATR).
+        sl_pips, tp_pips, regime_tag = self._dynamic_tp_sl_from_vol_atr(signals, meta, config)
+        decision = {
+            "action": action,
+            "asset": asset,
+            "entry_price": price,
+            "target_sl_pips": float(round(sl_pips, 3)),
+            "target_tp_pips": float(round(tp_pips, 3)),
+            "rule_name": "scalping_simple",
+            "confidence": float(signals.get("confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0)),
+            "meta": {"regime_tag": regime_tag},
+        }
+        return decision
+
+    # ==========================================================
+    # =============       RÈGLES D’ENTRÉE       ================
+    # ==========================================================
+    def _rule_burst_scalping(
+        self,
+        asset: str,
+        action: str,
+        entry_price: float,
+        meta: Dict[str, Any],
+        signals: Dict[str, Any],
+        burst_cfg: Dict[str, Any],
+        context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Logique d'entrée Scalping STRICTE + filtres intelligents :
-        - Liquidity Sweep
-        - Midline Bollinger
-        - Lecture chandeliers + EMA + séquence de bougies
-        - PAS de fallback Katana : pas de signal => pas de trade
+        Ouvre un panier (burst) de N ordres d’un coup.
+        Garde-fous :
+          - ATR M1 min (soft)
+          - Spread max
+          - Confirmation directionnelle M1 (optionnelle)
+        Niveaux :
+          - SL/TP en pips si fournis, sinon laissés au TradeExecutor
         """
-        self.logger.debug("ScalpingStrategy: évaluation d'entrée (STRICTE + filtres)...")
-
-        cfg = self.strategy_config or {}
-        rules_cfg = (cfg.get("entry_rules") or {}).get("scalping") or {}
-        ls_cfg = (rules_cfg.get("liquidity_sweep") or {})
-        mb_cfg = (rules_cfg.get("midline_bollinger") or {})
-
-        candidates = []
-        market_data = context.get("market_data") or {}
-
-        # === Liquidity Sweep ===
-        if ls_cfg.get("enabled", True):
-            for asset, df in market_data.items():
-                if df is None or not hasattr(df, "iloc"):
-                    continue
-                try:
-                    order = self._rule_liquidity_sweep(asset, df, ls_cfg, context)
-                    if order:
-                        candidates.append(order)
-                except Exception as e:
-                    self.logger.debug(f"Erreur liquidity_sweep {asset}: {e}")
-
-        # === Midline Bollinger ===
-        if mb_cfg.get("enabled", True):
-            for asset, df in market_data.items():
-                if df is None or not hasattr(df, "iloc"):
-                    continue
-                try:
-                    order = self._rule_midline_bollinger(asset, df, mb_cfg, context)
-                    if order:
-                        candidates.append(order)
-                except Exception as e:
-                    self.logger.debug(f"Erreur midline_bollinger {asset}: {e}")
-
-        if not candidates:
-            self.logger.info("Aucun signal strict trouvé → pas de trade.")
+        size = int(burst_cfg.get("size", 5))
+        if size <= 0:
             return None
 
-        # === Sélection du meilleur signal ===
-        best_cand = sorted(
-            candidates, key=lambda x: x.get("confidence", 0.0), reverse=True
-        )[0]
+        # Garde ATR/Spread
+        min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips", 0.0))
+        if min_atr_m1 > 0 and float(signals.get("atr_m1", 0.0) or 0.0) / max(meta["pip_size"], 1e-12) < min_atr_m1:
+            self.logger.info(f"[{asset}] Burst refusé: ATR M1 < {min_atr_m1} pips.")
+            return None
+        max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
+        if meta["spread_pips"] > max_spread_burst:
+            self.logger.info(f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst}p.")
+            return None
 
-        # === Application des filtres intelligents ===
-        df = market_data.get(best_cand["asset"])
-        if df is not None and hasattr(df, "iloc") and len(df) > 20:
-            close = df["close"]
-            ema_fast = close.ewm(span=20).mean().iloc[-1]
-            ema_slow = close.ewm(span=50).mean().iloc[-1]
-            last_close = close.iloc[-1]
-
-            # Filtre tendance
-            if best_cand["side"] == "BUY" and not (last_close > ema_fast > ema_slow):
-                self.logger.info("Signal rejeté: BUY mais tendance pas confirmée (EMA).")
-                return None
-            if best_cand["side"] == "SELL" and not (last_close < ema_fast < ema_slow):
-                self.logger.info("Signal rejeté: SELL mais tendance pas confirmée (EMA).")
+        # Confirmation directionnelle M1 (facultative)
+        if burst_cfg.get("require_m1_bias", False):
+            m1_bias = str(signals.get("m1_bias", "")).lower()
+            if (action == "BUY" and m1_bias != "up") or (action == "SELL" and m1_bias != "down"):
+                self.logger.info(f"[{asset}] Burst refusé: m1_bias={m1_bias} incompatible avec action={action}.")
                 return None
 
-            # Séquence bougies
-            last3 = close.iloc[-3:]
-            if best_cand["side"] == "BUY" and not all(x < y for x, y in zip(last3, last3[1:])):
-                self.logger.info("Signal rejeté: BUY sans séquence haussière claire.")
-                return None
-            if best_cand["side"] == "SELL" and not all(x > y for x, y in zip(last3, last3[1:])):
-                self.logger.info("Signal rejeté: SELL sans séquence baissière claire.")
-                return None
+        # Niveaux pips (optionnels)
+        sl_pips = burst_cfg.get("sl_pips")
+        tp_pips = burst_cfg.get("tp_pips")
 
-            # Chandeliers (engulfing, pinbar, doji)
-            if best_cand["side"] == "BUY":
-                if self._is_engulfing(df, bullish=False) or self._is_pinbar(df, bullish=False):
-                    self.logger.info("Signal rejeté: pattern baissier contre BUY.")
-                    return None
-            if best_cand["side"] == "SELL":
-                if self._is_engulfing(df, bullish=True) or self._is_pinbar(df, bullish=True):
-                    self.logger.info("Signal rejeté: pattern haussier contre SELL.")
-                    return None
-            if self._is_doji(df):
-                self.logger.info("Signal rejeté: doji détecté (indécision).")
-                return None
+        # Construire le panier
+        basket_id = f"burst_{asset}_{uuid.uuid4().hex[:8]}"
+        decisions: List[Dict[str, Any]] = []
+        for i in range(size):
+            d: Dict[str, Any] = {
+                "action": action,
+                "asset": asset,
+                "order_type": "MARKET",
+                "entry_price": entry_price,
+                "rule_name": "burst_scalping",
+                "basket_id": basket_id,
+                "burst_index": i + 1,
+                "burst_size": size,
+                "meta": {"burst": True},
+            }
+            if isinstance(sl_pips, (int, float)) and sl_pips > 0:
+                d["target_sl_pips"] = float(sl_pips)
+            if isinstance(tp_pips, (int, float)) and tp_pips > 0:
+                d["target_tp_pips"] = float(tp_pips)
+            decisions.append(d)
 
-        self.logger.info(
-            "Signal retenu: %s | conf=%.3f | side=%s",
-            best_cand["asset"],
-            best_cand["confidence"],
-            best_cand.get("side"),
-        )
-        return best_cand
+        self.logger.info(f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}")
+        return {"burst_decisions": decisions, "basket_id": basket_id}
 
-
-    def get_parameters(self) -> Dict[str, Any]:
-        """Retourne une copie des paramètres de configuration de la stratégie."""
-        return dict(self.strategy_config)
-
-    def update_strategy_parameters(self, new_params: Dict[str, Any]) -> None:
+    def _rule_liquidity_sweep(
+        self,
+        df: pd.DataFrame,
+        meta: Dict[str, Any],
+        lookback: int = 20,
+    ) -> Optional[str]:
         """
-        Met à jour la configuration de la stratégie proprement.
-        - Merge profond des dictionnaires
-        - Rafraîchit les attributs dépendants de la config
+        Détecte un sweep simple des HH/LL sur 'lookback' barres.
+        BUY si on casse le plus bas récent (sweep bas), SELL si on casse le plus haut récent (sweep haut).
         """
-        self.logger.info("Mise à jour des paramètres Scalping: %s", new_params)
+        if df is None or len(df) < lookback:
+            return None
 
-        def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
-            for k, v in (src or {}).items():
-                if isinstance(v, dict) and isinstance(dst.get(k), dict):
-                    dst[k] = _deep_merge(dst.get(k, {}), v)
-                else:
-                    dst[k] = v
-            return dst
+        recent = df.tail(lookback)
+        hh = float(recent["high"].max())
+        ll = float(recent["low"].min())
+        last = df.iloc[-1]
+        close = float(last["close"])
 
-        _deep_merge(self.strategy_config, new_params or {})
-        self._refresh_from_config()
+        # heuristique sweep : close au-delà de HH/LL
+        if close >= hh:
+            return "SELL"  # prise de liquidité au-dessus → contrarian
+        if close <= ll:
+            return "BUY"
+        return None
+
+    # ==========================================================
+    # =============      ADAPTATION TP/SL BASE     =============
+    # ==========================================================
+    def _dynamic_tp_sl_from_vol_atr(
+        self, signals: Dict[str, Any], meta: Dict[str, Any], config: Dict[str, Any]
+    ) -> Tuple[float, float, str]:
+        """
+        Calcule SL/TP (en pips) selon la vol% et l’ATR (fallback propre).
+        """
+        base_sl = float(config.get("stop_loss_pips", 12) or 12)
+        base_tp = float(config.get("take_profit_pips", 18) or 18)
+
+        vol_pct = self._extract_vol_pct(signals)
+        atr_m5 = float(signals.get("atr_m5", 0.0) or 0.0)
+        atr_m5_p = (atr_m5 / meta["pip_size"]) if meta["pip_size"] > 0 else 0.0
+
+        adapt = self.config_manager.get("adaptation_settings", {}) or {}
+        vols = adapt.get("volatility_thresholds", {}) or {}
+        low, high = float(vols.get("low", 0.05)), float(vols.get("high", 0.5))
+
+        scalping_adapt = adapt.get("scalping", {}) or {}
+        sl_high = float(scalping_adapt.get("stop_loss_pips_high_vol", base_sl))
+        tp_high = float(scalping_adapt.get("take_profit_pips_high_vol", base_tp))
+        sl_low = float(scalping_adapt.get("stop_loss_pips_low_vol", base_sl))
+        tp_low = float(scalping_adapt.get("take_profit_pips_low_vol", base_tp))
+
+        if vol_pct >= high:
+            sl_pips = max(sl_high, atr_m5_p * 0.8)
+            tp_pips = tp_high
+            tag = "high_vol"
+        elif vol_pct <= low:
+            sl_pips = max(sl_low, atr_m5_p * 0.6)
+            tp_pips = tp_low
+            tag = "low_vol"
+        else:
+            sl_pips = max(base_sl, atr_m5_p * 0.7)
+            tp_pips = base_tp
+            tag = "normal_vol"
+
+        # légère correction spread
+        spread_pips = meta["spread_pips"]
+        tp_pips = max(1.0, tp_pips - spread_pips)
+        sl_pips = max(1.0, sl_pips + spread_pips * 0.5)
+        return float(sl_pips), float(tp_pips), tag
+
+    # ==========================================================
+    # =============            HELPERS            =============
+    # ==========================================================
+    def _has_blocking_news(self, context: Dict[str, Any]) -> bool:
+        try:
+            return bool(
+                self.config_manager.check_news_schedule(
+                    context, context.get("economic_calendar", [])
+                )
+            )
+        except Exception:
+            return False
+
+    def _infer_action_from_signals(self, signals: Dict[str, Any]) -> Optional[str]:
+        mtf_dir = str(signals.get("mtf_direction", "none")).lower()
+        if mtf_dir in {"up", "down"}:
+            return "BUY" if mtf_dir == "up" else "SELL"
+
+        phase = str(signals.get("phase_memory_stabilized", signals.get("phase", ""))).lower()
+        if any(k in phase for k in ["bull", "up", "accumulation", "expansion", "trend"]):
+            return "BUY"
+        if any(k in phase for k in ["bear", "down", "distribution"]):
+            return "SELL"
+        return None
+
+    def _safe_price_from_signals(self, signals: Dict[str, Any]) -> Optional[float]:
+        for k in ("current_price", "last_close", "close", "entry_price"):
+            v = signals.get(k)
+            try:
+                if isinstance(v, (int, float)) and v > 0:
+                    return float(v)
+            except Exception:
+                continue
+        return None
+
+    def _safe_asset_meta(
+        self,
+        asset: str,
+        signals: Dict[str, Any],
+        context: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        md_asset = (context.get("market_data", {}) or {}).get(asset, {}) or {}
+        si = (md_asset.get("symbol_info") or config.get("symbol_info") or {}) or {}
+
+        def _num(x, d=0.0):
+            try:
+                v = float(x)
+                return v if math.isfinite(v) else d
+            except Exception:
+                return d
+
+        point = _num(si.get("point"), 0.00001)
+        digits = int(si.get("digits", 5) or 5)
+        pip_points = 10.0 if digits in (3, 5) else 1.0
+        pip_size = point * pip_points
+
+        spread_points = _num(md_asset.get("current_spread_points", signals.get("spread", 0.0)), 0.0)
+        spread_pips = spread_points / pip_points
+
+        return {
+            "point": point,
+            "digits": digits,
+            "pip_points": pip_points,
+            "pip_size": pip_size,
+            "spread_pips": spread_pips,
+        }
+
+    def _extract_vol_pct(self, signals: Dict[str, Any]) -> float:
+        if isinstance(signals.get("volatility_pct"), (int, float)):
+            return float(signals["volatility_pct"])
+        if isinstance(signals.get("volatility_percentage"), (int, float)):
+            return float(signals["volatility_percentage"])
+        v = signals.get("volatility")
+        if isinstance(v, (int, float)):
+            v = float(v)
+            return v * 100.0 if v <= 1.0 else v
+        return 0.0
+
+    # --- indicateurs génériques (utiles si tu veux enrichir plus tard)
+    @staticmethod
+    def _sma(series: pd.Series, period: int) -> pd.Series:
+        if series is None or period <= 1:
+            return series
+        return series.rolling(window=period, min_periods=1).mean()
+
+    @staticmethod
+    def _std(series: pd.Series, period: int) -> pd.Series:
+        if series is None or period <= 1:
+            return series * 0
+        return series.rolling(window=period, min_periods=1).std(ddof=0)
+
+    @staticmethod
+    def _atr(df: pd.DataFrame, period: int = 14) -> float:
+        if df is None or len(df) < period + 2:
+            return float("nan")
+        h = df["high"].astype(float)
+        l = df["low"].astype(float)
+        c = df["close"].astype(float)
+        pc = c.shift(1)
+        tr = np.maximum.reduce([(h - l).abs(), (h - pc).abs(), (l - pc).abs()])
+        atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
+        return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+
+    # --- Price Action light (au cas où tu veux filtrer)
+    @staticmethod
+    def _is_engulfing(o: float, h: float, l: float, c: float, oo: float, cc: float) -> bool:
+        # engulfing sur 2 bougies (précédente: oo->cc, actuelle: o->c)
+        body_prev = abs(cc - oo)
+        body_now = abs(c - o)
+        if body_prev <= 0 or body_now <= 0:
+            return False
+        # avale complètement
+        bull = (cc > oo) and (c < o) and (o > cc) and (c < oo)
+        bear = (cc < oo) and (c > o) and (o < cc) and (c > oo)
+        return bull or bear
+
+    @staticmethod
+    def _is_pinbar(o: float, h: float, l: float, c: float) -> bool:
+        rng = h - l
+        body = abs(c - o)
+        if rng <= 0:
+            return False
+        upper = h - max(o, c)
+        lower = min(o, c) - l
+        return (upper >= 2 * body and lower <= body) or (lower >= 2 * body and upper <= body)
+
+    @staticmethod
+    def _is_doji(o: float, c: float, h: float, l: float) -> bool:
+        rng = h - l
+        body = abs(c - o)
+        return rng > 0 and (body / rng) <= 0.1

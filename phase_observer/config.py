@@ -46,6 +46,7 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
     """
     Charge tous les paramètres depuis le ConfigManager de manière dynamique.
     Permet la surcharge de paramètres spécifiques via le dictionnaire 'overrides'.
+    Nettoyage : suppression des clés inutiles liées au scalping Bollinger/Katana.
     """
     self.logger.debug("Chargement des paramètres d'analyse pour PhaseObserver...")
 
@@ -89,14 +90,26 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
         else:
             all_settings = _deep_merge_dicts(all_settings, overrides)
 
-    # 3) Affecter tous les paramètres à l'instance
+    # 3) Filtrage : retirer les paramètres obsolètes (scalping Bollinger/Katana)
+    keys_to_remove = [
+        "bollinger_weights",
+        "bollinger_settings",
+        "scalping_confidence",
+        "katana_mode",
+    ]
+    for k in keys_to_remove:
+        if k in all_settings:
+            self.logger.info(f"[CLEAN] Suppression paramètre obsolète: {k}")
+            all_settings.pop(k, None)
+
+    # 4) Affecter tous les paramètres à l'instance
     for key, value in all_settings.items():
         try:
             setattr(self, key, value)
         except Exception as e:
             self.logger.warning(f"Impossible d'appliquer le paramètre '{key}': {e}")
 
-    # 4) Chemins de sortie (robuste même sans config_manager)
+    # 5) Chemins de sortie (robuste même sans config_manager)
     try:
         reports_dir = (
             self.config_manager.get("paths.reports", "output/")
@@ -119,5 +132,4 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
     except Exception as e:
         self.logger.warning(f"Création des répertoires sortie/logs impossible: {e}")
 
-    self.logger.debug("Paramètres de PhaseObserver chargés et appliqués.")
-    # TODO: mécanisme pour recharger les settings "à chaud" si la config change.
+    self.logger.debug("Paramètres de PhaseObserver chargés et appliqués (après nettoyage).")

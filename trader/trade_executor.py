@@ -92,6 +92,11 @@ class TradeExecutor:
         self._last_reconciliation_time: Optional[datetime] = (
             None  # Initialisé à None pour plus de clarté
         )
+        
+        self._burst = {
+        "baskets": {},   # basket_id -> meta
+        "by_order": {},  # order_id  -> basket_id
+        }
 
         # Chargement dynamique des paramètres
         self._load_settings()
@@ -1038,11 +1043,6 @@ class TradeExecutor:
         Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
         avant toute requête MT5.
 
-        ✅ Intégration 'katana midline scalp'
-        - Consomme les hints : sl_pips_hint / tp_pips_hint (ou target_sl_pips / target_tp_pips)
-        - Propage les infos Bollinger (bb_mid/upper/lower, level_mode) à _calculate_sl_tp_prices
-        - Garde-fous spread / fenêtre / RR (inchangé, permissif)
-
         ✅ Décision unique du volume
         - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
         Tout volume présent dans la décision est ignoré.
@@ -1653,6 +1653,8 @@ class TradeExecutor:
                 "rr": 0,
                 "valid": False,
             }
+            
+            
 
     def _calculate_sl_tp_prices(
         self,
@@ -1668,15 +1670,7 @@ class TradeExecutor:
         - Respecte trade_stops_level du broker
         - Conversion PIPS → prix corrigée (1 pip = 10 points pour FX/Gold)
         - Arrondit aux 'digits' du symbole
-        - ⚔️ Mode strict 'boll_midline_strict' (katana scalp) :
-            * SL au-delà de la bande opposée + buffer (aucun fallback)
-            * TP vers/sur la médiane (léger overshoot capé), RR >= min_rr sinon REJET
-            * Exige boll.{bb_mid, bb_upper, bb_lower} + pip_size valides et entry_gate_ok=True
-        - Mode non-strict 'boll_midline' :
-            * même logique, mais autorise les méthodes standards si les niveaux Bollinger/hints manquent
-        - ➕ Intègre les overrides Bollinger depuis config.decision_engine.katana.bollinger_overrides.tp_sl_overrides
-        (appliqués uniquement si les seuils entry_bias sont satisfaits).
-        - ➕ Consomme (si présents) : 'entry_gate_ok', 'half_band_pips', 'mid_distance_ratio'
+
         """
 
         self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
@@ -1706,48 +1700,7 @@ class TradeExecutor:
         tp_pips_override = trade_decision.get("target_tp_pips", None)
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-        # --- 🔁 Overrides Bollinger (Katana) conditionnels (si config les active) ---
-        try:
-            de = config.get("decision_engine") or {}
-            kat = de.get("katana") or {}
-            boll_ov = kat.get("bollinger_overrides") or {}
-            tp_sl_map = boll_ov.get("tp_sl_overrides") or {}
-            entry_bias = boll_ov.get("entry_bias") or {}
-
-            boll_signal = str(trade_decision.get("boll_signal", "") or "").strip()
-            breakout_score = float(
-                trade_decision.get("boll_breakout_score", 0.0) or 0.0
-            )
-            revert_score = float(
-                trade_decision.get("boll_mean_revert_score", 0.0) or 0.0
-            )
-
-            bb_buy_min = float(entry_bias.get("breakout_buy_min", 0.55) or 0.55)
-            bb_sell_min = float(entry_bias.get("breakout_sell_min", 0.55) or 0.55)
-            rv_buy_min = float(entry_bias.get("revert_buy_min", 0.55) or 0.55)
-            rv_sell_min = float(entry_bias.get("revert_sell_min", 0.55) or 0.55)
-
-            def _apply_if_allowed(key: str, thr: float, score: float):
-                nonlocal sl_pips_override, tp_pips_override
-                block = tp_sl_map.get(key)
-                if not isinstance(block, dict) or score < thr:
-                    return
-                if sl_pips_override is None and block.get("sl_pips") is not None:
-                    sl_pips_override = float(block["sl_pips"])
-                if tp_pips_override is None and block.get("tp_pips") is not None:
-                    tp_pips_override = float(block["tp_pips"])
-
-            if boll_signal == "buy_breakout":
-                _apply_if_allowed("on_buy_breakout", bb_buy_min, breakout_score)
-            elif boll_signal == "sell_breakout":
-                _apply_if_allowed("on_sell_breakout", bb_sell_min, breakout_score)
-            elif boll_signal == "buy_revert":
-                _apply_if_allowed("on_buy_revert", rv_buy_min, revert_score)
-            elif boll_signal == "sell_revert":
-                _apply_if_allowed("on_sell_revert", rv_sell_min, revert_score)
-        except Exception as e:
-            self.logger.debug(f"[Katana/Bollinger] Overrides non appliqués: {e}")
-
+       
         # --- Paramètres SL/TP standards ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
         sl_method = str(
@@ -1770,17 +1723,7 @@ class TradeExecutor:
             st_tp.get("hard_max_points", float("inf")) or float("inf")
         )
 
-        # --- Règles scalping (caps/guards Katana) ---
-        entry_rules_scalp = (config.get("entry_rules") or {}).get("scalping") or {}
-        reject_if_sl_over_cap = bool(
-            entry_rules_scalp.get("reject_if_sl_over_cap", False)
-        )
-        max_stop_pips_scalp = entry_rules_scalp.get("max_stop_pips_scalp")
-        min_atr_m1_pips = float(entry_rules_scalp.get("min_atr_m1_pips", 0.0) or 0.0)
-        hard_min_atr_m1_pips = float(
-            entry_rules_scalp.get("hard_min_atr_m1_pips", 0.0) or 0.0
-        )
-
+      
         # --- Market data pour SWING/ATR ---
         symbol = str(trade_decision.get("asset", "")).upper()
         md = (market_context.get("market_data") or {}).get(symbol)
@@ -1804,184 +1747,6 @@ class TradeExecutor:
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
-        # =====================================================================
-        # ⚔️ Mode 'boll_midline' / 'boll_midline_strict'
-        # =====================================================================
-        stop_loss_price = 0.0
-        take_profit_price = 0.0
-
-        try:
-            level_mode = str(trade_decision.get("level_mode") or "").lower()
-            strict_mode = level_mode == "boll_midline_strict"
-
-            boll = (
-                trade_decision.get("boll")
-                if isinstance(trade_decision.get("boll"), dict)
-                else {}
-            )
-            bb_mid = (
-                float(boll.get("bb_mid"))
-                if boll.get("bb_mid") is not None
-                else float("nan")
-            )
-            bb_up = (
-                float(boll.get("bb_upper"))
-                if boll.get("bb_upper") is not None
-                else float("nan")
-            )
-            bb_lo = (
-                float(boll.get("bb_lower"))
-                if boll.get("bb_lower") is not None
-                else float("nan")
-            )
-
-            entry_gate_ok = bool(trade_decision.get("entry_gate_ok", True))
-            half_band_pips_hint = trade_decision.get("half_band_pips")
-            mid_dist_ratio = float(trade_decision.get("mid_distance_ratio", 0.0) or 0.0)
-
-            # Config midline spécifique (scalping)
-            mid_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get(
-                "boll_midline"
-            ) or {}
-            rr_min_mid = float(mid_cfg.get("min_rr", 1.1) or 1.1)
-            k_halfband_tp = float(mid_cfg.get("tp_halfband_k", 0.6) or 0.6)
-            buffer_pips_min = float(mid_cfg.get("buffer_pips_min", 1.5) or 1.5)
-            mid_overshoot_k = float(
-                mid_cfg.get("tp_mid_overshoot_k", 0.05) or 0.05
-            )  # 5% demi-canal
-            min_mid_ratio = float(
-                mid_cfg.get("min_mid_distance_ratio", 0.12) or 0.12
-            )  # distance mini à la médiane
-
-            valid_boll = all(
-                isinstance(x, (int, float)) and math.isfinite(x)
-                for x in (bb_mid, bb_up, bb_lo)
-            )
-            can_apply_midline = (
-                (level_mode in {"boll_midline", "boll_midline_strict"})
-                and valid_boll
-                and isinstance(entry_price, (int, float))
-                and entry_price > 0
-                and (sl_pips_override is None)
-                and (tp_pips_override is None)
-            )
-
-            # En mode STRICT, tout manque → REJET immédiat (aucun fallback)
-            if strict_mode:
-                if not can_apply_midline:
-                    raise TradeExecutionError(
-                        "Mode strict: niveaux Bollinger/entry/overrides invalides."
-                    )
-                if not entry_gate_ok:
-                    raise TradeExecutionError(
-                        "Mode strict: entry_gate_ok=False (gate médiane refusé)."
-                    )
-                if not (pip_size and pip_size > 0):
-                    raise TradeExecutionError("Mode strict: pip_size indisponible.")
-            # En mode non-strict : si on ne peut pas appliquer midline, on laissera les méthodes standards plus bas
-
-            if can_apply_midline:
-                half_band_price = (bb_up - bb_lo) / 2.0
-                if (
-                    isinstance(half_band_pips_hint, (int, float))
-                    and half_band_pips_hint > 0
-                    and pip_size > 0
-                ):
-                    half_band_price = float(half_band_pips_hint) * pip_size
-
-                if not (half_band_price and half_band_price > 0):
-                    if strict_mode:
-                        raise TradeExecutionError(
-                            "Mode strict: half_band nul/invalide."
-                        )
-                    else:
-                        raise Exception(
-                            "half_band invalide, on laissera les méthodes standards."
-                        )
-
-                # Ajustement prudence si trop proche de la médiane
-                if mid_dist_ratio < min_mid_ratio:
-                    k_halfband_tp = min(k_halfband_tp, 0.5)
-
-                buffer_price = max(
-                    min_stop_distance_price,
-                    (
-                        (buffer_pips_min * pip_size)
-                        if pip_size and pip_size > 0
-                        else min_stop_distance_price
-                    ),
-                )
-
-                if action == "BUY":
-                    # SL sous la bande basse + buffer
-                    stop_loss_price = float(bb_lo - buffer_price)
-
-                    # TP vers médiane (léger overshoot capé), jamais au-dessus d'upper
-                    target_mid_price = float(bb_mid + mid_overshoot_k * half_band_price)
-                    direct_tp = max(0.0, target_mid_price - entry_price)
-                    fallback_tp = max(0.0, k_halfband_tp * half_band_price)
-                    tp_distance_price = max(direct_tp, fallback_tp)
-                    take_profit_price = float(entry_price + tp_distance_price)
-                    take_profit_price = min(
-                        take_profit_price, bb_up - buffer_price * 0.25
-                    )
-
-                    if entry_price >= bb_mid:
-                        take_profit_price = min(
-                            take_profit_price, bb_mid + 0.15 * half_band_price
-                        )
-
-                else:  # SELL
-                    # SL au-dessus de la bande haute + buffer
-                    stop_loss_price = float(bb_up + buffer_price)
-
-                    # TP vers médiane (overshoot capé), jamais en-dessous de lower
-                    target_mid_price = float(bb_mid - mid_overshoot_k * half_band_price)
-                    direct_tp = max(0.0, entry_price - target_mid_price)
-                    fallback_tp = max(0.0, k_halfband_tp * half_band_price)
-                    tp_distance_price = max(direct_tp, fallback_tp)
-                    take_profit_price = float(entry_price - tp_distance_price)
-                    take_profit_price = max(
-                        take_profit_price, bb_lo + buffer_price * 0.25
-                    )
-
-                    if entry_price <= bb_mid:
-                        take_profit_price = max(
-                            take_profit_price, bb_mid - 0.15 * half_band_price
-                        )
-
-                # RR contrôle
-                risk = (
-                    (entry_price - stop_loss_price)
-                    if action == "BUY"
-                    else (stop_loss_price - entry_price)
-                )
-                reward = (
-                    (take_profit_price - entry_price)
-                    if action == "BUY"
-                    else (entry_price - take_profit_price)
-                )
-
-                if not (risk > 0 and reward > 0):
-                    if strict_mode:
-                        raise TradeExecutionError(
-                            "Mode strict: distances risk/reward invalides."
-                        )
-                else:
-                    rr_val = reward / risk
-                    if strict_mode and (rr_val < rr_min_mid):
-                        raise TradeExecutionError(
-                            f"Mode strict: RR {rr_val:.2f} < min_rr {rr_min_mid:.2f}."
-                        )
-                    # en non-strict, on laisse le reste du pipeline s’occuper d’un éventuel ajustement plus loin
-
-        except TradeExecutionError:
-            # En mode strict, on propage l’erreur (aucun fallback)
-            raise
-        except Exception as e:
-            # En non-strict, si midline impraticable ici, on retombe (plus bas) sur les méthodes standards
-            self.logger.debug(f"[boll_midline] application partielle/non-strict: {e}")
-
         # ========================= SL (standards si non fixé) =========================
         if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
             sl_distance = float(sl_pips_override) * pip_size
@@ -1994,7 +1759,7 @@ class TradeExecutor:
                 f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}"
             )
         else:
-            if stop_loss_price == 0.0:  # non fixé par 'boll_midline'
+            if stop_loss_price == 0.0:
                 if sl_method == "SWING":
                     lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
                     buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
@@ -2058,7 +1823,7 @@ class TradeExecutor:
                 f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}"
             )
         else:
-            if take_profit_price == 0.0:  # non fixé par 'boll_midline'
+            if take_profit_price == 0.0:
                 if tp_method == "RR":
                     risk_distance_price = abs(entry_price - stop_loss_price)
                     if risk_distance_price <= 0:
@@ -2114,6 +1879,11 @@ class TradeExecutor:
 
         if sl_dist_price <= 0 or tp_dist_price <= 0:
             raise TradeExecutionError("Distances SL/TP invalides (<= 0).")
+        
+        # Conversion initiale en points (nécessaire même sans Katana)
+        sl_dist_points = sl_dist_price / point
+        tp_dist_points = tp_dist_price / point
+
 
         # A) Respect stops_level (broker)
         if min_stop_distance_price > 0:
@@ -2122,35 +1892,7 @@ class TradeExecutor:
             if tp_dist_price < min_stop_distance_price:
                 tp_dist_price = min_stop_distance_price
 
-        # B) Contraintes Katana (points)
-        sl_dist_points = sl_dist_price / point
-        tp_dist_points = tp_dist_price / point
-
-        if (
-            math.isfinite(sl_hard_min_points)
-            and sl_hard_min_points > 0
-            and sl_dist_points < sl_hard_min_points
-        ):
-            sl_dist_points = sl_hard_min_points
-        if math.isfinite(sl_hard_max_points) and sl_dist_points > sl_hard_max_points:
-            if reject_if_sl_over_cap:
-                raise TradeExecutionError(
-                    f"SL dépasse le cap dur ({sl_dist_points:.2f} pts > {sl_hard_max_points:.2f} pts)."
-                )
-            sl_dist_points = sl_hard_max_points
-
-        if isinstance(max_stop_pips_scalp, (int, float)) and max_stop_pips_scalp > 0:
-            max_stop_points_scalp = float(max_stop_pips_scalp) * points_per_pip
-            if sl_dist_points > max_stop_points_scalp:
-                if reject_if_sl_over_cap:
-                    raise TradeExecutionError(
-                        f"SL dépasse max_stop_pips_scalp ({sl_dist_points:.2f} pts > {max_stop_points_scalp:.2f} pts)."
-                    )
-                sl_dist_points = max_stop_points_scalp
-
-        if math.isfinite(tp_hard_max_points) and tp_dist_points > tp_hard_max_points:
-            tp_dist_points = tp_hard_max_points
-
+        
         # C) ATR M1 minimal (si dispo)
         try:
             atr_df = (market_context.get("market_data_m1") or {}).get(
@@ -2161,15 +1903,7 @@ class TradeExecutor:
                 if isinstance(atr_df, pd.DataFrame)
                 else float("nan")
             )
-            if atr_m1 == atr_m1 and atr_m1 > 0:
-                atr_m1_pips = atr_m1 / pip_size
-                if hard_min_atr_m1_pips > 0 and atr_m1_pips < hard_min_atr_m1_pips:
-                    raise TradeExecutionError(
-                        f"ATR M1 trop faible ({atr_m1_pips:.3f} pips < hard_min {hard_min_atr_m1_pips:.3f})."
-                    )
-                if min_atr_m1_pips > 0 and atr_m1_pips < min_atr_m1_pips:
-                    sl_dist_points = max(sl_dist_points, min_stop_distance_points)
-                    tp_dist_points = max(tp_dist_points, min_stop_distance_points)
+          
         except Exception:
             pass
 
@@ -2179,6 +1913,37 @@ class TradeExecutor:
             tp_pips_now = tp_dist_points / points_per_pip
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
+                
+                     # ========================= Burst Scalping (optionnel) =========================
+        burst_cfg = (config.get("burst_scalping") or {}) if isinstance(config, dict) else {}
+        if trade_decision.get("rule_name") == "burst_scalping" or burst_cfg.get("enabled", False):
+            burst_size = int(trade_decision.get("burst_size") or burst_cfg.get("burst_size", 3))
+            sl_pips_burst = float(trade_decision.get("burst_sl_pips") or burst_cfg.get("sl_pips", 5.0))
+            tp_pips_burst = float(trade_decision.get("burst_tp_pips") or burst_cfg.get("tp_pips", 8.0))
+
+            sl_dist_price = sl_pips_burst * pip_size
+            tp_dist_price = tp_pips_burst * pip_size
+
+            stop_loss_price = (
+                entry_price - sl_dist_price if action == "BUY" else entry_price + sl_dist_price
+            )
+            take_profit_price = (
+                entry_price + tp_dist_price if action == "BUY" else entry_price - tp_dist_price
+            )
+
+            # Génération de TP multiples si besoin
+            trade_decision["burst_tp_prices"] = [take_profit_price for _ in range(burst_size)]
+            trade_decision["burst_sl_price"] = stop_loss_price
+            trade_decision["burst_enabled"] = True
+
+            self.logger.info(
+                f"[BURST] SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} pour {burst_size} ordres"
+            )
+
+            stop_loss_price = round(float(stop_loss_price), digits)
+            take_profit_price = round(float(take_profit_price), digits)
+            return float(stop_loss_price), float(take_profit_price)
+   
 
         # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
@@ -2194,12 +1959,122 @@ class TradeExecutor:
             else (entry_price - tp_dist_price)
         )
 
-        if abs(stop_loss_price - take_profit_price) < max(point * 2, 1e-12):
-            raise TradeExecutionError("SL et TP trop proches après ajustements Katana.")
-
+        
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
+    
+    def _attach_burst_metadata(self, trade_decision: dict) -> dict:
+        """
+        Attache des métadonnées de burst (basket_id, horodatage, etc.)
+        à une décision de trade unique.
+        """
+        import time, uuid
+        if not trade_decision:
+            return trade_decision
+
+        basket_id = trade_decision.get("basket_id") or f"burst_{uuid.uuid4().hex[:8]}"
+        trade_decision["basket_id"] = basket_id
+        trade_decision["burst_timestamp"] = int(time.time())
+        trade_decision.setdefault("meta", {})["burst"] = True
+
+        return trade_decision
+
+    def close_burst_basket(self, basket_id: str):
+        """
+        Ferme immédiatement toutes les positions appartenant à un même burst basket_id.
+        """
+        if not basket_id:
+            self.logger.warning("close_burst_basket appelé sans basket_id")
+            return
+
+        open_positions = getattr(self, "mt5_connector", None).get_open_positions()
+        if not open_positions:
+            self.logger.info(f"Aucune position ouverte pour le basket {basket_id}")
+            return
+
+        basket_positions = [
+            pos for pos in open_positions if pos.get("basket_id") == basket_id
+        ]
+        if not basket_positions:
+            self.logger.info(f"Aucune position trouvée pour le basket {basket_id}")
+            return
+
+        for pos in basket_positions:
+            try:
+                self.logger.info(f"Clôture position burst {pos}")
+                self.mt5_connector.close_position(pos["ticket"])
+            except Exception as e:
+                self.logger.error(f"Erreur clôture position {pos}: {e}")
+
+    def monitor_burst_baskets(
+        self, max_loss_pips: float = 15.0, trail_trigger: float = 10.0, trail_step: float = 5.0
+    ):
+        """
+        Surveille tous les paniers burst en cours :
+        - Ferme le panier si perte > max_loss_pips
+        - Applique un trailing collectif :
+          * Break-even atteint dès trail_trigger
+          * Stop monte par paliers de trail_step/2
+        """
+        open_positions = getattr(self, "mt5_connector", None).get_open_positions()
+        if not open_positions:
+            return
+
+        baskets = {}
+        for pos in open_positions:
+            if pos.get("meta", {}).get("burst"):
+                bid = pos.get("basket_id")
+                baskets.setdefault(bid, []).append(pos)
+
+        for basket_id, positions in baskets.items():
+            try:
+                entry_prices = [p["entry_price"] for p in positions if "entry_price" in p]
+                current_prices = [p["current_price"] for p in positions if "current_price" in p]
+
+                if not entry_prices or not current_prices:
+                    continue
+
+                direction = positions[0]["action"]
+                pip_size = float(positions[0].get("pip_size", 0.01))
+
+                avg_entry = sum(entry_prices) / len(entry_prices)
+                avg_price = sum(current_prices) / len(current_prices)
+
+                pnl_pips = (
+                    (avg_price - avg_entry) / pip_size if direction == "BUY"
+                    else (avg_entry - avg_price) / pip_size
+                )
+
+                # --- STOP PERTE COLLECTIF ---
+                if pnl_pips <= -abs(max_loss_pips):
+                    self.logger.warning(f"❌ Burst {basket_id} atteint perte max {pnl_pips:.1f}p → fermeture immédiate.")
+                    self.close_burst_basket(basket_id)
+                    continue
+
+                # --- TRAILING COLLECTIF ---
+                trail_state = positions[0].get("meta", {}).get("burst_trail", {})
+                last_trail = trail_state.get("stop_level_pips", 0.0)
+
+                if pnl_pips >= trail_trigger:
+                    new_trail = max(last_trail, 0.0)  # break-even
+                    extra_gain = pnl_pips - trail_trigger
+                    steps = int(extra_gain // trail_step)
+                    new_trail = trail_trigger / 2.0 + (steps * trail_step / 2.0)
+
+                    if new_trail > last_trail:
+                        self.logger.info(f"📈 Burst {basket_id} trailing relevé: {new_trail:.1f}p (gain actuel {pnl_pips:.1f}p)")
+                        for pos in positions:
+                            pos.setdefault("meta", {})["burst_trail"] = {"stop_level_pips": new_trail}
+
+                    if pnl_pips <= new_trail:
+                        self.logger.warning(f"🔒 Burst {basket_id} stop collectif touché ({new_trail:.1f}p) → fermeture.")
+                        self.close_burst_basket(basket_id)
+
+            except Exception as e:
+                self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
+
+
 
     def _calculate_risk_based_volume(
         self,
@@ -2984,19 +2859,6 @@ class TradeExecutor:
             or trade_decision.get("rr_effective")
         )
 
-        extra_tag_parts = []
-        if "katana" in rule_name.lower():
-            extra_tag_parts.append("katana")
-        if "midline" in level_mode.lower() or "midline" in rule_name.lower():
-            extra_tag_parts.append("mid")
-        if isinstance(rr_proj, (int, float)) and rr_proj > 0:
-            extra_tag_parts.append(f"RR{float(rr_proj):.1f}")
-
-        comment = comment_tpl.format(strategy=strategy_tag, order_type=order_type_str)
-        if extra_tag_parts:
-            comment = f"{comment}|{'-'.join(extra_tag_parts)}"
-        request["comment"] = comment[:max_len]
-
         # --- Defaults ---
         request.setdefault(
             "action",
@@ -3006,7 +2868,6 @@ class TradeExecutor:
 
         # --- Compliance & audit (pour nos logs, ignoré par MT5) ---
         request["_meta_rule_name"] = rule_name
-        request["_meta_level_mode"] = level_mode
         request["_meta_action"] = action_str
         request["_meta_rr"] = rr_proj
         request["_meta_stops_level_points"] = stops_lvl_points
@@ -3016,7 +2877,6 @@ class TradeExecutor:
             "direction_ok": True,
             "stops_ok": True,
             "price_digits_ok": True,
-            "midline_strict": (level_mode.lower() == "boll_midline_strict"),
             "order_type": order_type_str,
         }
 

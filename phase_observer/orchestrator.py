@@ -27,7 +27,7 @@ from .types import (
     MarketFeatures,
     PhaseMemory,
 )
-from .validators import calculate_confidence_score
+
 from .features import FeaturesExtractor  # ✅ on importe la classe, plus les fonctions
 from .detectors import Detectors
 from reporter import PhaseObserverReporter
@@ -107,18 +107,15 @@ class PhaseObserver:
         )
 
     def calculate_optimized_confidence(self, row) -> float:
-        """Score de confiance unifié (core + confluence + Bollinger + bougies + qualité + lissage mémoire)."""
+        
+        """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
 
         # --- 1) Lecture config ---
         try:
             cfg = (
                 self.config_manager.get("confidence_score_calculation", None)
-                or self.config_manager.get(
-                    "phase_detection_defaults.confidence_score_calculation", None
-                )
-                or self.config_manager.get(
-                    "phase_detection_defaults.confidence_scoring", None
-                )
+                or self.config_manager.get("phase_detection_defaults.confidence_score_calculation", None)
+                or self.config_manager.get("phase_detection_defaults.confidence_scoring", None)
                 or {}
             )
             cfg_path_used = "config_loaded"
@@ -130,34 +127,18 @@ class PhaseObserver:
         if not isinstance(signal_weights, dict):
             weights = cfg.get("weights", {})
             signal_weights = {
-                "fvg_detected": float(
-                    weights.get("fvg", weights.get("fvg_detected", 0.25))
-                ),
-                "ob_detected": float(
-                    weights.get("ob", weights.get("ob_detected", 0.35))
-                ),
-                "bos_mss_detected": float(
-                    weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))
-                ),
-                "regime_alignment": float(
-                    weights.get("regime", weights.get("regime_alignment", 0.15))
-                ),
-                "candle_pattern": 0.15,  # 🔥 Ajout poids bougies
+                "fvg_detected": float(weights.get("fvg", weights.get("fvg_detected", 0.25))),
+                "ob_detected": float(weights.get("ob", weights.get("ob_detected", 0.35))),
+                "bos_mss_detected": float(weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))),
+                "regime_alignment": float(weights.get("regime", weights.get("regime_alignment", 0.15))),
+                "candle_pattern": 0.15,
             }
 
-        confluence_bonus = cfg.get("confluence_bonus", cfg.get("confluence", {})) or {}
-        quality_multipliers = (
-            cfg.get("quality_factors", cfg.get("quality_multipliers", {})) or {}
-        )
-
-        boll_weights = cfg.get("bollinger_weights") or {}
-        boll_mean_revert_w = float(boll_weights.get("mean_revert_score", 0.10))
-        boll_breakout_w = float(boll_weights.get("breakout_score", 0.10))
-        boll_squeeze_bonus = float(boll_weights.get("squeeze_bonus", 0.05))
-        boll_expansion_bonus = float(boll_weights.get("expansion_bonus", 0.05))
+        confluence_bonus    = cfg.get("confluence_bonus", cfg.get("confluence", {})) or {}
+        quality_multipliers = cfg.get("quality_factors", cfg.get("quality_multipliers", {})) or {}
 
         base_confidence = float(cfg.get("base_confidence", cfg.get("base", 0.2)))
-        max_confidence = float(cfg.get("max_confidence_cap", cfg.get("cap", 0.95)))
+        max_confidence  = float(cfg.get("max_confidence_cap", cfg.get("cap", 0.95)))
 
         # --- 3) Score de base ---
         score = float(base_confidence)
@@ -173,154 +154,78 @@ class PhaseObserver:
         if regime_strength > 0.7:
             score += signal_weights.get("regime_alignment", 0.15)
 
-        # --- 3bis) Liquidity-specific signals ---
+        # --- 3bis) Signaux spécifiques liquidity ---
         if bool(row.get("sweep_detected", False)):
             score += float(cfg.get("liquidity_weights", {}).get("sweep_detected", 0.35))
         if bool(row.get("absorption_confirmed", False)):
-            score += float(
-                cfg.get("liquidity_weights", {}).get("absorption_confirmed", 0.25)
-            )
+            score += float(cfg.get("liquidity_weights", {}).get("absorption_confirmed", 0.25))
         if bool(row.get("eqh_eql_detected", False)):
-            score += float(
-                cfg.get("liquidity_weights", {}).get("eqh_eql_detected", 0.20)
-            )
+            score += float(cfg.get("liquidity_weights", {}).get("eqh_eql_detected", 0.20))
 
         # --- 4) Bonus confluence ---
         if bool(row.get("fvg_ob_confluence", False)):
             score += confluence_bonus.get("fvg_ob_confluence", 0.15)
-        if bool(row.get("high_quality_ob", False)) and bool(
-            row.get("bos_mss_detected", False)
-        ):
+        if bool(row.get("high_quality_ob", False)) and bool(row.get("bos_mss_detected", False)):
             score += confluence_bonus.get("ob_bos_confluence", 0.10)
         if bool(row.get("institutional_setup", False)):
             score += confluence_bonus.get("full_confluence_bonus", 0.20)
 
-        # --- 5) Bougies (corrigé & enrichi) ---
-        candle_type = str(row.get("candle_pattern", "")).lower()
+        # --- 5) Bougies ---
+        candle_type  = str(row.get("candle_pattern", "")).lower()
         candle_score = float(row.get("candle_pattern_strength", 0.0) or 0.0)
-
         if candle_score > 0:
-            # Bonus de base
-            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(
-                1.0, candle_score
-            )
-
-            # Pondération selon le type de pattern
-            if candle_type in {
-                "bullish_engulfing",
-                "morning_star",
-                "three_white_soldiers",
-            }:
-                score += base_bonus * 1.3  # patterns haussiers forts
-            elif candle_type in {
-                "bearish_engulfing",
-                "evening_star",
-                "three_black_crows",
-            }:
-                score += base_bonus * 1.3  # patterns baissiers forts
+            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(1.0, candle_score)
+            if candle_type in {"bullish_engulfing", "morning_star", "three_white_soldiers"}:
+                score += base_bonus * 1.3
+            elif candle_type in {"bearish_engulfing", "evening_star", "three_black_crows"}:
+                score += base_bonus * 1.3
             elif candle_type in {"doji", "doji_cluster_consolidation"}:
-                score += base_bonus * 0.7  # neutre ou incertain
-            elif candle_type in {
-                "hammer",
-                "shooting_star",
-                "bullish_pinbar",
-                "bearish_pinbar",
-            }:
-                score += base_bonus * 1.0  # patterns de retournement modérés
+                score += base_bonus * 0.7
+            elif candle_type in {"hammer", "shooting_star", "bullish_pinbar", "bearish_pinbar"}:
+                score += base_bonus * 1.0
             else:
-                score += base_bonus  # par défaut
+                score += base_bonus
 
-        # --- 6) Bollinger (corrigé & enrichi) ---
-        try:
-            boll_revert = float(row.get("boll_mean_revert_score", 0.0) or 0.0)
-            boll_break = float(row.get("boll_breakout_score", 0.0) or 0.0)
-            boll_sig = (row.get("boll_signal") or "").strip().lower()
-            is_squeeze = bool(row.get("boll_is_squeeze", False))
-            is_expansion = bool(row.get("boll_is_expansion", False))
-            mid_dist = float(row.get("boll_mid_distance_ratio", 0.0) or 0.0)
-
-            regime = str(row.get("regime", "unknown") or "unknown").lower()
-            in_range_regime = ("range_" in regime) or ("low_volatility" in regime)
-            in_trend_regime = ("trending" in regime) or ("impulse" in regime)
-
-            # 🎯 Revert (retour vers la médiane)
-            if boll_revert > 0:
-                local_w = boll_mean_revert_w * (1.2 if in_range_regime else 0.9)
-                score += local_w * min(1.0, boll_revert)
-
-            # 🎯 Breakout (sortie des bandes)
-            if boll_break > 0:
-                local_w = boll_breakout_w * (1.3 if in_trend_regime else 1.0)
-                score += local_w * min(1.0, boll_break)
-
-            # 🔒 Distance midline : si trop proche → moins fiable
-            if mid_dist < 0.1:
-                score *= 0.9
-            elif mid_dist > 0.4:
-                score *= 1.05
-
-            # ⚡ Bonus squeeze (range actif prêt à exploser)
-            if is_squeeze and in_range_regime:
-                score += boll_squeeze_bonus
-
-            # ⚡ Bonus expansion (confirmation d’impulsion)
-            if is_expansion and in_trend_regime:
-                score += boll_expansion_bonus
-
-            # Signal explicite
-            if boll_sig in {"buy_breakout", "sell_breakout"} and in_trend_regime:
-                score += min(0.05, boll_break * 0.05)
-            elif boll_sig in {"buy_revert", "sell_revert"} and in_range_regime:
-                score += min(0.05, boll_revert * 0.05)
-        except Exception:
-            pass
-
-        # --- 7) Multiplicateurs qualité ---
+        # --- 6) Multiplicateurs qualité ---
         if bool(row.get("is_liquid", True)):
             score *= quality_multipliers.get("tight_spread", 1.05)
         if regime_strength > 0.8:
             score *= quality_multipliers.get("regime_strength", 1.10)
 
         try:
-            ob_details = row.get("ob_details")
+            ob_details  = row.get("ob_details")
             bos_details = row.get("bos_mss_details")
-            if (
-                isinstance(ob_details, dict)
-                and float(ob_details.get("volume_spike", 0) or 0) > 1.5
-            ):
+            if isinstance(ob_details, dict) and float(ob_details.get("volume_spike", 0) or 0) > 1.5:
                 score *= quality_multipliers.get("high_volume_confirmation", 1.15)
-            elif (
-                isinstance(bos_details, dict)
-                and float(bos_details.get("volume_ratio", 0) or 0) > 1.5
-            ):
+            elif isinstance(bos_details, dict) and float(bos_details.get("volume_ratio", 0) or 0) > 1.5:
                 score *= quality_multipliers.get("high_volume_confirmation", 1.15)
         except Exception:
             pass
 
-        # --- 8) Normalisation dynamique ---
+        # --- 7) Normalisation dynamique ---
         score = max(0.0, min(max_confidence, score))
 
-        # --- 9) EMA smoothing avec mémoire ---
+        # --- 8) EMA smoothing avec mémoire ---
         try:
             prev_conf = getattr(self.memory, "last_confidence", None)
             if prev_conf is not None:
-                alpha = 0.3  # vitesse de lissage
+                alpha = 0.3
                 score = (alpha * score) + ((1 - alpha) * prev_conf)
             self.memory.last_confidence = score
         except Exception:
             pass
 
-        # --- 10) Logging debug ---
+        # --- 9) Logging debug ---
         if getattr(self, "debug_confidence_logging", False):
             try:
                 self.logger.debug(
-                    f"[CONF] path='{cfg_path_used}' score={score:.3f} "
-                    f"| signals={signal_weights} | confluence={confluence_bonus} | candle={candle_score}"
+                    f"[CONF-clean] path='{cfg_path_used}' score={score:.3f} | candle={candle_score}"
                 )
             except Exception:
                 pass
 
         return score
+
 
     def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
         """
@@ -588,116 +493,6 @@ class PhaseObserver:
                         df_an["candle_pattern"] = None
                         df_an["candle_pattern_score"] = 0.0
 
-            # === (NOUVEAU) MICROPHASES BOLLINGER ===
-            if toggles.get("detect_bollinger", True):
-                try:
-                    # init cols
-                    init_cols = [
-                        ("boll_signal", None),
-                        ("boll_band_touch", None),
-                        ("boll_in_band", np.nan),
-                        ("boll_is_squeeze", np.nan),
-                        ("boll_is_expansion", np.nan),
-                        ("boll_breakout_score", np.nan),
-                        ("boll_mean_revert_score", np.nan),
-                        ("boll_z_band", np.nan),
-                        ("boll_dist_to_upper_pips", np.nan),
-                        ("boll_dist_to_lower_pips", np.nan),
-                        ("boll_dist_to_mid_pips", np.nan),
-                        ("boll_bb_upper", np.nan),
-                        ("boll_bb_lower", np.nan),
-                        ("boll_bb_mid", np.nan),
-                        ("boll_atr_pips", np.nan),
-                    ]
-                    for col, default in init_cols:
-                        if col not in df_an.columns:
-                            df_an[col] = default
-
-                    pip_size = None
-                    try:
-                        if "point" in df_an.columns:
-                            point_val = float(df_an["point"].iloc[-1])
-                            pip_size = point_val * 10.0 if point_val > 0 else None
-                    except Exception:
-                        pip_size = None
-
-                    boll = self.detectors.compute_bollinger_microphase_signals(
-                        df_an,
-                        price_col="close",
-                        period=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.period", 20
-                            )
-                        ),
-                        std_mult=float(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.std_mult", 2.0
-                            )
-                        ),
-                        squeeze_window=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.squeeze_window", 100
-                            )
-                        ),
-                        squeeze_percentile=float(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.squeeze_percentile",
-                                0.15,
-                            )
-                        ),
-                        min_bars=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.min_bars", 200
-                            )
-                        ),
-                        atr_period=int(
-                            self.config_manager.get(
-                                "phase_detection_defaults.bollinger.atr_period", 14
-                            )
-                        ),
-                        pip_size=pip_size,
-                        mode="katana",
-                    )
-
-                    if isinstance(boll, dict) and boll.get("ok", False):
-                        idx = df_an.index[-1]
-                        for k, v in {
-                            "boll_signal": boll.get("signal"),
-                            "boll_band_touch": boll.get("band_touch"),
-                            "boll_in_band": float(bool(boll.get("in_band"))),
-                            "boll_is_squeeze": float(bool(boll.get("is_squeeze"))),
-                            "boll_is_expansion": float(bool(boll.get("is_expansion"))),
-                            "boll_breakout_score": float(
-                                boll.get("breakout_score", np.nan)
-                            ),
-                            "boll_mean_revert_score": float(
-                                boll.get("mean_revert_score", np.nan)
-                            ),
-                            "boll_z_band": (
-                                float(boll.get("z_band"))
-                                if boll.get("z_band") is not None
-                                else np.nan
-                            ),
-                            "boll_dist_to_upper_pips": float(
-                                boll.get("dist_to_upper_pips", np.nan)
-                            ),
-                            "boll_dist_to_lower_pips": float(
-                                boll.get("dist_to_lower_pips", np.nan)
-                            ),
-                            "boll_dist_to_mid_pips": float(
-                                boll.get("dist_to_mid_pips", np.nan)
-                            ),
-                            "boll_bb_upper": float(boll.get("bb_upper", np.nan)),
-                            "boll_bb_lower": float(boll.get("bb_lower", np.nan)),
-                            "boll_bb_mid": float(boll.get("bb_mid", np.nan)),
-                            "boll_atr_pips": float(boll.get("atr_pips", np.nan)),
-                        }.items():
-                            df_an.loc[idx, k] = v
-                except Exception as e:
-                    self.logger.warning(
-                        f"[{current_asset_symbol}] Erreur compute_bollinger_microphase_signals: {e}",
-                        exc_info=False,
-                    )
 
             # === PHASE 3: LIQUIDITÉ ===
             try:
@@ -939,6 +734,34 @@ class PhaseObserver:
                 )
                 df_an["eqh_eql_details"] = None
                 df_an["eqh_eql_detected"] = False
+                
+                # === PHASE 4bis: MICRO-PHASE BURST SCALPING ===
+            try:
+                if hasattr(self.detectors, "detect_micro_phase_m1"):
+                    micro = self.detectors.detect_micro_phase_m1(df_an)
+                    if micro and isinstance(micro, dict):
+                        df_an["burst_signal"] = bool(micro.get("burst_signal", False))
+                        df_an["burst_side"] = str(micro.get("burst_side", "NEUTRAL"))
+                        df_an["burst_strength"] = float(micro.get("burst_strength", 0.0))
+                        df_an["suggested_burst_size"] = int(micro.get("suggested_burst_size", 0))
+                        df_an["burst_sl_pips"] = micro.get("sl_pips_suggestion")
+                        df_an["burst_tp_pips"] = micro.get("tp_pips_suggestion")
+                    else:
+                        df_an["burst_signal"] = False
+                        df_an["burst_side"] = "NEUTRAL"
+                        df_an["burst_strength"] = 0.0
+                        df_an["suggested_burst_size"] = 0
+                        df_an["burst_sl_pips"] = None
+                        df_an["burst_tp_pips"] = None
+            except Exception as e:
+                self.logger.warning(f"[{current_asset_symbol}] Erreur detect_micro_phase_m1: {e}")
+                df_an["burst_signal"] = False
+                df_an["burst_side"] = "NEUTRAL"
+                df_an["burst_strength"] = 0.0
+                df_an["suggested_burst_size"] = 0
+                df_an["burst_sl_pips"] = None
+                df_an["burst_tp_pips"] = None
+
 
             # === PHASE 5: PHASE PRIMAIRE ===
             df_an["phase_primary"] = df_an.apply(
@@ -965,21 +788,7 @@ class PhaseObserver:
 
             # === PHASE 7bis: STRATEGY FLAGS ===
             try:
-                # 1) Scalping OK si range plat (inchangé)
-                df_an["scalping_ok"] = (
-                    (
-                        (df_an["boll_is_expansion"] == 0)
-                        & (df_an["boll_is_squeeze"] == 0)
-                        & (df_an["volatility_pct"] < 0.1)
-                    )
-                    if (
-                        "boll_is_expansion" in df_an
-                        and "boll_is_squeeze" in df_an
-                        and "volatility_pct" in df_an
-                    )
-                    else False
-                )
-
+              
                 # 2) Switch Liquidity dès qu'une zone est identifiée (sweep ou absorption)
                 has_sweep = (
                     bool(df_an["sweep_detected"].iloc[-1])
@@ -1013,10 +822,7 @@ class PhaseObserver:
                     df_an["mtf_bias_aligned"] = False
 
                 # Logs explicites
-                if bool(df_an["scalping_ok"].iloc[-1]):
-                    self.logger.info(
-                        f"[{current_asset_symbol}] ✅ Scalping activé (range plat)."
-                    )
+              
                 if bool(df_an["switch_to_liquidity"].iloc[-1]):
                     self.logger.info(
                         f"[{current_asset_symbol}] ⚡ Zone de liquidité détectée → Switch Liquidity."
@@ -1075,8 +881,9 @@ class PhaseObserver:
                 if "candle_pattern" in df_an.columns:
                     last_candle = str(df_an["candle_pattern"].iloc[-1])
                     last_candle_strength = float(
-                        df_an.get("candle_pattern_strength", [0.0])[-1]
-                    )
+                    df_an.get("candle_pattern_score", [0.0])[-1]
+                )
+
                     if last_candle and last_candle != "None":
                         self.logger.info(
                             f"🕯️ [{current_asset_symbol}] Dernier pattern détecté: {last_candle} "
@@ -1457,466 +1264,7 @@ class PhaseObserver:
         )
         return final_signals
 
-    def get_katana_snapshot(self, asset: str, strategy_config: dict) -> dict:
-        """
-        Snapshot micro-décisionnel prêt pour le pipeline (M1 dirigé par BOS/MSS, alignement M5/M15,
-        SL/TP structurels, spread/liquidité, score final, katana_ready).
-
-        Version "desk banque privée" : contrôles renforcés, gates explicites, scoring stable, logs propres.
-        Signature conservée à l’identique.
-        """
-        # =========================
-        # 0) CONFIGS & GUARDRAILS
-        # =========================
-        pd_cfg = (
-            (strategy_config.get("phase_detection") or {})
-            if isinstance(strategy_config, dict)
-            else {}
-        )
-        mtf_cfg = pd_cfg.get("multi_timeframe") or {}
-        kat_cfg = pd_cfg.get("katana") or {}
-
-        # Paramètres Katana (défauts prudents)
-        max_age_sec = int(kat_cfg.get("max_signal_age_seconds", 30) or 30)
-        max_bos_age_bars = int(kat_cfg.get("max_bos_age_bars", 3) or 3)
-        min_atr_m1_pips = float(kat_cfg.get("min_atr_m1_pips", 0.60) or 0.60)
-        hard_min_atr_m1_pips = float(kat_cfg.get("hard_min_atr_m1_pips", 0.12) or 0.12)
-        min_final_score = float(kat_cfg.get("min_final_score", 0.55) or 0.55)
-        min_rr_required = float(kat_cfg.get("min_rr_required", 1.20) or 1.20)
-
-        # Poids score final
-        score_weights = kat_cfg.get("score_weights", {"mtf": 0.6, "m1": 0.4})
-        w_mtf = float(score_weights.get("mtf", 0.6))
-        w_m1 = float(score_weights.get("m1", 0.4))
-
-        # Bonus / pénalités
-        htf_alignment_bonus = float(kat_cfg.get("htf_alignment_bonus", 0.15) or 0.15)
-        atr_low_penalty = float(kat_cfg.get("atr_low_penalty", -0.10) or -0.10)
-        spread_penalty = float(kat_cfg.get("spread_penalty", -0.05) or -0.05)
-
-        points_per_pip = 10.0  # standard FX
-
-        # ===============================
-        # 1) ANALYSE MTF (confluence HTF)
-        # ===============================
-        mtf = (
-            self.analyze_asset_multi_timeframe(asset, strategy_config)
-            if hasattr(self, "analyze_asset_multi_timeframe")
-            else {}
-        )
-        if not mtf or not mtf.get("multi_tf_enabled", False):
-            return {"katana_ready": False, "reason": "insufficient_confluence"}
-
-        # =======================================
-        # 2) ACQUISITION & ANALYSE M1 FRAÎCHE
-        # =======================================
-        m1_raw = (
-            self._fetch_timeframe_data(asset, "M1", mtf_cfg)
-            if hasattr(self, "_fetch_timeframe_data")
-            else None
-        )
-        m1_df = self.analyze(m1_raw, asset_symbol=asset) if m1_raw is not None else None
-        if m1_df is None or m1_df.empty:
-            return {"katana_ready": False, "reason": "m1_analysis_failed"}
-
-        last = m1_df.iloc[-1]
-
-        # Fraîcheur du signal
-
-        now = datetime.now(timezone.utc)
-        ts_col = None
-        for c in ("timestamp", "time", "datetime", "ts"):
-            if c in m1_df.columns:
-                ts_col = c
-                break
-        if ts_col:
-            try:
-                last_ts = last[ts_col]
-                if hasattr(last_ts, "to_pydatetime"):
-                    last_dt = last_ts.to_pydatetime()
-                elif isinstance(last_ts, (int, float)) and last_ts > 1e9:
-                    last_dt = datetime.fromtimestamp(
-                        float(last_ts) / 1000.0, tz=timezone.utc
-                    )
-                elif isinstance(last_ts, (int, float)):
-                    last_dt = datetime.fromtimestamp(float(last_ts), tz=timezone.utc)
-                else:
-                    last_dt = datetime.fromisoformat(str(last_ts))
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                age_sec = (now - last_dt).total_seconds()
-                if age_sec > max_age_sec:
-                    return {
-                        "katana_ready": False,
-                        "reason": f"stale_m1_bar_{int(age_sec)}s",
-                    }
-            except Exception:
-                # si on ne peut pas déterminer l'âge, on ne bloque pas ici
-                pass
-
-        # ====================================================
-        # 3) DIRECTION M1 (BOS/MSS) + ÂGE DU BREAK EN BARRES
-        # ====================================================
-        side, break_ok = self._extract_m1_break_direction(last)
-        if side is None or not break_ok:
-            return {"katana_ready": False, "reason": "no_m1_break"}
-
-        bos_age_bars = None
-        # 3.a) colonnes dédiées si présentes
-        for k in ("bos_mss_age_bars", "m1_break_age_bars", "break_age"):
-            if k in m1_df.columns:
-                try:
-                    bos_age_bars = int(m1_df[k].iloc[-1])
-                    break
-                except Exception:
-                    pass
-        # 3.b) fallback: cherche le dernier index avec bos_mss_detected True ou bos_mss_details non-nul
-        if bos_age_bars is None:
-            try:
-                if "bos_mss_detected" in m1_df.columns:
-                    idx_last_break = m1_df.index[m1_df["bos_mss_detected"]].max()
-                elif "bos_mss_details" in m1_df.columns:
-                    idx_last_break = m1_df["bos_mss_details"].last_valid_index()
-                else:
-                    idx_last_break = None
-                if idx_last_break is not None:
-                    bos_age_bars = int(
-                        len(m1_df) - 1 - m1_df.index.get_loc(idx_last_break)
-                    )
-            except Exception:
-                bos_age_bars = None
-
-        if bos_age_bars is not None and bos_age_bars > max_bos_age_bars:
-            return {"katana_ready": False, "reason": f"stale_break_{bos_age_bars}bars"}
-
-        # ==========================================
-        # 4) ALIGNEMENT HTF (M5/M15) SUR LA PHASE
-        # ==========================================
-        phase = str(mtf.get("phase", "unknown") or "unknown").lower()
-        htf_alignment_ok = (side == "BUY" and ("bull" in phase or "up" in phase)) or (
-            side == "SELL" and ("bear" in phase or "down" in phase)
-        )
-
-        # ===================================
-        # 5) GATE LIQUIDITÉ / SPREAD / VOLUME
-        # ===================================
-        # Déduction de la classe d’actif (indices vs forex) pour seuils par défaut
-        try:
-            indices_symbols = (
-                set(
-                    self.config_manager.get(
-                        "global_safety.indices_symbols", ["US30", "NAS100"]
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else {"US30", "NAS100"}
-            )
-        except Exception:
-            indices_symbols = {"US30", "NAS100"}
-        is_index = asset in indices_symbols
-
-        # Seuils (prennent la config si dispo)
-        if is_index:
-            max_spread_points = (
-                float(
-                    self.config_manager.get(
-                        "phase_detection_defaults.liquidity_detection.indices_settings.max_allowed_spread_points",
-                        50,
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else 50.0
-            )
-            min_volume_th = (
-                float(
-                    self.config_manager.get(
-                        "phase_detection_defaults.liquidity_detection.indices_settings.min_volume_threshold",
-                        10,
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else 10.0
-            )
-        else:
-            max_spread_points = (
-                float(
-                    self.config_manager.get(
-                        "phase_detection_defaults.liquidity_detection.forex_settings.max_allowed_spread_points",
-                        10,
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else 10.0
-            )
-            min_volume_th = (
-                float(
-                    self.config_manager.get(
-                        "phase_detection_defaults.liquidity_detection.forex_settings.min_volume_threshold",
-                        1,
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else 1.0
-            )
-
-        # Volume zscore minimal (si dispo)
-        try:
-            vol_z_min = (
-                float(
-                    self.config_manager.get(
-                        "phase_detection_defaults.regime_detection_settings.volume_profile.min_volume_zscore_for_scalp",
-                        1.2,
-                    )
-                )
-                if getattr(self, "config_manager", None)
-                else 1.2
-            )
-        except Exception:
-            vol_z_min = 1.2
-
-        # Valeurs dernières
-        last_spread = (
-            float(last["spread"])
-            if "spread" in m1_df.columns and math.isfinite(last["spread"])
-            else float("inf")
-        )
-        last_volume = (
-            float(last["tick_volume"])
-            if "tick_volume" in m1_df.columns and math.isfinite(last["tick_volume"])
-            else 0.0
-        )
-        last_volz = (
-            float(last.get("volume_zscore", float("nan")))
-            if "volume_zscore" in m1_df.columns
-            else float("nan")
-        )
-
-        # Si pas de zscore présent, calcule rapide (fenêtre 50)
-        if not math.isfinite(last_volz):
-            try:
-                vol = m1_df["tick_volume"].astype(float)
-                mean50 = vol.rolling(50, min_periods=5).mean()
-                std50 = vol.rolling(50, min_periods=5).std(ddof=0).replace(0, math.nan)
-                last_volz = (
-                    float(((vol.iloc[-1] - mean50.iloc[-1]) / std50.iloc[-1]))
-                    if math.isfinite(std50.iloc[-1])
-                    else 0.0
-                )
-            except Exception:
-                last_volz = 0.0
-
-        spread_ok = last_spread <= max_spread_points
-        volume_ok = (last_volume >= min_volume_th) and (last_volz >= vol_z_min)
-
-        # ============================
-        # 6) ATR M1 (anti marchés morts)
-        # ============================
-        def _calc_atr(df_in: pd.DataFrame, period: int = 14) -> float:
-            if df_in is None or len(df_in) < period + 2:
-                return float("nan")
-            high = df_in["high"].astype(float)
-            low = df_in["low"].astype(float)
-            close = df_in["close"].astype(float)
-            prev_close = close.shift(1)
-            tr = np.maximum.reduce(
-                [
-                    (high - low).abs(),
-                    (high - prev_close).abs(),
-                    (low - prev_close).abs(),
-                ]
-            )
-            atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
-            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
-
-        if "atr14" in m1_df.columns and isinstance(
-            m1_df["atr14"].iloc[-1], (int, float)
-        ):
-            atr_m1 = float(m1_df["atr14"].iloc[-1])
-        else:
-            atr_m1 = _calc_atr(m1_df, 14)
-
-        # point -> pip_size
-        point = 0.0
-        try:
-            si = getattr(self, "symbol_info", None)
-            if si is not None and hasattr(si, "point"):
-                point = float(getattr(si, "point") or 0.0)
-            elif isinstance(si, dict):
-                point = float(si.get("point", 0.0) or 0.0)
-            if point <= 0 and "point" in m1_df.columns:
-                point = float(m1_df["point"].iloc[-1] or 0.0)
-        except Exception:
-            if "point" in m1_df.columns:
-                point = float(m1_df["point"].iloc[-1] or 0.0)
-
-        pip_size = point * points_per_pip if point > 0 else None
-        if pip_size and isinstance(atr_m1, float) and atr_m1 > 0:
-            atr_m1_pips = atr_m1 / pip_size
-            if atr_m1_pips < hard_min_atr_m1_pips:
-                return {
-                    "katana_ready": False,
-                    "reason": f"atr_m1_too_low_{atr_m1_pips:.3f}pips",
-                }
-            low_atr_flag = atr_m1_pips < min_atr_m1_pips
-        else:
-            atr_m1_pips = None
-            low_atr_flag = False  # inconnu => pas de pénalité dure
-
-        # ============================
-        # 7) PRIX D’ENTRÉE / SL / TP
-        # ============================
-        entry = float(last["close"])
-        sl = self._pick_sl_from_structure(last, side)
-        tp = self._pick_tp_from_nearest_liquidity(m1_df, side)
-
-        if sl is None or tp is None or not math.isfinite(entry) or entry <= 0:
-            return {"katana_ready": False, "reason": "invalid_prices"}
-
-        # R:R (reward/risk) + mesures en pips si possible
-        if side == "BUY":
-            risk = entry - float(sl)
-            reward = float(tp) - entry
-        else:
-            risk = float(sl) - entry
-            reward = entry - float(tp)
-
-        rr = float(reward / risk) if (risk is not None and risk > 0) else float("nan")
-
-        risk_pips = (risk / pip_size) if (pip_size and math.isfinite(risk)) else None
-        reward_pips = (
-            (reward / pip_size) if (pip_size and math.isfinite(reward)) else None
-        )
-
-        # ============================
-        # 8) SCORE FINAL & FLAGS
-        # ============================
-        conf_m1 = (
-            float(last.get("confidence_score", 0.0))
-            if "confidence_score" in m1_df.columns
-            else 0.0
-        )
-        conf_mtf = float(mtf.get("confidence_score", 0.0))
-
-        katana_score = (w_mtf * conf_mtf) + (w_m1 * conf_m1)
-        if htf_alignment_ok:
-            katana_score += htf_alignment_bonus
-        if low_atr_flag:
-            katana_score += atr_low_penalty
-        if not spread_ok:
-            katana_score += spread_penalty
-
-        # clamp
-        katana_score = round(max(0.0, min(0.98, katana_score)), 3)
-
-        # ============================
-        # 9) MICRO-PHASE (optionnel)
-        # ============================
-        snapshot_signals = {}
-        try:
-            micro_cfg = self.config_manager.get("features.micro_phase", {}) or {}
-            if bool(micro_cfg.get("enabled", True)) and hasattr(
-                self, "detect_micro_phase_m1"
-            ):
-                hint = self.detect_micro_phase_m1(m1_df, params=micro_cfg.get("params"))
-                snapshot_signals["micro_phase_hint"] = hint
-                # petit boost si la direction micro confirme
-                try:
-                    if hint.get("micro_phase") and hint.get("confidence_boost", 0) > 0:
-                        if (side == "BUY" and hint.get("direction") == "BUY") or (
-                            side == "SELL" and hint.get("direction") == "SELL"
-                        ):
-                            katana_score = min(
-                                0.98,
-                                float(katana_score) + float(hint["confidence_boost"]),
-                            )
-                except Exception:
-                    pass
-        except Exception as _e:
-            self.logger.debug(f"[{asset}] micro_phase hint non appliqué: {_e}")
-
-        # ======================================
-        # 10) DÉCISION TRADABLE & RAISONS CLAIRES
-        # ======================================
-        reasons = []
-        is_tradable = True
-
-        if not htf_alignment_ok:
-            is_tradable = False
-            reasons.append("htf_misaligned")
-
-        if not spread_ok:
-            is_tradable = False
-            reasons.append(f"spread_too_wide_{last_spread:.2f}>{max_spread_points}")
-
-        if not volume_ok:
-            is_tradable = False
-            reasons.append(f"volume_weak_vz{last_volz:.2f}<min{vol_z_min:.2f}")
-
-        if math.isnan(rr) or rr < min_rr_required:
-            is_tradable = False
-            reasons.append(
-                f"rr_too_low_{0 if math.isnan(rr) else round(rr,2)}<min{min_rr_required}"
-            )
-
-        if katana_score < min_final_score:
-            is_tradable = False
-            reasons.append(f"score_below_min_{katana_score:.2f}<min{min_final_score}")
-
-        # ============================
-        # 11) SNAPSHOT FINAL
-        # ============================
-        snapshot = {
-            "asset": asset,
-            "entry_side": side,  # "BUY" / "SELL"
-            "entry_price": entry,
-            "sl_price": float(sl),
-            "tp_price": float(tp),
-            "risk_reward": None if math.isnan(rr) else round(rr, 3),
-            "risk_pips": float(risk_pips) if risk_pips is not None else None,
-            "reward_pips": float(reward_pips) if reward_pips is not None else None,
-            "m1_break_ok": bool(break_ok),
-            "bos_age_bars": int(bos_age_bars) if bos_age_bars is not None else None,
-            "htf_alignment_ok": bool(htf_alignment_ok),
-            "spread_ok": bool(spread_ok),
-            "volume_ok": bool(volume_ok),
-            "atr_m1_pips": float(atr_m1_pips) if atr_m1_pips is not None else None,
-            "katana_score": float(katana_score),
-            "phase": mtf.get("phase"),
-            "dominant_tf": mtf.get("dominant_tf"),
-            "signal_agreement": mtf.get("signal_agreement_rates", {}),
-            "max_signal_age_seconds": max_age_sec,
-            "max_bos_age_bars": max_bos_age_bars,
-            "last_spread_points": (
-                float(last_spread) if math.isfinite(last_spread) else None
-            ),
-            "last_volume": float(last_volume),
-            "last_volume_zscore": float(last_volz),
-            "volatility_pct": (
-                float(last.get("volatility_pct", float("nan")))
-                if "volatility_pct" in m1_df.columns
-                else None
-            ),
-            "signals": snapshot_signals if snapshot_signals else None,
-            "reasons": reasons if reasons else None,
-        }
-
-        snapshot["katana_ready"] = all(
-            [
-                snapshot["m1_break_ok"],
-                snapshot["htf_alignment_ok"],
-                snapshot["spread_ok"],
-                snapshot["volume_ok"],
-                snapshot["sl_price"] is not None,
-                snapshot["tp_price"] is not None,
-                snapshot["katana_score"] >= min_final_score,
-                (
-                    snapshot["risk_reward"] is not None
-                    and snapshot["risk_reward"] >= min_rr_required
-                ),
-            ]
-        )
-
-        return snapshot
+  
 
     def process_multi_asset_config(self, config_filepath: Union[str, Path]):
         """
