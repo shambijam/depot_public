@@ -809,7 +809,7 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-                # Construire la requête via prepare_order
+               # --------- Construction des requêtes ---------
                 decision_package_for_executor: Dict[str, Any] = {
                     "trade_decision": final,
                     "active_config": decision_package.get("active_config", {}) or {},
@@ -817,48 +817,112 @@ def run_single_pipeline_cycle(
                 }
 
                 try:
-                    order_request = trade_executor.prepare_order(
-                        decision_package_for_executor
-                    )
+                    if final.get("rule_name") == "burst_scalping" or final.get("burst_enabled", False):
+                        # === MODE BURST ===
+                        burst_size = int(final.get("burst_size", 3))
+                        trade_decision = trade_executor._attach_burst_metadata(final)
+                        
+                        # --- ✅ Contrôles Risk spécifiques BURST ---
+                        burst_cfg = (decision_package.get("active_config", {}) or {}).get("burst", {}) or {}
 
-                    # Normalisation du magic (entier non nul)
-                    try:
-                        if not order_request.get("magic"):
-                            magic_cfg = (
-                                decision_package.get("active_config", {}) or {}
-                            ).get("magic_number")
-                            if not magic_cfg:
-                                magic_cfg = (base_config.get("strategy", {}) or {}).get(
-                                    "magic_number", 51001
-                                )
-                            order_request["magic"] = int(magic_cfg)
-                        else:
-                            order_request["magic"] = int(order_request["magic"])
-                    except Exception:
-                        order_request["magic"] = 51001
+                        # Limite journalière
+                        max_burst_per_day = int(burst_cfg.get("max_burst_per_day", 5))
+                        burst_count_today = global_context.get("burst_count_today", 0)
 
-                except Exception as e:
-                    logger.error(f"[EXECUTOR] Échec prepare_order: {e}", exc_info=True)
-                    trade_executed_successfully = False
-                else:
-                    # DEMO/DRY : simulation pure + return immédiat
-                    if is_dry_run or execution_mode == "DEMO":
-                        if hasattr(trade_executor, "log_simulated_order"):
-                            trade_executor.log_simulated_order(order_request)
-                        else:
-                            logger.info(
-                                f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
+                        if burst_count_today >= max_burst_per_day:
+                            logger.warning(f"[BURST] Limite journalière atteinte ({max_burst_per_day}). Aucune exécution.")
+                            return False  # stop direct → pas de burst
+
+                        # Sécurité volume max (fat-finger)
+                        burst_cap_volume = float(burst_cfg.get("burst_cap_volume", 5.0))
+                        vol = final.get("volume")
+                        if isinstance(vol, (int, float)) and vol > burst_cap_volume:
+                            logger.warning(
+                                f"[BURST] Volume {vol} > cap sécurité {burst_cap_volume}. Utilisation du cap."
                             )
-                        trade_executed_successfully = True
-                        return trade_executed_successfully  # le finally s'exécutera quand même
+                            final["volume"] = burst_cap_volume
 
-                    # LIVE seulement
-                    try:
+                        # Incrémenter le compteur burst pour la journée
+                        global_context["burst_count_today"] = burst_count_today + 1
+
+
+                        requests = []
+                        for i in range(burst_size):
+                            req = trade_executor.prepare_order(
+                                {
+                                    "trade_decision": dict(trade_decision),
+                                    "market_context": global_context,
+                                    "active_config": decision_package.get("active_config", {}) or {},
+                                }
+                            )
+                            req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                            requests.append(req)
+
+                        # --- DEMO/DRY ---
+                        if is_dry_run or execution_mode == "DEMO":
+                            for r in requests:
+                                trade_executor.log_simulated_order(r)
+                            logger.info(
+                                f"[BURST] DEMO/DRY: {burst_size} ordres simulés pour {final.get('asset')}"
+                            )
+                            trade_executed_successfully = True
+                            return trade_executed_successfully
+
+                        # --- LIVE : exécution réelle ---
+                        results = [trade_executor.execute_order(r) for r in requests]
+                        logger.info(
+                            f"[BURST] {len(results)} ordres envoyés pour panier {trade_decision.get('basket_id')}"
+                        )
+                        trade_executed_successfully = all(
+                            str(res.get("status", "")).lower() in {"filled", "placed"}
+                            for res in results
+                        )
+
+                        # --- Monitoring burst baskets (chaque cycle) ---
+                        try:
+                            trade_executor.monitor_burst_baskets(
+                                max_loss_pips=base_config.get("burst", {}).get("max_loss_pips", 15.0),
+                                trail_trigger=base_config.get("burst", {}).get("trail_trigger", 10.0),
+                                trail_step=base_config.get("burst", {}).get("trail_step", 5.0),
+                            )
+                            logger.debug("[BURST] Surveillance baskets exécutée en fin de cycle.")
+                        except Exception as e:
+                            logger.error(f"[PIPELINE] Erreur surveillance burst: {e}")
+
+                        return trade_executed_successfully
+
+                    else:
+                        # === MODE STANDARD ===
+                        order_request = trade_executor.prepare_order(decision_package_for_executor)
+
+                        # Normalisation du magic (entier non nul)
+                        try:
+                            if not order_request.get("magic"):
+                                magic_cfg = (decision_package.get("active_config", {}) or {}).get(
+                                    "magic_number"
+                                )
+                                if not magic_cfg:
+                                    magic_cfg = (base_config.get("strategy", {}) or {}).get(
+                                        "magic_number", 51001
+                                    )
+                                order_request["magic"] = int(magic_cfg)
+                            else:
+                                order_request["magic"] = int(order_request["magic"])
+                        except Exception:
+                            order_request["magic"] = 51001
+
+                        # --- DEMO/DRY ---
+                        if is_dry_run or execution_mode == "DEMO":
+                            if hasattr(trade_executor, "log_simulated_order"):
+                                trade_executor.log_simulated_order(order_request)
+                            else:
+                                logger.info(f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}")
+                            trade_executed_successfully = True
+                            return trade_executed_successfully
+
+                        # --- LIVE ---
                         exec_res = trade_executor.execute_order(order_request)
-                        status_ok = str(exec_res.get("status", "")).lower() in {
-                            "filled",
-                            "placed",
-                        }
+                        status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
                         if not status_ok:
                             raise RuntimeError(
                                 f"Statut exécution inattendu: {exec_res.get('status')}"
@@ -867,42 +931,54 @@ def run_single_pipeline_cycle(
                             f"[EXECUTOR] Ordre envoyé OK: ticket(order/deal)={exec_res.get('order') or exec_res.get('deal')}"
                         )
                         trade_executed_successfully = True
-                    except Exception as e:
-                        logger.error(
-                            f"[EXECUTOR] Échec exécution ordre: {e}", exc_info=True
-                        )
-                        trade_executed_successfully = False
+
+                        return trade_executed_successfully
+
+                except Exception as e:
+                    logger.error(f"[EXECUTOR] Erreur prepare/execute: {e}", exc_info=True)
+                    trade_executed_successfully = False
+
 
                     # (autres mises à jour de compteurs si besoin...)
 
-                    # ==========================================================
                     # 🔻 Vérification des EXIT Liquidity
-                    # ==========================================================
-                    try:
-                        current_positions = mt5_connector.get_open_positions()
-                        if current_positions:
-                            from strategy.liquidity import LiquidityStrategy
+                try:
+                    current_positions = mt5_connector.get_open_positions()
+                    if current_positions:
+                        from strategy.liquidity import LiquidityStrategy
 
-                            liqui = LiquidityStrategy(config_manager)
-                            exit_decisions = liqui.evaluate_exit(
-                                global_context, current_positions
+                        liqui = LiquidityStrategy(config_manager)
+                        exit_decisions = liqui.evaluate_exit(
+                            global_context, current_positions
+                        )
+
+                        if exit_decisions:
+                            trade_executor.execute_exit_orders(
+                                exit_decisions, is_dry_run=is_dry_run
+                            )
+                            logger.info(
+                                f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
+                            )
+                            print(
+                                f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
                             )
 
-                            if exit_decisions:
-                                trade_executor.execute_exit_orders(
-                                    exit_decisions, is_dry_run=is_dry_run
-                                )
-                                logger.info(
-                                    f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
-                                )
-                                print(
-                                    f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
-                                )
+                            # 🔒 Clôture des paniers burst si un exit liquidity touche un trade du panier
+                            try:
+                                for decision in exit_decisions:
+                                    if decision.get("basket_id") and decision.get("meta", {}).get("burst"):
+                                        trade_executor.close_burst_basket(decision["basket_id"])
+                                        logger.info(
+                                            f"[BURST] Panier {decision['basket_id']} fermé par EXIT Liquidity."
+                                        )
+                            except Exception as e:
+                                logger.error(f"[BURST] Erreur clôture burst via EXIT Liquidity: {e}")
 
-                    except Exception as e:
-                        logger.error(
-                            f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True
-                        )
+                except Exception as e:
+                    logger.error(
+                        f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True
+                    )
+
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
@@ -914,6 +990,7 @@ def run_single_pipeline_cycle(
             pass
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
+
 
 
 def main(args: argparse.Namespace) -> None:

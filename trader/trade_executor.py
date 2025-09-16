@@ -92,10 +92,10 @@ class TradeExecutor:
         self._last_reconciliation_time: Optional[datetime] = (
             None  # Initialisé à None pour plus de clarté
         )
-        
+
         self._burst = {
-        "baskets": {},   # basket_id -> meta
-        "by_order": {},  # order_id  -> basket_id
+            "baskets": {},  # basket_id -> meta
+            "by_order": {},  # order_id  -> basket_id
         }
 
         # Chargement dynamique des paramètres
@@ -1653,8 +1653,6 @@ class TradeExecutor:
                 "rr": 0,
                 "valid": False,
             }
-            
-            
 
     def _calculate_sl_tp_prices(
         self,
@@ -1700,7 +1698,6 @@ class TradeExecutor:
         tp_pips_override = trade_decision.get("target_tp_pips", None)
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-       
         # --- Paramètres SL/TP standards ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
         sl_method = str(
@@ -1723,7 +1720,6 @@ class TradeExecutor:
             st_tp.get("hard_max_points", float("inf")) or float("inf")
         )
 
-      
         # --- Market data pour SWING/ATR ---
         symbol = str(trade_decision.get("asset", "")).upper()
         md = (market_context.get("market_data") or {}).get(symbol)
@@ -1879,11 +1875,10 @@ class TradeExecutor:
 
         if sl_dist_price <= 0 or tp_dist_price <= 0:
             raise TradeExecutionError("Distances SL/TP invalides (<= 0).")
-        
+
         # Conversion initiale en points (nécessaire même sans Katana)
         sl_dist_points = sl_dist_price / point
         tp_dist_points = tp_dist_price / point
-
 
         # A) Respect stops_level (broker)
         if min_stop_distance_price > 0:
@@ -1892,7 +1887,6 @@ class TradeExecutor:
             if tp_dist_price < min_stop_distance_price:
                 tp_dist_price = min_stop_distance_price
 
-        
         # C) ATR M1 minimal (si dispo)
         try:
             atr_df = (market_context.get("market_data_m1") or {}).get(
@@ -1903,7 +1897,7 @@ class TradeExecutor:
                 if isinstance(atr_df, pd.DataFrame)
                 else float("nan")
             )
-          
+
         except Exception:
             pass
 
@@ -1913,26 +1907,42 @@ class TradeExecutor:
             tp_pips_now = tp_dist_points / points_per_pip
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
-                
-                     # ========================= Burst Scalping (optionnel) =========================
-        burst_cfg = (config.get("burst_scalping") or {}) if isinstance(config, dict) else {}
-        if trade_decision.get("rule_name") == "burst_scalping" or burst_cfg.get("enabled", False):
-            burst_size = int(trade_decision.get("burst_size") or burst_cfg.get("burst_size", 3))
-            sl_pips_burst = float(trade_decision.get("burst_sl_pips") or burst_cfg.get("sl_pips", 5.0))
-            tp_pips_burst = float(trade_decision.get("burst_tp_pips") or burst_cfg.get("tp_pips", 8.0))
+
+                # ========================= Burst Scalping (optionnel) =========================
+        burst_cfg = (
+            (config.get("burst_scalping") or {}) if isinstance(config, dict) else {}
+        )
+        if trade_decision.get("rule_name") == "burst_scalping" or burst_cfg.get(
+            "enabled", False
+        ):
+            burst_size = int(
+                trade_decision.get("burst_size") or burst_cfg.get("burst_size", 3)
+            )
+            sl_pips_burst = float(
+                trade_decision.get("burst_sl_pips") or burst_cfg.get("sl_pips", 5.0)
+            )
+            tp_pips_burst = float(
+                trade_decision.get("burst_tp_pips") or burst_cfg.get("tp_pips", 8.0)
+            )
 
             sl_dist_price = sl_pips_burst * pip_size
             tp_dist_price = tp_pips_burst * pip_size
 
             stop_loss_price = (
-                entry_price - sl_dist_price if action == "BUY" else entry_price + sl_dist_price
+                entry_price - sl_dist_price
+                if action == "BUY"
+                else entry_price + sl_dist_price
             )
             take_profit_price = (
-                entry_price + tp_dist_price if action == "BUY" else entry_price - tp_dist_price
+                entry_price + tp_dist_price
+                if action == "BUY"
+                else entry_price - tp_dist_price
             )
 
             # Génération de TP multiples si besoin
-            trade_decision["burst_tp_prices"] = [take_profit_price for _ in range(burst_size)]
+            trade_decision["burst_tp_prices"] = [
+                take_profit_price for _ in range(burst_size)
+            ]
             trade_decision["burst_sl_price"] = stop_loss_price
             trade_decision["burst_enabled"] = True
 
@@ -1943,7 +1953,6 @@ class TradeExecutor:
             stop_loss_price = round(float(stop_loss_price), digits)
             take_profit_price = round(float(take_profit_price), digits)
             return float(stop_loss_price), float(take_profit_price)
-   
 
         # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
@@ -1959,17 +1968,17 @@ class TradeExecutor:
             else (entry_price - tp_dist_price)
         )
 
-        
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = round(float(take_profit_price), digits)
         return float(stop_loss_price), float(take_profit_price)
-    
+
     def _attach_burst_metadata(self, trade_decision: dict) -> dict:
         """
         Attache des métadonnées de burst (basket_id, horodatage, etc.)
         à une décision de trade unique.
         """
         import time, uuid
+
         if not trade_decision:
             return trade_decision
 
@@ -2008,7 +2017,10 @@ class TradeExecutor:
                 self.logger.error(f"Erreur clôture position {pos}: {e}")
 
     def monitor_burst_baskets(
-        self, max_loss_pips: float = 15.0, trail_trigger: float = 10.0, trail_step: float = 5.0
+        self,
+        max_loss_pips: float = 15.0,
+        trail_trigger: float = 10.0,
+        trail_step: float = 5.0,
     ):
         """
         Surveille tous les paniers burst en cours :
@@ -2029,8 +2041,12 @@ class TradeExecutor:
 
         for basket_id, positions in baskets.items():
             try:
-                entry_prices = [p["entry_price"] for p in positions if "entry_price" in p]
-                current_prices = [p["current_price"] for p in positions if "current_price" in p]
+                entry_prices = [
+                    p["entry_price"] for p in positions if "entry_price" in p
+                ]
+                current_prices = [
+                    p["current_price"] for p in positions if "current_price" in p
+                ]
 
                 if not entry_prices or not current_prices:
                     continue
@@ -2042,13 +2058,16 @@ class TradeExecutor:
                 avg_price = sum(current_prices) / len(current_prices)
 
                 pnl_pips = (
-                    (avg_price - avg_entry) / pip_size if direction == "BUY"
+                    (avg_price - avg_entry) / pip_size
+                    if direction == "BUY"
                     else (avg_entry - avg_price) / pip_size
                 )
 
                 # --- STOP PERTE COLLECTIF ---
                 if pnl_pips <= -abs(max_loss_pips):
-                    self.logger.warning(f"❌ Burst {basket_id} atteint perte max {pnl_pips:.1f}p → fermeture immédiate.")
+                    self.logger.warning(
+                        f"❌ Burst {basket_id} atteint perte max {pnl_pips:.1f}p → fermeture immédiate."
+                    )
                     self.close_burst_basket(basket_id)
                     continue
 
@@ -2063,18 +2082,22 @@ class TradeExecutor:
                     new_trail = trail_trigger / 2.0 + (steps * trail_step / 2.0)
 
                     if new_trail > last_trail:
-                        self.logger.info(f"📈 Burst {basket_id} trailing relevé: {new_trail:.1f}p (gain actuel {pnl_pips:.1f}p)")
+                        self.logger.info(
+                            f"📈 Burst {basket_id} trailing relevé: {new_trail:.1f}p (gain actuel {pnl_pips:.1f}p)"
+                        )
                         for pos in positions:
-                            pos.setdefault("meta", {})["burst_trail"] = {"stop_level_pips": new_trail}
+                            pos.setdefault("meta", {})["burst_trail"] = {
+                                "stop_level_pips": new_trail
+                            }
 
                     if pnl_pips <= new_trail:
-                        self.logger.warning(f"🔒 Burst {basket_id} stop collectif touché ({new_trail:.1f}p) → fermeture.")
+                        self.logger.warning(
+                            f"🔒 Burst {basket_id} stop collectif touché ({new_trail:.1f}p) → fermeture."
+                        )
                         self.close_burst_basket(basket_id)
 
             except Exception as e:
                 self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
-
-
 
     def _calculate_risk_based_volume(
         self,
@@ -4266,38 +4289,65 @@ def run_trade_execution_pipeline(
                 "reason": reason,
                 "suggested_volume": hard_cap,
             }
-
-    # ----------- 5) Pre-trade checks -----------
-    ok, reason = trade_executor.pre_trade_checks(
-        trade_decision, active_config, market_context
-    )
-    if not ok:
-        logger.warning(f"Pipeline de trade AVORTÉ (Erreur contrôlée): {reason}")
-        feedback = trade_executor.feedback_pipeline(
-            order_id=final_decision.get("order_id", "N/A"),
-            status="failed",
-            reason=reason,
+        # ----------- 5) Pre-trade checks -----------
+        ok, reason = trade_executor.pre_trade_checks(
+            trade_decision, active_config, market_context
         )
-        trade_executor._feedback_safe(trade_decision, feedback)
-        return {"status": "failed", "reason": reason}
+        if not ok:
+            logger.warning(f"Pipeline de trade AVORTÉ (Erreur contrôlée): {reason}")
+            feedback = trade_executor.feedback_pipeline(
+                order_id=final_decision.get("order_id", "N/A"),
+                status="failed",
+                reason=reason,
+            )
+            trade_executor._feedback_safe(trade_decision, feedback)
+            return {"status": "failed", "reason": reason}
 
-    # ----------- 6) Préparer la requête MT5 -----------
-    try:
-        mt5_request = trade_executor.prepare_order(adapted_package)
-    except Exception as e:
-        reason = f"Préparation d'ordre échouée: {e}"
-        logger.error(reason, exc_info=True)
-        trade_executor._send_alert_safe(
-            "CRITIQUE", reason, alert_type="telegram_critical"
-        )
-        feedback = trade_executor.feedback_pipeline(
-            order_id=final_decision.get("order_id", "N/A"),
-            status="failed",
-            reason=str(e),
-        )
-        trade_executor._feedback_safe(trade_decision, feedback)
-        return {"status": "failed", "reason": str(e)}
+        # ----------- 6) Préparer la requête MT5 (BURST ou STANDARD) -----------
+        try:
+            if final_decision.get(
+                "rule_name"
+            ) == "burst_scalping" or final_decision.get("burst_enabled", False):
+                burst_size = int(final_decision.get("burst_size", 3))
+                trade_decision = trade_executor._attach_burst_metadata(trade_decision)
 
-        # ----------- 7) Exécution -----------
-    execution_result = trade_executor.execute_order(mt5_request)
-    return execution_result
+                requests = []
+                for i in range(burst_size):
+                    req = trade_executor.prepare_order(
+                        {
+                            "trade_decision": dict(trade_decision),
+                            "market_context": market_context,
+                            "active_config": active_config,
+                        }
+                    )
+                    # Taguer chaque ordre du panier
+                    req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                    requests.append(req)
+
+                results = [trade_executor.execute_order(r) for r in requests]
+                return {
+                    "status": "burst_executed",
+                    "basket_id": trade_decision.get("basket_id"),
+                    "results": results,
+                }
+
+            # --- Mode standard ---
+            mt5_request = trade_executor.prepare_order(adapted_package)
+
+        except Exception as e:
+            reason = f"Préparation d'ordre échouée: {e}"
+            logger.error(reason, exc_info=True)
+            trade_executor._send_alert_safe(
+                "CRITIQUE", reason, alert_type="telegram_critical"
+            )
+            feedback = trade_executor.feedback_pipeline(
+                order_id=final_decision.get("order_id", "N/A"),
+                status="failed",
+                reason=str(e),
+            )
+            trade_executor._feedback_safe(trade_decision, feedback)
+            return {"status": "failed", "reason": str(e)}
+
+        # ----------- 7) Exécution standard -----------
+        execution_result = trade_executor.execute_order(mt5_request)
+        return execution_result

@@ -159,8 +159,7 @@
     "global_allowed_symbols": [
       "EURUSD",
       "GBPUSD",
-      "USDCAD",
-      "USDCHF"
+      "XAUUSD"
     ],
     "max_allowed_lot_size": 50.0
   },
@@ -208,8 +207,7 @@
       "major_fx_pairs_for_correlation": [
         "EURUSD",
         "GBPUSD",
-        "USDCAD",
-        "USDCHF"
+        "XAUUSD"
       ],
       "min_signal_confidence": 0.01
     },

@@ -2,10 +2,7 @@
   "strategy_name": "scalping",
   "version": "2.5-katana-micro-nogate",
   "tradeable_assets": [
-    "EURUSD",
-    "GBPUSD",
-    "USDCAD",
-    "USDCHF"
+    "XAUUSD"
   ],
   "magic_number": 51001,
   "phase_detection": {

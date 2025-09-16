@@ -3,9 +3,7 @@
     "version": "2.1",
     "tradeable_assets": [
         "EURUSD",
-        "GBPUSD",
-        "USDCAD",
-        "USDCHF"
+        "GBPUSD"
     ],
     "magic_number": 51002,
     "risk_per_trade_percent": 0.4,

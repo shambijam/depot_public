@@ -12,8 +12,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCAD",
-                "USDCHF"
+                "XAUUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
@@ -35,8 +34,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCAD",
-                "USDCHF"
+                "XAUUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
@@ -58,8 +56,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "USDCAD",
-                "USDCHF"
+                "XAUUSD"
             ],
             "account_type": "RAW_SPREAD",
             "trade_settings": {
