@@ -31,7 +31,7 @@
           "range_retail",
           "range_low_volatility"
         ],
-        "min_confidence": 0.40
+        "min_confidence": 0.30
       },
       "order_type": "MARKET",
       "action_logic": {
