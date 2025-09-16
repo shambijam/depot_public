@@ -446,9 +446,9 @@ class Detectors:
             df["trend"] = _get_trend(self, df)
 
         # Swing points adaptatifs (séries alignées)
-        swing_highs, swing_lows = _get_adaptive_swing_points(self, df)
-        df["last_swing_high"] = swing_highs.reindex(df.index).ffill()
-        df["last_swing_low"] = swing_lows.reindex(df.index).ffill()
+        df["last_swing_high"] = df["high"].shift(1).ffill()
+        df["last_swing_low"] = df["low"].shift(1).ffill()
+
 
         # Sanitisation prix/volume
         for col in ("close", "high", "low"):
