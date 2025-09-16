@@ -125,12 +125,6 @@
             "regime_strength": 1.1,
             "high_volume_confirmation": 1.15
         },
-        "bollinger_weights": {
-            "mean_revert_score": 0.1,
-            "breakout_score": 0.1,
-            "squeeze_bonus": 0.05,
-            "expansion_bonus": 0.05
-        },
         "base_confidence": 0.2,
         "max_confidence_cap": 0.95
     },

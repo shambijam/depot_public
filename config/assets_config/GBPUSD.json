@@ -1,10 +1,9 @@
 {
-  "description": "Configuration optimisée GBPUSD avec flexibilité adaptative",
+  "description": "Configuration optimis\u00e9e GBPUSD avec flexibilit\u00e9 adaptative",
   "symbol": "GBPUSD",
   "type": "forex",
   "profile": "institutionnel",
   "last_updated": "2025-07-30",
-  "min_confidence_threshold": 0.20,
   "volatility": {
     "expected_daily_range_percent": {
       "value": 0.8,
@@ -127,5 +126,8 @@
         }
       }
     }
-  }
+  },
+  "strategy_whitelist": [
+    "liquidity"
+  ]
 }

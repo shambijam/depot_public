@@ -1,338 +1,92 @@
 {
   "strategy_name": "scalping",
-  "version": "2.5-katana-micro-nogate",
+  "version": "2.2",
+  "description": "Scalping propre (XAUUSD only). Bollinger & Katana retirés. Midline Bollinger explicitement désactivé.",
   "tradeable_assets": [
     "XAUUSD"
   ],
-  "magic_number": 51001,
+  "magic_number": 52001,
+  "risk_per_trade_percent": 0.40,
+  "confidence_threshold": 0.30,
   "phase_detection": {
-    "range_sensitivity": 0.55,
-    "low_vol_window": 100,
-    "low_vol_percentile": 0.15,
-    "atr_period": 14,
-    "min_bars": 200,
-    "std_mult": 2.0,
-    "squeeze_window": 100,
-    "squeeze_percentile": 0.15,
-    "lookback_window": 200,
-    "volatility_threshold": 0.0001,
-    "volume_zscore": 1.2
+    "use_phase_observer": true,
+    "allowed_phases": [
+      "liquidity_eqh_eql",
+      "range_retail",
+      "transitional"
+    ]
   },
-  "decision_rules": [
-    {
-      "name": "range_scalping_microbreak",
-      "priority": 2,
-      "conditions": {
-        "signal_must_contain": [
-          "ob_detected"
-        ],
-        "phase_must_contain": [
-          "range",
-          "range_retail",
-          "range_low_volatility"
-        ],
-        "min_confidence": 0.20
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "enter on bullish micro-break with OB confluence and spread <= max_spread_pips",
-        "SELL": "enter on bearish micro-break with OB confluence and spread <= max_spread_pips"
-      }
-    },
-    {
-      "name": "range_midline_scalping",
-      "priority": 3,
-      "conditions": {
-        "phase_must_contain": [
-          "range",
-          "range_low_volatility",
-          "range_retail"
-        ],
-        "min_confidence": 0.3,
-        "requires": {
-          "is_range": true,
-          "mid_entry": [
-            "buy",
-            "sell"
-          ],
-          "mid_entry_score_min": 0.55,
-          "range_score_min": 0.62
-        }
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "enter if mid_entry == 'buy' and spread <= max_spread_pips",
-        "SELL": "enter if mid_entry == 'sell' and spread <= max_spread_pips"
-      }
-    },
-    {
-      "name": "liquidity_sweep_absorption",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "liquidity_sweep",
-          "absorption_confirmed"
-        ],
-        "min_confidence": 0.3
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "take opposite of bearish sweep after absorption confirmation",
-        "SELL": "take opposite of bullish sweep after absorption confirmation"
-      }
-    }
-  ],
+  "take_profit_pips": 80,
+  "stop_loss_pips": 60,
   "entry_rules": {
     "scalping": {
-      "atr_filter": {
+      "liquidity_sweep": {
         "enabled": true,
-        "min_atr_pips": 4.0
+        "lookback": 30,
+        "min_wick_frac": 0.55,
+        "min_body_frac": 0.20,
+        "absorb_close_back_in": true,
+        "prefer_direction": "auto",
+        "min_confidence": 0.30,
+        "sl_pips": 60,
+        "tp_pips": 80
       },
-      "absorption": {
-        "confirm_candle_required": true,
-        "confirm_timeframe": "M1",
-        "confirm_max_latency_bars": 2,
-        "body_to_range_min": 0.45,
-        "closes_through_mid_of_sweep": true
-      },
-      "entry_logic": {
-        "direction": "opposite_of_sweep",
-        "trigger": "break_of_absorption_extreme",
-        "buffer_pips": 0.4,
-        "timeout_bars": 3
-      },
-      "risk_filters": {
-        "mtf_bias_timeframe": "M5",
-        "align_with_mtf_bias": true,
-        "max_consecutive_signals": 2,
-        "min_distance_to_round_number_pips": 1.5
+      "midline_bollinger": {
+        "enabled": false
       }
     }
   },
-  "execution_quality_filters": {
-    "atr_volatility_filter": {
-      "enabled": true,
-      "period": 14,
-      "min_atr": 0.0,
-      "max_atr": 1000000000.0
-    }
+  "filters": {
+    "spread_max_points": 25,
+    "min_atr_points": null
   },
-  "risk_limits": {
-    "max_spread_pips": 6,
-    "per_symbol": {
-      "USDJPY": {
-        "max_spread_pips": 12
-      },
-      "EURUSD": {
-        "max_spread_pips": 6
-      },
-      "GBPUSD": {
-        "max_spread_pips": 6
-      },
-      "USDCHF": {
-        "max_spread_pips": 6
-      }
-    }
-  },
-  "decision_engine": {
-    "min_decision_score": 0.3,
-    "thresholds": {
-      "min_volatility": 0.0004,
-      "max_spread_pips": 6,
-      "per_symbol_overrides": {
-        "USDCAD": {
-          "min_volatility": 0.0007,
-          "max_spread_pips": 12,
-          "max_lot_size": 0.08
-        },
-        "EURUSD": {
-          "max_lot_size": 0.15,
-          "min_volatility": 0.0004,
-          "max_spread_pips": 6
-        },
-        "GBPUSD": {
-          "max_lot_size": 0.15,
-          "min_volatility": 0.00045,
-          "max_spread_pips": 6
-        },
-        "USDCHF": {
-          "max_lot_size": 0.15,
-          "min_volatility": 0.00035,
-          "max_spread_pips": 6
-        }
-      }
-    },
-    "mtf": {
-      "timeframes": [
-        "M1",
-        "M5",
-        "M15"
-      ],
-      "required_agreements": 1,
-      "forbid_against_m15": false
-    },
-    "scoring": {
-      "base_score": 0.8,
-      "strategy_bias": 0.3,
-      "liquidity_bonus": 0.1,
-      "mtf_bonus_per_hit": 0.1,
-      "best_opportunity_bonus": 0.15,
-      "global_low_vol_penalty": -0.2,
-      "high_spread_penalty": -0.1,
-      "ob_conf_bonus": 0.25,
-      "mtf_shortfall_penalty": -0.08
-    },
-    "filters": {
-      "avoid_major_news": false,
-      "disable_on_weekends": true,
-      "min_account_equity": 0,
-      "allow_only_whitelist_assets": true,
-      "volatility": {
-        "min_atr_pips_m1": 0.35
-      },
-      "volume": {
-        "min_tick_volume_zscore": -1.0
-      },
-      "enable_soft_atr_continuation": false
-    },
-    "risk": {
-      "max_trades_per_day": 20,
-      "cooldown_seconds_after_trade": 0,
-      "skip_asset_if_spread_over_pips": 20,
-      "max_lot_size": 1.0
-    },
-    "execution": {
-      "order_type": "MARKET",
-      "slippage_points": 5,
-      "max_parallel_positions": 2,
-      "min_sl_tp_distance_pips": 20,
-      "entry_on_close_only": false,
-      "confirm_spread_at_entry": false,
-      "cooldown_bars_after_miss": 1
-    },
-    "smart_targets": {
-      "enabled": true,
-      "tp_sl_basis": "atr14",
-      "atr_period": 14,
-      "profiles": {
-        "default": {
-          "tp_multiple": 0.6,
-          "sl_multiple": 0.8,
-          "hard_min_points": 8
-        },
-        "scalp": {
-          "tp_multiple": 0.6,
-          "sl_multiple": 0.8,
-          "hard_min_points": 8
-        }
-      }
-    },
-    "exit_rules": {
-      "break_even_on_rr": 1.0,
-      "partial_take_profit": {
-        "enabled": true,
-        "at_rr": 1.0,
-        "reduce_fraction": 0.5
-      },
-      "time_stop": {
-        "enabled": false,
-        "max_bars_in_trade": 120
-      }
-    },
-    "risk_management": {
-      "max_daily_drawdown_pct": 8.0,
-      "max_consecutive_losses": 5,
-      "kill_switch_enabled": true,
-      "halt_minutes_after_kill": 180
-    },
-    "adaptation_settings": {
-      "ema_rsi_atr_trail": {
-        "enabled": true,
-        "atr_period": 14,
-        "trail_mult": 1.0,
-        "step_pips": 0.2
-      },
-      "volatility_profile": {
-        "enabled": true,
-        "atr_window": 14,
-        "reduce_risk_when_low_vol": false
-      },
-      "news_aware": {
-        "enabled": false,
-        "blackout_minutes_before": 15,
-        "blackout_minutes_after": 15
-      },
-      "session_adaptation": {
-        "enabled": true,
-        "london_bias": 0.1,
-        "ny_bias": 0.1
-      },
-      "degradation_mode": {
-        "enabled": false,
-        "reduce_trade_frequency": true
-      }
-    },
-    "rules": {
-      "allowed_actions": [
-        "BUY",
-        "SELL"
-      ],
-      "order_types": [
-        "MARKET"
-      ]
-    },
-    "tp_sl_profiles": {
-      "scalp": {
-        "tp_pips": 6,
-        "sl_pips": 6
-      },
-      "default": {
-        "tp_pips": 8,
-        "sl_pips": 8
-      }
-    },
-    "scoring_preferences": {
-      "prefer_best_opportunity": true,
-      "prefer_confluence": true
-    },
-    "big_reversal": {
+  "time_filters": {
+    "use_session_filter": true,
+    "allowed_sessions": [
+      "LDN",
+      "NY"
+    ],
+    "forbidden_hours_utc": [],
+    "news_filter": {
       "enabled": false,
-      "window": 200,
-      "threshold": 0.8,
-      "use_ob": true,
-      "mtf_confirm": false
-    },
-    "__compat__": {
-      "notes": "Anciennes cl\u00e9s conserv\u00e9es pour compatibilit\u00e9. Le code doit d\u2019abord lire les cl\u00e9s canoniques (p.ex. risk_limits / *_pips) puis retomber sur ces cl\u00e9s si n\u00e9cessaire.",
-      "execution_policy": {
-        "max_spread_points": null
-      },
-      "decision_engine": {
-        "thresholds": {
-          "max_spread_points": 60,
-          "per_symbol_overrides": {
-            "USDJPY": {
-              "max_spread_points": 120
-            },
-            "EURUSD": {
-              "max_spread_points": 60
-            },
-            "GBPUSD": {
-              "max_spread_points": 60
-            },
-            "USDCHF": {
-              "max_spread_points": 60
-            }
-          }
-        },
-        "risk": {
-          "skip_asset_if_spread_over_points": 200
-        }
-      },
-      "risk_per_trade_percent": 5.0,
-      "stop_loss_pips": 6,
-      "take_profit_pips": 10
+      "high_impact_only": true,
+      "min_minutes_before": 15,
+      "min_minutes_after": 15
     }
+  },
+  "tp_sl": {
+    "breakeven": {
+      "enabled": true,
+      "after_rr": 1.0
+    },
+    "trailing": {
+      "enabled": false,
+      "type": "step",
+      "step_pips": 30,
+      "activate_after_rr": 1.5
+    },
+    "partial": {
+      "enabled": true,
+      "at_rr": 1.0,
+      "size_frac": 0.5
+    }
+  },
+  "execution": {
+    "order_type": "MARKET",
+    "max_slippage_points": 30,
+    "comment_prefix": "SX-SCALP",
+    "limit_retry_ms": 800
+  },
+  "cooldowns": {
+    "per_asset_seconds": 120,
+    "after_win_seconds": 60,
+    "after_loss_seconds": 120
+  },
+  "backtest": {
+    "enabled": false
+  },
+  "misc": {
+    "log_level": "INFO"
   },
   "burst_scalping": {
     "enabled": true,

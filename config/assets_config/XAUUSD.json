@@ -1,12 +1,11 @@
 {
-  "description": "Fichier de configuration spécifique pour l'actif XAUUSD (Or). Il définit les préférences de timeframes, les phases de marché d'intérêt, les paramètres de volatilité et de risque, les bascules de stratégie, les cibles intelligentes, les biais institutionnels et les pondérations de signaux pour le trading de cet actif.",
+  "description": "Fichier de configuration sp\u00e9cifique pour l'actif XAUUSD (Or). Il d\u00e9finit les pr\u00e9f\u00e9rences de timeframes, les phases de march\u00e9 d'int\u00e9r\u00eat, les param\u00e8tres de volatilit\u00e9 et de risque, les bascules de strat\u00e9gie, les cibles intelligentes, les biais institutionnels et les pond\u00e9rations de signaux pour le trading de cet actif.",
   "symbol": "XAUUSD",
   "type": "metals",
   "profile": "institutionnel",
   "last_updated": "2025-07-23",
-  "min_confidence_threshold": 0.20,
   "timeframe_preference": {
-    "description": "Liste ordonnée des timeframes préférés pour l'analyse et le trading de cet actif, du plus court au plus long. Le PhaseObserver utilisera ces préférences.",
+    "description": "Liste ordonn\u00e9e des timeframes pr\u00e9f\u00e9r\u00e9s pour l'analyse et le trading de cet actif, du plus court au plus long. Le PhaseObserver utilisera ces pr\u00e9f\u00e9rences.",
     "list": [
       "M1",
       "M5",
@@ -16,7 +15,7 @@
     ]
   },
   "phases_of_interest": {
-    "description": "Phases de marché principales d'intérêt pour cet actif. Si la valeur est 'true', la stratégie peut y opérer activement ou rechercher des setups pertinents. Ces phases sont détectées par le PhaseObserver.",
+    "description": "Phases de march\u00e9 principales d'int\u00e9r\u00eat pour cet actif. Si la valeur est 'true', la strat\u00e9gie peut y op\u00e9rer activement ou rechercher des setups pertinents. Ces phases sont d\u00e9tect\u00e9es par le PhaseObserver.",
     "range": true,
     "trend_up": true,
     "trend_down": true,
@@ -25,111 +24,111 @@
     "expansion": true
   },
   "volatility": {
-    "description": "Paramètres liés à la gestion de la volatilité pour cet actif. Utilisés pour l'adaptation de la stratégie et les vérifications pré-trade.",
+    "description": "Param\u00e8tres li\u00e9s \u00e0 la gestion de la volatilit\u00e9 pour cet actif. Utilis\u00e9s pour l'adaptation de la strat\u00e9gie et les v\u00e9rifications pr\u00e9-trade.",
     "expected_daily_range_percent": {
-      "description": "Pourcentage de la fourchette de prix quotidienne attendue pour cet actif. Utilisé pour l'analyse de liquidité et l'adaptation des stratégies.",
+      "description": "Pourcentage de la fourchette de prix quotidienne attendue pour cet actif. Utilis\u00e9 pour l'analyse de liquidit\u00e9 et l'adaptation des strat\u00e9gies.",
       "value": 1.5
     },
     "max_allowed_spread_points": {
-      "description": "Spread maximal autorisé en points MT5 pour trader cet actif. Si le spread actuel dépasse cette valeur, le trading peut être bloqué.",
+      "description": "Spread maximal autoris\u00e9 en points MT5 pour trader cet actif. Si le spread actuel d\u00e9passe cette valeur, le trading peut \u00eatre bloqu\u00e9.",
       "value": 20
     },
     "min_tradable_range_points": {
-      "description": "Fourchette minimale en points MT5 que l'actif doit avoir pour être considéré comme tradable (pertinent pour les stratégies de range ou de scalping).",
+      "description": "Fourchette minimale en points MT5 que l'actif doit avoir pour \u00eatre consid\u00e9r\u00e9 comme tradable (pertinent pour les strat\u00e9gies de range ou de scalping).",
       "value": 30
     },
     "max_drawdown_allowed_percent": {
-      "description": "Pourcentage de drawdown maximal toléré par trade pour cet actif spécifique. C'est une limite de sécurité.",
+      "description": "Pourcentage de drawdown maximal tol\u00e9r\u00e9 par trade pour cet actif sp\u00e9cifique. C'est une limite de s\u00e9curit\u00e9.",
       "value": 1.2
     }
   },
   "risk_management": {
-    "description": "Paramètres de gestion des risques spécifiques à cet actif. Ces valeurs peuvent être supplantées par des règles globales ou de stratégie, mais servent de base.",
+    "description": "Param\u00e8tres de gestion des risques sp\u00e9cifiques \u00e0 cet actif. Ces valeurs peuvent \u00eatre supplant\u00e9es par des r\u00e8gles globales ou de strat\u00e9gie, mais servent de base.",
     "base_lot_size": {
-      "description": "Taille de lot de base suggérée pour cet actif, avant tout ajustement de risque dynamique.",
+      "description": "Taille de lot de base sugg\u00e9r\u00e9e pour cet actif, avant tout ajustement de risque dynamique.",
       "value": 0.1
     },
     "max_risk_per_trade_percent": {
-      "description": "Pourcentage maximum du capital du compte à risquer par trade pour cet actif.",
+      "description": "Pourcentage maximum du capital du compte \u00e0 risquer par trade pour cet actif.",
       "value": 0.7
     },
     "daily_loss_limit_percent": {
-      "description": "Pourcentage de perte maximale du capital du compte autorisé par jour pour cet actif. Le trading peut être suspendu si cette limite est atteinte.",
+      "description": "Pourcentage de perte maximale du capital du compte autoris\u00e9 par jour pour cet actif. Le trading peut \u00eatre suspendu si cette limite est atteinte.",
       "value": 2.5
     },
     "weekly_loss_limit_percent": {
-      "description": "Pourcentage de perte maximale du capital du compte autorisé par semaine pour cet actif. Le trading peut être suspendu si cette limite est atteinte.",
+      "description": "Pourcentage de perte maximale du capital du compte autoris\u00e9 par semaine pour cet actif. Le trading peut \u00eatre suspendu si cette limite est atteinte.",
       "value": 7.0
     }
   },
   "strategy_toggles": {
-    "description": "Interrupteurs pour activer/désactiver des comportements stratégiques spécifiques à cet actif. Ces paramètres peuvent affiner l'exécution des stratégies définies globalement.",
+    "description": "Interrupteurs pour activer/d\u00e9sactiver des comportements strat\u00e9giques sp\u00e9cifiques \u00e0 cet actif. Ces param\u00e8tres peuvent affiner l'ex\u00e9cution des strat\u00e9gies d\u00e9finies globalement.",
     "enable_scalping_mode": {
-      "description": "Active ou désactive le mode scalping pour cet actif (peut influencer la taille des SL/TP ou la fréquence des trades).",
+      "description": "Active ou d\u00e9sactive le mode scalping pour cet actif (peut influencer la taille des SL/TP ou la fr\u00e9quence des trades).",
       "value": true
     },
     "enable_trailing_stop": {
-      "description": "Active ou désactive l'utilisation du trailing stop pour les trades sur cet actif.",
+      "description": "Active ou d\u00e9sactive l'utilisation du trailing stop pour les trades sur cet actif.",
       "value": true
     },
     "enable_grid_in_range_only": {
-      "description": "Si activé, les stratégies de grille ne seront utilisées que lorsque l'actif est détecté dans une phase de 'range'.",
+      "description": "Si activ\u00e9, les strat\u00e9gies de grille ne seront utilis\u00e9es que lorsque l'actif est d\u00e9tect\u00e9 dans une phase de 'range'.",
       "value": false
     },
     "auto_blacklist_high_spread_assets": {
-      "description": "Si activé, l'actif sera automatiquement blacklisté pour une période si son spread dépasse les seuils définis.",
+      "description": "Si activ\u00e9, l'actif sera automatiquement blacklist\u00e9 pour une p\u00e9riode si son spread d\u00e9passe les seuils d\u00e9finis.",
       "value": false
     }
   },
   "smart_targets": {
-    "description": "Multiplicateurs et seuils pour le calcul dynamique des Take Profit et Stop Loss (SL/TP). Utilisés pour adapter les cibles en fonction de la volatilité ou du setup.",
+    "description": "Multiplicateurs et seuils pour le calcul dynamique des Take Profit et Stop Loss (SL/TP). Utilis\u00e9s pour adapter les cibles en fonction de la volatilit\u00e9 ou du setup.",
     "take_profit_multiplier": {
-      "description": "Multiplicateur appliqué à la distance du Stop Loss pour calculer la cible du Take Profit (basé sur le ratio Risque/Récompense).",
+      "description": "Multiplicateur appliqu\u00e9 \u00e0 la distance du Stop Loss pour calculer la cible du Take Profit (bas\u00e9 sur le ratio Risque/R\u00e9compense).",
       "value": 2.0
     },
     "stop_loss_multiplier": {
-      "description": "Multiplicateur ou ajustement appliqué au Stop Loss calculé (par exemple, pour ajouter un buffer).",
+      "description": "Multiplicateur ou ajustement appliqu\u00e9 au Stop Loss calcul\u00e9 (par exemple, pour ajouter un buffer).",
       "value": 1.0
     },
     "trailing_stop_start_after_percent": {
-      "description": "Pourcentage de profit (par rapport au prix d'entrée) après lequel le trailing stop est activé pour cet actif.",
+      "description": "Pourcentage de profit (par rapport au prix d'entr\u00e9e) apr\u00e8s lequel le trailing stop est activ\u00e9 pour cet actif.",
       "value": 0.8
     },
     "trailing_step_points": {
-      "description": "Nombre de points MT5 par lesquels le trailing stop se déplacera pour cet actif.",
+      "description": "Nombre de points MT5 par lesquels le trailing stop se d\u00e9placera pour cet actif.",
       "value": 20
     }
   },
   "institutional_bias": {
-    "description": "Préférences ou biais de trading institutionnels spécifiques à cet actif, influençant la détection de setups et la décision du ConfigManager.",
+    "description": "Pr\u00e9f\u00e9rences ou biais de trading institutionnels sp\u00e9cifiques \u00e0 cet actif, influen\u00e7ant la d\u00e9tection de setups et la d\u00e9cision du ConfigManager.",
     "favor_fake_breakouts": {
-      "description": "Si activé, la stratégie favorisera les trades basés sur des faux breakouts (mouvements inverses après une cassure apparente).",
+      "description": "Si activ\u00e9, la strat\u00e9gie favorisera les trades bas\u00e9s sur des faux breakouts (mouvements inverses apr\u00e8s une cassure apparente).",
       "value": true
     },
     "watch_liquidity_zones": {
-      "description": "Si activé, la stratégie accordera une attention particulière aux zones de liquidité (EQH/EQL, Order Blocks) pour les entrées et sorties.",
+      "description": "Si activ\u00e9, la strat\u00e9gie accordera une attention particuli\u00e8re aux zones de liquidit\u00e9 (EQH/EQL, Order Blocks) pour les entr\u00e9es et sorties.",
       "value": true
     },
     "aggressive_entry_in_expansion": {
-      "description": "Si activé, la stratégie adoptera une approche plus agressive pour les entrées pendant les phases d'expansion rapide.",
+      "description": "Si activ\u00e9, la strat\u00e9gie adoptera une approche plus agressive pour les entr\u00e9es pendant les phases d'expansion rapide.",
       "value": true
     },
     "conservative_entry_in_compression": {
-      "description": "Si activé, la stratégie sera plus prudente pour les entrées pendant les phases de compression/consolidation.",
+      "description": "Si activ\u00e9, la strat\u00e9gie sera plus prudente pour les entr\u00e9es pendant les phases de compression/consolidation.",
       "value": true
     }
   },
   "temporal_context": {
-    "description": "Paramètres liés aux heures et jours de trading spécifiques à cet actif. Ces règles sont appliquées en complément des règles globales.",
+    "description": "Param\u00e8tres li\u00e9s aux heures et jours de trading sp\u00e9cifiques \u00e0 cet actif. Ces r\u00e8gles sont appliqu\u00e9es en compl\u00e9ment des r\u00e8gles globales.",
     "avoid_trading_hours": {
-      "description": "Liste d'heures (format 'HH:MM' en UTC) pendant lesquelles le trading de cet actif est à éviter (par exemple, faible liquidité ou spreads élevés).",
+      "description": "Liste d'heures (format 'HH:MM' en UTC) pendant lesquelles le trading de cet actif est \u00e0 \u00e9viter (par exemple, faible liquidit\u00e9 ou spreads \u00e9lev\u00e9s).",
       "list": [
         "22:00",
         "23:00"
       ]
     },
     "monitor_hours": {
-      "description": "Heures (format 'HH:MM' en UTC) où l'actif doit être activement surveillé pour des opportunités (par exemple, ouverture de sessions importantes).",
+      "description": "Heures (format 'HH:MM' en UTC) o\u00f9 l'actif doit \u00eatre activement surveill\u00e9 pour des opportunit\u00e9s (par exemple, ouverture de sessions importantes).",
       "list": [
         "07:00",
         "08:30",
@@ -138,7 +137,7 @@
       ]
     },
     "high_risk_news_days": {
-      "description": "Jours de la semaine (format 'Monday', 'Tuesday', etc.) où des annonces de nouvelles à fort impact sont fréquemment attendues pour cet actif.",
+      "description": "Jours de la semaine (format 'Monday', 'Tuesday', etc.) o\u00f9 des annonces de nouvelles \u00e0 fort impact sont fr\u00e9quemment attendues pour cet actif.",
       "list": [
         "Wednesday",
         "Friday"
@@ -146,7 +145,7 @@
     }
   },
   "weighting": {
-    "description": "Poids attribués aux différents signaux détectés par le PhaseObserver pour cet actif. Utilisés par le ConfigManager pour le scoring des opportunités ou la décision de confluence des règles de stratégie.",
+    "description": "Poids attribu\u00e9s aux diff\u00e9rents signaux d\u00e9tect\u00e9s par le PhaseObserver pour cet actif. Utilis\u00e9s par le ConfigManager pour le scoring des opportunit\u00e9s ou la d\u00e9cision de confluence des r\u00e8gles de strat\u00e9gie.",
     "breaker_block": 1.0,
     "liquidity_zone": 1.0,
     "fvg_zone": 1.0,
@@ -154,5 +153,8 @@
     "market_structure_shift": 1.0,
     "volume_spike": 1.0,
     "smart_spread_indicator": 1.0
-  }
+  },
+  "strategy_whitelist": [
+    "scalping"
+  ]
 }
