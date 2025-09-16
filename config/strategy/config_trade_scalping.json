@@ -1,23 +1,30 @@
 {
   "strategy_name": "scalping",
-  "version": "2.2",
-  "description": "Scalping propre (XAUUSD only). Bollinger & Katana retirés. Midline Bollinger explicitement désactivé.",
+  "version": "2.3",
+  "description": "Scalping propre (XAUUSD only). Aucuns fallback stratégiques. Katana/Bollinger retirés.",
   "tradeable_assets": [
     "XAUUSD"
   ],
   "magic_number": 52001,
   "risk_per_trade_percent": 0.40,
   "confidence_threshold": 0.30,
+  "take_profit_pips": 80,
+  "stop_loss_pips": 60,
+  "max_spread_points": 50,
+  "halt_on_major_news": false,
   "phase_detection": {
     "use_phase_observer": true,
     "allowed_phases": [
       "liquidity_eqh_eql",
       "range_retail",
       "transitional"
-    ]
+    ],
+    "lookback_window": 12,
+    "volatility_threshold": 0.0,
+    "volume_zscore": 0.0,
+    "eq_level_tolerance": 0.0,
+    "impulse_threshold": 0.0
   },
-  "take_profit_pips": 80,
-  "stop_loss_pips": 60,
   "entry_rules": {
     "scalping": {
       "liquidity_sweep": {
@@ -98,5 +105,27 @@
     "trail_step": 3.0,
     "max_burst_per_day": 3,
     "burst_cap_volume": 1.0
-  }
+  },
+  "decision_rules": [
+    {
+      "name": "primary",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "liquidity_sweep"
+        ],
+        "phase_must_contain": [
+          "liquidity_eqh_eql",
+          "range_retail",
+          "transitional"
+        ],
+        "min_confidence": 0.30
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
+        "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
+      }
+    }
+  ]
 }
