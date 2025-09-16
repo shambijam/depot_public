@@ -161,7 +161,7 @@
             "name": "liquidity_entry",
             "priority": 1,
             "conditions": {
-                "min_confidence": 0.5
+                "min_confidence": 0.35
             },
             "order_type": "MARKET",
             "action_logic": {

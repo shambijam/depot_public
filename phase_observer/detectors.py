@@ -785,52 +785,63 @@ class Detectors:
     ) -> List[Optional[Dict[str, Any]]]:
         """
         🎯 Détection Equal Highs / Equal Lows (EQH/EQL).
-        Retourne une liste alignée sur df avec détails ou None.
+        Retourne une liste alignée sur df (longueur = len(df)).
+        Améliorations :
+        - Alignement garanti avec df.index
+        - Qualité ajoutée (low / medium / high)
+        - Tolérance dynamique en pips
         """
 
         if df is None or len(df) < 5:
-            return []
+            return [None] * (len(df) if df is not None else 0)
 
         cfg = eqh_config or {}
         tolerance_pips = float(cfg.get("tolerance_pips", 2.0))
         min_touches = int(cfg.get("min_touches", 2))
 
-        pip_size = None
+        # Détermination taille pip
         try:
             point_val = float(df["point"].iloc[-1])
-            pip_size = point_val * 10.0 if point_val > 0 else None
+            pip_size = point_val * 10.0 if point_val > 0 else 1.0
         except Exception:
-            pip_size = None
-        pip_size = pip_size or 1.0
+            pip_size = 1.0
 
-        results: List[Optional[Dict[str, Any]]] = []
         highs = df["high"].round(5)
         lows = df["low"].round(5)
 
-        for i in range(2, len(df)):
+        results: List[Optional[Dict[str, Any]]] = [None] * len(df)
+
+        for i in range(min_touches - 1, len(df)):
             info = None
+
             # Equal Highs
             recent_highs = highs.iloc[i - min_touches + 1 : i + 1]
             if recent_highs.max() - recent_highs.min() <= tolerance_pips * pip_size:
                 info = {
-                    "index": i,
+                    "index": int(i),
                     "timestamp": str(df.index[i]),
                     "type": "eqh",
                     "level": float(recent_highs.mean()),
                     "touches": len(recent_highs),
+                    "quality": "high" if len(recent_highs) >= min_touches + 1 else "medium",
                 }
+
             # Equal Lows
             recent_lows = lows.iloc[i - min_touches + 1 : i + 1]
             if recent_lows.max() - recent_lows.min() <= tolerance_pips * pip_size:
                 info = {
-                    "index": i,
+                    "index": int(i),
                     "timestamp": str(df.index[i]),
                     "type": "eql",
                     "level": float(recent_lows.mean()),
                     "touches": len(recent_lows),
+                    "quality": "high" if len(recent_lows) >= min_touches + 1 else "medium",
                 }
-            results.append(info)
+
+            results[i] = info
+
         return results
+
 
     def detect_candle_patterns(
         self,
