@@ -4,6 +4,7 @@
   "type": "forex",
   "profile": "institutionnel",
   "last_updated": "2025-07-30",
+  "min_confidence_threshold": 0.20,
   "volatility": {
     "expected_daily_range_percent": {
       "value": 0.8,

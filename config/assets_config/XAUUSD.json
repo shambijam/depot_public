@@ -4,6 +4,7 @@
   "type": "metals",
   "profile": "institutionnel",
   "last_updated": "2025-07-23",
+  "min_confidence_threshold": 0.20,
   "timeframe_preference": {
     "description": "Liste ordonnée des timeframes préférés pour l'analyse et le trading de cet actif, du plus court au plus long. Le PhaseObserver utilisera ces préférences.",
     "list": [
