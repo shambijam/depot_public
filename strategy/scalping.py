@@ -48,6 +48,13 @@ class ScalpingStrategy:
           - (optionnel) "sl_price"/"tp_price" OU "target_sl_pips"/"target_tp_pips"
           - (burst) {"burst_decisions": [ ... ]} avec un "basket_id"
         """
+        
+        # Vérifier que l'actif est autorisé pour scalping
+        allowed_assets = config.get("tradeable_assets", [])
+        if allowed_assets and asset not in allowed_assets:
+            self.logger.info(f"[{asset}] Ignoré: non autorisé pour scalping (whitelist={allowed_assets}).")
+            return {}
+
         # 0) Garde globales simples (news, disponibilité prix, spread)
         if config.get("halt_on_major_news", True) and self._has_blocking_news(context):
             self.logger.info(f"[{asset}] Halt: actualité majeure.")

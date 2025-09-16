@@ -1106,78 +1106,26 @@ class DecisionPipeline:
             )
             if optimal_score < min_optimal_score_threshold:
                 self.logger.warning(
-                    f"Le score optimal ({optimal_score:.2f}) est inférieur au seuil minimal ({min_optimal_score_threshold:.2f}). Cherche une stratégie par défaut."
+                    f"Le score optimal ({optimal_score:.2f}) est inférieur au seuil minimal ({min_optimal_score_threshold:.2f})."
                 )
                 optimal_config_path = None
 
         if optimal_config_path is None:
             self.logger.warning(
-                "Aucune configuration optimale trouvée par le scoring ou le score est trop bas. Tentative de chargement de la stratégie par défaut."
+                "Aucune configuration optimale trouvée par le scoring ou le score est trop bas. "
+                "Le pipeline s'arrête sans fallback stratégique."
             )
+            return {}
 
-            default_strategy_key = self.config_manager.get(
-                "strategies.default_strategy"
-            )
-            if default_strategy_key:
-                config_mapping = self.config_manager.get(
-                    "strategies.config_mapping", {}
-                )
-                default_strategy_file_name = config_mapping.get(default_strategy_key)
-                if default_strategy_file_name:
-                    actual_config_dir = Path(
-                        self.config_manager.get("paths.strategy_configs", "config/")
-                    )
-                    default_strategy_file_path = (
-                        actual_config_dir / default_strategy_file_name
-                    )
-
-                    try:
-                        # Utilise ConfigLoader pour parser
-                        default_strategy_content = (
-                            self.config_manager.config_loader.parse_json_config(
-                                str(default_strategy_file_path)
-                            )
-                        )
-                        # Ensure consistent structure
-                        if (
-                            isinstance(default_strategy_content, dict)
-                            and "content" not in default_strategy_content
-                        ):
-                            optimal_config_content = default_strategy_content
-                        else:
-                            optimal_config_content = default_strategy_content.get(
-                                "content", default_strategy_content
-                            )
-                        optimal_score = 0.0
-                        self.logger.info(
-                            f"Stratégie par défaut '{default_strategy_key}' chargée comme fallback."
-                        )
-
-                    except Exception as e:
-                        self.logger.error(
-                            f"Échec du chargement de la stratégie par défaut '{default_strategy_key}' depuis {default_strategy_file_path}: {e}",
-                            exc_info=True,
-                        )
-                        return {}
-                else:
-                    self.logger.error(
-                        f"Aucun fichier de configuration mappé pour la stratégie par défaut '{default_strategy_key}'. Impossible de fournir un fallback."
-                    )
-                    return {}
-            else:
-                self.logger.critical(
-                    "Aucune 'default_strategy' n'est définie et aucune optimale n'a été sélectionnée. Impossible de procéder."
-                )
-                return {}
-        else:
-            config_data = configs[optimal_config_path]
-            optimal_config_content = config_data.get("config", config_data)
+        # Config optimale trouvée
+        config_data = configs[optimal_config_path]
+        optimal_config_content = config_data.get("config", config_data)
 
         self.logger.info(
             f"Configuration finale sélectionnée : '{optimal_config_content.get('strategy_name')}' avec un score de {optimal_score:.2f}"
         )
 
-        market_regime = context.get("current_market_regime", "unknown_regime_fallback")
+        market_regime = context.get("current_market_regime", "unknown_regime")
 
         self.config_manager.log_decision(  # Log via ConfigManager
             config=optimal_config_content,
@@ -1190,6 +1138,7 @@ class DecisionPipeline:
             reason=f"Configuration optimale sélectionnée via scoring (score: {optimal_score:.2f}) pour le régime de marché '{market_regime}'",
         )
         return optimal_config_content
+
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]

@@ -39,6 +39,12 @@ class LiquidityStrategy(BaseStrategy):
         if not tradeable_assets:
             self.logger.warning("[LIQ] Aucun asset tradable configuré.")
             return None
+        
+            # Vérification stricte: ignorer les actifs hors whitelist
+            invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
+            if invalid_assets:
+                self.logger.info(f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})")
+
 
         min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.6))
         best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})

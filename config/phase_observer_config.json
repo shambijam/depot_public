@@ -1,6 +1,6 @@
 {
     "core_parameters": {
-        "description": "Paramètres de base optimisés pour détection de signaux",
+        "description": "Param\u00e8tres de base optimis\u00e9s pour d\u00e9tection de signaux",
         "lookback_window": 12,
         "volatility_threshold": 0.0002,
         "volume_zscore": 1.2,
@@ -12,7 +12,7 @@
         "bos_mss_structure_window_ratio": 0.25,
         "min_window_eqh_eql": 6,
         "min_window_volume_anomaly": 5,
-        "min_std_dev_volume_anomaly": 0.000001,
+        "min_std_dev_volume_anomaly": 1e-06,
         "min_window_fvg_presence": 3,
         "fvg_window_slice_size": 2,
         "swing_point_order": 2,
@@ -23,12 +23,12 @@
         "min_allowed_spread_for_liquid_check": 10,
         "min_volume_for_liquid_check": 5,
         "default_spread_points": 0.0,
-        "default_point_value": 0.00001,
-        "default_trade_tick_size": 0.00001,
+        "default_point_value": 1e-05,
+        "default_trade_tick_size": 1e-05,
         "default_trade_contract_size": 100000.0
     },
     "detection_toggles": {
-        "description": "Indicateurs activés pour architecture SNIPER_X",
+        "description": "Indicateurs activ\u00e9s pour architecture SNIPER_X",
         "detect_fvg": true,
         "detect_order_block": true,
         "detect_bos_mss": true,
@@ -45,7 +45,7 @@
         "max_gap_age_bars": 50
     },
     "order_block_ml_settings": {
-        "description": "Order Blocks avec scoring ML et confluence (resserré)",
+        "description": "Order Blocks avec scoring ML et confluence (resserr\u00e9)",
         "enable_ml_scoring": true,
         "confluence_requirements": {
             "min_confluence_score": 0.73,
@@ -60,7 +60,7 @@
         }
     },
     "adaptive_swing_settings": {
-        "description": "Swing Points adaptatifs selon régime de volatilité",
+        "description": "Swing Points adaptatifs selon r\u00e9gime de volatilit\u00e9",
         "volatility_regimes": {
             "high_vol": {
                 "swing_order": 5,
@@ -83,7 +83,7 @@
         }
     },
     "bos_mss_enhanced_settings": {
-        "description": "BOS/MSS avec confirmations volume et momentum (resserré)",
+        "description": "BOS/MSS avec confirmations volume et momentum (resserr\u00e9)",
         "volume_confirmation": {
             "enable": true,
             "volume_multiplier_threshold": 1.2,
@@ -100,7 +100,7 @@
         }
     },
     "regime_detection_settings": {
-        "description": "Détection sophistiquée du régime de marché",
+        "description": "D\u00e9tection sophistiqu\u00e9e du r\u00e9gime de march\u00e9",
         "adx_settings": {
             "period": 14,
             "trending_threshold": 25,
@@ -118,14 +118,14 @@
         }
     },
     "confidence_score_calculation": {
-        "description": "Pondération des signaux et bonus de confluence (resserré)",
+        "description": "Pond\u00e9ration des signaux et bonus de confluence (resserr\u00e9)",
         "base_confidence": 0.25,
         "signal_weights": {
             "fvg_detected": 0.15,
-            "ob_detected": 0.30,
-            "bos_mss_detected": 0.20,
+            "ob_detected": 0.3,
+            "bos_mss_detected": 0.2,
             "liquidity_grab_detected": 0.15,
-            "eqh_eql_detected": 0.10,
+            "eqh_eql_detected": 0.1,
             "volume_anomaly_detected": 0.05,
             "trend_alignment": 0.05,
             "regime_alignment": 0.05
@@ -133,7 +133,7 @@
         "confluence_bonus": {
             "multiple_signals_bonus": 0.15,
             "min_signals_for_bonus": 4,
-            "fvg_ob_confluence": 0.10,
+            "fvg_ob_confluence": 0.1,
             "ob_bos_confluence": 0.08,
             "full_confluence_bonus": 0.15,
             "max_confidence_cap": 0.95
@@ -142,15 +142,9 @@
             "volume_confirmation_bonus": 0.05,
             "trend_strength_bonus": 0.05,
             "spread_quality_bonus": 0.05,
-            "high_volume_confirmation": 1.10,
+            "high_volume_confirmation": 1.1,
             "regime_strength": 1.05,
             "tight_spread": 1.05
-        },
-        "bollinger_weights": {
-            "mean_revert_score": 0.10,
-            "breakout_score": 0.10,
-            "squeeze_bonus": 0.05,
-            "expansion_bonus": 0.05
         }
     },
     "liquidity_detection": {
@@ -173,7 +167,7 @@
         "enable_signal_quality_report": true
     },
     "multi_timeframe_settings": {
-        "description": "Configuration multi-timeframe pour confluence (resserrée)",
+        "description": "Configuration multi-timeframe pour confluence (resserr\u00e9e)",
         "enabled": true,
         "timeframes": [
             "M1",
@@ -188,7 +182,7 @@
         }
     },
     "data_requirements": {
-        "description": "Exigences minimales d'historique/qualité pour produire des signaux",
+        "description": "Exigences minimales d'historique/qualit\u00e9 pour produire des signaux",
         "enabled": true,
         "min_bars_total": 500,
         "min_bars_by_timeframe": {
@@ -202,65 +196,12 @@
         "reject_asset_if_any_tf_below_min": true
     },
     "readiness_gate": {
-        "description": "Garde-fou de démarrage pour éviter les trades sans historique suffisant (durci)",
+        "description": "Garde-fou de d\u00e9marrage pour \u00e9viter les trades sans historique suffisant (durci)",
         "enabled": true,
         "block_signals_first_n_cycles": 8,
         "max_allowed_data_age_seconds": 90
     },
-    "strategy_profiles": {
-        "scalping_katana": {
-            "description": "Entrées micro-phases M1 avec alignement M5/M15, SL/TP serrés et sorties rapides.",
-            "enabled": true,
-            "timeframes": [
-                "M1",
-                "M5",
-                "M15"
-            ],
-            "entry_filters": {
-                "require_m1_signal_types": [
-                    "bos_mss_enhanced",
-                    "fvg_enhanced",
-                    "order_block_ml_enhanced"
-                ],
-                "min_m1_break_distance": 0.0001,
-                "require_m5_alignment": true,
-                "m5_alignment_lookback_bars": 5,
-                "m15_bias_weight": 0.2,
-                "fresh_swing_distance_pips_min": 3.0,
-                "max_spread_points_for_entry": 15,
-                "max_signal_age_seconds": 30
-            },
-            "sl_tp_policy": {
-                "use_atr_m1": true,
-                "atr_period": 14,
-                "sl_atr_multiplier": 1.2,
-                "tp_rr": 1.8,
-                "min_sl_pips": 4.0,
-                "max_sl_pips": 12.0,
-                "hard_tp_pips_cap": 20.0,
-                "enforce_points_per_pip": true
-            },
-            "risk": {
-                "risk_per_trade_percent": 0.7
-            },
-            "trade_management": {
-                "max_trade_bars_m1": 12,
-                "breakeven_after_rr": 1.0,
-                "partial_tp_rr": 1.0,
-                "partial_tp_fraction": 0.5,
-                "trail_after_rr": 1.5,
-                "trail_step_pips": 2.0,
-                "kill_switch_if_m5_trend_flips": true
-            },
-            "session_filters": {
-                "enable_session_filter": false,
-                "allowed_sessions": [
-                    "london",
-                    "new_york"
-                ]
-            }
-        }
-    },
+    "strategy_profiles": {},
     "phase_detection_defaults": {
         "detection_toggles": {
             "detect_fvg": true,
@@ -269,16 +210,7 @@
             "detect_liquidity_grab": true,
             "detect_eqh_eql": true,
             "detect_volume_anomaly": true,
-            "detect_regime": true,
-            "detect_bollinger": true
-        },
-        "bollinger": {
-            "period": 20,
-            "std_mult": 2.0,
-            "squeeze_window": 100,
-            "squeeze_percentile": 0.15,
-            "min_bars": 200,
-            "atr_period": 14
+            "detect_regime": true
         }
     }
 }
