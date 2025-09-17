@@ -519,62 +519,37 @@ class DecisionPipeline:
             # 3) Dispatch générique par stratégie/actif
             print("🤖 [DECISION] Étape 3: Dispatch des stratégies par actif...")
             signals = analyzed_context.get("trading_signals", {}) or {}
-            dispatch_map = self.dispatch_strategies_per_asset()
+
+            # Utilisation du vrai dispatch robuste
+            dispatch = self.dispatch_strategies_per_asset(analyzed_context)
 
             td, chosen_strategy, chosen_asset = None, None, None
 
             # --- Priorité SCALPING (XAUUSD) ---
-            if "XAUUSD" in signals and "XAUUSD" in dispatch_map:
-                strat_name, strat = dispatch_map["XAUUSD"]
-                td = strat.evaluate_entry(
-                    "XAUUSD", analyzed_context, signals.get("XAUUSD")
-                )
-                if td and td.get("action"):
-                    chosen_strategy, chosen_asset = strat_name, "XAUUSD"
-
-            # --- Sinon Liquidity EURUSD puis GBPUSD ---
-            if not td or not td.get("action"):
-                for asset in ["EURUSD", "GBPUSD"]:
-                    if asset in signals and asset in dispatch_map:
-                        strat_name, strat = dispatch_map[asset]
-                        td = strat.evaluate_entry(
-                            asset, analyzed_context, signals.get(asset)
-                        )
-                        if td and td.get("action"):
-                            chosen_strategy, chosen_asset = strat_name, asset
-                            break
-
-            # --- PRIORITÉ SCALPING : XAUUSD ---
             if "XAUUSD" in signals:
-                dispatch = self.dispatch_strategies_per_asset(analyzed_context)
-                strat = dispatch["mapping"].get("scalping", {}).get(asset)
+                strat = dispatch["mapping"].get("scalping", {}).get("XAUUSD")
+                if strat:
+                    td = strat.evaluate_entry(
+                        "XAUUSD", analyzed_context, signals["XAUUSD"]
+                    )
+                    if td and td.get("action"):
+                        chosen_strategy, chosen_asset = "scalping", "XAUUSD"
 
-                td = strat.evaluate_entry(
-                    "XAUUSD", analyzed_context, signals.get("XAUUSD")
-                )
-                if td and td.get("action"):
-                    chosen_strategy = "scalping"
-                    chosen_asset = "XAUUSD"
-                else:
-                    td, chosen_strategy, chosen_asset = None, None, None
-            else:
-                td, chosen_strategy, chosen_asset = None, None, None
-
-            # --- Sinon Liquidity : EURUSD, puis GBPUSD ---
-            if td is None or not td.get("action"):
+            # --- Sinon Liquidity (EURUSD puis GBPUSD) ---
+            if not td or not td.get("action"):
                 for asset in ["EURUSD", "GBPUSD"]:
                     if asset in signals:
-                        strat = self.strategy_manager.get_strategy("liquidity")
-                        td = strat.evaluate_entry(
-                            asset, analyzed_context, signals.get(asset)
-                        )
-                        if td and td.get("action"):
-                            chosen_strategy = "liquidity"
-                            chosen_asset = asset
-                            break
+                        strat = dispatch["mapping"].get("liquidity", {}).get(asset)
+                        if strat:
+                            td = strat.evaluate_entry(
+                                asset, analyzed_context, signals[asset]
+                            )
+                            if td and td.get("action"):
+                                chosen_strategy, chosen_asset = "liquidity", asset
+                                break
 
+            # --- Aucun trade trouvé ---
             if not td or not td.get("action"):
-                # Aucun signal valide -> sortie propre
                 print("🤖 [DECISION] ❌ Aucun trade détecté pour ce cycle")
                 return {
                     "timestamp_utc": datetime.now(UTC).isoformat(),
