@@ -5,12 +5,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import math
 import time
 import uuid
+from .base_strategy import BaseStrategy
+
 
 import numpy as np
 import pandas as pd
 
 
-class ScalpingStrategy:
+class ScalpingStrategy(BaseStrategy):
     """
     Stratégie SCALPING focalisée sur :
       1) Burst Scalping (basket d’ordres simultanés) — priorité
