@@ -102,6 +102,7 @@ class ScalpingStrategy:
         # 4) Sinon, entrée simple (fallback propre sans Bollinger)
         #    -> On propose des cibles en pips (TP/SL) dynamiques (adaptées vol/ATR).
         sl_pips, tp_pips, regime_tag = self._dynamic_tp_sl_from_vol_atr(signals, meta, config)
+        
         decision = {
             "action": action,
             "asset": asset,
@@ -109,10 +110,12 @@ class ScalpingStrategy:
             "target_sl_pips": float(round(sl_pips, 3)),
             "target_tp_pips": float(round(tp_pips, 3)),
             "rule_name": "scalping_simple",
+            "strategy_type": "scalping",  # ✅ ajouté pour audit & logs
             "confidence": float(signals.get("confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0)),
             "meta": {"regime_tag": regime_tag},
         }
         return decision
+
 
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================
@@ -171,11 +174,13 @@ class ScalpingStrategy:
                 "order_type": "MARKET",
                 "entry_price": entry_price,
                 "rule_name": "burst_scalping",
+                "strategy_type": "scalping",   # ✅ ajouté pour cohérence
                 "basket_id": basket_id,
                 "burst_index": i + 1,
                 "burst_size": size,
                 "meta": {"burst": True},
             }
+
             if isinstance(sl_pips, (int, float)) and sl_pips > 0:
                 d["target_sl_pips"] = float(sl_pips)
             if isinstance(tp_pips, (int, float)) and tp_pips > 0:

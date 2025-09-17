@@ -33,10 +33,10 @@ except ImportError:
 
 class StrategyManager:
     """
-    Gère le chargement dynamique des stratégies, le mappage, la sélection intelligente
+    Gère le chargement dynamique des stratégies, leur mappage
     et leur intégration dans la configuration du bot.
-    Implémente un cache persistant pour les configurations et les classes de stratégies.
     """
+
 
     def __init__(
         self,
@@ -72,7 +72,7 @@ class StrategyManager:
         self.logger.propagate = False  # Empêche la double propagation au logger racine.
 
         self.strategy_registry: Dict[str, Dict[str, Any]] = {}
-        self._config_knowledge_base: Dict[str, Dict[str, Any]] = {}
+       
 
         # self.load_all_strategies() # RETIRÉ : L'appel est prématuré et cause l'erreur de chargement.
 
@@ -151,11 +151,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path.stat().st_mtime,
                 }
-                self._config_knowledge_base[strategy_name_from_config] = {
-                    "config": config,
-                    "class": strategy_class,
-                    "version": str(config_path.stat().st_mtime),
-                }
+               
                 self.logger.debug(
                     f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}."
                 )
@@ -402,11 +398,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path.stat().st_mtime,
                 }
-                self._config_knowledge_base[strategy_name_from_config] = {
-                    "config": config,
-                    "class": strategy_class,
-                    "version": str(config_path.stat().st_mtime),
-                }
+             
             else:
                 self.logger.error(
                     f"[load_strategy] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre."
@@ -436,206 +428,7 @@ class StrategyManager:
                 f"Échec du chargement de '{strategy_key}' : {str(e)}", exc_info=True
             )
             return False
-
-    def select_strategy(self, context: Dict[str, Any]) -> str:
-        """
-        Sélectionne la meilleure stratégie en fonction du contexte du marché.
-        Modes supportés (via config) :
-        - strategy_selection.mode = "scalping_only" | "auto" | "blended"
-            * "scalping_only" : force la stratégie 'scalping' (phase Katana de stabilisation)
-            * "auto"          : scoring classique (par défaut)
-            * "blended"       : scoring avec surpondération des stratégies 'ready' dans le contexte
-        """
-        self.logger.info("Sélection intelligente de la stratégie...")
-
-        # ----- 0) Lecture du mode de sélection -----
-        try:
-            sel_mode = self.config_manager.get("strategy_selection.mode", "auto")
-        except Exception:
-            sel_mode = "auto"
-
-        # Si phase de stabilisation Katana → forcer scalping si dispo
-        if sel_mode == "scalping_only":
-            if "scalping" in self.strategy_registry and (
-                self.strategy_registry["scalping"]["config"].get("enabled", True)
-            ):
-                self.logger.info(
-                    "Mode 'scalping_only' actif → stratégie 'scalping' sélectionnée."
-                )
-                return "scalping"
-            # fallback si désactivée
-            self.logger.warning(
-                "Mode 'scalping_only' actif mais 'scalping' indisponible. Bascule en 'auto'."
-            )
-
-        market_regime = context.get("current_market_regime", "unknown")
-        volatility = context.get("market_volatility_percentage", 0.0)
-        signals = context.get("trading_signals", {})
-        strategy_scoring_rules = self.config_manager.get(
-            "scoring_rules.strategy_selection", {}
-        )
-
-        # ----- 1) Vérification mapping market_regimes (prioritaire) -----
-        try:
-            market_regimes = self.config_manager.get("market_regimes", {})
-            if market_regimes and market_regime != "unknown":
-                for strat, regimes in market_regimes.items():
-                    if market_regime in regimes:
-                        self.logger.info(
-                            f"[STRATEGY_MANAGER] Régime '{market_regime}' → stratégie '{strat}' (mapping market_regimes)."
-                        )
-                        return strat
-        except Exception as e:
-            self.logger.warning(
-                f"[STRATEGY_MANAGER] Mapping market_regimes non appliqué: {e}"
-            )
-
-        # Surpondérations contextuelles (blended/auto)
-        katana_ready_assets = set(context.get("katana_ready_assets", []) or [])
-        strategy_readiness = (
-            context.get("strategy_readiness") or {}
-        )  # ex: {"scalping": True, "liquidity": False}
-
-        strategy_scores: Dict[str, float] = {}
-        for strategy_name_in_reg, strategy_info in self.strategy_registry.items():
-            config = strategy_info.get("config", {}) or {}
-            if not config.get("enabled", True):
-                continue  # stratégie désactivée
-
-            tags = config.get("strategy_tags", [])
-            score = 0.0
-
-            # 1) Regime fit (fallback scoring)
-            if (
-                market_regime != "unknown"
-                and market_regime in strategy_scoring_rules.get("regime_weights", {})
-            ):
-                regime_tags = market_regime.split("_")
-                for tag in tags:
-                    if tag in regime_tags:
-                        score += strategy_scoring_rules["regime_weights"].get(tag, 0.0)
-
-            # 2) Volatility fit
-            if "high_volatility" in tags and volatility > strategy_scoring_rules.get(
-                "volatility_thresholds.high", 0.8
-            ):
-                score += strategy_scoring_rules.get(
-                    "volatility_weights.high_volatility", 0.3
-                )
-            if "low_volatility" in tags and volatility < strategy_scoring_rules.get(
-                "volatility_thresholds.low", 0.3
-            ):
-                score += strategy_scoring_rules.get(
-                    "volatility_weights.low_volatility", 0.3
-                )
-
-            # 3) Signal confidence (moyenne cross-assets)
-            if signals:
-                try:
-                    total_confidence = sum(
-                        float(asset_signal.get("confidence_score", 0.0))
-                        for asset_signal in signals.values()
-                    )
-                    avg_confidence = total_confidence / max(len(signals), 1)
-                except Exception:
-                    avg_confidence = 0.0
-                score += avg_confidence * strategy_scoring_rules.get(
-                    "signal_confidence_weight", 0.2
-                )
-
-            # 4) AI advisor (si activé)
-            if self.config_manager.get("ai.enabled", False):
-                ai_scores = context.get("ai_recommendation_score", {}) or {}
-                ai_weight = float(
-                    self.config_manager.get("ai.strategy_selection_weight", 0.1) or 0.1
-                )
-                tradeables = set(
-                    self.config_manager.get_current_dynamic_config().get(
-                        "tradeable_assets", []
-                    )
-                )
-                relevant = [float(v) for k, v in ai_scores.items() if k in tradeables]
-                if relevant:
-                    score += max(relevant) * ai_weight
-
-            # 5) Performance historique
-            historical_performance = strategy_info.get("performance", {}) or {}
-            sharpe_ratio = float(historical_performance.get("sharpe_ratio", 0.0) or 0.0)
-            if sharpe_ratio > strategy_scoring_rules.get(
-                "performance_thresholds.good_sharpe", 1.0
-            ):
-                score += strategy_scoring_rules.get(
-                    "performance_weights.good_sharpe_boost", 0.1
-                )
-            elif sharpe_ratio < strategy_scoring_rules.get(
-                "performance_thresholds.poor_sharpe", 0.5
-            ):
-                score -= strategy_scoring_rules.get(
-                    "performance_weights.poor_sharpe_penalty", 0.1
-                )
-
-            # 6) Blended/Readiness boosts
-            if sel_mode == "blended":
-                if strategy_readiness.get(strategy_name_in_reg) is True:
-                    score += 0.25
-                if strategy_name_in_reg == "scalping" and katana_ready_assets:
-                    score += 0.20
-
-            # 7) Priorité Katana douce en mode auto
-            if (
-                sel_mode == "auto"
-                and strategy_name_in_reg == "scalping"
-                and katana_ready_assets
-            ):
-                score += 0.10
-
-            strategy_scores[strategy_name_in_reg] = score
-
-        if not strategy_scores:
-            self.logger.warning("Aucune stratégie disponible.")
-            default_strategy_key_from_config = self.config_manager.get(
-                "strategies.default_strategy", "scalping"
-            )
-            default_strategy_config_file = self.config_manager.get(
-                "strategies.config_mapping", {}
-            ).get(default_strategy_key_from_config)
-            if default_strategy_config_file:
-                try:
-                    default_config_path = (
-                        Path(
-                            self.config_manager.get(
-                                "paths.strategy_configs", "config/strategy/"
-                            )
-                        )
-                        / default_strategy_config_file
-                    )
-                    default_strategy_content = self.config_loader.load_dynamic_config(
-                        str(default_config_path)
-                    )
-                    default_strategy_name = default_strategy_content.get(
-                        "strategy_name", default_strategy_key_from_config
-                    )
-                    self.logger.info(
-                        f"Retour de la stratégie par défaut '{default_strategy_name}'."
-                    )
-                    return default_strategy_name
-                except Exception as e:
-                    self.logger.error(
-                        f"Impossible de charger la config de la stratégie par défaut '{default_strategy_key_from_config}': {e}",
-                        exc_info=True,
-                    )
-                    return ""
-            else:
-                self.logger.error(
-                    "Aucune stratégie par défaut définie ou mappée. Impossible de sélectionner une stratégie."
-                )
-                return ""
-
-        best_strategy = max(strategy_scores, key=strategy_scores.get)
-        self.logger.info(
-            f"Stratégie sélectionnée : '{best_strategy}' (score: {strategy_scores[best_strategy]:.2f})."
-        )
-        return best_strategy
+  
 
     def redefine_strategy(
         self, strategy_key: str, config_path: str, python_module: Optional[str] = None
@@ -676,11 +469,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path_obj.stat().st_mtime,
                 }
-                self._config_knowledge_base[strategy_name_from_config] = {
-                    "config": config,
-                    "class": strategy_class,
-                    "version": str(config_path_obj.stat().st_mtime),
-                }
+               
             else:
                 self.logger.error(
                     f"[redefine_strategy] La configuration '{config_path_obj.name}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. La redéfinition échoue."
@@ -832,7 +621,7 @@ class StrategyManager:
             strategy_name (str): Nom de la stratégie.
 
         Returns:
-            Optional[Dict[str, Any]]: La configuration, ou None si introuvable.
+            Optional[Dict[str, Any]]: La configuration, ou None si introuvable.mais j'ai enlever tout ca
         """
         for strategy_key, strategy_info in self.strategy_registry.items():
             if strategy_info["config"].get("strategy_name", "") == strategy_name:

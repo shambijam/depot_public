@@ -599,6 +599,7 @@ def run_single_pipeline_cycle(
     - ✅ Pas de raise "ticket nul".
     - ✅ Import local protégé de get_tracker_from_context pour le finally.
     - ✅ Signals consolidés (phase/confidence/point/spread) + logs pipeline.
+    - ✅ Compat avec nouveau pipeline: utilise 'config_used' (et plus 'active_config').
     """
 
     # import DIAG local (sécurisé)
@@ -636,7 +637,9 @@ def run_single_pipeline_cycle(
         # Liste des symboles tradables (filtrage par compte si nécessaire)
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
-        account_allowed = set(active_mt5_account_details.get("allowed_symbols", []))
+        account_allowed = set(
+            (active_mt5_account_details or {}).get("allowed_symbols", [])
+        )
         tradeable_assets = (
             [a for a in all_symbols if a in account_allowed]
             if account_allowed
@@ -751,7 +754,8 @@ def run_single_pipeline_cycle(
             tradeable_assets,
             active_mt5_account_details,
         )
-        global_context["diag_tracker"] = DiagnosticTracker(cycle_count)
+        # ✅ diag_tracker sûr (plus de NameError sur DiagnosticTracker)
+        global_context["diag_tracker"] = get_tracker_from_context(global_context)
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
@@ -809,28 +813,35 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-               # --------- Construction des requêtes ---------
+                # --------- Construction des requêtes ---------
                 decision_package_for_executor: Dict[str, Any] = {
                     "trade_decision": final,
-                    "active_config": decision_package.get("active_config", {}) or {},
+                    "active_config": decision_package.get("config_used", {})
+                    or {},  # ✅ compat nouveau pipeline
                     "market_context": global_context,
                 }
 
                 try:
-                    if final.get("rule_name") == "burst_scalping" or final.get("burst_enabled", False):
+                    if final.get("rule_name") == "burst_scalping" or final.get(
+                        "burst_enabled", False
+                    ):
                         # === MODE BURST ===
                         burst_size = int(final.get("burst_size", 3))
                         trade_decision = trade_executor._attach_burst_metadata(final)
-                        
+
                         # --- ✅ Contrôles Risk spécifiques BURST ---
-                        burst_cfg = (decision_package.get("active_config", {}) or {}).get("burst", {}) or {}
+                        burst_cfg = (decision_package.get("config_used", {}) or {}).get(
+                            "burst", {}
+                        ) or {}
 
                         # Limite journalière
                         max_burst_per_day = int(burst_cfg.get("max_burst_per_day", 5))
                         burst_count_today = global_context.get("burst_count_today", 0)
 
                         if burst_count_today >= max_burst_per_day:
-                            logger.warning(f"[BURST] Limite journalière atteinte ({max_burst_per_day}). Aucune exécution.")
+                            logger.warning(
+                                f"[BURST] Limite journalière atteinte ({max_burst_per_day}). Aucune exécution."
+                            )
                             return False  # stop direct → pas de burst
 
                         # Sécurité volume max (fat-finger)
@@ -845,17 +856,21 @@ def run_single_pipeline_cycle(
                         # Incrémenter le compteur burst pour la journée
                         global_context["burst_count_today"] = burst_count_today + 1
 
-
                         requests = []
                         for i in range(burst_size):
                             req = trade_executor.prepare_order(
                                 {
                                     "trade_decision": dict(trade_decision),
                                     "market_context": global_context,
-                                    "active_config": decision_package.get("active_config", {}) or {},
+                                    "active_config": decision_package.get(
+                                        "config_used", {}
+                                    )
+                                    or {},
                                 }
                             )
-                            req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                            req["comment"] = (
+                                f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                            )
                             requests.append(req)
 
                         # --- DEMO/DRY ---
@@ -881,11 +896,19 @@ def run_single_pipeline_cycle(
                         # --- Monitoring burst baskets (chaque cycle) ---
                         try:
                             trade_executor.monitor_burst_baskets(
-                                max_loss_pips=base_config.get("burst", {}).get("max_loss_pips", 15.0),
-                                trail_trigger=base_config.get("burst", {}).get("trail_trigger", 10.0),
-                                trail_step=base_config.get("burst", {}).get("trail_step", 5.0),
+                                max_loss_pips=base_config.get("burst", {}).get(
+                                    "max_loss_pips", 15.0
+                                ),
+                                trail_trigger=base_config.get("burst", {}).get(
+                                    "trail_trigger", 10.0
+                                ),
+                                trail_step=base_config.get("burst", {}).get(
+                                    "trail_step", 5.0
+                                ),
                             )
-                            logger.debug("[BURST] Surveillance baskets exécutée en fin de cycle.")
+                            logger.debug(
+                                "[BURST] Surveillance baskets exécutée en fin de cycle."
+                            )
                         except Exception as e:
                             logger.error(f"[PIPELINE] Erreur surveillance burst: {e}")
 
@@ -893,18 +916,20 @@ def run_single_pipeline_cycle(
 
                     else:
                         # === MODE STANDARD ===
-                        order_request = trade_executor.prepare_order(decision_package_for_executor)
+                        order_request = trade_executor.prepare_order(
+                            decision_package_for_executor
+                        )
 
                         # Normalisation du magic (entier non nul)
                         try:
                             if not order_request.get("magic"):
-                                magic_cfg = (decision_package.get("active_config", {}) or {}).get(
-                                    "magic_number"
-                                )
+                                magic_cfg = (
+                                    decision_package.get("config_used", {}) or {}
+                                ).get("magic_number")
                                 if not magic_cfg:
-                                    magic_cfg = (base_config.get("strategy", {}) or {}).get(
-                                        "magic_number", 51001
-                                    )
+                                    magic_cfg = (
+                                        base_config.get("strategy", {}) or {}
+                                    ).get("magic_number", 51001)
                                 order_request["magic"] = int(magic_cfg)
                             else:
                                 order_request["magic"] = int(order_request["magic"])
@@ -916,13 +941,18 @@ def run_single_pipeline_cycle(
                             if hasattr(trade_executor, "log_simulated_order"):
                                 trade_executor.log_simulated_order(order_request)
                             else:
-                                logger.info(f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}")
+                                logger.info(
+                                    f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
+                                )
                             trade_executed_successfully = True
                             return trade_executed_successfully
 
                         # --- LIVE ---
                         exec_res = trade_executor.execute_order(order_request)
-                        status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+                        status_ok = str(exec_res.get("status", "")).lower() in {
+                            "filled",
+                            "placed",
+                        }
                         if not status_ok:
                             raise RuntimeError(
                                 f"Statut exécution inattendu: {exec_res.get('status')}"
@@ -935,13 +965,12 @@ def run_single_pipeline_cycle(
                         return trade_executed_successfully
 
                 except Exception as e:
-                    logger.error(f"[EXECUTOR] Erreur prepare/execute: {e}", exc_info=True)
+                    logger.error(
+                        f"[EXECUTOR] Erreur prepare/execute: {e}", exc_info=True
+                    )
                     trade_executed_successfully = False
 
-
-                    # (autres mises à jour de compteurs si besoin...)
-
-                    # 🔻 Vérification des EXIT Liquidity
+                # 🔻 Vérification des EXIT Liquidity
                 try:
                     current_positions = mt5_connector.get_open_positions()
                     if current_positions:
@@ -966,19 +995,24 @@ def run_single_pipeline_cycle(
                             # 🔒 Clôture des paniers burst si un exit liquidity touche un trade du panier
                             try:
                                 for decision in exit_decisions:
-                                    if decision.get("basket_id") and decision.get("meta", {}).get("burst"):
-                                        trade_executor.close_burst_basket(decision["basket_id"])
+                                    if decision.get("basket_id") and decision.get(
+                                        "meta", {}
+                                    ).get("burst"):
+                                        trade_executor.close_burst_basket(
+                                            decision["basket_id"]
+                                        )
                                         logger.info(
                                             f"[BURST] Panier {decision['basket_id']} fermé par EXIT Liquidity."
                                         )
                             except Exception as e:
-                                logger.error(f"[BURST] Erreur clôture burst via EXIT Liquidity: {e}")
+                                logger.error(
+                                    f"[BURST] Erreur clôture burst via EXIT Liquidity: {e}"
+                                )
 
                 except Exception as e:
                     logger.error(
                         f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True
                     )
-
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
@@ -990,7 +1024,6 @@ def run_single_pipeline_cycle(
             pass
         logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
 
 
 def main(args: argparse.Namespace) -> None:

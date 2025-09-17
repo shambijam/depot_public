@@ -107,8 +107,12 @@ class LiquidityStrategy(BaseStrategy):
             f"RR={rr_est:.2f} | Confiance={conf:.2f}"
         )
 
-        # Package final pour l’executor
-        return self._build_decision_package_from_proposal(asset, proposal)
+       # Package final pour l’executor
+        decision = self._build_decision_package_from_proposal(asset, proposal) or {}
+        decision["strategy_type"] = "liquidity"  # ✅ ajouté pour audit & logs
+        decision.setdefault("rule_name", "liquidity_entry")  # fallback propre si absent
+        return decision
+
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):
         """
@@ -259,22 +263,28 @@ class LiquidityStrategy(BaseStrategy):
                         f"[LIQUIDITY] ⛔ Exit {asset} (BUY) : invalidation sweep (price={last_price:.5f} < sweep={sweep_extreme:.5f})"
                     )
                     exit_decisions.append(
-                        {
-                            "ticket_to_close": pos["ticket"],
-                            "reason": "Invalidation Sweep",
-                        }
-                    )
+                    {
+                        "ticket_to_close": pos["ticket"],
+                        "reason": "Invalidation Sweep",
+                        "strategy_type": "liquidity",      
+                        "rule_name": "exit_invalidation", 
+                    }
+                )
+
                     continue
                 if side == "SELL" and last_price > sweep_extreme:
                     self.logger.info(
                         f"[LIQUIDITY] ⛔ Exit {asset} (SELL) : invalidation sweep (price={last_price:.5f} > sweep={sweep_extreme:.5f})"
                     )
                     exit_decisions.append(
-                        {
-                            "ticket_to_close": pos["ticket"],
-                            "reason": "Invalidation Sweep",
-                        }
-                    )
+                    {
+                        "ticket_to_close": pos["ticket"],
+                        "reason": "Invalidation Sweep",
+                        "strategy_type": "liquidity",      
+                        "rule_name": "exit_invalidation", 
+                    }
+                )
+
                     continue
 
             # === 2) Exit Volume : spike anormal contre la position ===
@@ -511,13 +521,17 @@ class LiquidityStrategy(BaseStrategy):
             "entry_price": entry_price,
             "sl_price": sl_price,
             "tp_price": tp_price,
-            "order_type": order_type,  # on resp. la conf: LIMIT attendu pour Liquidity
+            "order_type": order_type,  # resp. config: LIMIT attendu pour Liquidity
             "buffer_pips": buffer_pips,
             "timeout_bars": timeout_bars,
             "rr_estimate": rr_est,
             "use_mitigation": use_mitigation,
+            # Champs ajoutés pour compatibilité et audit
+            "confidence": float(sig.get("confidence_score", 0.0)),  # ✅ score du signal
+            "rule_name": "liquidity_sweep_absorption",              # ✅ identifiant clair
         }
         return proposal
+
 
     def _infer_direction(self, sig: Dict[str, Any]) -> Optional[str]:
         """
@@ -1273,8 +1287,10 @@ class LiquidityStrategy(BaseStrategy):
         except Exception:
             pass
 
-        rule_name = "Liquidity: sweep→absorption→impulsion"
-        return {
+       # Rule name plus souple (si défini dans la proposition, sinon valeur par défaut)
+        rule_name = p.get("rule_name") or "liquidity_entry"
+
+        decision = {
             "action": p.get("action"),
             "asset": asset,
             "order_type": p.get("order_type", "LIMIT"),
@@ -1290,7 +1306,10 @@ class LiquidityStrategy(BaseStrategy):
             # Compat descendante (si l'executor attend encore des 'pips')
             "target_tp_pips": target_tp_pips,
             "target_sl_pips": target_sl_pips,
+            # Métadonnées utiles pour logs et audit
+            "confidence": p.get("confidence", 0.0),
         }
+        return decision
 
     # =========================
     #     CONFIG HELPERS

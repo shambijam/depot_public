@@ -5,8 +5,6 @@ import json
 import sys
 import yaml
 import numpy as np
-import importlib.util
-import inspect
 import jsonschema
 import os
 import pandas as pd
@@ -923,9 +921,10 @@ class ConfigManager:
         self, trade_info: Dict[str, Any], result: Dict[str, Any]
     ) -> None:
         """
-        Traite le résultat d'un trade pour mettre à jour les métriques de performance de la stratégie
-        et fournir une boucle de feedback pour l'apprentissage.
-        Les templates de messages Telegram sont externalisés pour une flexibilité accrue.
+        Traite le résultat d'un trade pour fournir un feedback
+        (logging, alertes, IA si activée).
+        ⚠️ Version simplifiée : suppression de la mise à jour des métriques
+        liées à _config_knowledge_base (scoring/fallback supprimés).
         """
         self.logger.info(
             f"Traitement du feedback pour le trade ID: {trade_info.get('order_id', 'N/A')}"
@@ -942,41 +941,7 @@ class ConfigManager:
         else:
             status = TradeStatus.BREAKEVEN
 
-        config_path_to_update = None
-        for path, config_data in self._config_knowledge_base.items():
-            if (
-                isinstance(config_data, dict)
-                and isinstance(config_data.get("content"), dict)
-                and config_data["content"].get("strategy_name") == strategy_name
-            ):
-                config_path_to_update = path
-                break
-
-        if config_path_to_update:
-            perf_metrics = self._config_knowledge_base[
-                config_path_to_update
-            ].setdefault(
-                "performance",
-                {
-                    "wins": 0,
-                    "losses": 0,
-                    "total_pnl": 0.0,
-                    "sharpe_ratio": 0.0,
-                    "max_drawdown_percent": 0.0,
-                },
-            )
-
-            if status == TradeStatus.PROFIT:
-                perf_metrics["wins"] += 1
-            elif status == TradeStatus.LOSS:
-                perf_metrics["losses"] += 1
-            perf_metrics["total_pnl"] += pnl
-
-            self.logger.info(
-                f"Mise à jour des métriques de performance pour la stratégie '{strategy_name}'. Nouveau P&L: {perf_metrics['total_pnl']:.2f}."
-            )
-            self._save_config_knowledge_base()
-
+        # --- Message Telegram ---
         message_template = self.get(
             "telegram.templates.trade_closed",
             "📊 **Trade Clôturé**\nSymbol: `{asset}` | Stratégie: `{strategy}`\nP&L: `${pnl:.2f}` (`{status}`)\nHeure: `{time}`",
@@ -990,6 +955,7 @@ class ConfigManager:
         )
         self.send_alert(message, "telegram_trade_closed")
 
+        # --- Feedback IA ---
         if hasattr(self, "ai_decision_instance") and self.ai_decision_instance:
             try:
                 self.ai_decision_instance.feedback_on_result(
@@ -1004,6 +970,7 @@ class ConfigManager:
                     exc_info=True,
                 )
 
+        # --- Log décision ---
         self.log_decision(
             config=self.get_current_dynamic_config(),
             trade_decision=trade_info,
@@ -1012,111 +979,6 @@ class ConfigManager:
             ai_input=None,
         )
 
-    def _save_config_knowledge_base(self) -> None:
-        """
-        Sauvegarde la base de connaissance des configurations (`_config_knowledge_base`)
-        vers un fichier JSON (pour la persistance des métriques de performance).
-        """
-        kb_path = (
-            Path(self.get("paths.configs", "config/")) / "config_knowledge_base.json"
-        )
-        temp_path = kb_path.with_suffix(".tmp")
-        try:
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    self._config_knowledge_base, f, indent=4, cls=CustomJSONEncoder
-                )
-            temp_path.rename(kb_path)
-            self.logger.info(
-                f"Base de connaissance des configurations sauvegardée avec succès vers '{kb_path}'."
-            )
-        except Exception as e:
-            self.logger.error(
-                f"Échec de la sauvegarde de la base de connaissance des configurations vers '{kb_path}': {e}",
-                exc_info=True,
-            )
-
-    def _load_config_knowledge_base_from_file(self) -> None:
-        """
-        Charge la base de connaissance des configurations depuis un fichier JSON au démarrage.
-        """
-        kb_path = (
-            Path(self.get("paths.configs", "config/")) / "config_knowledge_base.json"
-        )
-        if kb_path.exists():
-            try:
-                with open(kb_path, "r", encoding="utf-8") as f:
-                    self._config_knowledge_base = json.load(f)
-                self.logger.info(
-                    f"Base de connaissance des configurations chargée depuis '{kb_path}'."
-                )
-            except Exception as e:
-                self.logger.error(
-                    f"Échec du chargement de la base de connaissance des configurations depuis '{kb_path}': {e}",
-                    exc_info=True,
-                )
-                self._config_knowledge_base = {}
-        else:
-            self.logger.info(
-                "Fichier de base de connaissance des configurations non trouvé. Initialisation vide."
-            )
-            self._config_knowledge_base = {}
-
-    def auto_update_knowledge_base(self) -> None:
-        """
-        Met à jour la base de connaissance en scannant le répertoire de configurations
-        pour découvrir de nouvelles stratégies ajoutées "à chaud" (hot-reload),
-        et détecter les modifications ou suppressions.
-        """
-        self.logger.info(
-            "Mise à jour automatique de la base de connaissance des stratégies..."
-        )
-
-        strategy_config_dir = self.get("paths.strategy_configs", "config/strategies/")
-
-        latest_configs = self.scan_config_files(strategy_config_dir)
-
-        new_configs_found = set(latest_configs.keys()) - set(
-            self._config_knowledge_base.keys()
-        )
-        if new_configs_found:
-            self.logger.info(
-                f"Nouvelles configurations de stratégies détectées : {list(new_configs_found)}"
-            )
-            self._config_knowledge_base.update(
-                {k: v for k, v in latest_configs.items() if k in new_configs_found}
-            )
-            self._save_config_knowledge_base()
-
-        modified_configs = []
-        for path, new_data in latest_configs.items():
-            if (
-                path in self._config_knowledge_base
-                and new_data["version"] != self._config_knowledge_base[path]["version"]
-            ):
-                modified_configs.append(path)
-                self._config_knowledge_base[path] = new_data
-                self.logger.info(
-                    f"Configuration de stratégie modifiée détectée : {Path(path).name}. Mise à jour de la base de connaissance."
-                )
-        if modified_configs:
-            self._save_config_knowledge_base()
-
-        deleted_configs = set(self._config_knowledge_base.keys()) - set(
-            latest_configs.keys()
-        )
-        if deleted_configs:
-            self.logger.warning(
-                f"Configurations de stratégies supprimées détectées : {list(deleted_configs)}. Elles seront retirées de la base de connaissance."
-            )
-            for path in deleted_configs:
-                del self._config_knowledge_base[path]
-            self._save_config_knowledge_base()
-
-        if not new_configs_found and not modified_configs and not deleted_configs:
-            self.logger.debug(
-                "Aucun changement détecté dans les configurations de stratégies. Base de connaissance à jour."
-            )
 
     def backtest_strategy(
         self, config: Dict[str, Any], historical_data: pd.DataFrame
@@ -1186,119 +1048,6 @@ class ConfigManager:
             f"Backtest terminé pour la stratégie '{config.get('strategy_name', 'inconnue')}'. Résultats: {results}"
         )
         return results
-
-    def update_config_from_backtest(self, results: Dict[str, Any]) -> None:
-        """
-        Met à jour activement une configuration en fonction des résultats de son backtest.
-        """
-        self.logger.info(
-            "Mise à jour de la configuration suite aux résultats du backtest..."
-        )
-        config = results.get("config_snapshot")
-        if not config:
-            self.logger.warning(
-                "Snapshot de configuration manquant dans les résultats du backtest. Mise à jour annulée."
-            )
-            self.log_decision(
-                self.get_current_dynamic_config(),
-                {},
-                {"backtest_results": results},
-                "Mise à jour config annulée: Snapshot manquant.",
-            )
-            return
-
-        sharpe_ratio = results.get("sharpe_ratio", 0.0)
-        max_drawdown = results.get("max_drawdown_percent", 100.0)
-        strategy_name = config.get("strategy_name", "inconnue")
-
-        thresholds = self.get(
-            "backtest_evaluation.sharpe_thresholds",
-            {"poor_performance": 0.5, "suboptimal_ai_intervention": 0.7},
-        )
-        high_drawdown_threshold = self.get(
-            "backtest_evaluation.thresholds.high_drawdown", 10.0
-        )
-
-        config_path_in_kb = None
-        for path, data in self._config_knowledge_base.items():
-            if data["content"].get("strategy_name") == strategy_name:
-                config_path_in_kb = path
-                break
-
-        if config_path_in_kb:
-            perf_metrics = self._config_knowledge_base[config_path_in_kb].setdefault(
-                "performance", {"wins": 0, "losses": 0, "total_pnl": 0.0}
-            )
-            perf_metrics["sharpe_ratio"] = sharpe_ratio
-            perf_metrics["max_drawdown_percent"] = max_drawdown
-            perf_metrics["last_backtest_timestamp"] = datetime.now(UTC).isoformat()
-            self.logger.info(
-                f"Métriques de backtest pour stratégie '{strategy_name}' mises à jour dans la base de connaissance."
-            )
-            self._save_config_knowledge_base()
-
-        update_payload: Dict[str, Any] = {}
-
-        if (
-            sharpe_ratio < thresholds.get("poor_performance")
-            or max_drawdown > high_drawdown_threshold
-        ):
-            self.logger.warning(
-                f"La stratégie '{strategy_name}' a montré une performance faible en backtest (Sharpe: {sharpe_ratio:.2f}, DD: {max_drawdown:.2f}%)."
-            )
-
-            risk_reduction_factor = self.get(
-                "backtest_evaluation.risk_reduction_factor", 0.9
-            )
-            current_risk = config.get("risk_per_trade_percent", 1.0)
-            new_risk = current_risk * risk_reduction_factor
-
-            update_payload["risk_per_trade_percent"] = round(new_risk, 3)
-            update_payload["notes"] = (
-                f"Risque ajusté automatiquement à {new_risk:.3f}% suite à un backtest non performant."
-            )
-
-            if (
-                self.get("ai.enabled", False)
-                and hasattr(self, "ai_decision_instance")
-                and self.ai_decision_instance
-            ):
-                try:
-                    ai_advice = self.ai_decision_instance.suggest_trading_improvements(
-                        logs=[results],
-                        context={
-                            "backtest_type": "poor_performance_detected",
-                            "strategy_name": strategy_name,
-                        },
-                    )
-                    self.logger.info(
-                        f"Recommandation d'optimisation de l'IA reçue suite à un backtest faible pour '{strategy_name}'."
-                    )
-                    if ai_advice.get("recommended_adjustments"):
-                        update_payload = self._merge_dicts(
-                            update_payload, ai_advice["recommended_adjustments"]
-                        )
-                        self.logger.info(
-                            "Ajustements IA fusionnés dans le payload de mise à jour de la config."
-                        )
-                except Exception as e:
-                    self.logger.error(
-                        f"Échec de l'interaction avec l'IA pour l'optimisation de backtest: {e}",
-                        exc_info=True,
-                    )
-        else:
-            self.logger.info(
-                f"La stratégie '{strategy_name}' a bien performé en backtest (Sharpe: {sharpe_ratio:.2f}). Aucun ajustement de risque automatique nécessaire."
-            )
-
-        if update_payload:
-            self.update_dynamic_config(
-                updates=update_payload, source="backtest_feedback_optimizer"
-            )
-        else:
-            self.logger.info(
-                f"Aucun ajustement de configuration appliqué pour la stratégie '{strategy_name}' suite au backtest."
-            )
 
     def export_config(
         self, config: Dict[str, Any], path: str, fmt: str = "json"
@@ -1575,49 +1324,12 @@ class ConfigManager:
                 "ERREUR: StrategyManager n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie."
             )
             raise RuntimeError("StrategyManager non initialisé.")
-
-        # La base de connaissance des stratégies est dans strategy_manager.strategy_registry
-        config_knowledge_base_from_strategy_manager = (
-            self.strategy_manager.strategy_registry
-        )
-
-        optimal_config_content = self.decision_pipeline.select_optimal_config(
-            analyzed_context, config_knowledge_base_from_strategy_manager
-        )
-        if not optimal_config_content:
-            self.logger.warning(
-                "Aucune stratégie optimale sélectionnée. Fin du pipeline."
-            )
-            return {
-                "final_decision": {},
-                "config_used": self.get_current_dynamic_config(),
-            }
-
-        # La fusion et l'adaptation de la config se font toujours ici car c'est la config globale qui est affectée.
-        config_for_this_cycle = self.get_current_dynamic_config()
-        config_for_this_cycle = self._merge_dicts(
-            config_for_this_cycle, optimal_config_content
-        )
-        # CORRECTION : Appeler adapt_config via l'instance du DecisionPipeline.
-        config_for_this_cycle = self.decision_pipeline.adapt_config(
-            config_for_this_cycle, analyzed_context
-        )
-
-        signals = analyzed_context.get("trading_signals", {})
-        # decide_trade_to_execute devrait aussi être appelée via decision_pipeline
-        trade_decision = (
-            self.decision_pipeline.decide_trade_to_execute(  # <-- CORRECTION ICI
-                analyzed_context, config_for_this_cycle, signals
-            )
-        )
-
+                      
         return {
-            "timestamp_utc": datetime.now(UTC).isoformat(),
-            "context": analyzed_context,
-            "config_used": config_for_this_cycle,
-            "final_decision": trade_decision,
+            "final_decision": {},
+            "config_used": self.get_current_dynamic_config(),
         }
-
+     
         # NOTE : La fonction issue_trade_order DOIT être une méthode de la classe ConfigManager,
         # et non imbriquée dans organize_pipeline_decision.
         # Je la place ici comme une méthode de la classe ConfigManager.

@@ -1053,7 +1053,11 @@ class TradeExecutor:
 
         # --- Raccourcis locaux ---
         trade_decision = decision_package.get("trade_decision", {}) or {}
-        active_config = decision_package.get("active_config", {}) or {}
+        active_config = (
+            decision_package.get("active_config")
+            or decision_package.get("config_used")
+            or {}
+        )
         market_context = decision_package.get("market_context", {}) or {}
 
         # ---------- Helpers internes ----------
@@ -2903,8 +2907,14 @@ class TradeExecutor:
             "order_type": order_type_str,
         }
 
+        # --- Champs explicites pour exécution & audit ---
+        request["strategy_type"] = str(config.get("strategy_name", "unknown")).lower()
+        request["rule_name"] = rule_name or config.get("rule_name", "")
+        request["meta_rr_projected"] = rr_proj
+
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
         return request
+
 
     def _update_internal_position_state(
         self, mt5_result: Any, initial_risk: float
@@ -3307,12 +3317,21 @@ class TradeExecutor:
                 except Exception:
                     pass
 
-            # === Log standard + Liquidity ===
+                    # === Log standard + stratégie ===
             self.logger.info(f"Exécution OK: {execution_summary}")
 
-            if request.get("strategy_type") == "liquidity":
+            strat_type = request.get("strategy_type", "unknown").lower()
+            if strat_type == "liquidity":
                 self.logger.info(
                     f"[LIQUIDITY TRADE] ✅ {symbol} | action={action} "
+                    f"| entry={execution_summary['price']} "
+                    f"| sl={execution_summary['sl']} "
+                    f"| tp={execution_summary['tp']} "
+                    f"| rr={request.get('meta_rr_projected', 'N/A')}"
+                )
+            elif strat_type == "scalping":
+                self.logger.info(
+                    f"[SCALPING TRADE] ⚡ {symbol} | action={action} "
                     f"| entry={execution_summary['price']} "
                     f"| sl={execution_summary['sl']} "
                     f"| tp={execution_summary['tp']} "
@@ -4226,7 +4245,9 @@ def run_trade_execution_pipeline(
         "target_sl_pips": final_decision.get("target_sl_pips"),
         "target_tp_pips": final_decision.get("target_tp_pips"),
         "rule_name": final_decision.get("rule_name"),
+        "strategy_type": final_decision.get("strategy_type", "unknown"),  # ✅ ajouté
     }
+
 
     adapted_package = {
         "trade_decision": trade_decision,
