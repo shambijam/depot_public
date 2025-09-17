@@ -38,94 +38,92 @@
         "sl_pips": 60,
         "tp_pips": 80
       },
-      "midline_bollinger": {
-        "enabled": false
-      }
-    }
-  },
-  "filters": {
-    "spread_max_points": 25,
-    "min_atr_points": null
-  },
-  "time_filters": {
-    "use_session_filter": true,
-    "allowed_sessions": [
-      "LDN",
-      "NY"
-    ],
-    "forbidden_hours_utc": [],
-    "news_filter": {
-      "enabled": false,
-      "high_impact_only": true,
-      "min_minutes_before": 15,
-      "min_minutes_after": 15
-    }
-  },
-  "tp_sl": {
-    "breakeven": {
-      "enabled": true,
-      "after_rr": 1.0
-    },
-    "trailing": {
-      "enabled": false,
-      "type": "step",
-      "step_pips": 30,
-      "activate_after_rr": 1.5
-    },
-    "partial": {
-      "enabled": true,
-      "at_rr": 1.0,
-      "size_frac": 0.5
-    }
-  },
-  "execution": {
-    "order_type": "MARKET",
-    "max_slippage_points": 30,
-    "comment_prefix": "SX-SCALP",
-    "limit_retry_ms": 800
-  },
-  "cooldowns": {
-    "per_asset_seconds": 120,
-    "after_win_seconds": 60,
-    "after_loss_seconds": 120
-  },
-  "backtest": {
-    "enabled": false
-  },
-  "misc": {
-    "log_level": "INFO"
-  },
-  "burst_scalping": {
-    "enabled": true,
-    "burst_size": 5,
-    "sl_pips": 6.0,
-    "tp_pips": 10.0,
-    "max_loss_pips": 15.0,
-    "trail_trigger": 8.0,
-    "trail_step": 3.0,
-    "max_burst_per_day": 3,
-    "burst_cap_volume": 1.0
-  },
-  "decision_rules": [
-    {
-      "name": "primary",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "liquidity_sweep"
-        ],
-        "phase_must_contain": [
-          "liquidity_eqh_eql",
-          "range_retail",
-          "transitional"
-        ],
-        "min_confidence": 0.30
+      "filters": {
+        "spread_max_points": 25,
+        "min_atr_points": null
       },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
-        "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
-      }
+      "time_filters": {
+        "use_session_filter": true,
+        "allowed_sessions": [
+          "LDN",
+          "NY"
+        ],
+        "forbidden_hours_utc": [],
+        "news_filter": {
+          "enabled": false,
+          "high_impact_only": true,
+          "min_minutes_before": 15,
+          "min_minutes_after": 15
+        }
+      },
+      "tp_sl": {
+        "breakeven": {
+          "enabled": true,
+          "after_rr": 1.0
+        },
+        "trailing": {
+          "enabled": false,
+          "type": "step",
+          "step_pips": 30,
+          "activate_after_rr": 1.5
+        },
+        "partial": {
+          "enabled": true,
+          "at_rr": 1.0,
+          "size_frac": 0.5
+        }
+      },
+      "execution": {
+        "order_type": "MARKET",
+        "max_slippage_points": 30,
+        "comment_prefix": "SX-SCALP",
+        "limit_retry_ms": 800
+      },
+      "cooldowns": {
+        "per_asset_seconds": 120,
+        "after_win_seconds": 60,
+        "after_loss_seconds": 120
+      },
+      "backtest": {
+        "enabled": false
+      },
+      "misc": {
+        "log_level": "INFO"
+      },
+      "burst_scalping": {
+        "enabled": true,
+        "min_atr_m1_pips": 25,
+        "burst_size": 8,
+        "sl_pips": 6.0,
+        "tp_pips": 10.0,
+        "max_loss_pips": 15.0,
+        "trail_trigger": 8.0,
+        "trail_step": 3.0,
+        "max_burst_per_day": 8,
+        "burst_cap_volume": 1.0
+      },
+      "decision_rules": [
+        {
+          "name": "primary",
+          "priority": 1,
+          "conditions": {
+            "signal_must_contain": [
+              "liquidity_sweep"
+            ],
+            "phase_must_contain": [
+              "liquidity_eqh_eql",
+              "range_retail",
+              "transitional"
+            ],
+            "min_confidence": 0.30
+          },
+          "order_type": "MARKET",
+          "action_logic": {
+            "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
+            "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
+          }
+        }
+      ]
     }
-  ]
+  }
 }
