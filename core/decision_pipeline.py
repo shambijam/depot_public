@@ -521,36 +521,67 @@ class DecisionPipeline:
             signals = analyzed_context.get("trading_signals", {}) or {}
 
             # Utilisation du vrai dispatch robuste
-            dispatch = self.dispatch_strategies_per_asset(analyzed_context)
+            dispatch_map = self.dispatch_strategies_per_asset(analyzed_context)
 
             td, chosen_strategy, chosen_asset = None, None, None
+            decision_trace = []
 
             # --- Priorité SCALPING (XAUUSD) ---
-            if "XAUUSD" in signals:
-                strat = dispatch["mapping"].get("scalping", {}).get("XAUUSD")
-                if strat:
-                    td = strat.evaluate_entry(
-                        "XAUUSD", analyzed_context, signals["XAUUSD"]
+            if "XAUUSD" in signals and "XAUUSD" in dispatch_map:
+                strat_name, strat = dispatch_map["XAUUSD"]
+                td = strat.evaluate_entry(
+                    "XAUUSD", analyzed_context, signals.get("XAUUSD")
+                )
+                if td and td.get("action"):
+                    chosen_strategy, chosen_asset = strat_name, "XAUUSD"
+                    decision_trace.append(
+                        "✅ ScalpingStrategy a généré un signal valide sur XAUUSD"
                     )
-                    if td and td.get("action"):
-                        chosen_strategy, chosen_asset = "scalping", "XAUUSD"
+                else:
+                    decision_trace.append(
+                        "❌ ScalpingStrategy n'a pas confirmé de setup sur XAUUSD"
+                    )
+            else:
+                decision_trace.append(
+                    "ℹ️ Aucun signal SCALPING détecté sur XAUUSD ou stratégie non dispatchée"
+                )
 
-            # --- Sinon Liquidity (EURUSD puis GBPUSD) ---
+            # --- Sinon Liquidity EURUSD puis GBPUSD ---
             if not td or not td.get("action"):
                 for asset in ["EURUSD", "GBPUSD"]:
-                    if asset in signals:
-                        strat = dispatch["mapping"].get("liquidity", {}).get(asset)
-                        if strat:
-                            td = strat.evaluate_entry(
-                                asset, analyzed_context, signals[asset]
+                    if asset in signals and asset in dispatch_map:
+                        strat_name, strat = dispatch_map[asset]
+                        td = strat.evaluate_entry(
+                            asset, analyzed_context, signals.get(asset)
+                        )
+                        if td and td.get("action"):
+                            chosen_strategy, chosen_asset = strat_name, asset
+                            decision_trace.append(
+                                f"✅ LiquidityStrategy a validé un trade sur {asset}"
                             )
-                            if td and td.get("action"):
-                                chosen_strategy, chosen_asset = "liquidity", asset
-                                break
+                            break
+                        else:
+                            decision_trace.append(
+                                f"❌ LiquidityStrategy a rejeté le signal sur {asset}"
+                            )
+                    else:
+                        decision_trace.append(
+                            f"ℹ️ Aucun signal valide sur {asset} ou stratégie absente"
+                        )
 
-            # --- Aucun trade trouvé ---
+            # --- Aucun trade retenu ---
             if not td or not td.get("action"):
-                print("🤖 [DECISION] ❌ Aucun trade détecté pour ce cycle")
+                decision_trace.append(
+                    "⚠️ Aucun trade retenu (aucun setup validé par les stratégies)"
+                )
+
+                # === Affichage trace détaillée ===
+                print("============================================================")
+                print("🔍 TRACE DÉTAILLÉE DE LA DÉCISION:")
+                for line in decision_trace:
+                    print("   " + line)
+                print("============================================================")
+
                 return {
                     "timestamp_utc": datetime.now(UTC).isoformat(),
                     "context": analyzed_context,
@@ -562,6 +593,7 @@ class DecisionPipeline:
                         "execution_status": "none",
                     },
                     "execution_context": {},
+                    "decision_trace": decision_trace,
                 }
 
             # 4) Adaptation config (fusion base + config stratégie choisie)
@@ -630,6 +662,14 @@ class DecisionPipeline:
                     label = "TRADE DÉCIDÉ"
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
+
+            # === Affichage trace détaillée ===
+            print("============================================================")
+            print("🔍 TRACE DÉTAILLÉE DE LA DÉCISION:")
+            for line in decision_trace:
+                print("   " + line)
+            print("============================================================")
+
             self.logger.info(
                 "3️⃣ DÉCISION RETOURNÉE:\n"
                 f"   Strategy: {chosen_strategy}\n"
@@ -646,6 +686,7 @@ class DecisionPipeline:
                 "config_used": adapted_config,
                 "final_decision": td,
                 "execution_context": execution_context,
+                "decision_trace": decision_trace,
             }
 
         except Exception as e:
