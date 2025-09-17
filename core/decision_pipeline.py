@@ -5,12 +5,15 @@ import pandas as pd
 import numpy as np
 import math
 import time
+import traceback
 from datetime import datetime, UTC, timezone
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from core.ai_interface import AIInterface
 from core.utils import ConfigValidationError, TradeStatus
 from typing import Any, Dict, List, Optional, Tuple
+from strategy.scalping import ScalpingStrategy
+from strategy.liquidity import LiquidityStrategy
 
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
@@ -41,7 +44,6 @@ class DecisionPipeline:
         - Ne touche PAS à self.phase_observer si None
         - Lit le flag de debug depuis la config, et l'applique uniquement si un PhaseObserver est fourni
         """
-
         self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
@@ -51,7 +53,6 @@ class DecisionPipeline:
         self.phase_observer = phase_observer_instance
 
         # Flag de debug (on ne force rien si pas de phase_observer)
-        # On essaie plusieurs chemins possibles, valeur par défaut False
         debug_flag = (
             self.config_manager.get(
                 "debug_settings.phase_observer.debug_confidence_logging", None
@@ -86,10 +87,407 @@ class DecisionPipeline:
             )
         self.logger.info("PhaseObserver attaché au DecisionPipeline.")
 
+    @staticmethod
     def get_max_spread_pips(cfg_scalping: dict, symbol: str) -> float:
+        """
+        Lit la marge max autorisée en pips depuis la conf scalping.
+        Accepte soit une valeur unique, soit un dict par symbole, avec clé 'default'.
+        """
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
-        # Autorise un dict par symbole, sinon valeur unique
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
+
+    def dispatch_strategies_per_asset(
+        self, context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        DEV-DESK: Dispatch robuste des stratégies par actif.
+
+        Retourne un dict:
+        {
+          "mapping": {
+            "scalping": {"XAUUSD": <ScalpingStrategy instance>, ...},
+            "liquidity": {"EURUSD": <LiquidityStrategy instance>, ...}
+          },
+          "metadata": {
+            "loaded": ["scalping","liquidity"],
+            "skipped": {"scalping": "reason", ...},
+            "reserved_assets": {"XAUUSD": "scalping"},
+            "conflicts": {"EURUSD": {"prev": "liquidity", "now": "scalping"}},
+            "timestamp_utc": 1690000000.0,
+            "total_assets": 3
+          }
+        }
+
+        Comportement :
+        - Récupère les instances depuis StrategyManager (registry ou getter).
+        - Lit la config via get_parameters() ou attribute strategy_config.
+        - Récupère tradeable_assets et filtre les actifs non valides.
+        - Respecte un listing d'exclusions "strategy_exclusive_assets" (optionnel).
+        - Priorité configurable via config.strategy_priority (défaut: scalping > liquidity).
+        """
+        import time
+        import traceback
+
+        result: Dict[str, Any] = {
+            "mapping": {},
+            "metadata": {
+                "loaded": [],
+                "skipped": {},
+                "reserved_assets": {},
+                "conflicts": {},
+                "timestamp_utc": time.time(),
+                "total_assets": 0,
+            },
+        }
+
+        try:
+            sm = getattr(self, "strategy_manager", None)
+            if sm is None:
+                self.logger.error(
+                    "[DISPATCH] StrategyManager absent (self.strategy_manager is None)."
+                )
+                result["metadata"]["skipped"]["__all__"] = "strategy_manager_missing"
+                return result
+
+            # Source des stratégies
+            strategy_items = None
+            registry = getattr(sm, "strategy_registry", None)
+            if isinstance(registry, dict) and registry:
+                strategy_items = registry.items()
+            else:
+                # getters possibles côté StrategyManager
+                get_map = getattr(sm, "get_loaded_strategies", None) or getattr(
+                    sm, "list_strategies", None
+                )
+                if callable(get_map):
+                    mapping = get_map()
+                    if isinstance(mapping, dict):
+                        strategy_items = mapping.items()
+
+            if not strategy_items:
+                self.logger.warning(
+                    "[DISPATCH] Aucune stratégie chargée/fournie par StrategyManager."
+                )
+                result["metadata"]["skipped"]["__all__"] = "no_strategies_loaded"
+                return result
+
+            # Priorités (plus haut = prioritaire)
+            priority_map = self.config_manager.get("strategy_priority") or {
+                "scalping": 100,
+                "liquidity": 50,
+            }
+
+            # Exclusivités d'actifs éventuelles
+            exclusive_cfg_raw = (
+                self.config_manager.get("strategy_exclusive_assets") or {}
+            )
+            # normaliser en {name: [list uppercase]}
+            exclusive_cfg = {
+                str(sname).lower(): list(map(lambda x: str(x).upper(), excl or []))
+                for sname, excl in (
+                    exclusive_cfg_raw.items()
+                    if isinstance(exclusive_cfg_raw, dict)
+                    else []
+                )
+            }
+
+            # Liste blanche d'actifs (globale)
+            allowed_glob = set(
+                map(
+                    str.upper,
+                    (
+                        self.config_manager.get("global_safety.global_allowed_symbols")
+                        or self.config_manager.get("global_safety", {}).get(
+                            "global_allowed_symbols", []
+                        )
+                        or []
+                    ),
+                )
+            )
+
+            assets_assigned: Dict[str, Tuple[str, str]] = (
+                {}
+            )  # asset -> (strategy_name, reason)
+            total_assets = 0
+
+            for name, strat in list(strategy_items):
+                sname = str(name).lower()
+
+                # Instancier si on nous a donné la classe
+                if isinstance(strat, type):
+                    try:
+                        # différentes signatures possibles
+                        try:
+                            strat_inst = strat(
+                                self.config_manager,
+                                getattr(self, "strategy_manager", None),
+                            )
+                        except Exception:
+                            strat_inst = strat(self.config_manager)
+                    except Exception as e:
+                        err = f"instantiate_failed: {e}"
+                        result["metadata"]["skipped"][sname] = err
+                        self.logger.error(f"[DISPATCH] {sname}: {err}")
+                        continue
+                else:
+                    strat_inst = strat
+
+                # Lire paramètres
+                cfg = {}
+                try:
+                    if hasattr(strat_inst, "get_parameters") and callable(
+                        getattr(strat_inst, "get_parameters")
+                    ):
+                        cfg = strat_inst.get_parameters() or {}
+                    elif hasattr(strat_inst, "strategy_config"):
+                        cfg = getattr(strat_inst, "strategy_config") or {}
+                except Exception as e:
+                    self.logger.warning(
+                        f"[DISPATCH] {sname}: get_parameters échoué ({e})."
+                    )
+
+                # Récupérer les actifs
+                assets = cfg.get("tradeable_assets") or cfg.get("assets") or []
+                if not assets:
+                    result["metadata"]["skipped"][sname] = "no_tradeable_assets"
+                    continue
+
+                # Normaliser
+                normalized_assets = []
+                for a in assets:
+                    try:
+                        aa = str(a).upper().strip()
+                        if aa:
+                            normalized_assets.append(aa)
+                    except Exception:
+                        continue
+
+                if not normalized_assets:
+                    result["metadata"]["skipped"][sname] = "no_assets_after_normalize"
+                    continue
+
+                # Assignation par actif
+                for a in normalized_assets:
+                    # Filtre whitelist globale si définie
+                    if allowed_glob and a not in allowed_glob:
+                        self.logger.debug(
+                            f"[DISPATCH] {a}: refusé (hors global_allowed_symbols)."
+                        )
+                        continue
+
+                    # Exclusivité: si une autre stratégie a réservé l’actif
+                    reserved_by = None
+                    for owner_name, excl_list in exclusive_cfg.items():
+                        if a in excl_list and owner_name != sname:
+                            reserved_by = owner_name
+                            break
+                    if reserved_by:
+                        self.logger.debug(
+                            f"[DISPATCH] {a}: réservé par {reserved_by} → ignoré pour {sname}."
+                        )
+                        result["metadata"]["reserved_assets"][a] = reserved_by
+                        continue
+
+                    # Conflit d'assignation: on tranche par priorité
+                    if a in assets_assigned and assets_assigned[a][0] != sname:
+                        prev_name = assets_assigned[a][0]
+                        cur_prio = int(priority_map.get(sname, 0))
+                        prev_prio = int(priority_map.get(prev_name, 0))
+                        if cur_prio > prev_prio:
+                            assets_assigned[a] = (
+                                sname,
+                                f"override_by_priority({cur_prio}>{prev_prio})",
+                            )
+                            result["metadata"]["conflicts"][a] = {
+                                "prev": prev_name,
+                                "now": sname,
+                            }
+                            # Remplacer le mapping de l'ancien proprio
+                            try:
+                                if (
+                                    prev_name in result["mapping"]
+                                    and a in result["mapping"][prev_name]
+                                ):
+                                    del result["mapping"][prev_name][a]
+                            except Exception:
+                                pass
+                        else:
+                            result["metadata"]["conflicts"][a] = {
+                                "prev": prev_name,
+                                "rejected": sname,
+                            }
+                            continue
+                    else:
+                        assets_assigned[a] = (sname, "assigned")
+
+                    # Attacher l'instance dans le mapping final
+                    result["mapping"].setdefault(sname, {})[a] = strat_inst
+                    total_assets += 1
+
+                result["metadata"]["loaded"].append(sname)
+
+            result["metadata"]["total_assets"] = total_assets
+            return result
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.logger.error(f"[DISPATCH] Erreur inattendue: {e}\n{tb}")
+            result["metadata"]["skipped"]["__internal__"] = str(e)
+            return result
+
+    def execute_strategies_and_collect_decisions(
+        self,
+        dispatch_bundle: Dict[str, Any],
+        context: Dict[str, Any],
+        signals: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Exécute evaluate_entry (ou API équivalente) de chaque stratégie sur ses actifs.
+        - Collecte decisions individuelles
+        - Applique règles de priorité (scalping prioritaire)
+        - Retourne:
+        {
+            "all_decisions": [...],
+            "final_decision": {...} or {},
+            "logs": { ... }
+        }
+        """
+        all_decisions: List[Dict[str, Any]] = []
+        logs = {"per_strategy": {}, "errors": []}
+
+        mapping = dispatch_bundle.get("mapping", {}) or {}
+        # iterate strategies in deterministic order (scalping first if present)
+        ordered_strats = sorted(
+            mapping.keys(), key=lambda x: 0 if str(x).lower() == "scalping" else 1
+        )
+
+        for strat_name in ordered_strats:
+            assets_map = mapping.get(strat_name, {}) or {}
+            logs["per_strategy"].setdefault(
+                strat_name, {"assets": list(assets_map.keys()), "decisions": []}
+            )
+
+            for asset, strat_inst in assets_map.items():
+                try:
+                    # strategy API compatibility: prefer evaluate_entry signature with asset + market_df + signals + context + config
+                    evaluate_fn = getattr(strat_inst, "evaluate_entry", None)
+                    if not callable(evaluate_fn):
+                        logs["per_strategy"][strat_name]["decisions"].append(
+                            {"asset": asset, "skipped": "no_evaluate_entry"}
+                        )
+                        continue
+
+                    # try to pass market data if present
+                    market_df = (
+                        (context.get("market_data", {}) or {})
+                        .get(asset, {})
+                        .get("rates_df")
+                    )
+                    sig = (signals or {}).get(asset) or {}
+
+                    decision = None
+                    try:
+                        # attempt common signature
+                        decision = evaluate_fn(
+                            asset,
+                            market_df,
+                            sig,
+                            context,
+                            (
+                                strat_inst.get_parameters()
+                                if hasattr(strat_inst, "get_parameters")
+                                else {}
+                            ),
+                        )
+                    except TypeError:
+                        # fallback to simpler signature (context, signals)
+                        try:
+                            decision = evaluate_fn(context, sig)
+                        except Exception:
+                            # as a last resort, call without args
+                            decision = evaluate_fn()
+                    except Exception as e:
+                        raise
+
+                    if not decision:
+                        logs["per_strategy"][strat_name]["decisions"].append(
+                            {"asset": asset, "decision": None}
+                        )
+                        continue
+
+                    # annotate
+                    if isinstance(decision, dict):
+                        decision["strategy_type"] = strat_name
+                        decision["asset"] = decision.get("asset", asset)
+                        # confidence normalization (if exists)
+                        if "confidence" in decision:
+                            try:
+                                decision["confidence"] = float(
+                                    decision.get("confidence") or 0.0
+                                )
+                            except Exception:
+                                decision["confidence"] = 0.0
+
+                    all_decisions.append(decision)
+                    logs["per_strategy"][strat_name]["decisions"].append(
+                        {"asset": asset, "decision": decision}
+                    )
+
+                    # If scalping produced a valid trade, we can short-circuit and return it as final (priority)
+                    if strat_name.lower() == "scalping":
+                        # prefer the first scalping decision with valid action BUY/SELL
+                        act = str(decision.get("action", "")).upper()
+                        if act in {"BUY", "SELL", "CLOSE"}:
+                            return {
+                                "all_decisions": all_decisions,
+                                "final_decision": decision,
+                                "logs": logs,
+                            }
+
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    self.logger.error(
+                        f"[DECISION] Erreur exécution strategy {strat_name} pour {asset}: {e}\n{tb}"
+                    )
+                    logs["errors"].append(
+                        {"strategy": strat_name, "asset": asset, "error": str(e)}
+                    )
+                    continue
+
+        # If no scalping decision found, pick the best liquidity decision by confidence
+        final_decision = {}
+        if all_decisions:
+            # filter actionable decisions
+            actionable = [
+                d
+                for d in all_decisions
+                if isinstance(d, dict)
+                and str(d.get("action", "")).upper() in {"BUY", "SELL", "CLOSE"}
+            ]
+            if actionable:
+                # sort by (strategy priority then confidence)
+                def score_dec(d):
+                    strat = str(d.get("strategy_type", "")).lower()
+                    prio_map = (self.config_manager.get("strategy_priority") or {}) or {
+                        "scalping": 100,
+                        "liquidity": 50,
+                    }
+                    prio = int(prio_map.get(strat, 0))
+                    conf = float(
+                        d.get("confidence") or d.get("confidence_score") or 0.0
+                    )
+                    return (prio, conf)
+
+                actionable_sorted = sorted(
+                    actionable, key=lambda x: score_dec(x), reverse=True
+                )
+                final_decision = actionable_sorted[0]
+
+        return {
+            "all_decisions": all_decisions,
+            "final_decision": final_decision,
+            "logs": logs,
+        }
 
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
@@ -118,9 +516,33 @@ class DecisionPipeline:
             print("🤖 [DECISION] Étape 2: Vérification IA...")
             print("🤖 [DECISION] IA désactivée")
 
-            # 3) Dispatch fixe par actif/stratégie
-            print("🤖 [DECISION] Étape 3: Dispatch fixe des stratégies...")
+            # 3) Dispatch générique par stratégie/actif
+            print("🤖 [DECISION] Étape 3: Dispatch des stratégies par actif...")
             signals = analyzed_context.get("trading_signals", {}) or {}
+            dispatch_map = self.dispatch_strategies_per_asset()
+
+            td, chosen_strategy, chosen_asset = None, None, None
+
+            # --- Priorité SCALPING (XAUUSD) ---
+            if "XAUUSD" in signals and "XAUUSD" in dispatch_map:
+                strat_name, strat = dispatch_map["XAUUSD"]
+                td = strat.evaluate_entry(
+                    "XAUUSD", analyzed_context, signals.get("XAUUSD")
+                )
+                if td and td.get("action"):
+                    chosen_strategy, chosen_asset = strat_name, "XAUUSD"
+
+            # --- Sinon Liquidity EURUSD puis GBPUSD ---
+            if not td or not td.get("action"):
+                for asset in ["EURUSD", "GBPUSD"]:
+                    if asset in signals and asset in dispatch_map:
+                        strat_name, strat = dispatch_map[asset]
+                        td = strat.evaluate_entry(
+                            asset, analyzed_context, signals.get(asset)
+                        )
+                        if td and td.get("action"):
+                            chosen_strategy, chosen_asset = strat_name, asset
+                            break
 
             # --- PRIORITÉ SCALPING : XAUUSD ---
             if "XAUUSD" in signals:
@@ -263,8 +685,7 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
-   
-              
+
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -691,7 +1112,7 @@ class DecisionPipeline:
         )
         print(f"🎯 [CORE] Stratégie paramétrée: {strategy_name}")
 
-       # 3) CORE évalue directement les signaux (via stratégies dédiées)
+        # 3) CORE évalue directement les signaux (via stratégies dédiées)
         trade_decision = {}
 
         try:
@@ -734,7 +1155,9 @@ class DecisionPipeline:
                         self.logger.info(
                             f"[CORE] Signal liquidity retenu sur {decision.get('asset')}"
                         )
-                        print(f"✅ [CORE] Décision liquidity détectée sur {decision.get('asset')}")
+                        print(
+                            f"✅ [CORE] Décision liquidity détectée sur {decision.get('asset')}"
+                        )
                 except Exception as e:
                     self.logger.error(f"[CORE] Erreur evaluate_entry liquidity: {e}")
 
@@ -743,7 +1166,6 @@ class DecisionPipeline:
             self.logger.info("[CORE] Aucun signal exploitable (scalping/liquidity)")
             print("⚠️ [CORE] Aucun trade décidé ce cycle.")
             return {}
-
 
         # --- 🔒 Normalisation/Validation ACTION & ASSET (anti-UNKNOWN) ---
         action_raw = str(trade_decision.get("action", "")).upper()
@@ -1505,7 +1927,7 @@ class DecisionPipeline:
 
         # Toujours retourner la décision (enrichie du statut d’exécution)
         return trade_decision
-     
+
     def _build_decision_ema_rsi_atr_trail(
         self,
         asset: str,
