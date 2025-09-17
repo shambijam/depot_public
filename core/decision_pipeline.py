@@ -1139,7 +1139,6 @@ class DecisionPipeline:
         )
         return optimal_config_content
 
-
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -2521,7 +2520,7 @@ class DecisionPipeline:
             spread_points = 0.0
         spread_pips = max(0.0, spread_points / (points_per_pip or 1.0))
 
-               # ---------- Direction (MTF > phase) ----------
+        # ---------- Direction (MTF > phase) ----------
         action: Optional[str] = None
         mtf_dir = str(signals.get("mtf_direction", "none")).lower()
         if strategy_name == "scalping" and mtf_dir in ("up", "down"):
@@ -2540,6 +2539,28 @@ class DecisionPipeline:
             self.logger.info("%s: aucune direction claire → pas de trade.", asset)
             return {}
 
+        # --- PATCH pour stratégie Liquidity ---
+        if action is None and strategy_name == "liquidity":
+            if signals.get("sweep_detected") and signals.get("absorption_confirmed"):
+                # Si sweep sur un haut récent → SELL
+                if "bear" in phase or "down" in phase:
+                    action = "SELL"
+                # Si sweep sur un bas récent → BUY
+                elif "bull" in phase or "up" in phase:
+                    action = "BUY"
+            elif signals.get("sweep_detected"):
+                # Sweep sans absorption → direction phase
+                if "bear" in phase or "down" in phase:
+                    action = "SELL"
+                elif "bull" in phase or "up" in phase:
+                    action = "BUY"
+
+        if action is None:
+            self.logger.info(
+                "%s: aucune direction claire (y compris liquidity) → pas de trade.",
+                asset,
+            )
+            return {}
 
         # ---------- Métriques utiles (informatives) ----------
         atr_m1 = float(signals.get("atr_m1", 0.0) or 0.0)
