@@ -79,6 +79,14 @@ class StrategyManager:
         self.logger.info(
             "StrategyManager initialisé (les stratégies ne sont pas encore chargées)."
         )
+    def get_strategy(self, name: str):
+        """
+        Retourne l'instance de stratégie par son nom.
+        """
+        if not hasattr(self, "loaded_strategies"):
+            return None
+        return self.loaded_strategies.get(name)
+ 
 
     def initialize_strategies(self) -> None:
         """

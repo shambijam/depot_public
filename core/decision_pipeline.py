@@ -546,7 +546,9 @@ class DecisionPipeline:
 
             # --- PRIORITÉ SCALPING : XAUUSD ---
             if "XAUUSD" in signals:
-                strat = self.strategy_manager.get_strategy("scalping")
+                dispatch = self.dispatch_strategies_per_asset(analyzed_context)
+                strat = dispatch["mapping"].get("scalping", {}).get(asset)
+
                 td = strat.evaluate_entry(
                     "XAUUSD", analyzed_context, signals.get("XAUUSD")
                 )
