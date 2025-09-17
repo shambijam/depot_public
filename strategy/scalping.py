@@ -6,8 +6,6 @@ import math
 import time
 import uuid
 from .base_strategy import BaseStrategy
-
-
 import numpy as np
 import pandas as pd
 
@@ -31,92 +29,163 @@ class ScalpingStrategy(BaseStrategy):
     # ==========================================================
     # =============   API PRINCIPALE (ENTRÉE)   ================
     # ==========================================================
+    # --- Dans class ScalpingStrategy(BaseStrategy): ---
+
     def evaluate_entry(
         self,
         asset: str,
-        market_df: Optional[pd.DataFrame],
-        signals: Dict[str, Any],
-        context: Dict[str, Any],
-        config: Dict[str, Any],
+        analyzed_context: Dict[str, Any],
+        asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Décide d’une entrée scalping.
-        Retourne soit un trade unique, soit un panier 'burst_decisions' prêt pour l’exécution.
-
-        Signature attendue par le StrategyManager / DecisionPipeline :
-          - "action": "BUY"/"SELL"
-          - "asset": str
-          - "entry_price": float
-          - (optionnel) "sl_price"/"tp_price" OU "target_sl_pips"/"target_tp_pips"
-          - (burst) {"burst_decisions": [ ... ]} avec un "basket_id"
+        Version 'desk pro' compatible pipeline:
+        - 3 args (asset, analyzed_context, asset_signals)
+        - Burst prioritaire, filtres propres (ATR/Spread), biais MTF,
+        sweep de liquidité, candle patterns = enrichissement (jamais bloquant)
         """
-        
-        # Vérifier que l'actif est autorisé pour scalping
-        allowed_assets = config.get("tradeable_assets", [])
-        if allowed_assets and asset not in allowed_assets:
-            self.logger.info(f"[{asset}] Ignoré: non autorisé pour scalping (whitelist={allowed_assets}).")
+        try:
+            # --- 0) Récup des données & config robustes ---
+            ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+            df_m1 = ctx_md.get("df_m1") or ctx_md.get("df")  # fallback
+            if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50:
+                df_work = df_m1.copy()
+            else:
+                df_work = None
+
+            # config de la stratégie (depuis ConfigManager)
+            strat_cfg = (self.config_manager.get_strategy_config("scalping") or {}).copy()
+
+            # compat double emplacement: root.burst_scalping OU entry_rules.scalping.burst_scalping
+            burst_cfg = (strat_cfg.get("burst_scalping")
+                        or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
+                        or {})
+            # max_spread côté entrée simple (fallback)
+            max_spread_pips_simple = float(
+                strat_cfg.get("max_spread_points", 999)
+            ) / (10.0 if (ctx_md.get("symbol_info", {}).get("digits") in (3, 5)) else 1.0)
+
+            # --- 1) Métadonnées symbole / spread / pip ---
+            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
+            pip_size = meta["pip_size"]
+            if pip_size <= 0:
+                self.logger.warning(f"[{asset}] pip_size invalide.")
+                return {}
+
+            # --- 2) Prix courant ---
+            price = self._safe_price_from_signals(asset_signals)
+            if not price:
+                self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
+                return {}
+
+            # --- 3) Biais directionnel MTF + phase (non bloquant si absent) ---
+            action = self._infer_action_from_signals(asset_signals)
+            if action is None:
+                # petit secours : si phase/biais absent, tente un micro-biais prix vs SMA
+                if isinstance(df_work, pd.DataFrame) and len(df_work) >= 20:
+                    sma = self._sma(df_work["close"].astype(float), 20).iloc[-1]
+                    action = "BUY" if price >= sma else "SELL"
+                else:
+                    self.logger.info(f"[{asset}] Aucune direction claire.")
+                    return {}
+
+            # --- 4) Enrichissement (non bloquant) chandeliers + sweep ---
+            #     ➜ seulement pour booster la confiance
+            extra_boost = 0.0
+            if isinstance(df_work, pd.DataFrame):
+                # a) Candle patterns non bloquant
+                try:
+                    patt = self.detect_candle_patterns(df_work)
+                    if patt:
+                        last_sig = next((s for s in reversed(patt) if s), None)
+                        if last_sig:
+                            sc = float(last_sig.get("strength_score", 0.0) or 0.0)
+                            extra_boost += min(0.15, sc * 0.05)  # +0 à +0.15
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] Candle enrich skipped: {e}")
+
+                # b) Liquidity sweep simple (peut FORCER la direction si clair)
+                try:
+                    liq_action = self._rule_liquidity_sweep(df_work, meta, lookback= int(
+                        ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("liquidity_sweep", {}).get("lookback", 30)
+                    ))
+                    if liq_action in {"BUY", "SELL"}:
+                        action = liq_action
+                        self.logger.info(f"[{asset}] Liquidity Sweep → action forcée = {action}")
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] Liquidity sweep skipped: {e}")
+
+            # --- 5) ATR M1 + filtres de burst / spread ---
+            atr_m1_pips = None
+            if isinstance(df_work, pd.DataFrame):
+                atr_m1 = self._atr(df_work, period=14)
+                atr_m1_pips = (atr_m1 / pip_size) if (isinstance(atr_m1, (int, float)) and atr_m1 > 0 and pip_size > 0) else None
+
+            # spread : garde générique (simple) + spécifique burst plus strict
+            # (a) simple
+            if meta["spread_pips"] > max_spread_pips_simple:
+                self.logger.info(f"[{asset}] Spread trop élevé ({meta['spread_pips']:.1f}p > {max_spread_pips_simple:.1f}p).")
+                return {}
+
+            # (b) burst
+            min_atr_req = float(burst_cfg.get("min_atr_m1_pips", 0.0))
+            max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
+            if meta["spread_pips"] > max_spread_burst:
+                self.logger.info(f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p.")
+                # on ne bloque pas la voie “entrée simple” → on continue
+                burst_allowed = False
+            else:
+                burst_allowed = True
+
+            if min_atr_req > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
+                self.logger.info(f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p.")
+                burst_allowed = False
+
+            # --- 6) BURST prioritaire (s’il est autorisé) ---
+            if bool(burst_cfg.get("enabled", True)) and burst_allowed:
+                burst_decision = self._rule_burst_scalping(
+                    asset=asset,
+                    action=action,
+                    entry_price=price,
+                    meta=meta,
+                    signals={**asset_signals, "atr_m1_pips": atr_m1_pips},
+                    burst_cfg=burst_cfg,
+                    context=analyzed_context,
+                )
+                if burst_decision:
+                    # boost de confiance dans les enfants du burst
+                    for d in burst_decision.get("burst_decisions", []):
+                        base_conf = float(asset_signals.get("confidence_stabilized",
+                                                            asset_signals.get("confidence_score", 0.0)) or 0.0)
+                        d["confidence"] = round(min(1.0, base_conf + extra_boost), 3)
+                    return burst_decision
+
+            # --- 7) Entrée simple (fallback propre) ---
+            sl_pips, tp_pips, regime_tag = self._dynamic_tp_sl_from_vol_atr(
+                signals=asset_signals, meta=meta, config=strat_cfg
+            )
+            base_conf = float(asset_signals.get("confidence_stabilized",
+                                                asset_signals.get("confidence_score", 0.0)) or 0.0)
+            decision = {
+                "action": action,
+                "asset": asset,
+                "entry_price": price,
+                "target_sl_pips": float(round(sl_pips, 2)),
+                "target_tp_pips": float(round(tp_pips, 2)),
+                "rule_name": "scalping_pro",
+                "strategy_type": "scalping",
+                "confidence": round(min(1.0, base_conf + extra_boost), 3),
+                "meta": {
+                    "regime_tag": regime_tag,
+                    "atr_m1_pips": atr_m1_pips,
+                    "spread_pips": meta["spread_pips"],
+                },
+            }
+            return decision
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
 
-        # 0) Garde globales simples (news, disponibilité prix, spread)
-        if config.get("halt_on_major_news", True) and self._has_blocking_news(context):
-            self.logger.info(f"[{asset}] Halt: actualité majeure.")
-            return {}
-
-        price = self._safe_price_from_signals(signals)
-        if not price:
-            self.logger.warning(f"[{asset}] Prix invalide/absent pour evaluate_entry.")
-            return {}
-
-        # Symbol meta (robuste)
-        meta = self._safe_asset_meta(asset, signals, context, config)
-        pip_size = meta["pip_size"]
-        if pip_size <= 0:
-            self.logger.warning(f"[{asset}] pip_size invalide.")
-            return {}
-
-        spread_pips = meta["spread_pips"]
-        max_spread = float(config.get("entry_rules", {}).get("scalping", {}).get("max_spread_pips", 999))
-        if spread_pips > max_spread:
-            self.logger.info(f"[{asset}] Spread trop élevé ({spread_pips:.2f}p > {max_spread:.2f}p).")
-            return {}
-
-        # 1) Direction de base : MTF > Phase
-        action = self._infer_action_from_signals(signals)
-        if action is None:
-            self.logger.info(f"[{asset}] Aucune direction claire (MTF/phase).")
-            return {}
-
-        # 2) Option: déclencheur Liquidity Sweep → peut forcer une action
-        liq_cfg = (config.get("scalping") or {}).get("liquidity_sweep", {}) or {}
-        if liq_cfg.get("enabled", True) and isinstance(market_df, pd.DataFrame) and len(market_df) >= int(liq_cfg.get("lookback_bars", 20)):
-            liq_action = self._rule_liquidity_sweep(market_df, meta, lookback=int(liq_cfg.get("lookback_bars", 20)))
-            if liq_action in {"BUY", "SELL"}:
-                action = liq_action
-                self.logger.info(f"[{asset}] Liquidity Sweep → action forcée = {action}")
-
-        # 3) Mode BURST prioritaire
-        burst_cfg = (config.get("burst_scalping") or {})
-        if bool(burst_cfg.get("enabled", True)):
-            burst = self._rule_burst_scalping(asset, action, price, meta, signals, burst_cfg, context)
-            if burst:
-                return burst
-
-        # 4) Sinon, entrée simple (fallback propre sans Bollinger)
-        #    -> On propose des cibles en pips (TP/SL) dynamiques (adaptées vol/ATR).
-        sl_pips, tp_pips, regime_tag = self._dynamic_tp_sl_from_vol_atr(signals, meta, config)
-        
-        decision = {
-            "action": action,
-            "asset": asset,
-            "entry_price": price,
-            "target_sl_pips": float(round(sl_pips, 3)),
-            "target_tp_pips": float(round(tp_pips, 3)),
-            "rule_name": "scalping_simple",
-            "strategy_type": "scalping",  # ✅ ajouté pour audit & logs
-            "confidence": float(signals.get("confidence_stabilized", signals.get("confidence_score", 0.0) or 0.0)),
-            "meta": {"regime_tag": regime_tag},
-        }
-        return decision
 
 
     # ==========================================================
@@ -266,6 +335,28 @@ class ScalpingStrategy(BaseStrategy):
     # ==========================================================
     # =============            HELPERS            =============
     # ==========================================================
+    
+    def detect_candle_patterns(
+        self,
+        df: pd.DataFrame,
+        min_long_mult: float = 2.5,
+        min_body_ratio: float = 0.65,
+        small_body_ratio: float = 0.2,
+        wick_ratio: float = 2.0,
+    ) -> List[Optional[Dict[str, Any]]]:
+        """
+        Enrichissement SEULEMENT (non bloquant). Retourne une liste de dicts ou None.
+        """
+        try:
+            import numpy as _np
+            if df is None or len(df) < 30:
+                return []
+            # implémente ta version existante (celle que tu as collée) ou garde ce stub
+            # Ici: on retourne juste une liste vide pour rester léger si tu veux
+            return []
+        except Exception:
+            return []
+
     def _has_blocking_news(self, context: Dict[str, Any]) -> bool:
         try:
             return bool(

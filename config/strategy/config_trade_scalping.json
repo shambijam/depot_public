@@ -25,6 +25,28 @@
     "eq_level_tolerance": 0.0,
     "impulse_threshold": 0.0
   },
+  "decision_rules": [
+    {
+      "name": "primary",
+      "priority": 1,
+      "conditions": {
+        "signal_must_contain": [
+          "liquidity_sweep"
+        ],
+        "phase_must_contain": [
+          "liquidity_eqh_eql",
+          "range_retail",
+          "transitional"
+        ],
+        "min_confidence": 0.30
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
+        "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
+      }
+    }
+  ],
   "entry_rules": {
     "scalping": {
       "liquidity_sweep": {
@@ -93,37 +115,57 @@
       "burst_scalping": {
         "enabled": true,
         "min_atr_m1_pips": 25,
+        "max_spread_pips": 25,
         "burst_size": 8,
-        "sl_pips": 6.0,
-        "tp_pips": 10.0,
-        "max_loss_pips": 15.0,
-        "trail_trigger": 8.0,
-        "trail_step": 3.0,
-        "max_burst_per_day": 8,
-        "burst_cap_volume": 1.0
-      },
-      "decision_rules": [
-        {
-          "name": "primary",
-          "priority": 1,
-          "conditions": {
-            "signal_must_contain": [
-              "liquidity_sweep"
-            ],
-            "phase_must_contain": [
-              "liquidity_eqh_eql",
-              "range_retail",
-              "transitional"
-            ],
-            "min_confidence": 0.30
+        "burst_cap_volume": 1.0,
+        "candle_patterns": {
+          "enabled": true,
+          "min_pattern_strength": 0.7,
+          "require_confluence": true,
+          "allowed_patterns": [
+            "engulfing",
+            "marubozu",
+            "hammer",
+            "shooting_star"
+          ]
+        },
+        "multi_timeframe": {
+          "enabled": true,
+          "confirm_with": [
+            "M5",
+            "M15"
+          ],
+          "require_same_direction": true
+        },
+        "phase_filters": {
+          "enabled": true,
+          "allowed_phases": [
+            "liquidity_eqh_eql",
+            "range_retail",
+            "transitional"
+          ]
+        },
+        "risk_controls": {
+          "max_burst_per_day": 6,
+          "cooldown_after_win_sec": 60,
+          "cooldown_after_loss_sec": 180,
+          "stop_trading_after_drawdown_pct": 5.0
+        },
+        "tp_sl": {
+          "sl_pips": 6.0,
+          "tp_pips": 10.0,
+          "trailing": {
+            "enabled": true,
+            "activate_after_rr": 1.5,
+            "step_pips": 2
           },
-          "order_type": "MARKET",
-          "action_logic": {
-            "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
-            "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
+          "partial": {
+            "enabled": true,
+            "at_rr": 1.0,
+            "size_frac": 0.5
           }
         }
-      ]
+      }
     }
   }
 }
