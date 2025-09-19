@@ -361,90 +361,38 @@ class ScalpingStrategy(BaseStrategy):
         return True
 
 
-    def _rule_range_accumulation_mtf(
+    def _rule_range_accumulation(
         self,
-        df_m1: Optional[pd.DataFrame],
+        df: pd.DataFrame,
         asset: str,
         price: float,
+        action: str,
         meta: Dict[str, Any],
         cfg: Dict[str, Any],
-        analyzed_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Détecte un range 'plat' confirmé MTF (M15/M5), puis trade les extrêmes sur M1.
-        - Indépendant de l'ATR : ne doit pas être bloqué.
-        - Confirme côté M15/M5: faible slope / faible ADX / bande de prix compacte.
-        - Sur M1: on prend SELL près du haut, BUY près du bas (avec tolérance).
+        Détecte un range plat (accumulation) et prend un trade
+        sur les extrêmes (haut/bas du range).
+        - On regarde un lookback court (ex: 20 bougies M1)
+        - Si le prix tape proche du max → SELL
+        - Si le prix tape proche du min → BUY
         """
+        lookback = int(cfg.get("lookback_bars", 20))
+        tolerance = float(cfg.get("tolerance_frac", 0.15))  # ex: 15% du range
 
-        # --- Garde de base ---
-        if df_m1 is None or len(df_m1) < 50:
-            return None
-        if price is None:
-            return None
-        if not bool(cfg.get("enabled", True)):
+        if len(df) < lookback:
             return None
 
-        # --- Paramètres ---
-        lookback_m1   = int(cfg.get("lookback_m1", 20))
-        tol_frac      = float(cfg.get("tolerance_frac", 0.15))   # 15% du range
-        m5_window     = int(cfg.get("m5_window_bars", 20))
-        m15_window    = int(cfg.get("m15_window_bars", 20))
-        max_slope_m5  = float(cfg.get("max_slope_m5", 0.0))      # 0 = strict
-        max_slope_m15 = float(cfg.get("max_slope_m15", 0.0))     # 0 = strict
-        max_band_m5   = float(cfg.get("max_band_frac_m5", 0.35)) # largeur/bb avg
-        max_band_m15  = float(cfg.get("max_band_frac_m15", 0.35))
-
-        sl_pips       = float(cfg.get("sl_pips", 30.0))
-        tp_pips       = float(cfg.get("tp_pips", 30.0))
-
-        trailing_cfg  = cfg.get("trailing", {})
-        trailing_en   = bool(trailing_cfg.get("enabled", False))
-        trail_trigger = float(trailing_cfg.get("trigger_pips", 15.0))
-        trail_step    = float(trailing_cfg.get("step_pips", 5.0))
-
-        # --- Data M5/M15 depuis le contexte ---
-        md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-        df_m5  = md.get("M5")  or md.get("df_m5")
-        df_m15 = md.get("M15") or md.get("df_m15")
-
-        def _is_flat(df: Optional[pd.DataFrame], win: int, max_slope: float, max_band_frac: float) -> bool:
-            if not isinstance(df, pd.DataFrame) or len(df) < max(win, 30):
-                return False
-            close = df["close"].astype(float).tail(win)
-            if close.empty:
-                return False
-            # slope (régression linéaire simple)
-            x = np.arange(len(close))
-            try:
-                coef = np.polyfit(x, close.values, 1)[0]  # pente
-            except Exception:
-                coef = 0.0
-            slope_ok = abs(coef) <= max_slope
-
-            # bande relative (simple: (max-min)/moyenne)
-            hi = float(close.max()); lo = float(close.min()); avg = float(close.mean())
-            band_frac = ((hi - lo) / avg) if avg > 0 else 1.0
-            band_ok = band_frac <= max_band_frac
-
-            return bool(slope_ok and band_ok)
-
-        # --- Confirmation MTF: M15 & M5 'plats' ---
-        m15_flat = _is_flat(df_m15, m15_window, max_slope_m15, max_band_m15)
-        m5_flat  = _is_flat(df_m5,  m5_window,  max_slope_m5,  max_band_m5)
-
-        if not (m15_flat and m5_flat):
-            return None
-
-        # --- Définition du range sur M1 ---
-        recent = df_m1.tail(lookback_m1)
-        hh = float(recent["high"].max()); ll = float(recent["low"].min())
+        recent = df.tail(lookback)
+        hh = float(recent["high"].max())
+        ll = float(recent["low"].min())
         rng = hh - ll
         if rng <= 0:
             return None
 
-        top_zone = hh - tol_frac * rng
-        bot_zone = ll + tol_frac * rng
+        # zones haut/bas avec tolérance
+        top_zone = hh - tolerance * rng
+        bot_zone = ll + tolerance * rng
 
         decision = None
         if price >= top_zone:
@@ -452,44 +400,48 @@ class ScalpingStrategy(BaseStrategy):
                 "action": "SELL",
                 "asset": asset,
                 "entry_price": price,
-                "target_sl_pips": sl_pips,
-                "target_tp_pips": tp_pips,
-                "rule_name": "mtf_range_accum_top",
+                "target_sl_pips": float(cfg.get("sl_pips", 30)),
+                "target_tp_pips": float(cfg.get("tp_pips", 30)),
+                "rule_name": "range_accumulation_top",
                 "strategy_type": "scalping",
-                "confidence": 0.72,  # range confirmé MTF
-                "meta": {
-                    "range_high": hh, "range_low": ll,
-                    "m15_flat": m15_flat, "m5_flat": m5_flat,
-                    "rng_points": rng,
-                },
+                "confidence": 0.7,
+                "meta": {"range_high": hh, "range_low": ll},
             }
         elif price <= bot_zone:
             decision = {
                 "action": "BUY",
                 "asset": asset,
                 "entry_price": price,
-                "target_sl_pips": sl_pips,
-                "target_tp_pips": tp_pips,
-                "rule_name": "mtf_range_accum_low",
+                "target_sl_pips": float(cfg.get("sl_pips", 30)),
+                "target_tp_pips": float(cfg.get("tp_pips", 30)),
+                "rule_name": "range_accumulation_low",
                 "strategy_type": "scalping",
-                "confidence": 0.72,
-                "meta": {
-                    "range_high": hh, "range_low": ll,
-                    "m15_flat": m15_flat, "m5_flat": m5_flat,
-                    "rng_points": rng,
-                },
+                "confidence": 0.7,
+                "meta": {"range_high": hh, "range_low": ll},
             }
 
-        if decision and trailing_en:
-            decision["trailing"] = {"trigger": trail_trigger, "step": trail_step}
-
         if decision:
-            self.logger.info(
-                f"[{asset}] 📦 MTF Range Accum: {decision['action']} @ {price} "
-                f"(HH={hh:.2f} LL={ll:.2f} tol={tol_frac*100:.0f}%)"
-            )
+            self.logger.info(f"[{asset}] 🎯 Range Accumulation détectée: {decision['action']} @ {price}")
 
-        return decision
+            # === BONUS : détection d’impulsion avant range (non bloquant) ===
+            impulse_detected = False
+            if len(df) > lookback * 2:
+                prev_segment = df.tail(lookback * 2).head(lookback)
+                rng_prev = prev_segment["high"].max() - prev_segment["low"].min()
+                rng_recent = rng
+                if rng_prev > 2 * rng_recent:  # impulsion suivie d’un range
+                    impulse_detected = True
+
+            if impulse_detected:
+                decision["confidence"] = round(min(1.0, decision["confidence"] + 0.15), 3)
+                decision["meta"]["impulse_context"] = "detected"
+            else:
+                decision["meta"]["impulse_context"] = "absent"
+
+            return decision
+
+        return None
+
 
     def _rule_liquidity_sweep(
         self,
