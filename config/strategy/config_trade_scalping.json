@@ -181,6 +181,60 @@
             "enabled": true,
             "at_rr": 1.0,
             "size_frac": 0.5
+          },
+          "marubozu_playbook": {
+            "enabled": true,
+            "detection": {
+              "atr_period": 14,
+              "min_atr_mult": 2.2,
+              "min_body_ratio": 0.85,
+              "lookback_bars": 3
+            },
+            "continuation": {
+              "enabled": true,
+              "pullback_frac_min": 0.2,
+              "pullback_frac_max": 0.4,
+              "rr_target": 1.5,
+              "use_trailing": false,
+              "trailing": {
+                "trigger_pips": 20,
+                "step_pips": 7
+              }
+            },
+            "reversal": {
+              "enabled": true,
+              "min_reintegrate_frac": 0.5,
+              "rr_target": 1.2,
+              "use_trailing": true,
+              "trailing": {
+                "trigger_pips": 15,
+                "step_pips": 5
+              }
+            },
+            "range_active": {
+              "enabled": true,
+              "lookback_bars": 20,
+              "max_range_over_atr": 3.0,
+              "min_avg_candle_atr": 0.9,
+              "tolerance_frac": 0.15,
+              "sl_pips": 30,
+              "tp_mode": "mid_or_opposite",
+              "use_trailing": true,
+              "trailing": {
+                "trigger_pips": 12,
+                "step_pips": 4
+              }
+            },
+            "mtf_bias": {
+              "use": true,
+              "prefer_h1": true,
+              "block_against_both": true
+            },
+            "cooldowns": {
+              "per_asset_seconds": 60,
+              "after_win_seconds": 30,
+              "after_loss_seconds": 90
+            }
           }
         }
       }
