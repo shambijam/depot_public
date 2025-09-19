@@ -79,7 +79,7 @@
         }
       },
       "filters": {
-        "spread_max_points": 25,
+        "spread_max_points": 50,
         "min_atr_points": null
       },
       "time_filters": {
@@ -182,6 +182,51 @@
             "at_rr": 1.0,
             "size_frac": 0.5
           },
+          "continuation": {
+            "enabled": true,
+            "pullback_frac_min": 0.2,
+            "pullback_frac_max": 0.4,
+            "rr_target": 1.5,
+            "use_trailing": false,
+            "trailing": {
+              "trigger_pips": 20,
+              "step_pips": 7
+            }
+          },
+          "reversal": {
+            "enabled": true,
+            "min_reintegrate_frac": 0.5,
+            "rr_target": 1.2,
+            "use_trailing": true,
+            "trailing": {
+              "trigger_pips": 15,
+              "step_pips": 5
+            }
+          },
+          "range_active": {
+            "enabled": true,
+            "lookback_bars": 20,
+            "max_range_over_atr": 3.0,
+            "min_avg_candle_atr": 0.9,
+            "tolerance_frac": 0.15,
+            "sl_pips": 30,
+            "tp_mode": "mid_or_opposite",
+            "use_trailing": true,
+            "trailing": {
+              "trigger_pips": 12,
+              "step_pips": 4
+            }
+          },
+          "mtf_bias": {
+            "use": true,
+            "prefer_h1": true,
+            "block_against_both": true
+          },
+          "cooldowns": {
+            "per_asset_seconds": 60,
+            "after_win_seconds": 30,
+            "after_loss_seconds": 90
+          },
           "marubozu_playbook": {
             "enabled": true,
             "detection": {
@@ -194,46 +239,18 @@
               "enabled": true,
               "pullback_frac_min": 0.2,
               "pullback_frac_max": 0.4,
-              "rr_target": 1.5,
-              "use_trailing": false,
-              "trailing": {
-                "trigger_pips": 20,
-                "step_pips": 7
-              }
+              "rr_target": 1.5
             },
             "reversal": {
               "enabled": true,
               "min_reintegrate_frac": 0.5,
-              "rr_target": 1.2,
-              "use_trailing": true,
-              "trailing": {
-                "trigger_pips": 15,
-                "step_pips": 5
-              }
+              "rr_target": 1.2
             },
             "range_active": {
               "enabled": true,
               "lookback_bars": 20,
-              "max_range_over_atr": 3.0,
-              "min_avg_candle_atr": 0.9,
-              "tolerance_frac": 0.15,
               "sl_pips": 30,
-              "tp_mode": "mid_or_opposite",
-              "use_trailing": true,
-              "trailing": {
-                "trigger_pips": 12,
-                "step_pips": 4
-              }
-            },
-            "mtf_bias": {
-              "use": true,
-              "prefer_h1": true,
-              "block_against_both": true
-            },
-            "cooldowns": {
-              "per_asset_seconds": 60,
-              "after_win_seconds": 30,
-              "after_loss_seconds": 90
+              "tp_mode": "mid_or_opposite"
             }
           }
         }
