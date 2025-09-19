@@ -132,7 +132,7 @@
       },
       "burst_scalping": {
         "enabled": true,
-        "min_atr_m1_pips": 25,
+        "min_atr_m1_pips": 10,
         "max_spread_pips": 25,
         "burst_size": 8,
         "burst_cap_volume": 1.0,
@@ -186,8 +186,8 @@
             "enabled": true,
             "detection": {
               "atr_period": 14,
-              "min_atr_mult": 2.2,
-              "min_body_ratio": 0.85,
+              "min_atr_mult": 1.5,
+              "min_body_ratio": 0.75,
               "lookback_bars": 3
             },
             "continuation": {
