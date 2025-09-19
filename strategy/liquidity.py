@@ -31,7 +31,7 @@ class LiquidityStrategy(BaseStrategy):
         self, context: Dict[str, Any], signals: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Décide d'une entrée Liquidity par actif, puis sélectionne le meilleur.
+        Décide d'une entrée Liquidity par actif, puis sélectionne la meilleure.
         Utilise les signaux: sweep_detected, absorption_confirmed, bos_mss_detected,
         fvg_details, ob_details, eqh_eql_details, confidence_score.
         """
@@ -39,12 +39,13 @@ class LiquidityStrategy(BaseStrategy):
         if not tradeable_assets:
             self.logger.warning("[LIQ] Aucun asset tradable configuré.")
             return None
-        
-            # Vérification stricte: ignorer les actifs hors whitelist
-            invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
-            if invalid_assets:
-                self.logger.info(f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})")
 
+        # Vérification stricte: ignorer les actifs hors whitelist (log d'info)
+        invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
+        if invalid_assets:
+            self.logger.info(
+                f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
+            )
 
         min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.6))
         best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})
@@ -54,7 +55,7 @@ class LiquidityStrategy(BaseStrategy):
             if not sig:
                 continue
 
-            # Conditions coeur Liquidity
+            # Conditions cœur Liquidity
             sweep = bool(sig.get("sweep_detected", False))
             absorb = bool(sig.get("absorption_confirmed", False))
             bos_ok = bool(sig.get("bos_mss_detected", False))  # impulsion/validation
@@ -65,8 +66,7 @@ class LiquidityStrategy(BaseStrategy):
 
             confidence = float(sig.get("confidence_score", 0.0) or 0.0)
             if confidence < min_conf:
-                # on reste strict mais paramétrable par config
-                continue
+                continue  # strict mais paramétrable par config
 
             # Construire une proposition d'ordre pour cet asset
             try:
@@ -80,8 +80,10 @@ class LiquidityStrategy(BaseStrategy):
             if not proposal:
                 continue
 
-            # Scorer la proposition (simple: on priorise la confiance, puis la distance TP/SL)
-            prop_score = confidence + 0.01 * proposal.get("rr_estimate", 0.0)
+            # Scoring simple: on priorise la confiance, puis la qualité RR
+            prop_score = confidence + 0.01 * float(
+                proposal.get("rr_estimate", 0.0) or 0.0
+            )
             if prop_score > best[1]:
                 best = (asset, prop_score, proposal)
 
@@ -94,25 +96,30 @@ class LiquidityStrategy(BaseStrategy):
         asset, _, proposal = best
 
         # === LOGGING DÉTAILLÉ LIQUIDITY ===
-        side = proposal.get("side")
+        def _fmt_price(v: Any) -> str:
+            try:
+                return f"{float(v):.5f}"
+            except Exception:
+                return str(v)
+
+        action = proposal.get("action")
         entry = proposal.get("entry_price")
         sl = proposal.get("sl_price")
-        tp_list = proposal.get("tp_price")
+        tp = proposal.get("tp_price")
         rr_est = proposal.get("rr_estimate")
-        conf = proposal.get("confidence", 0.0)
+        conf = float(proposal.get("confidence", 0.0) or 0.0)
 
         self.logger.info(
-            f"[LIQUIDITY] 🔍 {asset} | Side={side} | "
-            f"Entry={entry:.5f} | SL={sl:.5f} | TPs={tp_list} | "
-            f"RR={rr_est:.2f} | Confiance={conf:.2f}"
+            f"[LIQUIDITY] 🔍 {asset} | Side={action} | "
+            f"Entry={_fmt_price(entry)} | SL={_fmt_price(sl)} | TP={_fmt_price(tp)} | "
+            f"RR={rr_est if isinstance(rr_est,(int,float)) else rr_est} | Confiance={conf:.2f}"
         )
 
-       # Package final pour l’executor
+        # Package final pour l’executor
         decision = self._build_decision_package_from_proposal(asset, proposal) or {}
-        decision["strategy_type"] = "liquidity"  # ✅ ajouté pour audit & logs
-        decision.setdefault("rule_name", "liquidity_entry")  # fallback propre si absent
+        decision["strategy_type"] = "liquidity"  # audit & logs
+        decision.setdefault("rule_name", "liquidity_entry")  # identifiant si absent
         return decision
-
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):
         """
@@ -263,13 +270,13 @@ class LiquidityStrategy(BaseStrategy):
                         f"[LIQUIDITY] ⛔ Exit {asset} (BUY) : invalidation sweep (price={last_price:.5f} < sweep={sweep_extreme:.5f})"
                     )
                     exit_decisions.append(
-                    {
-                        "ticket_to_close": pos["ticket"],
-                        "reason": "Invalidation Sweep",
-                        "strategy_type": "liquidity",      
-                        "rule_name": "exit_invalidation", 
-                    }
-                )
+                        {
+                            "ticket_to_close": pos["ticket"],
+                            "reason": "Invalidation Sweep",
+                            "strategy_type": "liquidity",
+                            "rule_name": "exit_invalidation",
+                        }
+                    )
 
                     continue
                 if side == "SELL" and last_price > sweep_extreme:
@@ -277,13 +284,13 @@ class LiquidityStrategy(BaseStrategy):
                         f"[LIQUIDITY] ⛔ Exit {asset} (SELL) : invalidation sweep (price={last_price:.5f} > sweep={sweep_extreme:.5f})"
                     )
                     exit_decisions.append(
-                    {
-                        "ticket_to_close": pos["ticket"],
-                        "reason": "Invalidation Sweep",
-                        "strategy_type": "liquidity",      
-                        "rule_name": "exit_invalidation", 
-                    }
-                )
+                        {
+                            "ticket_to_close": pos["ticket"],
+                            "reason": "Invalidation Sweep",
+                            "strategy_type": "liquidity",
+                            "rule_name": "exit_invalidation",
+                        }
+                    )
 
                     continue
 
@@ -444,24 +451,59 @@ class LiquidityStrategy(BaseStrategy):
         self, asset: str, context: Dict[str, Any], sig: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Construit la proposition d'ordre:
-        - déduire le sens (opposé au sweep, sinon via phase/bos)
-        - calculer entry selon entry_logic (break vs retracement)
-        - calculer SL (derrière sweep ou fallback ATR)
-        - calculer TP (EQH/EQL > OB > FVG ; fallback ATR)
-        - calculer RR estimé
+        Construit la proposition d'ordre Liquidity :
+        - Déduit le sens (par défaut : opposé au sweep ; overridable via entry_logic.direction)
+        - Calcule le prix d'entrée (break vs retracement, avec/ss mitigation)
+        - Calcule SL (derrière extrême du sweep ; fallback ATR si besoin)
+        - Calcule TP (priorité EQH/EQL > OB > FVG ; fallback ATR)
+        - Estime le RR
+
+        Robustesse ajoutée :
+        - Sécurisation point/pip_size
+        - Arrondi des niveaux au tick (point)
+        - Logs explicites en cas d'abandon
+        - Retour des métadonnées utiles (direction_pref, rule_name, confidence)
         """
+
+        # --- helpers locaux ---
+        def _as_float(x, default=0.0) -> float:
+            try:
+                v = float(x)
+                if not (v == v) or v in (float("inf"), float("-inf")):
+                    return float(default)
+                return v
+            except Exception:
+                return float(default)
+
+        def _round_to_point(
+            price: Optional[float], point_val: float
+        ) -> Optional[float]:
+            if price is None or price <= 0 or point_val <= 0:
+                return price
+            # Arrondi au tick MT5 (point)
+            steps = round(price / point_val)
+            return steps * point_val
+
         # --- paramètres / marché ---
-        point = float(sig.get("point", context.get("point", 0.00001)) or 0.00001)
+        # point : taille minimale de variation de prix (tick). Fallbacks protégés.
+        point = _as_float(sig.get("point", context.get("point", 0.0)), 0.0)
+        if point <= 0.0:
+            # fallback via digits si dispo
+            digits = sig.get("digits", context.get("digits"))
+            if isinstance(digits, (int, float)) and int(digits) >= 0:
+                point = 10.0 ** (-int(digits))
+            else:
+                # fallback générique FX
+                point = 0.00001
+
+        # pip_size : pour FX à 5 décimales => 10 * point (0.00010) ; pour XAU (0.01) => 0.1
         pip_size = point * 10.0 if point > 0 else 0.0001
-        price = float(
-            sig.get("close", context.get("close", 0.0)) or 0.0
-        )  # dernier close si dispo
+        price_now = _as_float(sig.get("close", context.get("close", 0.0)), 0.0)
 
         # --- entry_logic & execution ---
         entry_logic = self._cfg_dict("liquidity_sweep.entry_logic", default={})
         trigger = str(entry_logic.get("trigger", "break_of_absorption_extreme")).lower()
-        buffer_pips = float(entry_logic.get("buffer_pips", 0.4))
+        buffer_pips = _as_float(entry_logic.get("buffer_pips", 0.4), 0.4)
         timeout_bars = int(entry_logic.get("timeout_bars", 3))
         direction_pref = str(entry_logic.get("direction", "opposite_of_sweep")).lower()
 
@@ -472,6 +514,7 @@ class LiquidityStrategy(BaseStrategy):
         # --- sens du trade ---
         side = self._infer_direction(sig, direction_pref)
         if side not in ("BUY", "SELL"):
+            self.logger.warning("[LIQUIDITY] abandon: direction indécise.")
             return None
 
         # --- niveaux 'sweep' / 'absorption' ---
@@ -485,14 +528,16 @@ class LiquidityStrategy(BaseStrategy):
             trigger=trigger,
             buffer_pips=buffer_pips,
             pip_size=pip_size,
-            price_now=price,
+            price_now=price_now,
             sweep_extreme=sweep_extreme,
             absorb_extreme=absorb_extreme,
             sig=sig,
-            use_mitigation=use_mitigation,
+            use_mitigation=use_mitigation if order_type == "LIMIT" else False,
         )
         if entry_price is None or entry_price <= 0:
+            self.logger.warning("[LIQUIDITY] abandon: entry_price invalide.")
             return None
+        entry_price = _round_to_point(entry_price, point)
 
         # --- SL ---
         sl_price = self._compute_sl(
@@ -502,6 +547,13 @@ class LiquidityStrategy(BaseStrategy):
             sig=sig,
         )
         if sl_price is None or sl_price <= 0:
+            self.logger.warning("[LIQUIDITY] abandon: sl_price invalide.")
+            return None
+        sl_price = _round_to_point(sl_price, point)
+
+        # Écarter le cas pathologique entry == SL
+        if sl_price == entry_price:
+            self.logger.warning("[LIQUIDITY] abandon: sl_price == entry_price.")
             return None
 
         # --- TP ---
@@ -512,88 +564,222 @@ class LiquidityStrategy(BaseStrategy):
             pip_size=pip_size,
             sig=sig,
         )
+        if tp_price is not None and tp_price > 0:
+            tp_price = _round_to_point(tp_price, point)
 
         # --- RR estimé ---
-        rr_est = self._estimate_rr(entry_price, sl_price, tp_price, side)
+        rr_est: Optional[float] = None
+        try:
+            rr_est = self._estimate_rr(entry_price, sl_price, tp_price, side)
+        except Exception:
+            rr_est = None
 
         proposal = {
             "action": side,
             "entry_price": entry_price,
             "sl_price": sl_price,
             "tp_price": tp_price,
-            "order_type": order_type,  # resp. config: LIMIT attendu pour Liquidity
+            "order_type": order_type,  # LIMIT attendu pour Liquidity (config)
             "buffer_pips": buffer_pips,
             "timeout_bars": timeout_bars,
             "rr_estimate": rr_est,
-            "use_mitigation": use_mitigation,
-            # Champs ajoutés pour compatibilité et audit
-            "confidence": float(sig.get("confidence_score", 0.0)),  # ✅ score du signal
-            "rule_name": "liquidity_sweep_absorption",              # ✅ identifiant clair
+            "use_mitigation": use_mitigation if order_type == "LIMIT" else False,
+            # Audit / compat
+            "confidence": float(sig.get("confidence_score", 0.0)),
+            "rule_name": "liquidity_sweep_absorption",
+            "direction_pref": direction_pref,
         }
+        self.logger.info(
+            f"[LIQUIDITY] ✅ Proposition: side={side} entry={proposal['entry_price']} "
+            f"sl={proposal['sl_price']} tp={proposal['tp_price']} rr≈{proposal['rr_estimate']}"
+        )
         return proposal
 
-
-    def _infer_direction(self, sig: Dict[str, Any]) -> Optional[str]:
+    def _infer_direction(
+        self,
+        sig: Dict[str, Any],
+        direction_pref: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Détermine la direction (BUY/SELL) d'un setup Liquidity.
-        Priorité :
-        1. Sweep (low→BUY, high→SELL)
-        2. Validation MTF bias
-        3. Phase/Regime si sweep absent
-        ❌ Aucun fallback : si incertain → None
+
+        Priorité par défaut (mode 'auto'):
+        1) Sweep (low → BUY, high → SELL)  [opposé au sweep]
+        2) Validation MTF bias (si présent et aligné)
+        3) Phase/Régime (fallback)
+        → Si incertain ou conflit: None
+
+        Paramètre optionnel:
+        - direction_pref (str): peut forcer une heuristique particulière.
+            Valeurs supportées (insensibles à la casse):
+            * "opposite_of_sweep" (défaut) : low→BUY, high→SELL
+            * "with_sweep" / "follow_sweep" : low→SELL, high→BUY
+            * "mtf_bias" : utiliser exclusivement le biais MTF (si aligné)
+            * "phase" / "regime" : utiliser le contexte de phase/régime
+            * "auto" : suit la priorité par défaut ci-dessus
         """
-        side = None
+        # -- normalisation
+        pref = (direction_pref or "auto").strip().lower()
+        side: Optional[str] = None
 
-        # === 1) Sweep dominant ===
-        sd = sig.get("sweep_details")
-        if isinstance(sd, dict) and sd.get("present"):
-            if sd.get("sweep_type") == "low":
-                side = "BUY"
-            elif sd.get("sweep_type") == "high":
-                side = "SELL"
-        elif isinstance(sd, list) and sd:
-            for x in reversed(sd):
-                if isinstance(x, dict) and x.get("present"):
-                    if x.get("sweep_type") == "low":
-                        side = "BUY"
-                    elif x.get("sweep_type") == "high":
-                        side = "SELL"
-                    break
+        # === Helpers locaux ===
+        def _sweep_side(opposite: bool = True) -> Optional[str]:
+            sd = sig.get("sweep_details")
+            sweep_type = None
 
-        # === 2) Phase/Regime comme backup interne (toujours Liquidity, pas fallback externe) ===
-        if not side:
+            # sweep_details peut être dict (dernier) ou liste (historique)
+            if isinstance(sd, dict) and sd.get("present"):
+                sweep_type = str(sd.get("sweep_type", "")).lower()
+            elif isinstance(sd, list) and sd:
+                for x in reversed(sd):
+                    if isinstance(x, dict) and x.get("present"):
+                        sweep_type = str(x.get("sweep_type", "")).lower()
+                        break
+
+            if sweep_type is None:
+                return None
+
+            # mapping
+            if opposite:
+                # Opposé au sweep : low→BUY, high→SELL
+                return (
+                    "BUY"
+                    if sweep_type == "low"
+                    else ("SELL" if sweep_type == "high" else None)
+                )
+            else:
+                # Avec le sweep : low→SELL, high→BUY
+                return (
+                    "SELL"
+                    if sweep_type == "low"
+                    else ("BUY" if sweep_type == "high" else None)
+                )
+
+        def _mtf_direction() -> Tuple[Optional[str], bool]:
+            mtf_bias = sig.get("mtf_bias")
+            mtf_aligned = bool(sig.get("mtf_bias_aligned", True))
+            if not mtf_aligned:
+                return None, False
+            if mtf_bias:
+                mb = str(mtf_bias).upper()
+                if mb in ("BUY", "SELL"):
+                    return mb, True
+            return None, True  # aligné mais pas de biais exploitable
+
+        def _phase_regime_direction() -> Optional[str]:
             phase = str(sig.get("phase", "")).lower()
             regime = str(sig.get("regime", "")).lower()
-            if "impulse" in phase or "impulsion" in regime:
-                side = "BUY" if "bull" in regime else "SELL"
-
-        # === 3) Validation MTF bias ===
-        mtf_bias = sig.get("mtf_bias")
-        mtf_aligned = sig.get("mtf_bias_aligned", True)
-
-        if not mtf_aligned:
-            self.logger.warning(
-                "[LIQUIDITY] ❌ Direction rejetée : MTF bias non aligné."
-            )
+            # Heuristique simple : si momentum/impulsion détecté, utiliser le polarity du regime
+            if "impulse" in phase or "impulsion" in regime or "momentum" in regime:
+                if "bull" in regime:
+                    return "BUY"
+                if "bear" in regime:
+                    return "SELL"
             return None
 
-        if mtf_bias:
-            mtf_bias = str(mtf_bias).upper()
-            if side and side != mtf_bias:
+        # === Modes orientés par préférence explicite ===
+        if pref in ("with_sweep", "follow_sweep"):
+            # direction = avec le sweep (utile pour stratégies breakout)
+            side = _sweep_side(opposite=False)
+            if side is None:
                 self.logger.warning(
-                    f"[LIQUIDITY] ❌ Conflit directionnel: side={side}, mtf_bias={mtf_bias}"
+                    "[LIQUIDITY] ❌ Direction with_sweep impossible: sweep absent."
                 )
                 return None
-            side = mtf_bias if not side else side
 
-        if not side:
+            mtf_side, mtf_ok = _mtf_direction()
+            if not mtf_ok:
+                self.logger.warning(
+                    "[LIQUIDITY] ❌ Direction rejetée : MTF bias non aligné."
+                )
+                return None
+            if mtf_side and mtf_side != side:
+                self.logger.warning(
+                    f"[LIQUIDITY] ❌ Conflit directionnel with_sweep: side={side}, mtf_bias={mtf_side}"
+                )
+                return None
+            self.logger.info(f"[LIQUIDITY] ✅ Direction with_sweep confirmée: {side}")
+            return side
+
+        if pref in ("mtf_bias", "mtf"):
+            side_mtf, mtf_ok = _mtf_direction()
+            if not mtf_ok:
+                self.logger.warning(
+                    "[LIQUIDITY] ❌ Direction rejetée : MTF bias non aligné."
+                )
+                return None
+            if side_mtf in ("BUY", "SELL"):
+                self.logger.info(f"[LIQUIDITY] ✅ Direction (mtf_bias): {side_mtf}")
+                return side_mtf
             self.logger.warning(
-                "[LIQUIDITY] ❌ Direction indécise (aucun sweep/phase/MTF)."
+                "[LIQUIDITY] ❌ Direction (mtf_bias) indécise (biais absent)."
             )
             return None
 
-        self.logger.info(f"[LIQUIDITY] ✅ Direction confirmée: {side}")
-        return side
+        if pref in ("phase", "regime"):
+            side_phase = _phase_regime_direction()
+            if side_phase in ("BUY", "SELL"):
+                # Vérifier alignement MTF s'il existe
+                side_mtf, mtf_ok = _mtf_direction()
+                if not mtf_ok:
+                    self.logger.warning(
+                        "[LIQUIDITY] ❌ Direction rejetée : MTF bias non aligné."
+                    )
+                    return None
+                if side_mtf and side_mtf != side_phase:
+                    self.logger.warning(
+                        f"[LIQUIDITY] ❌ Conflit directionnel phase: side={side_phase}, mtf_bias={side_mtf}"
+                    )
+                    return None
+                self.logger.info(
+                    f"[LIQUIDITY] ✅ Direction (phase/regime): {side_phase}"
+                )
+                return side_phase
+            self.logger.warning("[LIQUIDITY] ❌ Direction (phase/regime) indécise.")
+            return None
+
+        # === Mode 'auto' (ou 'opposite_of_sweep' explicite) ===
+        # 1) Sweep (opposé par défaut)  2) MTF  3) Phase/Régime
+        if pref in ("auto", "opposite_of_sweep", "opposite", ""):
+            side = _sweep_side(opposite=True)
+            side_mtf, mtf_ok = _mtf_direction()
+
+            if not mtf_ok:
+                self.logger.warning(
+                    "[LIQUIDITY] ❌ Direction rejetée : MTF bias non aligné."
+                )
+                return None
+
+            if side:
+                if side_mtf and side_mtf != side:
+                    self.logger.warning(
+                        f"[LIQUIDITY] ❌ Conflit directionnel: sweep_side={side}, mtf_bias={side_mtf}"
+                    )
+                    return None
+                self.logger.info(f"[LIQUIDITY] ✅ Direction (sweep→opposé): {side}")
+                return side
+
+            if side_mtf in ("BUY", "SELL"):
+                self.logger.info(f"[LIQUIDITY] ✅ Direction (mtf_bias): {side_mtf}")
+                return side_mtf
+
+            side_phase = _phase_regime_direction()
+            if side_phase in ("BUY", "SELL"):
+                self.logger.info(
+                    f"[LIQUIDITY] ✅ Direction (phase/regime): {side_phase}"
+                )
+                return side_phase
+
+            self.logger.warning(
+                "[LIQUIDITY] ❌ Direction indécise (aucun sweep/MTF/phase)."
+            )
+            return None
+
+        # === Préférence non reconnue → fallback auto
+        self.logger.debug(
+            f"[LIQUIDITY] ⚠️ direction_pref inconnu '{direction_pref}', fallback 'auto'."
+        )
+        return self._infer_direction(sig, direction_pref="auto")
 
     def _last_sweep_side(self, sig: Dict[str, Any]) -> Optional[str]:
         """
@@ -665,12 +851,12 @@ class LiquidityStrategy(BaseStrategy):
         use_mitigation: bool,
     ) -> Optional[float]:
         """
-        ENTRY LOGIC (dev desk):
-        - break_of_absorption_extreme ± buffer
-        - retracement priorisant zone OB∩FVG (confluence), sinon OB puis FVG
-        - wick_fill: entrée à X% du remplissage de la mèche du sweep
+        ENTRY LOGIC (STRICT, no fallback):
+        - break_of_absorption_extreme ± buffer  → nécessite absorb_extreme
+        - retracement: priorité OB∩FVG (confluence), sinon OB puis FVG → si aucune zone valide: None
+        - wick_fill: entrée à X% du remplissage de mèche (nécessite sweep_extreme & absorb_extreme)
         - support MTF si des zones HTF sont exposées dans les signaux
-        - sélection du niveau le plus proche dans le bon sens (avec tolérance)
+        - aucune dégradation vers un 'break' si le retracement échoue
         """
 
         # --- Config lecture (avec défauts sûrs) ---
@@ -680,10 +866,11 @@ class LiquidityStrategy(BaseStrategy):
         wick_fill_ratio = float(el_cfg.get("wick_fill_ratio", 0.50))  # 0..1
         use_mtf_zone = bool(el_cfg.get("use_mtf_zone", False))
         retr_tolerance_pips = float(el_cfg.get("retracement_tolerance_pips", 3.0))
-        retr_tolerance_px = max(0.0, retr_tolerance_pips) * pip_size
+        retr_tolerance_px = max(0.0, retr_tolerance_pips) * max(pip_size, 0.0)
+        mitigation_ratio = float(el_cfg.get("mitigation_ratio", 0.33))
 
         # Buffer en prix
-        buf = float(buffer_pips) * pip_size
+        buf = float(buffer_pips) * max(pip_size, 0.0)
 
         # Helpers locaux pour lire une "zone"
         def zone_band_from_dict(d: Dict[str, Any]) -> Optional[Tuple[float, float]]:
@@ -694,13 +881,19 @@ class LiquidityStrategy(BaseStrategy):
             z_hi = None
             z_lo = None
             for k in keys_hi:
-                if k in d and d[k] is not None:
-                    z_hi = float(d[k])
-                    break
+                if d.get(k) is not None:
+                    try:
+                        z_hi = float(d[k])
+                        break
+                    except Exception:
+                        pass
             for k in keys_lo:
-                if k in d and d[k] is not None:
-                    z_lo = float(d[k])
-                    break
+                if d.get(k) is not None:
+                    try:
+                        z_lo = float(d[k])
+                        break
+                    except Exception:
+                        pass
             if z_hi is None and z_lo is not None:
                 z_hi = z_lo
             if z_lo is None and z_hi is not None:
@@ -714,7 +907,6 @@ class LiquidityStrategy(BaseStrategy):
             if isinstance(obj, dict):
                 return zone_band_from_dict(obj)
             if isinstance(obj, list) and obj:
-                # On prend la plus récente zone valide (en partant de la fin)
                 for x in reversed(obj):
                     zb = zone_band_from_dict(x) if isinstance(x, dict) else None
                     if zb:
@@ -728,77 +920,73 @@ class LiquidityStrategy(BaseStrategy):
             hi = min(a[1], b[1])
             return (lo, hi) if hi >= lo else None
 
-        def side_entry_edge(band: Tuple[float, float], side_: str) -> float:
+        def edge_or_mitigated(band: Tuple[float, float], side_: str) -> float:
             lo, hi = band
-            return lo if side_ == "BUY" else hi  # BUY: bas de zone, SELL: haut de zone
+            if not use_mitigation:
+                return lo if side_ == "BUY" else hi
+            width = max(0.0, hi - lo)
+            if width <= 0.0:
+                return lo if side_ == "BUY" else hi
+            return (
+                (lo + mitigation_ratio * width)
+                if side_ == "BUY"
+                else (hi - mitigation_ratio * width)
+            )
 
         def nearest_valid_retracement(
             side_: str, candidates: List[float], ref_price: float
         ) -> Optional[float]:
-            # Filtre directionnel + plus proche du prix actuel
-            # BUY: on veut une limite EN-DESSOUS du prix actuel; SELL: EN-DESSUS
             if side_ == "BUY":
                 cands = [c for c in candidates if c <= ref_price + retr_tolerance_px]
                 if not cands:
                     return None
-                # plus proche par dessous (ou très légèrement dessus si toléré)
                 cands.sort(key=lambda x: (abs(ref_price - x), -x))
                 return cands[0]
             else:
                 cands = [c for c in candidates if c >= ref_price - retr_tolerance_px]
                 if not cands:
                     return None
-                # plus proche par dessus
                 cands.sort(key=lambda x: (abs(x - ref_price), x))
                 return cands[0]
 
-        # --- 0) Wick Fill (optionnel) ---
-        # Si activé, on peut forcer une entrée à X% du remplissage de la mèche
-        # entre l'extrême du sweep et l'extrême d'absorption.
-        # BUY : entrée = sweep_low + ratio*(absorb_extreme - sweep_low)
-        # SELL: entrée = sweep_high - ratio*(sweep_high - absorb_extreme)
+        # --- 0) Wick Fill (optionnel, strict: nécessite sweep_extreme & absorb_extreme) ---
         if (
             use_wick_fill
-            and sweep_extreme
-            and absorb_extreme
+            and sweep_extreme is not None
+            and absorb_extreme is not None
             and 0.0 <= wick_fill_ratio <= 1.0
         ):
             try:
+                anchor = float(sweep_extreme)
+                target = float(absorb_extreme)
                 if side == "BUY":
-                    anchor = float(sweep_extreme)
-                    target = float(absorb_extreme)
-                    entry_wick = anchor + wick_fill_ratio * (target - anchor)
+                    entry_wick = min(
+                        anchor + wick_fill_ratio * (target - anchor) + buf, target
+                    )
                 else:
-                    anchor = float(sweep_extreme)
-                    target = float(absorb_extreme)
-                    entry_wick = anchor - wick_fill_ratio * (anchor - target)
-
-                # On applique un léger buffer côté sécurité
-                entry_wick = float(entry_wick)
-                if side == "BUY":
-                    entry_wick = min(entry_wick + buf, max(entry_wick, target))
-                else:
-                    entry_wick = max(entry_wick - buf, min(entry_wick, target))
-
+                    entry_wick = max(
+                        anchor - wick_fill_ratio * (anchor - target) - buf, target
+                    )
                 if entry_wick > 0:
-                    return round(entry_wick, 10)
+                    return round(float(entry_wick), 10)
             except Exception:
-                # On ignore et on retombe sur la logique standard
-                pass
+                pass  # on retombe sur la logique stricte ci-dessous
 
-        # --- 1) Break of absorption extreme ---
+        # --- 1) BREAK (STRICT) ---
         if trigger == "break_of_absorption_extreme":
-            ref = float(absorb_extreme) if absorb_extreme else float(price_now)
+            if absorb_extreme is None:
+                self.logger.warning(
+                    "[LIQUIDITY] STRICT: break_of_absorption_extreme sans absorb_extreme → None"
+                )
+                return None
+            ref = float(absorb_extreme)
             price = (ref + buf) if side == "BUY" else (ref - buf)
             return round(price, 10) if price > 0 else None
 
-        # --- 2) Retracement (OB/FVG), avec confluence et MTF ---
+        # --- 2) RETRACEMENT (STRICT : aucune dégradation en break si pas de zone valide) ---
         if trigger in {"retracement", "ob_or_fvg_retest", "retest"}:
-            # Zones LTF
             ob_band = zone_band_from_obj(sig.get("ob_details"))
             fvg_band = zone_band_from_obj(sig.get("fvg_details"))
-
-            # Zones MTF (si dispo et autorisé)
             if use_mtf_zone:
                 ob_band_htf = zone_band_from_obj(
                     sig.get("ob_details_htf")
@@ -814,52 +1002,36 @@ class LiquidityStrategy(BaseStrategy):
                 ob_band_htf = None
                 fvg_band_htf = None
 
-            # 2.a Confluence OB∩FVG (LTF d'abord)
             confl_band = None
             if prefer_confluent and ob_band and fvg_band:
                 confl_band = zone_overlap(ob_band, fvg_band)
-
-            # 2.b Confluence MTF si pas de confluence LTF
             if prefer_confluent and confl_band is None and ob_band_htf and fvg_band_htf:
                 confl_band = zone_overlap(ob_band_htf, fvg_band_htf)
 
-            # 2.c Liste des candidats (ordre de priorité)
             candidates_prices: List[float] = []
-
             if confl_band:
-                candidates_prices.append(side_entry_edge(confl_band, side))
-            # Sinon OB/FVG LTF
+                candidates_prices.append(edge_or_mitigated(confl_band, side))
             if ob_band:
-                candidates_prices.append(side_entry_edge(ob_band, side))
+                candidates_prices.append(edge_or_mitigated(ob_band, side))
             if fvg_band:
-                candidates_prices.append(side_entry_edge(fvg_band, side))
-            # Puis OB/FVG HTF si demandé
+                candidates_prices.append(edge_or_mitigated(fvg_band, side))
             if use_mtf_zone:
                 if ob_band_htf:
-                    candidates_prices.append(side_entry_edge(ob_band_htf, side))
+                    candidates_prices.append(edge_or_mitigated(ob_band_htf, side))
                 if fvg_band_htf:
-                    candidates_prices.append(side_entry_edge(fvg_band_htf, side))
+                    candidates_prices.append(edge_or_mitigated(fvg_band_htf, side))
 
-            # Choix du meilleur candidat (plus proche dans le bon sens)
             level = nearest_valid_retracement(side, candidates_prices, float(price_now))
             if level is not None and level > 0:
                 return round(float(level), 10)
 
-            # fallback retracement: si on a un extrême d'absorption, utiliser le break
-            if absorb_extreme:
-                ref = float(absorb_extreme)
-                price = (ref + buf) if side == "BUY" else (ref - buf)
-                return round(price, 10) if price > 0 else None
-
+            # STRICT: pas de fallback en break si aucun niveau de retracement valide
+            self.logger.info("[LIQUIDITY] STRICT: retracement sans zone valide → None")
             return None
 
-        # --- 3) Fallback par défaut -> break ---
-        if absorb_extreme:
-            ref = float(absorb_extreme)
-        else:
-            ref = float(price_now)
-        price = (ref + buf) if side == "BUY" else (ref - buf)
-        return round(price, 10) if price > 0 else None
+        # --- 3) Triggers inconnus : STRICT → None ---
+        self.logger.warning(f"[LIQUIDITY] STRICT: trigger inconnu '{trigger}' → None")
+        return None
 
     def _first_retracement_level(
         self, sig: Dict[str, Any], side: str
@@ -1287,7 +1459,7 @@ class LiquidityStrategy(BaseStrategy):
         except Exception:
             pass
 
-       # Rule name plus souple (si défini dans la proposition, sinon valeur par défaut)
+        # Rule name plus souple (si défini dans la proposition, sinon valeur par défaut)
         rule_name = p.get("rule_name") or "liquidity_entry"
 
         decision = {

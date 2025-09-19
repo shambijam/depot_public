@@ -60,6 +60,24 @@
         "sl_pips": 60,
         "tp_pips": 80
       },
+      "range_accumulation_mtf": {
+        "enabled": true,
+        "lookback_m1": 20,
+        "tolerance_frac": 0.15,
+        "m5_window_bars": 20,
+        "m15_window_bars": 20,
+        "max_slope_m5": 0.0,
+        "max_slope_m15": 0.0,
+        "max_band_frac_m5": 0.35,
+        "max_band_frac_m15": 0.35,
+        "sl_pips": null,
+        "tp_pips": null,
+        "trailing": {
+          "enabled": true,
+          "trigger_pips": 15,
+          "step_pips": 5
+        }
+      },
       "filters": {
         "spread_max_points": 25,
         "min_atr_points": null

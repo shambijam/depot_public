@@ -113,6 +113,22 @@ class ScalpingStrategy(BaseStrategy):
                         self.logger.info(f"[{asset}] Liquidity Sweep → action forcée = {action}")
                 except Exception as e:
                     self.logger.debug(f"[{asset}] Liquidity sweep skipped: {e}")
+                             # === Règle MTF Range/Accumulation (indépendante de l'ATR/Spread) ===
+            try:
+                mtf_cfg = (strat_cfg.get("range_accumulation_mtf") or {})
+                mtf_decision = self._rule_range_accumulation_mtf(
+                    df_m1=df_work,
+                    asset=asset,
+                    price=price,
+                    meta=meta,
+                    cfg=mtf_cfg,
+                    analyzed_context=analyzed_context,
+                )
+                if mtf_decision:
+                    return self._finalize_decision(mtf_decision, analyzed_context)
+            except Exception as e:
+                self.logger.debug(f"[{asset}] MTF range-accum skipped: {e}")
+   
 
             # --- 5) ATR M1 + filtres de burst / spread ---
             atr_m1_pips = None
@@ -139,6 +155,22 @@ class ScalpingStrategy(BaseStrategy):
             if min_atr_req > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
                 self.logger.info(f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p.")
                 burst_allowed = False
+                
+                # --- 5bis) Détection Range Accumulation (expérimental) ---
+            if isinstance(df_work, pd.DataFrame):
+                try:
+                    range_decision = self._rule_range_accumulation(
+                        df=df_work,
+                        asset=asset,
+                        price=price,
+                        action=action,
+                        meta=meta,
+                        cfg=(strat_cfg.get("range_accumulation") or {}),
+                    )
+                    if range_decision:
+                        return range_decision
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] Range accumulation skipped: {e}")
 
             # --- 6) BURST prioritaire (s’il est autorisé) ---
             if bool(burst_cfg.get("enabled", True)) and burst_allowed:
@@ -260,6 +292,204 @@ class ScalpingStrategy(BaseStrategy):
 
         self.logger.info(f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}")
         return {"burst_decisions": decisions, "basket_id": basket_id}
+    
+    # --- Helpers MTF pour la règle range/accumulation ---
+
+    def _get_bars(self, asset: str, timeframe: str, count: int):
+        """
+        Récupère un DataFrame OHLC pour `asset` et `timeframe`.
+        Essaie d'abord phase_observer (si dispo), sinon MT5Connector.
+        Doit renvoyer un df avec colonnes: ['open','high','low','close','time'] indexé par time.
+        """
+        try:
+            # 1) PhaseObserver (si ton app remonte déjà MTF dans le contexte)
+            if hasattr(self, "phase_observer") and hasattr(self.phase_observer, "get_bars"):
+                df = self.phase_observer.get_bars(asset, timeframe, count)
+                if df is not None and len(df) >= min(10, count):
+                    return df
+
+            # 2) MT5Connector (fallback standard)
+            if hasattr(self, "mt5_connector") and hasattr(self.mt5_connector, "get_recent_bars"):
+                df = self.mt5_connector.get_recent_bars(asset, timeframe, count)
+                return df
+        except Exception as e:
+            self.logger.warning(f"[{asset}] _get_bars({timeframe}) failed: {e}")
+
+        return None
+
+
+    def _is_range_environment(self, df15, df5, params) -> bool:
+        """
+        Confirme un 'vrai' range plat via M15 + M5.
+        - M15 définit le couloir (HH/LL sur lookback_m15)
+        - M5 doit rester majoritairement à l’intérieur du couloir M15
+        et représenter une amplitude 'suffisamment contenue'
+        (range5 / range15 < max_consolidation_ratio)
+        - Optionnel: vérifier qu'il n'y a pas eu de close > HH15 ou < LL15
+        au-delà d'une petite tolérance (anti-breakout).
+        """
+        if df15 is None or df5 is None:
+            return False
+        if len(df15) < params["lookback_m15"] or len(df5) < params["lookback_m5"]:
+            return False
+
+        recent15 = df15.tail(params["lookback_m15"])
+        recent5  = df5.tail(params["lookback_m5"])
+
+        hh15 = float(recent15["high"].max())
+        ll15 = float(recent15["low"].min())
+        range15 = hh15 - ll15
+        if range15 <= 0:
+            return False
+
+        hh5 = float(recent5["high"].max())
+        ll5 = float(recent5["low"].min())
+        range5 = hh5 - ll5
+
+        # M5 doit être "concentré" par rapport à M15
+        if (range5 / range15) >= params["max_consolidation_ratio"]:
+            return False
+
+        # Anti-breakout: peu (ou pas) de clôtures qui sortent franchement du couloir M15
+        tol = params["breakout_tolerance_frac"] * range15
+        closes = recent5["close"]
+        if (closes > (hh15 + tol)).sum() > params["max_breakout_closes"]:
+            return False
+        if (closes < (ll15 - tol)).sum() > params["max_breakout_closes"]:
+            return False
+
+        return True
+
+
+    def _rule_range_accumulation_mtf(
+        self,
+        df_m1: Optional[pd.DataFrame],
+        asset: str,
+        price: float,
+        meta: Dict[str, Any],
+        cfg: Dict[str, Any],
+        analyzed_context: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Détecte un range 'plat' confirmé MTF (M15/M5), puis trade les extrêmes sur M1.
+        - Indépendant de l'ATR : ne doit pas être bloqué.
+        - Confirme côté M15/M5: faible slope / faible ADX / bande de prix compacte.
+        - Sur M1: on prend SELL près du haut, BUY près du bas (avec tolérance).
+        """
+
+        # --- Garde de base ---
+        if df_m1 is None or len(df_m1) < 50:
+            return None
+        if price is None:
+            return None
+        if not bool(cfg.get("enabled", True)):
+            return None
+
+        # --- Paramètres ---
+        lookback_m1   = int(cfg.get("lookback_m1", 20))
+        tol_frac      = float(cfg.get("tolerance_frac", 0.15))   # 15% du range
+        m5_window     = int(cfg.get("m5_window_bars", 20))
+        m15_window    = int(cfg.get("m15_window_bars", 20))
+        max_slope_m5  = float(cfg.get("max_slope_m5", 0.0))      # 0 = strict
+        max_slope_m15 = float(cfg.get("max_slope_m15", 0.0))     # 0 = strict
+        max_band_m5   = float(cfg.get("max_band_frac_m5", 0.35)) # largeur/bb avg
+        max_band_m15  = float(cfg.get("max_band_frac_m15", 0.35))
+
+        sl_pips       = float(cfg.get("sl_pips", 30.0))
+        tp_pips       = float(cfg.get("tp_pips", 30.0))
+
+        trailing_cfg  = cfg.get("trailing", {})
+        trailing_en   = bool(trailing_cfg.get("enabled", False))
+        trail_trigger = float(trailing_cfg.get("trigger_pips", 15.0))
+        trail_step    = float(trailing_cfg.get("step_pips", 5.0))
+
+        # --- Data M5/M15 depuis le contexte ---
+        md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+        df_m5  = md.get("M5")  or md.get("df_m5")
+        df_m15 = md.get("M15") or md.get("df_m15")
+
+        def _is_flat(df: Optional[pd.DataFrame], win: int, max_slope: float, max_band_frac: float) -> bool:
+            if not isinstance(df, pd.DataFrame) or len(df) < max(win, 30):
+                return False
+            close = df["close"].astype(float).tail(win)
+            if close.empty:
+                return False
+            # slope (régression linéaire simple)
+            x = np.arange(len(close))
+            try:
+                coef = np.polyfit(x, close.values, 1)[0]  # pente
+            except Exception:
+                coef = 0.0
+            slope_ok = abs(coef) <= max_slope
+
+            # bande relative (simple: (max-min)/moyenne)
+            hi = float(close.max()); lo = float(close.min()); avg = float(close.mean())
+            band_frac = ((hi - lo) / avg) if avg > 0 else 1.0
+            band_ok = band_frac <= max_band_frac
+
+            return bool(slope_ok and band_ok)
+
+        # --- Confirmation MTF: M15 & M5 'plats' ---
+        m15_flat = _is_flat(df_m15, m15_window, max_slope_m15, max_band_m15)
+        m5_flat  = _is_flat(df_m5,  m5_window,  max_slope_m5,  max_band_m5)
+
+        if not (m15_flat and m5_flat):
+            return None
+
+        # --- Définition du range sur M1 ---
+        recent = df_m1.tail(lookback_m1)
+        hh = float(recent["high"].max()); ll = float(recent["low"].min())
+        rng = hh - ll
+        if rng <= 0:
+            return None
+
+        top_zone = hh - tol_frac * rng
+        bot_zone = ll + tol_frac * rng
+
+        decision = None
+        if price >= top_zone:
+            decision = {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": price,
+                "target_sl_pips": sl_pips,
+                "target_tp_pips": tp_pips,
+                "rule_name": "mtf_range_accum_top",
+                "strategy_type": "scalping",
+                "confidence": 0.72,  # range confirmé MTF
+                "meta": {
+                    "range_high": hh, "range_low": ll,
+                    "m15_flat": m15_flat, "m5_flat": m5_flat,
+                    "rng_points": rng,
+                },
+            }
+        elif price <= bot_zone:
+            decision = {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": price,
+                "target_sl_pips": sl_pips,
+                "target_tp_pips": tp_pips,
+                "rule_name": "mtf_range_accum_low",
+                "strategy_type": "scalping",
+                "confidence": 0.72,
+                "meta": {
+                    "range_high": hh, "range_low": ll,
+                    "m15_flat": m15_flat, "m5_flat": m5_flat,
+                    "rng_points": rng,
+                },
+            }
+
+        if decision and trailing_en:
+            decision["trailing"] = {"trigger": trail_trigger, "step": trail_step}
+
+        if decision:
+            self.logger.info(
+                f"[{asset}] 📦 MTF Range Accum: {decision['action']} @ {price} "
+                f"(HH={hh:.2f} LL={ll:.2f} tol={tol_frac*100:.0f}%)"
+            )
+
+        return decision
 
     def _rule_liquidity_sweep(
         self,
