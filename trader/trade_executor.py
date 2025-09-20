@@ -2423,8 +2423,22 @@ class TradeExecutor:
             f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
             f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym})."
         )
-        return float(volume)
+        
+                  # --- Ajustement final par volatilité si fourni ---
+        if isinstance(trade_decision, dict) and "volatility_factor" in trade_decision:
+            try:
+                factor = float(trade_decision.get("volatility_factor", 1.0))
+                if math.isfinite(factor) and factor > 0:
+                    adjusted = volume * factor
+                    self.logger.info(
+                        f"[VOLATILITY FACTOR] Volume ajusté: {volume:.4f} -> {adjusted:.4f} (facteur={factor:.3f})"
+                    )
+                    volume = adjusted
+            except Exception as e:
+                self.logger.warning(f"[VOLATILITY FACTOR] Ignoré: {e}")
 
+        return float(volume)
+        
     def _cooldown_guard(
         self,
         asset: str,
@@ -3144,19 +3158,52 @@ class TradeExecutor:
         audit_ctx = getattr(self, "execution_context", {}) or {}
 
         try:
-            # --- Envoi via le connecteur (aucune simulation) ---
-            result = self.mt5_connector.order_send(request)
+            # --- Envoi via le connecteur (avec retry limité & logs enrichis) ---
+            max_retries = 2
+            last_error = None
+            result = None
 
-            if result is None:
-                # Aucun retour → échec franc
-                last_err = None
+            for attempt in range(max_retries):
                 try:
-                    last_err = mt5.last_error()
-                except Exception:
-                    pass
-                raise TradeExecutionError(
-                    f"order_send() n'a retourné aucun résultat. last_error={last_err}"
+                    result = self.mt5_connector.order_send(request)
+                except Exception as e:
+                    last_error = e
+                    self.logger.error(
+                        f"[EXECUTOR] Exception order_send tentative {attempt+1}/{max_retries}: {e}",
+                        exc_info=True
+                    )
+                    continue  # réessaie si encore une tentative dispo
+
+                # Vérifie si résultat valide
+                if result and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                    break  # succès
+                else:
+                    retcode = getattr(result, "retcode", None)
+                    self.logger.warning(
+                        f"[EXECUTOR] Tentative {attempt+1}/{max_retries} échouée "
+                        f"(retcode={retcode}, comment={getattr(result,'comment','')})"
+                    )
+                    last_error = result
+
+            # Après retry, vérifier si succès ou échec final
+            if not result or getattr(result, "retcode", None) != mt5.TRADE_RETCODE_DONE:
+                retcode = getattr(result, "retcode", None)
+                comment = getattr(result, "comment", "")
+                reason = "UNKNOWN"
+
+                if retcode in (mt5.TRADE_RETCODE_NO_CONNECTION, mt5.TRADE_RETCODE_TIMEOUT):
+                    reason = "BROKER/NETWORK"
+                elif retcode in (mt5.TRADE_RETCODE_INVALID_VOLUME, mt5.TRADE_RETCODE_INVALID_PRICE):
+                    reason = "PARAMS"
+                elif retcode in (mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_REJECT):
+                    reason = "MARKET"
+
+                msg = (
+                    f"[EXECUTOR] ❌ Trade échoué [{reason}] "
+                    f"(retcode={retcode}, comment={comment}, request={request})"
                 )
+                self.logger.error(msg)
+                raise TradeExecutionError(msg)
 
             # --- Récupération sûre des champs renvoyés ---
             retcode = getattr(result, "retcode", None)
@@ -3166,6 +3213,7 @@ class TradeExecutor:
             result_price = getattr(result, "price", None)
             result_volume = getattr(result, "volume", None)
             request_id = getattr(result, "request_id", None)
+
 
             # --- Normalisation retcode / succès ---
             RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")

@@ -190,6 +190,62 @@ class ScalpingStrategy(BaseStrategy):
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================
     # ==========================================================
+    def _get_atr_m1_pips(
+        self,
+        asset: str,
+        signals: Dict[str, Any],
+        context: Dict[str, Any],
+        pip_size_value: float,
+    ) -> Optional[float]:
+        """
+        Essaie de récupérer et convertir l'ATR M1 en pips à partir de plusieurs sources.
+        Retourne None si toutes les conversions échouent.
+        """
+        atr_sources: List[Tuple[str, Any, bool]] = [
+            ("signals['atr_m1_pips']", signals.get("atr_m1_pips"), False),
+            (
+                "context['atr_m1_pips']",
+                (
+                    (context or {}).get("atr_m1_pips")
+                    if isinstance(context, dict)
+                    else None
+                ),
+                False,
+            ),
+            ("signals['atr_m1']", signals.get("atr_m1"), True),
+        ]
+
+        conversion_errors: List[str] = []
+
+        for label, raw_value, needs_division in atr_sources:
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                conversion_errors.append(f"{label}: {exc}")
+                continue
+
+            if needs_division:
+                if pip_size_value <= 0:
+                    conversion_errors.append(
+                        f"{label}: pip_size {pip_size_value} invalide pour conversion"
+                    )
+                    continue
+                candidate = numeric_value / pip_size_value
+            else:
+                candidate = numeric_value
+
+            if candidate > 0:
+                return candidate
+            conversion_errors.append(
+                f"{label}: valeur <= 0 après conversion ({candidate})"
+            )
+
+        if conversion_errors:
+            self.logger.debug(
+                f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
+            )
+        return None
+
     def _rule_burst_scalping(
         self,
         asset: str,
@@ -213,45 +269,25 @@ class ScalpingStrategy(BaseStrategy):
         if size <= 0:
             return None
 
-        # Garde ATR/Spread
+        try:
+            pip_size_value = float(meta.get("pip_size", 0.0))
+        except (TypeError, ValueError):
+            pip_size_value = 0.0
+
+        # ✅ Utilisation de la fonction refactorisée
+        atr_m1_pips = self._get_atr_m1_pips(asset, signals, context, pip_size_value)
+
+        # Garde ATR
         min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips", 0.0))
-
-        atr_value_pips: Optional[float] = None
-        for candidate in (
-            signals.get("atr_m1_pips"),
-            context.get("atr_m1_pips"),
-        ):
-            if candidate is None:
-                continue
-            try:
-                atr_value_pips = float(candidate)
-                break
-            except (TypeError, ValueError):
-                continue
-
-        if atr_value_pips is None:
-            raw_atr = signals.get("atr_m1")
-            pip_size = float(meta.get("pip_size", 0.0) or 0.0)
-            if raw_atr is not None and pip_size > 0:
-                try:
-                    atr_value_pips = float(raw_atr) / pip_size
-                except (TypeError, ValueError):
-                    atr_value_pips = None
-
-        if atr_value_pips is None:
-            atr_value_pips = 0.0
-
-        if min_atr_m1 > 0 and atr_value_pips < min_atr_m1:
-            self.logger.info(
-                f"[{asset}] Burst refusé: ATR M1 {atr_value_pips:.2f}p < min {min_atr_m1}p."
-            )
+        if min_atr_m1 > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_m1):
+            self.logger.info(f"[{asset}] Burst refusé: ATR M1 < {min_atr_m1} pips.")
             return None
 
+        # Garde Spread
         max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
-        spread_pips = float(meta.get("spread_pips", 0.0) or 0.0)
-        if spread_pips > max_spread_burst:
+        if meta["spread_pips"] > max_spread_burst:
             self.logger.info(
-                f"[{asset}] Burst refusé: spread {spread_pips:.2f}p > {max_spread_burst}p."
+                f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst}p."
             )
             return None
 
@@ -280,7 +316,7 @@ class ScalpingStrategy(BaseStrategy):
                 "order_type": "MARKET",
                 "entry_price": entry_price,
                 "rule_name": "burst_scalping",
-                "strategy_type": "scalping",  # ✅ ajouté pour cohérence
+                "strategy_type": "scalping",  # ✅ cohérence
                 "basket_id": basket_id,
                 "burst_index": i + 1,
                 "burst_size": size,
