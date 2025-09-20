@@ -49,19 +49,29 @@ class ScalpingStrategy(BaseStrategy):
             # --- 0) Données & config ---
             ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
             df_m1 = ctx_md.get("df_m1") or ctx_md.get("df")
-            df_work = df_m1.copy() if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50 else None
+            df_work = (
+                df_m1.copy()
+                if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
+                else None
+            )
 
-            strat_cfg = (self.config_manager.get_strategy_config("scalping") or {}).copy()
+            strat_cfg = (
+                self.config_manager.get_strategy_config("scalping") or {}
+            ).copy()
 
             # Compatibilité burst_scalping
             burst_cfg = (
                 strat_cfg.get("burst_scalping")
-                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
+                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                    "burst_scalping"
+                )
                 or {}
             )
 
             # --- 1) Métadonnées ---
-            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
+            meta = self._safe_asset_meta(
+                asset, asset_signals, analyzed_context, strat_cfg
+            )
             pip_size = meta["pip_size"]
             if pip_size <= 0:
                 self.logger.warning(f"[{asset}] pip_size invalide.")
@@ -147,10 +157,14 @@ class ScalpingStrategy(BaseStrategy):
 
             burst_allowed = True
             if meta["spread_pips"] > max_spread_burst:
-                self.logger.info(f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p.")
+                self.logger.info(
+                    f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
+                )
                 burst_allowed = False
             if min_atr_req > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
-                self.logger.info(f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p.")
+                self.logger.info(
+                    f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p."
+                )
                 burst_allowed = False
 
             if bool(burst_cfg.get("enabled", True)) and burst_allowed:
@@ -173,7 +187,6 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
 
-
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================
     # ==========================================================
@@ -190,11 +203,11 @@ class ScalpingStrategy(BaseStrategy):
         """
         Ouvre un panier (burst) de N ordres d’un coup.
         Garde-fous :
-          - ATR M1 min (soft)
-          - Spread max
-          - Confirmation directionnelle M1 (optionnelle)
+            - ATR M1 min (soft)
+            - Spread max
+            - Confirmation directionnelle M1 (optionnelle)
         Niveaux :
-          - SL/TP en pips si fournis, sinon laissés au TradeExecutor
+            - SL/TP en pips si fournis, sinon laissés au TradeExecutor
         """
         size = int(burst_cfg.get("size", 5))
         if size <= 0:
@@ -202,17 +215,43 @@ class ScalpingStrategy(BaseStrategy):
 
         # Garde ATR/Spread
         min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips", 0.0))
-        if (
-            min_atr_m1 > 0
-            and float(signals.get("atr_m1", 0.0) or 0.0) / max(meta["pip_size"], 1e-12)
-            < min_atr_m1
+
+        atr_value_pips: Optional[float] = None
+        for candidate in (
+            signals.get("atr_m1_pips"),
+            context.get("atr_m1_pips"),
         ):
-            self.logger.info(f"[{asset}] Burst refusé: ATR M1 < {min_atr_m1} pips.")
-            return None
-        max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
-        if meta["spread_pips"] > max_spread_burst:
+            if candidate is None:
+                continue
+            try:
+                atr_value_pips = float(candidate)
+                break
+            except (TypeError, ValueError):
+                continue
+
+        if atr_value_pips is None:
+            raw_atr = signals.get("atr_m1")
+            pip_size = float(meta.get("pip_size", 0.0) or 0.0)
+            if raw_atr is not None and pip_size > 0:
+                try:
+                    atr_value_pips = float(raw_atr) / pip_size
+                except (TypeError, ValueError):
+                    atr_value_pips = None
+
+        if atr_value_pips is None:
+            atr_value_pips = 0.0
+
+        if min_atr_m1 > 0 and atr_value_pips < min_atr_m1:
             self.logger.info(
-                f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst}p."
+                f"[{asset}] Burst refusé: ATR M1 {atr_value_pips:.2f}p < min {min_atr_m1}p."
+            )
+            return None
+
+        max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
+        spread_pips = float(meta.get("spread_pips", 0.0) or 0.0)
+        if spread_pips > max_spread_burst:
+            self.logger.info(
+                f"[{asset}] Burst refusé: spread {spread_pips:.2f}p > {max_spread_burst}p."
             )
             return None
 
@@ -487,8 +526,6 @@ class ScalpingStrategy(BaseStrategy):
                     # On n’interdit pas, mais on pénalise plus bas si besoin
                     pass
                 return True
-            
-            
 
         # --- B) Utilitaires locaux ---
         def last_big_candle(df_, atr_period, min_mult, min_body):
@@ -692,8 +729,9 @@ class ScalpingStrategy(BaseStrategy):
                     # TP logique (milieu/opposé) géré côté exécution si tu veux
                     dec["meta"]["tp_mode"] = rg_cfg.get("tp_mode", "mid_or_opposite")
                     return dec
-                
+
                 # === Règle Range Accumulation ===
+
     def _rule_range_accumulation(
         self, df: pd.DataFrame, asset: str, price: float, cfg: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -757,7 +795,11 @@ class ScalpingStrategy(BaseStrategy):
         lower_wick = min(last["open"], last["close"]) - last["low"]
 
         # critères marubozu
-        if body > cfg.get("min_body_mult", 2.5) * df["close"].diff().rolling(20).std().iloc[-1]:
+        if (
+            body
+            > cfg.get("min_body_mult", 2.5)
+            * df["close"].diff().rolling(20).std().iloc[-1]
+        ):
             if upper_wick < 0.1 * body and lower_wick < 0.1 * body:
                 action = "BUY" if last["close"] > last["open"] else "SELL"
                 return {
@@ -771,7 +813,7 @@ class ScalpingStrategy(BaseStrategy):
                     "confidence": 0.8,
                 }
         return None
-           
+
     # ==========================================================
     # =============      ADAPTATION TP/SL BASE     =============
     # ==========================================================
