@@ -9,6 +9,7 @@ from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
 from phase_observer.detectors import Detectors
+from sniper_patterns.pattern_engine import PatternEngine
 
 
 class ScalpingStrategy(BaseStrategy):
@@ -42,7 +43,7 @@ class ScalpingStrategy(BaseStrategy):
         """
         Version 'desk pro' compatible pipeline:
         - Pas de fallback → uniquement des règles explicites
-        - Priorité: Marubozu > Range Accumulation MTF > Range Accumulation simple > Burst scalping
+        - Priorité: Marubozu (via PatternEngine + Playbook) > Range Accumulation MTF > Range Accumulation simple > Burst scalping
         - ATR/Spread n'affecte que le burst, jamais les règles indépendantes
         """
         try:
@@ -54,6 +55,27 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
+
+            # --- 0b) Lecture patterns bougies via PatternEngine ---
+            patterns = []
+            latest_pattern = None
+            if isinstance(df_work, pd.DataFrame):
+                try:
+                    pe = PatternEngine()
+                    results = pe.analyze(df_work, with_combo=True)
+                    patterns = results.get("combo_signals", [])
+                    latest_pattern = pe.latest_signal(df_work)
+
+                    if latest_pattern:
+                        self.logger.info(
+                            f"[{asset}] Dernier pattern détecté: "
+                            f"{latest_pattern.get('pattern')} "
+                            f"(type={latest_pattern.get('signal_type')}, bullish={latest_pattern.get('is_bullish')})"
+                        )
+                        # ➕ Injection dans les signaux de l’asset
+                        asset_signals["latest_pattern"] = latest_pattern
+                except Exception as e:
+                    self.logger.warning(f"[{asset}] PatternEngine skipped: {e}")
 
             strat_cfg = (
                 self.config_manager.get_strategy_config("scalping") or {}
@@ -83,13 +105,18 @@ class ScalpingStrategy(BaseStrategy):
                 self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
                 return {}
 
-            # --- 3) Marubozu Playbook ---
+           # --- 3) Marubozu Playbook (déclenché par PatternEngine) ---
             mp_cfg = (
                 (strat_cfg.get("entry_rules") or {})
                 .get("scalping", {})
                 .get("marubozu_playbook", {})
             )
-            if mp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
+            if (
+                mp_cfg.get("enabled", True)
+                and isinstance(df_work, pd.DataFrame)
+                and latest_pattern
+                and "marubozu" in latest_pattern.get("pattern", "")
+            ):
                 mp_decision = self._rule_marubozu_playbook(
                     asset=asset,
                     df=df_work,
@@ -100,6 +127,24 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 if mp_decision:
                     return self._finalize_decision(mp_decision, analyzed_context)
+
+            # --- 3b) Marubozu Impulse (détection brute, même sans Playbook) ---
+            imp_cfg = (
+                (strat_cfg.get("entry_rules") or {})
+                .get("scalping", {})
+                .get("marubozu_impulse", {})
+            )
+            if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
+                impulse_decision = self._rule_marubozu_impulse(
+                    df=df_work,
+                    asset=asset,
+                    price=price,
+                    meta=meta,
+                    cfg=imp_cfg,
+                )
+                if impulse_decision:
+                    return self._finalize_decision(impulse_decision, analyzed_context)
+
 
             # --- 4) Biais directionnel MTF ---
             action = self._infer_action_from_signals(asset_signals)
@@ -127,7 +172,7 @@ class ScalpingStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug(f"[{asset}] MTF range-accum skipped: {e}")
 
-            # --- 6) Range Accumulation simple (indépendante) ---
+            # --- 6) Range Accumulation simple ---
             try:
                 range_decision = self._rule_range_accumulation(
                     df=df_work,
@@ -142,7 +187,7 @@ class ScalpingStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
-            # --- 7) Burst scalping (protégé par ATR/Spread) ---
+            # --- 7) Burst scalping ---
             atr_m1_pips = None
             if isinstance(df_work, pd.DataFrame):
                 atr_m1 = self._atr(df_work, period=14)
@@ -526,10 +571,10 @@ class ScalpingStrategy(BaseStrategy):
     ) -> Optional[Dict[str, Any]]:
         """
         Détecte marubozu / réintégration / range actif et propose un trade.
-        Jamais bloquant : retourne None si pas de setup propre.
+        Patchée pour intégrer le dernier pattern bougie détecté.
         """
 
-        # --- A) Biais MTF (facultatif mais recommandé) ---
+        # --- A) Biais MTF ---
         if cfg.get("mtf_bias", {}).get("use", True):
             bias_h1 = (mtf_ctx.get("bias_h1") or "").lower()
             bias_m15 = (mtf_ctx.get("bias_m15") or "").lower()
@@ -537,11 +582,6 @@ class ScalpingStrategy(BaseStrategy):
             block_against_both = cfg["mtf_bias"].get("block_against_both", True)
 
             def dir_ok(direction: str) -> bool:
-                # direction ∈ {"buy","sell"}
-                if not direction:
-                    return True
-
-                # Map bias text → dir
                 def bias_to_dir(b):
                     return (
                         "buy"
@@ -549,21 +589,17 @@ class ScalpingStrategy(BaseStrategy):
                         else ("sell" if "down" in b or "bear" in b else "neutre")
                     )
 
-                d_h1 = bias_to_dir(bias_h1)
-                d_m15 = bias_to_dir(bias_m15)
-
+                d_h1, d_m15 = bias_to_dir(bias_h1), bias_to_dir(bias_m15)
                 if block_against_both and d_h1 != "neutre" and d_m15 != "neutre":
-                    if direction == "buy" and (d_h1 == "sell" and d_m15 == "sell"):
+                    if direction == "buy" and d_h1 == "sell" and d_m15 == "sell":
                         return False
-                    if direction == "sell" and (d_h1 == "buy" and d_m15 == "buy"):
+                    if direction == "sell" and d_h1 == "buy" and d_m15 == "buy":
                         return False
-
                 if prefer_h1 and d_h1 != "neutre" and direction != d_h1:
-                    # On n’interdit pas, mais on pénalise plus bas si besoin
                     pass
                 return True
 
-        # --- B) Utilitaires locaux ---
+        # --- B) Helpers ---
         def last_big_candle(df_, atr_period, min_mult, min_body):
             if len(df_) < atr_period + 3:
                 return None
@@ -573,14 +609,8 @@ class ScalpingStrategy(BaseStrategy):
             body = (df_["close"] - df_["open"]).abs()
             size = (df_["high"] - df_["low"]).abs()
             body_ratio = (body / size.replace(0, np.nan)).fillna(0.0)
-
-            for idx in range(
-                len(df_) - 1,
-                max(len(df_) - 1 - int(cfg["detection"].get("lookback_bars", 3)), 1),
-                -1,
-            ):
-                csize = float(size.iloc[idx])
-                brat = float(body_ratio.iloc[idx])
+            for idx in range(len(df_) - 1, max(len(df_) - 4, 1), -1):
+                csize, brat = float(size.iloc[idx]), float(body_ratio.iloc[idx])
                 if csize >= min_mult * atr and brat >= min_body:
                     return {
                         "index": idx,
@@ -616,7 +646,7 @@ class ScalpingStrategy(BaseStrategy):
                 }
             return False, None
 
-        # --- C) Détection marubozu / continuation / inversion ---
+        # --- C) Détection ---
         det = cfg.get("detection", {})
         big = last_big_candle(
             df,
@@ -624,11 +654,12 @@ class ScalpingStrategy(BaseStrategy):
             min_mult=float(det.get("min_atr_mult", 2.2)),
             min_body=float(det.get("min_body_ratio", 0.85)),
         )
+        latest_pat = meta.get("latest_pattern")
 
         if big:
             direction = "buy" if big["bull"] else "sell"
 
-            # (1) Continuation : pullback dans [min,max] du corps
+            # (1) Continuation
             if cfg.get("continuation", {}).get("enabled", True):
                 pmin = float(cfg["continuation"].get("pullback_frac_min", 0.2))
                 pmax = float(cfg["continuation"].get("pullback_frac_max", 0.4))
@@ -645,12 +676,12 @@ class ScalpingStrategy(BaseStrategy):
                     if big["bull"]
                     else body_bot + pmin * (body_top - body_bot)
                 )
-
                 in_zone = (
                     (pull_min <= price <= pull_max)
                     if big["bull"]
                     else (pull_max <= price <= pull_min)
                 )
+
                 if in_zone and (
                     not cfg.get("mtf_bias", {}).get("use", True) or dir_ok(direction)
                 ):
@@ -672,19 +703,21 @@ class ScalpingStrategy(BaseStrategy):
                         "confidence": 0.7,
                         "meta": {"marubozu": big},
                     }
-                    if cfg["continuation"].get("use_trailing", False):
-                        dec["trailing"] = cfg["continuation"]["trailing"]
+                    if latest_pat:
+                        dec["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
+                        dec["meta"]["pattern"] = latest_pat
                     return dec
 
-            # (2) Inversion : réintégration >= 50% + close opposée
+            # (2) Reversal
             if (
                 cfg.get("reversal", {}).get("enabled", True)
                 and len(df) > big["index"] + 1
             ):
                 nxt = big["index"] + 1
                 mid = big["mid"]
-                next_close = float(df["close"].iloc[nxt])
-                next_open = float(df["open"].iloc[nxt])
+                next_close, next_open = float(df["close"].iloc[nxt]), float(
+                    df["open"].iloc[nxt]
+                )
                 reintegrated = (next_close < mid) if big["bull"] else (next_close > mid)
                 closed_opposite = (
                     (next_close < next_open)
@@ -693,7 +726,6 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
                 if reintegrated and closed_opposite:
-                    # entrer contre
                     sl = (
                         (big["high"] + meta["pip_size"] * 2)
                         if big["bull"]
@@ -712,11 +744,12 @@ class ScalpingStrategy(BaseStrategy):
                         "confidence": 0.65,
                         "meta": {"marubozu": big},
                     }
-                    if cfg["reversal"].get("use_trailing", True):
-                        dec["trailing"] = cfg["reversal"]["trailing"]
+                    if latest_pat:
+                        dec["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
+                        dec["meta"]["pattern"] = latest_pat
                     return dec
 
-        # --- D) Range actif (grosses bougies qui oscillent, pas d’impulsion unique) ---
+        # --- D) Range actif ---
         rg_cfg = cfg.get("range_active", {})
         if rg_cfg.get("enabled", True):
             ok, info = is_range_active(
@@ -728,16 +761,15 @@ class ScalpingStrategy(BaseStrategy):
             if ok and info:
                 hh, ll = info["hh"], info["ll"]
                 tol = float(rg_cfg.get("tolerance_frac", 0.15))
-                top_zone = hh - tol * (hh - ll)
-                bot_zone = ll + tol * (hh - ll)
-
+                top_zone, bot_zone = hh - tol * (hh - ll), ll + tol * (hh - ll)
+                dec = None
                 if price >= top_zone:
                     dec = {
                         "action": "SELL",
                         "asset": asset,
                         "entry_price": price,
                         "target_sl_pips": float(rg_cfg.get("sl_pips", 30)),
-                        "target_tp_pips": 0.0,  # géré par tp_mode/trailing
+                        "target_tp_pips": 0.0,
                         "rule_name": "range_active_top",
                         "strategy_type": "scalping",
                         "confidence": 0.65,
@@ -755,29 +787,29 @@ class ScalpingStrategy(BaseStrategy):
                         "confidence": 0.65,
                         "meta": {"range_high": hh, "range_low": ll},
                     }
-                else:
-                    dec = None
+                if dec and latest_pat:
+                    dec["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
+                    dec["meta"]["pattern"] = latest_pat
+                return dec
 
-                if dec:
-                    # trailing optionnel
-                    if rg_cfg.get("use_trailing", True):
-                        dec["trailing"] = rg_cfg["trailing"]
-                    # TP logique (milieu/opposé) géré côté exécution si tu veux
-                    dec["meta"]["tp_mode"] = rg_cfg.get("tp_mode", "mid_or_opposite")
-                    return dec
-
-                # === Règle Range Accumulation ===
+        return None
 
     def _rule_range_accumulation(
-        self, df: pd.DataFrame, asset: str, price: float, cfg: Dict[str, Any]
+        self,
+        df: pd.DataFrame,
+        asset: str,
+        price: float,
+        action: str,
+        meta: Dict[str, Any],
+        cfg: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
         Détecte un range plat (accumulation) et prend un trade
         sur les extrêmes (haut/bas du range).
+        Patché pour intégrer le dernier pattern bougie détecté.
         """
         lookback = int(cfg.get("lookback_bars", 20))
         tolerance = float(cfg.get("tolerance_frac", 0.15))
-
         if len(df) < lookback:
             return None
 
@@ -788,9 +820,11 @@ class ScalpingStrategy(BaseStrategy):
             return None
 
         top_zone, bot_zone = hh - tolerance * rng, ll + tolerance * rng
+        latest_pat = meta.get("latest_pattern")
 
+        dec = None
         if price >= top_zone:
-            return {
+            dec = {
                 "action": "SELL",
                 "asset": asset,
                 "entry_price": price,
@@ -801,7 +835,7 @@ class ScalpingStrategy(BaseStrategy):
                 "confidence": 0.7,
             }
         elif price <= bot_zone:
-            return {
+            dec = {
                 "action": "BUY",
                 "asset": asset,
                 "entry_price": price,
@@ -811,44 +845,97 @@ class ScalpingStrategy(BaseStrategy):
                 "strategy_type": "scalping",
                 "confidence": 0.7,
             }
-        return None
+
+        if dec and latest_pat:
+            pat_name = str(latest_pat.get("pattern", "")).lower()
+            pat_bull = latest_pat.get("is_bullish")
+            if dec["action"] == "BUY" and pat_bull is True:
+                dec["confidence"] += 0.2
+            elif dec["action"] == "SELL" and pat_bull is False:
+                dec["confidence"] += 0.2
+            elif pat_bull is not None:
+                dec["confidence"] -= 0.1
+            dec["rule_name"] += f"+pattern:{pat_name}"
+            dec["meta"] = dec.get("meta", {})
+            dec["meta"]["pattern"] = latest_pat
+
+        return dec
 
     # === Règle Marubozu / Impulsion ===
     def _rule_marubozu_impulse(
-        self, df: pd.DataFrame, asset: str, price: float, cfg: Dict[str, Any]
+        self,
+        df: pd.DataFrame,
+        asset: str,
+        price: float,
+        meta: Dict[str, Any],
+        cfg: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Détecte une bougie marubozu (longue bougie sans mèches)
-        et prend un trade dans sa direction.
+        Détecte une bougie marubozu (impulsion propre, sans mèches)
+        et propose un trade dans sa direction.
+        - Utilise pip_size pour calculer SL/TP
+        - Intègre le dernier pattern bougie détecté (latest_pattern)
+        - Jamais bloquant : retourne None si les conditions ne sont pas réunies
         """
         if len(df) < 2:
             return None
 
         last = df.iloc[-1]
-        size = last["high"] - last["low"]
-        body = abs(last["close"] - last["open"])
-        upper_wick = last["high"] - max(last["open"], last["close"])
-        lower_wick = min(last["open"], last["close"]) - last["low"]
+        size = float(last["high"] - last["low"])
+        body = abs(float(last["close"] - last["open"]))
+        upper_wick = float(last["high"] - max(last["open"], last["close"]))
+        lower_wick = float(min(last["open"], last["close"]) - last["low"])
 
-        # critères marubozu
-        if (
-            body
-            > cfg.get("min_body_mult", 2.5)
-            * df["close"].diff().rolling(20).std().iloc[-1]
-        ):
-            if upper_wick < 0.1 * body and lower_wick < 0.1 * body:
-                action = "BUY" if last["close"] > last["open"] else "SELL"
-                return {
-                    "action": action,
-                    "asset": asset,
-                    "entry_price": price,
-                    "target_sl_pips": float(cfg.get("sl_pips", 40)),
-                    "target_tp_pips": float(cfg.get("tp_pips", 80)),
-                    "rule_name": "marubozu_impulse",
-                    "strategy_type": "scalping",
-                    "confidence": 0.8,
-                }
+        pip_size = meta.get("pip_size", 0.0001)
+        latest_pat = meta.get("latest_pattern")
+
+        # --- Critères marubozu ---
+        if size <= 0:
+            return None
+
+        body_ratio = body / size
+        min_body_ratio = float(cfg.get("min_body_ratio", 0.9))  # ex: 90% du range
+        max_wick_ratio = float(cfg.get("max_wick_ratio", 0.1))  # ex: mèches < 10% du corps
+
+        if body_ratio >= min_body_ratio and upper_wick <= max_wick_ratio * body and lower_wick <= max_wick_ratio * body:
+            action = "BUY" if last["close"] > last["open"] else "SELL"
+
+            # SL : derrière l'extrême
+            sl_price = (last["low"] - 2 * pip_size) if action == "BUY" else (last["high"] + 2 * pip_size)
+            sl_pips = abs(price - sl_price) / pip_size
+
+            # TP : R:R basé sur config
+            rr_target = float(cfg.get("rr_target", 2.0))
+            tp_pips = sl_pips * rr_target
+            tp_price = price + tp_pips * pip_size if action == "BUY" else price - tp_pips * pip_size
+
+            decision = {
+                "action": action,
+                "asset": asset,
+                "entry_price": price,
+                "sl_price": round(sl_price, 5),
+                "tp_price": round(tp_price, 5),
+                "target_sl_pips": round(sl_pips, 2),
+                "target_tp_pips": round(tp_pips, 2),
+                "rule_name": "marubozu_impulse",
+                "strategy_type": "scalping",
+                "confidence": 0.8,
+                "meta": {
+                    "body_ratio": round(body_ratio, 3),
+                    "upper_wick": round(upper_wick, 5),
+                    "lower_wick": round(lower_wick, 5),
+                },
+            }
+
+            # Ajout éventuel du dernier pattern bougie
+            if latest_pat:
+                decision["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
+                decision["meta"]["pattern"] = latest_pat
+
+            return decision
+
         return None
+
 
     # ==========================================================
     # =============      ADAPTATION TP/SL BASE     =============

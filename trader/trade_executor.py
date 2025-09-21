@@ -269,14 +269,7 @@ class TradeExecutor:
                 self.logger.info(
                     f"Position #{ticket} ({self._open_positions[ticket]['symbol']}) absente chez le broker. Supprimée de l'état interne."
                 )
-
-            # 3. Remplacer l'ancien état par le nouvel état réconcilié
-            self._open_positions = reconciled_positions
-            self._last_reconciliation_time = datetime.now(UTC)
-            self.logger.info(
-                f"Réconciliation terminée. {len(self._open_positions)} positions actives synchronisées."
-            )
-
+          
             # 3. Remplacer l'ancien état par le nouvel état réconcilié
             self._open_positions = reconciled_positions
             self._last_reconciliation_time = datetime.now(UTC)
@@ -288,9 +281,38 @@ class TradeExecutor:
             for ticket, pos in self._open_positions.items():
                 try:
                     symbol = pos.get("symbol")
-                    sl_pips = pos.get("sl_pips", 6.0)  # fallback par défaut si absent
-                    atr_pips = pos.get("atr_pips", 3.0)  # fallback par défaut si absent
-                    self.apply_dynamic_trailing(symbol, ticket, sl_pips, atr_pips)
+
+                    # Vérifie si la position est marquée pour trailing
+                    if pos.get("use_trailing"):
+                        trailing_params = pos.get("trailing_params", {})
+                        trigger_pips = float(trailing_params.get("trigger_pips", 15))
+                        step_pips = float(trailing_params.get("step_pips", 5))
+
+                        self.apply_dynamic_trailing(
+                            symbol=symbol,
+                            ticket=ticket,
+                            trigger_pips=trigger_pips,
+                            step_pips=step_pips,
+                        )
+                    else:
+                        # ✅ Fallback technique de sécurité :
+                        # Si la position n’a pas de trailing_params explicite,
+                        # on applique un trailing basique (valeurs par défaut).
+                        sl_pips = float(pos.get("sl_pips", 6.0))
+                        atr_pips = float(pos.get("atr_pips", 3.0))
+
+                        self.logger.info(
+                            f"[SAFE TRAILING] Position {ticket} ({symbol}) sans paramètres explicites → "
+                            f"application fallback technique: trigger={sl_pips}p, step={atr_pips}p"
+                        )
+
+                        self.apply_dynamic_trailing(
+                            symbol=symbol,
+                            ticket=ticket,
+                            trigger_pips=sl_pips,
+                            step_pips=atr_pips,
+                        )
+
                 except Exception as e:
                     self.logger.warning(
                         f"Trailing stop non appliqué sur {pos.get('symbol')} (ticket {ticket}): {e}"
@@ -1533,6 +1555,43 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
+            
+    def apply_dynamic_trailing(self, symbol: str, ticket: int, sl_pips: float, atr_pips: float) -> None:
+        """
+        Applique un trailing stop dynamique à une position.
+        - sl_pips = distance minimale en pips
+        - atr_pips = buffer additionnel lié à la volatilité (ex: ATR)
+        """
+        try:
+            pos = self._open_positions.get(ticket)
+            if not pos:
+                return
+
+            action = "BUY" if pos.get("type") == self.POSITION_TYPE_BUY else "SELL"
+            current_price = self.mt5_connector.get_current_price(symbol, action)
+            if not current_price:
+                return
+
+            point = float(pos.get("point") or 0.0001)
+            pip_size = 10.0 * point  # ⚠️ FX/XAU: 1 pip = 10 points
+
+            # Distance trailing
+            trailing_dist = (sl_pips + atr_pips) * pip_size
+
+            if action == "BUY":
+                new_sl = current_price - trailing_dist
+                if not pos.get("sl") or new_sl > pos.get("sl"):
+                    self.mt5_connector.modify_position(ticket, sl=new_sl)
+                    self.logger.info(f"[TRAILING] BUY {symbol} ticket={ticket}: SL relevé → {new_sl:.5f}")
+            else:  # SELL
+                new_sl = current_price + trailing_dist
+                if not pos.get("sl") or new_sl < pos.get("sl"):
+                    self.mt5_connector.modify_position(ticket, sl=new_sl)
+                    self.logger.info(f"[TRAILING] SELL {symbol} ticket={ticket}: SL abaissé → {new_sl:.5f}")
+
+        except Exception as e:
+            self.logger.warning(f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}")
+ 
 
     def smart_scalping_tp_sl(
         self,
@@ -3001,6 +3060,90 @@ class TradeExecutor:
         # Nettoyage des ordres annulés
         for oid in to_remove:
             self._open_positions.pop(oid, None)
+            
+    def monitor_trailing_stops(self) -> None:
+        """
+        Surveille les positions ouvertes avec trailing activé et ajuste le SL.
+        À appeler à chaque cycle du pipeline.
+        """
+        try:
+            mt5 = getattr(self.mt5_connector, "mt5", None)
+            if not mt5:
+                return
+
+            positions = mt5.positions_get()
+            if not positions:
+                return
+
+            for pos in positions:
+                symbol = getattr(pos, "symbol", None)
+                if not symbol:
+                    continue
+
+                # Vérifier si on a stocké trailing dans _open_positions
+                meta = (self._open_positions.get(pos.ticket, {}) or {}).get("_meta", {})
+                trailing_cfg = meta.get("trailing")
+                if not trailing_cfg or not trailing_cfg.get("enabled", False):
+                    continue
+
+                trigger_pips = float(trailing_cfg.get("trigger_pips", 15))
+                step_pips = float(trailing_cfg.get("step_pips", 5))
+
+                point = getattr(pos, "point", 0.0001)
+                digits = getattr(pos, "digits", 5)
+                pip_points = 10.0 if digits in (3, 5) else 1.0
+                pip_size = point * pip_points
+
+                current_price = (
+                    mt5.symbol_info_tick(symbol).bid
+                    if pos.type == mt5.ORDER_TYPE_BUY
+                    else mt5.symbol_info_tick(symbol).ask
+                )
+                entry_price = getattr(pos, "price_open", None)
+                sl = getattr(pos, "sl", None)
+
+                if not entry_price or not current_price:
+                    continue
+
+                # Distance en pips entre entry et prix actuel
+                profit_pips = (
+                    (current_price - entry_price) / pip_size
+                    if pos.type == mt5.ORDER_TYPE_BUY
+                    else (entry_price - current_price) / pip_size
+                )
+
+                if profit_pips >= trigger_pips:
+                    # Nouveau SL calculé
+                    new_sl = (
+                        current_price - (step_pips * pip_size)
+                        if pos.type == mt5.ORDER_TYPE_BUY
+                        else current_price + (step_pips * pip_size)
+                    )
+
+                    # Si SL est déjà au-dessus, ne rien faire
+                    if (pos.type == mt5.ORDER_TYPE_BUY and (not sl or new_sl > sl)) or (
+                        pos.type == mt5.ORDER_TYPE_SELL and (not sl or new_sl < sl)
+                    ):
+                        sl_update = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": symbol,
+                            "position": pos.ticket,
+                            "sl": round(new_sl, digits),
+                            "tp": getattr(pos, "tp", 0.0),
+                        }
+                        result = self.mt5_connector.order_send(sl_update)
+
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            self.logger.info(
+                                f"[TRAILING] SL ajusté sur {symbol}: {sl} -> {new_sl} (profit={profit_pips:.1f}p)"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"[TRAILING] ❌ Échec update SL {symbol}, retcode={getattr(result,'retcode','N/A')}"
+                            )
+        except Exception as e:
+            self.logger.error(f"[TRAILING] Erreur monitor_trailing_stops: {e}", exc_info=True)
+        
 
     def _bars_since(self, open_time_str: str) -> int:
         """

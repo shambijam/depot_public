@@ -1,260 +1,102 @@
 {
   "strategy_name": "scalping",
-  "version": "2.3",
-  "description": "Scalping propre (XAUUSD only). Aucuns fallback stratégiques. Katana/Bollinger retirés.",
-  "tradeable_assets": [
-    "XAUUSD"
-  ],
-  "magic_number": 52001,
-  "risk_per_trade_percent": 0.40,
-  "confidence_threshold": 0.30,
-  "take_profit_pips": 80,
-  "stop_loss_pips": 60,
-  "max_spread_points": 50,
-  "halt_on_major_news": false,
-  "phase_detection": {
-    "use_phase_observer": true,
-    "allowed_phases": [
-      "liquidity_eqh_eql",
-      "range_retail",
-      "transitional"
-    ],
-    "lookback_window": 12,
-    "volatility_threshold": 0.0,
-    "volume_zscore": 0.0,
-    "eq_level_tolerance": 0.0,
-    "impulse_threshold": 0.0
+  "enabled": true,
+  "risk_management": {
+    "max_trades_per_day": 10,
+    "max_trades_per_asset_per_day": 5,
+    "min_rr": 1.5,
+    "atr_penalty_factor": 0.85,
+    "atr_confidence_floor": 0.35
   },
-  "decision_rules": [
-    {
-      "name": "primary",
-      "priority": 1,
-      "conditions": {
-        "signal_must_contain": [
-          "liquidity_sweep"
-        ],
-        "phase_must_contain": [
-          "liquidity_eqh_eql",
-          "range_retail",
-          "transitional"
-        ],
-        "min_confidence": 0.30
-      },
-      "order_type": "MARKET",
-      "action_logic": {
-        "BUY": "Prendre BUY si mtf_direction == 'up' sinon laisser au moteur CORE (phase bullish).",
-        "SELL": "Prendre SELL si mtf_direction == 'down' sinon laisser au moteur CORE (phase bearish)."
-      }
-    }
-  ],
   "entry_rules": {
     "scalping": {
-      "liquidity_sweep": {
+      "marubozu_playbook": {
         "enabled": true,
-        "lookback": 30,
-        "min_wick_frac": 0.55,
-        "min_body_frac": 0.20,
-        "absorb_close_back_in": true,
-        "prefer_direction": "auto",
-        "min_confidence": 0.30,
-        "sl_pips": 60,
-        "tp_pips": 80
+        "mtf_bias": {
+          "use": true,
+          "prefer_h1": true,
+          "block_against_both": true
+        },
+        "detection": {
+          "atr_period": 14,
+          "lookback_bars": 3,
+          "min_atr_mult": 2.2,
+          "min_body_ratio": 0.85
+        },
+        "continuation": {
+          "enabled": true,
+          "pullback_frac_min": 0.2,
+          "pullback_frac_max": 0.4,
+          "rr_target": 1.5,
+          "use_trailing": false,
+          "trailing": {
+            "trigger_pips": 12,
+            "step_pips": 6
+          }
+        },
+        "reversal": {
+          "enabled": true,
+          "rr_target": 1.2,
+          "use_trailing": true,
+          "trailing": {
+            "trigger_pips": 10,
+            "step_pips": 5
+          }
+        },
+        "range_active": {
+          "enabled": true,
+          "lookback_bars": 20,
+          "max_range_over_atr": 3.0,
+          "min_avg_candle_atr": 0.9,
+          "tolerance_frac": 0.15,
+          "sl_pips": 30,
+          "tp_mode": "mid_or_opposite",
+          "use_trailing": true,
+          "trailing": {
+            "trigger_pips": 15,
+            "step_pips": 7
+          }
+        }
+      },
+      "range_accumulation": {
+        "enabled": true,
+        "lookback_bars": 20,
+        "tolerance_frac": 0.15,
+        "sl_pips": 30,
+        "tp_pips": 30
       },
       "range_accumulation_mtf": {
         "enabled": true,
-        "lookback_m1": 20,
-        "tolerance_frac": 0.15,
-        "m5_window_bars": 20,
-        "m15_window_bars": 20,
-        "max_slope_m5": 0.0,
-        "max_slope_m15": 0.0,
-        "max_band_frac_m5": 0.35,
-        "max_band_frac_m15": 0.35,
-        "sl_pips": null,
-        "tp_pips": null,
-        "trailing": {
-          "enabled": true,
-          "trigger_pips": 15,
-          "step_pips": 5
-        }
-      },
-      "filters": {
-        "spread_max_points": 50,
-        "min_atr_points": null
-      },
-      "time_filters": {
-        "use_session_filter": true,
-        "allowed_sessions": [
-          "LDN",
-          "NY"
+        "bias_timeframes": [
+          "M15",
+          "H1"
         ],
-        "forbidden_hours_utc": [],
-        "news_filter": {
-          "enabled": false,
-          "high_impact_only": true,
-          "min_minutes_before": 15,
-          "min_minutes_after": 15
-        }
-      },
-      "tp_sl": {
-        "breakeven": {
-          "enabled": true,
-          "after_rr": 1.0
-        },
-        "trailing": {
-          "enabled": false,
-          "type": "step",
-          "step_pips": 30,
-          "activate_after_rr": 1.5
-        },
-        "partial": {
-          "enabled": true,
-          "at_rr": 1.0,
-          "size_frac": 0.5
-        }
-      },
-      "execution": {
-        "order_type": "MARKET",
-        "max_slippage_points": 30,
-        "comment_prefix": "SX-SCALP",
-        "limit_retry_ms": 800
-      },
-      "cooldowns": {
-        "per_asset_seconds": 120,
-        "after_win_seconds": 60,
-        "after_loss_seconds": 120
-      },
-      "backtest": {
-        "enabled": false
-      },
-      "misc": {
-        "log_level": "INFO"
+        "lookback_bars": 20,
+        "sl_pips": 25,
+        "tp_pips": 40
       },
       "burst_scalping": {
         "enabled": true,
-        "min_atr_m1_pips": 10,
-        "max_spread_pips": 25,
-        "burst_size": 8,
-        "burst_cap_volume": 1.0,
-        "candle_patterns": {
-          "enabled": true,
-          "min_pattern_strength": 0.7,
-          "require_confluence": true,
-          "allowed_patterns": [
-            "engulfing",
-            "marubozu",
-            "hammer",
-            "shooting_star"
-          ]
-        },
-        "multi_timeframe": {
-          "enabled": true,
-          "confirm_with": [
-            "M5",
-            "M15"
-          ],
-          "require_same_direction": true
-        },
-        "phase_filters": {
-          "enabled": true,
-          "allowed_phases": [
-            "liquidity_eqh_eql",
-            "range_retail",
-            "transitional"
-          ]
-        },
-        "risk_controls": {
-          "max_burst_per_day": 6,
-          "cooldown_after_win_sec": 60,
-          "cooldown_after_loss_sec": 180,
-          "stop_trading_after_drawdown_pct": 5.0
-        },
+        "sl_pips": 5,
+        "burst_size": 3,
+        "max_spread_pips": 3.0,
+        "min_atr_m1_pips": 2.5,
         "tp_sl": {
-          "sl_pips": 6.0,
-          "tp_pips": 10.0,
           "trailing": {
             "enabled": true,
-            "activate_after_rr": 1.5,
-            "step_pips": 2
-          },
-          "partial": {
-            "enabled": true,
-            "at_rr": 1.0,
-            "size_frac": 0.5
-          },
-          "continuation": {
-            "enabled": true,
-            "pullback_frac_min": 0.2,
-            "pullback_frac_max": 0.4,
-            "rr_target": 1.5,
-            "use_trailing": false,
-            "trailing": {
-              "trigger_pips": 20,
-              "step_pips": 7
-            }
-          },
-          "reversal": {
-            "enabled": true,
-            "min_reintegrate_frac": 0.5,
-            "rr_target": 1.2,
-            "use_trailing": true,
-            "trailing": {
-              "trigger_pips": 15,
-              "step_pips": 5
-            }
-          },
-          "range_active": {
-            "enabled": true,
-            "lookback_bars": 20,
-            "max_range_over_atr": 3.0,
-            "min_avg_candle_atr": 0.9,
-            "tolerance_frac": 0.15,
-            "sl_pips": 30,
-            "tp_mode": "mid_or_opposite",
-            "use_trailing": true,
-            "trailing": {
-              "trigger_pips": 12,
-              "step_pips": 4
-            }
-          },
-          "mtf_bias": {
-            "use": true,
-            "prefer_h1": true,
-            "block_against_both": true
-          },
-          "cooldowns": {
-            "per_asset_seconds": 60,
-            "after_win_seconds": 30,
-            "after_loss_seconds": 90
-          },
-          "marubozu_playbook": {
-            "enabled": true,
-            "detection": {
-              "atr_period": 14,
-              "min_atr_mult": 1.5,
-              "min_body_ratio": 0.75,
-              "lookback_bars": 3
-            },
-            "continuation": {
-              "enabled": true,
-              "pullback_frac_min": 0.2,
-              "pullback_frac_max": 0.4,
-              "rr_target": 1.5
-            },
-            "reversal": {
-              "enabled": true,
-              "min_reintegrate_frac": 0.5,
-              "rr_target": 1.2
-            },
-            "range_active": {
-              "enabled": true,
-              "lookback_bars": 20,
-              "sl_pips": 30,
-              "tp_mode": "mid_or_opposite"
-            }
+            "trigger_pips": 15,
+            "step_pips": 5,
+            "activate_after_rr": 1.0
           }
         }
       }
+    }
+  },
+  "exit_rules": {
+    "use_trailing_stop": true,
+    "trailing_stop": {
+      "enabled": true,
+      "distance_pips": 5.0
     }
   }
 }

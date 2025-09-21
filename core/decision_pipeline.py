@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from core.utils import normalize_levels
+from sniper_patterns.pattern_engine import PatternEngine
 
 
 
@@ -50,6 +51,8 @@ class DecisionPipeline:
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
         self.strategy_manager = strategy_manager_instance
+        self.pattern_engine = PatternEngine(enable_context=True, enable_structure=True, enable_multi_tf=True)
+
 
         # PhaseObserver optionnel (peut être attaché plus tard via attach_phase_observer)
         self.phase_observer = phase_observer_instance
@@ -526,44 +529,63 @@ class DecisionPipeline:
             dispatch_map = self.dispatch_strategies_per_asset(analyzed_context)
 
             td, chosen_strategy, chosen_asset = None, None, None
-            
+
             decision_trace = []
             decision_trace.append("🧠 [TRACE] Pipeline institutionnel démarré")
-            decision_trace.append(f"Contexte enrichi: clés={list(analyzed_context.keys())}")
+            decision_trace.append(
+                f"Contexte enrichi: clés={list(analyzed_context.keys())}"
+            )
 
             # --- Priorité SCALPING (XAUUSD) ---
             if "XAUUSD" in signals and "XAUUSD" in dispatch_map:
                 strat_name, strat = dispatch_map["XAUUSD"]
-                td = strat.evaluate_entry("XAUUSD", analyzed_context, signals.get("XAUUSD"))
+                td = strat.evaluate_entry(
+                    "XAUUSD", analyzed_context, signals.get("XAUUSD")
+                )
                 if td and td.get("action"):
                     chosen_strategy, chosen_asset = strat_name, "XAUUSD"
-                    decision_trace.append("✅ ScalpingStrategy a généré un signal valide sur XAUUSD")
+                    decision_trace.append(
+                        "✅ ScalpingStrategy a généré un signal valide sur XAUUSD"
+                    )
                     decision_trace.append(f"Détails décision: {td}")
                 else:
-                    decision_trace.append("❌ ScalpingStrategy n'a pas confirmé de setup sur XAUUSD")
+                    decision_trace.append(
+                        "❌ ScalpingStrategy n'a pas confirmé de setup sur XAUUSD"
+                    )
             else:
-                decision_trace.append("ℹ️ Aucun signal SCALPING détecté sur XAUUSD ou stratégie absente")
+                decision_trace.append(
+                    "ℹ️ Aucun signal SCALPING détecté sur XAUUSD ou stratégie absente"
+                )
 
             # --- Sinon Liquidity EURUSD puis GBPUSD ---
             if not td or not td.get("action"):
                 for asset in ["EURUSD", "GBPUSD"]:
                     if asset in signals and asset in dispatch_map:
                         strat_name, strat = dispatch_map[asset]
-                        td = strat.evaluate_entry(asset, analyzed_context, signals.get(asset))
+                        td = strat.evaluate_entry(
+                            asset, analyzed_context, signals.get(asset)
+                        )
                         if td and td.get("action"):
                             chosen_strategy, chosen_asset = strat_name, asset
-                            decision_trace.append(f"✅ LiquidityStrategy a validé un trade sur {asset}")
+                            decision_trace.append(
+                                f"✅ LiquidityStrategy a validé un trade sur {asset}"
+                            )
                             decision_trace.append(f"Détails décision: {td}")
                             break
                         else:
-                            decision_trace.append(f"❌ LiquidityStrategy a rejeté le signal sur {asset}")
+                            decision_trace.append(
+                                f"❌ LiquidityStrategy a rejeté le signal sur {asset}"
+                            )
                     else:
-                        decision_trace.append(f"ℹ️ Aucun signal valide ou stratégie absente sur {asset}")
+                        decision_trace.append(
+                            f"ℹ️ Aucun signal valide ou stratégie absente sur {asset}"
+                        )
 
             # --- Aucun trade retenu ---
             if not td or not td.get("action"):
-                decision_trace.append("⚠️ Aucun trade retenu (aucun setup validé par les stratégies)")
-
+                decision_trace.append(
+                    "⚠️ Aucun trade retenu (aucun setup validé par les stratégies)"
+                )
 
             # 4) Adaptation config (fusion base + config stratégie choisie)
             print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
@@ -1220,6 +1242,35 @@ class DecisionPipeline:
         print(
             f"📝 [CORE] Décision normalisée → {normalized_action} {asset_raw} | type={order_type}"
         )
+        
+        # ==========================================================
+        # 📊 Analyse patterns / bougies (Desk Pro Mode)
+        # ==========================================================
+        try:
+            md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+            df_patterns = md_asset.get("annotated_rates_df") or md_asset.get("rates_df")
+
+            if isinstance(df_patterns, pd.DataFrame) and not df_patterns.empty:
+                analysis = self.pattern_engine.analyze(df_patterns)
+                last_sig = self.pattern_engine.latest_signal(df_patterns)
+
+                context.setdefault("pattern_analysis", {})[asset_raw] = {
+                    "all_patterns": analysis,
+                    "latest_signal": last_sig,
+                }
+
+                if last_sig and last_sig.get("pattern") in {
+                    "bullish_engulfing", "morning_star", "hammer",
+                    "bearish_engulfing", "evening_star", "shooting_star"
+                }:
+                    trade_decision["rule_name"] = trade_decision.get("rule_name", "") + "+pattern"
+                    trade_decision["confidence"] = min(
+                        1.0, float(trade_decision.get("confidence", 0.5)) + 0.3
+                    )
+                    print(f"🕯️ [CORE] Pattern fort reconnu → {last_sig['pattern']} (confiance boostée)")
+        except Exception as e:
+            self.logger.warning(f"Erreur PatternEngine: {e}")
+
 
         # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
@@ -1397,14 +1448,6 @@ class DecisionPipeline:
                                 signals.get("suggested_burst_size")
                                 or burst_cfg.get("burst_size", 3)
                             )
-                            sl_pips = float(
-                                signals.get("burst_sl_pips")
-                                or burst_cfg.get("sl_pips", 5.0)
-                            )
-                            tp_pips = float(
-                                signals.get("burst_tp_pips")
-                                or burst_cfg.get("tp_pips", 8.0)
-                            )
 
                             # pip_size
                             si = (
@@ -1417,41 +1460,60 @@ class DecisionPipeline:
                             pip_points = 10.0 if digits in (3, 5) else 1.0
                             pip_size = point * pip_points
 
-                            if pip_size > 0:
-                                if burst_side == "BUY":
-                                    sl_price = price - (sl_pips * pip_size)
-                                    tp_price = price + (tp_pips * pip_size)
-                                else:
-                                    sl_price = price + (sl_pips * pip_size)
-                                    tp_price = price - (tp_pips * pip_size)
+                            # SL basé sur config
+                            sl_pips = float(
+                                signals.get("burst_sl_pips")
+                                or burst_cfg.get("sl_pips", 5.0)
+                            )
+                            sl_price = (
+                                price - (sl_pips * pip_size)
+                                if burst_side == "BUY"
+                                else price + (sl_pips * pip_size)
+                            )
 
-                                basket_id = f"burst_{asset_raw}_{int(time.time())}"
+                        # Trailing Stop Config
+                        tp_sl_cfg = (burst_cfg.get("tp_sl") or {}).get("trailing", {})
+                        trailing_enabled = bool(tp_sl_cfg.get("enabled", True))
+                        trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
+                        step_pips = float(tp_sl_cfg.get("step_pips", 5))
+                        # Fix: define activate_after_rr (default to trigger_pips or another config value)
+                        activate_after_rr = float(tp_sl_cfg.get("activate_after_rr", trigger_pips))
 
-                                burst_decisions = []
-                                for i in range(burst_size):
-                                    burst_decisions.append(
-                                        {
-                                            "action": burst_side,
-                                            "asset": asset_raw,
-                                            "order_type": "MARKET",
-                                            "entry_price": price,
-                                            "sl_price": round(sl_price, 5),
-                                            "tp_price": round(tp_price, 5),
-                                            "rule_name": "burst_scalping",
-                                            "basket_id": basket_id,
-                                            "burst_index": i + 1,
-                                            "burst_size": burst_size,
-                                        }
-                                    )
+                        basket_id = f"burst_{asset_raw}_{int(time.time())}"
 
-                                self.logger.info(
-                                    f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw}"
-                                )
-                                print(
-                                    f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} (SL={sl_price}, TP={tp_price})"
-                                )
+                        burst_decisions = []
+                        for i in range(burst_size):
+                            order = {
+                                "action": burst_side,
+                                "asset": asset_raw,
+                                "order_type": "MARKET",
+                                "entry_price": price,
+                                "sl_price": round(sl_price, digits),
+                                "rule_name": "burst_scalping",
+                                "basket_id": basket_id,
+                                "burst_index": i + 1,
+                                "burst_size": burst_size,
+                            }
 
-                                return {"burst_decisions": burst_decisions}
+                            if trailing_enabled:
+                                order["trailing"] = {
+                                    "enabled": True,
+                                    "activate_after_rr": activate_after_rr,
+                                    "step_pips": step_pips,
+                                }
+
+                            burst_decisions.append(order)
+
+                        self.logger.info(
+                            f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw} "
+                            f"avec Trailing Stop (trigger={trigger_pips}p, step={step_pips}p)."
+                        )
+                        print(
+                            f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} "
+                            f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
+                        )
+
+                        return {"burst_decisions": burst_decisions}
 
                 # ✅ Liquidity Sweep (optionnel)
                 if strategy_name.lower() == "scalping":
@@ -1627,7 +1689,7 @@ class DecisionPipeline:
             except Exception as e:
                 self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
 
-        # === RÈGLE 2 : Trailing Stop (indépendant du Bollinger)
+        # === RÈGLE 2 : Trailing Stop 
         try:
             if normalized_action in {"BUY", "SELL"}:
                 trail_cfg = (current_config.get("scalping") or {}).get(
@@ -1674,7 +1736,7 @@ class DecisionPipeline:
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
             print(f"⚠️ [CORE] Erreur trailing: {e}")
-            
+
             # --- PATCH: normalisation SL/TP ---
         levels = normalize_levels(
             entry_price=trade_decision.get("entry_price"),
@@ -1699,20 +1761,34 @@ class DecisionPipeline:
             trade_decision,
             context,
             f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
-        ) 
-
-        # Log final (décision avant exécution)
-        self.config_manager.log_decision(
-            current_config,
-            trade_decision,
-            context,
-            f"Décision CORE avec paramètres '{strategy_name}': {trade_decision.get('rule_name', 'N/A')}",
         )
         print(
             f"📦 [CORE] Décision finale prête → {trade_decision.get('action','?')} "
             f"{trade_decision.get('asset','?')} | vol={trade_decision.get('volume','?')} | "
             f"SL={trade_decision.get('sl_price','?')} | TP={trade_decision.get('tp_price','?')}"
         )
+        
+        # ==========================================================
+        # 📋 Log final enrichi avec analyse patterns (si dispo)
+        # ==========================================================
+        try:
+            latest_pattern = (
+                context.get("pattern_analysis", {})
+                .get(asset_raw, {})
+                .get("latest_signal")
+            )
+            if latest_pattern:
+                self.logger.info(
+                    f"[PATTERN] Dernier signal {asset_raw}: {latest_pattern.get('pattern')} "
+                    f"(type={latest_pattern.get('signal_type')}, bullish={latest_pattern.get('is_bullish')})"
+                )
+                print(
+                    f"🕯️ [PATTERN] {asset_raw} → {latest_pattern.get('pattern')} "
+                    f"(type={latest_pattern.get('signal_type')}, bullish={latest_pattern.get('is_bullish')})"
+                )
+        except Exception as e:
+            self.logger.debug(f"[PATTERN] Log final ignoré: {e}")
+
 
         # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
         try:
@@ -1857,8 +1933,14 @@ class DecisionPipeline:
                 )
                 # --- PATCH: Construction et exécution directe via TradeExecutor ---
                 try:
-                    md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
-                    si = md_asset.get("symbol_info") or current_config.get("symbol_info") or {}
+                    md_asset = (context.get("market_data", {}) or {}).get(
+                        asset_raw, {}
+                    ) or {}
+                    si = (
+                        md_asset.get("symbol_info")
+                        or current_config.get("symbol_info")
+                        or {}
+                    )
 
                     point = float(si.get("point") or 0.0001)
                     digits = int(si.get("digits") or 5)
@@ -1867,7 +1949,9 @@ class DecisionPipeline:
 
                     req = {
                         "symbol": trade_decision["asset"],
-                        "type": getattr(te.mt5, f"ORDER_TYPE_{trade_decision['action']}"),
+                        "type": getattr(
+                            te.mt5, f"ORDER_TYPE_{trade_decision['action']}"
+                        ),
                         "volume": trade_decision.get("volume", 0.1),
                         "price": trade_decision.get("entry_price"),
                         "sl": trade_decision.get("sl_price"),
@@ -1880,28 +1964,43 @@ class DecisionPipeline:
                         "pip_size": pip_size,
                     }
 
-                    print(f"🚀 [EXECUTOR-PATCH] Envoi direct ordre → {req['symbol']} | {req['type']} "
-                        f"| vol={req['volume']} | SL={req['sl']} | TP={req['tp']}")
+                    print(
+                        f"🚀 [EXECUTOR-PATCH] Envoi direct ordre → {req['symbol']} | {req['type']} "
+                        f"| vol={req['volume']} | SL={req['sl']} | TP={req['tp']}"
+                    )
 
                     exec_res = te.execute_order(req)
-                    self.logger.info(f"[EXECUTOR-PATCH] Résultat exécution directe: {exec_res}")
+                    self.logger.info(
+                        f"[EXECUTOR-PATCH] Résultat exécution directe: {exec_res}"
+                    )
 
                     # enrichir la décision avec le résultat
-                    trade_decision["execution_status"] = exec_res.get("status", "unknown")
-                    trade_decision["executed"] = trade_decision["execution_status"] in {"filled", "placed"}
+                    trade_decision["execution_status"] = exec_res.get(
+                        "status", "unknown"
+                    )
+                    trade_decision["executed"] = trade_decision["execution_status"] in {
+                        "filled",
+                        "placed",
+                    }
                     trade_decision["order_id"] = exec_res.get("order")
                     trade_decision["deal_id"] = exec_res.get("deal")
                     trade_decision["execution_price"] = exec_res.get("price")
 
                     # logs humains
                     if trade_decision["executed"]:
-                        print(f"🎉 [EXECUTOR-PATCH] TRADE EXÉCUTÉ → {trade_decision['action']} {trade_decision['asset']} "
-                            f"@{trade_decision['execution_price']} (vol={trade_decision['volume']})")
+                        print(
+                            f"🎉 [EXECUTOR-PATCH] TRADE EXÉCUTÉ → {trade_decision['action']} {trade_decision['asset']} "
+                            f"@{trade_decision['execution_price']} (vol={trade_decision['volume']})"
+                        )
                     else:
-                        print(f"⚠️ [EXECUTOR-PATCH] Trade non exécuté: status={trade_decision['execution_status']}")
+                        print(
+                            f"⚠️ [EXECUTOR-PATCH] Trade non exécuté: status={trade_decision['execution_status']}"
+                        )
 
                 except Exception as e:
-                    self.logger.error(f"[EXECUTOR-PATCH] Erreur envoi direct MT5: {e}", exc_info=True)
+                    self.logger.error(
+                        f"[EXECUTOR-PATCH] Erreur envoi direct MT5: {e}", exc_info=True
+                    )
                     print(f"💥 [EXECUTOR-PATCH] Erreur exécution: {e}")
 
                 exec_res = run_trade_execution_pipeline(
@@ -2753,8 +2852,8 @@ class DecisionPipeline:
         spread_comp_price = spread_pts * point
         effective_tp_dist = max(0.0, (tp_dist_price or 0.0) - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
-        
-                # --- 7bis) Facteur dynamique basé sur la volatilité (ATR M1) ---
+
+        # --- 7bis) Facteur dynamique basé sur la volatilité (ATR M1) ---
         atr_m1_pips = None
         try:
             if df is not None and not df.empty and "atr" in df.columns:
@@ -2786,7 +2885,6 @@ class DecisionPipeline:
 
             # On ne calcule pas le volume ici mais on garde le facteur
             trade_decision["volatility_factor"] = vol_factor
-
 
         # --- 8) Volume délégué ---
         notes.append("volume_delegated_to_executor")

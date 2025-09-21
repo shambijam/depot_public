@@ -5,6 +5,7 @@ from .base_strategy import BaseStrategy
 import math
 import pandas as pd
 import numpy as np
+from sniper_patterns.pattern_engine import PatternEngine
 
 
 class LiquidityStrategy(BaseStrategy):
@@ -39,6 +40,25 @@ class LiquidityStrategy(BaseStrategy):
         if not tradeable_assets:
             self.logger.warning("[LIQ] Aucun asset tradable configuré.")
             return None
+
+        from sniper_patterns.pattern_engine import PatternEngine
+
+        # --- Lecture patterns chandeliers (complément desk) ---
+        try:
+            md = (context.get("market_data") or {}).get(asset, {})
+            df_m1 = md.get("df_m1") or md.get("rates_df")
+            if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 20:
+                pe = PatternEngine()
+                pat_results = pe.analyze(df_m1, with_combo=True)
+                latest_pat = pe.latest_signal(df_m1)
+                if latest_pat:
+                    sig["latest_pattern"] = latest_pat
+                    self.logger.info(
+                        f"[LIQ] {asset} | Dernier pattern: "
+                        f"{latest_pat.get('pattern')} ({latest_pat.get('signal_type')})"
+                    )
+        except Exception as e:
+            self.logger.debug(f"[LIQ] PatternEngine skipped for {asset}: {e}")
 
         # Vérification stricte: ignorer les actifs hors whitelist (log d'info)
         invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
@@ -447,22 +467,12 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #     INTERNAL HELPERS
     # =========================
+
     def _build_order_proposal(
         self, asset: str, context: Dict[str, Any], sig: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """
-        Construit la proposition d'ordre Liquidity :
-        - Déduit le sens (par défaut : opposé au sweep ; overridable via entry_logic.direction)
-        - Calcule le prix d'entrée (break vs retracement, avec/ss mitigation)
-        - Calcule SL (derrière extrême du sweep ; fallback ATR si besoin)
-        - Calcule TP (priorité EQH/EQL > OB > FVG ; fallback ATR)
-        - Estime le RR
-
-        Robustesse ajoutée :
-        - Sécurisation point/pip_size
-        - Arrondi des niveaux au tick (point)
-        - Logs explicites en cas d'abandon
-        - Retour des métadonnées utiles (direction_pref, rule_name, confidence)
+        Construit la proposition d'ordre Liquidity avec intégration des patterns chandeliers.
         """
 
         # --- helpers locaux ---
@@ -480,27 +490,21 @@ class LiquidityStrategy(BaseStrategy):
         ) -> Optional[float]:
             if price is None or price <= 0 or point_val <= 0:
                 return price
-            # Arrondi au tick MT5 (point)
             steps = round(price / point_val)
             return steps * point_val
 
-        # --- paramètres / marché ---
-        # point : taille minimale de variation de prix (tick). Fallbacks protégés.
+        # --- paramètres marché ---
         point = _as_float(sig.get("point", context.get("point", 0.0)), 0.0)
         if point <= 0.0:
-            # fallback via digits si dispo
             digits = sig.get("digits", context.get("digits"))
             if isinstance(digits, (int, float)) and int(digits) >= 0:
                 point = 10.0 ** (-int(digits))
             else:
-                # fallback générique FX
                 point = 0.00001
-
-        # pip_size : pour FX à 5 décimales => 10 * point (0.00010) ; pour XAU (0.01) => 0.1
         pip_size = point * 10.0 if point > 0 else 0.0001
         price_now = _as_float(sig.get("close", context.get("close", 0.0)), 0.0)
 
-        # --- entry_logic & execution ---
+        # --- entry_logic ---
         entry_logic = self._cfg_dict("liquidity_sweep.entry_logic", default={})
         trigger = str(entry_logic.get("trigger", "break_of_absorption_extreme")).lower()
         buffer_pips = _as_float(entry_logic.get("buffer_pips", 0.4), 0.4)
@@ -517,12 +521,12 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.warning("[LIQUIDITY] abandon: direction indécise.")
             return None
 
-        # --- niveaux 'sweep' / 'absorption' ---
+        # --- niveaux sweep/absorption ---
         sweep_extreme, absorb_extreme = self._extract_sweep_absorption_extremes(
             sig, side
         )
 
-        # --- entry price ---
+        # --- entry ---
         entry_price = self._compute_entry_price(
             side=side,
             trigger=trigger,
@@ -541,57 +545,69 @@ class LiquidityStrategy(BaseStrategy):
 
         # --- SL ---
         sl_price = self._compute_sl(
-            side=side,
-            pip_size=pip_size,
-            sweep_extreme=sweep_extreme,
-            sig=sig,
+            side=side, pip_size=pip_size, sweep_extreme=sweep_extreme, sig=sig
         )
         if sl_price is None or sl_price <= 0:
             self.logger.warning("[LIQUIDITY] abandon: sl_price invalide.")
             return None
         sl_price = _round_to_point(sl_price, point)
-
-        # Écarter le cas pathologique entry == SL
         if sl_price == entry_price:
             self.logger.warning("[LIQUIDITY] abandon: sl_price == entry_price.")
             return None
 
         # --- TP ---
         tp_price = self._compute_tp(
-            asset=asset,
-            side=side,
-            entry_price=entry_price,
-            pip_size=pip_size,
-            sig=sig,
+            asset=asset, side=side, entry_price=entry_price, pip_size=pip_size, sig=sig
         )
         if tp_price is not None and tp_price > 0:
             tp_price = _round_to_point(tp_price, point)
 
-        # --- RR estimé ---
+        # --- RR ---
         rr_est: Optional[float] = None
         try:
             rr_est = self._estimate_rr(entry_price, sl_price, tp_price, side)
         except Exception:
             rr_est = None
 
+        # --- Base proposal ---
+        confidence = float(sig.get("confidence_score", 0.0))
+        rule_name = "liquidity_sweep_absorption"
+
+        # === 🔥 Patch PatternEngine ===
+        latest_pat = sig.get("latest_pattern")
+        if latest_pat:
+            pat_name = str(latest_pat.get("pattern", "")).lower()
+            pat_bull = latest_pat.get("is_bullish", None)
+
+            # Ajuster confiance selon confluence pattern
+            if side == "BUY" and pat_bull is True:
+                confidence += 0.2
+            elif side == "SELL" and pat_bull is False:
+                confidence += 0.2
+            elif pat_bull is not None:
+                confidence -= 0.1  # contradiction légère
+
+            rule_name += f"+pattern:{pat_name}"
+
         proposal = {
             "action": side,
             "entry_price": entry_price,
             "sl_price": sl_price,
             "tp_price": tp_price,
-            "order_type": order_type,  # LIMIT attendu pour Liquidity (config)
+            "order_type": order_type,
             "buffer_pips": buffer_pips,
             "timeout_bars": timeout_bars,
             "rr_estimate": rr_est,
             "use_mitigation": use_mitigation if order_type == "LIMIT" else False,
-            # Audit / compat
-            "confidence": float(sig.get("confidence_score", 0.0)),
-            "rule_name": "liquidity_sweep_absorption",
+            "confidence": round(confidence, 3),
+            "rule_name": rule_name,
             "direction_pref": direction_pref,
         }
+
         self.logger.info(
             f"[LIQUIDITY] ✅ Proposition: side={side} entry={proposal['entry_price']} "
-            f"sl={proposal['sl_price']} tp={proposal['tp_price']} rr≈{proposal['rr_estimate']}"
+            f"sl={proposal['sl_price']} tp={proposal['tp_price']} rr≈{proposal['rr_estimate']} "
+            f"| conf={proposal['confidence']}"
         )
         return proposal
 
