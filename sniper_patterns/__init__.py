@@ -13,7 +13,7 @@ Contient :
 """
 
 from .candle_detector import detect_single_candle
-from .multi_candle_detector import detect_multi_candle
+from .multi_candle_detector import detect_multi_candle_patterns
 from .combo_detector import detect_combos
 from .context_enricher import enrich_context
 from .structure_detector import enrich_structure
@@ -23,7 +23,7 @@ from .pattern_engine import PatternEngine
 
 __all__ = [
     "detect_single_candle",
-    "detect_multi_candle",
+    "detect_multi_candle_patterns",
     "detect_combos",
     "enrich_context",
     "enrich_structure",
