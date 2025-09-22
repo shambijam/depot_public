@@ -91,8 +91,7 @@ def detect_multi_candle(
     results: List[Dict[str, Any]] = []
     if i < 2:
         return []
-
-    patterns = []
+    
     detectors = [
         is_morning_star,
         is_evening_star,
@@ -125,6 +124,7 @@ def detect_multi_candle(
 
 def detect_multi_candle_patterns(
     df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
 ) -> List[Optional[List[Dict[str, Any]]]]:
     """
     Détection complète multi-bougies pour tout le DataFrame.
@@ -137,10 +137,11 @@ def detect_multi_candle_patterns(
     results: List[Optional[List[Dict[str, Any]]]] = []
     for i in range(len(df)):
         try:
-            patterns = detect_multi_candle(df, i)
-            results.append(patterns if patterns else None)
+            found_patterns = detect_multi_candle(df, i, patterns=patterns)
+            results.append(found_patterns if found_patterns else None)
         except Exception as e:
             print(f"Erreur detect_multi_candle_patterns à l’index {i}: {e}")
             results.append(None)
 
     return results
+
