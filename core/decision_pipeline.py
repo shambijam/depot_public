@@ -58,9 +58,7 @@ class DecisionPipeline:
         self.asset_configs: Dict[str, Dict[str, Any]] = {}
         for asset in ["EURUSD", "GBPUSD", "XAUUSD"]:
             try:
-                cfg = self.config_manager.load_config(
-                    f"config/assets_config/{asset}.json", schema="asset"
-                )
+                cfg = self.config_manager.load_asset_config(asset)
                 self.asset_configs[asset] = cfg
                 self.logger.info(f"[CACHE] Config {asset} chargée une seule fois au démarrage.")
             except Exception as e:
