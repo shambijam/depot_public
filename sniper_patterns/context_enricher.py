@@ -46,7 +46,6 @@ def position_in_range(close: float, high: float, low: float) -> str:
 
 
 def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) -> List[Optional[Dict[str, Any]]]:
-
     """
     Enrichit chaque signal brut avec :
       - volatilité
@@ -59,11 +58,23 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
     signals = normalize_signals(signals)
 
     enriched: List[Optional[Dict[str, Any]]] = []
+    ok_count = 0
+    skipped_count = 0
+    error_count = 0
 
     for i, sig in enumerate(signals):
         print(f"[DEBUG] enrich_context i={i}, type(sig)={type(sig)}, len(df)={len(df)}")
+
         if not sig:
             enriched.append(None)
+            skipped_count += 1
+            continue
+
+        # 🚨 Protection contre l’out-of-bounds
+        if i >= len(df):
+            print(f"[ContextEnricher] Skip index {i}: hors du DataFrame (len(df)={len(df)})")
+            enriched.append(sig)
+            skipped_count += 1
             continue
 
         try:
@@ -107,9 +118,17 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
             enriched_sig["context"] = context
 
             enriched.append(enriched_sig)
+            ok_count += 1
 
         except Exception as e:
             print(f"[ContextEnricher] Erreur enrichissement index {i}: {e}")
             enriched.append(sig)
+            error_count += 1
+
+    # 🔹 Résumé final
+    print(
+        f"[ContextEnricher] Résumé → Total={len(signals)} | Enrichis={ok_count} | Skippés={skipped_count} | Erreurs={error_count}"
+    )
 
     return enriched
+
