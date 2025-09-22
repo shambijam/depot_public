@@ -1,6 +1,9 @@
 # sniper_patterns/pattern_engine.py
 
 import pandas as pd
+import json
+import logging
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 # Briques fonctionnelles
@@ -11,6 +14,8 @@ from .context_enricher import enrich_context
 from .structure_detector import enrich_structure
 from .multi_tf_confirmer import confirm_multi_tf
 from .orderflow_detector import detect_orderflow   
+
+LOG = logging.getLogger(__name__)
 
 
 class PatternEngine:
@@ -28,21 +33,50 @@ class PatternEngine:
     pour le pipeline décisionnel du bot.
     """
 
-    def __init__(self, enable_context=True, enable_structure=True, enable_multi_tf=True, enable_orderflow=True):
+    def __init__(
+        self,
+        enable_context=True,
+        enable_structure=True,
+        enable_multi_tf=True,
+        enable_orderflow=True,
+        patterns_file: Optional[str] = "config/sniper_patterns.json",
+        auto_reload: bool = False,
+    ):
         self.enable_context = enable_context
         self.enable_structure = enable_structure
         self.enable_multi_tf = enable_multi_tf
-        self.enable_orderflow = enable_orderflow   # 🆕
+        self.enable_orderflow = enable_orderflow
+
+        self.patterns_file = Path(patterns_file) if patterns_file else None
+        self.auto_reload = auto_reload
+        self._patterns_mtime = None
+        self.patterns = self._load_patterns()
+ 
+
+    def _load_patterns(self) -> Dict[str, Any]:
+        """Charge le JSON des patterns (safe). Retourne {} si erreur."""
+        if not self.patterns_file:
+            return {}
+        try:
+            if not self.patterns_file.exists():
+                LOG.warning("Patterns file introuvable: %s", self.patterns_file)
+                return {}
+            # auto-reload check: si modifié, relire
+            if self.auto_reload:
+                mtime = self.patterns_file.stat().st_mtime
+                if self._patterns_mtime and mtime == self._patterns_mtime:
+                    return self.patterns or {}
+                self._patterns_mtime = mtime
+
+            with self.patterns_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            LOG.info("Patterns JSON chargé depuis %s", self.patterns_file)
+            return data or {}
+        except Exception as e:
+            LOG.exception("Erreur chargement patterns JSON: %s", e)
+            return {}
 
     def analyze(self, df: pd.DataFrame, with_combo: bool = True) -> Dict[str, List[Optional[Dict[str, Any]]]]:
-        """
-        Analyse un DataFrame OHLC et retourne tous les patterns détectés.
-        ------------------------------------------------
-        - candle_signals  : bougies individuelles
-        - multi_signals   : patterns multi-bougies
-        - combo_signals   : fusion enrichie
-        - orderflow_signals : lecture du flux (déséquilibre, absorption, exhaustion)
-        """
         if df is None or len(df) < 5:
             return {
                 "candle_signals": [],
@@ -51,17 +85,17 @@ class PatternEngine:
                 "orderflow_signals": [],
             }
 
-        # 1️⃣ Bougies simples
-        candle_signals = [detect_single_candle(df, i) for i in range(len(df))]
+        # 1️⃣ Bougies simples (on passe patterns)
+        candle_signals = [detect_single_candle(df, i, patterns=self.patterns) for i in range(len(df))]
 
         # 2️⃣ Multi-bougies
-        multi_signals = detect_multi_candle_patterns(df)
+        multi_signals = detect_multi_candle_patterns(df, patterns=self.patterns)
 
         # 3️⃣ Combos fusionnés
-        combo_signals = detect_combos(df) if with_combo else []
+        combo_signals = detect_combos(df, patterns=self.patterns) if with_combo else []
 
         # 4️⃣ Order Flow
-        orderflow_signals = detect_orderflow(df) if self.enable_orderflow else []
+        orderflow_signals = detect_orderflow(df, patterns=self.patterns) if self.enable_orderflow else []
 
         # 5️⃣ Enrichissements (optionnels, activables par flags)
         if self.enable_context:
@@ -71,13 +105,13 @@ class PatternEngine:
         if self.enable_multi_tf:
             combo_signals = confirm_multi_tf(df, combo_signals)
 
-        # 6️⃣ Retour structuré pour le pipeline
         return {
             "candle_signals": candle_signals,
             "multi_signals": multi_signals,
             "combo_signals": combo_signals,
-            "orderflow_signals": orderflow_signals,   # 🆕 ajouté
+            "orderflow_signals": orderflow_signals,
         }
+
 
     def latest_signal(self, df: pd.DataFrame, prefer_combo: bool = True, prefer_orderflow: bool = False) -> Optional[Dict[str, Any]]:
         """
