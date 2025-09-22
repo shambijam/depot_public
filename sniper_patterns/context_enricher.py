@@ -43,7 +43,8 @@ def position_in_range(close: float, high: float, low: float) -> str:
         return "haut"
 
 
-def enrich_signals(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) -> List[Optional[Dict[str, Any]]]:
+def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) -> List[Optional[Dict[str, Any]]]:
+
     """
     Enrichit chaque signal brut avec :
       - volatilité
