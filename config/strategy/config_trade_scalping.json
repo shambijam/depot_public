@@ -1,12 +1,24 @@
 {
   "strategy_name": "scalping",
-  "enabled": true,
-  "risk_management": {
-    "max_trades_per_day": 10,
-    "max_trades_per_asset_per_day": 5,
-    "min_rr": 1.5,
-    "atr_penalty_factor": 0.85,
-    "atr_confidence_floor": 0.35
+  "version": "2.3",
+  "description": "Scalping propre (XAUUSD only). Aucuns fallback stratégiques. Katana/Bollinger retirés.",
+  "tradeable_assets": [
+    "XAUUSD"
+  ],
+  "magic_number": 52001,
+  "risk_per_trade_percent": 0.40,
+  "confidence_threshold": 0.30,
+  "take_profit_pips": 80,
+  "stop_loss_pips": 60,
+  "max_spread_points": 50,
+  "halt_on_major_news": false,
+  "phase_detection": {
+    "use_phase_observer": true,
+    "allowed_phases": [
+      "liquidity_eqh_eql",
+      "range_retail",
+      "transitional"
+    ]
   },
   "entry_rules": {
     "scalping": {
@@ -98,5 +110,19 @@
       "enabled": true,
       "distance_pips": 5.0
     }
-  }
+  },
+  "decision_rules": [
+    {
+      "name": "scalping_entry",
+      "priority": 1,
+      "conditions": {
+        "min_confidence": 0.20
+      },
+      "order_type": "MARKET",
+      "action_logic": {
+        "BUY": "enter_on_scalping_signal",
+        "SELL": "enter_on_scalping_signal"
+      }
+    }
+  ]
 }
