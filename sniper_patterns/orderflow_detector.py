@@ -15,9 +15,10 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 
 
-def detect_orderflow(df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
-    if df is None or len(df) < 1:
-        return []
+def detect_orderflow(
+    df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Optional[Dict[str, Any]]]:
 
     signals: List[Optional[Dict[str, Any]]] = []
 

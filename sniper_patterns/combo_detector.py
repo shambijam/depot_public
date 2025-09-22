@@ -7,7 +7,10 @@ from .candle_detector import detect_single_candle
 from .multi_candle_detector import detect_multi_candle_patterns
 
 
-def detect_combos(df: pd.DataFrame) -> List[Optional[Dict[str, Any]]]:
+def detect_combos(
+    df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Optional[Dict[str, Any]]]:
     """
     Détecteur desk-trader brut :
       - Chandeliers individuels (Doji, Hammer, etc.)

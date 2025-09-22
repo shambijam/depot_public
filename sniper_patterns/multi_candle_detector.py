@@ -77,10 +77,18 @@ def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
 
 
 # === MAIN ENTRYPOINT (multi-patterns par index) ===
-def detect_multi_candle(df: pd.DataFrame, i: int) -> List[Dict[str, Any]]:
+def detect_multi_candle(
+    df: pd.DataFrame,
+    i: int,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
     """
-    Retourne une liste de tous les patterns multi-bougies détectés à l’index i.
+    Détecteur de patterns multi-bougies pour l'index i.
+    - patterns : dictionnaire optionnel chargé depuis sniper_patterns.json
+                 (ex: {"multi_candle": {"enabled": True, "allowed": ["three_inside","morning_star"]}})
+    Retourne une liste (potentiellement vide) de dicts {pattern, type, is_bullish, ...}
     """
+    results: List[Dict[str, Any]] = []
     if i < 2:
         return []
 
