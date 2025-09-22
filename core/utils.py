@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from enum import Enum # Importation nécessaire pour les Énumérations
 
 # Définition de l'exception ConfigValidationError
@@ -68,8 +68,8 @@ def normalize_levels(
     entry_price: float,
     action: str,
     pip_size: float,
-    sl_pips: float | None = None,
-    tp_pips: float | None = None,
+    sl_pips: Optional[float] = None,
+    tp_pips: Optional[float] = None,
     sl_price: float | None = None,
     tp_price: float | None = None,
 ) -> dict:
@@ -108,3 +108,26 @@ def normalize_levels(
             tp = entry_price - tp_pips * pip_size
 
     return {"sl": sl, "tp": tp}
+
+def normalize_signals(
+    signals: List[Dict[str, Any]] | Dict[str, Any] | None
+) -> List[Optional[Dict[str, Any]]]:
+    """
+    Normalise l'entrée 'signals' pour garantir une liste cohérente :
+      - None -> []
+      - Dict -> [Dict]
+      - List -> inchangé
+
+    Exemple :
+        normalize_signals(None) -> []
+        normalize_signals({"pattern": "doji"}) -> [{"pattern": "doji"}]
+        normalize_signals([{"pattern": "hammer"}, {"pattern": "doji"}]) -> idem
+    """
+    if signals is None:
+        return []
+    if isinstance(signals, dict):
+        return [signals]
+    if isinstance(signals, list):
+        return signals
+    raise TypeError(f"[normalize_signals] Format inattendu: {type(signals)}")
+

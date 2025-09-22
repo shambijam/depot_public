@@ -2,6 +2,8 @@
 
 import pandas as pd
 from typing import List, Dict, Any, Optional
+from core.utils import normalize_signals
+
 
 
 def detect_structure(df: pd.DataFrame, i: int) -> Dict[str, Any]:
@@ -17,13 +19,20 @@ def detect_structure(df: pd.DataFrame, i: int) -> Dict[str, Any]:
     
 def enrich_structure(
     df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]
-    ) -> List[Optional[Dict[str, Any]]]:
+) -> List[Optional[Dict[str, Any]]]:
     """
     Enrichit chaque signal avec la proximité structurelle :
     - OB (Order Block)
     - FVG (Fair Value Gap)
     - BOS (Break of Structure)
     """
+
+    # 🔹 Patch : accepte dict ou None
+    if signals is None:
+        signals = []
+    elif isinstance(signals, dict):
+        signals = [signals]
+
     enriched: List[Optional[Dict[str, Any]]] = []
 
     for i, sig in enumerate(signals):
@@ -47,4 +56,4 @@ def enrich_structure(
             enriched.append(sig)
 
     return enriched
-    
+

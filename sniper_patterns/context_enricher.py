@@ -15,6 +15,8 @@ Objectif : Ajouter une lecture "desk-trader" aux signaux bruts :
 
 import pandas as pd
 from typing import List, Dict, Any, Optional
+from core.utils import normalize_signals
+
 
 
 def classify_volatility(candle_size: float, atr: float) -> str:
