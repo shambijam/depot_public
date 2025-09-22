@@ -61,6 +61,7 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
     enriched: List[Optional[Dict[str, Any]]] = []
 
     for i, sig in enumerate(signals):
+        print(f"[DEBUG] enrich_context i={i}, type(sig)={type(sig)}, len(df)={len(df)}")
         if not sig:
             enriched.append(None)
             continue
