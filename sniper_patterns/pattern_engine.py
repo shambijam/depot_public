@@ -77,7 +77,7 @@ class PatternEngine:
             LOG.exception("Erreur chargement patterns JSON: %s", e)
             return {}
 
-    def analyze(self, df: pd.DataFrame, with_combo: bool = True) -> Dict[str, List[Optional[Dict[str, Any]]]]:
+    def analyze(self, df: pd.DataFrame, with_combo: bool = True) -> Dict[str, List[Dict[str, Any]]]:
         if df is None or len(df) < 5:
             return {
                 "candle_signals": [],
@@ -86,12 +86,15 @@ class PatternEngine:
                 "orderflow_signals": [],
             }
 
-        # 1️⃣ Bougies simples (on passe patterns)
-        candle_signals = [detect_single_candle(df, i, patterns=self.patterns) for i in range(len(df))]
+        # 1️⃣ Bougies simples (1 signal par bougie, None si rien)
+        candle_signals = [
+            detect_single_candle(df, i, patterns=self.patterns) 
+            for i in range(len(df))
+        ]
+        candle_signals = [s for s in candle_signals if s]  # ✅ filtre None → liste plate
 
-        # 2️⃣ Multi-bougies
+        # 2️⃣ Multi-bougies (liste plate déjà corrigée)
         multi_signals = detect_multi_candle(df, patterns=self.patterns)
-
 
         # 3️⃣ Combos fusionnés
         combo_signals = detect_combos(df, patterns=self.patterns) if with_combo else []
@@ -99,7 +102,7 @@ class PatternEngine:
         # 4️⃣ Order Flow
         orderflow_signals = detect_orderflow(df, patterns=self.patterns) if self.enable_orderflow else []
 
-        # 5️⃣ Enrichissements (optionnels, activables par flags)
+        # 5️⃣ Enrichissements (optionnels)
         if self.enable_context:
             combo_signals = enrich_context(df, combo_signals)
         if self.enable_structure:
@@ -113,7 +116,6 @@ class PatternEngine:
             "combo_signals": combo_signals,
             "orderflow_signals": orderflow_signals,
         }
-
 
     def latest_signal(self, df: pd.DataFrame, prefer_combo: bool = True, prefer_orderflow: bool = False) -> Optional[Dict[str, Any]]:
         """

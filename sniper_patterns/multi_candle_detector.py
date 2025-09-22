@@ -103,11 +103,23 @@ def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
 
 def detect_multi_candle(
     df: pd.DataFrame,
-    i: int,
+    i: Optional[int] = None,
     patterns: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
-    """Détection d’un ensemble de patterns multi-bougies à l’index i."""
+    """
+    Détection d’un ensemble de patterns multi-bougies.
+    - Si `i` est fourni → détection ponctuelle à l'index i.
+    - Si `i` est None → parcourt tout le DataFrame.
+    """
     results: List[Dict[str, Any]] = []
+
+    # Cas 1: on parcourt tout le DataFrame
+    if i is None:
+        for idx in range(len(df)):
+            results.extend(detect_multi_candle(df, idx, patterns))
+        return results
+
+    # Cas 2: détection ponctuelle
     if i < 2:
         return results
 
@@ -133,7 +145,7 @@ def detect_multi_candle(
                 if "volume_zscore" in df.columns:
                     enriched["volume_zscore"] = float(df["volume_zscore"].iloc[i])
 
-                results.append(enriched)  # ✅ liste propre
+                results.append(enriched)
         except Exception as e:
             print(f"Erreur {detector.__name__} à l’index {i}: {e}")
 
@@ -143,10 +155,11 @@ def detect_multi_candle(
 def detect_multi_candle_patterns(
     df: pd.DataFrame,
     patterns: Optional[Dict[str, Any]] = None
-) -> List[Optional[List[Dict[str, Any]]]]:
-    """Itère sur tout le DataFrame pour chercher les patterns multi-bougies."""
-    results: List[Optional[List[Dict[str, Any]]]] = []
-    for i in range(len(df)):
-        found = detect_multi_candle(df, i, patterns=patterns)
-        results.append(found if found else None)
-    return results
+) -> List[Dict[str, Any]]:
+    """
+    Détection des patterns multi-bougies sur tout le DataFrame.
+    Utilise detect_multi_candle(df) en mode global (i=None).
+    Retourne une liste à plat de tous les patterns détectés.
+    """
+    return detect_multi_candle(df, i=None, patterns=patterns)
+

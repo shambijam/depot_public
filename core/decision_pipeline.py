@@ -18,7 +18,6 @@ from core.utils import normalize_levels
 from sniper_patterns.pattern_engine import PatternEngine
 
 
-
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
     from core.config_manager import (
@@ -51,8 +50,9 @@ class DecisionPipeline:
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
         self.strategy_manager = strategy_manager_instance
-        self.pattern_engine = PatternEngine(enable_context=True, enable_structure=True, enable_multi_tf=True)
-
+        self.pattern_engine = PatternEngine(
+            enable_context=True, enable_structure=True, enable_multi_tf=True
+        )
 
         # PhaseObserver optionnel (peut être attaché plus tard via attach_phase_observer)
         self.phase_observer = phase_observer_instance
@@ -325,9 +325,15 @@ class DecisionPipeline:
                     else:
                         assets_assigned[a] = (sname, "assigned")
 
-                    # Attacher l'instance dans le mapping final
-                    result["mapping"].setdefault(sname, {})[a] = strat_inst
-                    total_assets += 1
+                        # Attacher l'instance dans le mapping final
+                        result["mapping"].setdefault(sname, {})[a] = strat_inst
+
+                        # 🔥 Correction : enrichir le mapping avec le nom de la stratégie
+                        result["mapping"][sname][a] = {
+                            "instance": strat_inst,
+                            "strategy_name": sname,
+                        }
+                        total_assets += 1
 
                 result["metadata"]["loaded"].append(sname)
 
@@ -372,7 +378,15 @@ class DecisionPipeline:
                 strat_name, {"assets": list(assets_map.keys()), "decisions": []}
             )
 
-            for asset, strat_inst in assets_map.items():
+            for asset, strat_entry in assets_map.items():
+                # ✅ Compatibilité ancien / nouveau format
+                if isinstance(strat_entry, dict) and "instance" in strat_entry:
+                    strat_inst = strat_entry["instance"]
+                    strategy_name = strat_entry.get("strategy_name", strat_name)
+                else:
+                    strat_inst = strat_entry
+                    strategy_name = strat_name
+
                 try:
                     # strategy API compatibility: prefer evaluate_entry signature with asset + market_df + signals + context + config
                     evaluate_fn = getattr(strat_inst, "evaluate_entry", None)
@@ -422,8 +436,9 @@ class DecisionPipeline:
 
                     # annotate
                     if isinstance(decision, dict):
-                        decision["strategy_type"] = strat_name
+                        decision["strategy_type"] = strategy_name
                         decision["asset"] = decision.get("asset", asset)
+
                         # confidence normalization (if exists)
                         if "confidence" in decision:
                             try:
@@ -635,7 +650,7 @@ class DecisionPipeline:
             }
             analyzed_context["execution_context"] = execution_context
 
-          # 5) Décision finale
+            # 5) Décision finale
             print("🤖 [DECISION] Étape 5: Décision de trade finale...")
 
             if td is None:
@@ -668,7 +683,7 @@ class DecisionPipeline:
                 print("   " + line)
             print("============================================================")
 
-           # Sécurise la récupération du volume
+            # Sécurise la récupération du volume
             volume = (td or {}).get("volume", 0)
 
             self.logger.info(
@@ -1253,7 +1268,7 @@ class DecisionPipeline:
         print(
             f"📝 [CORE] Décision normalisée → {normalized_action} {asset_raw} | type={order_type}"
         )
-        
+
         # ==========================================================
         # 📊 Analyse patterns / bougies (Desk Pro Mode)
         # ==========================================================
@@ -1271,17 +1286,24 @@ class DecisionPipeline:
                 }
 
                 if last_sig and last_sig.get("pattern") in {
-                    "bullish_engulfing", "morning_star", "hammer",
-                    "bearish_engulfing", "evening_star", "shooting_star"
+                    "bullish_engulfing",
+                    "morning_star",
+                    "hammer",
+                    "bearish_engulfing",
+                    "evening_star",
+                    "shooting_star",
                 }:
-                    trade_decision["rule_name"] = trade_decision.get("rule_name", "") + "+pattern"
+                    trade_decision["rule_name"] = (
+                        trade_decision.get("rule_name", "") + "+pattern"
+                    )
                     trade_decision["confidence"] = min(
                         1.0, float(trade_decision.get("confidence", 0.5)) + 0.3
                     )
-                    print(f"🕯️ [CORE] Pattern fort reconnu → {last_sig['pattern']} (confiance boostée)")
+                    print(
+                        f"🕯️ [CORE] Pattern fort reconnu → {last_sig['pattern']} (confiance boostée)"
+                    )
         except Exception as e:
             self.logger.warning(f"Erreur PatternEngine: {e}")
-
 
         # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
@@ -1488,7 +1510,9 @@ class DecisionPipeline:
                         trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
                         step_pips = float(tp_sl_cfg.get("step_pips", 5))
                         # Fix: define activate_after_rr (default to trigger_pips or another config value)
-                        activate_after_rr = float(tp_sl_cfg.get("activate_after_rr", trigger_pips))
+                        activate_after_rr = float(
+                            tp_sl_cfg.get("activate_after_rr", trigger_pips)
+                        )
 
                         basket_id = f"burst_{asset_raw}_{int(time.time())}"
 
@@ -1700,7 +1724,7 @@ class DecisionPipeline:
             except Exception as e:
                 self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
 
-        # === RÈGLE 2 : Trailing Stop 
+        # === RÈGLE 2 : Trailing Stop
         try:
             if normalized_action in {"BUY", "SELL"}:
                 trail_cfg = (current_config.get("scalping") or {}).get(
@@ -1778,7 +1802,7 @@ class DecisionPipeline:
             f"{trade_decision.get('asset','?')} | vol={trade_decision.get('volume','?')} | "
             f"SL={trade_decision.get('sl_price','?')} | TP={trade_decision.get('tp_price','?')}"
         )
-        
+
         # ==========================================================
         # 📋 Log final enrichi avec analyse patterns (si dispo)
         # ==========================================================
@@ -1799,7 +1823,6 @@ class DecisionPipeline:
                 )
         except Exception as e:
             self.logger.debug(f"[PATTERN] Log final ignoré: {e}")
-
 
         # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
         try:
