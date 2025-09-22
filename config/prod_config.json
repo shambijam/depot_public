@@ -145,10 +145,15 @@
             "breakout"
           ]
         },
-        "primary": "scalping",
-        "secondary": "liquidity",
-        "weight_primary": 0.7,
-        "weight_secondary": 0.3
+        "strategy_asset_mapping": {
+          "scalping": [
+            "XAUUSD"
+          ],
+          "liquidity": [
+            "EURUSD",
+            "GBPUSD"
+          ]
+        }
       }
     }
   },
