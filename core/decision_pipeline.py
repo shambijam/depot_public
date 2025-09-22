@@ -54,6 +54,21 @@ class DecisionPipeline:
             enable_context=True, enable_structure=True, enable_multi_tf=True
         )
 
+        # ✅ Cache local des configs assets (chargées une seule fois au démarrage)
+        self.asset_configs: Dict[str, Dict[str, Any]] = {}
+        for asset in ["EURUSD", "GBPUSD", "XAUUSD"]:
+            try:
+                cfg = self.config_manager.load_config(
+                    f"config/assets_config/{asset}.json", schema="asset"
+                )
+                self.asset_configs[asset] = cfg
+                self.logger.info(f"[CACHE] Config {asset} chargée une seule fois au démarrage.")
+            except Exception as e:
+                self.logger.error(f"[CACHE] Impossible de charger {asset}.json: {e}")
+                self.asset_configs[asset] = {}
+
+        self.logger.info("DecisionPipeline initialisé avec cache asset_configs.")
+
         # PhaseObserver optionnel (peut être attaché plus tard via attach_phase_observer)
         self.phase_observer = phase_observer_instance
 
@@ -82,6 +97,14 @@ class DecisionPipeline:
             f"DecisionPipeline initialisé (phase_observer={'present' if self.phase_observer else 'absent'}) "
             f"| debug_confidence_logging={self.debug_confidence_logging}"
         )
+
+    def get_asset_config(self, asset: str) -> Dict[str, Any]:
+        """Charge une config asset une seule fois et la met en cache."""
+        if asset not in self.asset_configs:
+            cfg = self.config_manager.load_asset_config(asset)
+            self.asset_configs[asset] = cfg
+            self.logger.info(f"[CACHE] Config pour {asset} chargée et stockée.")
+        return self.asset_configs[asset]
 
     def attach_phase_observer(self, phase_observer):
         """Attache/met à jour le PhaseObserver après coup, en appliquant le flag de debug s'il existe."""

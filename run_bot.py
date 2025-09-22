@@ -785,6 +785,17 @@ def run_single_pipeline_cycle(
                 f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
             )
         print("=" * 60)
+        
+        # Charger configs des assets (une seule fois via cache du ConfigManager)
+        asset_configs = {}
+        for asset in tradeable_assets:
+            try:
+                cfg = config_manager.load_asset_config(asset)
+                if cfg:
+                    asset_configs[asset] = cfg
+            except Exception as e:
+                logger.warning(f"[{asset}] Impossible de charger la config: {e}")
+
 
         # Contexte global
         global_context = _build_global_context(

@@ -104,6 +104,34 @@ class ConfigManager:
 
         self._initialized = True
         self.logger.info("ConfigManager initialisé avec succès (Singleton).")
+        
+    def load_asset_config(self, asset: str) -> Dict[str, Any]:
+        """
+        Charge et met en cache la config d'un actif (EURUSD.json, GBPUSD.json, XAUUSD.json).
+        Si déjà en mémoire, retourne depuis le cache.
+        """
+        if not hasattr(self, "_asset_config_cache"):
+            self._asset_config_cache: Dict[str, Dict[str, Any]] = {}
+
+        if asset in self._asset_config_cache:
+            return self._asset_config_cache[asset]
+
+        config_dir = self.get("paths.assets_config", "config/assets_config/")
+        asset_path = Path(config_dir) / f"{asset}.json"
+
+        if not asset_path.is_file():
+            self.logger.warning(f"Config pour {asset} introuvable: {asset_path}")
+            return {}
+
+        try:
+            cfg = self.import_config(str(asset_path), fmt="json")
+            self._asset_config_cache[asset] = cfg
+            self.logger.info(f"[CACHE] Config {asset} chargée et mise en cache.")
+            return cfg
+        except Exception as e:
+            self.logger.error(f"Impossible de charger la config {asset}: {e}")
+            return {}
+
 
 
     def _reset_session_state(self) -> None:
