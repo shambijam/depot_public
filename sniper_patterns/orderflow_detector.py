@@ -12,7 +12,10 @@ Retourne un tableau brut de signaux factuels.
 """
 
 import pandas as pd
+import logging
 from typing import List, Dict, Any, Optional
+
+LOG = logging.getLogger(__name__)
 
 
 def detect_orderflow(
@@ -68,7 +71,6 @@ def detect_orderflow(
                     extra["footprint"] = f"buy>{buy_aggr},sell>{sell_aggr}"
 
             # === 4️⃣ Détection Iceberg ===
-            # Hypothèse : exécution répétée à même prix avec volumes anormalement stables
             if "executions_count" in df.columns and "avg_exec_size" in df.columns:
                 exec_count = df["executions_count"].iloc[i]
                 avg_size = df["avg_exec_size"].iloc[i]
@@ -97,7 +99,7 @@ def detect_orderflow(
                 signals.append(None)
 
         except Exception as e:
-            print(f"Erreur orderflow_detector à l’index {i}: {e}")
+            LOG.error(f"[OrderflowDetector] Erreur à l’index {i}: {e}")
             signals.append(None)
 
     return signals

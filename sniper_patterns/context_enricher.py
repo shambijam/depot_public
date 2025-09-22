@@ -16,6 +16,8 @@ Objectif : Ajouter une lecture "desk-trader" aux signaux bruts :
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from core.utils import normalize_signals
+import logging
+LOG = logging.getLogger(__name__)
 
 
 
@@ -44,7 +46,6 @@ def position_in_range(close: float, high: float, low: float) -> str:
     else:
         return "haut"
 
-
 def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) -> List[Optional[Dict[str, Any]]]:
     """
     Enrichit chaque signal brut avec :
@@ -63,7 +64,7 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
     error_count = 0
 
     for i, sig in enumerate(signals):
-        print(f"[DEBUG] enrich_context i={i}, type(sig)={type(sig)}, len(df)={len(df)}")
+        LOG.debug(f"enrich_context i={i}, type(sig)={type(sig)}, len(df)={len(df)}")
 
         if not sig:
             enriched.append(None)
@@ -72,7 +73,7 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
 
         # 🚨 Protection contre l’out-of-bounds
         if i >= len(df):
-            print(f"[ContextEnricher] Skip index {i}: hors du DataFrame (len(df)={len(df)})")
+            LOG.warning(f"[ContextEnricher] Skip index {i}: hors du DataFrame (len(df)={len(df)})")
             enriched.append(sig)
             skipped_count += 1
             continue
@@ -121,14 +122,15 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
             ok_count += 1
 
         except Exception as e:
-            print(f"[ContextEnricher] Erreur enrichissement index {i}: {e}")
+            LOG.error(f"[ContextEnricher] Erreur enrichissement index {i}: {e}")
             enriched.append(sig)
             error_count += 1
 
     # 🔹 Résumé final
-    print(
+    LOG.info(
         f"[ContextEnricher] Résumé → Total={len(signals)} | Enrichis={ok_count} | Skippés={skipped_count} | Erreurs={error_count}"
     )
 
     return enriched
+
 

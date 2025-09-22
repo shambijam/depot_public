@@ -1,4 +1,4 @@
-# sniper_patterns/multi_tf_confirmer.py
+#  sniper_patterns/multi_tf_confirmer.py
 
 """
 Multi-timeframe confirmer
@@ -8,8 +8,11 @@ est confirmé par une ou plusieurs timeframes supérieures.
 """
 
 import pandas as pd
+import logging
 from typing import List, Dict, Any, Optional
 from core.utils import normalize_signals
+
+LOG = logging.getLogger(__name__)
 
 
 def confirm_multi_tf(
@@ -51,7 +54,7 @@ def confirm_multi_tf(
             enriched.append(new_sig)
 
         except Exception as e:
-            print(f"[MultiTFConfirmer] Erreur à l'index {i}: {e}")
+            LOG.error(f"[MultiTFConfirmer] Erreur à l'index {i}: {e}")
             enriched.append(sig)
 
     return enriched

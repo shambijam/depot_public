@@ -406,18 +406,24 @@ class DecisionPipeline:
 
                     decision = None
                     try:
-                        # attempt common signature
-                        decision = evaluate_fn(
-                            asset,
-                            market_df,
-                            sig,
-                            context,
-                            (
-                                strat_inst.get_parameters()
-                                if hasattr(strat_inst, "get_parameters")
-                                else {}
-                            ),
-                        )
+                        if strat_name.lower() == "scalping":
+                            # Signature: (asset, analyzed_context, asset_signals)
+                            decision = evaluate_fn(
+                                asset,
+                                context,
+                                sig,
+                            )
+                        elif strat_name.lower() == "liquidity":
+                            # Signature: (context, signals) — Liquidity choisit elle-même le meilleur asset
+                            decision = evaluate_fn(
+                                context,
+                                signals,
+                            )
+                        else:
+                            # 🔒 Si tu ajoutes d'autres stratégies plus tard
+                            self.logger.warning(f"[DECISION] Signature non gérée pour {strat_name}, skip.")
+                            decision = None
+
                     except TypeError:
                         # fallback to simpler signature (context, signals)
                         try:
