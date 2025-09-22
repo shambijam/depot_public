@@ -8,7 +8,8 @@ from typing import List, Dict, Any, Optional
 
 # Briques fonctionnelles
 from .candle_detector import detect_single_candle
-from .multi_candle_detector import detect_multi_candle_patterns
+# pattern_engine.py
+from .multi_candle_detector import detect_multi_candle
 from .combo_detector import detect_combos
 from .context_enricher import enrich_context
 from .structure_detector import enrich_structure
@@ -89,7 +90,8 @@ class PatternEngine:
         candle_signals = [detect_single_candle(df, i, patterns=self.patterns) for i in range(len(df))]
 
         # 2️⃣ Multi-bougies
-        multi_signals = detect_multi_candle_patterns(df, patterns=self.patterns)
+        multi_signals = detect_multi_candle(df, patterns=self.patterns)
+
 
         # 3️⃣ Combos fusionnés
         combo_signals = detect_combos(df, patterns=self.patterns) if with_combo else []

@@ -635,22 +635,29 @@ class DecisionPipeline:
             }
             analyzed_context["execution_context"] = execution_context
 
-            # 5) Décision finale
+          # 5) Décision finale
             print("🤖 [DECISION] Étape 5: Décision de trade finale...")
-            action_raw = (td.get("action") or "").strip().upper()
-            has_action = action_raw in {"BUY", "SELL", "CLOSE"}
-            status = str(td.get("execution_status") or "").lower()
-            if not has_action:
+
+            if td is None:
+                action_raw = ""
+                has_action = False
+                status = ""
                 label = "AUCUN"
             else:
-                if status in {"filled", "placed"}:
-                    label = "TRADE EXÉCUTÉ"
-                elif status == "pending_manual_approval":
-                    label = "EN ATTENTE VALIDATION"
-                elif status == "ready":
-                    label = "PRÊT (DRY RUN)"
+                action_raw = (td.get("action") or "").strip().upper()
+                has_action = action_raw in {"BUY", "SELL", "CLOSE"}
+                status = str(td.get("execution_status") or "").lower()
+                if not has_action:
+                    label = "AUCUN"
                 else:
-                    label = "TRADE DÉCIDÉ"
+                    if status in {"filled", "placed"}:
+                        label = "TRADE EXÉCUTÉ"
+                    elif status == "pending_manual_approval":
+                        label = "EN ATTENTE VALIDATION"
+                    elif status == "ready":
+                        label = "PRÊT (DRY RUN)"
+                    else:
+                        label = "TRADE DÉCIDÉ"
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
 
