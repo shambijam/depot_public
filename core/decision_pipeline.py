@@ -668,14 +668,18 @@ class DecisionPipeline:
                 print("   " + line)
             print("============================================================")
 
+           # Sécurise la récupération du volume
+            volume = (td or {}).get("volume", 0)
+
             self.logger.info(
                 "3️⃣ DÉCISION RETOURNÉE:\n"
                 f"   Strategy: {chosen_strategy}\n"
                 f"   Action: {action_raw}\n"
                 f"   Asset: {chosen_asset}\n"
-                f"   Volume: {td.get('volume', 0)}\n"
+                f"   Volume: {volume}\n"
                 f"   Statut: {label}"
             )
+
             analyzed_context["__decision_logged"] = True
 
             return {
