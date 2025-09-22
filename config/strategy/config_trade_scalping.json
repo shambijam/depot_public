@@ -18,7 +18,12 @@
       "liquidity_eqh_eql",
       "range_retail",
       "transitional"
-    ]
+    ],
+    "lookback_window": 12,
+    "volatility_threshold": 0.0,
+    "volume_zscore": 0.0,
+    "eq_level_tolerance": 0.0,
+    "impulse_threshold": 0.0
   },
   "entry_rules": {
     "scalping": {
