@@ -18,6 +18,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
+from sniper_patterns.pattern_engine import PatternEngine
 
 
 load_dotenv()
@@ -698,6 +699,48 @@ def run_single_pipeline_cycle(
                     )
                     or {}
                 )
+                # ---------- Enrichissement via sniper_patterns.PatternEngine ----------
+                try:
+                    # Petit garde-fou sur la taille du DF (évite sur-traitement)
+                    if annotated_rates_df is not None and len(annotated_rates_df) >= 20:
+                        pe = PatternEngine()
+                        try:
+                            # analyse complète (combo/orderflow/multi-candle/structure)
+                            pe_results = pe.analyze(annotated_rates_df.copy(), with_combo=True)
+                        except TypeError:
+                            # fallback si l'API analyse attend d'autres paramètres
+                            pe_results = pe.analyze(annotated_rates_df.copy())
+
+                        # Merge contrôlé des résultats dans les signaux (préfixe pattern_)
+                        if isinstance(pe_results, dict):
+                            # Conserver les clés utiles sans écraser les champs existants
+                            if pe_results.get("combo_signals"):
+                                signals["pattern_combo_signals"] = pe_results.get("combo_signals")
+                            if pe_results.get("orderflow_signals"):
+                                signals["pattern_orderflow"] = pe_results.get("orderflow_signals")
+                            if pe_results.get("multi_candle_patterns"):
+                                signals["pattern_multi_candles"] = pe_results.get("multi_candle_patterns")
+                            if pe_results.get("structure_signals"):
+                                signals["pattern_structure"] = pe_results.get("structure_signals")
+                            # toute autre clé utile
+                            for k in ("confidence_overview", "quality_metrics"):
+                                if pe_results.get(k):
+                                    signals.setdefault("pattern_metrics", {})[k] = pe_results.get(k)
+
+                        # Latest single-pattern convenience (utilisé ailleurs)
+                        try:
+                            latest_pat = pe.latest_signal(annotated_rates_df)
+                            if latest_pat:
+                                signals["latest_pattern"] = latest_pat
+                        except Exception:
+                            # non bloquant
+                            pass
+                    else:
+                        logger.debug(f"[{asset}] PatternEngine skipped (DF trop petit).")
+                except Exception as e:
+                    # Ne doit jamais casser le pipeline : on log et on continue
+                    logger.warning(f"[{asset}] PatternEngine non appliqué: {e}")
+
 
                 # Phase & score (avec fallbacks)
                 signals["phase"] = str(
