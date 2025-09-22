@@ -4,6 +4,9 @@ import sys
 import os # Nécessaire pour les variables d'environnement si les modules internes les lisent directement
 from pathlib import Path
 from dotenv import load_dotenv
+import sys, os
+sys.path.append(os.path.dirname(__file__))
+
 
 # Configurer un logger de base pour cli.py avant l'initialisation complète du logging
 # (ceci sera surchargé par setup_production_logging dans main.py)
