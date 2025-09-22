@@ -11,7 +11,12 @@ import pandas as pd
 from typing import Dict, Any, Optional
 
 
-def detect_single_candle(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+def detect_single_candle(
+    df: pd.DataFrame,
+    i: int,
+    patterns: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+
     try:
         o, h, l, c = df["open"].iloc[i], df["high"].iloc[i], df["low"].iloc[i], df["close"].iloc[i]
         body = abs(c - o)
