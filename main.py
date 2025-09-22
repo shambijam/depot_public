@@ -243,87 +243,57 @@ def verify_environment_and_config(
 
     Args:
         config_manager (ConfigManager): Une instance de ConfigManager avec la configuration chargée.
-        mt5_connector (MT5Connector): Une instance de MT5Connector pour les tests de connexion MT5.
+        mt5_connector (MT5Connector): Une instance de MT5Connector (utilisé plus tard pour la connexion persistante).
         bot_mode (str): Le mode d'exécution du bot ('DEMO' ou 'LIVE').
 
     Raises:
         SystemExit: Si des composants critiques sont manquants ou invalides.
-        RuntimeError: Si la connexion MT5 échoue pendant la vérification initiale.
     """
-    logger = logging.getLogger(__name__)  # Utilise le logger local
-    logger.info(
-        "Vérification de l'environnement de production et de la configuration chargée..."
-    )
+    logger = logging.getLogger(__name__)
+    logger.info("Vérification de l'environnement de production et de la configuration chargée...")
 
+    # --- Vérification de la configuration dynamique ---
     try:
-        # Accéder à la configuration dynamique déjà chargée
         current_config = config_manager.get_current_dynamic_config()
         if not current_config:
-            logger.critical(
-                "FATAL: La configuration dynamique est vide après l'initialisation. Le bot ne peut pas continuer."
-            )
+            logger.critical("FATAL: La configuration dynamique est vide après l'initialisation. Le bot ne peut pas continuer.")
             sys.exit(1)
         logger.info("Configuration dynamique accédée avec succès pour vérification.")
     except Exception as e:
-        logger.critical(
-            f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}",
-            exc_info=True,
-        )
+        logger.critical(f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}", exc_info=True)
         sys.exit(1)
 
-    # Vérifier la présence du modèle AI (chemin et nom lus dynamiquement)
+    # --- Vérification du modèle IA ---
     models_dir = config_manager.get("paths.models", "models/")
     ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
-
     model_path = Path(models_dir) / ai_model_name
     if not model_path.is_file():
         logger.critical(
-            f"FATAL: Modèle IA non trouvé à '{model_path}'. Le bot ne peut pas démarrer sans modèle IA. Veuillez télécharger le modèle GGUF."
+            f"FATAL: Modèle IA non trouvé à '{model_path}'. Le bot ne peut pas démarrer sans modèle IA. "
+            f"Veuillez télécharger le modèle GGUF."
         )
         sys.exit(1)
     logger.info(f"Modèle IA trouvé : {model_path}")
 
-    # Vérification des identifiants MT5 via ConfigManager (qui les a chargés depuis .env)
-    active_mt5_account_details = None
+    # --- Vérification des identifiants MT5 (sans tentative de connexion ici) ---
     try:
-        active_mt5_account_details = config_manager.get_mt5_account_credentials(
-            mode=bot_mode
-        )
+        active_mt5_account_details = config_manager.get_mt5_account_credentials(mode=bot_mode)
         if active_mt5_account_details is None:
             logger.critical(
-                f"FATAL: Aucun compte MT5 actif ou valide n'a pu être trouvé pour le mode '{bot_mode}'. Vérifiez la configuration dans 'broker_accounts.json' et les variables d'environnement."
+                f"FATAL: Aucun compte MT5 actif ou valide n'a pu être trouvé pour le mode '{bot_mode}'. "
+                f"Vérifiez la configuration dans 'broker_accounts.json' et les variables d'environnement."
             )
             sys.exit(1)
 
         logger.info(
-            f"Compte MT5 actif sélectionné pour vérification : '{active_mt5_account_details['account_id']}' (Login: {active_mt5_account_details['login']})."
+            f"Compte MT5 actif détecté pour le mode '{bot_mode}' : "
+            f"'{active_mt5_account_details['account_id']}' (Login: {active_mt5_account_details['login']})."
         )
-
-        # Vérification proactive de la connexion MT5 avec le compte sélectionné
-        if not mt5_connector.connect(active_mt5_account_details):
-            raise RuntimeError(
-                f"La connexion initiale à MetaTrader 5 a échoué pour le compte '{active_mt5_account_details['account_id']}'. Veuillez vérifier les identifiants et le statut du terminal."
-            )
-        logger.info(
-            "Connexion MT5 vérifiée avec succès (connexion/déconnexion initiale)."
-        )
-    except (ValueError, RuntimeError) as e:
-        logger.critical(
-            f"FATAL: Échec de la configuration ou de la connexion MT5 : {e}",
-            exc_info=True,
-        )
+    except Exception as e:
+        logger.critical(f"FATAL: Erreur lors du chargement des identifiants MT5 : {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        if mt5_connector.is_connected:
-            try:
-                mt5_connector.disconnect()
-                logger.info("Déconnecté de MetaTrader 5 après vérification initiale.")
-            except Exception as e:
-                logger.warning(
-                    f"Erreur lors de la déconnexion de MetaTrader 5 après vérification: {e}"
-                )
 
-    # Vérifier les identifiants Telegram (crucial pour le monitoring en production si activé)
+    # --- Vérification des identifiants Telegram ---
     telegram_token = config_manager.get("env_vars.TELEGRAM_BOT_TOKEN")
     telegram_chat_id = config_manager.get("env_vars.TELEGRAM_CHAT_ID")
 
@@ -331,21 +301,16 @@ def verify_environment_and_config(
         telegram_globally_enabled = config_manager.get("telegram.enabled", False)
         if telegram_globally_enabled:
             logger.critical(
-                "FATAL: Le bot token ou l'ID de chat Telegram est manquant dans les variables d'environnement chargées par ConfigManager. Les notifications Telegram sont critiques pour le monitoring en production quand activées. Sortie du bot."
+                "FATAL: Le bot token ou l'ID de chat Telegram est manquant. "
+                "Les notifications Telegram sont critiques pour le monitoring en production quand activées."
             )
             sys.exit(1)
         else:
-            logger.warning(
-                "Les notifications Telegram sont globalement désactivées et les identifiants ne sont pas définis. Le bot continue sans alertes Telegram."
-            )
+            logger.warning("Les notifications Telegram sont globalement désactivées. Le bot continue sans alertes Telegram.")
     else:
-        logger.info(
-            "Identifiants Telegram chargés (via ConfigManager depuis les variables d'environnement)."
-        )
+        logger.info("Identifiants Telegram chargés (via ConfigManager depuis les variables d'environnement).")
 
-    logger.info(
-        "Vérification de la configuration et de l'environnement terminée avec succès."
-    )
+    logger.info("Vérification de la configuration et de l'environnement terminée avec succès.")
 
 
 def main(args: argparse.Namespace) -> None:
