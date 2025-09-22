@@ -77,44 +77,273 @@ class PatternEngine:
             LOG.exception("Erreur chargement patterns JSON: %s", e)
             return {}
 
-    def analyze(self, df: pd.DataFrame, with_combo: bool = True) -> Dict[str, List[Dict[str, Any]]]:
-        if df is None or len(df) < 5:
+    def analyze(self, df: pd.DataFrame, with_combo: bool = True, detailed: bool = False) -> Dict[str, Any]:
+        """
+        Version Dev-Desk (banque privée) de l'analyse des patterns.
+
+        - Retourne des listes **alignées** sur len(df) pour chaque type de signal :
+        * candle_signals: List[Optional[Dict]]
+        * multi_signals:  List[Optional[List[Dict]]]
+        * combo_signals:  List[Optional[List[Dict]]]
+        * orderflow_signals: List[Optional[Dict]]
+
+        - Ajoute une section `meta` résumant le run.
+        - Flag `detailed` pour logs détaillés (trace par bougie).
+        - Résilient : normalise / pad / truncate les sorties pour éviter tout mismatch downstream.
+        """
+        # garde-temps / validations rapides
+        if df is None:
             return {
                 "candle_signals": [],
                 "multi_signals": [],
                 "combo_signals": [],
                 "orderflow_signals": [],
+                "meta": {"nb_rows": 0, "last_timestamp": None, "summary": {}},
+            }
+        n = len(df)
+        if n < 1:
+            return {
+                "candle_signals": [None] * n,
+                "multi_signals": [None] * n,
+                "combo_signals": [None] * n,
+                "orderflow_signals": [None] * n,
+                "meta": {"nb_rows": n, "last_timestamp": None, "summary": {}},
             }
 
-        # 1️⃣ Bougies simples (1 signal par bougie, None si rien)
-        candle_signals = [
-            detect_single_candle(df, i, patterns=self.patterns) 
-            for i in range(len(df))
-        ]
-        candle_signals = [s for s in candle_signals if s]  # ✅ filtre None → liste plate
+        # ---------- helpers locaux ----------
+        def _ensure_len(lst, name: str):
+            # tronque ou pad avec None pour garantir len == n
+            if lst is None:
+                return [None] * n
+            if len(lst) == n:
+                return lst
+            if len(lst) > n:
+                LOG.debug("PatternEngine._ensure_len: truncating %s from %d to %d", name, len(lst), n)
+                return lst[:n]
+            # pad
+            LOG.debug("PatternEngine._ensure_len: padding %s from %d to %d", name, len(lst), n)
+            return list(lst) + [None] * (n - len(lst))
 
-        # 2️⃣ Multi-bougies (liste plate déjà corrigée)
-        multi_signals = detect_multi_candle(df, patterns=self.patterns)
+        def _compute_context_at(i_idx: int) -> Dict[str, Any]:
+            # réimplémentation légère et robuste du context_enricher pour usage par-signal
+            ctx: Dict[str, Any] = {}
+            try:
+                high = df["high"].iloc[i_idx]
+                low = df["low"].iloc[i_idx]
+                close = df["close"].iloc[i_idx]
+                candle_size = high - low
+                atr = df["atr"].iloc[i_idx] if "atr" in df.columns else candle_size
 
-        # 3️⃣ Combos fusionnés
-        combo_signals = detect_combos(df, patterns=self.patterns) if with_combo else []
+                # volatilité qualitative
+                if atr <= 0:
+                    ctx["volatility"] = "inconnu"
+                else:
+                    r = candle_size / atr
+                    ctx["volatility"] = "faible" if r < 0.8 else "normale" if r < 1.5 else "élevée"
 
-        # 4️⃣ Order Flow
-        orderflow_signals = detect_orderflow(df, patterns=self.patterns) if self.enable_orderflow else []
+                # position in range
+                if high == low:
+                    ctx["range_position"] = "inconnu"
+                else:
+                    rel = (close - low) / (high - low)
+                    ctx["range_position"] = "bas" if rel < 0.33 else "milieu" if rel < 0.66 else "haut"
 
-        # 5️⃣ Enrichissements (optionnels)
-        if self.enable_context:
-            combo_signals = enrich_context(df, combo_signals)
-        if self.enable_structure:
-            combo_signals = enrich_structure(df, combo_signals)
-        if self.enable_multi_tf:
-            combo_signals = confirm_multi_tf(df, combo_signals)
+                # volume
+                if "volume_zscore" in df.columns:
+                    try:
+                        vz = float(df["volume_zscore"].iloc[i_idx])
+                        ctx["volume_zscore"] = vz
+                        ctx["volume_anomaly"] = abs(vz) > 2
+                    except Exception:
+                        ctx["volume_zscore"] = None
+                        ctx["volume_anomaly"] = False
+                else:
+                    ctx["volume_zscore"] = None
+                    ctx["volume_anomaly"] = False
+
+                # structure proximity
+                for key in ("ob_zone", "fvg", "bos"):
+                    ctx[f"near_{key}"] = key in df.columns and not pd.isna(df[key].iloc[i_idx])
+                ctx["high_confluence"] = sum(1 for k in ("ob_zone", "fvg", "bos") if ctx.get(f"near_{k}", False)) >= 2
+
+                # phase
+                if "phase" in df.columns:
+                    ctx["phase"] = str(df["phase"].iloc[i_idx])
+
+            except Exception as e:
+                LOG.debug("PatternEngine._compute_context_at error at %d: %s", i_idx, e)
+            return ctx
+
+        # ---------- 1) Candles (aligned, one dict or None per index) ----------
+        candle_signals = [None] * n
+        for i in range(n):
+            try:
+                s = detect_single_candle(df, i, patterns=self.patterns)
+                candle_signals[i] = s if s else None
+            except Exception as e:
+                LOG.error("PatternEngine.analyze: detect_single_candle error idx=%d -> %s", i, e)
+                candle_signals[i] = None
+
+        # ---------- 2) Multi-candle (aligned, list per index or None) ----------
+        multi_signals: List[Optional[List[Dict[str, Any]]]] = [None] * n
+        for i in range(n):
+            try:
+                res = detect_multi_candle(df, i, patterns=self.patterns)  # returns list (0..m) for that index
+                multi_signals[i] = res if res else None
+            except Exception as e:
+                LOG.error("PatternEngine.analyze: detect_multi_candle error idx=%d -> %s", i, e)
+                multi_signals[i] = None
+
+        # ---------- 3) Combo signals (use detect_combos which should be aligned already) ----------
+        combo_raw = detect_combos(df, patterns=self.patterns) if with_combo else [None] * n
+        combo_signals = _ensure_len(combo_raw, "combo_signals")
+
+        # ---------- 4) Orderflow (aligned) ----------
+        orderflow_raw = detect_orderflow(df, patterns=self.patterns) if self.enable_orderflow else [None] * n
+        orderflow_signals = _ensure_len(orderflow_raw, "orderflow_signals")
+
+        # ---------- 5) Enrichissements appliqués localement (pour garder robustesse) ----------
+        # Context & structure & multi-tf confirmation: appliqués sur chaque signal individuel présent
+        for i in range(n):
+            ctx = _compute_context_at(i)
+
+            # structure snippet
+            struct = {
+                "near_ob": "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i]),
+                "near_fvg": "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i]),
+                "near_bos": "bos" in df.columns and not pd.isna(df["bos"].iloc[i]),
+            }
+
+            # a) enrich combos (combo_signals may be list of dicts or None)
+            if combo_signals[i]:
+                try:
+                    enriched_list = []
+                    for elem in combo_signals[i]:
+                        # defensive copy
+                        e = dict(elem)
+                        if self.enable_context:
+                            e["context"] = ctx
+                        if self.enable_structure:
+                            e["structure"] = struct
+                        # multi-tf quick confirmation (pattern_m5/pattern_m15 presence)
+                        confirmed = []
+                        for tf in ("pattern_m5", "pattern_m15"):
+                            if tf in df.columns and e.get("pattern") and df[tf].iloc[i] == e.get("pattern"):
+                                confirmed.append(tf.upper())
+                        if confirmed:
+                            e["confirmed_tf"] = confirmed
+                            e["is_multi_tf_confirmed"] = True
+                        else:
+                            e.setdefault("confirmed_tf", [])
+                            e.setdefault("is_multi_tf_confirmed", False)
+                        enriched_list.append(e)
+                    combo_signals[i] = enriched_list
+                except Exception as ex:
+                    LOG.error("PatternEngine.analyze: error enriching combo at idx=%d -> %s", i, ex)
+                    # leave original
+
+            # b) enrich multi_signals list-of-patterns
+            if multi_signals[i]:
+                try:
+                    enriched_multi = []
+                    for elem in multi_signals[i]:
+                        e = dict(elem)
+                        if self.enable_context:
+                            e["context"] = ctx
+                        if self.enable_structure:
+                            e["structure"] = struct
+                        # confirmed tf
+                        confirmed = []
+                        for tf in ("pattern_m5", "pattern_m15"):
+                            if tf in df.columns and e.get("pattern") and df[tf].iloc[i] == e.get("pattern"):
+                                confirmed.append(tf.upper())
+                        if confirmed:
+                            e["confirmed_tf"] = confirmed
+                            e["is_multi_tf_confirmed"] = True
+                        else:
+                            e.setdefault("confirmed_tf", [])
+                            e.setdefault("is_multi_tf_confirmed", False)
+                        enriched_multi.append(e)
+                    multi_signals[i] = enriched_multi
+                except Exception as ex:
+                    LOG.error("PatternEngine.analyze: error enriching multi at idx=%d -> %s", i, ex)
+
+            # c) optionally attach simple context to single candle signals (if present)
+            if candle_signals[i]:
+                try:
+                    e = dict(candle_signals[i])
+                    if self.enable_context:
+                        e["context"] = ctx
+                    if self.enable_structure:
+                        e["structure"] = struct
+                    # confirmed tf for single candle
+                    confirmed = []
+                    for tf in ("pattern_m5", "pattern_m15"):
+                        if tf in df.columns and e.get("pattern") and df[tf].iloc[i] == e.get("pattern"):
+                            confirmed.append(tf.upper())
+                    if confirmed:
+                        e["confirmed_tf"] = confirmed
+                        e["is_multi_tf_confirmed"] = True
+                    candle_signals[i] = e
+                except Exception as ex:
+                    LOG.debug("PatternEngine.analyze: failed to enrich candle idx=%d -> %s", i, ex)
+
+            # d) orderflow signals enrichment (attach timestamp/index if missing)
+            if orderflow_signals[i]:
+                try:
+                    of = dict(orderflow_signals[i])
+                    of.setdefault("index", i)
+                    of.setdefault("timestamp", str(df.index[i]) if hasattr(df.index, "dtype") else None)
+                    orderflow_signals[i] = of
+                except Exception:
+                    pass
+
+            # detailed log per-index
+            if detailed:
+                try:
+                    LOG.info(
+                        "PatternEngine[IDX=%d] candle=%s | multi=%s | combo=%s | of=%s",
+                        i,
+                        bool(candle_signals[i]),
+                        bool(multi_signals[i]),
+                        bool(combo_signals[i]),
+                        bool(orderflow_signals[i]),
+                    )
+                except Exception:
+                    pass
+
+        # ---------- 6) Meta / Résumé ----------
+        def _count_entries(aligned_list):
+            if aligned_list is None:
+                return 0
+            cnt = 0
+            for item in aligned_list:
+                if item is None:
+                    continue
+                # if list (multiple patterns) count elements, if dict count 1
+                if isinstance(item, list):
+                    cnt += len(item)
+                else:
+                    cnt += 1
+            return cnt
+
+        meta = {
+            "nb_rows": n,
+            "last_timestamp": str(df.index[-1]) if n and hasattr(df.index, "__len__") else None,
+            "summary": {
+                "candles": _count_entries(candle_signals),
+                "multi": _count_entries(multi_signals),
+                "combos": _count_entries(combo_signals),
+                "orderflow": _count_entries(orderflow_signals),
+            },
+        }
 
         return {
             "candle_signals": candle_signals,
             "multi_signals": multi_signals,
             "combo_signals": combo_signals,
             "orderflow_signals": orderflow_signals,
+            "meta": meta,
         }
 
     def latest_signal(self, df: pd.DataFrame, prefer_combo: bool = True, prefer_orderflow: bool = False) -> Optional[Dict[str, Any]]:

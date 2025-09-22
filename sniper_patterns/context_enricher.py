@@ -63,17 +63,21 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
     skipped_count = 0
     error_count = 0
 
-    for i, sig in enumerate(signals):
-        LOG.debug(f"enrich_context i={i}, type(sig)={type(sig)}, len(df)={len(df)}")
+    max_idx = len(df) - 1  # borne max du DataFrame
 
+    for i, sig in enumerate(signals):
         if not sig:
             enriched.append(None)
             skipped_count += 1
             continue
 
-        # 🚨 Protection contre l’out-of-bounds
-        if i >= len(df):
-            LOG.warning(f"[ContextEnricher] Skip index {i}: hors du DataFrame (len(df)={len(df)})")
+        # 🚨 Protection stricte contre l’out-of-bounds
+        if i > max_idx:
+            if i == max_idx + 1:
+                # On logge une seule fois le dépassement, pas pour chaque index suivant
+                LOG.warning(
+                    f"[ContextEnricher] Stop enrichissement: index {i} hors du DataFrame (len(df)={len(df)})"
+                )
             enriched.append(sig)
             skipped_count += 1
             continue
@@ -132,5 +136,3 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
     )
 
     return enriched
-
-

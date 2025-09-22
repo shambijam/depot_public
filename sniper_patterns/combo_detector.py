@@ -1,16 +1,19 @@
 # sniper_patterns/combo_detector.py
 
 import pandas as pd
+import logging
 from typing import List, Dict, Any, Optional
 
 from .candle_detector import detect_single_candle
-from .multi_candle_detector import detect_multi_candle_patterns
+from .multi_candle_detector import detect_multi_candle
+
+LOG = logging.getLogger(__name__)
 
 
 def detect_combos(
     df: pd.DataFrame,
     patterns: Optional[Dict[str, Any]] = None
-) -> List[Optional[Dict[str, Any]]]:
+) -> List[Optional[List[Dict[str, Any]]]]:
     """
     Détecteur desk-trader brut :
       - Chandeliers individuels (Doji, Hammer, etc.)
@@ -19,16 +22,12 @@ def detect_combos(
       - Confirmations multi-timeframe (pattern_m5 / pattern_m15)
 
     ❌ Aucun scoring → que du factuel.
-    ✅ Chaque bougie peut avoir plusieurs patterns détectés.
+    ✅ Chaque bougie a 0, 1 ou plusieurs patterns alignés à son index.
     """
-
     if df is None or len(df) < 5:
-        return []
+        return [None] * (len(df) if df is not None else 0)
 
-    signals: List[Optional[Dict[str, Any]]] = []
-
-    # Détection brute multi-bougies (déjà renvoie une liste avec potentiels multiples)
-    multi_signals = detect_multi_candle_patterns(df)
+    signals: List[Optional[List[Dict[str, Any]]]] = []
 
     for i in range(len(df)):
         try:
@@ -39,13 +38,10 @@ def detect_combos(
             if simple:
                 sigs.append({"source": "single", **simple})
 
-            # 2) Pattern(s) multi-bougies
-            if i < len(multi_signals) and multi_signals[i]:
-                if isinstance(multi_signals[i], list):
-                    for m in multi_signals[i]:
-                        sigs.append({"source": "multi", **m})
-                else:
-                    sigs.append({"source": "multi", **multi_signals[i]})
+            # 2) Pattern(s) multi-bougies (détection ponctuelle à l’index i)
+            multi_patterns = detect_multi_candle(df, i, patterns=patterns)
+            for m in multi_patterns:
+                sigs.append({"source": "multi", **m})
 
             if not sigs:
                 signals.append(None)
@@ -72,7 +68,7 @@ def detect_combos(
             signals.append(sigs)
 
         except Exception as e:
-            print(f"Erreur detect_combos à l'index {i}: {e}")
+            LOG.error(f"[ComboDetector] Erreur à l'index {i}: {e}")
             signals.append(None)
 
     return signals
