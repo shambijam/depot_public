@@ -55,6 +55,9 @@ def enrich_context(df: pd.DataFrame, signals: List[Optional[Dict[str, Any]]]) ->
       - OB/FVG/BOS
       - phase si dispo
     """
+    # 🔹 Normalisation universelle des signaux
+    signals = normalize_signals(signals)
+
     enriched: List[Optional[Dict[str, Any]]] = []
 
     for i, sig in enumerate(signals):

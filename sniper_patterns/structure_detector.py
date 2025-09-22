@@ -27,14 +27,11 @@ def enrich_structure(
     - BOS (Break of Structure)
     """
 
-    # 🔹 Patch : accepte dict ou None
-    if signals is None:
-        signals = []
-    elif isinstance(signals, dict):
-        signals = [signals]
+    # 🔹 Normalisation universelle des signaux
+    signals = normalize_signals(signals)
 
     enriched: List[Optional[Dict[str, Any]]] = []
-
+   
     for i, sig in enumerate(signals):
         if not sig:
             enriched.append(None)

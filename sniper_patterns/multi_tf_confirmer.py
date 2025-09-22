@@ -1,5 +1,4 @@
-#sniper_patterns/multi_tf_confirmer.py
-
+# sniper_patterns/multi_tf_confirmer.py
 
 """
 Multi-timeframe confirmer
@@ -11,7 +10,6 @@ est confirmé par une ou plusieurs timeframes supérieures.
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from core.utils import normalize_signals
-
 
 
 def confirm_multi_tf(
@@ -30,12 +28,8 @@ def confirm_multi_tf(
     :param signals: Liste des signaux détectés (ou un seul dict, ou None)
     :param tfs: Liste des colonnes à comparer
     """
-
-    # 🔹 Patch pour accepter dict / None / liste
-    if signals is None:
-        signals = []
-    elif isinstance(signals, dict):
-        signals = [signals]
+    # 🔹 Normalisation universelle des signaux
+    signals = normalize_signals(signals)
 
     enriched: List[Optional[Dict[str, Any]]] = []
 
@@ -61,4 +55,3 @@ def confirm_multi_tf(
             enriched.append(sig)
 
     return enriched
-
