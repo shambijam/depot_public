@@ -1228,6 +1228,19 @@ class ConfigManager:
             ) from e
 
     _schema_cache: Dict[str, Dict[str, Any]] = {}
+    
+    def parse_json_config(self, path: str) -> Dict[str, Any]:
+        """
+        Parse un fichier JSON et retourne son contenu sous forme de dict.
+        """
+        
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Erreur lors du parsing JSON pour {path}: {e}")
+            raise
+
 
     def validate_config(
         self, config: Dict[str, Any], soft_when_schema_missing: bool = True
