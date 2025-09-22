@@ -108,7 +108,8 @@ class ConfigManager:
     def load_asset_config(self, asset: str) -> Dict[str, Any]:
         """
         Charge et met en cache la config d'un actif (EURUSD.json, GBPUSD.json, XAUUSD.json).
-        Si déjà en mémoire, retourne depuis le cache.
+        Lecture directe du JSON sans passer par import_config() pour éviter la validation
+        stricte (compatible avec l'ancien comportement).
         """
         if not hasattr(self, "_asset_config_cache"):
             self._asset_config_cache: Dict[str, Dict[str, Any]] = {}
@@ -124,15 +125,17 @@ class ConfigManager:
             return {}
 
         try:
-            cfg = self.import_config(str(asset_path), fmt="json")
+            # Lecture directe du JSON (pas de validation/parsing via import_config)
+            with open(asset_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            # On met en cache le contenu tel quel (comportement antérieur)
             self._asset_config_cache[asset] = cfg
-            self.logger.info(f"[CACHE] Config {asset} chargée et mise en cache.")
+            self.logger.info(f"[CACHE] Config {asset} chargée et mise en cache (lecture JSON directe).")
             return cfg
         except Exception as e:
-            self.logger.error(f"Impossible de charger la config {asset}: {e}")
+            self.logger.error(f"Impossible de charger la config {asset}: {e}", exc_info=True)
             return {}
-
-
 
     def _reset_session_state(self) -> None:
         """
