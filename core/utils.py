@@ -116,18 +116,21 @@ def normalize_signals(
     Normalise l'entrée 'signals' pour garantir une liste cohérente :
       - None -> []
       - Dict -> [Dict]
-      - List -> inchangé
-
-    Exemple :
-        normalize_signals(None) -> []
-        normalize_signals({"pattern": "doji"}) -> [{"pattern": "doji"}]
-        normalize_signals([{"pattern": "hammer"}, {"pattern": "doji"}]) -> idem
+      - List de Dict -> inchangé
+      - List imbriquée -> aplatie
     """
     if signals is None:
         return []
     if isinstance(signals, dict):
         return [signals]
     if isinstance(signals, list):
-        return signals
+        flat = []
+        for s in signals:
+            if isinstance(s, list):   # cas liste imbriquée
+                flat.extend(s)
+            else:
+                flat.append(s)
+        return flat
     raise TypeError(f"[normalize_signals] Format inattendu: {type(signals)}")
+
 
