@@ -935,6 +935,33 @@ class ScalpingStrategy(BaseStrategy):
             return decision
 
         return None
+    
+        # --- Implémentations minimales obligatoires (héritage BaseStrategy) ---
+
+    def evaluate_exit(self, *args, **kwargs):
+        """
+        Méthode obligatoire : logique de sortie (StopLoss, TakeProfit, invalidation).
+        Patch minimal -> retourne None pour l'instant.
+        """
+        return None
+
+    def get_parameters(self):
+        """
+        Méthode obligatoire : renvoie les paramètres de la stratégie.
+        Ici on fixe XAUUSD comme actif unique.
+        """
+        return {"tradeable_assets": ["XAUUSD"]}
+
+    def update_strategy_parameters(self, new_params: dict):
+        """
+        Méthode obligatoire : met à jour la configuration interne.
+        Patch minimal -> fusionne simplement les paramètres reçus.
+        """
+        if hasattr(self, "strategy_config"):
+            self.strategy_config.update(new_params or {})
+        else:
+            self.strategy_config = new_params or {}
+
 
 
     # ==========================================================

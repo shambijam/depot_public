@@ -294,9 +294,8 @@ class DecisionPipeline:
             results = self.execute_strategies_and_collect_decisions(
                 dispatch_bundle, analyzed_context, signals
             )
-
-            final_decisions = results.get("final_decisions", [])
-            td = final_decisions[0] if final_decisions else {}
+            
+            td = results.get("final_decision") or {}
             chosen_strategy = td.get("strategy_type")
             chosen_asset = td.get("asset")
 
