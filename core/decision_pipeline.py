@@ -284,11 +284,11 @@ class DecisionPipeline:
                     "liquidity": {
                         "EURUSD": {
                             # signature: (config_manager, strategy_config=None, logger=None, asset=None)
-                            "instance": LiquidityStrategy(self.config_manager, sca_cfg, sca_logger),
+                            "instance": LiquidityStrategy(self.config_manager, sca_cfg, liq_logger),
                             "strategy_name": "liquidity",
                         },
                         "GBPUSD": {
-                            "instance": LiquidityStrategy(self.config_manager, sca_cfg, sca_logger),
+                            "instance": LiquidityStrategy(self.config_manager, sca_cfg, liq_logger),
                             "strategy_name": "liquidity",
                         },
                     },

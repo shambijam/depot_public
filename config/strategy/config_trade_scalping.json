@@ -96,7 +96,7 @@
         "enabled": true,
         "sl_pips": 5,
         "burst_size": 3,
-        "max_spread_pips": 3.0,
+        "max_spread_pips": 20.0,
         "min_atr_m1_pips": 2.5,
         "tp_sl": {
           "trailing": {
