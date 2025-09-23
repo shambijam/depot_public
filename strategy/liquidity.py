@@ -28,6 +28,7 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #      PUBLIC METHODS
     # =========================
+
     def evaluate_entry(
         self, context: Dict[str, Any], signals: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -43,23 +44,6 @@ class LiquidityStrategy(BaseStrategy):
 
         from sniper_patterns.pattern_engine import PatternEngine
 
-        # --- Lecture patterns chandeliers (complément desk) ---
-        try:
-            md = (context.get("market_data") or {}).get(asset, {})
-            df_m1 = md.get("df_m1") or md.get("rates_df")
-            if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 20:
-                pe = PatternEngine()
-                pat_results = pe.analyze(df_m1, with_combo=True)
-                latest_pat = pe.latest_signal(df_m1)
-                if latest_pat:
-                    sig["latest_pattern"] = latest_pat
-                    self.logger.info(
-                        f"[LIQ] {asset} | Dernier pattern: "
-                        f"{latest_pat.get('pattern')} ({latest_pat.get('signal_type')})"
-                    )
-        except Exception as e:
-            self.logger.debug(f"[LIQ] PatternEngine skipped for {asset}: {e}")
-
         # Vérification stricte: ignorer les actifs hors whitelist (log d'info)
         invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
         if invalid_assets:
@@ -74,6 +58,23 @@ class LiquidityStrategy(BaseStrategy):
             sig = signals.get(asset) or {}
             if not sig:
                 continue
+
+            # --- Lecture patterns chandeliers (complément desk) ---
+            try:
+                md = (context.get("market_data") or {}).get(asset, {})
+                df_m1 = md.get("df_m1") or md.get("rates_df")
+                if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 20:
+                    pe = PatternEngine()
+                    pat_results = pe.analyze(df_m1, with_combo=True)
+                    latest_pat = pe.latest_signal(df_m1)
+                    if latest_pat:
+                        sig["latest_pattern"] = latest_pat
+                        self.logger.info(
+                            f"[LIQ] {asset} | Dernier pattern: "
+                            f"{latest_pat.get('pattern')} ({latest_pat.get('signal_type')})"
+                        )
+            except Exception as e:
+                self.logger.debug(f"[LIQ] PatternEngine skipped for {asset}: {e}")
 
             # Conditions cœur Liquidity
             sweep = bool(sig.get("sweep_detected", False))

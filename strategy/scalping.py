@@ -24,10 +24,16 @@ class ScalpingStrategy(BaseStrategy):
        laissés au moteur de SL/TP du TradeExecutor (_calculate_sl_tp_prices).
     """
 
-    def __init__(self, logger, config_manager):
-        self.logger = logger
+    def __init__(self, config_manager, logger=None):
+        """
+        Initialise la stratégie Scalping.
+        - config_manager : gestionnaire de configuration global
+        - logger : optionnel, sinon on récupère celui du config_manager
+        """
         self.config_manager = config_manager
-        self.detectors = Detectors(logger=logger, config_manager=config_manager)
+        self.logger = logger or getattr(config_manager, "logger", None)
+        self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
+
 
     # ==========================================================
     # =============   API PRINCIPALE (ENTRÉE)   ================
@@ -77,9 +83,7 @@ class ScalpingStrategy(BaseStrategy):
                 except Exception as e:
                     self.logger.warning(f"[{asset}] PatternEngine skipped: {e}")
 
-            strat_cfg = (
-                self.config_manager.get_strategy_config("scalping") or {}
-            ).copy()
+            strat_cfg = (self.strategy_config or {}).copy()
 
             # Compatibilité burst_scalping
             burst_cfg = (

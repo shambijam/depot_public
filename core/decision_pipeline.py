@@ -266,33 +266,35 @@ class DecisionPipeline:
             signals = analyzed_context.get("trading_signals", {}) or {}
 
             # Récupérer les configs de stratégie depuis le StrategyManager
-            liq_cfg = (self.strategy_manager.get_strategy_config("liquidity") 
-                    if self.strategy_manager else {}) or {}
-            sca_cfg = (self.strategy_manager.get_strategy_config("scalping") 
-                    if self.strategy_manager else {}) or {}
+            sca_cfg = self.strategy_manager.get_strategy_config("scalping") or {}
+            liq_cfg = self.strategy_manager.get_strategy_config("liquidity") or {}
+           
+            sca_logger = logging.getLogger("Strategy.Scalping")
+            liq_logger = logging.getLogger("Strategy.Liquidity")
 
             dispatch_bundle = {
                 "mapping": {
                     "scalping": {
                         "XAUUSD": {
-                            # ✅ ScalpingStrategy veut (logger, config_manager)
-                            "instance": ScalpingStrategy(self.logger, self.config_manager),
+                            # signature: (config_manager, strategy_config=None, logger=None)
+                            "instance": ScalpingStrategy(self.config_manager, sca_cfg, sca_logger),
                             "strategy_name": "scalping",
                         }
                     },
                     "liquidity": {
                         "EURUSD": {
-                            # ✅ LiquidityStrategy veut (config_manager, strategy_config)
-                            "instance": LiquidityStrategy(self.config_manager, liq_cfg),
+                            # signature: (config_manager, strategy_config=None, logger=None, asset=None)
+                            "instance": LiquidityStrategy(self.config_manager, liq_cfg, liq_logger, asset="EURUSD"),
                             "strategy_name": "liquidity",
                         },
                         "GBPUSD": {
-                            "instance": LiquidityStrategy(self.config_manager, liq_cfg),
+                            "instance": LiquidityStrategy(self.config_manager, liq_cfg, liq_logger, asset="GBPUSD"),
                             "strategy_name": "liquidity",
                         },
                     },
                 }
             }
+
             # 🔔 Log clair du dispatch fixe
             self.logger.info("📌 Dispatch fixe des stratégies activé :")
             self.logger.info("   - ScalpingStrategy -> XAUUSD")
@@ -302,10 +304,11 @@ class DecisionPipeline:
             results = self.execute_strategies_and_collect_decisions(
                 dispatch_bundle, analyzed_context, signals
             )
-            
+
             td = results.get("final_decision") or {}
             chosen_strategy = td.get("strategy_type")
             chosen_asset = td.get("asset")
+
 
             # 4) Adaptation config (fusion base + config stratégie choisie)
             print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
