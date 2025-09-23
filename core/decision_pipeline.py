@@ -261,25 +261,33 @@ class DecisionPipeline:
             print("🤖 [DECISION] Étape 2: Vérification IA...")
             print("🤖 [DECISION] IA désactivée")
 
-            # 3) Dispatch fixe (pas de scoring, pas de fallback)
+          # 3) Dispatch fixe (pas de scoring, pas de fallback)
             print("🤖 [DECISION] Étape 3: Dispatch des stratégies par actif...")
             signals = analyzed_context.get("trading_signals", {}) or {}
+
+            # Récupérer les configs de stratégie depuis le StrategyManager
+            liq_cfg = (self.strategy_manager.get_strategy_config("liquidity") 
+                    if self.strategy_manager else {}) or {}
+            sca_cfg = (self.strategy_manager.get_strategy_config("scalping") 
+                    if self.strategy_manager else {}) or {}
 
             dispatch_bundle = {
                 "mapping": {
                     "scalping": {
                         "XAUUSD": {
-                            "instance": ScalpingStrategy(self.config_manager),
+                            # ✅ ScalpingStrategy veut (logger, config_manager)
+                            "instance": ScalpingStrategy(self.logger, self.config_manager),
                             "strategy_name": "scalping",
                         }
                     },
                     "liquidity": {
                         "EURUSD": {
-                            "instance": LiquidityStrategy(self.config_manager),
+                            # ✅ LiquidityStrategy veut (config_manager, strategy_config)
+                            "instance": LiquidityStrategy(self.config_manager, liq_cfg),
                             "strategy_name": "liquidity",
                         },
                         "GBPUSD": {
-                            "instance": LiquidityStrategy(self.config_manager),
+                            "instance": LiquidityStrategy(self.config_manager, liq_cfg),
                             "strategy_name": "liquidity",
                         },
                     },

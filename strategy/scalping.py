@@ -936,31 +936,52 @@ class ScalpingStrategy(BaseStrategy):
 
         return None
     
-        # --- Implémentations minimales obligatoires (héritage BaseStrategy) ---
+         # --- API attendue par BaseStrategy (stubs fonctionnels) ---
+    def get_parameters(self) -> Dict[str, any]:
+        """
+        Retourne un snapshot des paramètres runtime de la stratégie (pour logs/diagnostic).
+        """
+        try:
+            sca_cfg = (self.config_manager.get_strategy_config("scalping") or {}).copy()
+        except Exception:
+            sca_cfg = {}
+        return {
+            "name": "scalping",
+            "configured": bool(sca_cfg),
+            "config_keys": list(sca_cfg.keys()),
+        }
 
-    def evaluate_exit(self, *args, **kwargs):
+    def update_strategy_parameters(self, **kwargs) -> None:
         """
-        Méthode obligatoire : logique de sortie (StopLoss, TakeProfit, invalidation).
-        Patch minimal -> retourne None pour l'instant.
+        Mise à jour dynamique de quelques paramètres légers (ex: seuils).
+        On reste défensif: on ne casse rien si une clé n’existe pas.
         """
-        return None
+        try:
+            sca_cfg = self.config_manager.get_strategy_config("scalping") or {}
+            changed = []
+            for k, v in kwargs.items():
+                if k in sca_cfg:
+                    sca_cfg[k] = v
+                    changed.append(k)
+            if changed:
+                # si tu as une API pour renvoyer la config modifiée dans le ConfigManager, appelle-la ici.
+                self.logger.info(f"[SCALPING] Params mis à jour: {changed}")
+        except Exception as e:
+            self.logger.warning(f"[SCALPING] update_strategy_parameters skipped: {e}")
 
-    def get_parameters(self):
+    def evaluate_exit(self, context: Dict[str, Any], open_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Méthode obligatoire : renvoie les paramètres de la stratégie.
-        Ici on fixe XAUUSD comme actif unique.
+        Politique de sortie par défaut (no-op) — renvoie une liste vide si pas de conditions spécifiques.
+        L’executor ou d’autres modules peuvent fermer les positions via trailing/SL/TP.
         """
-        return {"tradeable_assets": ["XAUUSD"]}
+        try:
+            # Exemple de garde-fou: on pourrait fermer des paniers "burst" sur condition extrême.
+            # Ici, on garde un comportement neutre : pas de force-close.
+            return []
+        except Exception as e:
+            self.logger.warning(f"[SCALPING] evaluate_exit skipped: {e}")
+            return []
 
-    def update_strategy_parameters(self, new_params: dict):
-        """
-        Méthode obligatoire : met à jour la configuration interne.
-        Patch minimal -> fusionne simplement les paramètres reçus.
-        """
-        if hasattr(self, "strategy_config"):
-            self.strategy_config.update(new_params or {})
-        else:
-            self.strategy_config = new_params or {}
 
 
 

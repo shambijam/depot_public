@@ -1030,7 +1030,8 @@ def run_single_pipeline_cycle(
                     if current_positions:
                         from strategy.liquidity import LiquidityStrategy
 
-                        liqui = LiquidityStrategy(config_manager)
+                        liq_cfg = (config_manager.get_strategy_config("liquidity") or {})
+                        liqui = LiquidityStrategy(config_manager, liq_cfg)
                         exit_decisions = liqui.evaluate_exit(
                             global_context, current_positions
                         )
