@@ -1,4 +1,134 @@
 {
+  "project": "SNIPER_X",
+  "mode_execution": "DEMO",
+  "log_level": "INFO",
+  "paths": {
+    "logs": "logs/",
+    "models": "models/",
+    "reports": "output/",
+    "configs": "config/",
+    "strategy_configs": "config/strategy/",
+    "asset_configs": "config/assets_config/",
+    "prompts": "config/prompts/",
+    "phase_observer_config": "config/phase_observer_config.json",
+    "telegram_config": "config/telegram_config.json",
+    "ai_history_log": "logs/suggestion_history.jsonl",
+    "ai_supervisor_logs_file": "logs/ai_supervisor_logs.jsonl",
+    "ai_supervisor_feedback_file": "logs/ai_supervisor_feedback.jsonl",
+    "backup_dir": "output/backups/",
+    "ai_audit": "config/ai_audit/"
+  },
+  "data_collection": {
+    "default_timeframe": "M1",
+    "default_bars_count": 200
+  },
+  "timeframe_mapping": {
+    "M1": {
+      "mt5_name": "TIMEFRAME_M1",
+      "minutes": 1,
+      "bars_min": 600,
+      "order": 1
+    },
+    "M5": {
+      "mt5_name": "TIMEFRAME_M5",
+      "minutes": 5,
+      "bars_min": 360,
+      "order": 2
+    },
+    "M15": {
+      "mt5_name": "TIMEFRAME_M15",
+      "minutes": 15,
+      "bars_min": 240,
+      "order": 3
+    },
+    "M30": {
+      "mt5_name": "TIMEFRAME_M30",
+      "minutes": 30,
+      "bars_min": 200,
+      "order": 4
+    },
+    "H1": {
+      "mt5_name": "TIMEFRAME_H1",
+      "minutes": 60,
+      "bars_min": 200,
+      "order": 5
+    }
+  },
+  "ai": {
+    "enabled": true,
+    "model_name": "llama-2-7b-chat.Q4_K_M.gguf",
+    "min_confidence": 0.6,
+    "apply_recommendation_threshold": 1.1,
+    "generation_params": {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "max_tokens": 2048,
+      "ideal_tokens_ratio": 0.75,
+      "stop_sequences": [
+        "User query:",
+        "\n```json",
+        "\n```",
+        "---",
+        "###",
+        "```python"
+      ]
+    },
+    "supervisor_settings": {
+      "suggestion_reminder_hours": 24,
+      "suggestion_reminder_priority": 0.7,
+      "log_sample_size": 10,
+      "historical_data_sample_size": 10,
+      "min_priority": 0.7,
+      "remind_after_hours": 24,
+      "reminder_multiplier": 0.5
+    },
+    "suggestion_settings": {
+      "default_initial_status": "pending"
+    },
+    "token_estimation_ratio": 4,
+    "token_estimation_encoding": "cl100k_base",
+    "opportunity_filtering": {
+      "max_shortlist_assets": 5,
+      "scoring_weights": {
+        "liquidity": 2.0,
+        "signal_confidence_multiplier": 1.5,
+        "institutional_phase_accumulation_distribution": 1.0,
+        "institutional_phase_trending": 0.5
+      },
+      "major_fx_pairs_for_correlation": [
+        "EURUSD",
+        "GBPUSD",
+        "XAUUSD"
+      ],
+      "min_signal_confidence": 0.01
+    },
+    "prompt_settings": {
+      "recent_price_data_points": 10,
+      "prompts_file_name": "prompts.yaml"
+    },
+    "min_confidence_expansion": 0.35,
+    "min_confidence_reversal": 0.5,
+    "strategy_selection_weight": 0.1,
+    "cache_settings": {
+      "enabled": true,
+      "ttl_seconds": 300
+    },
+    "audit_mode": {
+      "enabled": true,
+      "background_analysis": false,
+      "daily_report_enabled": false,
+      "daily_report_time": "23:55",
+      "observations_to_track": [
+        "all_decisions",
+        "rejected_opportunities",
+        "strategy_performance",
+        "signal_accuracy",
+        "market_regime_changes",
+        "confidence_score_distribution",
+        "phase_detection_accuracy"
+      ]
+    }
+  },
   "strategies": {
     "default_strategy": "scalping",
     "config_mapping": {
