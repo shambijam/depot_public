@@ -18,7 +18,7 @@
         "independent": true,
         "ignore_bollinger": true,
         "lookback_bars": 30,
-        "max_spread_pips": 5.0,
+        "max_spread_pips": 20.0,
         "min_atr_m1_pips": 0.25,
         "sweep": {
             "use_swings": true,
@@ -104,9 +104,9 @@
     },
     "confidence_score_calculation": {
         "liquidity_weights": {
-            "sweep_detected": 0.35,
-            "absorption_confirmed": 0.25,
-            "eqh_eql_detected": 0.2
+            "sweep_detected": 0.45,
+            "absorption_confirmed": 0.40,
+            "eqh_eql_detected": 0.3
         },
         "signal_weights": {
             "fvg_detected": 0.25,
