@@ -22,19 +22,16 @@ class LiquidityStrategy(BaseStrategy):
     #         LIFECYCLE
     # =========================
     def __init__(self, config_manager, strategy_config: Optional[Dict[str, Any]] = None, logger=None):
-        """
-        Initialise la stratégie Liquidity.
-        - config_manager : gestionnaire de configuration global
-        - strategy_config : configuration spécifique à la stratégie (chargée via StrategyManager)
-        - logger : optionnel, sinon on récupère celui du config_manager
-        """
-        super().__init__(config_manager)  # Initialise le socle commun BaseStrategy
+            """
+            Initialise la stratégie Liquidity.
+            """
+            super().__init__(config_manager, strategy_config or {})
 
-        self.config_manager = config_manager
-        self.strategy_config = strategy_config or {}
-        self.logger = logger or getattr(config_manager, "logger", None)
+            self.config_manager = config_manager
+            self.strategy_config = strategy_config or {}
+            self.logger = logger or getattr(config_manager, "logger", None)
 
-        self.logger.info("Moteur de stratégie Liquidity initialisé.")
+            self.logger.info("Moteur de stratégie Liquidity initialisé.")
 
     # =========================
     #      PUBLIC METHODS

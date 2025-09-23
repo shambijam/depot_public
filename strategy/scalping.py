@@ -27,22 +27,16 @@ class ScalpingStrategy(BaseStrategy):
     def __init__(self, config_manager, strategy_config: Optional[Dict[str, Any]] = None, logger=None):
         """
         Initialise la stratégie Scalping.
-        - config_manager : gestionnaire de configuration global
-        - strategy_config : configuration spécifique à la stratégie (chargée via StrategyManager)
-        - logger : optionnel, sinon on récupère celui du config_manager
         """
-        super().__init__(config_manager)  # initialise le tronc commun BaseStrategy
+        # Appel correct de BaseStrategy avec les deux arguments
+        super().__init__(config_manager, strategy_config or {})
 
         self.config_manager = config_manager
         self.strategy_config = strategy_config or {}
         self.logger = logger or getattr(config_manager, "logger", None)
 
-        # Initialiser les détecteurs (indicateurs/signaux)
-        self.detectors = Detectors(
-            logger=self.logger,
-            config_manager=config_manager,
-            strategy_config=self.strategy_config
-        )
+        # Initialisation des détecteurs
+        self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
