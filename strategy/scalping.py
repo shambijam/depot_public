@@ -484,10 +484,27 @@ class ScalpingStrategy(BaseStrategy):
                 d["target_tp_pips"] = float(tp_pips)
             decisions.append(d)
 
-        self.logger.info(
+            self.logger.info(
             f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
         )
-        return {"burst_decisions": decisions, "basket_id": basket_id}
+
+        # ✅ Transformation en décision standardisée
+        final_decision = {
+            "asset": asset,
+            "action": action,
+            "entry_price": entry_price,
+            "strategy_type": "scalping",
+            "rule_name": "burst_scalping",
+            "basket_id": basket_id,
+            "volume": size,
+            "meta": {
+                "burst": True,
+                "burst_size": size,
+                "decisions": decisions,  # détails des ordres du panier
+            },
+        }
+        return final_decision
+
 
     # --- Helpers MTF pour la règle range/accumulation ---
 
