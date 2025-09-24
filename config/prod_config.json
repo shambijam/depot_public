@@ -57,7 +57,7 @@
   "ai": {
     "enabled": true,
     "model_name": "llama-2-7b-chat.Q4_K_M.gguf",
-    "min_confidence": 0.6,
+    "min_confidence": 0.4,
     "apply_recommendation_threshold": 1.1,
     "generation_params": {
       "temperature": 0.7,
@@ -187,7 +187,7 @@
     "volatility": {
       "enabled": false,
       "atr_period": 14,
-      "min_atr_m1_pips": 0.45,
+      "min_atr_m1_pips": 0.1,
       "soft_mode": false,
       "soft_floor_rr": 0.85
     },
