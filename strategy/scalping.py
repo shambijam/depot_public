@@ -44,6 +44,30 @@ class ScalpingStrategy(BaseStrategy):
     # =============   API PRINCIPALE (ENTRÉE)   ================
     # ==========================================================
     # --- Dans class ScalpingStrategy(BaseStrategy): ---
+    def _finalize_decision(self, decision: Dict[str, Any], analyzed_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalise la décision avant retour au pipeline.
+        Évite que le pipeline écrase une décision valide faute de champs attendus.
+        """
+        if not isinstance(decision, dict):
+            return {}
+
+        # Champs standard attendus par l'executor / pipeline
+        decision.setdefault("strategy_type", "scalping")
+        decision.setdefault("rule_name", decision.get("rule_name", "burst_scalping"))
+        decision.setdefault("execution_status", "ready")   # prêt à exécuter
+        decision.setdefault("confidence", float(decision.get("confidence", 0.0) or 0.0))
+
+        # Optionnel: petit snapshot de contexte utile au debug
+        ctx = analyzed_context or {}
+        decision.setdefault("context_snapshot", {
+            "cycle": ctx.get("cycle_count"),
+            "daily_trade_count": ctx.get("daily_trade_count"),
+            "market_regime": ctx.get("market_regime"),
+        })
+
+        return decision
+
 
     def evaluate_entry(
         self,
