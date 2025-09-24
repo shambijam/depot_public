@@ -182,10 +182,10 @@
     "max_allowed_data_age_seconds": 0
   },
   "guardrails": {
-    "enabled": true,
+    "enabled": false,
     "allow_fallbacks": false,
     "volatility": {
-      "enabled": true,
+      "enabled": false,
       "atr_period": 14,
       "min_atr_m1_pips": 0.45,
       "soft_mode": false,
