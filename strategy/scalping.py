@@ -83,7 +83,7 @@ class ScalpingStrategy(BaseStrategy):
                             f"{latest_pattern.get('pattern')} "
                             f"(type={latest_pattern.get('signal_type')}, bullish={latest_pattern.get('is_bullish')})"
                         )
-                        # ➕ Injection dans les signaux de l’asset
+                        # ➕ Injection dans les signaux
                         asset_signals["latest_pattern"] = latest_pattern
                 except Exception as e:
                     self.logger.warning(f"[{asset}] PatternEngine skipped: {e}")
@@ -93,16 +93,12 @@ class ScalpingStrategy(BaseStrategy):
             # Compatibilité burst_scalping
             burst_cfg = (
                 strat_cfg.get("burst_scalping")
-                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
-                    "burst_scalping"
-                )
+                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
                 or {}
             )
 
             # --- 1) Métadonnées ---
-            meta = self._safe_asset_meta(
-                asset, asset_signals, analyzed_context, strat_cfg
-            )
+            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
             pip_size = meta["pip_size"]
             if pip_size <= 0:
                 self.logger.warning(f"[{asset}] pip_size invalide.")
@@ -114,12 +110,8 @@ class ScalpingStrategy(BaseStrategy):
                 self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
                 return {}
 
-           # --- 3) Marubozu Playbook (déclenché par PatternEngine) ---
-            mp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_playbook", {})
-            )
+            # --- 3) Marubozu Playbook ---
+            mp_cfg = (strat_cfg.get("entry_rules") or {}).get("scalping", {}).get("marubozu_playbook", {})
             if (
                 mp_cfg.get("enabled", True)
                 and isinstance(df_work, pd.DataFrame)
@@ -137,23 +129,14 @@ class ScalpingStrategy(BaseStrategy):
                 if mp_decision:
                     return self._finalize_decision(mp_decision, analyzed_context)
 
-            # --- 3b) Marubozu Impulse (détection brute, même sans Playbook) ---
-            imp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_impulse", {})
-            )
+            # --- 3b) Marubozu Impulse ---
+            imp_cfg = (strat_cfg.get("entry_rules") or {}).get("scalping", {}).get("marubozu_impulse", {})
             if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
                 impulse_decision = self._rule_marubozu_impulse(
-                    df=df_work,
-                    asset=asset,
-                    price=price,
-                    meta=meta,
-                    cfg=imp_cfg,
+                    df=df_work, asset=asset, price=price, meta=meta, cfg=imp_cfg
                 )
                 if impulse_decision:
                     return self._finalize_decision(impulse_decision, analyzed_context)
-
 
             # --- 4) Biais directionnel MTF ---
             action = self._infer_action_from_signals(asset_signals)
@@ -196,7 +179,7 @@ class ScalpingStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
-                       # --- 7) Burst scalping ---
+            # --- 7) Burst scalping ---
             atr_m1_pips = None
             if isinstance(df_work, pd.DataFrame):
                 atr_m1 = self._atr(df_work, period=14)
@@ -206,60 +189,55 @@ class ScalpingStrategy(BaseStrategy):
                     else None
                 )
 
-            # --- Seuils dynamiques (burst_cfg -> guardrails) ---
-            # Priorité : burst_cfg (stratégie) > guardrails (prod_config) > fallback neutre
+            # Config guardrails dynamique
             guardrails_cfg = {}
             try:
-                guardrails_cfg = (
-                    self.config_manager.get("guardrails", {}) or {}
-                )
+                guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
             except Exception:
                 guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-            # read dynamic thresholds
-            min_atr_req = None
+            # Seuils dynamiques → burst_cfg > guardrails > fallback
             try:
-                if "min_atr_m1_pips" in burst_cfg:
-                    min_atr_req = float(burst_cfg.get("min_atr_m1_pips"))
-                else:
-                    min_atr_req = float(
-                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0)
+                min_atr_req = float(
+                    burst_cfg.get(
+                        "min_atr_m1_pips",
+                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0),
                     )
+                )
             except Exception:
                 min_atr_req = 0.0
 
             try:
-                max_spread_burst = None
-                if "max_spread_pips" in burst_cfg:
-                    max_spread_burst = float(burst_cfg.get("max_spread_pips"))
-                else:
-                    max_spread_burst = float(
-                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0)
+                max_spread_burst = float(
+                    burst_cfg.get(
+                        "max_spread_pips",
+                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0),
                     )
+                )
             except Exception:
                 max_spread_burst = 999.0
 
-            # Optional bypass (local to burst or global)
+            # Flags bypass
             ignore_all = bool(guardrails_cfg.get("ignore_all", False))
             burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
             effective_ignore_checks = ignore_all or burst_ignore_checks
 
             self.logger.debug(
-                f"[{asset}][SCALPING] thresholds -> min_atr_m1={min_atr_req}, "
+                f"[{asset}][SCALPING] thresholds → min_atr_m1={min_atr_req}, "
                 f"max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
             )
 
             burst_allowed = True
-            # Si on bypasse les checks, on accepte tout
             if not effective_ignore_checks:
-                if max_spread_burst is not None and meta.get("spread_pips", 0.0) > max_spread_burst:
+                if max_spread_burst and meta.get("spread_pips", 0.0) > max_spread_burst:
                     self.logger.info(
-                        f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
+                        f"[{asset}] REFUS BURST → spread {meta['spread_pips']:.2f}p > seuil {max_spread_burst:.2f}p"
                     )
                     burst_allowed = False
-                if (min_atr_req or 0.0) > 0 and (atr_m1_pips is None or atr_m1_pips < (min_atr_req or 0.0)):
+
+                if min_atr_req > 0.0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
                     self.logger.info(
-                        f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p."
+                        f"[{asset}] REFUS BURST → ATR M1 {atr_m1_pips or 0:.2f}p < seuil {min_atr_req:.2f}p"
                     )
                     burst_allowed = False
 
@@ -276,14 +254,12 @@ class ScalpingStrategy(BaseStrategy):
                 if burst_decision:
                     return burst_decision
 
-
             # --- Aucun setup valide ---
+            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu (flux normal).")
             return {}
 
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
-            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
-
             return {}
 
     # ==========================================================

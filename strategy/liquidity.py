@@ -49,6 +49,7 @@ class LiquidityStrategy(BaseStrategy):
         Décide d'une entrée Liquidity par actif, puis sélectionne la meilleure.
         Utilise les signaux: sweep_detected, absorption_confirmed, bos_mss_detected,
         fvg_details, ob_details, eqh_eql_details, confidence_score.
+        100% dynamique (pas de valeurs codées en dur).
         """
         tradeable_assets = self._cfg_list("tradeable_assets", default=[])
         if not tradeable_assets:
@@ -63,24 +64,39 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.info(
                 f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
             )
-            # PATCH DEBUG
             self.logger.debug(f"[LIQ][DEBUG] actifs ignorés car pas dans whitelist → {invalid_assets}")
 
+        # --- Chargement dynamique des conditions ---
+        guardrails_cfg = {}
+        try:
+            guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
+        except Exception:
+            guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-        # --- PATCH dynamique confiance ---
-        min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.0))
-        ignore_conf = bool(self.strategy_config.get("ignore_confidence", False))
+        cond_cfg = (self.strategy_config or {}).get("conditions", {}) or {}
+        min_conf = float(
+            cond_cfg.get(
+                "min_confidence_for_entry",
+                guardrails_cfg.get("conditions", {}).get("min_confidence_for_entry", 0.0),
+            )
+        )
+        ignore_conf = bool(
+            cond_cfg.get(
+                "ignore_confidence",
+                guardrails_cfg.get("conditions", {}).get("ignore_confidence", False),
+            )
+        )
 
         self.logger.debug(
-            f"[LIQ] Seuil min_confidence={min_conf} | ignore_confidence={ignore_conf}"
+            f"[LIQ] Seuils utilisés → min_conf={min_conf} | ignore_conf={ignore_conf}"
         )
-        # --- FIN PATCH ---
-     
+
         best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})
 
         for asset in tradeable_assets:
             sig = signals.get(asset) or {}
             if not sig:
+                self.logger.debug(f"[LIQ][DEBUG] {asset} ignoré → aucun signal dispo")
                 continue
 
             # Lecture patterns chandeliers
@@ -110,24 +126,13 @@ class LiquidityStrategy(BaseStrategy):
                 self.logger.debug(f"[LIQ][DEBUG] {asset} refusé → aucun sweep/absorb/bos/switch")
                 continue
 
-
-            # === APRES (PATCH dynamique) ===
+            # Confidence check (dynamique)
             force_execute = bool((context or {}).get("force_execute", False))
-            min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.0))
-            ignore_conf_flag = bool(self.strategy_config.get("ignore_confidence", False))
-
             confidence = float(sig.get("confidence_score", 0.0) or 0.0)
-            if not (force_execute or ignore_conf_flag) and confidence < min_conf:
+
+            if not (force_execute or ignore_conf) and confidence < min_conf:
                 self.logger.debug(
                     f"[LIQ][DEBUG] {asset} refusé → confidence {confidence:.3f} < seuil {min_conf:.3f}"
-                )
-                continue
-
-
-            # Appliquer min_conf seulement si ignore_confidence est False
-            if not ignore_conf and confidence < min_conf:
-                self.logger.debug(
-                    f"[LIQ] Signal {asset} ignoré: confiance {confidence:.3f} < seuil {min_conf:.3f}"
                 )
                 continue
 
@@ -145,9 +150,7 @@ class LiquidityStrategy(BaseStrategy):
                 continue
 
             # Scoring simple: confiance + RR
-            prop_score = confidence + 0.01 * float(
-                proposal.get("rr_estimate", 0.0) or 0.0
-            )
+            prop_score = confidence + 0.01 * float(proposal.get("rr_estimate", 0.0) or 0.0)
             if prop_score > best[1]:
                 best = (asset, prop_score, proposal)
 
@@ -155,10 +158,9 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.info(
                 "[LIQ] Aucun actif Liquidity sélectionné (aucun signal valide après filtrage)."
             )
-            # PATCH DEBUG
             self.logger.debug("[LIQ][DEBUG] evaluate_entry a parcouru tous les assets → aucun retenu")
             return None
-        
+
         asset, _, proposal = best
 
         # Logging détaillé Liquidity
