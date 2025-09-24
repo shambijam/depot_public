@@ -444,7 +444,7 @@ class DecisionPipeline:
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
             
-            # --- PATCH FALLBACK TEST ---
+         # --- PATCH FALLBACK TEST ---
             if not td:
                 for asset, sig in signals.items():
                     conf = float(sig.get("confidence_score", 0.0) or 0.0)
@@ -456,8 +456,12 @@ class DecisionPipeline:
                             "rule_name": "force_confidence_test",
                             "asset": asset,
                             "action": action,
+                            "order_type": "MARKET",
+                            "entry_price": sig.get("current_price", 1.0),  # fallback si manquant
                             "volume": 0.1,
                             "confidence": conf,
+                            "target_sl_pips": 10,   # SL fictif
+                            "target_tp_pips": 20,   # TP fictif
                             "execution_status": "ready"
                         }
                         self.logger.warning(
@@ -465,6 +469,7 @@ class DecisionPipeline:
                         )
                         print(f"[PATCH] 🚨 Fallback déclenché → {asset} {action} (conf={conf:.3f})")
                         break
+
 
 
             # === Affichage trace détaillée / raisons de refus ===
