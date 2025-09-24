@@ -244,46 +244,87 @@ class DecisionPipeline:
             - ScalpingStrategy -> XAUUSD
             - LiquidityStrategy -> EURUSD, GBPUSD
         Un seul trade max par cycle (si plusieurs signaux, on prend le premier).
-        """
-        from datetime import datetime, timezone as _tz
 
+        ⚠️ Ajouts debug:
+        - Dump des flags guardrails (prod_config)
+        - Dump whitelist / assets tradables
+        - Dump des seuils de confiance/ATR/Spread utilisés réellement (issus des configs dynamiques)
+        - Trace des signaux par actif (confidence, sweep/absorb/bos/switch, spread, phase)
+        - Traçage clair du "pourquoi refusé"
+        """
+
+        from datetime import datetime, timezone as _tz
         UTC = _tz.utc
+
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
         print("🤖 [DECISION] Début du pipeline institutionnel")
 
         try:
-            # 1) Analyse et enrichissement du contexte
+            # === ÉTAPE 1: Analyse + enrichissement du contexte ===
             print("🤖 [DECISION] Étape 1: Analyse du contexte...")
-            analyzed_context = self.config_manager.analyze_context(context)
+            analyzed_context = self.config_manager.analyze_context(context) or {}
             print("🤖 [DECISION] Contexte analysé avec succès")
 
-            # 2) IA désactivée
+            # === DEBUG: état guardrails (prod_config) ===
+            base_cfg = self.config_manager.get_current_dynamic_config() or {}
+            guard = (base_cfg.get("guardrails") or {})
+            vol_g = (guard.get("volatility") or {})
+            spr_g = (guard.get("spread") or {})
+            sess_g = (guard.get("sessions_news") or {})
+            risk_g = (guard.get("risk_caps") or {})
+            cd_g = (guard.get("cooldowns") or {})
+            print("🧱 [DEBUG] GUARDRAILS SNAPSHOT →",
+                f"enabled={guard.get('enabled')}, "
+                f"vol.enabled={vol_g.get('enabled')} min_atr_m1={vol_g.get('min_atr_m1_pips')}, "
+                f"spread.enabled={spr_g.get('enabled')} max_spread_pips={spr_g.get('max_spread_pips')}, ",
+                f"sessions.enabled={sess_g.get('enabled')} news_blackout={sess_g.get('news_blackout_enabled')}, ",
+                f"risk_caps.enabled={risk_g.get('enabled')}, cooldowns.enabled={cd_g.get('enabled')}")
+
+            # === ÉTAPE 2: IA (si désactivée, on le log juste) ===
             print("🤖 [DECISION] Étape 2: Vérification IA...")
-            print("🤖 [DECISION] IA désactivée")
+            ai_cfg = base_cfg.get("ai", {}) or {}
+            print(f"🤖 [DECISION] IA {'activée' if ai_cfg.get('enabled') else 'désactivée'} "
+                f"(min_conf={ai_cfg.get('min_confidence')})")
 
-          # 3) Dispatch fixe (pas de scoring, pas de fallback)
+            # === ÉTAPE 3: Dispatch fixe des stratégies ===
             print("🤖 [DECISION] Étape 3: Dispatch des stratégies par actif...")
-            signals = analyzed_context.get("trading_signals", {}) or {}
 
-            # Récupérer les configs de stratégie depuis le StrategyManager
+            signals = analyzed_context.get("trading_signals", {}) or {}
+            market_data = analyzed_context.get("market_data", {}) or {}
+
+            # Récup configs dynamiques des stratégies via StrategyManager (100% dynamique)
             sca_cfg = self.strategy_manager.get_strategy_config("scalping") or {}
             liq_cfg = self.strategy_manager.get_strategy_config("liquidity") or {}
-           
+
+            # DEBUG: seuils utilisés réellement côté stratégies
+            liq_cond = (liq_cfg.get("conditions") or {})
+            print("🧪 [DEBUG] LIQ conditions →",
+                f"ignore_confidence={liq_cond.get('ignore_confidence')}, ",
+                f"min_conf={liq_cond.get('min_confidence')}, ",
+                f"min_conf_entry={liq_cond.get('min_confidence_for_entry')}")
+
+            burst_cfg = (sca_cfg.get("burst_scalping") or {})
+            rm_cfg = (base_cfg.get("risk_management") or {})
+            print("🧪 [DEBUG] SCALPING burst → enabled={burst_cfg.get('enabled')}, "
+                f"max_spread={burst_cfg.get('max_spread_pips')}, min_atr_m1={burst_cfg.get('min_atr_m1_pips')}")
+            print("🧪 [DEBUG] RISK mgmt → min_rr=", rm_cfg.get("min_rr"),
+                " default_sl_pips=", rm_cfg.get("default_sl_pips"))
+
+            # Loggers dédiés
             sca_logger = logging.getLogger("Strategy.Scalping")
             liq_logger = logging.getLogger("Strategy.Liquidity")
 
+            # Instanciation dynamique des stratégies (pas de valeurs en dur dans la logique)
             dispatch_bundle = {
                 "mapping": {
                     "scalping": {
                         "XAUUSD": {
-                            # signature: (config_manager, strategy_config=None, logger=None)
                             "instance": ScalpingStrategy(self.config_manager, sca_cfg, sca_logger),
                             "strategy_name": "scalping",
                         }
                     },
                     "liquidity": {
                         "EURUSD": {
-                            # signature: (config_manager, strategy_config=None, logger=None, asset=None)
                             "instance": LiquidityStrategy(self.config_manager, liq_cfg, liq_logger),
                             "strategy_name": "liquidity",
                         },
@@ -295,57 +336,75 @@ class DecisionPipeline:
                 }
             }
 
-            # 🔔 Log clair du dispatch fixe
+            # 🔔 Trace claire du dispatch
             self.logger.info("📌 Dispatch fixe des stratégies activé :")
             self.logger.info("   - ScalpingStrategy -> XAUUSD")
             self.logger.info("   - LiquidityStrategy -> EURUSD, GBPUSD")
             print("📌 Dispatch fixe : Scalping(XAUUSD) | Liquidity(EURUSD, GBPUSD)")
 
+            # === DEBUG: dump des signaux bruts utiles (pour comprendre les refus) ===
+            def _bool(v): 
+                try: return bool(v)
+                except: return False
+
+            for asset, sig in signals.items():
+                md = (market_data.get(asset) or {})
+                sym = md.get("symbol_info") or {}
+                spread_pts = (sig.get("current_spread_points")
+                            or getattr(sym, "spread", None)
+                            or md.get("current_spread_points")
+                            or float("nan"))
+                print(f"🔎 [DEBUG] {asset} → "
+                    f"phase={sig.get('phase')} "
+                    f"conf={sig.get('confidence_score')} "
+                    f"sweep={_bool(sig.get('sweep_detected'))} "
+                    f"absorb={_bool(sig.get('absorption_confirmed'))} "
+                    f"bos={_bool(sig.get('bos_mss_detected'))} "
+                    f"switch={_bool(sig.get('switch_to_liquidity'))} "
+                    f"spread_pts={spread_pts}")
+
+            # Lancer les stratégies et agréger les décisions
             results = self.execute_strategies_and_collect_decisions(
                 dispatch_bundle, analyzed_context, signals
-            )
+            ) or {}
+
+            # === DEBUG: pourquoi refusé ? (trace consolidée par stratégie) ===
+            for line in results.get("logs", {}).get("why_rejected", []):
+                print("⛔ [WHY] ", line)
 
             td = results.get("final_decision") or {}
-            chosen_strategy = td.get("strategy_type")
-            chosen_asset = td.get("asset")
+            chosen_strategy = td.get("strategy_type") or None
+            chosen_asset = td.get("asset") or None
 
-
-            # 4) Adaptation config (fusion base + config stratégie choisie)
+            # ÉTAPE 4: Adaptation config (fusion base + config stratégie choisie)
             print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
-            base_cfg = self.config_manager.get_current_dynamic_config() or {}
-            strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
-            config_for_this_cycle = self.config_manager._merge_dicts(
-                base_cfg, strat_cfg
-            )
-            adapted_config = (
-                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
-            )
+
+            # Si aucune stratégie n'a été choisie, éviter le warning inutile en restant silencieux
+            if chosen_strategy:
+                strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+            else:
+                strat_cfg = {}
+
+            config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
+            adapted_config = (self.adapt_config(config_for_this_cycle, analyzed_context) or {})
             print("🤖 [DECISION] Configuration adaptée avec succès")
 
-            # 4bis) Execution context
+            # Étape 4bis) Execution context (spreads/katana)
             print("🤖 [DECISION] Étape 4bis: Construction execution_context...")
             spreads_pips, katana_snapshots, katana_ready_assets = {}, {}, []
             if chosen_asset:
                 if hasattr(self, "mt5_connector") and self.mt5_connector:
                     try:
-                        sym = self.config_manager.get("asset_symbol_mapping", {}).get(
-                            chosen_asset, chosen_asset
-                        )
+                        sym_map = self.config_manager.get("asset_symbol_mapping", {}) or {}
+                        sym = sym_map.get(chosen_asset, chosen_asset)
                         sp = self.mt5_connector.get_spread_pips(sym)
                         spreads_pips[chosen_asset] = float(sp)
                     except Exception:
                         spreads_pips[chosen_asset] = float("inf")
 
-                if hasattr(self, "phase_observer") and hasattr(
-                    self.phase_observer, "get_katana_snapshot"
-                ):
+                if hasattr(self, "phase_observer") and hasattr(self.phase_observer, "get_katana_snapshot"):
                     try:
-                        snap = (
-                            self.phase_observer.get_katana_snapshot(
-                                chosen_asset, adapted_config
-                            )
-                            or {}
-                        )
+                        snap = self.phase_observer.get_katana_snapshot(chosen_asset, adapted_config) or {}
                     except Exception:
                         snap = {"katana_ready": False, "reason": "snapshot_error"}
                     katana_snapshots[chosen_asset] = snap
@@ -359,7 +418,7 @@ class DecisionPipeline:
             }
             analyzed_context["execution_context"] = execution_context
 
-            # 5) Décision finale
+            # ÉTAPE 5: Décision finale (affichage propre)
             print("🤖 [DECISION] Étape 5: Décision de trade finale...")
 
             if not td:
@@ -385,14 +444,15 @@ class DecisionPipeline:
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
 
-            # === Affichage trace détaillée ===
+            # === Affichage trace détaillée / raisons de refus ===
             print("============================================================")
             print("🔍 TRACE DÉTAILLÉE DE LA DÉCISION:")
             for line in results.get("logs", {}).get("decision_trace", []):
                 print("   " + line)
+            for line in results.get("logs", {}).get("why_rejected", []):
+                print("   ⛔ " + line)
             print("============================================================")
 
-            # Sécurise la récupération du volume
             volume = (td or {}).get("volume", 0)
 
             self.logger.info(
@@ -404,6 +464,7 @@ class DecisionPipeline:
                 f"   Statut: {label}"
             )
 
+            # Empêche le double log en amont
             analyzed_context["__decision_logged"] = True
 
             return {
@@ -429,6 +490,7 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
+
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
