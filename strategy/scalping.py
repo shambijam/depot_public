@@ -282,6 +282,8 @@ class ScalpingStrategy(BaseStrategy):
 
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
+            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
+
             return {}
 
     # ==========================================================

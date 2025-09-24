@@ -63,6 +63,9 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.info(
                 f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
             )
+            # PATCH DEBUG
+            self.logger.debug(f"[LIQ][DEBUG] actifs ignorés car pas dans whitelist → {invalid_assets}")
+
 
         # --- PATCH dynamique confiance ---
         min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.0))
@@ -104,7 +107,9 @@ class LiquidityStrategy(BaseStrategy):
             switch_flag = bool(sig.get("switch_to_liquidity", False))
 
             if not (sweep or absorb or switch_flag or bos_ok):
-                continue  # pas de setup liquidity
+                self.logger.debug(f"[LIQ][DEBUG] {asset} refusé → aucun sweep/absorb/bos/switch")
+                continue
+
 
             # === APRES (PATCH dynamique) ===
             force_execute = bool((context or {}).get("force_execute", False))
@@ -113,6 +118,9 @@ class LiquidityStrategy(BaseStrategy):
 
             confidence = float(sig.get("confidence_score", 0.0) or 0.0)
             if not (force_execute or ignore_conf_flag) and confidence < min_conf:
+                self.logger.debug(
+                    f"[LIQ][DEBUG] {asset} refusé → confidence {confidence:.3f} < seuil {min_conf:.3f}"
+                )
                 continue
 
 
@@ -133,6 +141,7 @@ class LiquidityStrategy(BaseStrategy):
                 continue
 
             if not proposal:
+                self.logger.debug(f"[LIQ][DEBUG] {asset} refusé → build_order_proposal a renvoyé None")
                 continue
 
             # Scoring simple: confiance + RR
@@ -146,8 +155,10 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.info(
                 "[LIQ] Aucun actif Liquidity sélectionné (aucun signal valide après filtrage)."
             )
+            # PATCH DEBUG
+            self.logger.debug("[LIQ][DEBUG] evaluate_entry a parcouru tous les assets → aucun retenu")
             return None
-
+        
         asset, _, proposal = best
 
         # Logging détaillé Liquidity
