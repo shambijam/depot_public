@@ -456,12 +456,12 @@ class DecisionPipeline:
                             "rule_name": "force_confidence_test",
                             "asset": asset,
                             "action": action,
-                            "order_type": "MARKET",
-                            "entry_price": sig.get("current_price", 1.0),  # fallback si manquant
+                            "order_type": "MARKET",                           # ✅ obligatoire
+                            "entry_price": sig.get("current_price", 1.0),     # ✅ obligatoire
                             "volume": 0.1,
                             "confidence": conf,
-                            "target_sl_pips": 10,   # SL fictif
-                            "target_tp_pips": 20,   # TP fictif
+                            "target_sl_pips": 10,                             # ✅ fictif, suffisant pour test
+                            "target_tp_pips": 20,
                             "execution_status": "ready"
                         }
                         self.logger.warning(

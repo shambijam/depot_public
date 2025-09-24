@@ -1026,7 +1026,8 @@ def run_single_pipeline_cycle(
 
                 # 🔻 Vérification des EXIT Liquidity
                 try:
-                    current_positions = mt5_connector.get_open_positions()
+                    current_positions = mt5_connector.get_positions()
+
                     if current_positions:
                         from strategy.liquidity import LiquidityStrategy
 
