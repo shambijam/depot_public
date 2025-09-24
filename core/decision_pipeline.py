@@ -444,14 +444,20 @@ class DecisionPipeline:
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
             
-        # --- PATCH FALLBACK TEST ---
+       # --- PATCH FALLBACK TEST ---
             if not td:
                 for asset, sig in signals.items():
                     conf = float(sig.get("confidence_score", 0.0) or 0.0)
                     if conf > 0.45:
                         regime = str(sig.get("regime", "neutral")).lower()
                         action = "BUY" if "bull" in regime or "up" in regime else "SELL"
-                        price = sig.get("current_price", 1.0)
+
+                        price = float(sig.get("current_price", 1.0))
+                        point = float(sig.get("point", 0.0001))
+
+                        # ⚡ SL/TP en prix absolus (obligatoires pour _build_mt5_request)
+                        sl_price = price - (10 * point) if action == "BUY" else price + (10 * point)
+                        tp_price = price + (20 * point) if action == "BUY" else price - (20 * point)
 
                         td = {
                             "strategy_type": "fallback_test",
@@ -460,25 +466,22 @@ class DecisionPipeline:
                             "action": action,
                             "order_type": "MARKET",
                             "entry_price": price,
+                            "sl_price": sl_price,
+                            "tp_price": tp_price,
                             "volume": 0.1,
                             "confidence": conf,
-                            # SL/TP fictifs pour que TradeExecutor passe
-                            "target_sl_pips": 10,
-                            "target_tp_pips": 20,
                             "execution_status": "ready"
                         }
 
                         self.logger.warning(
                             f"[PATCH] 🚨 Fallback déclenché → {asset} {action} "
-                            f"(conf={conf:.3f}, prix={price})"
+                            f"(conf={conf:.3f}, prix={price}, SL={sl_price}, TP={tp_price})"
                         )
                         print(
                             f"[PATCH] 🚨 Fallback déclenché → {asset} {action} "
-                            f"(conf={conf:.3f}, prix={price})"
+                            f"(conf={conf:.3f}, prix={price}, SL={sl_price}, TP={tp_price})"
                         )
                         break
-
-
 
 
             # === Affichage trace détaillée / raisons de refus ===
