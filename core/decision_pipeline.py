@@ -1319,7 +1319,7 @@ class DecisionPipeline:
                             f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
                         )
 
-                        # 🟢 IMPORTANT: on fournit une final_decision pour que le pipeline exécute
+                        # 🟢 IMPORTANT: fournir une final_decision pour exécution pipeline
                         return {
                             "final_decision": {
                                 "action": burst_side,
@@ -1341,6 +1341,7 @@ class DecisionPipeline:
                             "config_used": current_config,
                             "burst_decisions": burst_decisions,
                         }
+
 
                 # ✅ Liquidity Sweep (optionnel)
                 if strategy_name.lower() == "scalping":
