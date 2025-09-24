@@ -1240,7 +1240,7 @@ class DecisionPipeline:
                     self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
 
                     # ==========================================================
-                    # ✅ MODE BURST SCALPING (remplace Katana/Bollinger)
+                    # ✅ MODE BURST SCALPING 
                     # ==========================================================
                     burst_cfg = current_config.get("burst_scalping", {}) or {}
                     burst_enabled = bool(burst_cfg.get("enabled", True))
@@ -1319,7 +1319,28 @@ class DecisionPipeline:
                             f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
                         )
 
-                        return {"burst_decisions": burst_decisions}
+                        # 🟢 IMPORTANT: on fournit une final_decision pour que le pipeline exécute
+                        return {
+                            "final_decision": {
+                                "action": burst_side,
+                                "asset": asset_raw,
+                                "order_type": "MARKET",
+                                "entry_price": price,
+                                "sl_price": round(sl_price, digits),
+                                "rule_name": "burst_scalping",
+                                "burst_enabled": True,
+                                "burst_size": burst_size,
+                                **({
+                                    "trailing": {
+                                        "enabled": True,
+                                        "activate_after_rr": activate_after_rr,
+                                        "step_pips": step_pips,
+                                    }
+                                } if trailing_enabled else {}),
+                            },
+                            "config_used": current_config,
+                            "burst_decisions": burst_decisions,
+                        }
 
                 # ✅ Liquidity Sweep (optionnel)
                 if strategy_name.lower() == "scalping":
