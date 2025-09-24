@@ -337,6 +337,19 @@ class PatternEngine:
                 "orderflow": _count_entries(orderflow_signals),
             },
         }
+        
+                # --- PATCH: ajout du current_price dans le résumé meta ---
+        try:
+            if "close" in df.columns and not df.empty:
+                last_close = float(df["close"].iloc[-1])
+                meta["current_price"] = last_close
+                LOG.debug(f"[PatternEngine] current_price ajouté: {last_close}")
+            else:
+                meta["current_price"] = None
+        except Exception as e:
+            LOG.warning(f"[PatternEngine] Impossible d'ajouter current_price: {e}")
+            meta["current_price"] = None
+
 
         return {
             "candle_signals": candle_signals,

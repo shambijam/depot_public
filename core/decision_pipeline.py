@@ -444,31 +444,40 @@ class DecisionPipeline:
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
             
-         # --- PATCH FALLBACK TEST ---
+        # --- PATCH FALLBACK TEST ---
             if not td:
                 for asset, sig in signals.items():
                     conf = float(sig.get("confidence_score", 0.0) or 0.0)
                     if conf > 0.45:
                         regime = str(sig.get("regime", "neutral")).lower()
                         action = "BUY" if "bull" in regime or "up" in regime else "SELL"
+                        price = sig.get("current_price", 1.0)
+
                         td = {
                             "strategy_type": "fallback_test",
                             "rule_name": "force_confidence_test",
                             "asset": asset,
                             "action": action,
-                            "order_type": "MARKET",                           # ✅ obligatoire
-                            "entry_price": sig.get("current_price", 1.0),     # ✅ obligatoire
+                            "order_type": "MARKET",
+                            "entry_price": price,
                             "volume": 0.1,
                             "confidence": conf,
-                            "target_sl_pips": 10,                             # ✅ fictif, suffisant pour test
+                            # SL/TP fictifs pour que TradeExecutor passe
+                            "target_sl_pips": 10,
                             "target_tp_pips": 20,
                             "execution_status": "ready"
                         }
+
                         self.logger.warning(
-                            f"[PATCH] 🚨 Fallback déclenché → {asset} {action} (conf={conf:.3f})"
+                            f"[PATCH] 🚨 Fallback déclenché → {asset} {action} "
+                            f"(conf={conf:.3f}, prix={price})"
                         )
-                        print(f"[PATCH] 🚨 Fallback déclenché → {asset} {action} (conf={conf:.3f})")
+                        print(
+                            f"[PATCH] 🚨 Fallback déclenché → {asset} {action} "
+                            f"(conf={conf:.3f}, prix={price})"
+                        )
                         break
+
 
 
 

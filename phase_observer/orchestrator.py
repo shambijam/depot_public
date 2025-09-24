@@ -894,8 +894,29 @@ class PhaseObserver:
                     self.logger.info(
                         f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
                     )
+                    
+                if last_phase == "no_clear_phase":
+                    self.logger.info(
+                        f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
+                    )
+                # --- PATCH: ajoute current_price ---
+                try:
+                    if "close" in df_an.columns and not df_an.empty:
+                        last_close = float(df_an["close"].iloc[-1])
+                        df_an["current_price"] = last_close
+                        self.logger.debug(
+                            f"[{current_asset_symbol}] current_price ajouté: {last_close}"
+                        )
+                    else:
+                        df_an["current_price"] = None
+                except Exception as e:
+                    self.logger.warning(
+                        f"[{current_asset_symbol}] Impossible d'ajouter current_price: {e}"
+                    )
+                    df_an["current_price"] = None
 
             return df_an
+
         except Exception as e:
             self.logger.error(f"analyze() failure: {e}", exc_info=True)
             return None
