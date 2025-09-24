@@ -196,7 +196,7 @@ class ScalpingStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
-            # --- 7) Burst scalping ---
+                       # --- 7) Burst scalping ---
             atr_m1_pips = None
             if isinstance(df_work, pd.DataFrame):
                 atr_m1 = self._atr(df_work, period=14)
@@ -206,20 +206,62 @@ class ScalpingStrategy(BaseStrategy):
                     else None
                 )
 
-            min_atr_req = float(burst_cfg.get("min_atr_m1_pips", 0.0))
-            max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
+            # --- Seuils dynamiques (burst_cfg -> guardrails) ---
+            # Priorité : burst_cfg (stratégie) > guardrails (prod_config) > fallback neutre
+            guardrails_cfg = {}
+            try:
+                guardrails_cfg = (
+                    self.config_manager.get("guardrails", {}) or {}
+                )
+            except Exception:
+                guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
+
+            # read dynamic thresholds
+            min_atr_req = None
+            try:
+                if "min_atr_m1_pips" in burst_cfg:
+                    min_atr_req = float(burst_cfg.get("min_atr_m1_pips"))
+                else:
+                    min_atr_req = float(
+                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0)
+                    )
+            except Exception:
+                min_atr_req = 0.0
+
+            try:
+                max_spread_burst = None
+                if "max_spread_pips" in burst_cfg:
+                    max_spread_burst = float(burst_cfg.get("max_spread_pips"))
+                else:
+                    max_spread_burst = float(
+                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0)
+                    )
+            except Exception:
+                max_spread_burst = 999.0
+
+            # Optional bypass (local to burst or global)
+            ignore_all = bool(guardrails_cfg.get("ignore_all", False))
+            burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
+            effective_ignore_checks = ignore_all or burst_ignore_checks
+
+            self.logger.debug(
+                f"[{asset}][SCALPING] thresholds -> min_atr_m1={min_atr_req}, "
+                f"max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
+            )
 
             burst_allowed = True
-            if meta["spread_pips"] > max_spread_burst:
-                self.logger.info(
-                    f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
-                )
-                burst_allowed = False
-            if min_atr_req > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
-                self.logger.info(
-                    f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p."
-                )
-                burst_allowed = False
+            # Si on bypasse les checks, on accepte tout
+            if not effective_ignore_checks:
+                if max_spread_burst is not None and meta.get("spread_pips", 0.0) > max_spread_burst:
+                    self.logger.info(
+                        f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
+                    )
+                    burst_allowed = False
+                if (min_atr_req or 0.0) > 0 and (atr_m1_pips is None or atr_m1_pips < (min_atr_req or 0.0)):
+                    self.logger.info(
+                        f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_req:.1f}p."
+                    )
+                    burst_allowed = False
 
             if bool(burst_cfg.get("enabled", True)) and burst_allowed:
                 burst_decision = self._rule_burst_scalping(
@@ -233,6 +275,7 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 if burst_decision:
                     return burst_decision
+
 
             # --- Aucun setup valide ---
             return {}
@@ -331,15 +374,15 @@ class ScalpingStrategy(BaseStrategy):
         # ✅ Utilisation de la fonction refactorisée
         atr_m1_pips = self._get_atr_m1_pips(asset, signals, context, pip_size_value)
 
-        # --- PATCH dynamique pour min_atr_m1 et max_spread ---
+               # --- PATCH dynamique pour min_atr_m1 et max_spread ---
         try:
             if "min_atr_m1_pips" in burst_cfg:
                 min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips"))
             else:
                 guardrails_cfg = {}
-                if hasattr(self.config_manager, "get"):
+                try:
                     guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-                else:
+                except Exception:
                     guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
                 min_atr_m1 = float(
                     guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0)
@@ -352,28 +395,44 @@ class ScalpingStrategy(BaseStrategy):
                 max_spread_burst = float(burst_cfg.get("max_spread_pips"))
             else:
                 guardrails_cfg = {}
-                if hasattr(self.config_manager, "get"):
+                try:
                     guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-                else:
+                except Exception:
                     guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
                 max_spread_burst = float(
-                    guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999)
+                    guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0)
                 )
         except Exception:
-            max_spread_burst = 999
+            max_spread_burst = 999.0
+
+        # optional bypass
+        try:
+            guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
+        except Exception:
+            guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
+        ignore_all = bool(guardrails_cfg.get("ignore_all", False))
+        burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
+        effective_ignore_checks = ignore_all or burst_ignore_checks
 
         self.logger.debug(
-            f"[SCALPING] seuils utilisés => min_atr_m1={min_atr_m1}, max_spread={max_spread_burst}"
+            f"[SCALPING] seuils utilisés => min_atr_m1={min_atr_m1}, max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
         )
         # --- FIN PATCH ---
 
-        # Garde Spread
-        max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
-        if meta["spread_pips"] > max_spread_burst:
-            self.logger.info(
-                f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst}p."
-            )
-            return None
+        # Garde Spread (appliquer seulement si on ne bypasse pas)
+        if not effective_ignore_checks:
+            if meta.get("spread_pips", 0.0) > max_spread_burst:
+                self.logger.info(
+                    f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
+                )
+                return None
+            # ATR guard
+            if (min_atr_m1 or 0.0) > 0 and (atr_m1_pips is None or atr_m1_pips < (min_atr_m1 or 0.0)):
+                self.logger.info(
+                    f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_m1:.1f}p."
+                )
+                return None
+
 
         # Confirmation directionnelle M1 (facultative)
         if burst_cfg.get("require_m1_bias", False):

@@ -198,7 +198,7 @@
     },
     "spread": {
       "enabled": true,
-      "max_spread_pips": 30.0,
+      "max_spread_pips": 999.0,
       "max_spread_points": 30,
       "smart_spread_check_enabled": true
     },
@@ -338,9 +338,13 @@
     "blacklist_duration_minutes": 60
   },
   "risk_management": {
+    "risk_per_trade_pct": 0.25,
+    "min_rr": 1.8,
+    "max_tp_to_sl_ratio": 3.5,
+    "default_sl_pips": 8.0,
     "atr_target_min": 3.0,
     "atr_target_max": 20.0,
     "low_atr_factor": 0.7,
-    "min_factor": 0.3
+    "min_factor": 0.9
   }
 }

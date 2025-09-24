@@ -623,19 +623,23 @@ class StrategyManager:
 
     def get_strategy_config(self, strategy_name: str) -> Optional[Dict[str, Any]]:
         """
-        Retourne la configuration d'une stratégie via son nom.
-
-        Args:
-            strategy_name (str): Nom de la stratégie.
-
-        Returns:
-            Optional[Dict[str, Any]]: La configuration, ou None si introuvable.mais j'ai enlever tout ca
+        Récupère la configuration d'une stratégie par son nom.
+        Si strategy_name est None ou vide, on retourne None sans warning.
         """
+        if not strategy_name or strategy_name == "None":
+            self.logger.debug(
+                "[StrategyManager] Aucune stratégie sélectionnée (strategy_name=None)."
+            )
+            return None
+
         for strategy_key, strategy_info in self.strategy_registry.items():
-            if strategy_info["config"].get("strategy_name", "") == strategy_name:
+            cfg_name = strategy_info["config"].get("strategy_name", "")
+            if cfg_name == strategy_name:
                 return strategy_info["config"]
+
+        # Ici seulement, on log un warning car c'est un vrai problème : stratégie non trouvée
         self.logger.warning(
-            f"Configuration introuvable pour la stratégie '{strategy_name}'."
+            f"[StrategyManager] Configuration introuvable pour la stratégie '{strategy_name}'."
         )
         return None
 

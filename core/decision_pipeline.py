@@ -2442,19 +2442,19 @@ class DecisionPipeline:
     ) -> dict:
         """
         Évalue les niveaux de risque/targets (SL/TP) et la cohérence du trade.
-        ❗️Le SIZING (volume) est désormais DÉLÉGUÉ au TradeExecutor._calculate_risk_based_volume.
-        -> Ici : on NE calcule plus le volume. On renvoie 'volume': None.
+        ❗️Le SIZING (volume) est désormais délégué à TradeExecutor._calculate_risk_based_volume.
+        Ici : on NE calcule plus le volume. On renvoie 'volume': None.
 
         Priorités des niveaux (de la plus forte à la plus faible):
         1) target_sl_pips / target_tp_pips        — décision de base
         2) sl_price / tp_price                    — si fournis explicitement en prix
-        3) fallback dynamique via default_sl_pips (config risk_management) si SL absent
+        3) fallback via default_sl_pips (si défini en config risk_management)
 
-        REFUS explicites (hard):
+        Refus explicites (hard):
         - action/symbole/prix invalide
         - incohérence directionnelle (BUY: sl<entry<tp ; SELL: tp<entry<sl)
         - equity nulle
-        - contraintes BROKER (stops_level) impossibles à satisfaire
+        - contraintes broker (stops_level) impossibles à satisfaire
         """
 
         notes = []
@@ -2469,7 +2469,7 @@ class DecisionPipeline:
         symbol_info = md.get("symbol_info", {}) or {}
         account_info = context.get("account_info", {}) or {}
 
-        # DataFrame ATR: priorité M1 (scalping)
+        # DataFrame ATR: priorité M1
         df_m1 = md.get("annotated_rates_df_m1")
         df = df_m1 if df_m1 is not None else md.get("annotated_rates_df")
 
@@ -2484,15 +2484,13 @@ class DecisionPipeline:
         except Exception:
             return {"ok": False, "reason": "invalid_entry_price"}
 
-        # --- 2) Broker/symbole (unités et contraintes) ---
+        # --- 2) Broker/symbole ---
         contract = float(symbol_info.get("trade_contract_size", 100000.0) or 100000.0)
         point = float(symbol_info.get("point", 0.00001) or 0.00001)
         digits = int(symbol_info.get("digits", 5) or 5)
 
-        # Stops level
         stops_lvl_points = float(
-            symbol_info.get("trade_stops_level", symbol_info.get("stops_level", 0.0))
-            or 0.0
+            symbol_info.get("trade_stops_level", symbol_info.get("stops_level", 0.0)) or 0.0
         )
         spread_pts = float(md.get("current_spread_points", 0.0) or 0.0)
 
@@ -2501,22 +2499,39 @@ class DecisionPipeline:
         spread_pips = spread_pts / pip_points
         stops_level_pips = stops_lvl_points / pip_points
         min_stop_price_dist = stops_lvl_points * point
+        
+        # --- Contrôle dynamique du spread (guardrails) ---
+        gr_spread = ((current_config.get("guardrails") or {}).get("spread") or {})
+        use_spread_guard = bool(gr_spread.get("enabled", False))
+
+        max_spread_pips = float(gr_spread.get("max_spread_pips", 999.0))
+        max_spread_points = float(gr_spread.get("max_spread_points", 9999))
+
+        if use_spread_guard:
+            if spread_pips > max_spread_pips:
+                return {"ok": False, "reason": f"spread_too_high:{spread_pips:.2f}p > {max_spread_pips}p"}
+            if spread_pts > max_spread_points:
+                return {"ok": False, "reason": f"spread_points_too_high:{spread_pts:.1f} > {max_spread_points}"}
+        else:
+            notes.append("spread_check_disabled_by_guardrails")
+
 
         # --- 3) Risque (config) ---
         rm_cfg = (current_config or {}).get("risk_management", {}) or {}
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.25))
-        min_rr = float(rm_cfg.get("min_rr", 1.8))
-        max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 3.5))
-        default_sl_pips = float(rm_cfg.get("default_sl_pips", 10.0))
+
+        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.0))          # sizing délégué
+        min_rr = float(rm_cfg.get("min_rr", 0.0))                        # neutre si absent
+        max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 999.0)) # neutre si absent
+
+        default_sl_pips = rm_cfg.get("default_sl_pips", None)
+        default_sl_pips = float(default_sl_pips) if default_sl_pips is not None else None
 
         # Equity check
-        equity = float(
-            account_info.get("equity", account_info.get("balance", 0.0)) or 0.0
-        )
+        equity = float(account_info.get("equity", account_info.get("balance", 0.0)) or 0.0)
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
-        # --- 4) Niveaux: PRIX vs PIPS ---
+        # --- 4) SL/TP en pips ou en prix ---
         sl_pips_val = None
         tp_pips_val = None
 
@@ -2525,12 +2540,11 @@ class DecisionPipeline:
         sl_price_in = trade_decision.get("sl_price")
         tp_price_in = trade_decision.get("tp_price")
 
-        if isinstance(sl_pips_target, (int, float)) and isinstance(
-            tp_pips_target, (int, float)
-        ):
+        if isinstance(sl_pips_target, (int, float)) and isinstance(tp_pips_target, (int, float)):
             sl_pips_val = float(sl_pips_target)
             tp_pips_val = float(tp_pips_target)
             notes.append("levels_from_target_pips")
+
         elif sl_price_in is not None:
             try:
                 sl_price_in = float(sl_price_in)
@@ -2540,15 +2554,19 @@ class DecisionPipeline:
             sl_pips_val = abs(entry - sl_price_in) / pip_size
             tp_pips_val = abs(tp_price_in - entry) / pip_size if tp_price_in else None
             notes.append("levels_from_price")
-        else:
+
+        elif default_sl_pips is not None and default_sl_pips > 0:
             sl_pips_val = default_sl_pips
             tp_pips_val = None
             notes.append(f"used_default_sl:{default_sl_pips}p")
 
+        else:
+            return {"ok": False, "reason": "missing_sl_and_no_default_in_config"}
+
         if not (sl_pips_val and sl_pips_val > 0):
             return {"ok": False, "reason": "invalid_sl_distance"}
 
-        # Reconstruire PRIX
+        # Reconstruire les prix
         sl_dist_price = sl_pips_val * pip_size
         tp_dist_price = tp_pips_val * pip_size if tp_pips_val else None
 
@@ -2568,35 +2586,27 @@ class DecisionPipeline:
             if sl_dist_price < min_stop_price_dist:
                 sl_dist_price = min_stop_price_dist
                 sl_pips_val = sl_dist_price / pip_size
-                sl_price = (
-                    entry - sl_dist_price if action == "BUY" else entry + sl_dist_price
-                )
+                sl_price = entry - sl_dist_price if action == "BUY" else entry + sl_dist_price
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
             if tp_dist_price and tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
-                tp_price = (
-                    entry + tp_dist_price if action == "BUY" else entry - tp_dist_price
-                )
+                tp_price = entry + tp_dist_price if action == "BUY" else entry - tp_dist_price
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
 
-        # --- 6) Rounding prix ---
+        # --- 6) Rounding ---
         if isinstance(digits, int) and digits >= 0:
             sl_price = round(sl_price, digits)
             if tp_price:
                 tp_price = round(tp_price, digits)
 
         # --- 7) RR ---
-        rr = (
-            (tp_dist_price / sl_dist_price)
-            if (tp_dist_price and sl_dist_price > 0)
-            else None
-        )
+        rr = (tp_dist_price / sl_dist_price) if (tp_dist_price and sl_dist_price > 0) else None
         spread_comp_price = spread_pts * point
         effective_tp_dist = max(0.0, (tp_dist_price or 0.0) - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-        # --- 7bis) Facteur dynamique basé sur la volatilité (ATR M1) ---
+       # --- 7bis) Facteur dynamique ATR (optionnel, piloté par config) ---
         atr_m1_pips = None
         try:
             if df is not None and not df.empty and "atr" in df.columns:
@@ -2604,30 +2614,30 @@ class DecisionPipeline:
         except Exception:
             atr_m1_pips = None
 
+        # Lecture config dynamique
+        gr_vol = ((current_config.get("guardrails") or {}).get("volatility") or {})
+        use_volatility_guard = bool(gr_vol.get("enabled", False))
+
+        target_min = float(rm_cfg.get("atr_target_min", gr_vol.get("min_atr_m1_pips", 0.0)))
+        target_max = float(rm_cfg.get("atr_target_max", gr_vol.get("max_atr_m1_pips", 999.0)))
+        low_factor = float(rm_cfg.get("low_atr_factor", 1.0))
+        min_factor = float(rm_cfg.get("min_factor", 1.0))
+
         if atr_m1_pips and atr_m1_pips > 0:
-            target_min = float(rm_cfg.get("atr_target_min", 5.0))
-            target_max = float(rm_cfg.get("atr_target_max", 15.0))
-            low_factor = float(rm_cfg.get("low_atr_factor", 0.5))
-            min_factor = float(rm_cfg.get("min_factor", 0.25))
-
-            if atr_m1_pips < target_min:
-                vol_factor = low_factor
-                notes.append(
-                    f"atr_low:{atr_m1_pips:.2f}p (<{target_min}) → facteur {vol_factor}"
-                )
-            elif atr_m1_pips > target_max:
-                vol_factor = max(min_factor, target_max / atr_m1_pips)
-                notes.append(
-                    f"atr_high:{atr_m1_pips:.2f}p (>{target_max}) → facteur {vol_factor:.2f}"
-                )
+            if use_volatility_guard:
+                if atr_m1_pips < target_min:
+                    vol_factor = low_factor
+                    notes.append(f"atr_low:{atr_m1_pips:.2f}p (<{target_min}) → facteur {vol_factor}")
+                elif atr_m1_pips > target_max:
+                    safe_ratio = (target_max / atr_m1_pips) if atr_m1_pips > 0 else 1.0
+                    vol_factor = max(min_factor, safe_ratio)
+                    notes.append(f"atr_high:{atr_m1_pips:.2f}p (>{target_max}) → facteur {vol_factor:.2f}")
+                else:
+                    vol_factor = 1.0
+                    notes.append(f"atr_ok:{atr_m1_pips:.2f}p (zone [{target_min}-{target_max}]) → neutre")
+                trade_decision["volatility_factor"] = vol_factor
             else:
-                vol_factor = 1.0
-                notes.append(
-                    f"atr_ok:{atr_m1_pips:.2f}p (zone [{target_min}-{target_max}]) → facteur neutre"
-                )
-
-            # On ne calcule pas le volume ici mais on garde le facteur
-            trade_decision["volatility_factor"] = vol_factor
+                notes.append("atr_check_disabled_by_guardrails")
 
         # --- 8) Volume délégué ---
         notes.append("volume_delegated_to_executor")
@@ -2635,7 +2645,7 @@ class DecisionPipeline:
         # --- 9) Sortie ---
         return {
             "ok": True,
-            "volume": None,  # sizing délégué
+            "volume": None,
             "rr": rr,
             "rr_effective": rr_effective,
             "entry_price": entry,

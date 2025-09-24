@@ -21,17 +21,22 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #         LIFECYCLE
     # =========================
-    def __init__(self, config_manager, strategy_config: Optional[Dict[str, Any]] = None, logger=None):
-            """
-            Initialise la stratégie Liquidity.
-            """
-            super().__init__(config_manager, strategy_config or {})
+    def __init__(
+        self,
+        config_manager,
+        strategy_config: Optional[Dict[str, Any]] = None,
+        logger=None,
+    ):
+        """
+        Initialise la stratégie Liquidity.
+        """
+        super().__init__(config_manager, strategy_config or {})
 
-            self.config_manager = config_manager
-            self.strategy_config = strategy_config or {}
-            self.logger = logger or getattr(config_manager, "logger", None)
+        self.config_manager = config_manager
+        self.strategy_config = strategy_config or {}
+        self.logger = logger or getattr(config_manager, "logger", None)
 
-            self.logger.info("Moteur de stratégie Liquidity initialisé.")
+        self.logger.info("Moteur de stratégie Liquidity initialisé.")
 
     # =========================
     #      PUBLIC METHODS
@@ -59,23 +64,15 @@ class LiquidityStrategy(BaseStrategy):
                 f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
             )
 
-        # --- PATCH dynamique pour min_confidence ---
-        try:
-            if "min_confidence_for_entry" in self.strategy_config:
-                min_conf = float(self.strategy_config.get("min_confidence_for_entry"))
-            else:
-                ai_cfg = {}
-                if hasattr(self.config_manager, "get"):
-                    ai_cfg = self.config_manager.get("ai", {}) or {}
-                else:
-                    ai_cfg = getattr(self.config_manager, "ai", {}) or {}
-                min_conf = float(ai_cfg.get("min_confidence", 0.0))
-        except Exception:
-            min_conf = 0.0
+        # --- PATCH dynamique confiance ---
+        min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.0))
+        ignore_conf = bool(self.strategy_config.get("ignore_confidence", False))
 
-        self.logger.debug(f"[LIQ] min_confidence utilisé = {min_conf}")
+        self.logger.debug(
+            f"[LIQ] Seuil min_confidence={min_conf} | ignore_confidence={ignore_conf}"
+        )
         # --- FIN PATCH ---
-
+     
         best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})
 
         for asset in tradeable_assets:
@@ -89,7 +86,7 @@ class LiquidityStrategy(BaseStrategy):
                 df_m1 = md.get("df_m1") or md.get("rates_df")
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 20:
                     pe = PatternEngine()
-                    pat_results = pe.analyze(df_m1, with_combo=True)
+                    pe.analyze(df_m1, with_combo=True)
                     latest_pat = pe.latest_signal(df_m1)
                     if latest_pat:
                         sig["latest_pattern"] = latest_pat
@@ -109,10 +106,20 @@ class LiquidityStrategy(BaseStrategy):
             if not (sweep or absorb or switch_flag or bos_ok):
                 continue  # pas de setup liquidity
 
+            # === APRES (PATCH dynamique) ===
+            force_execute = bool((context or {}).get("force_execute", False))
+            min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.0))
+            ignore_conf_flag = bool(self.strategy_config.get("ignore_confidence", False))
+
             confidence = float(sig.get("confidence_score", 0.0) or 0.0)
-            if confidence < min_conf:
+            if not (force_execute or ignore_conf_flag) and confidence < min_conf:
+                continue
+
+
+            # Appliquer min_conf seulement si ignore_confidence est False
+            if not ignore_conf and confidence < min_conf:
                 self.logger.debug(
-                    f"[LIQ] Signal ignoré ({asset}) - confiance {confidence:.3f} < seuil {min_conf:.3f}"
+                    f"[LIQ] Signal {asset} ignoré: confiance {confidence:.3f} < seuil {min_conf:.3f}"
                 )
                 continue
 
@@ -137,7 +144,7 @@ class LiquidityStrategy(BaseStrategy):
 
         if not best[0]:
             self.logger.info(
-                "[LIQ] Aucun actif ne dépasse le seuil de confiance/liquidity."
+                "[LIQ] Aucun actif Liquidity sélectionné (aucun signal valide après filtrage)."
             )
             return None
 
