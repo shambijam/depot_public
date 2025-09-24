@@ -927,18 +927,10 @@ def run_single_pipeline_cycle(
                             )
                             requests.append(req)
 
-                        # --- DEMO/DRY ---
-                        if is_dry_run or execution_mode == "DEMO":
-                            for r in requests:
-                                trade_executor.log_simulated_order(r)
-                            logger.info(
-                                f"[BURST] DEMO/DRY: {burst_size} ordres simulés pour {final.get('asset')}"
-                            )
-                            trade_executed_successfully = True
-                            return trade_executed_successfully
-
-                        # --- LIVE : exécution réelle ---
+                       # --- LIVE/DEMO (exécution réelle unique) ---
+                        logger.info(f"[BURST] Envoi {len(requests)} ordres en mode {execution_mode}...")
                         results = [trade_executor.execute_order(r) for r in requests]
+
                         logger.info(
                             f"[BURST] {len(results)} ordres envoyés pour panier {trade_decision.get('basket_id')}"
                         )
@@ -990,23 +982,11 @@ def run_single_pipeline_cycle(
                         except Exception:
                             order_request["magic"] = 51001
 
-                        # --- DEMO/DRY ---
-                        if is_dry_run or execution_mode == "DEMO":
-                            if hasattr(trade_executor, "log_simulated_order"):
-                                trade_executor.log_simulated_order(order_request)
-                            else:
-                                logger.info(
-                                    f"[EXECUTOR] DEMO/DRY-RUN → ordre simulé: {order_request}"
-                                )
-                            trade_executed_successfully = True
-                            return trade_executed_successfully
-
-                        # --- LIVE ---
+                      # --- LIVE/DEMO (exécution réelle unique) ---
+                        logger.info(f"[EXECUTOR] Envoi ordre MT5 en mode {execution_mode}...")
                         exec_res = trade_executor.execute_order(order_request)
-                        status_ok = str(exec_res.get("status", "")).lower() in {
-                            "filled",
-                            "placed",
-                        }
+                        status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+
                         if not status_ok:
                             raise RuntimeError(
                                 f"Statut exécution inattendu: {exec_res.get('status')}"
