@@ -2737,14 +2737,7 @@ class TradeExecutor:
 
         if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
             tp_price = round(float(trade_decision["tp_price"]), digits)
-
-        # Timeout bars & mitigation (meta only, pour exécutions différées)
-        timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
-        use_mitigation = bool(trade_decision.get("use_mitigation", False))
-
-        request["_meta_timeout_bars"] = timeout_bars
-        request["_meta_use_mitigation"] = use_mitigation
-
+        
         # --- Mapping constantes MT5 (tolérant) ---
         if mt5 is None:
             raise TradeExecutionError("Module/constantes MT5 indisponibles.")
@@ -2820,6 +2813,13 @@ class TradeExecutor:
             "deviation": deviation_points,
             "comment": "",  # rempli plus bas
         }
+        
+        # Timeout bars & mitigation (meta only, pour exécutions différées)
+        timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
+        use_mitigation = bool(trade_decision.get("use_mitigation", False))
+
+        request["_meta_timeout_bars"] = timeout_bars
+        request["_meta_use_mitigation"] = use_mitigation
 
         # --- Détermination du type d’ordre et prix de référence ---
         if order_type_str == "MARKET":
