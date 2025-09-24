@@ -1,7 +1,7 @@
 {
   "strategy_name": "scalping",
   "version": "2.3",
-  "description": "Scalping propre (XAUUSD only). Aucuns fallback stratégiques. Katana/Bollinger retirés.",
+  "description": "Scalping Burst propre (XAUUSD only)",
   "tradeable_assets": [
     "XAUUSD"
   ],
@@ -96,8 +96,8 @@
         "enabled": true,
         "sl_pips": 5,
         "burst_size": 3,
-        "max_spread_pips": 20.0,
-        "min_atr_m1_pips": 2.5,
+        "max_spread_pips": 30.0,
+        "min_atr_m1_pips": 0.0,
         "tp_sl": {
           "trailing": {
             "enabled": true,

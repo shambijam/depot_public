@@ -198,8 +198,8 @@
     },
     "spread": {
       "enabled": true,
-      "max_spread_pips": 2.5,
-      "max_spread_points": 25,
+      "max_spread_pips": 30.0,
+      "max_spread_points": 30,
       "smart_spread_check_enabled": true
     },
     "sessions_news": {

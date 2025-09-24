@@ -18,8 +18,8 @@
         "independent": true,
         "ignore_bollinger": true,
         "lookback_bars": 30,
-        "max_spread_pips": 20.0,
-        "min_atr_m1_pips": 0.25,
+        "max_spread_pips": 30.0,
+        "min_atr_m1_pips": 0.0,
         "sweep": {
             "use_swings": true,
             "swing_window": 5,
@@ -90,7 +90,7 @@
     "filters": {
         "avoid_major_news": true,
         "disable_on_weekends": true,
-        "allow_only_whitelist_assets": true
+        "allow_only_whitelist_assets": false
     },
     "risk": {
         "max_trades_per_day": 4,
