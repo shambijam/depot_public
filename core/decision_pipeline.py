@@ -183,17 +183,32 @@ class DecisionPipeline:
 
                     # 🔎 Exécution selon la stratégie
                     if strategy_name.lower() == "scalping":
-                        # ScalpingStrategy → signature: evaluate_entry(asset, market_df, signals)
-                        decision = evaluate_fn(asset, market_df, sig)
+                        # ⚠️ ATTENTION: ScalpingStrategy attend (asset, rates_df, signals, context, config)
+                        decision = evaluate_fn(
+                            asset,
+                            (context.get("market_data", {}) or {})
+                            .get(asset, {})
+                            .get("rates_df"),
+                            sig,
+                            context,
+                            context.get("config_used", {}),
+                        )
                     elif strategy_name.lower() == "liquidity":
-                        # LiquidityStrategy → signature: evaluate_entry(context, signals_subset)
+                        # ⚠️ LiquidityStrategy attend (context, signals_filtrés)
                         liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
                         decision = evaluate_fn(
                             context, {a: signals[a] for a in liq_assets}
                         )
                     else:
-                        # 🚫 Stratégie inconnue → on ne fait rien
-                        decision = None
+                        # fallback générique si d’autres stratégies existent
+                        decision = evaluate_fn(context, sig)
+
+                    # ✅ Sécu: si une stratégie retourne None → on skippe sans planter
+                    if not decision:
+                        logs["per_strategy"][strat_name]["decisions"].append(
+                            {"asset": asset, "decision": None}
+                        )
+                        continue
 
                     # --- Normalisation stricte ---
                     if isinstance(decision, dict):
