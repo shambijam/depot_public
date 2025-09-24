@@ -57,7 +57,7 @@
   "ai": {
     "enabled": true,
     "model_name": "llama-2-7b-chat.Q4_K_M.gguf",
-    "min_confidence": 0.4,
+    "min_confidence": 0.10,
     "apply_recommendation_threshold": 1.1,
     "generation_params": {
       "temperature": 0.7,
@@ -106,8 +106,8 @@
       "recent_price_data_points": 10,
       "prompts_file_name": "prompts.yaml"
     },
-    "min_confidence_expansion": 0.35,
-    "min_confidence_reversal": 0.5,
+    "min_confidence_expansion": 0.10,
+    "min_confidence_reversal": 0.10,
     "strategy_selection_weight": 0.1,
     "cache_settings": {
       "enabled": true,
