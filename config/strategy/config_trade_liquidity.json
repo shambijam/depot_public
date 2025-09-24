@@ -156,7 +156,8 @@
             "priority": 1,
             "conditions": {
                 "min_confidence": 0.20,
-                "min_confidence_for_entry": 0.2
+                "min_confidence_for_entry": 0.0,
+                "ignore_confidence": true
             },
             "order_type": "MARKET",
             "action_logic": {
