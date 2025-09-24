@@ -336,5 +336,11 @@
       "api_error": 60
     },
     "blacklist_duration_minutes": 60
+  },
+  "risk_management": {
+    "atr_target_min": 3.0,
+    "atr_target_max": 20.0,
+    "low_atr_factor": 0.7,
+    "min_factor": 0.3
   }
 }

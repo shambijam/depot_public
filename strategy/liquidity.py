@@ -52,14 +52,30 @@ class LiquidityStrategy(BaseStrategy):
 
         from sniper_patterns.pattern_engine import PatternEngine
 
-        # Vérification stricte: ignorer les actifs hors whitelist (log d'info)
+        # Vérification stricte: ignorer les actifs hors whitelist
         invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
         if invalid_assets:
             self.logger.info(
                 f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
             )
 
-        min_conf = float(self.strategy_config.get("min_confidence_for_entry", 0.6))
+        # --- PATCH dynamique pour min_confidence ---
+        try:
+            if "min_confidence_for_entry" in self.strategy_config:
+                min_conf = float(self.strategy_config.get("min_confidence_for_entry"))
+            else:
+                ai_cfg = {}
+                if hasattr(self.config_manager, "get"):
+                    ai_cfg = self.config_manager.get("ai", {}) or {}
+                else:
+                    ai_cfg = getattr(self.config_manager, "ai", {}) or {}
+                min_conf = float(ai_cfg.get("min_confidence", 0.0))
+        except Exception:
+            min_conf = 0.0
+
+        self.logger.debug(f"[LIQ] min_confidence utilisé = {min_conf}")
+        # --- FIN PATCH ---
+
         best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})
 
         for asset in tradeable_assets:
@@ -67,7 +83,7 @@ class LiquidityStrategy(BaseStrategy):
             if not sig:
                 continue
 
-            # --- Lecture patterns chandeliers (complément desk) ---
+            # Lecture patterns chandeliers
             try:
                 md = (context.get("market_data") or {}).get(asset, {})
                 df_m1 = md.get("df_m1") or md.get("rates_df")
@@ -95,7 +111,10 @@ class LiquidityStrategy(BaseStrategy):
 
             confidence = float(sig.get("confidence_score", 0.0) or 0.0)
             if confidence < min_conf:
-                continue  # strict mais paramétrable par config
+                self.logger.debug(
+                    f"[LIQ] Signal ignoré ({asset}) - confiance {confidence:.3f} < seuil {min_conf:.3f}"
+                )
+                continue
 
             # Construire une proposition d'ordre pour cet asset
             try:
@@ -109,7 +128,7 @@ class LiquidityStrategy(BaseStrategy):
             if not proposal:
                 continue
 
-            # Scoring simple: on priorise la confiance, puis la qualité RR
+            # Scoring simple: confiance + RR
             prop_score = confidence + 0.01 * float(
                 proposal.get("rr_estimate", 0.0) or 0.0
             )
@@ -124,7 +143,7 @@ class LiquidityStrategy(BaseStrategy):
 
         asset, _, proposal = best
 
-        # === LOGGING DÉTAILLÉ LIQUIDITY ===
+        # Logging détaillé Liquidity
         def _fmt_price(v: Any) -> str:
             try:
                 return f"{float(v):.5f}"
@@ -146,8 +165,8 @@ class LiquidityStrategy(BaseStrategy):
 
         # Package final pour l’executor
         decision = self._build_decision_package_from_proposal(asset, proposal) or {}
-        decision["strategy_type"] = "liquidity"  # audit & logs
-        decision.setdefault("rule_name", "liquidity_entry")  # identifiant si absent
+        decision["strategy_type"] = "liquidity"
+        decision.setdefault("rule_name", "liquidity_entry")
         return decision
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):

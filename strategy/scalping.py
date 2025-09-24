@@ -331,11 +331,41 @@ class ScalpingStrategy(BaseStrategy):
         # ✅ Utilisation de la fonction refactorisée
         atr_m1_pips = self._get_atr_m1_pips(asset, signals, context, pip_size_value)
 
-        # Garde ATR
-        min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips", 0.0))
-        if min_atr_m1 > 0 and (atr_m1_pips is None or atr_m1_pips < min_atr_m1):
-            self.logger.info(f"[{asset}] Burst refusé: ATR M1 < {min_atr_m1} pips.")
-            return None
+        # --- PATCH dynamique pour min_atr_m1 et max_spread ---
+        try:
+            if "min_atr_m1_pips" in burst_cfg:
+                min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips"))
+            else:
+                guardrails_cfg = {}
+                if hasattr(self.config_manager, "get"):
+                    guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
+                else:
+                    guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
+                min_atr_m1 = float(
+                    guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0)
+                )
+        except Exception:
+            min_atr_m1 = 0.0
+
+        try:
+            if "max_spread_pips" in burst_cfg:
+                max_spread_burst = float(burst_cfg.get("max_spread_pips"))
+            else:
+                guardrails_cfg = {}
+                if hasattr(self.config_manager, "get"):
+                    guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
+                else:
+                    guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
+                max_spread_burst = float(
+                    guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999)
+                )
+        except Exception:
+            max_spread_burst = 999
+
+        self.logger.debug(
+            f"[SCALPING] seuils utilisés => min_atr_m1={min_atr_m1}, max_spread={max_spread_burst}"
+        )
+        # --- FIN PATCH ---
 
         # Garde Spread
         max_spread_burst = float(burst_cfg.get("max_spread_pips", 999))
