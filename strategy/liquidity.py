@@ -182,12 +182,14 @@ class LiquidityStrategy(BaseStrategy):
             f"Entry={_fmt_price(entry)} | SL={_fmt_price(sl)} | TP={_fmt_price(tp)} | "
             f"RR={rr_est if isinstance(rr_est,(int,float)) else rr_est} | Confiance={conf:.2f}"
         )
-
+               
         # Package final pour l’executor
         decision = self._build_decision_package_from_proposal(asset, proposal) or {}
         decision["strategy_type"] = "liquidity"
         decision.setdefault("rule_name", "liquidity_entry")
+        decision.setdefault("execution_status", "ready")  # ✅ Normalisation obligatoire
         return decision
+
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):
         """

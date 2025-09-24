@@ -175,7 +175,12 @@ class ScalpingStrategy(BaseStrategy):
                     cfg=(strat_cfg.get("range_accumulation") or {}),
                 )
                 if range_decision:
-                    return range_decision
+                    # Normalisation + méta minimales
+                    range_decision.setdefault("strategy_type", "scalping")
+                    range_decision.setdefault("rule_name", "range_accumulation")
+                    range_decision.setdefault("execution_status", "ready")
+                    return self._finalize_decision(range_decision, analyzed_context)
+
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
@@ -252,7 +257,12 @@ class ScalpingStrategy(BaseStrategy):
                     context=analyzed_context,
                 )
                 if burst_decision:
-                    return burst_decision
+                    # ✅ MÉTA OBLIGATOIRES pour que le pipeline conserve la décision
+                    burst_decision.setdefault("strategy_type", "scalping")
+                    burst_decision.setdefault("rule_name", "burst_scalping")
+                    burst_decision.setdefault("execution_status", "ready")
+                    return self._finalize_decision(burst_decision, analyzed_context)
+
 
             # --- Aucun setup valide ---
             self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu (flux normal).")
