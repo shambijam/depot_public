@@ -820,9 +820,18 @@ def run_single_pipeline_cycle(
         )
 
         # ====== LOG DÉCISION (anti-doublon) ======
+        final_decisions = decision_package.get("final_decisions", []) or []
         final = decision_package.get("final_decision", {}) or {}
         ctx_out = decision_package.get("context", {}) or {}
 
+        # 🔥 si plusieurs décisions, on les log toutes
+        if final_decisions:
+            print("📦 [PIPELINE] Décisions multiples détectées:")
+            for d in final_decisions:
+                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+        else:
+            print("📦 [PIPELINE] Aucune décision multiple détectée.")
+       
         # Seulement si la pipeline n'a PAS déjà loggué elle-même
         if not ctx_out.get("__decision_logged"):
             print("3️⃣ DÉCISION RETOURNÉE:")
@@ -838,8 +847,60 @@ def run_single_pipeline_cycle(
         # ====== FIN LOG DÉCISION ======
 
         # Exécution décision → TradeExecutor
-        action = str(final.get("action", "")).upper()
-        if action in ("BUY", "SELL"):
+        decisions_to_execute = final_decisions if final_decisions else ([final] if final else [])
+
+        for td in decisions_to_execute:
+            action = str(td.get("action", "")).upper()
+            if action not in ("BUY", "SELL"):
+                continue
+
+            # Construit le package pour cet ordre
+            decision_package_for_executor: Dict[str, Any] = {
+                "trade_decision": td,
+                "active_config": decision_package.get("config_used", {}) or {},
+                "market_context": global_context,
+            }
+
+            try:
+                if td.get("rule_name") == "burst_scalping" or td.get("burst_enabled", False):
+                    # === MODE BURST ===
+                    burst_size = int(td.get("burst_size", 3))
+                    trade_decision = trade_executor._attach_burst_metadata(td)
+
+                    requests = []
+                    for i in range(burst_size):
+                        req = trade_executor.prepare_order(
+                            {
+                                "trade_decision": dict(trade_decision),
+                                "market_context": global_context,
+                                "active_config": decision_package.get("config_used", {}) or {},
+                            }
+                        )
+                        req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                        requests.append(req)
+
+                    logger.info(f"[BURST] Envoi {len(requests)} ordres...")
+                    results = [trade_executor.execute_order(r) for r in requests]
+                    trade_executed_successfully |= all(
+                        str(res.get("status", "")).lower() in {"filled", "placed"}
+                        for res in results
+                    )
+
+                else:
+                    # === MODE STANDARD ===
+                    order_request = trade_executor.prepare_order(decision_package_for_executor)
+                    logger.info(f"[EXECUTOR] Envoi ordre MT5...")
+                    exec_res = trade_executor.execute_order(order_request)
+                    status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+                    if status_ok:
+                        logger.info(
+                            f"[EXECUTOR] Ordre envoyé OK: {exec_res.get('order') or exec_res.get('deal')}"
+                        )
+                    trade_executed_successfully |= status_ok
+
+            except Exception as e:
+                logger.error(f"[EXECUTOR] Erreur prepare/execute pour {td.get('asset')}: {e}", exc_info=True)
+
             # Sanity: ne pas stopper brutalement si instances manquent
             if trade_executor is None or mt5_connector is None:
                 logger.warning(

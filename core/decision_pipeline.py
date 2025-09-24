@@ -136,9 +136,9 @@ class DecisionPipeline:
 
         Retourne:
         {
-        "all_decisions": [...],      # toutes les décisions collectées
-        "final_decisions": [...],    # décisions valides retenues (BUY/SELL/CLOSE)
-        "logs": {...}                # logs par stratégie
+            "all_decisions": [...],      # toutes les décisions collectées
+            "final_decisions": [...],    # décisions valides retenues (BUY/SELL/CLOSE)
+            "logs": {...}                # logs par stratégie
         }
 
         📌 Règles:
@@ -183,9 +183,10 @@ class DecisionPipeline:
 
                     # 🔎 Exécution selon la stratégie
                     if strategy_name.lower() == "scalping":
-                        decision = evaluate_fn(asset, context, sig)
+                        decision = evaluate_fn(asset, market_df, sig, context, context.get("config_used", {}))
                     elif strategy_name.lower() == "liquidity":
-                        decision = evaluate_fn(context, signals)
+                        liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
+                        decision = evaluate_fn(context, {a: signals[a] for a in liq_assets})
                     else:
                         decision = evaluate_fn(context, sig)
 
@@ -195,19 +196,21 @@ class DecisionPipeline:
                         )
                         continue
 
-                    # Annotation standardisée
+                    # --- Normalisation stricte ---
                     if isinstance(decision, dict):
                         decision["strategy_type"] = strategy_name
                         decision["asset"] = decision.get("asset", asset)
 
-                        # Normalisation confiance
-                        if "confidence" in decision:
-                            try:
-                                decision["confidence"] = float(
-                                    decision.get("confidence") or 0.0
-                                )
-                            except Exception:
-                                decision["confidence"] = 0.0
+                        if not decision["asset"] or str(decision["asset"]).upper() == "UNKNOWN":
+                            self.logger.warning(
+                                f"[DECISION] Asset invalide pour {strategy_name}, fallback={asset}"
+                            )
+                            decision["asset"] = asset
+
+                        try:
+                            decision["confidence"] = float(decision.get("confidence") or 0.0)
+                        except Exception:
+                            decision["confidence"] = 0.0
 
                     all_decisions.append(decision)
                     logs["per_strategy"][strat_name]["decisions"].append(
@@ -235,6 +238,7 @@ class DecisionPipeline:
             "logs": logs,
         }
 
+
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -254,6 +258,7 @@ class DecisionPipeline:
         """
 
         from datetime import datetime, timezone as _tz
+
         UTC = _tz.utc
 
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
@@ -267,24 +272,28 @@ class DecisionPipeline:
 
             # === DEBUG: état guardrails (prod_config) ===
             base_cfg = self.config_manager.get_current_dynamic_config() or {}
-            guard = (base_cfg.get("guardrails") or {})
-            vol_g = (guard.get("volatility") or {})
-            spr_g = (guard.get("spread") or {})
-            sess_g = (guard.get("sessions_news") or {})
-            risk_g = (guard.get("risk_caps") or {})
-            cd_g = (guard.get("cooldowns") or {})
-            print("🧱 [DEBUG] GUARDRAILS SNAPSHOT →",
+            guard = base_cfg.get("guardrails") or {}
+            vol_g = guard.get("volatility") or {}
+            spr_g = guard.get("spread") or {}
+            sess_g = guard.get("sessions_news") or {}
+            risk_g = guard.get("risk_caps") or {}
+            cd_g = guard.get("cooldowns") or {}
+            print(
+                "🧱 [DEBUG] GUARDRAILS SNAPSHOT →",
                 f"enabled={guard.get('enabled')}, "
                 f"vol.enabled={vol_g.get('enabled')} min_atr_m1={vol_g.get('min_atr_m1_pips')}, "
                 f"spread.enabled={spr_g.get('enabled')} max_spread_pips={spr_g.get('max_spread_pips')}, ",
                 f"sessions.enabled={sess_g.get('enabled')} news_blackout={sess_g.get('news_blackout_enabled')}, ",
-                f"risk_caps.enabled={risk_g.get('enabled')}, cooldowns.enabled={cd_g.get('enabled')}")
+                f"risk_caps.enabled={risk_g.get('enabled')}, cooldowns.enabled={cd_g.get('enabled')}",
+            )
 
             # === ÉTAPE 2: IA (si désactivée, on le log juste) ===
             print("🤖 [DECISION] Étape 2: Vérification IA...")
             ai_cfg = base_cfg.get("ai", {}) or {}
-            print(f"🤖 [DECISION] IA {'activée' if ai_cfg.get('enabled') else 'désactivée'} "
-                f"(min_conf={ai_cfg.get('min_confidence')})")
+            print(
+                f"🤖 [DECISION] IA {'activée' if ai_cfg.get('enabled') else 'désactivée'} "
+                f"(min_conf={ai_cfg.get('min_confidence')})"
+            )
 
             # === ÉTAPE 3: Dispatch fixe des stratégies ===
             print("🤖 [DECISION] Étape 3: Dispatch des stratégies par actif...")
@@ -297,18 +306,26 @@ class DecisionPipeline:
             liq_cfg = self.strategy_manager.get_strategy_config("liquidity") or {}
 
             # DEBUG: seuils utilisés réellement côté stratégies
-            liq_cond = (liq_cfg.get("conditions") or {})
-            print("🧪 [DEBUG] LIQ conditions →",
+            liq_cond = liq_cfg.get("conditions") or {}
+            print(
+                "🧪 [DEBUG] LIQ conditions →",
                 f"ignore_confidence={liq_cond.get('ignore_confidence')}, ",
                 f"min_conf={liq_cond.get('min_confidence')}, ",
-                f"min_conf_entry={liq_cond.get('min_confidence_for_entry')}")
+                f"min_conf_entry={liq_cond.get('min_confidence_for_entry')}",
+            )
 
-            burst_cfg = (sca_cfg.get("burst_scalping") or {})
-            rm_cfg = (base_cfg.get("risk_management") or {})
-            print("🧪 [DEBUG] SCALPING burst → enabled={burst_cfg.get('enabled')}, "
-                f"max_spread={burst_cfg.get('max_spread_pips')}, min_atr_m1={burst_cfg.get('min_atr_m1_pips')}")
-            print("🧪 [DEBUG] RISK mgmt → min_rr=", rm_cfg.get("min_rr"),
-                " default_sl_pips=", rm_cfg.get("default_sl_pips"))
+            burst_cfg = sca_cfg.get("burst_scalping") or {}
+            rm_cfg = base_cfg.get("risk_management") or {}
+            print(
+                "🧪 [DEBUG] SCALPING burst → enabled={burst_cfg.get('enabled')}, "
+                f"max_spread={burst_cfg.get('max_spread_pips')}, min_atr_m1={burst_cfg.get('min_atr_m1_pips')}"
+            )
+            print(
+                "🧪 [DEBUG] RISK mgmt → min_rr=",
+                rm_cfg.get("min_rr"),
+                " default_sl_pips=",
+                rm_cfg.get("default_sl_pips"),
+            )
 
             # Loggers dédiés
             sca_logger = logging.getLogger("Strategy.Scalping")
@@ -319,17 +336,23 @@ class DecisionPipeline:
                 "mapping": {
                     "scalping": {
                         "XAUUSD": {
-                            "instance": ScalpingStrategy(self.config_manager, sca_cfg, sca_logger),
+                            "instance": ScalpingStrategy(
+                                self.config_manager, sca_cfg, sca_logger
+                            ),
                             "strategy_name": "scalping",
                         }
                     },
                     "liquidity": {
                         "EURUSD": {
-                            "instance": LiquidityStrategy(self.config_manager, liq_cfg, liq_logger),
+                            "instance": LiquidityStrategy(
+                                self.config_manager, liq_cfg, liq_logger
+                            ),
                             "strategy_name": "liquidity",
                         },
                         "GBPUSD": {
-                            "instance": LiquidityStrategy(self.config_manager, liq_cfg, liq_logger),
+                            "instance": LiquidityStrategy(
+                                self.config_manager, liq_cfg, liq_logger
+                            ),
                             "strategy_name": "liquidity",
                         },
                     },
@@ -343,50 +366,69 @@ class DecisionPipeline:
             print("📌 Dispatch fixe : Scalping(XAUUSD) | Liquidity(EURUSD, GBPUSD)")
 
             # === DEBUG: dump des signaux bruts utiles (pour comprendre les refus) ===
-            def _bool(v): 
-                try: return bool(v)
-                except: return False
+            def _bool(v):
+                try:
+                    return bool(v)
+                except:
+                    return False
 
             for asset, sig in signals.items():
-                md = (market_data.get(asset) or {})
+                md = market_data.get(asset) or {}
                 sym = md.get("symbol_info") or {}
-                spread_pts = (sig.get("current_spread_points")
-                            or getattr(sym, "spread", None)
-                            or md.get("current_spread_points")
-                            or float("nan"))
-                print(f"🔎 [DEBUG] {asset} → "
+                spread_pts = (
+                    sig.get("current_spread_points")
+                    or getattr(sym, "spread", None)
+                    or md.get("current_spread_points")
+                    or float("nan")
+                )
+                print(
+                    f"🔎 [DEBUG] {asset} → "
                     f"phase={sig.get('phase')} "
                     f"conf={sig.get('confidence_score')} "
                     f"sweep={_bool(sig.get('sweep_detected'))} "
                     f"absorb={_bool(sig.get('absorption_confirmed'))} "
                     f"bos={_bool(sig.get('bos_mss_detected'))} "
                     f"switch={_bool(sig.get('switch_to_liquidity'))} "
-                    f"spread_pts={spread_pts}")
+                    f"spread_pts={spread_pts}"
+                )
 
             # Lancer les stratégies et agréger les décisions
-            results = self.execute_strategies_and_collect_decisions(
-                dispatch_bundle, analyzed_context, signals
-            ) or {}
+            results = (
+                self.execute_strategies_and_collect_decisions(
+                    dispatch_bundle, analyzed_context, signals
+                )
+                or {}
+            )
 
             # === DEBUG: pourquoi refusé ? (trace consolidée par stratégie) ===
             for line in results.get("logs", {}).get("why_rejected", []):
                 print("⛔ [WHY] ", line)
 
-            td = results.get("final_decision") or {}
-            chosen_strategy = td.get("strategy_type") or None
-            chosen_asset = td.get("asset") or None
+            final_decisions = results.get("final_decisions", []) or []
+
+            # Choix principal (si on garde "un seul" pour compatibilité logs)
+            td = final_decisions[0] if final_decisions else {}
+            chosen_strategy = td.get("strategy_type") if td else None
+            chosen_asset = td.get("asset") if td else None
+
 
             # ÉTAPE 4: Adaptation config (fusion base + config stratégie choisie)
             print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
 
             # Si aucune stratégie n'a été choisie, éviter le warning inutile en restant silencieux
             if chosen_strategy:
-                strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+                strat_cfg = (
+                    self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+                )
             else:
                 strat_cfg = {}
 
-            config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
-            adapted_config = (self.adapt_config(config_for_this_cycle, analyzed_context) or {})
+            config_for_this_cycle = self.config_manager._merge_dicts(
+                base_cfg, strat_cfg
+            )
+            adapted_config = (
+                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            )
             print("🤖 [DECISION] Configuration adaptée avec succès")
 
             # Étape 4bis) Execution context (spreads/katana)
@@ -395,16 +437,25 @@ class DecisionPipeline:
             if chosen_asset:
                 if hasattr(self, "mt5_connector") and self.mt5_connector:
                     try:
-                        sym_map = self.config_manager.get("asset_symbol_mapping", {}) or {}
+                        sym_map = (
+                            self.config_manager.get("asset_symbol_mapping", {}) or {}
+                        )
                         sym = sym_map.get(chosen_asset, chosen_asset)
                         sp = self.mt5_connector.get_spread_pips(sym)
                         spreads_pips[chosen_asset] = float(sp)
                     except Exception:
                         spreads_pips[chosen_asset] = float("inf")
 
-                if hasattr(self, "phase_observer") and hasattr(self.phase_observer, "get_katana_snapshot"):
+                if hasattr(self, "phase_observer") and hasattr(
+                    self.phase_observer, "get_katana_snapshot"
+                ):
                     try:
-                        snap = self.phase_observer.get_katana_snapshot(chosen_asset, adapted_config) or {}
+                        snap = (
+                            self.phase_observer.get_katana_snapshot(
+                                chosen_asset, adapted_config
+                            )
+                            or {}
+                        )
                     except Exception:
                         snap = {"katana_ready": False, "reason": "snapshot_error"}
                     katana_snapshots[chosen_asset] = snap
@@ -443,7 +494,7 @@ class DecisionPipeline:
                         label = "TRADE DÉCIDÉ"
 
             print(f"🤖 [DECISION] Décision finale: {action_raw} | {label}")
-                       
+
             # === Affichage trace détaillée / raisons de refus ===
             print("============================================================")
             print("🔍 TRACE DÉTAILLÉE DE LA DÉCISION:")
@@ -471,10 +522,12 @@ class DecisionPipeline:
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
                 "config_used": adapted_config,
-                "final_decision": td,
+                "final_decisions": final_decisions,   
+                "final_decision": td,                
                 "execution_context": execution_context,
                 "decision_trace": results.get("logs", {}).get("decision_trace", []),
             }
+
 
         except Exception as e:
             print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
@@ -490,7 +543,6 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
-
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
@@ -1239,109 +1291,111 @@ class DecisionPipeline:
                 except Exception as e:
                     self.logger.debug(f"Erreur gate Big Reversal Candle: {e}")
 
-                    # ==========================================================
-                    # ✅ MODE BURST SCALPING 
-                    # ==========================================================
-                    burst_cfg = current_config.get("burst_scalping", {}) or {}
-                    burst_enabled = bool(burst_cfg.get("enabled", True))
+                # ==========================================================
+                # ✅ MODE BURST SCALPING
+                # ==========================================================
+                burst_cfg = current_config.get("burst_scalping", {}) or {}
+                burst_enabled = bool(burst_cfg.get("enabled", True))
+                asset_sig = signals.get(asset_raw, {})
 
-                    if burst_enabled and signals.get("burst_signal"):
-                        burst_side = str(signals.get("burst_side", "NEUTRAL")).upper()
-                        if burst_side in {"BUY", "SELL"}:
-                            burst_size = int(
-                                signals.get("suggested_burst_size")
-                                or burst_cfg.get("burst_size", 3)
-                            )
-
-                            # pip_size
-                            si = (
-                                context.get("market_data", {}).get(asset_raw, {}) or {}
-                            ).get("symbol_info", {}) or {}
-                            point = float(
-                                si.get("point") or signals.get("point") or 0.0001
-                            )
-                            digits = int(si.get("digits") or 5)
-                            pip_points = 10.0 if digits in (3, 5) else 1.0
-                            pip_size = point * pip_points
-
-                            # SL basé sur config
-                            sl_pips = float(
-                                signals.get("burst_sl_pips")
-                                or burst_cfg.get("sl_pips", 5.0)
-                            )
-                            sl_price = (
-                                price - (sl_pips * pip_size)
-                                if burst_side == "BUY"
-                                else price + (sl_pips * pip_size)
-                            )
-
-                        # Trailing Stop Config
-                        tp_sl_cfg = (burst_cfg.get("tp_sl") or {}).get("trailing", {})
-                        trailing_enabled = bool(tp_sl_cfg.get("enabled", True))
-                        trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
-                        step_pips = float(tp_sl_cfg.get("step_pips", 5))
-                        # Fix: define activate_after_rr (default to trigger_pips or another config value)
-                        activate_after_rr = float(
-                            tp_sl_cfg.get("activate_after_rr", trigger_pips)
+                if burst_enabled and asset_sig.get("burst_signal"):
+                    burst_side = str(asset_sig.get("burst_side", "NEUTRAL")).upper()
+                    if burst_side in {"BUY", "SELL"}:
+                        burst_size = int(
+                            asset_sig.get("suggested_burst_size")
+                            or burst_cfg.get("burst_size", 3)
                         )
 
-                        basket_id = f"burst_{asset_raw}_{int(time.time())}"
+                        # pip_size
+                        si = (
+                            context.get("market_data", {}).get(asset_raw, {}) or {}
+                        ).get("symbol_info", {}) or {}
+                        point = float(si.get("point") or signals.get("point") or 0.0001)
+                        digits = int(si.get("digits") or 5)
+                        pip_points = 10.0 if digits in (3, 5) else 1.0
+                        pip_size = point * pip_points
 
-                        burst_decisions = []
-                        for i in range(burst_size):
-                            order = {
-                                "action": burst_side,
-                                "asset": asset_raw,
-                                "order_type": "MARKET",
-                                "entry_price": price,
-                                "sl_price": round(sl_price, digits),
-                                "rule_name": "burst_scalping",
-                                "basket_id": basket_id,
-                                "burst_index": i + 1,
-                                "burst_size": burst_size,
+                        # SL basé sur config
+                        sl_pips = float(
+                            asset_sig.get("burst_sl_pips")
+                            or burst_cfg.get("sl_pips", 5.0)
+                        )
+                        sl_price = (
+                            price - (sl_pips * pip_size)
+                            if burst_side == "BUY"
+                            else price + (sl_pips * pip_size)
+                        )
+
+                    # Trailing Stop Config
+                    tp_sl_cfg = (burst_cfg.get("tp_sl") or {}).get("trailing", {})
+                    trailing_enabled = bool(tp_sl_cfg.get("enabled", True))
+                    trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
+                    step_pips = float(tp_sl_cfg.get("step_pips", 5))
+                    # Fix: define activate_after_rr (default to trigger_pips or another config value)
+                    activate_after_rr = float(
+                        tp_sl_cfg.get("activate_after_rr", trigger_pips)
+                    )
+
+                    basket_id = f"burst_{asset_raw}_{int(time.time())}"
+
+                    burst_decisions = []
+                    for i in range(burst_size):
+                        order = {
+                            "action": burst_side,
+                            "asset": asset_raw,
+                            "order_type": "MARKET",
+                            "entry_price": price,
+                            "sl_price": round(sl_price, digits),
+                            "rule_name": "burst_scalping",
+                            "basket_id": basket_id,
+                            "burst_index": i + 1,
+                            "burst_size": burst_size,
+                        }
+
+                        if trailing_enabled:
+                            order["trailing"] = {
+                                "enabled": True,
+                                "activate_after_rr": activate_after_rr,
+                                "step_pips": step_pips,
                             }
 
-                            if trailing_enabled:
-                                order["trailing"] = {
-                                    "enabled": True,
-                                    "activate_after_rr": activate_after_rr,
-                                    "step_pips": step_pips,
-                                }
+                        burst_decisions.append(order)
 
-                            burst_decisions.append(order)
+                    self.logger.info(
+                        f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw} "
+                        f"avec Trailing Stop (trigger={trigger_pips}p, step={step_pips}p)."
+                    )
+                    print(
+                        f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} "
+                        f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
+                    )
 
-                        self.logger.info(
-                            f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw} "
-                            f"avec Trailing Stop (trigger={trigger_pips}p, step={step_pips}p)."
-                        )
-                        print(
-                            f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} "
-                            f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
-                        )
-
-                        # 🟢 IMPORTANT: fournir une final_decision pour exécution pipeline
-                        return {
-                            "final_decision": {
-                                "action": burst_side,
-                                "asset": asset_raw,
-                                "order_type": "MARKET",
-                                "entry_price": price,
-                                "sl_price": round(sl_price, digits),
-                                "rule_name": "burst_scalping",
-                                "burst_enabled": True,
-                                "burst_size": burst_size,
-                                **({
+                    # 🟢 IMPORTANT: fournir une final_decision pour exécution pipeline
+                    return {
+                        "final_decision": {
+                            "action": burst_side,
+                            "asset": asset_raw,
+                            "order_type": "MARKET",
+                            "entry_price": price,
+                            "sl_price": round(sl_price, digits),
+                            "rule_name": "burst_scalping",
+                            "burst_enabled": True,
+                            "burst_size": burst_size,
+                            **(
+                                {
                                     "trailing": {
                                         "enabled": True,
                                         "activate_after_rr": activate_after_rr,
                                         "step_pips": step_pips,
                                     }
-                                } if trailing_enabled else {}),
-                            },
-                            "config_used": current_config,
-                            "burst_decisions": burst_decisions,
-                        }
-
+                                }
+                                if trailing_enabled
+                                else {}
+                            ),
+                        },
+                        "config_used": current_config,
+                        "burst_decisions": burst_decisions,
+                    }
 
                 # ✅ Liquidity Sweep (optionnel)
                 if strategy_name.lower() == "scalping":
@@ -1534,7 +1588,7 @@ class DecisionPipeline:
                     or current_config.get("symbol_info")
                     or {}
                 ) or {}
-                point = float(si.get("point") or signals.get("point") or 0.0001)
+                point = float(si.get("point") or asset_sig.get("point") or 0.0001)
                 digits = int(si.get("digits") or 5)
                 pip_points = 10.0 if digits in (3, 5) else 1.0
                 pip_size = point * pip_points
@@ -2574,7 +2628,8 @@ class DecisionPipeline:
         digits = int(symbol_info.get("digits", 5) or 5)
 
         stops_lvl_points = float(
-            symbol_info.get("trade_stops_level", symbol_info.get("stops_level", 0.0)) or 0.0
+            symbol_info.get("trade_stops_level", symbol_info.get("stops_level", 0.0))
+            or 0.0
         )
         spread_pts = float(md.get("current_spread_points", 0.0) or 0.0)
 
@@ -2583,9 +2638,9 @@ class DecisionPipeline:
         spread_pips = spread_pts / pip_points
         stops_level_pips = stops_lvl_points / pip_points
         min_stop_price_dist = stops_lvl_points * point
-        
+
         # --- Contrôle dynamique du spread (guardrails) ---
-        gr_spread = ((current_config.get("guardrails") or {}).get("spread") or {})
+        gr_spread = (current_config.get("guardrails") or {}).get("spread") or {}
         use_spread_guard = bool(gr_spread.get("enabled", False))
 
         max_spread_pips = float(gr_spread.get("max_spread_pips", 999.0))
@@ -2593,25 +2648,36 @@ class DecisionPipeline:
 
         if use_spread_guard:
             if spread_pips > max_spread_pips:
-                return {"ok": False, "reason": f"spread_too_high:{spread_pips:.2f}p > {max_spread_pips}p"}
+                return {
+                    "ok": False,
+                    "reason": f"spread_too_high:{spread_pips:.2f}p > {max_spread_pips}p",
+                }
             if spread_pts > max_spread_points:
-                return {"ok": False, "reason": f"spread_points_too_high:{spread_pts:.1f} > {max_spread_points}"}
+                return {
+                    "ok": False,
+                    "reason": f"spread_points_too_high:{spread_pts:.1f} > {max_spread_points}",
+                }
         else:
             notes.append("spread_check_disabled_by_guardrails")
-
 
         # --- 3) Risque (config) ---
         rm_cfg = (current_config or {}).get("risk_management", {}) or {}
 
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.0))          # sizing délégué
-        min_rr = float(rm_cfg.get("min_rr", 0.0))                        # neutre si absent
-        max_tp_sl_ratio = float(rm_cfg.get("max_tp_to_sl_ratio", 999.0)) # neutre si absent
+        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.0))  # sizing délégué
+        min_rr = float(rm_cfg.get("min_rr", 0.0))  # neutre si absent
+        max_tp_sl_ratio = float(
+            rm_cfg.get("max_tp_to_sl_ratio", 999.0)
+        )  # neutre si absent
 
         default_sl_pips = rm_cfg.get("default_sl_pips", None)
-        default_sl_pips = float(default_sl_pips) if default_sl_pips is not None else None
+        default_sl_pips = (
+            float(default_sl_pips) if default_sl_pips is not None else None
+        )
 
         # Equity check
-        equity = float(account_info.get("equity", account_info.get("balance", 0.0)) or 0.0)
+        equity = float(
+            account_info.get("equity", account_info.get("balance", 0.0)) or 0.0
+        )
         if equity <= 0:
             return {"ok": False, "reason": "no_equity"}
 
@@ -2624,7 +2690,9 @@ class DecisionPipeline:
         sl_price_in = trade_decision.get("sl_price")
         tp_price_in = trade_decision.get("tp_price")
 
-        if isinstance(sl_pips_target, (int, float)) and isinstance(tp_pips_target, (int, float)):
+        if isinstance(sl_pips_target, (int, float)) and isinstance(
+            tp_pips_target, (int, float)
+        ):
             sl_pips_val = float(sl_pips_target)
             tp_pips_val = float(tp_pips_target)
             notes.append("levels_from_target_pips")
@@ -2670,12 +2738,16 @@ class DecisionPipeline:
             if sl_dist_price < min_stop_price_dist:
                 sl_dist_price = min_stop_price_dist
                 sl_pips_val = sl_dist_price / pip_size
-                sl_price = entry - sl_dist_price if action == "BUY" else entry + sl_dist_price
+                sl_price = (
+                    entry - sl_dist_price if action == "BUY" else entry + sl_dist_price
+                )
                 notes.append(f"sl_raised_to_broker_min:{sl_pips_val:.2f}p")
             if tp_dist_price and tp_dist_price < min_stop_price_dist:
                 tp_dist_price = min_stop_price_dist
                 tp_pips_val = tp_dist_price / pip_size
-                tp_price = entry + tp_dist_price if action == "BUY" else entry - tp_dist_price
+                tp_price = (
+                    entry + tp_dist_price if action == "BUY" else entry - tp_dist_price
+                )
                 notes.append(f"tp_raised_to_broker_min:{tp_pips_val:.2f}p")
 
         # --- 6) Rounding ---
@@ -2685,12 +2757,16 @@ class DecisionPipeline:
                 tp_price = round(tp_price, digits)
 
         # --- 7) RR ---
-        rr = (tp_dist_price / sl_dist_price) if (tp_dist_price and sl_dist_price > 0) else None
+        rr = (
+            (tp_dist_price / sl_dist_price)
+            if (tp_dist_price and sl_dist_price > 0)
+            else None
+        )
         spread_comp_price = spread_pts * point
         effective_tp_dist = max(0.0, (tp_dist_price or 0.0) - spread_comp_price)
         rr_effective = (effective_tp_dist / sl_dist_price) if sl_dist_price > 0 else 0.0
 
-       # --- 7bis) Facteur dynamique ATR (optionnel, piloté par config) ---
+        # --- 7bis) Facteur dynamique ATR (optionnel, piloté par config) ---
         atr_m1_pips = None
         try:
             if df is not None and not df.empty and "atr" in df.columns:
@@ -2699,11 +2775,15 @@ class DecisionPipeline:
             atr_m1_pips = None
 
         # Lecture config dynamique
-        gr_vol = ((current_config.get("guardrails") or {}).get("volatility") or {})
+        gr_vol = (current_config.get("guardrails") or {}).get("volatility") or {}
         use_volatility_guard = bool(gr_vol.get("enabled", False))
 
-        target_min = float(rm_cfg.get("atr_target_min", gr_vol.get("min_atr_m1_pips", 0.0)))
-        target_max = float(rm_cfg.get("atr_target_max", gr_vol.get("max_atr_m1_pips", 999.0)))
+        target_min = float(
+            rm_cfg.get("atr_target_min", gr_vol.get("min_atr_m1_pips", 0.0))
+        )
+        target_max = float(
+            rm_cfg.get("atr_target_max", gr_vol.get("max_atr_m1_pips", 999.0))
+        )
         low_factor = float(rm_cfg.get("low_atr_factor", 1.0))
         min_factor = float(rm_cfg.get("min_factor", 1.0))
 
@@ -2711,14 +2791,20 @@ class DecisionPipeline:
             if use_volatility_guard:
                 if atr_m1_pips < target_min:
                     vol_factor = low_factor
-                    notes.append(f"atr_low:{atr_m1_pips:.2f}p (<{target_min}) → facteur {vol_factor}")
+                    notes.append(
+                        f"atr_low:{atr_m1_pips:.2f}p (<{target_min}) → facteur {vol_factor}"
+                    )
                 elif atr_m1_pips > target_max:
                     safe_ratio = (target_max / atr_m1_pips) if atr_m1_pips > 0 else 1.0
                     vol_factor = max(min_factor, safe_ratio)
-                    notes.append(f"atr_high:{atr_m1_pips:.2f}p (>{target_max}) → facteur {vol_factor:.2f}")
+                    notes.append(
+                        f"atr_high:{atr_m1_pips:.2f}p (>{target_max}) → facteur {vol_factor:.2f}"
+                    )
                 else:
                     vol_factor = 1.0
-                    notes.append(f"atr_ok:{atr_m1_pips:.2f}p (zone [{target_min}-{target_max}]) → neutre")
+                    notes.append(
+                        f"atr_ok:{atr_m1_pips:.2f}p (zone [{target_min}-{target_max}]) → neutre"
+                    )
                 trade_decision["volatility_factor"] = vol_factor
             else:
                 notes.append("atr_check_disabled_by_guardrails")
