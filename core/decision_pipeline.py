@@ -183,32 +183,36 @@ class DecisionPipeline:
 
                     # 🔎 Exécution selon la stratégie
                     if strategy_name.lower() == "scalping":
-                        decision = evaluate_fn(asset, market_df, sig, context, context.get("config_used", {}))
+                        # ScalpingStrategy → signature: evaluate_entry(asset, market_df, signals)
+                        decision = evaluate_fn(asset, market_df, sig)
                     elif strategy_name.lower() == "liquidity":
+                        # LiquidityStrategy → signature: evaluate_entry(context, signals_subset)
                         liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
-                        decision = evaluate_fn(context, {a: signals[a] for a in liq_assets})
-                    else:
-                        decision = evaluate_fn(context, sig)
-
-                    if not decision:
-                        logs["per_strategy"][strat_name]["decisions"].append(
-                            {"asset": asset, "decision": None}
+                        decision = evaluate_fn(
+                            context, {a: signals[a] for a in liq_assets}
                         )
-                        continue
+                    else:
+                        # 🚫 Stratégie inconnue → on ne fait rien
+                        decision = None
 
                     # --- Normalisation stricte ---
                     if isinstance(decision, dict):
                         decision["strategy_type"] = strategy_name
                         decision["asset"] = decision.get("asset", asset)
 
-                        if not decision["asset"] or str(decision["asset"]).upper() == "UNKNOWN":
+                        if (
+                            not decision["asset"]
+                            or str(decision["asset"]).upper() == "UNKNOWN"
+                        ):
                             self.logger.warning(
                                 f"[DECISION] Asset invalide pour {strategy_name}, fallback={asset}"
                             )
                             decision["asset"] = asset
 
                         try:
-                            decision["confidence"] = float(decision.get("confidence") or 0.0)
+                            decision["confidence"] = float(
+                                decision.get("confidence") or 0.0
+                            )
                         except Exception:
                             decision["confidence"] = 0.0
 
@@ -237,7 +241,6 @@ class DecisionPipeline:
             "final_decisions": final_decisions,  # ✅ LISTE (multi-stratégies)
             "logs": logs,
         }
-
 
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
@@ -411,7 +414,6 @@ class DecisionPipeline:
             chosen_strategy = td.get("strategy_type") if td else None
             chosen_asset = td.get("asset") if td else None
 
-
             # ÉTAPE 4: Adaptation config (fusion base + config stratégie choisie)
             print("🤖 [DECISION] Étape 4: Adaptation de configuration...")
 
@@ -522,12 +524,11 @@ class DecisionPipeline:
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
                 "config_used": adapted_config,
-                "final_decisions": final_decisions,   
-                "final_decision": td,                
+                "final_decisions": final_decisions,
+                "final_decision": td,
                 "execution_context": execution_context,
                 "decision_trace": results.get("logs", {}).get("decision_trace", []),
             }
-
 
         except Exception as e:
             print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
