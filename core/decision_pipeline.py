@@ -173,7 +173,10 @@ class DecisionPipeline:
                     f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} conf={sig.get('confidence_score')} spread_pts={spread_pts}"
                 )
 
+            scalping_decisions: list = []
+            liquidity_decisions: list = []
             final_decisions: list = []
+
 
             # Utilitaires de normalisation
             def _norm_action(x: str) -> str:
@@ -210,7 +213,7 @@ class DecisionPipeline:
                             _ensure_asset(dec, "XAUUSD")
                             dec.setdefault("execution_status", "ready")
                             if _keep(dec):
-                                final_decisions.append(dec)
+                                scalping_decisions.append(dec)
                     except Exception as e:
                         self.logger.error(
                             f"[DECISION] Erreur scalping: {e}", exc_info=True
@@ -246,11 +249,17 @@ class DecisionPipeline:
                             _ensure_asset(d, liq_assets[0])
                             d.setdefault("execution_status", "ready")
                             if _keep(d):
-                                final_decisions.append(d)
+                                liquidity_decisions.append(d)
                     except Exception as e:
                         self.logger.error(
                             f"[DECISION] Erreur liquidity: {e}", exc_info=True
                         )
+                        # Fusion pour compatibilité avec l'ancien pipeline
+                        final_decisions = scalping_decisions + liquidity_decisions
+                        td = final_decisions[0] if final_decisions else {}
+                        chosen_strategy = td.get("strategy_type") if td else None
+                        chosen_asset = td.get("asset") if td else None
+
 
             # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
             td = final_decisions[0] if final_decisions else {}
@@ -303,6 +312,8 @@ class DecisionPipeline:
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
                 "config_used": adapted_config,
+                "scalping_decisions": scalping_decisions,     
+                "liquidity_decisions": liquidity_decisions,   
                 "final_decisions": final_decisions,
                 "final_decision": td,
                 "execution_context": execution_context,

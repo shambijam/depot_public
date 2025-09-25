@@ -578,6 +578,54 @@ def _mtf_readiness_gate(
         return True
 
 
+def _execute_single_decision(
+    td,
+    trade_executor,
+    mt5_connector,
+    global_context,
+    decision_package,
+    execution_mode,
+    logger,
+):
+    """Exécute une décision unique (scalping ou liquidity)."""
+    decision_package_for_executor = {
+        "trade_decision": td,
+        "active_config": decision_package.get("config_used", {}) or {},
+        "market_context": global_context,
+    }
+
+    try:
+        if td.get("rule_name") == "burst_scalping" or td.get("burst_enabled", False):
+            burst_size = int(td.get("burst_size", 3))
+            trade_decision = trade_executor._attach_burst_metadata(td)
+            requests = []
+            for i in range(burst_size):
+                req = trade_executor.prepare_order(
+                    {
+                        "trade_decision": dict(trade_decision),
+                        "market_context": global_context,
+                        "active_config": decision_package.get("config_used", {}) or {},
+                    }
+                )
+                req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
+                requests.append(req)
+            results = [trade_executor.execute_order(r) for r in requests]
+            return all(
+                str(res.get("status", "")).lower() in {"filled", "placed"}
+                for res in results
+            )
+        else:
+            order_request = trade_executor.prepare_order(decision_package_for_executor)
+            exec_res = trade_executor.execute_order(order_request)
+            return str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+    except Exception as e:
+        logger.error(
+            f"[EXECUTOR] Erreur prepare/execute pour {td.get('asset')}: {e}",
+            exc_info=True,
+        )
+        return False
+
+
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
     phase_observer: PhaseObserver,
@@ -706,7 +754,9 @@ def run_single_pipeline_cycle(
                         pe = PatternEngine()
                         try:
                             # analyse complète (combo/orderflow/multi-candle/structure)
-                            pe_results = pe.analyze(annotated_rates_df.copy(), with_combo=True)
+                            pe_results = pe.analyze(
+                                annotated_rates_df.copy(), with_combo=True
+                            )
                         except TypeError:
                             # fallback si l'API analyse attend d'autres paramètres
                             pe_results = pe.analyze(annotated_rates_df.copy())
@@ -715,17 +765,27 @@ def run_single_pipeline_cycle(
                         if isinstance(pe_results, dict):
                             # Conserver les clés utiles sans écraser les champs existants
                             if pe_results.get("combo_signals"):
-                                signals["pattern_combo_signals"] = pe_results.get("combo_signals")
+                                signals["pattern_combo_signals"] = pe_results.get(
+                                    "combo_signals"
+                                )
                             if pe_results.get("orderflow_signals"):
-                                signals["pattern_orderflow"] = pe_results.get("orderflow_signals")
+                                signals["pattern_orderflow"] = pe_results.get(
+                                    "orderflow_signals"
+                                )
                             if pe_results.get("multi_candle_patterns"):
-                                signals["pattern_multi_candles"] = pe_results.get("multi_candle_patterns")
+                                signals["pattern_multi_candles"] = pe_results.get(
+                                    "multi_candle_patterns"
+                                )
                             if pe_results.get("structure_signals"):
-                                signals["pattern_structure"] = pe_results.get("structure_signals")
+                                signals["pattern_structure"] = pe_results.get(
+                                    "structure_signals"
+                                )
                             # toute autre clé utile
                             for k in ("confidence_overview", "quality_metrics"):
                                 if pe_results.get(k):
-                                    signals.setdefault("pattern_metrics", {})[k] = pe_results.get(k)
+                                    signals.setdefault("pattern_metrics", {})[k] = (
+                                        pe_results.get(k)
+                                    )
 
                         # Latest single-pattern convenience (utilisé ailleurs)
                         try:
@@ -736,11 +796,12 @@ def run_single_pipeline_cycle(
                             # non bloquant
                             pass
                     else:
-                        logger.debug(f"[{asset}] PatternEngine skipped (DF trop petit).")
+                        logger.debug(
+                            f"[{asset}] PatternEngine skipped (DF trop petit)."
+                        )
                 except Exception as e:
                     # Ne doit jamais casser le pipeline : on log et on continue
                     logger.warning(f"[{asset}] PatternEngine non appliqué: {e}")
-
 
                 # Phase & score (avec fallbacks)
                 signals["phase"] = str(
@@ -785,7 +846,7 @@ def run_single_pipeline_cycle(
                 f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
             )
         print("=" * 60)
-        
+
         # Charger configs des assets (une seule fois via cache du ConfigManager)
         asset_configs = {}
         for asset in tradeable_assets:
@@ -795,7 +856,6 @@ def run_single_pipeline_cycle(
                     asset_configs[asset] = cfg
             except Exception as e:
                 logger.warning(f"[{asset}] Impossible de charger la config: {e}")
-
 
         # Contexte global
         global_context = _build_global_context(
@@ -820,7 +880,12 @@ def run_single_pipeline_cycle(
         )
 
         # ====== LOG DÉCISION (anti-doublon) ======
-        final_decisions = decision_package.get("final_decisions", []) or []
+        scalping_decisions = decision_package.get("scalping_decisions", []) or []
+        liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
+
+        # Compatibilité : fusion pour les logs globaux
+        final_decisions = scalping_decisions + liquidity_decisions
+
         final = decision_package.get("final_decision", {}) or {}
         ctx_out = decision_package.get("context", {}) or {}
 
@@ -828,10 +893,12 @@ def run_single_pipeline_cycle(
         if final_decisions:
             print("📦 [PIPELINE] Décisions multiples détectées:")
             for d in final_decisions:
-                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+                print(
+                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
+                )
         else:
             print("📦 [PIPELINE] Aucune décision multiple détectée.")
-       
+
         # Seulement si la pipeline n'a PAS déjà loggué elle-même
         if not ctx_out.get("__decision_logged"):
             print("3️⃣ DÉCISION RETOURNÉE:")
@@ -844,131 +911,80 @@ def run_single_pipeline_cycle(
                 else "   ❌ PAS DE TRADE"
             )
             print("=" * 60 + "\n")
-       
+
         # === EXÉCUTION DES DÉCISIONS ===
-        if not final_decisions:
+
+        scalping_decisions = decision_package.get("scalping_decisions", []) or []
+        liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
+
+        if not scalping_decisions and not liquidity_decisions:
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
 
-        print("📦 [PIPELINE] Décisions détectées:")
-        for d in final_decisions:
-            print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+        # --- Exécution Scalping ---
+        if scalping_decisions:
+            print("📦 [PIPELINE] Décisions Scalping détectées:")
+            for d in scalping_decisions:
+                print(
+                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
+                )
 
-        for td in final_decisions:
-            action = str(td.get("action", "")).upper()
-            if action not in {"BUY", "SELL"}:
-                continue
-          
-            # Construit le package pour cet ordre
-            decision_package_for_executor: Dict[str, Any] = {
-                "trade_decision": td,
-                "active_config": decision_package.get("config_used", {}) or {},
-                "market_context": global_context,
-            }
-
-            try:
-                if td.get("rule_name") == "burst_scalping" or td.get("burst_enabled", False):
-                    # === MODE BURST ===
-                    burst_size = int(td.get("burst_size", 3))
-                    trade_decision = trade_executor._attach_burst_metadata(td)
-
-                    requests = []
-                    for i in range(burst_size):
-                        req = trade_executor.prepare_order(
-                            {
-                                "trade_decision": dict(trade_decision),
-                                "market_context": global_context,
-                                "active_config": decision_package.get("config_used", {}) or {},
-                            }
-                        )
-                        req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
-                        requests.append(req)
-
-                    logger.info(f"[BURST] Envoi {len(requests)} ordres...")
-                    results = [trade_executor.execute_order(r) for r in requests]
-                    trade_executed_successfully |= all(
-                        str(res.get("status", "")).lower() in {"filled", "placed"}
-                        for res in results
+            for td in scalping_decisions:
+                action = str(td.get("action", "")).upper()
+                if action in {"BUY", "SELL"}:
+                    _execute_single_decision(
+                        td,
+                        trade_executor,
+                        mt5_connector,
+                        global_context,
+                        decision_package,
+                        execution_mode,
+                        logger,
                     )
 
-                else:
-                    # === MODE STANDARD ===
-                    order_request = trade_executor.prepare_order(decision_package_for_executor)
-                    logger.info(f"[EXECUTOR] Envoi ordre MT5...")
-                    exec_res = trade_executor.execute_order(order_request)
-                    status_ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
-                    if status_ok:
-                        logger.info(
-                            f"[EXECUTOR] Ordre envoyé OK: {exec_res.get('order') or exec_res.get('deal')}"
-                        )
-                    trade_executed_successfully |= status_ok
-
-            except Exception as e:
-                logger.error(f"[EXECUTOR] Erreur prepare/execute pour {td.get('asset')}: {e}", exc_info=True)
-
-            # Sanity: ne pas stopper brutalement si instances manquent
-            if trade_executor is None or mt5_connector is None:
-                logger.warning(
-                    "[EXECUTOR] Aucune instance TradeExecutor/MT5Connector disponible → envoi MT5 ignoré ce cycle."
+        # --- Exécution Liquidity ---
+        if liquidity_decisions:
+            print("📦 [PIPELINE] Décisions Liquidity détectées:")
+            for d in liquidity_decisions:
+                print(
+                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
-                trade_executed_successfully = False
-            else:
-                # Injecter le mt5_connector si nécessaire
-                try:
-                    if (
-                        not hasattr(trade_executor, "mt5_connector")
-                        or trade_executor.mt5_connector is None
-                    ):
-                        trade_executor.mt5_connector = mt5_connector
-                except Exception:
-                    pass
 
-                # Contexte d’exécution (utile à l’audit)
-                try:
-                    trade_executor.execution_context = {
-                        "cycle_count": cycle_count,
-                        "daily_trade_count": daily_trade_count,
-                        "mode": execution_mode,
-                    }
-                except Exception:
-                    pass
+            for td in liquidity_decisions:
+                action = str(td.get("action", "")).upper()
+                if action in {"BUY", "SELL"}:
+                    _execute_single_decision(
+                        td,
+                        trade_executor,
+                        mt5_connector,
+                        global_context,
+                        decision_package,
+                        execution_mode,
+                        logger,
+                    )
 
-                # 🔻 Vérification des EXIT Liquidity
-                try:
-                    current_positions = mt5_connector.get_positions()
-                    if current_positions:
-                        from strategy.liquidity import LiquidityStrategy
-                        liq_cfg = (config_manager.get_strategy_config("liquidity") or {})
-                        liqui = LiquidityStrategy(config_manager, liq_cfg)
-                        exit_decisions = liqui.evaluate_exit(
-                            global_context, current_positions
-                        )
+        # --- Vérification des EXIT Liquidity (sorties forcées) ---
+        try:
+            current_positions = mt5_connector.get_positions()
+            if current_positions:
+                from strategy.liquidity import LiquidityStrategy
 
-                        if exit_decisions:
-                            trade_executor.execute_exit_orders(
-                                exit_decisions, is_dry_run=is_dry_run
-                            )
-                            logger.info(
-                                f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
-                            )
-                            print(
-                                f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
-                            )
-                            # 🔒 Clôture des paniers burst si un exit liquidity touche un trade du panier
-                            try:
-                                for decision in exit_decisions:
-                                    if decision.get("basket_id") and decision.get("meta", {}).get("burst"):
-                                        trade_executor.close_burst_basket(decision["basket_id"])
-                                        logger.info(
-                                            f"[BURST] Panier {decision['basket_id']} fermé par EXIT Liquidity."
-                                        )
-                            except Exception as e:
-                                logger.error(
-                                    f"[BURST] Erreur clôture burst via EXIT Liquidity: {e}"
-                                )
-                except Exception as e:
-                    logger.error(f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True)
+                liq_cfg = config_manager.get_strategy_config("liquidity") or {}
+                liqui = LiquidityStrategy(config_manager, liq_cfg)
+                exit_decisions = liqui.evaluate_exit(global_context, current_positions)
+                if exit_decisions:
+                    trade_executor.execute_exit_orders(
+                        exit_decisions, is_dry_run=is_dry_run
+                    )
+                    logger.info(
+                        f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
+                    )
+                    print(
+                        f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
+                    )
+        except Exception as e:
+            logger.error(f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True)
 
     except Exception as e:
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
