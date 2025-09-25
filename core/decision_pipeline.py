@@ -123,6 +123,7 @@ class DecisionPipeline:
         """
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
+    
 
     def institutional_decision_pipeline(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -211,6 +212,10 @@ class DecisionPipeline:
                             dec.setdefault("execution_status", "ready")
                             if _is_valid(dec):
                                 scalping_decisions.append(dec)
+                                print(f"✅ [SCALPING] décision retenue: {dec.get('action')} {dec.get('asset')} rule={dec.get('rule_name')}")
+                            else:
+                                print(f"⛔ [SCALPING] décision rejetée: {dec}")
+
                     except Exception as e:
                         self.logger.error(f"[DECISION] Erreur scalping: {e}", exc_info=True)
 
@@ -242,6 +247,21 @@ class DecisionPipeline:
                                 liquidity_decisions.append(d)
                     except Exception as e:
                         self.logger.error(f"[DECISION] Erreur liquidity: {e}", exc_info=True)
+                        
+                    # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
+                    print(f"📦 scalping_decisions={len(scalping_decisions)} | liquidity_decisions={len(liquidity_decisions)}")
+                    if scalping_decisions:
+                        print(f"   ↳ top scalping: {scalping_decisions[0].get('action')} {scalping_decisions[0].get('asset')}")
+                    if liquidity_decisions:
+                        print(f"   ↳ top liquidity: {liquidity_decisions[0].get('action')} {liquidity_decisions[0].get('asset')}")
+
+                    final_decisions = scalping_decisions + liquidity_decisions
+
+                    # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
+                    td = final_decisions[0] if final_decisions else {}
+                    chosen_strategy = td.get("strategy_type") if td else None
+                    chosen_asset = td.get("asset") if td else None
+  
 
             # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
             final_decisions = scalping_decisions + liquidity_decisions
@@ -252,7 +272,11 @@ class DecisionPipeline:
             chosen_asset = td.get("asset") if td else None
 
             # === ÉTAPE 4: Adaptation config (base + config stratégie choisie) ===
-            strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+            if chosen_strategy:
+                strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+            else:
+                strat_cfg = {}  # ne JAMAIS appeler get_strategy_config(None)
+
             config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
             adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context) or {}
             print("🤖 [DECISION] Configuration adaptée avec succès")
