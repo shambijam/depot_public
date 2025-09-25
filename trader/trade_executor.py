@@ -3276,6 +3276,17 @@ class TradeExecutor:
                 return getattr(mt5, name)
             except Exception:
                 return getattr(mt5, default_name, None)
+            
+        # --- Patch compatibilité retcodes (selon version MT5) ---
+        TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
+        TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
+        TRADE_RETCODE_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
+
+        # Codes d’erreur "connexion" possibles (selon version MT5 installée)
+        CONNECTION_ERROR_CODES = {
+            code for code in (TRADE_RETCODE_NO_CONNECTION, TRADE_RETCODE_CONNECTION, TRADE_RETCODE_TIMEOUT)
+            if code is not None
+        }
 
         # --- Déterminer l'action attendue (BUY/SELL) à partir du type ---
         order_type = request.get("type")
@@ -3334,11 +3345,27 @@ class TradeExecutor:
                 comment = getattr(result, "comment", "")
                 reason = "UNKNOWN"
 
-                if retcode in (mt5.TRADE_RETCODE_NO_CONNECTION, mt5.TRADE_RETCODE_TIMEOUT):
+                # --- Compatibilité multi-versions MT5 ---
+                TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
+                TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
+                TRADE_RETCODE_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
+
+                CONNECTION_ERROR_CODES = {
+                    code for code in (
+                        TRADE_RETCODE_NO_CONNECTION,
+                        TRADE_RETCODE_CONNECTION,
+                        TRADE_RETCODE_TIMEOUT,
+                    )
+                    if code is not None
+                }
+
+                if retcode in CONNECTION_ERROR_CODES:
                     reason = "BROKER/NETWORK"
-                elif retcode in (mt5.TRADE_RETCODE_INVALID_VOLUME, mt5.TRADE_RETCODE_INVALID_PRICE):
+                elif retcode in (getattr(mt5, "TRADE_RETCODE_INVALID_VOLUME", -1),
+                                getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", -2)):
                     reason = "PARAMS"
-                elif retcode in (mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_REJECT):
+                elif retcode in (getattr(mt5, "TRADE_RETCODE_REQUOTE", -3),
+                                getattr(mt5, "TRADE_RETCODE_REJECT", -4)):
                     reason = "MARKET"
 
                 msg = (
