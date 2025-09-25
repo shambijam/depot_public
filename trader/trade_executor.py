@@ -3310,6 +3310,122 @@ class TradeExecutor:
 
         # --- Contexte exécution (pour audit si dispo) ---
         audit_ctx = getattr(self, "execution_context", {}) or {}
+        
+        # --- Normalisation / correction SL/TP pour éviter "Invalid stops" (10016) ---
+        try:
+            info = None
+            if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                info = self.mt5_connector.mt5.symbol_info(symbol)
+            if not info and hasattr(self, "mt5") and self.mt5:
+                info = self.mt5.symbol_info(symbol)
+
+            point = getattr(info, "point", None) or 0.0
+            digits = getattr(info, "digits", None) or 0
+            tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
+            contract_size = getattr(info, "trade_contract_size", None) or 1.0
+            stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)  # en "points" MT5
+
+            # Prix courant pour contrôle de distance (si pas fourni dans request)
+            def _get_market_price(sym: str, side: str) -> float:
+                px = request.get("price")
+                if px:
+                    return float(px)
+                m = None
+                if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                    m = self.mt5_connector.mt5.symbol_info_tick(sym)
+                if not m and hasattr(self, "mt5") and self.mt5:
+                    m = self.mt5.symbol_info_tick(sym)
+                if not m:
+                    return 0.0
+                # Pour une exécution MARKET :
+                #   BUY → prix = ask ; SELL → prix = bid
+                bid = getattr(m, "bid", None)
+                ask = getattr(m, "ask", None)
+                if side == "BUY" and ask is not None:
+                    return float(ask)
+                if side == "SELL" and bid is not None:
+                    return float(bid)
+                # fallback
+                return float(ask or bid or 0.0)
+
+            def _round_to_tick(px: float) -> float:
+                if not tick_size or tick_size <= 0:
+                    # arrondi à "digits" si pas de tick_size
+                    return round(float(px), int(digits))
+                # quantification au tick
+                steps = round(float(px) / tick_size)
+                return round(steps * tick_size, int(digits))
+
+            # Lis les SL/TP souhaités
+            sl = request.get("sl")
+            tp = request.get("tp")
+            price = _get_market_price(symbol, action)
+
+            # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
+            if price and point:
+                # Sens attendu des stops selon action
+                #   BUY  → SL < price, TP > price
+                #   SELL → SL > price, TP < price
+                def _min_distance_ok(px_a: float, px_b: float) -> bool:
+                    # distance en points MT5
+                    return abs(px_a - px_b) / point >= max(stops_level_pts, 0)
+
+                # Buffer de sécurité : +1 tick au-delà du stops_level
+                def _apply_buffer(target: float, ref: float, side: str, is_sl: bool) -> float:
+                    # pousse d'un tick dans la bonne direction si trop proche
+                    buf = tick_size or (point or 0.0)
+                    if is_sl:
+                        if side == "BUY" and target >= ref:
+                            target = ref - buf
+                        elif side == "SELL" and target <= ref:
+                            target = ref + buf
+                    else:  # TP
+                        if side == "BUY" and target <= ref:
+                            target = ref + buf
+                        elif side == "SELL" and target >= ref:
+                            target = ref - buf
+                    # si encore trop près, pousse d’assez de ticks pour dépasser stops_level
+                    while not _min_distance_ok(target, ref):
+                        if side == "BUY":
+                            target = target - buf if is_sl else target + buf
+                        else:  # SELL
+                            target = target + buf if is_sl else target - buf
+                    return _round_to_tick(target)
+
+                # Corrige SL si présent
+                if sl is not None:
+                    sl = float(sl)
+                    # sens
+                    if action == "BUY" and sl >= price:
+                        sl = price - (tick_size or point)
+                    elif action == "SELL" and sl <= price:
+                        sl = price + (tick_size or point)
+                    # distance mini
+                    if not _min_distance_ok(sl, price):
+                        sl = _apply_buffer(sl, price, action, is_sl=True)
+                    request["sl"] = _round_to_tick(sl)
+
+                # Corrige TP si présent
+                if tp is not None:
+                    tp = float(tp)
+                    # sens
+                    if action == "BUY" and tp <= price:
+                        tp = price + (tick_size or point)
+                    elif action == "SELL" and tp >= price:
+                        tp = price - (tick_size or point)
+                    # distance mini
+                    if not _min_distance_ok(tp, price):
+                        tp = _apply_buffer(tp, price, action, is_sl=False)
+                    request["tp"] = _round_to_tick(tp)
+
+                # Log de debug complet
+                self.logger.info(
+                    f"[EXECUTOR][STOPS] {symbol} action={action} price={round(price, digits)} "
+                    f"sl={request.get('sl')} tp={request.get('tp')} "
+                    f"| stops_level_pts={stops_level_pts} point={point} tick_size={tick_size}"
+                )
+        except Exception as _e:
+            self.logger.warning(f"[EXECUTOR][STOPS] Normalisation SL/TP ignorée: {_e}")
 
         try:
             # --- Envoi via le connecteur (avec retry limité & logs enrichis) ---
@@ -3349,24 +3465,79 @@ class TradeExecutor:
                 TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
                 TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
                 TRADE_RETCODE_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
+                TRADE_RETCODE_INVALID_STOPS = getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", None)
+                TRADE_RETCODE_INVALID_PRICE = getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", None)
+                TRADE_RETCODE_INVALID_VOLUME = getattr(mt5, "TRADE_RETCODE_INVALID_VOLUME", None)
+                TRADE_RETCODE_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
+                TRADE_RETCODE_REJECT = getattr(mt5, "TRADE_RETCODE_REJECT", None)
 
                 CONNECTION_ERROR_CODES = {
                     code for code in (
                         TRADE_RETCODE_NO_CONNECTION,
                         TRADE_RETCODE_CONNECTION,
                         TRADE_RETCODE_TIMEOUT,
-                    )
-                    if code is not None
+                    ) if code is not None
                 }
 
                 if retcode in CONNECTION_ERROR_CODES:
                     reason = "BROKER/NETWORK"
-                elif retcode in (getattr(mt5, "TRADE_RETCODE_INVALID_VOLUME", -1),
-                                getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", -2)):
+                elif retcode in {TRADE_RETCODE_INVALID_STOPS, TRADE_RETCODE_INVALID_PRICE, TRADE_RETCODE_INVALID_VOLUME}:
                     reason = "PARAMS"
-                elif retcode in (getattr(mt5, "TRADE_RETCODE_REQUOTE", -3),
-                                getattr(mt5, "TRADE_RETCODE_REJECT", -4)):
+                elif retcode in {TRADE_RETCODE_REQUOTE, TRADE_RETCODE_REJECT}:
                     reason = "MARKET"
+
+                # Log de diagnostic très précis pour Invalid stops
+                if retcode == TRADE_RETCODE_INVALID_STOPS or str(comment).lower().find("invalid stops") >= 0:
+                    try:
+                        info = None
+                        if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                            info = self.mt5_connector.mt5.symbol_info(symbol)
+                        if not info and hasattr(self, "mt5") and self.mt5:
+                            info = self.mt5.symbol_info(symbol)
+
+                        point = getattr(info, "point", None) or 0.0
+                        digits = getattr(info, "digits", None) or 0
+                        tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
+                        stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)
+
+                        # Prix utilisé (même logique que plus haut)
+                        def _get_market_price(sym: str, side: str) -> float:
+                            px = request.get("price")
+                            if px:
+                                return float(px)
+                            m = None
+                            if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                                m = self.mt5_connector.mt5.symbol_info_tick(sym)
+                            if not m and hasattr(self, "mt5") and self.mt5:
+                                m = self.mt5.symbol_info_tick(sym)
+                            if not m:
+                                return 0.0
+                            bid = getattr(m, "bid", None)
+                            ask = getattr(m, "ask", None)
+                            if side == "BUY" and ask is not None:
+                                return float(ask)
+                            if side == "SELL" and bid is not None:
+                                return float(bid)
+                            return float(ask or bid or 0.0)
+
+                        px = _get_market_price(symbol, action)
+                        sl = request.get("sl")
+                        tp = request.get("tp")
+
+                        def _pts(a, b):
+                            return (abs(float(a) - float(b)) / (point or 1.0)) if (a is not None and b is not None) else None
+
+                        sl_pts = _pts(sl, px)
+                        tp_pts = _pts(tp, px)
+
+                        self.logger.error(
+                            "[EXECUTOR][INVALID_STOPS] symbol=%s action=%s price=%s sl=%s tp=%s | "
+                            "sl_pts=%s tp_pts=%s | stops_level_pts=%s point=%s tick_size=%s comment=%s",
+                            symbol, action, round(px, digits) if px else px, sl, tp,
+                            sl_pts, tp_pts, stops_level_pts, point, tick_size, comment
+                        )
+                    except Exception as _e:
+                        self.logger.error(f"[EXECUTOR][INVALID_STOPS] diag error: {_e}")
 
                 msg = (
                     f"[EXECUTOR] ❌ Trade échoué [{reason}] "
@@ -3374,6 +3545,7 @@ class TradeExecutor:
                 )
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
+
 
             # --- Récupération sûre des champs renvoyés ---
             retcode = getattr(result, "retcode", None)
