@@ -319,12 +319,11 @@ class DecisionPipeline:
                 try:
                     strat = ScalpingStrategy(self.config_manager, sca_cfg, sca_logger)
                     decision = strat.evaluate_entry(
-                        "XAUUSD",
-                        (market_data.get("XAUUSD") or {}).get("rates_df"),
-                        signals.get("XAUUSD", {}),
-                        analyzed_context,
-                        sca_cfg,
-                    )
+                    "XAUUSD",
+                    analyzed_context,
+                    signals.get("XAUUSD", {}),
+                )
+
                     if decision and decision.get("action") in {"BUY", "SELL"}:
                         decision["strategy_type"] = "scalping"
                         final_decisions.append(decision)
