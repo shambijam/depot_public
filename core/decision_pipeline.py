@@ -207,14 +207,22 @@ class DecisionPipeline:
                     try:
                         dec = scalping.evaluate_entry("XAUUSD", analyzed_context, signals["XAUUSD"])
                         if isinstance(dec, dict):
-                            dec["strategy_type"] = "scalping"
-                            _ensure_asset(dec, "XAUUSD")
-                            dec.setdefault("execution_status", "ready")
-                            if _is_valid(dec):
-                                scalping_decisions.append(dec)
-                                print(f"✅ [SCALPING] décision retenue: {dec.get('action')} {dec.get('asset')} rule={dec.get('rule_name')}")
+                            # Cas spécial BURST
+                            if "burst_decisions" in dec and isinstance(dec["burst_decisions"], list):
+                                for sub_dec in dec["burst_decisions"]:
+                                    sub_dec["strategy_type"] = "scalping"
+                                    _ensure_asset(sub_dec, "XAUUSD")
+                                    sub_dec.setdefault("execution_status", "ready")
+                                    if _is_valid(sub_dec):
+                                        scalping_decisions.append(sub_dec)
+                                        print(f"✅ [SCALPING] burst décision retenue: {sub_dec.get('action')} {sub_dec.get('asset')} idx={sub_dec.get('burst_index')}")
                             else:
-                                print(f"⛔ [SCALPING] décision rejetée: {dec}")
+                                dec["strategy_type"] = "scalping"
+                                _ensure_asset(dec, "XAUUSD")
+                                dec.setdefault("execution_status", "ready")
+                                if _is_valid(dec):
+                                    scalping_decisions.append(dec)
+                                    print(f"✅ [SCALPING] décision retenue: {dec.get('action')} {dec.get('asset')} rule={dec.get('rule_name')}")
 
                     except Exception as e:
                         self.logger.error(f"[DECISION] Erreur scalping: {e}", exc_info=True)
