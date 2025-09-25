@@ -124,15 +124,14 @@ class DecisionPipeline:
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
 
-    def institutional_decision_pipeline(
-        self, context: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def institutional_decision_pipeline(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Orchestration décisionnelle (Banque Privée)
         - ScalpingStrategy -> XAUUSD
         - LiquidityStrategy -> EURUSD, GBPUSD
         - 1 trade max par cycle (on prend le premier valide)
         """
+        import logging
         from datetime import datetime, timezone as _tz
 
         UTC = _tz.utc
@@ -152,7 +151,7 @@ class DecisionPipeline:
             ai_cfg = base_cfg.get("ai", {}) or {}
             print(
                 "🧱 [DEBUG] GUARDRAILS SNAPSHOT →",
-                f"enabled={guard.get('enabled')}, ",
+                f"enabled={(guard or {}).get('enabled')}, ",
                 f"vol.min_atr_m1={(guard.get('volatility') or {}).get('min_atr_m1_pips')}, ",
                 f"spread.max={(guard.get('spread') or {}).get('max_spread_pips')}, ",
                 f"sessions.news_blackout={(guard.get('sessions_news') or {}).get('news_blackout_enabled')}",
@@ -170,26 +169,26 @@ class DecisionPipeline:
             for asset, sig in signals.items():
                 spread_pts = sig.get("current_spread_points")
                 print(
-                    f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} conf={sig.get('confidence_score')} spread_pts={spread_pts}"
+                    f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} "
+                    f"conf={sig.get('confidence_score')} spread_pts={spread_pts}"
                 )
 
+            # Conteneurs séparés (séparation stricte des domaines)
             scalping_decisions: list = []
             liquidity_decisions: list = []
-            final_decisions: list = []
 
-
-            # Utilitaires de normalisation
+            # --- Helpers locaux ---
             def _norm_action(x: str) -> str:
                 return (x or "").strip().upper()
 
-            def _keep(dec: dict) -> bool:
+            def _is_valid(dec: dict) -> bool:
                 return _norm_action(dec.get("action")) in {"BUY", "SELL", "CLOSE"}
 
             def _ensure_asset(dec: dict, fallback_asset: str) -> None:
                 if not dec.get("asset") or str(dec.get("asset")).upper() == "UNKNOWN":
                     dec["asset"] = fallback_asset
 
-            # --- Scalping (XAUUSD only)
+            # --- SCALPING (XAUUSD only) ---
             if "XAUUSD" in signals:
                 scalping = self.strategy_manager.get_strategy_instance(
                     "scalping",
@@ -205,21 +204,17 @@ class DecisionPipeline:
                 )
                 if scalping:
                     try:
-                        dec = scalping.evaluate_entry(
-                            "XAUUSD", analyzed_context, signals["XAUUSD"]
-                        )
+                        dec = scalping.evaluate_entry("XAUUSD", analyzed_context, signals["XAUUSD"])
                         if isinstance(dec, dict):
                             dec["strategy_type"] = "scalping"
                             _ensure_asset(dec, "XAUUSD")
                             dec.setdefault("execution_status", "ready")
-                            if _keep(dec):
+                            if _is_valid(dec):
                                 scalping_decisions.append(dec)
                     except Exception as e:
-                        self.logger.error(
-                            f"[DECISION] Erreur scalping: {e}", exc_info=True
-                        )
+                        self.logger.error(f"[DECISION] Erreur scalping: {e}", exc_info=True)
 
-            # --- Liquidity (EURUSD/GBPUSD)
+            # --- LIQUIDITY (EURUSD/GBPUSD) ---
             liq_assets = [a for a in ("EURUSD", "GBPUSD") if a in signals]
             if liq_assets:
                 liquidity = self.strategy_manager.get_strategy_instance(
@@ -238,28 +233,18 @@ class DecisionPipeline:
                         dec = liquidity.evaluate_entry(
                             analyzed_context, {a: signals[a] for a in liq_assets}
                         )
-                        # tolère dict ou liste
-                        decs = (
-                            dec
-                            if isinstance(dec, list)
-                            else [dec] if isinstance(dec, dict) else []
-                        )
+                        decs = dec if isinstance(dec, list) else ([dec] if isinstance(dec, dict) else [])
                         for d in decs:
                             d["strategy_type"] = "liquidity"
                             _ensure_asset(d, liq_assets[0])
                             d.setdefault("execution_status", "ready")
-                            if _keep(d):
+                            if _is_valid(d):
                                 liquidity_decisions.append(d)
                     except Exception as e:
-                        self.logger.error(
-                            f"[DECISION] Erreur liquidity: {e}", exc_info=True
-                        )
-                        # Fusion pour compatibilité avec l'ancien pipeline
-                        final_decisions = scalping_decisions + liquidity_decisions
-                        td = final_decisions[0] if final_decisions else {}
-                        chosen_strategy = td.get("strategy_type") if td else None
-                        chosen_asset = td.get("asset") if td else None
+                        self.logger.error(f"[DECISION] Erreur liquidity: {e}", exc_info=True)
 
+            # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
+            final_decisions = scalping_decisions + liquidity_decisions
 
             # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
             td = final_decisions[0] if final_decisions else {}
@@ -267,29 +252,16 @@ class DecisionPipeline:
             chosen_asset = td.get("asset") if td else None
 
             # === ÉTAPE 4: Adaptation config (base + config stratégie choisie) ===
-            if chosen_strategy:
-                strat_cfg = (
-                    self.strategy_manager.get_strategy_config(chosen_strategy) or {}
-                )
-            else:
-                strat_cfg = {}
-            config_for_this_cycle = self.config_manager._merge_dicts(
-                base_cfg, strat_cfg
-            )
-            adapted_config = (
-                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
-            )
+            strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+            config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
+            adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context) or {}
             print("🤖 [DECISION] Configuration adaptée avec succès")
 
-            # === ÉTAPE 4bis: Execution context minimal (optionnel) ===
-            execution_context = {
-                "spreads_pips": {},
-                "katana_snapshots": {},
-                "katana_ready_assets": [],
-            }
+            # === ÉTAPE 4bis: Execution context (léger) ===
+            execution_context = {"spreads_pips": {}, "katana_snapshots": {}, "katana_ready_assets": []}
             analyzed_context["execution_context"] = execution_context
 
-            # === ÉTAPE 5: Décision finale (affichage propre) ===
+            # === ÉTAPE 5: Affichage décision finale ===
             if not td:
                 action_raw, label = "", "AUCUN"
             else:
@@ -312,8 +284,10 @@ class DecisionPipeline:
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": analyzed_context,
                 "config_used": adapted_config,
-                "scalping_decisions": scalping_decisions,     
-                "liquidity_decisions": liquidity_decisions,   
+                # Listes séparées pour exécution indépendante dans run_single_pipeline_cycle
+                "scalping_decisions": scalping_decisions,
+                "liquidity_decisions": liquidity_decisions,
+                # Compat héritage
                 "final_decisions": final_decisions,
                 "final_decision": td,
                 "execution_context": execution_context,
@@ -322,10 +296,7 @@ class DecisionPipeline:
 
         except Exception as e:
             print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
-            self.logger.error(
-                f"Erreur critique dans institutional_decision_pipeline: {e}",
-                exc_info=True,
-            )
+            self.logger.error(f"Erreur critique dans institutional_decision_pipeline: {e}", exc_info=True)
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": context,
@@ -334,6 +305,7 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
+
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
