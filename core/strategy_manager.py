@@ -6,8 +6,9 @@ import inspect
 from pathlib import Path
 from typing import Dict, Any, Optional, Type, TYPE_CHECKING
 from core.config_loader import ConfigLoader, ConfigValidationError
-import sys  # Nécessaire pour StreamHandler
-import traceback  # Import local nécessaire pour capturer les traces d'erreur
+import sys
+import traceback
+from copy import deepcopy
 from datetime import (
     datetime,
     UTC,
@@ -36,7 +37,6 @@ class StrategyManager:
     Gère le chargement dynamique des stratégies, leur mappage
     et leur intégration dans la configuration du bot.
     """
-
 
     def __init__(
         self,
@@ -72,13 +72,13 @@ class StrategyManager:
         self.logger.propagate = False  # Empêche la double propagation au logger racine.
 
         self.strategy_registry: Dict[str, Dict[str, Any]] = {}
-       
 
         # self.load_all_strategies() # RETIRÉ : L'appel est prématuré et cause l'erreur de chargement.
 
         self.logger.info(
             "StrategyManager initialisé (les stratégies ne sont pas encore chargées)."
         )
+
     def get_strategy(self, name: str):
         """
         Retourne l'instance de stratégie par son nom.
@@ -86,7 +86,6 @@ class StrategyManager:
         if not hasattr(self, "loaded_strategies"):
             return None
         return self.loaded_strategies.get(name)
- 
 
     def initialize_strategies(self) -> None:
         """
@@ -159,7 +158,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path.stat().st_mtime,
                 }
-               
+
                 self.logger.debug(
                     f"[load_all_strategies] Stratégie '{strategy_name_from_config}' (clé de mapping: '{strategy_key}') chargée depuis '{config_file}'. Classe: {strategy_class}."
                 )
@@ -406,7 +405,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path.stat().st_mtime,
                 }
-             
+
             else:
                 self.logger.error(
                     f"[load_strategy] La configuration '{config_file}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. Elle ne sera pas ajoutée au registre."
@@ -436,7 +435,6 @@ class StrategyManager:
                 f"Échec du chargement de '{strategy_key}' : {str(e)}", exc_info=True
             )
             return False
-  
 
     def redefine_strategy(
         self, strategy_key: str, config_path: str, python_module: Optional[str] = None
@@ -477,7 +475,7 @@ class StrategyManager:
                     "class": strategy_class,
                     "last_modified": config_path_obj.stat().st_mtime,
                 }
-               
+
             else:
                 self.logger.error(
                     f"[redefine_strategy] La configuration '{config_path_obj.name}' pour la clé '{strategy_key}' ne contient pas de 'strategy_name'. La redéfinition échoue."
@@ -516,6 +514,170 @@ class StrategyManager:
                 exc_info=True,
             )
             return False
+
+    def _deep_merge(self, a: dict, b: dict) -> dict:
+        out = deepcopy(a) if isinstance(a, dict) else {}
+        if not isinstance(b, dict):
+            return out
+        for k, v in b.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = self._deep_merge(out[k], v)
+            else:
+                out[k] = deepcopy(v)
+        return out
+
+    def get_strategy_instance(
+        self,
+        strategy_name: str,
+        *,
+        logger: Optional[logging.Logger] = None,
+        config_override: Optional[Dict[str, Any]] = None,
+        per_asset: Optional[str] = None,
+        inject: Optional[Dict[str, Any]] = None,
+        return_bundle: bool = False,
+        strict: bool = False,
+    ):
+        """
+        Fournit une instance PRÊTE d'une stratégie donnée, sans décider à sa place.
+
+        - Ne fait PAS d'orchestration de signaux/ordres.
+        - Ne collecte PAS de décisions.
+        - N'exécute PAS la stratégie : juste instanciation + wiring propre.
+
+        Params
+        ------
+        strategy_name : str
+            Clé de la stratégie telle que mappée (ex: "scalping", "liquidity").
+        logger : logging.Logger | None
+            Logger à utiliser. Sinon, crée un logger de nom "Strategy.<Name>[.<Asset>]".
+        config_override : dict | None
+            Overrides ponctuels pour cette instance (ex: seuils pour un run).
+        per_asset : str | None
+            Actif cible pour spécialiser le logger et, si souhaité, pousser des hints dans la config.
+        inject : dict | None
+            Dépendances à injecter si la stratégie expose des hooks. Clés supportées:
+              - "mt5_connector", "phase_observer", "ai_interface",
+                "risk_manager", "audit_logger", "config_manager"
+        return_bundle : bool
+            Si True → retourne {"instance","strategy_name","config","logger"}.
+        strict : bool
+            Si True → raise en cas d'anomalie; sinon, log + return None.
+
+        Retour
+        ------
+        Strategy instance ou (si return_bundle) un dict avec instance/config/etc.
+        """
+        try:
+            key = (strategy_name or "").strip().lower()
+            if not key:
+                msg = "get_strategy_instance: 'strategy_name' vide."
+                if strict:
+                    raise ValueError(msg)
+                self.logger.error(msg)
+                return None
+
+            # 1) Résolution registre (lazy-load si nécessaire)
+            strat_info = self.get_strategy_by_key(key)
+            if not strat_info:
+                # tentative de (re)chargement
+                try:
+                    self.load_strategy(key)
+                    strat_info = self.get_strategy_by_key(key)
+                except Exception as e:
+                    strat_info = None
+
+            if not strat_info:
+                msg = f"Stratégie '{key}' introuvable après tentative de chargement."
+                if strict:
+                    raise LookupError(msg)
+                self.logger.error(msg)
+                return None
+
+            strat_class = strat_info.get("class")
+            base_cfg = deepcopy(strat_info.get("config") or {})
+            if not strat_class:
+                msg = f"Classe Python manquante pour la stratégie '{key}'."
+                if strict:
+                    raise TypeError(msg)
+                self.logger.error(msg)
+                return None
+
+            # 2) Construction de la config finale (copie figée pour l'instance)
+            final_cfg = deepcopy(base_cfg)
+            if config_override:
+                final_cfg = self._deep_merge(final_cfg, config_override)
+
+            # hint non-intrusif pour les stratégies qui veulent savoir l'actif cible
+            if per_asset:
+                final_cfg.setdefault("_runtime", {}).update({"per_asset": per_asset})
+
+            # 3) Logger “propre”
+            if logger is None:
+                name = f"Strategy.{key.capitalize()}"
+                if per_asset:
+                    name += f".{per_asset}"
+                logger = logging.getLogger(name)
+
+            # 4) Instanciation — contrat de base (config_manager, strategy_config, logger)
+            instance = strat_class(self.config_manager, final_cfg, logger)
+
+            # 5) Injections (best-effort, sans imposer de signature)
+            inject = inject or {}
+            # si pas fourni, on tente de récupérer depuis le manager (confort)
+            inject.setdefault("config_manager", getattr(self, "config_manager", None))
+            for dep_key, dep_obj in inject.items():
+                if dep_obj is None:
+                    continue
+                # hooks possibles par convention
+                candidates = [
+                    f"set_{dep_key}",
+                    f"attach_{dep_key}",
+                    f"set_{dep_key.replace('ai_', 'ai')}",
+                    f"attach_{dep_key.replace('ai_', 'ai')}",
+                ]
+                attached = False
+                for m in candidates:
+                    if hasattr(instance, m) and callable(getattr(instance, m)):
+                        try:
+                            getattr(instance, m)(dep_obj)
+                            attached = True
+                            break
+                        except Exception as _:
+                            pass
+                if not attached:
+                    # dernier recours: setattr silencieux
+                    try:
+                        setattr(instance, dep_key, dep_obj)
+                    except Exception:
+                        # on ne bloque pas la création d'instance pour ça
+                        logger.debug(
+                            f"[{key}] Injection '{dep_key}' ignorée (ni hook ni setattr)."
+                        )
+
+            # 6) Hook d'initialisation facultatif
+            if hasattr(instance, "on_instance_ready") and callable(
+                getattr(instance, "on_instance_ready")
+            ):
+                try:
+                    instance.on_instance_ready()
+                except Exception as e:
+                    logger.debug(f"[{key}] on_instance_ready a échoué (soft): {e}")
+
+            if return_bundle:
+                return {
+                    "instance": instance,
+                    "strategy_name": key,
+                    "config": final_cfg,
+                    "logger": logger,
+                }
+            return instance
+
+        except Exception as e:
+            msg = f"get_strategy_instance('{strategy_name}') a échoué: {e}"
+            if strict:
+                raise
+            self.logger.error(msg, exc_info=True)
+            return None
 
     def _load_custom_python_module(self, module_path: str) -> Optional[Type]:
         """

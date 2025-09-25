@@ -124,246 +124,167 @@ class DecisionPipeline:
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
 
-    def execute_strategies_and_collect_decisions(
-        self,
-        dispatch_bundle: Dict[str, Any],
-        context: Dict[str, Any],
-        signals: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        DEV-DESK VERSION:
-        Exécute toutes les stratégies et permet des décisions MULTIPLES en parallèle.
-
-        Retourne:
-        {
-            "all_decisions": [...],      # toutes les décisions collectées
-            "final_decisions": [...],    # décisions valides retenues (BUY/SELL/CLOSE)
-            "logs": {...}                # logs par stratégie
-        }
-
-        📌 Règles:
-        - Chaque stratégie agit sur SES actifs définis (ex: scalping → XAUUSD, liquidity → EURUSD+GBPUSD).
-        - Aucune stratégie n’écrase l’autre.
-        - Plusieurs trades peuvent être pris en même temps si les setups sont valides.
-        """
-        all_decisions: List[Dict[str, Any]] = []
-        final_decisions: List[Dict[str, Any]] = []
-        logs = {"per_strategy": {}, "errors": []}
-
-        mapping = dispatch_bundle.get("mapping", {}) or {}
-
-        for strat_name, assets_map in mapping.items():
-            logs["per_strategy"].setdefault(
-                strat_name, {"assets": list(assets_map.keys()), "decisions": []}
-            )
-
-            for asset, strat_entry in assets_map.items():
-                # ✅ Compatibilité ancien/nouveau format
-                if isinstance(strat_entry, dict) and "instance" in strat_entry:
-                    strat_inst = strat_entry["instance"]
-                    strategy_name = strat_entry.get("strategy_name", strat_name)
-                else:
-                    strat_inst = strat_entry
-                    strategy_name = strat_name
-
-                try:
-                    evaluate_fn = getattr(strat_inst, "evaluate_entry", None)
-                    if not callable(evaluate_fn):
-                        logs["per_strategy"][strat_name]["decisions"].append(
-                            {"asset": asset, "skipped": "no_evaluate_entry"}
-                        )
-                        continue
-
-                    market_df = (
-                        (context.get("market_data", {}) or {})
-                        .get(asset, {})
-                        .get("rates_df")
-                    )
-                    sig = (signals or {}).get(asset) or {}
-
-                    # 🔎 Exécution selon la stratégie
-                    if strategy_name.lower() == "scalping":
-                        # ⚠️ ScalpingStrategy attend (asset, analyzed_context, signals)
-                        decision = evaluate_fn(asset, context, sig)
-
-                    elif strategy_name.lower() == "liquidity":
-                        # ⚠️ LiquidityStrategy attend (context, signals_filtrés)
-                        liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
-                        decision = evaluate_fn(
-                            context, {a: signals[a] for a in liq_assets}
-                        )
-
-                    else:
-                        # fallback générique si d’autres stratégies existent
-                        decision = evaluate_fn(context, sig)
-
-                    # ✅ Sécu: si une stratégie retourne None → on skippe sans planter
-                    if not decision:
-                        logs["per_strategy"][strat_name]["decisions"].append(
-                            {"asset": asset, "decision": None}
-                        )
-                        continue
-
-                    # --- Normalisation stricte ---
-                    if isinstance(decision, dict):
-                        decision["strategy_type"] = strategy_name
-                        decision["asset"] = decision.get("asset", asset)
-
-                        if (
-                            not decision["asset"]
-                            or str(decision["asset"]).upper() == "UNKNOWN"
-                        ):
-                            self.logger.warning(
-                                f"[DECISION] Asset invalide pour {strategy_name}, fallback={asset}"
-                            )
-                            decision["asset"] = asset
-
-                        try:
-                            decision["confidence"] = float(
-                                decision.get("confidence") or 0.0
-                            )
-                        except Exception:
-                            decision["confidence"] = 0.0
-
-                    all_decisions.append(decision)
-                    logs["per_strategy"][strat_name]["decisions"].append(
-                        {"asset": asset, "decision": decision}
-                    )
-
-                    # 📌 Nouvelle règle : toutes les décisions valides sont retenues
-                    act = str(decision.get("action", "")).upper()
-                    if act in {"BUY", "SELL", "CLOSE"}:
-                        final_decisions.append(decision)
-
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    self.logger.error(
-                        f"[DECISION] Erreur exécution strategy {strat_name} pour {asset}: {e}\n{tb}"
-                    )
-                    logs["errors"].append(
-                        {"strategy": strat_name, "asset": asset, "error": str(e)}
-                    )
-                    continue
-
-        return {
-            "all_decisions": all_decisions,
-            "final_decisions": final_decisions,  # ✅ LISTE (multi-stratégies)
-            "logs": logs,
-        }
-
     def institutional_decision_pipeline(
         self, context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Orchestre le pipeline de décision de haut niveau pour un cycle de trading.
-        Version Banque Privée :
-            - ScalpingStrategy -> XAUUSD
-            - LiquidityStrategy -> EURUSD, GBPUSD
-        Un seul trade max par cycle (si plusieurs signaux, on prend le premier).
+        Orchestration décisionnelle (Banque Privée)
+        - ScalpingStrategy -> XAUUSD
+        - LiquidityStrategy -> EURUSD, GBPUSD
+        - 1 trade max par cycle (on prend le premier valide)
         """
-
         from datetime import datetime, timezone as _tz
+
         UTC = _tz.utc
 
         self.logger.info("--- Démarrage du Pipeline de Décision Institutionnel ---")
         print("🤖 [DECISION] Début du pipeline institutionnel")
 
         try:
-            # === ÉTAPE 1: Analyse contexte ===
+            # === ÉTAPE 1: Analyse du contexte ===
             print("🤖 [DECISION] Étape 1: Analyse du contexte...")
             analyzed_context = self.config_manager.analyze_context(context) or {}
             print("🤖 [DECISION] Contexte analysé avec succès")
 
-            # === DEBUG guardrails ===
+            # === Snapshot guardrails / IA (debug) ===
             base_cfg = self.config_manager.get_current_dynamic_config() or {}
             guard = base_cfg.get("guardrails") or {}
+            ai_cfg = base_cfg.get("ai", {}) or {}
             print(
                 "🧱 [DEBUG] GUARDRAILS SNAPSHOT →",
                 f"enabled={guard.get('enabled')}, ",
-                f"vol.min_atr_m1={guard.get('volatility',{}).get('min_atr_m1_pips')}, ",
-                f"spread.max={guard.get('spread',{}).get('max_spread_pips')}, ",
-                f"sessions.news_blackout={guard.get('sessions_news',{}).get('news_blackout_enabled')}"
+                f"vol.min_atr_m1={(guard.get('volatility') or {}).get('min_atr_m1_pips')}, ",
+                f"spread.max={(guard.get('spread') or {}).get('max_spread_pips')}, ",
+                f"sessions.news_blackout={(guard.get('sessions_news') or {}).get('news_blackout_enabled')}",
             )
-
-            # === ÉTAPE 2: IA ===
-            ai_cfg = base_cfg.get("ai", {}) or {}
             print(
                 f"🤖 [DECISION] IA {'activée' if ai_cfg.get('enabled') else 'désactivée'} "
                 f"(min_conf={ai_cfg.get('min_confidence')})"
             )
 
-            # === ÉTAPE 3: Dispatch fixe ===
-            print("🤖 [DECISION] Étape 3: Dispatch des stratégies...")
+            # === ÉTAPE 2: Dispatch + appels stratégies (via StrategyManager) ===
+            print("🤖 [DECISION] Étape 2: Dispatch des stratégies...")
             signals = analyzed_context.get("trading_signals", {}) or {}
-            market_data = analyzed_context.get("market_data", {}) or {}
 
-            sca_cfg = self.strategy_manager.get_strategy_config("scalping") or {}
-            liq_cfg = self.strategy_manager.get_strategy_config("liquidity") or {}
-
-            sca_logger = logging.getLogger("Strategy.Scalping")
-            liq_logger = logging.getLogger("Strategy.Liquidity")
-
-            # === DEBUG signaux bruts ===
+            # Dump court des signaux utiles (debug)
             for asset, sig in signals.items():
-                spread_pts = sig.get("current_spread_points") or float("nan")
+                spread_pts = sig.get("current_spread_points")
                 print(
-                    f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} "
-                    f"conf={sig.get('confidence_score')} spread_pts={spread_pts}"
+                    f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} conf={sig.get('confidence_score')} spread_pts={spread_pts}"
                 )
 
-            # === ÉTAPE 3B: Appels directs stratégies ===
-            td, final_decisions = {}, []
+            final_decisions: list = []
 
-            # Scalping (XAUUSD)
+            # Utilitaires de normalisation
+            def _norm_action(x: str) -> str:
+                return (x or "").strip().upper()
+
+            def _keep(dec: dict) -> bool:
+                return _norm_action(dec.get("action")) in {"BUY", "SELL", "CLOSE"}
+
+            def _ensure_asset(dec: dict, fallback_asset: str) -> None:
+                if not dec.get("asset") or str(dec.get("asset")).upper() == "UNKNOWN":
+                    dec["asset"] = fallback_asset
+
+            # --- Scalping (XAUUSD only)
             if "XAUUSD" in signals:
-                try:
-                    strat = ScalpingStrategy(self.config_manager, sca_cfg, sca_logger)
-                    decision = strat.evaluate_entry(
-                    "XAUUSD",
-                    analyzed_context,
-                    signals.get("XAUUSD", {}),
+                scalping = self.strategy_manager.get_strategy_instance(
+                    "scalping",
+                    per_asset="XAUUSD",
+                    inject={
+                        "mt5_connector": getattr(self, "mt5_connector", None),
+                        "phase_observer": getattr(self, "phase_observer", None),
+                        "ai_interface": getattr(self, "ai_interface", None),
+                        "risk_manager": getattr(self, "risk_manager", None),
+                        "audit_logger": logging.getLogger("AuditLogger"),
+                    },
+                    strict=False,
                 )
+                if scalping:
+                    try:
+                        dec = scalping.evaluate_entry(
+                            "XAUUSD", analyzed_context, signals["XAUUSD"]
+                        )
+                        if isinstance(dec, dict):
+                            dec["strategy_type"] = "scalping"
+                            _ensure_asset(dec, "XAUUSD")
+                            dec.setdefault("execution_status", "ready")
+                            if _keep(dec):
+                                final_decisions.append(dec)
+                    except Exception as e:
+                        self.logger.error(
+                            f"[DECISION] Erreur scalping: {e}", exc_info=True
+                        )
 
-                    if decision and decision.get("action") in {"BUY", "SELL"}:
-                        decision["strategy_type"] = "scalping"
-                        final_decisions.append(decision)
-                except Exception as e:
-                    self.logger.error(f"[DECISION] Erreur scalping: {e}")
+            # --- Liquidity (EURUSD/GBPUSD)
+            liq_assets = [a for a in ("EURUSD", "GBPUSD") if a in signals]
+            if liq_assets:
+                liquidity = self.strategy_manager.get_strategy_instance(
+                    "liquidity",
+                    inject={
+                        "mt5_connector": getattr(self, "mt5_connector", None),
+                        "phase_observer": getattr(self, "phase_observer", None),
+                        "ai_interface": getattr(self, "ai_interface", None),
+                        "risk_manager": getattr(self, "risk_manager", None),
+                        "audit_logger": logging.getLogger("AuditLogger"),
+                    },
+                    strict=False,
+                )
+                if liquidity:
+                    try:
+                        dec = liquidity.evaluate_entry(
+                            analyzed_context, {a: signals[a] for a in liq_assets}
+                        )
+                        # tolère dict ou liste
+                        decs = (
+                            dec
+                            if isinstance(dec, list)
+                            else [dec] if isinstance(dec, dict) else []
+                        )
+                        for d in decs:
+                            d["strategy_type"] = "liquidity"
+                            _ensure_asset(d, liq_assets[0])
+                            d.setdefault("execution_status", "ready")
+                            if _keep(d):
+                                final_decisions.append(d)
+                    except Exception as e:
+                        self.logger.error(
+                            f"[DECISION] Erreur liquidity: {e}", exc_info=True
+                        )
 
-            # Liquidity (EURUSD / GBPUSD)
-            try:
-                liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
-                if liq_assets:
-                    strat = LiquidityStrategy(self.config_manager, liq_cfg, liq_logger)
-                    decision = strat.evaluate_entry(
-                        analyzed_context, {a: signals[a] for a in liq_assets}
-                    )
-                    if decision and decision.get("action") in {"BUY", "SELL"}:
-                        decision["strategy_type"] = "liquidity"
-                        final_decisions.append(decision)
-            except Exception as e:
-                self.logger.error(f"[DECISION] Erreur liquidity: {e}")
-
-            # Un seul trade max par cycle → on garde le 1er
+            # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
             td = final_decisions[0] if final_decisions else {}
             chosen_strategy = td.get("strategy_type") if td else None
             chosen_asset = td.get("asset") if td else None
 
-            # === ÉTAPE 4: Adaptation config ===
-            strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
-            config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
-            adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            # === ÉTAPE 4: Adaptation config (base + config stratégie choisie) ===
+            if chosen_strategy:
+                strat_cfg = (
+                    self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+                )
+            else:
+                strat_cfg = {}
+            config_for_this_cycle = self.config_manager._merge_dicts(
+                base_cfg, strat_cfg
+            )
+            adapted_config = (
+                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            )
             print("🤖 [DECISION] Configuration adaptée avec succès")
 
-            # === ÉTAPE 4bis: Execution context ===
-            execution_context = {"spreads_pips": {}, "katana_snapshots": {}, "katana_ready_assets": []}
+            # === ÉTAPE 4bis: Execution context minimal (optionnel) ===
+            execution_context = {
+                "spreads_pips": {},
+                "katana_snapshots": {},
+                "katana_ready_assets": [],
+            }
             analyzed_context["execution_context"] = execution_context
 
-            # === ÉTAPE 5: Décision finale ===
+            # === ÉTAPE 5: Décision finale (affichage propre) ===
             if not td:
                 action_raw, label = "", "AUCUN"
             else:
-                action_raw = (td.get("action") or "").upper()
+                action_raw = _norm_action(td.get("action"))
                 status = str(td.get("execution_status") or "").lower()
                 if action_raw not in {"BUY", "SELL", "CLOSE"}:
                     label = "AUCUN"
@@ -391,7 +312,8 @@ class DecisionPipeline:
         except Exception as e:
             print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
             self.logger.error(
-                f"Erreur critique dans institutional_decision_pipeline: {e}", exc_info=True
+                f"Erreur critique dans institutional_decision_pipeline: {e}",
+                exc_info=True,
             )
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),
@@ -401,7 +323,6 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
-
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
