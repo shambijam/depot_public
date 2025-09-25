@@ -181,24 +181,16 @@ class DecisionPipeline:
                     )
                     sig = (signals or {}).get(asset) or {}
 
-                    # 🔎 Exécution selon la stratégie
+                   # 🔎 Exécution selon la stratégie
                     if strategy_name.lower() == "scalping":
-                        # ⚠️ ATTENTION: ScalpingStrategy attend (asset, rates_df, signals, context, config)
-                        decision = evaluate_fn(
-                            asset,
-                            (context.get("market_data", {}) or {})
-                            .get(asset, {})
-                            .get("rates_df"),
-                            sig,
-                            context,
-                            context.get("config_used", {}),
-                        )
+                        # ⚠️ ScalpingStrategy attend (asset, analyzed_context, signals)
+                        decision = evaluate_fn(asset, context, sig)
+
                     elif strategy_name.lower() == "liquidity":
                         # ⚠️ LiquidityStrategy attend (context, signals_filtrés)
                         liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
-                        decision = evaluate_fn(
-                            context, {a: signals[a] for a in liq_assets}
-                        )
+                        decision = evaluate_fn(context, {a: signals[a] for a in liq_assets})
+
                     else:
                         # fallback générique si d’autres stratégies existent
                         decision = evaluate_fn(context, sig)
