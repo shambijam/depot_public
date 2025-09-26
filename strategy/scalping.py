@@ -378,10 +378,13 @@ class ScalpingStrategy(BaseStrategy):
         if size <= 0:
             return None
 
+        # ⚡ Patch robuste : calculer la vraie taille d'un pip depuis le broker
         try:
-            pip_size_value = float(meta.get("pip_size", 0.0))
-        except (TypeError, ValueError):
-            pip_size_value = 0.0
+            symbol_info = context.get("symbol_info", {}) or {}
+            point = float(symbol_info.get("point", 0.01))
+            pip_size_value = point * 10.0  # 1 pip = 10 points
+        except Exception:
+            pip_size_value = 0.1  # fallback safe
 
         # ✅ Utilisation de la fonction refactorisée
         atr_m1_pips = self._get_atr_m1_pips(asset, signals, context, pip_size_value)
