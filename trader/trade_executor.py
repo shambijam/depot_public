@@ -14,8 +14,10 @@ import jsonschema
 from datetime import datetime, UTC  # AMÉLIORATION: Import explicite de UTC
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC, timezone
 from typing import TYPE_CHECKING
+from core.utils import enforce_no_tp_for_burst
+
 
 if TYPE_CHECKING:
     from core.config_manager import ConfigManager
@@ -269,7 +271,7 @@ class TradeExecutor:
                 self.logger.info(
                     f"Position #{ticket} ({self._open_positions[ticket]['symbol']}) absente chez le broker. Supprimée de l'état interne."
                 )
-          
+
             # 3. Remplacer l'ancien état par le nouvel état réconcilié
             self._open_positions = reconciled_positions
             self._last_reconciliation_time = datetime.now(UTC)
@@ -1555,8 +1557,10 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
             ) from e
-            
-    def apply_dynamic_trailing(self, symbol: str, ticket: int, sl_pips: float, atr_pips: float) -> None:
+
+    def apply_dynamic_trailing(
+        self, symbol: str, ticket: int, sl_pips: float, atr_pips: float
+    ) -> None:
         """
         Applique un trailing stop dynamique à une position.
         - sl_pips = distance minimale en pips
@@ -1582,16 +1586,21 @@ class TradeExecutor:
                 new_sl = current_price - trailing_dist
                 if not pos.get("sl") or new_sl > pos.get("sl"):
                     self.mt5_connector.modify_position(ticket, sl=new_sl)
-                    self.logger.info(f"[TRAILING] BUY {symbol} ticket={ticket}: SL relevé → {new_sl:.5f}")
+                    self.logger.info(
+                        f"[TRAILING] BUY {symbol} ticket={ticket}: SL relevé → {new_sl:.5f}"
+                    )
             else:  # SELL
                 new_sl = current_price + trailing_dist
                 if not pos.get("sl") or new_sl < pos.get("sl"):
                     self.mt5_connector.modify_position(ticket, sl=new_sl)
-                    self.logger.info(f"[TRAILING] SELL {symbol} ticket={ticket}: SL abaissé → {new_sl:.5f}")
+                    self.logger.info(
+                        f"[TRAILING] SELL {symbol} ticket={ticket}: SL abaissé → {new_sl:.5f}"
+                    )
 
         except Exception as e:
-            self.logger.warning(f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}")
- 
+            self.logger.warning(
+                f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}"
+            )
 
     def smart_scalping_tp_sl(
         self,
@@ -1625,6 +1634,18 @@ class TradeExecutor:
         logger = logging.getLogger(__name__)
 
         try:
+
+            # 🚫 PATCH : Pas de TP pour Burst Scalping
+            rule = str(config.get("rule_name", "")).lower()
+            if rule == "burst_scalping":
+                return {
+                    "sl_price": None,  # sera traité par trailing stop ailleurs
+                    "tp_price": None,  # forcé à None
+                    "method": "burst_no_tp",
+                    "rr": 0,
+                    "valid": True,  # valide mais sans TP
+                }
+
             # 1️⃣ Config locale
             rr_min = float(config.get("min_rr", 1.2))
             atr_mult_sl = float(config.get("atr_multiplier_sl", 1.0))
@@ -2482,8 +2503,8 @@ class TradeExecutor:
             f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
             f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym})."
         )
-        
-                  # --- Ajustement final par volatilité si fourni ---
+
+        # --- Ajustement final par volatilité si fourni ---
         if isinstance(trade_decision, dict) and "volatility_factor" in trade_decision:
             try:
                 factor = float(trade_decision.get("volatility_factor", 1.0))
@@ -2497,7 +2518,7 @@ class TradeExecutor:
                 self.logger.warning(f"[VOLATILITY FACTOR] Ignoré: {e}")
 
         return float(volume)
-        
+
     def _cooldown_guard(
         self,
         asset: str,
@@ -2515,7 +2536,7 @@ class TradeExecutor:
 
         Ne persiste rien: garde mémoire en RAM via attributs.
         """
-                
+
         try:
             # Mémoire RAM
             if not hasattr(self, "_last_trade_ts_by_asset"):
@@ -2547,8 +2568,6 @@ class TradeExecutor:
                 gap = per_asset_cooldown_s - (now_ts - last_ts)
                 self.logger.info(f"[THROTTLE] Cooldown {asset} encore ~{gap:.1f}s.")
                 return True
-            
-            
 
             return False
         except Exception as e:
@@ -2585,6 +2604,7 @@ class TradeExecutor:
         # ✅ PATCH : pas de TP pour Burst
         rule = str(trade_decision.get("rule_name", "")).lower()
         if rule == "burst_scalping":
+            trade_decision.pop("tp_price", None)  # on supprime toute trace de TP
             return [
                 self._build_mt5_request(
                     trade_decision,
@@ -2598,7 +2618,7 @@ class TradeExecutor:
                     order_type_str,
                 )
             ]
-            
+
         if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
             # un seul TP → on passe par _build_mt5_request classique
             return [
@@ -2664,9 +2684,6 @@ class TradeExecutor:
 
         Lève TradeExecutionError en cas d’invalidité bloquante.
         """
-        from datetime import datetime, timezone, timedelta
-        import math
-
         # ——— import des constantes MT5, robustifié ———
         mt5 = None
         try:
@@ -2757,7 +2774,7 @@ class TradeExecutor:
 
         if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
             tp_price = round(float(trade_decision["tp_price"]), digits)
-        
+
         # --- Mapping constantes MT5 (tolérant) ---
         if mt5 is None:
             raise TradeExecutionError("Module/constantes MT5 indisponibles.")
@@ -2833,12 +2850,14 @@ class TradeExecutor:
             "deviation": deviation_points,
             "comment": "",  # rempli plus bas
         }
-        
+
         # 🔧 PATCH (NO TP pour BURST)
         if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
             request["tp"] = 0.0
-            self.logger.info(f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {expected_symbol}")
-        
+            self.logger.info(
+                f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {expected_symbol}"
+            )
+
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
         use_mitigation = bool(trade_decision.get("use_mitigation", False))
@@ -3011,8 +3030,8 @@ class TradeExecutor:
         request["meta_rr_projected"] = rr_proj
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
+        request = enforce_no_tp_for_burst(request)
         return request
-
 
     def _update_internal_position_state(
         self, mt5_result: Any, initial_risk: float
@@ -3085,7 +3104,7 @@ class TradeExecutor:
         # Nettoyage des ordres annulés
         for oid in to_remove:
             self._open_positions.pop(oid, None)
-            
+
     def monitor_trailing_stops(self) -> None:
         """
         Surveille les positions ouvertes avec trailing activé et ajuste le SL.
@@ -3167,8 +3186,9 @@ class TradeExecutor:
                                 f"[TRAILING] ❌ Échec update SL {symbol}, retcode={getattr(result,'retcode','N/A')}"
                             )
         except Exception as e:
-            self.logger.error(f"[TRAILING] Erreur monitor_trailing_stops: {e}", exc_info=True)
-        
+            self.logger.error(
+                f"[TRAILING] Erreur monitor_trailing_stops: {e}", exc_info=True
+            )
 
     def _bars_since(self, open_time_str: str) -> int:
         """
@@ -3285,6 +3305,9 @@ class TradeExecutor:
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
 
+        # --- Dev Desk Rule: suppression TP pour Burst ---
+        request = enforce_no_tp_for_burst(request)
+
         # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
         mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
         if mt5 is None:
@@ -3301,7 +3324,7 @@ class TradeExecutor:
                 return getattr(mt5, name)
             except Exception:
                 return getattr(mt5, default_name, None)
-            
+
         # --- Patch compatibilité retcodes (selon version MT5) ---
         TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
         TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
@@ -3309,7 +3332,12 @@ class TradeExecutor:
 
         # Codes d’erreur "connexion" possibles (selon version MT5 installée)
         CONNECTION_ERROR_CODES = {
-            code for code in (TRADE_RETCODE_NO_CONNECTION, TRADE_RETCODE_CONNECTION, TRADE_RETCODE_TIMEOUT)
+            code
+            for code in (
+                TRADE_RETCODE_NO_CONNECTION,
+                TRADE_RETCODE_CONNECTION,
+                TRADE_RETCODE_TIMEOUT,
+            )
             if code is not None
         }
 
@@ -3335,7 +3363,7 @@ class TradeExecutor:
 
         # --- Contexte exécution (pour audit si dispo) ---
         audit_ctx = getattr(self, "execution_context", {}) or {}
-        
+
         # --- Normalisation / correction SL/TP pour éviter "Invalid stops" (10016) ---
         try:
             info = None
@@ -3348,7 +3376,9 @@ class TradeExecutor:
             digits = getattr(info, "digits", None) or 0
             tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
             contract_size = getattr(info, "trade_contract_size", None) or 1.0
-            stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)  # en "points" MT5
+            stops_level_pts = int(
+                getattr(info, "trade_stops_level", 0) or 0
+            )  # en "points" MT5
 
             # Prix courant pour contrôle de distance (si pas fourni dans request)
             def _get_market_price(sym: str, side: str) -> float:
@@ -3385,7 +3415,7 @@ class TradeExecutor:
             sl = request.get("sl")
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
-            
+
             # 🔧 PATCH (NO TP pour BURST) : suppression physique
             try:
                 rn = str(request.get("rule_name", "")).lower()
@@ -3393,11 +3423,12 @@ class TradeExecutor:
                     if "tp" in request:
                         del request["tp"]  # ✅ on enlève la clé complètement
                     tp = None
-                    self.logger.info(f"[EXECUTOR][PATCH] TP supprimé physiquement pour Burst {symbol}")
+                    self.logger.info(
+                        f"[EXECUTOR][PATCH] TP supprimé physiquement pour Burst {symbol}"
+                    )
             except Exception as _e:
                 self.logger.debug(f"[EXECUTOR][PATCH] Skip no_tp: {_e}")
             # /PATCH
-
 
             # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
             if price and point:
@@ -3409,7 +3440,9 @@ class TradeExecutor:
                     return abs(px_a - px_b) / point >= max(stops_level_pts, 0)
 
                 # Buffer de sécurité : +1 tick au-delà du stops_level
-                def _apply_buffer(target: float, ref: float, side: str, is_sl: bool) -> float:
+                def _apply_buffer(
+                    target: float, ref: float, side: str, is_sl: bool
+                ) -> float:
                     # pousse d'un tick dans la bonne direction si trop proche
                     buf = tick_size or (point or 0.0)
                     if is_sl:
@@ -3478,12 +3511,15 @@ class TradeExecutor:
                     last_error = e
                     self.logger.error(
                         f"[EXECUTOR] Exception order_send tentative {attempt+1}/{max_retries}: {e}",
-                        exc_info=True
+                        exc_info=True,
                     )
                     continue  # réessaie si encore une tentative dispo
 
                 # Vérifie si résultat valide
-                if result and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                if (
+                    result
+                    and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE
+                ):
                     break  # succès
                 else:
                     retcode = getattr(result, "retcode", None)
@@ -3500,43 +3536,69 @@ class TradeExecutor:
                 reason = "UNKNOWN"
 
                 # --- Compatibilité multi-versions MT5 ---
-                TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
-                TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
+                TRADE_RETCODE_NO_CONNECTION = getattr(
+                    mt5, "TRADE_RETCODE_NO_CONNECTION", None
+                )
+                TRADE_RETCODE_CONNECTION = getattr(
+                    mt5, "TRADE_RETCODE_CONNECTION", None
+                )
                 TRADE_RETCODE_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
-                TRADE_RETCODE_INVALID_STOPS = getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", None)
-                TRADE_RETCODE_INVALID_PRICE = getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", None)
-                TRADE_RETCODE_INVALID_VOLUME = getattr(mt5, "TRADE_RETCODE_INVALID_VOLUME", None)
+                TRADE_RETCODE_INVALID_STOPS = getattr(
+                    mt5, "TRADE_RETCODE_INVALID_STOPS", None
+                )
+                TRADE_RETCODE_INVALID_PRICE = getattr(
+                    mt5, "TRADE_RETCODE_INVALID_PRICE", None
+                )
+                TRADE_RETCODE_INVALID_VOLUME = getattr(
+                    mt5, "TRADE_RETCODE_INVALID_VOLUME", None
+                )
                 TRADE_RETCODE_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
                 TRADE_RETCODE_REJECT = getattr(mt5, "TRADE_RETCODE_REJECT", None)
 
                 CONNECTION_ERROR_CODES = {
-                    code for code in (
+                    code
+                    for code in (
                         TRADE_RETCODE_NO_CONNECTION,
                         TRADE_RETCODE_CONNECTION,
                         TRADE_RETCODE_TIMEOUT,
-                    ) if code is not None
+                    )
+                    if code is not None
                 }
 
                 if retcode in CONNECTION_ERROR_CODES:
                     reason = "BROKER/NETWORK"
-                elif retcode in {TRADE_RETCODE_INVALID_STOPS, TRADE_RETCODE_INVALID_PRICE, TRADE_RETCODE_INVALID_VOLUME}:
+                elif retcode in {
+                    TRADE_RETCODE_INVALID_STOPS,
+                    TRADE_RETCODE_INVALID_PRICE,
+                    TRADE_RETCODE_INVALID_VOLUME,
+                }:
                     reason = "PARAMS"
                 elif retcode in {TRADE_RETCODE_REQUOTE, TRADE_RETCODE_REJECT}:
                     reason = "MARKET"
 
                 # Log de diagnostic très précis pour Invalid stops
-                if retcode == TRADE_RETCODE_INVALID_STOPS or str(comment).lower().find("invalid stops") >= 0:
+                if (
+                    retcode == TRADE_RETCODE_INVALID_STOPS
+                    or str(comment).lower().find("invalid stops") >= 0
+                ):
                     try:
                         info = None
-                        if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                        if (
+                            hasattr(self.mt5_connector, "mt5")
+                            and self.mt5_connector.mt5
+                        ):
                             info = self.mt5_connector.mt5.symbol_info(symbol)
                         if not info and hasattr(self, "mt5") and self.mt5:
                             info = self.mt5.symbol_info(symbol)
 
                         point = getattr(info, "point", None) or 0.0
                         digits = getattr(info, "digits", None) or 0
-                        tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
-                        stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)
+                        tick_size = (
+                            getattr(info, "trade_tick_size", None) or point or 0.0
+                        )
+                        stops_level_pts = int(
+                            getattr(info, "trade_stops_level", 0) or 0
+                        )
 
                         # Prix utilisé (même logique que plus haut)
                         def _get_market_price(sym: str, side: str) -> float:
@@ -3544,7 +3606,10 @@ class TradeExecutor:
                             if px:
                                 return float(px)
                             m = None
-                            if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                            if (
+                                hasattr(self.mt5_connector, "mt5")
+                                and self.mt5_connector.mt5
+                            ):
                                 m = self.mt5_connector.mt5.symbol_info_tick(sym)
                             if not m and hasattr(self, "mt5") and self.mt5:
                                 m = self.mt5.symbol_info_tick(sym)
@@ -3563,7 +3628,11 @@ class TradeExecutor:
                         tp = request.get("tp")
 
                         def _pts(a, b):
-                            return (abs(float(a) - float(b)) / (point or 1.0)) if (a is not None and b is not None) else None
+                            return (
+                                (abs(float(a) - float(b)) / (point or 1.0))
+                                if (a is not None and b is not None)
+                                else None
+                            )
 
                         sl_pts = _pts(sl, px)
                         tp_pts = _pts(tp, px)
@@ -3571,8 +3640,17 @@ class TradeExecutor:
                         self.logger.error(
                             "[EXECUTOR][INVALID_STOPS] symbol=%s action=%s price=%s sl=%s tp=%s | "
                             "sl_pts=%s tp_pts=%s | stops_level_pts=%s point=%s tick_size=%s comment=%s",
-                            symbol, action, round(px, digits) if px else px, sl, tp,
-                            sl_pts, tp_pts, stops_level_pts, point, tick_size, comment
+                            symbol,
+                            action,
+                            round(px, digits) if px else px,
+                            sl,
+                            tp,
+                            sl_pts,
+                            tp_pts,
+                            stops_level_pts,
+                            point,
+                            tick_size,
+                            comment,
                         )
                     except Exception as _e:
                         self.logger.error(f"[EXECUTOR][INVALID_STOPS] diag error: {_e}")
@@ -3584,7 +3662,6 @@ class TradeExecutor:
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
 
-
             # --- Récupération sûre des champs renvoyés ---
             retcode = getattr(result, "retcode", None)
             comment = getattr(result, "comment", "")
@@ -3593,7 +3670,6 @@ class TradeExecutor:
             result_price = getattr(result, "price", None)
             result_volume = getattr(result, "volume", None)
             request_id = getattr(result, "request_id", None)
-
 
             # --- Normalisation retcode / succès ---
             RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")
@@ -4675,7 +4751,6 @@ def run_trade_execution_pipeline(
         "rule_name": final_decision.get("rule_name"),
         "strategy_type": final_decision.get("strategy_type", "unknown"),  # ✅ ajouté
     }
-
 
     adapted_package = {
         "trade_decision": trade_decision,

@@ -114,6 +114,24 @@ def normalize_levels(
 
     return {"sl": sl, "tp": tp}
 
+def enforce_no_tp_for_burst(request: dict) -> dict:
+    """
+    DEV DESK RULE:
+    Supprime physiquement tout TP si la stratégie = burst_scalping.
+    - Efface la clé 'tp' dans la requête MT5.
+    - Neutralise tout champ associé au TP.
+    """
+    try:
+        rn = str(request.get("rule_name", "")).lower()
+        if rn == "burst_scalping":
+            if "tp" in request:
+                del request["tp"]          # ✅ enlève le champ
+            request["_meta_tp_removed"] = True  # tag pour logs/debug
+    except Exception:
+        pass
+    return request
+
+
 
 def normalize_signals(
     signals: List[Dict[str, Any]] | Dict[str, Any] | None,
