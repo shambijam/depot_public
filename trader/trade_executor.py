@@ -3361,13 +3361,14 @@ class TradeExecutor:
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
             
-            # 🔧 PATCH (NO TP pour BURST)
+            # 🔧 PATCH (NO TP pour BURST) : suppression physique
             try:
                 rn = str(request.get("rule_name", "")).lower()
                 if rn == "burst_scalping" or bool(request.get("no_tp", False)):
+                    if "tp" in request:
+                        del request["tp"]  # ✅ on enlève la clé complètement
                     tp = None
-                    request["tp"] = 0.0  # MT5: 0.0 = pas de TP
-                    self.logger.info(f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {symbol}")
+                    self.logger.info(f"[EXECUTOR][PATCH] TP supprimé physiquement pour Burst {symbol}")
             except Exception as _e:
                 self.logger.debug(f"[EXECUTOR][PATCH] Skip no_tp: {_e}")
             # /PATCH
