@@ -1275,7 +1275,24 @@ class TradeExecutor:
                     trigger_price = entry_price_hint
                 else:
                     trigger_price = entry_price_market
-                                   
+
+            # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
+            rule_name = str(trade_decision.get("rule_name", "")).lower()
+
+            if rule_name == "burst_scalping":
+                # Burst : SL uniquement si défini, jamais de TP
+                sl_price = float(trade_decision.get("sl_price", 0.0) or 0.0)
+                tp_price = None  # 🚫 pas de TP fixe (Trailing géré ailleurs)
+            else:
+                # Autres stratégies → calcul normal
+                sl_price, tp_price = self._calculate_sl_tp_prices(
+                    trade_decision,
+                    active_config,
+                    symbol_info,
+                    entry_price_market,
+                    market_context,
+                )
+
             # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
                 import math
@@ -1364,11 +1381,14 @@ class TradeExecutor:
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
-                min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
+                min_rr = float(
+                    self.config_manager.get("risk_management.min_rr", 0) or 0.0
+                )
             except Exception:
                 min_rr = 0.0
 
             rr_value = None
+            
             # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
             if trade_decision.get("rule_name", "").lower() != "burst_scalping":
                 if min_rr > 0.0 and tp_price is not None:
@@ -1389,7 +1409,7 @@ class TradeExecutor:
                         self.logger.info(
                             f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                         )
-           
+
             # ---------- 9) Volume (uniquement via risk sizer) ----------
             # Note: on ignore explicitement tout volume fourni par la décision.
             if any(k in trade_decision for k in ("volume", "target_volume")):
@@ -1512,7 +1532,11 @@ class TradeExecutor:
             else:
                 # 🏦 Mode classique avec TP/SL
                 return self._build_mt5_request(
-                    {"action": action, "asset": broker_symbol, "order_type": order_type},
+                    {
+                        "action": action,
+                        "asset": broker_symbol,
+                        "order_type": order_type,
+                    },
                     active_config,
                     volume_final,
                     entry_price_market,
@@ -1577,7 +1601,7 @@ class TradeExecutor:
             self.logger.warning(
                 f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}"
             )
-  
+
     def _calculate_sl_tp_prices(
         self,
         trade_decision: dict,
@@ -1630,8 +1654,12 @@ class TradeExecutor:
         st_sl = strat_st.get("stop_loss") or {}
         st_tp = strat_st.get("take_profit") or {}
         sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
-        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
-        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
+        sl_hard_max_points = float(
+            st_sl.get("hard_max_points", float("inf")) or float("inf")
+        )
+        tp_hard_max_points = float(
+            st_tp.get("hard_max_points", float("inf")) or float("inf")
+        )
 
         # --- Données marché (pour ATR/SWING) ---
         symbol = str(trade_decision.get("asset", "")).upper()
@@ -1644,14 +1672,18 @@ class TradeExecutor:
             low = df["low"].astype(float)
             close = df["close"].astype(float)
             pc = close.shift(1)
-            tr = np.maximum.reduce([(high - low).abs(), (high - pc).abs(), (low - pc).abs()])
+            tr = np.maximum.reduce(
+                [(high - low).abs(), (high - pc).abs(), (low - pc).abs()]
+            )
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
         # ================= SL =================
         if isinstance(sl_pips_override, (int, float)) and sl_pips_override > 0:
             sl_dist = float(sl_pips_override) * pip_size
-            stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
+            stop_loss_price = (
+                entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
+            )
         else:
             if sl_method == "SWING":
                 lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
@@ -1661,34 +1693,54 @@ class TradeExecutor:
                 else:
                     buf = buffer_pips * pip_size
                     if action == "BUY":
-                        stop_loss_price = float(rates_df.tail(lookback)["low"].min()) - buf
+                        stop_loss_price = (
+                            float(rates_df.tail(lookback)["low"].min()) - buf
+                        )
                     else:
-                        stop_loss_price = float(rates_df.tail(lookback)["high"].max()) + buf
+                        stop_loss_price = (
+                            float(rates_df.tail(lookback)["high"].max()) + buf
+                        )
 
             if sl_method == "ATR" and stop_loss_price == 0.0:
-                atr_p = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
+                atr_p = int(
+                    prod_st.get(
+                        "sl_atr_period",
+                        prod_st.get("atr_settings", {}).get("period", 14),
+                    )
+                    or 14
+                )
                 atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
                 atr = _compute_atr(rates_df, atr_p)
                 if not (atr == atr and atr > 0):
                     sl_method = "PIPS"
                 else:
                     sl_dist = atr_mult * atr
-                    stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
+                    stop_loss_price = (
+                        entry_price - sl_dist
+                        if action == "BUY"
+                        else entry_price + sl_dist
+                    )
 
             if sl_method == "PIPS" and stop_loss_price == 0.0:
                 sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
                 sl_dist = sl_pips * pip_size
-                stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
+                stop_loss_price = (
+                    entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
+                )
 
         # ================= TP =================
         # (Mode sans TP pour burst_scalping)
-        no_tp = str(config.get("strategy_name", "")).lower() in {"burst_scalping", "scalping_burst"} \
-                or bool(trade_decision.get("no_tp", False))
+        no_tp = str(config.get("strategy_name", "")).lower() in {
+            "burst_scalping",
+            "scalping_burst",
+        } or bool(trade_decision.get("no_tp", False))
 
         if not no_tp:
             if isinstance(tp_pips_override, (int, float)) and tp_pips_override > 0:
                 tp_dist = float(tp_pips_override) * pip_size
-                take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                take_profit_price = (
+                    entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                )
             else:
                 if tp_method == "RR":
                     risk = abs(entry_price - stop_loss_price)
@@ -1696,35 +1748,58 @@ class TradeExecutor:
                         tp_method = "PIPS"
                     else:
                         tp_dist = risk * rr_ratio
-                        take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                        take_profit_price = (
+                            entry_price + tp_dist
+                            if action == "BUY"
+                            else entry_price - tp_dist
+                        )
 
                 if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
-                    atr_p = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
+                    atr_p = int(
+                        prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14))
+                        or 14
+                    )
                     atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
                     atr = _compute_atr(rates_df, atr_p)
                     if not (atr == atr and atr > 0):
                         tp_method = "PIPS"
                     else:
                         tp_dist = atr_mult * atr
-                        take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                        take_profit_price = (
+                            entry_price + tp_dist
+                            if action == "BUY"
+                            else entry_price - tp_dist
+                        )
 
                 if tp_method == "PIPS" and take_profit_price == 0.0:
                     tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
                     tp_dist = tp_pips * pip_size
-                    take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                    take_profit_price = (
+                        entry_price + tp_dist
+                        if action == "BUY"
+                        else entry_price - tp_dist
+                    )
 
         # ================= Validations & ajustements =================
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
         # Distances actuelles
-        sl_dist_price = (entry_price - stop_loss_price) if action == "BUY" else (stop_loss_price - entry_price)
+        sl_dist_price = (
+            (entry_price - stop_loss_price)
+            if action == "BUY"
+            else (stop_loss_price - entry_price)
+        )
         if sl_dist_price <= 0:
             raise TradeExecutionError("Distance SL invalide (<=0).")
 
         tp_dist_price = None
         if not no_tp:
-            tp_dist_price = (take_profit_price - entry_price) if action == "BUY" else (entry_price - take_profit_price)
+            tp_dist_price = (
+                (take_profit_price - entry_price)
+                if action == "BUY"
+                else (entry_price - take_profit_price)
+            )
             if tp_dist_price is None or tp_dist_price <= 0:
                 raise TradeExecutionError("Distance TP invalide (<=0).")
 
@@ -1746,8 +1821,8 @@ class TradeExecutor:
 
         # C) Ajustement spread: éviter TP < SL + spread (en pips)
         if tp_dist_price is not None and spread_pips > 0:
-            sl_pips_now = (sl_dist_points / points_per_pip)
-            tp_pips_now = (tp_dist_points / points_per_pip)
+            sl_pips_now = sl_dist_points / points_per_pip
+            tp_pips_now = tp_dist_points / points_per_pip
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
                 tp_dist_price = tp_dist_points * point
@@ -1773,14 +1848,23 @@ class TradeExecutor:
                         take_profit_price = bid - soft_min_price
         else:
             # fallback sans bid/ask
-            stop_loss_price = entry_price - sl_dist_price if action == "BUY" else entry_price + sl_dist_price
+            stop_loss_price = (
+                entry_price - sl_dist_price
+                if action == "BUY"
+                else entry_price + sl_dist_price
+            )
             if not no_tp:
-                take_profit_price = entry_price + tp_dist_price if action == "BUY" else entry_price - tp_dist_price
+                take_profit_price = (
+                    entry_price + tp_dist_price
+                    if action == "BUY"
+                    else entry_price - tp_dist_price
+                )
 
         stop_loss_price = round(float(stop_loss_price), digits)
         take_profit_price = None if no_tp else round(float(take_profit_price), digits)
-        return float(stop_loss_price), (None if take_profit_price is None else float(take_profit_price))
-
+        return float(stop_loss_price), (
+            None if take_profit_price is None else float(take_profit_price)
+        )
 
     def _attach_burst_metadata(self, trade_decision: dict) -> dict:
         """
@@ -2327,7 +2411,7 @@ class TradeExecutor:
         on split le volume en plusieurs ordres (50/50 par défaut).
         Chaque ordre est construit via _build_mt5_request.
         """
-                # 🚫 Cas spécial Burst → jamais de TP
+        # 🚫 Cas spécial Burst → jamais de TP
         rule = str(trade_decision.get("rule_name", "")).lower()
         if rule == "burst_scalping":
             trade_decision.pop("tp_price", None)  # nettoyage
@@ -2345,7 +2429,6 @@ class TradeExecutor:
                 )
             ]
 
-       
         if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
             # un seul TP → on passe par _build_mt5_request classique
             return [
@@ -2487,7 +2570,7 @@ class TradeExecutor:
             sl_price = round(float(sl_price), digits)
             if tp_price is not None:
                 tp_price = round(float(tp_price), digits)
-            
+
         except Exception as e:
             raise TradeExecutionError(f"SL/TP invalides: {e}")
 
@@ -2566,14 +2649,14 @@ class TradeExecutor:
         )
         if deviation_points < 0:
             deviation_points = 0
-            
+
         # --- Patch : neutraliser TP pour burst_scalping ---
         rule = str(trade_decision.get("rule_name", "")).lower()
         if rule == "burst_scalping":
             if tp_price is None or tp_price <= 0:
                 tp_price = 0.0  # MT5 = pas de TP
                 self.logger.debug("[BURST] TP neutralisé → trailing stop only")
-        
+
         # --- Construction base requête ---
         order_type_str = str(order_type_str or "MARKET").upper()
         request = {
@@ -2586,7 +2669,7 @@ class TradeExecutor:
             "deviation": deviation_points,
             "comment": "",  # rempli plus bas
         }
-     
+
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
         use_mitigation = bool(trade_decision.get("use_mitigation", False))
@@ -2683,7 +2766,7 @@ class TradeExecutor:
                     request["type_time"] = ORDER_TIME_GTC
         else:
             raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
-     
+
         # --- Distances min broker (SL/TP vs price_ref) ---
         if min_stop_distance_price > 0:
             if action_str == "BUY":
@@ -2747,7 +2830,7 @@ class TradeExecutor:
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
         return request
-    
+
     def build_burst_trailing_request(
         self,
         trade_decision: dict,
@@ -2793,7 +2876,9 @@ class TradeExecutor:
             digits = int(getattr(symbol_info, "digits", 0) or 0)
             point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         except Exception:
-            raise TradeExecutionErrorCls("[BURST] Impossible de lire digits/point du symbol_info.")
+            raise TradeExecutionErrorCls(
+                "[BURST] Impossible de lire digits/point du symbol_info."
+            )
 
         if point <= 0:
             raise TradeExecutionErrorCls("[BURST] symbol_info.point invalide (<=0).")
@@ -2801,7 +2886,9 @@ class TradeExecutor:
         # Volume normalization (FLOOR)
         try:
             vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
-            vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+            vmax = float(
+                getattr(symbol_info, "volume_max", float("inf")) or float("inf")
+            )
             vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
         except Exception:
             vmin, vmax, vstep = 0.0, float("inf"), 0.0
@@ -2843,7 +2930,9 @@ class TradeExecutor:
             if action == "BUY" and (entry_price - sl_price) < min_stop_distance_price:
                 # shift SL below entry by min_stop_distance
                 sl_price = round(entry_price - min_stop_distance_price, digits)
-            elif action == "SELL" and (sl_price - entry_price) < min_stop_distance_price:
+            elif (
+                action == "SELL" and (sl_price - entry_price) < min_stop_distance_price
+            ):
                 sl_price = round(entry_price + min_stop_distance_price, digits)
 
         # Final directional coherence: only SL vs price for burst (no TP)
@@ -2898,7 +2987,9 @@ class TradeExecutor:
             "_meta_no_tp": True,
             "_meta_trailing": trade_decision.get(
                 "trailing",
-                config.get("burst_scalping", {}).get("tp_sl", {}).get("trailing", {"enabled": True}),
+                config.get("burst_scalping", {})
+                .get("tp_sl", {})
+                .get("trailing", {"enabled": True}),
             ),
             "_meta_entry_source": trade_decision.get("source", "core_decision"),
             "_meta_stops_level_points": stops_lvl_points,
@@ -2923,7 +3014,6 @@ class TradeExecutor:
         }
 
         return request
-
 
     def _update_internal_position_state(
         self, mt5_result: Any, initial_risk: float
@@ -3196,7 +3286,7 @@ class TradeExecutor:
             vol = 0.0
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
-     
+
         # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
         mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
         if mt5 is None:
@@ -3252,7 +3342,7 @@ class TradeExecutor:
 
         # --- Contexte exécution (pour audit si dispo) ---
         audit_ctx = getattr(self, "execution_context", {}) or {}
-        
+
         # --- Patch : suppression TP None pour burst_scalping ---
         try:
             rn = str(request.get("rule_name", "")).lower()
@@ -3266,7 +3356,6 @@ class TradeExecutor:
                     self.logger.debug(f"[BURST] TP neutralisé pour {rn}")
         except Exception:
             pass
-
 
         # --- Normalisation / correction SL/TP pour éviter "Invalid stops" (10016) ---
         try:
@@ -3320,8 +3409,6 @@ class TradeExecutor:
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
 
-            
-
             # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
             if price and point:
                 # Sens attendu des stops selon action
@@ -3367,7 +3454,7 @@ class TradeExecutor:
                     if not _min_distance_ok(sl, price):
                         sl = _apply_buffer(sl, price, action, is_sl=True)
                     request["sl"] = _round_to_tick(sl)
-                
+
                 # Log de debug complet
                 self.logger.info(
                     f"[EXECUTOR][STOPS] {symbol} action={action} price={round(price, digits)} "
