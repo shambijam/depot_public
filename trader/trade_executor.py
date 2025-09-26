@@ -2806,7 +2806,14 @@ class TradeExecutor:
         )
         if deviation_points < 0:
             deviation_points = 0
-
+            
+        # --- Patch : neutraliser TP pour burst_scalping ---
+        rule = str(trade_decision.get("rule_name", "")).lower()
+        if rule == "burst_scalping":
+            if tp_price is None or tp_price <= 0:
+                tp_price = 0.0  # MT5 = pas de TP
+                self.logger.debug("[BURST] TP neutralisé → trailing stop only")
+        
         # --- Construction base requête ---
         order_type_str = str(order_type_str or "MARKET").upper()
         request = {
@@ -3485,6 +3492,21 @@ class TradeExecutor:
 
         # --- Contexte exécution (pour audit si dispo) ---
         audit_ctx = getattr(self, "execution_context", {}) or {}
+        
+        # --- Patch : suppression TP None pour burst_scalping ---
+        try:
+            rn = str(request.get("rule_name", "")).lower()
+            if rn == "burst_scalping":
+                if request.get("tp", None) is None:
+                    # soit tu supprimes complètement :
+                    if "tp" in request:
+                        del request["tp"]
+                    # ou tu forces à 0.0 (MT5 = pas de TP)
+                    request["tp"] = 0.0
+                    self.logger.debug(f"[BURST] TP neutralisé pour {rn}")
+        except Exception:
+            pass
+
 
         # --- Normalisation / correction SL/TP pour éviter "Invalid stops" (10016) ---
         try:
