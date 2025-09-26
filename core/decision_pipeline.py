@@ -1121,53 +1121,51 @@ class DecisionPipeline:
                             else price + (sl_pips * pip_size)
                         )
 
-                    # Trailing Stop Config
-                    tp_sl_cfg = (burst_cfg.get("tp_sl") or {}).get("trailing", {})
-                    trailing_enabled = bool(tp_sl_cfg.get("enabled", True))
-                    trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
-                    step_pips = float(tp_sl_cfg.get("step_pips", 5))
-                    # Fix: define activate_after_rr (default to trigger_pips or another config value)
-                    activate_after_rr = float(
-                        tp_sl_cfg.get("activate_after_rr", trigger_pips)
-                    )
+                        # Trailing Stop Config
+                        tp_sl_cfg = (burst_cfg.get("tp_sl") or {}).get("trailing", {})
+                        trailing_enabled = bool(tp_sl_cfg.get("enabled", True))
+                        trigger_pips = float(tp_sl_cfg.get("trigger_pips", 15))
+                        step_pips = float(tp_sl_cfg.get("step_pips", 5))
+                        activate_after_rr = float(
+                            tp_sl_cfg.get("activate_after_rr", trigger_pips)
+                        )
 
-                    basket_id = f"burst_{asset_raw}_{int(time.time())}"
+                        basket_id = f"burst_{asset_raw}_{int(time.time())}"
 
-                    burst_decisions = []
-                    for i in range(burst_size):
-                        order = {
-                            "action": burst_side,
-                            "asset": asset_raw,
-                            "order_type": "MARKET",
-                            "entry_price": price,
-                            "sl_price": round(sl_price, digits),
-                            "rule_name": "burst_scalping",
-                            "basket_id": basket_id,
-                            "burst_index": i + 1,
-                            "burst_size": burst_size,
-                        }
-
-                        if trailing_enabled:
-                            order["trailing"] = {
-                                "enabled": True,
-                                "activate_after_rr": activate_after_rr,
-                                "step_pips": step_pips,
+                        burst_decisions = []
+                        for i in range(burst_size):
+                            order = {
+                                "action": burst_side,
+                                "asset": asset_raw,
+                                "order_type": "MARKET",
+                                "entry_price": price,
+                                "sl_price": round(sl_price, digits),
+                                "rule_name": "burst_scalping",
+                                "basket_id": basket_id,
+                                "burst_index": i + 1,
+                                "burst_size": burst_size,
                             }
 
-                        burst_decisions.append(order)
+                            if trailing_enabled:
+                                order["trailing"] = {
+                                    "enabled": True,
+                                    "activate_after_rr": activate_after_rr,
+                                    "step_pips": step_pips,
+                                }
 
-                    self.logger.info(
-                        f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw} "
-                        f"avec Trailing Stop (trigger={trigger_pips}p, step={step_pips}p)."
-                    )
-                    print(
-                        f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} "
-                        f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
-                    )
+                            burst_decisions.append(order)
 
-                    # 🟢 IMPORTANT: fournir une final_decision pour exécution pipeline
-                    return {
-                        "final_decision": {
+                        self.logger.info(
+                            f"🔥 Burst Scalping activé: {burst_size} ordres {burst_side} sur {asset_raw} "
+                            f"avec Trailing Stop (trigger={trigger_pips}p, step={step_pips}p)."
+                        )
+                        print(
+                            f"🔥 [CORE] Burst Scalping → {burst_size}x {burst_side} {asset_raw} "
+                            f"(SL={sl_price}, Trailing Stop: trigger={trigger_pips}p, step={step_pips}p)"
+                        )
+
+                        # === Final Decision Burst ===
+                        final_decision = {
                             "action": burst_side,
                             "asset": asset_raw,
                             "order_type": "MARKET",
@@ -1176,23 +1174,24 @@ class DecisionPipeline:
                             "rule_name": "burst_scalping",
                             "burst_enabled": True,
                             "burst_size": burst_size,
-                            **(
-                                {
-                                    "trailing": {
-                                        "enabled": True,
-                                        "activate_after_rr": activate_after_rr,
-                                        "step_pips": step_pips,
-                                    }
-                                }
-                                if trailing_enabled
-                                else {}
-                            ),
-                        },
-                        "config_used": current_config,
-                        "burst_decisions": burst_decisions,
-                    }
+                        }
+                        if trailing_enabled:
+                            final_decision["trailing"] = {
+                                "enabled": True,
+                                "activate_after_rr": activate_after_rr,
+                                "step_pips": step_pips,
+                            }
 
+                        return {
+                            "final_decision": final_decision,
+                            "config_used": current_config,
+                            "burst_decisions": burst_decisions,
+                        }
+
+
+                # ==========================================================
                 # ✅ Liquidity Sweep (optionnel)
+                # ==========================================================
                 if strategy_name.lower() == "scalping":
                     sweep_cfg = (current_config.get("scalping") or {}).get(
                         "liquidity_sweep", {}
@@ -1228,6 +1227,7 @@ class DecisionPipeline:
                         }
                         print("💧 [CORE] Liquidity sweep LOW → BUY.")
 
+
         # 4) Contrôles compte/risque simples
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
@@ -1256,33 +1256,17 @@ class DecisionPipeline:
                 trade_decision["volume"] = float(vol_ok)
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
-            if risk_params.get("tp_price") is not None:
-                trade_decision["tp_price"] = float(risk_params["tp_price"])
+
+            # ✅ Patch : pas de TP pour burst
+            if trade_decision.get("rule_name") != "burst_scalping":
+                if risk_params.get("tp_price") is not None:
+                    trade_decision["tp_price"] = float(risk_params["tp_price"])
+                if risk_params.get("tp_pips") is not None:
+                    trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
+
             if risk_params.get("sl_pips") is not None:
                 trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
-            if risk_params.get("tp_pips") is not None:
-                trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
 
-            if str(risk_params.get("reason", "")).lower() == "soft_atr_m1_low":
-                self.logger.warning(
-                    f"⚠️ ATR M1 faible sur {trade_decision['asset']} — CONTINUATION (soft), "
-                    f"atr={risk_params.get('atr_m1_pips'):.3f} < min={risk_params.get('min_atr_m1_pips'):.3f}"
-                )
-                flags = trade_decision.setdefault("flags", {})
-                flags["soft_atr_m1_low"] = True
-
-                penalty = float(
-                    current_config.get("risk_management", {}).get(
-                        "atr_penalty_factor", 0.85
-                    )
-                )
-                floor = float(
-                    current_config.get("risk_management", {}).get(
-                        "atr_confidence_floor", 0.35
-                    )
-                )
-                current_conf = float(trade_decision.get("confidence", 0.5))
-                trade_decision["confidence"] = max(current_conf * penalty, floor)
 
                 # plancher volume soft
                 try:
@@ -1413,21 +1397,32 @@ class DecisionPipeline:
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
             print(f"⚠️ [CORE] Erreur trailing: {e}")
-
-            # --- PATCH: normalisation SL/TP ---
-        levels = normalize_levels(
-            entry_price=trade_decision.get("entry_price"),
-            action=trade_decision.get("action"),
-            pip_size=pip_size,
-            sl_pips=trade_decision.get("target_sl_pips"),
-            tp_pips=trade_decision.get("target_tp_pips"),
-            sl_price=trade_decision.get("sl_price"),
-            tp_price=trade_decision.get("tp_price"),
-        )
-
-        trade_decision["sl_price"] = levels["sl"]
-        trade_decision["tp_price"] = levels["tp"]
-
+            
+        # ✅ Patch Burst Scalping : suppression physique du TP
+        if trade_decision.get("rule_name") == "burst_scalping":
+            levels = normalize_levels(
+                entry_price=trade_decision.get("entry_price"),
+                action=trade_decision.get("action"),
+                pip_size=pip_size,
+                sl_pips=trade_decision.get("target_sl_pips"),
+                sl_price=trade_decision.get("sl_price"),
+                # 🚫 pas de tp_pips ni tp_price
+            )
+            trade_decision["sl_price"] = levels["sl"]
+            # pas de ligne trade_decision["tp_price"]
+        else:
+            levels = normalize_levels(
+                entry_price=trade_decision.get("entry_price"),
+                action=trade_decision.get("action"),
+                pip_size=pip_size,
+                sl_pips=trade_decision.get("target_sl_pips"),
+                tp_pips=trade_decision.get("target_tp_pips"),
+                sl_price=trade_decision.get("sl_price"),
+                tp_price=trade_decision.get("tp_price"),
+            )
+            trade_decision["sl_price"] = levels["sl"]
+            trade_decision["tp_price"] = levels["tp"]
+                      
         self.logger.debug(
             f"[CORE] Niveaux normalisés pour {trade_decision['asset']} → SL={levels['sl']} | TP={levels['tp']}"
         )

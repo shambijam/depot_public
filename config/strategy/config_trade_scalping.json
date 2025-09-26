@@ -98,13 +98,11 @@
         "burst_size": 3,
         "max_spread_pips": 30.0,
         "min_atr_m1_pips": 0.0,
-        "tp_sl": {
-          "trailing": {
-            "enabled": true,
-            "trigger_pips": 15,
-            "step_pips": 5,
-            "activate_after_rr": 1.0
-          }
+        "trailing": {
+          "enabled": true,
+          "trigger_pips": 15,
+          "step_pips": 5,
+          "activate_after_rr": 1.0
         }
       }
     }
