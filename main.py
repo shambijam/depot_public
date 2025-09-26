@@ -539,10 +539,12 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
+                strategy_manager,   # ✅ ajoute-le ici
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
             )
+
 
             if trade_executed_in_cycle:
                 daily_trade_count += 1
