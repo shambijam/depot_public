@@ -1275,45 +1275,7 @@ class TradeExecutor:
                     trigger_price = entry_price_hint
                 else:
                     trigger_price = entry_price_market
-
-            # ---------- 8) SL/TP (smart scalping + fallback) ----------
-            smart_sl_tp = {}
-            try:
-                smart_sl_tp = self.smart_scalping_tp_sl(
-                    symbol=broker_symbol,
-                    entry_price=entry_price_market,
-                    action=action,
-                    config=active_config.get("scalping", {}) or active_config,
-                    market_context=market_context,
-                )
-            except Exception as e:
-                self.logger.warning(f"[TPSL] Smart scalping SL/TP échoué: {e}")
-
-            if smart_sl_tp.get("valid"):
-                sl_price = float(smart_sl_tp["sl_price"])
-                tp_price = float(smart_sl_tp["tp_price"])
-                self.logger.info(
-                    f"[TPSL] Smart scalping utilisé ({smart_sl_tp['method']}) "
-                    f"→ SL={sl_price}, TP={tp_price}, RR={smart_sl_tp.get('rr', 0):.2f}"
-                )
-            else:
-                sl_price, tp_price = self._calculate_sl_tp_prices(
-                    {
-                        "action": action,
-                        "asset": broker_symbol,
-                        "order_type": order_type,
-                        "target_sl_pips": trade_decision.get("target_sl_pips"),
-                        "target_tp_pips": trade_decision.get("target_tp_pips"),
-                    },
-                    active_config,
-                    symbol_info,
-                    entry_price_market,
-                    market_context,
-                )
-                self.logger.info(
-                    f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
-                )
-                        
+                                   
             # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
                 import math
@@ -1613,143 +1575,7 @@ class TradeExecutor:
             self.logger.warning(
                 f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}"
             )
-
-    def smart_scalping_tp_sl(
-        self,
-        symbol: str,
-        entry_price: float,
-        action: str,
-        config: dict,
-        market_context: dict,
-    ) -> dict:
-        """
-        Calcule des niveaux TP/SL intelligents pour scalping institutionnel.
-        Combine ATR, swings, FVG, et fallback pips fixes avec garde-fous robustes.
-
-        Args:
-        symbol (str): Actif (ex: 'EURUSD')
-        entry_price (float): Prix d'entrée
-        action (str): 'BUY' ou 'SELL'
-        config (dict): Configuration de la stratégie/actif
-        market_context (dict): Contexte marché enrichi (ATR, swings, spreads, etc.)
-
-        Returns:
-        dict: {
-            "sl_price": float,
-            "tp_price": float,
-            "method": str,
-            "rr": float,
-            "valid": bool
-        }
-        """
-
-        logger = logging.getLogger(__name__)
-
-        try:
-
-            # 🚫 PATCH : Pas de TP pour Burst Scalping
-            rule = str(config.get("rule_name", "")).lower()
-            if rule == "burst_scalping":
-                return {
-                    "sl_price": None,  # sera traité par trailing stop ailleurs
-                    "tp_price": None,  # forcé à None
-                    "method": "burst_no_tp",
-                    "rr": 0,
-                    "valid": True,  # valide mais sans TP
-                }
-
-            # 1️⃣ Config locale
-            rr_min = float(config.get("min_rr", 1.2))
-            atr_mult_sl = float(config.get("atr_multiplier_sl", 1.0))
-            atr_mult_tp = float(config.get("atr_multiplier_tp", 1.5))
-            sl_fixed = float(config.get("target_sl_pips", 5))
-            tp_fixed = float(config.get("target_tp_pips", 8))
-            max_sl = float(config.get("max_sl_pips", 20))
-            min_sl = float(config.get("min_sl_pips", 2))
-
-            point = market_context.get("point", 0.0001)
-            atr = float(market_context.get("atr_m5", 0) or 0)
-            last_swings = market_context.get("swings", {}) or {}
-            fvg_levels = market_context.get("fvg_levels", {}) or {}
-
-            # 2️⃣ SL initial : priorité swings > ATR > fixe
-            if action == "BUY":
-                sl_price = last_swings.get("last_swing_low")
-                if sl_price and sl_price < entry_price:
-                    method = "swing_low"
-                elif atr > 0:
-                    sl_price = entry_price - atr * atr_mult_sl * point
-                    method = "ATR"
-                else:
-                    sl_price = entry_price - sl_fixed * point
-                    method = "fixed"
-            else:  # SELL
-                sl_price = last_swings.get("last_swing_high")
-                if sl_price and sl_price > entry_price:
-                    method = "swing_high"
-                elif atr > 0:
-                    sl_price = entry_price + atr * atr_mult_sl * point
-                    method = "ATR"
-                else:
-                    sl_price = entry_price + sl_fixed * point
-                    method = "fixed"
-
-            # 3️⃣ TP initial : RR basé ou FVG
-            if action == "BUY":
-                if "upside_fvg" in fvg_levels:
-                    tp_price = fvg_levels["upside_fvg"]
-                    method += "+FVG"
-                else:
-                    tp_price = entry_price + (abs(entry_price - sl_price) * atr_mult_tp)
-            else:
-                if "downside_fvg" in fvg_levels:
-                    tp_price = fvg_levels["downside_fvg"]
-                    method += "+FVG"
-                else:
-                    tp_price = entry_price - (abs(entry_price - sl_price) * atr_mult_tp)
-
-            # 4️⃣ Vérification RR
-            rr = abs(tp_price - entry_price) / max(abs(entry_price - sl_price), 1e-6)
-            if rr < rr_min:
-                adj = rr_min / rr
-                if action == "BUY":
-                    tp_price = entry_price + (tp_price - entry_price) * adj
-                else:
-                    tp_price = entry_price - (entry_price - tp_price) * adj
-                method += "+RRfix"
-
-            # 5️⃣ Garde-fous broker
-            sl_pips = abs(entry_price - sl_price) / point
-            if sl_pips < min_sl or sl_pips > max_sl:
-                logger.warning(
-                    f"[{symbol}] SL {sl_pips:.1f} pips hors bornes [{min_sl}-{max_sl}]."
-                )
-                return {
-                    "sl_price": None,
-                    "tp_price": None,
-                    "method": method,
-                    "rr": rr,
-                    "valid": False,
-                }
-
-            return {
-                "sl_price": round(sl_price, 5),
-                "tp_price": round(tp_price, 5),
-                "method": method,
-                "rr": rr,
-                "valid": True,
-            }
-
-        except Exception as e:
-            logger.error(f"Erreur smart_scalping_tp_sl: {e}", exc_info=True)
-            return {
-                "sl_price": None,
-                "tp_price": None,
-                "method": "error",
-                "rr": 0,
-                "valid": False,
-            }
-
+  
     def _calculate_sl_tp_prices(
         self,
         trade_decision: dict,
@@ -1757,270 +1583,202 @@ class TradeExecutor:
         symbol_info: Any,
         entry_price: float,
         market_context: dict,
-    ) -> tuple[float, float]:
-        """
-        SL/TP institutionnel avec 3 méthodes de SL (SWING / ATR / PIPS) et 3 TP (RR / ATR_MULTIPLE / PIPS).
-        - Priorité aux overrides en PIPS: trade_decision['target_sl_pips'] / ['target_tp_pips']
-        - Respecte trade_stops_level du broker
-        - Conversion PIPS → prix corrigée (1 pip = 10 points pour FX/Gold)
-        - Arrondit aux 'digits' du symbole
-
-        """
-
+    ) -> tuple[float, Optional[float]]:
         self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
 
-        # --- Normalisation action ---
+        # --- Init sûres ---
+        stop_loss_price: float = 0.0
+        take_profit_price: float = 0.0
+
+        # --- Action ---
         action_raw = str(trade_decision.get("action", "")).strip().upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action_raw, action_raw)
         if action not in ("BUY", "SELL"):
             raise TradeExecutionError(f"Action invalide pour SL/TP: '{action_raw}'")
 
-        # --- Paramètres symbole / broker ---
+        # --- Symbole/broker ---
         point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         if point <= 0:
             raise TradeExecutionError("symbol_info.point invalide (<=0).")
         digits = int(getattr(symbol_info, "digits", 0) or 0)
-        min_stop_distance_points = int(
-            getattr(symbol_info, "trade_stops_level", 0) or 0
-        )
-        min_stop_distance_price = min_stop_distance_points * point
+        tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or point)
+        min_stop_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
+        min_stop_price = min_stop_points * point
 
-        # --- Heuristique pip-size: 1 pip = 10 points (FX majeurs / JPY / XAU) ---
+        # --- Ticks min "défensif" si broker annonce 0 ---
+        min_ticks_soft = 2  # <<< clé pour éviter 10016 quand stops_level=0
+        soft_min_price = max(min_stop_price, min_ticks_soft * tick_size)
+
+        # --- Pips heuristique ---
         points_per_pip = 10.0
-        pip_size = point * points_per_pip  # valeur d'1 pip en prix
+        pip_size = point * points_per_pip
 
-        # --- Overrides en PIPS (prioritaires si fournis) ---
-        sl_pips_override = trade_decision.get("target_sl_pips", None)
-        tp_pips_override = trade_decision.get("target_tp_pips", None)
+        # --- Overrides PIPS ---
+        sl_pips_override = trade_decision.get("target_sl_pips")
+        tp_pips_override = trade_decision.get("target_tp_pips")
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
-        # --- Paramètres SL/TP standards ---
+        # --- Paramètres produit & stratégie ---
         prod_st = config.get("smart_sl_tp_settings", {}) or {}
-        sl_method = str(
-            prod_st.get("sl_placement_method", "PIPS")
-        ).upper()  # PIPS|SWING|ATR
-        tp_method = str(
-            prod_st.get("tp_placement_method", "RR")
-        ).upper()  # RR|ATR_MULTIPLE|PIPS
+        sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()
+        tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()
         rr_ratio = float(prod_st.get("tp_rr_ratio", 1.5) or 1.5)
 
         strat_st = config.get("smart_targets") or {}
         st_sl = strat_st.get("stop_loss") or {}
         st_tp = strat_st.get("take_profit") or {}
-
         sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
-        sl_hard_max_points = float(
-            st_sl.get("hard_max_points", float("inf")) or float("inf")
-        )
-        tp_hard_max_points = float(
-            st_tp.get("hard_max_points", float("inf")) or float("inf")
-        )
+        sl_hard_max_points = float(st_sl.get("hard_max_points", float("inf")) or float("inf"))
+        tp_hard_max_points = float(st_tp.get("hard_max_points", float("inf")) or float("inf"))
 
-        # --- Market data pour SWING/ATR ---
+        # --- Données marché (pour ATR/SWING) ---
         symbol = str(trade_decision.get("asset", "")).upper()
-        md = (market_context.get("market_data") or {}).get(symbol)
-        rates_df = md if isinstance(md, pd.DataFrame) else None
+        rates_df = (market_context.get("market_data") or {}).get(symbol)
 
-        # --- Helper ATR ---
         def _compute_atr(df: pd.DataFrame, period: int) -> float:
-            if df is None or len(df) < period + 2:
+            if not isinstance(df, pd.DataFrame) or len(df) < period + 2:
                 return float("nan")
             high = df["high"].astype(float)
             low = df["low"].astype(float)
             close = df["close"].astype(float)
-            prev_close = close.shift(1)
-            tr = np.maximum.reduce(
-                [
-                    (high - low).abs(),
-                    (high - prev_close).abs(),
-                    (low - prev_close).abs(),
-                ]
-            )
+            pc = close.shift(1)
+            tr = np.maximum.reduce([(high - low).abs(), (high - pc).abs(), (low - pc).abs()])
             atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
             return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
-        # ========================= SL (standards si non fixé) =========================
-        if isinstance(sl_pips_override, (int, float)) and float(sl_pips_override) > 0:
-            sl_distance = float(sl_pips_override) * pip_size
-            stop_loss_price = (
-                entry_price - sl_distance
-                if action == "BUY"
-                else entry_price + sl_distance
-            )
-            self.logger.debug(
-                f"[SL] override utilisé: {sl_pips_override} pips -> {stop_loss_price:.10f}"
-            )
+        # ================= SL =================
+        if isinstance(sl_pips_override, (int, float)) and sl_pips_override > 0:
+            sl_dist = float(sl_pips_override) * pip_size
+            stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
         else:
-            if stop_loss_price == 0.0:
-                if sl_method == "SWING":
-                    lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
-                    buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-                    if (
-                        not isinstance(rates_df, pd.DataFrame)
-                        or len(rates_df) < lookback
-                    ):
-                        self.logger.warning(
-                            f"Pas assez de données pour SL SWING (need {lookback}). Fallback ATR puis PIPS."
-                        )
-                        sl_method = "ATR"
+            if sl_method == "SWING":
+                lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
+                buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
+                if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
+                    sl_method = "ATR"
+                else:
+                    buf = buffer_pips * pip_size
+                    if action == "BUY":
+                        stop_loss_price = float(rates_df.tail(lookback)["low"].min()) - buf
                     else:
-                        recent = rates_df.tail(lookback)
-                        buffer_price = buffer_pips * pip_size
-                        if action == "BUY":
-                            swing_low = float(recent["low"].min())
-                            stop_loss_price = swing_low - buffer_price
-                        else:
-                            swing_high = float(recent["high"].max())
-                            stop_loss_price = swing_high + buffer_price
+                        stop_loss_price = float(rates_df.tail(lookback)["high"].max()) + buf
 
-                if sl_method == "ATR" and stop_loss_price == 0.0:
-                    atr_period = int(
-                        prod_st.get(
-                            "sl_atr_period",
-                            prod_st.get("atr_settings", {}).get("period", 14),
-                        )
-                        or 14
-                    )
-                    atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
-                    atr = _compute_atr(rates_df, atr_period)
-                    if not (atr == atr and atr > 0):
-                        self.logger.warning("ATR indisponible. Fallback PIPS pour SL.")
-                        sl_method = "PIPS"
-                    else:
-                        sl_distance = atr_mult * atr
-                        stop_loss_price = (
-                            entry_price - sl_distance
-                            if action == "BUY"
-                            else entry_price + sl_distance
-                        )
+            if sl_method == "ATR" and stop_loss_price == 0.0:
+                atr_p = int(prod_st.get("sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)) or 14)
+                atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
+                atr = _compute_atr(rates_df, atr_p)
+                if not (atr == atr and atr > 0):
+                    sl_method = "PIPS"
+                else:
+                    sl_dist = atr_mult * atr
+                    stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
 
-                if sl_method == "PIPS" and stop_loss_price == 0.0:
-                    sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
-                    sl_distance = sl_pips * pip_size
-                    stop_loss_price = (
-                        entry_price - sl_distance
-                        if action == "BUY"
-                        else entry_price + sl_distance
-                    )
+            if sl_method == "PIPS" and stop_loss_price == 0.0:
+                sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
+                sl_dist = sl_pips * pip_size
+                stop_loss_price = entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
 
-        # ========================= TP (standards si non fixé) =========================
-        if isinstance(tp_pips_override, (int, float)) and float(tp_pips_override) > 0:
-            tp_distance = float(tp_pips_override) * pip_size
-            take_profit_price = (
-                entry_price + tp_distance
-                if action == "BUY"
-                else entry_price - tp_distance
-            )
-            self.logger.debug(
-                f"[TP] override utilisé: {tp_pips_override} pips -> {take_profit_price:.10f}"
-            )
-        else:
-            if take_profit_price == 0.0:
+        # ================= TP =================
+        # (Mode sans TP pour burst_scalping)
+        no_tp = str(config.get("strategy_name", "")).lower() in {"burst_scalping", "scalping_burst"} \
+                or bool(trade_decision.get("no_tp", False))
+
+        if not no_tp:
+            if isinstance(tp_pips_override, (int, float)) and tp_pips_override > 0:
+                tp_dist = float(tp_pips_override) * pip_size
+                take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+            else:
                 if tp_method == "RR":
-                    risk_distance_price = abs(entry_price - stop_loss_price)
-                    if risk_distance_price <= 0:
-                        self.logger.warning(
-                            "Distance de risque nulle pour TP RR. Fallback PIPS."
-                        )
+                    risk = abs(entry_price - stop_loss_price)
+                    if not (risk > 0):
                         tp_method = "PIPS"
                     else:
-                        tp_distance = risk_distance_price * rr_ratio
-                        take_profit_price = (
-                            entry_price + tp_distance
-                            if action == "BUY"
-                            else entry_price - tp_distance
-                        )
+                        tp_dist = risk * rr_ratio
+                        take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
 
                 if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
-                    atr_period = int(
-                        prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14))
-                        or 14
-                    )
+                    atr_p = int(prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14)
                     atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
-                    atr = _compute_atr(rates_df, atr_period)
+                    atr = _compute_atr(rates_df, atr_p)
                     if not (atr == atr and atr > 0):
-                        self.logger.warning("ATR indisponible pour TP. Fallback PIPS.")
                         tp_method = "PIPS"
                     else:
-                        tp_distance = atr_mult * atr
-                        take_profit_price = (
-                            entry_price + tp_distance
-                            if action == "BUY"
-                            else entry_price - tp_distance
-                        )
+                        tp_dist = atr_mult * atr
+                        take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
 
                 if tp_method == "PIPS" and take_profit_price == 0.0:
                     tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
-                    tp_distance = tp_pips * pip_size
-                    take_profit_price = (
-                        entry_price + tp_distance
-                        if action == "BUY"
-                        else entry_price - tp_distance
-                    )
+                    tp_dist = tp_pips * pip_size
+                    take_profit_price = entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
 
-        # ========================= Validations Katana & ajustements de sécurité =========================
+        # ================= Validations & ajustements =================
         if entry_price <= 0:
             raise TradeExecutionError("Prix d'entrée invalide.")
 
-        if action == "BUY":
-            sl_dist_price = entry_price - stop_loss_price
-            tp_dist_price = take_profit_price - entry_price
-        else:
-            sl_dist_price = stop_loss_price - entry_price
-            tp_dist_price = entry_price - take_profit_price
+        # Distances actuelles
+        sl_dist_price = (entry_price - stop_loss_price) if action == "BUY" else (stop_loss_price - entry_price)
+        if sl_dist_price <= 0:
+            raise TradeExecutionError("Distance SL invalide (<=0).")
 
-        if sl_dist_price <= 0 or tp_dist_price <= 0:
-            raise TradeExecutionError("Distances SL/TP invalides (<= 0).")
+        tp_dist_price = None
+        if not no_tp:
+            tp_dist_price = (take_profit_price - entry_price) if action == "BUY" else (entry_price - take_profit_price)
+            if tp_dist_price is None or tp_dist_price <= 0:
+                raise TradeExecutionError("Distance TP invalide (<=0).")
 
-        # Conversion initiale en points (nécessaire même sans Katana)
+        # A) min broker (stops_level) + soft 2 ticks
+        sl_dist_price = max(sl_dist_price, soft_min_price)
+        if tp_dist_price is not None:
+            tp_dist_price = max(tp_dist_price, soft_min_price)
+
+        # B) Hard limits
         sl_dist_points = sl_dist_price / point
-        tp_dist_points = tp_dist_price / point
+        sl_dist_points = max(sl_dist_points, sl_hard_min_points)
+        sl_dist_points = min(sl_dist_points, sl_hard_max_points)
+        sl_dist_price = sl_dist_points * point
 
-        # A) Respect stops_level (broker)
-        if min_stop_distance_price > 0:
-            if sl_dist_price < min_stop_distance_price:
-                sl_dist_price = min_stop_distance_price
-            if tp_dist_price < min_stop_distance_price:
-                tp_dist_price = min_stop_distance_price
+        if tp_dist_price is not None:
+            tp_dist_points = tp_dist_price / point
+            tp_dist_points = min(tp_dist_points, tp_hard_max_points)
+            tp_dist_price = tp_dist_points * point
 
-        # C) ATR M1 minimal (si dispo)
-        try:
-            atr_df = (market_context.get("market_data_m1") or {}).get(
-                symbol
-            ) or rates_df
-            atr_m1 = (
-                _compute_atr(atr_df, period=14)
-                if isinstance(atr_df, pd.DataFrame)
-                else float("nan")
-            )
-
-        except Exception:
-            pass
-
-        # D) Ajustement pour spread (évite TP < SL + spread)
-        if spread_pips > 0:
-            sl_pips_now = sl_dist_points / points_per_pip
-            tp_pips_now = tp_dist_points / points_per_pip
+        # C) Ajustement spread: éviter TP < SL + spread (en pips)
+        if tp_dist_price is not None and spread_pips > 0:
+            sl_pips_now = (sl_dist_points / points_per_pip)
+            tp_pips_now = (tp_dist_points / points_per_pip)
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
-              
-        # Reconversion points -> prix
-        sl_dist_price = sl_dist_points * point
-        tp_dist_price = tp_dist_points * point
-        stop_loss_price = (
-            (entry_price - sl_dist_price)
-            if action == "BUY"
-            else (entry_price + sl_dist_price)
-        )
-        take_profit_price = (
-            (entry_price + tp_dist_price)
-            if action == "BUY"
-            else (entry_price - tp_dist_price)
-        )
+                tp_dist_price = tp_dist_points * point
+
+        # D) Côté BID/ASK pour MARKET
+        tick = (market_context.get("last_tick") or {}).get(symbol) or {}
+        bid = float(tick.get("bid") or 0.0)
+        ask = float(tick.get("ask") or 0.0)
+        if bid > 0 and ask > 0 and ask > bid:
+            if action == "BUY":
+                stop_loss_price = entry_price - sl_dist_price
+                if not no_tp:
+                    take_profit_price = entry_price + tp_dist_price
+                    # imposer > ASK + min
+                    if take_profit_price < (ask + soft_min_price - 1e-12):
+                        take_profit_price = ask + soft_min_price
+            else:
+                stop_loss_price = entry_price + sl_dist_price
+                if not no_tp:
+                    take_profit_price = entry_price - tp_dist_price
+                    # imposer < BID - min
+                    if take_profit_price > (bid - soft_min_price + 1e-12):
+                        take_profit_price = bid - soft_min_price
+        else:
+            # fallback sans bid/ask
+            stop_loss_price = entry_price - sl_dist_price if action == "BUY" else entry_price + sl_dist_price
+            if not no_tp:
+                take_profit_price = entry_price + tp_dist_price if action == "BUY" else entry_price - tp_dist_price
 
         stop_loss_price = round(float(stop_loss_price), digits)
-        take_profit_price = round(float(take_profit_price), digits)
-        return float(stop_loss_price), float(take_profit_price)
+        take_profit_price = None if no_tp else round(float(take_profit_price), digits)
+        return float(stop_loss_price), (None if take_profit_price is None else float(take_profit_price))
+
 
     def _attach_burst_metadata(self, trade_decision: dict) -> dict:
         """
