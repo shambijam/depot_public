@@ -2515,6 +2515,7 @@ class TradeExecutor:
 
         Ne persiste rien: garde mémoire en RAM via attributs.
         """
+                
         try:
             # Mémoire RAM
             if not hasattr(self, "_last_trade_ts_by_asset"):
@@ -2546,6 +2547,8 @@ class TradeExecutor:
                 gap = per_asset_cooldown_s - (now_ts - last_ts)
                 self.logger.info(f"[THROTTLE] Cooldown {asset} encore ~{gap:.1f}s.")
                 return True
+            
+            
 
             return False
         except Exception as e:
@@ -2579,6 +2582,23 @@ class TradeExecutor:
         on split le volume en plusieurs ordres (50/50 par défaut).
         Chaque ordre est construit via _build_mt5_request.
         """
+        # ✅ PATCH : pas de TP pour Burst
+        rule = str(trade_decision.get("rule_name", "")).lower()
+        if rule == "burst_scalping":
+            return [
+                self._build_mt5_request(
+                    trade_decision,
+                    config,
+                    volume,
+                    entry_price_market,
+                    sl_price,
+                    0.0,  # pas de TP
+                    symbol_info,
+                    trigger_price,
+                    order_type_str,
+                )
+            ]
+            
         if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
             # un seul TP → on passe par _build_mt5_request classique
             return [
@@ -2813,6 +2833,11 @@ class TradeExecutor:
             "deviation": deviation_points,
             "comment": "",  # rempli plus bas
         }
+        
+        # 🔧 PATCH (NO TP pour BURST)
+        if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
+            request["tp"] = 0.0
+            self.logger.info(f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {expected_symbol}")
         
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
