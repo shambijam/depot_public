@@ -6,7 +6,7 @@
     "XAUUSD"
   ],
   "magic_number": 52001,
-  "risk_per_trade_percent": 0.40,
+  "risk_per_trade_percent": 3.0,
   "confidence_threshold": 0.30,
   "take_profit_pips": 80,
   "stop_loss_pips": 60,

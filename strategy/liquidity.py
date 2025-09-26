@@ -308,7 +308,7 @@ class LiquidityStrategy(BaseStrategy):
         vol_exit_threshold = float(liqui_exit_cfg.get("volume_exit_threshold", 3.0))
 
         for pos in current_positions:
-            if pos.get("magic") != self.strategy_config.get("magic_number"):
+            if getattr(pos, "magic", None) != self.strategy_config.get("magic_number"):
                 continue
 
             asset = pos.get("symbol")

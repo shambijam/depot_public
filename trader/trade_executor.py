@@ -3408,6 +3408,17 @@ class TradeExecutor:
             vol = 0.0
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
+        
+                # --- Vérification du nombre de positions ouvertes ---
+        try:
+            open_positions = self.mt5_connector.get_positions(symbol=symbol)
+            if open_positions and len(open_positions) >= 200:  # ⚠️ adapte la limite selon ton broker
+                msg = f"[EXECUTOR] ❌ Limite de positions atteinte pour {symbol} ({len(open_positions)} ouvertes)."
+                self.logger.error(msg)
+                raise TradeExecutionError(msg)
+        except Exception as e:
+            self.logger.warning(f"[EXECUTOR] Impossible de vérifier le nombre de positions pour {symbol}: {e}")
+
 
         # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
         mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
