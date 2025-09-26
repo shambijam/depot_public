@@ -480,11 +480,23 @@ class ScalpingStrategy(BaseStrategy):
 
             if isinstance(sl_pips, (int, float)) and sl_pips > 0:
                 d["target_sl_pips"] = float(sl_pips)
+                
+                # ✅ Conversion pips → prix concret (sl_price attendu par TradeExecutor)
+                if action == "BUY":
+                    d["sl_price"] = entry_price - sl_pips * pip_size_value
+                else:
+                    d["sl_price"] = entry_price + sl_pips * pip_size_value
+            else:
+                # fallback minimal obligatoire (sinon build_burst_trailing_request plantera)
+                default_sl_pips = 5.0  # à paramétrer dans ton burst_cfg si tu veux
+                if action == "BUY":
+                    d["sl_price"] = entry_price - default_sl_pips * pip_size_value
+                else:
+                    d["sl_price"] = entry_price + default_sl_pips * pip_size_value
 
             # 🚫 Pas de TP pour burst_scalping → on ne met pas target_tp_pips
 
             decisions.append(d)
-
 
         self.logger.info(
             f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
