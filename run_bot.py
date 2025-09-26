@@ -1120,6 +1120,14 @@ def main(args: argparse.Namespace) -> None:
         # Instancier Mecano
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
+        
+        # Instancier StrategyManager
+        strategy_manager = StrategyManager(
+            config_loader_instance=config_manager.config_loader,
+            config_manager_instance=config_manager,
+        )
+        strategy_manager.initialize_strategies()
+
 
     except Exception as e:
         logger.critical(
@@ -1224,7 +1232,7 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
-                StrategyManager,
+                strategy_manager,   # ✅ ici tu passes l’instance
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
