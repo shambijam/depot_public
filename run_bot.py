@@ -628,7 +628,6 @@ def _execute_single_decision(
         )
         return False
 
-
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
     phase_observer: PhaseObserver,
@@ -636,10 +635,12 @@ def run_single_pipeline_cycle(
     trade_executor: TradeExecutor,
     config_manager: ConfigManager,
     mecano: Mecano,
+    strategy_manager: StrategyManager,   # ✅ ajout
     is_dry_run: bool,
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
+
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique).
 
@@ -1223,6 +1224,7 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
+                StrategyManager,
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,

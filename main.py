@@ -539,7 +539,6 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
-                strategy_manager,
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
