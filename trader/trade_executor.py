@@ -3607,20 +3607,7 @@ class TradeExecutor:
                     if not _min_distance_ok(sl, price):
                         sl = _apply_buffer(sl, price, action, is_sl=True)
                     request["sl"] = _round_to_tick(sl)
-
-                # Corrige TP si présent
-                if tp is not None:
-                    tp = float(tp)
-                    # sens
-                    if action == "BUY" and tp <= price:
-                        tp = price + (tick_size or point)
-                    elif action == "SELL" and tp >= price:
-                        tp = price - (tick_size or point)
-                    # distance mini
-                    if not _min_distance_ok(tp, price):
-                        tp = _apply_buffer(tp, price, action, is_sl=False)
-                    request["tp"] = _round_to_tick(tp)
-
+                
                 # Log de debug complet
                 self.logger.info(
                     f"[EXECUTOR][STOPS] {symbol} action={action} price={round(price, digits)} "
