@@ -1412,20 +1412,6 @@ class DecisionPipeline:
         except Exception as e:
             self.logger.warning(f"Erreur application Trailing Stop: {e}")
             print(f"⚠️ [CORE] Erreur trailing: {e}")
-            
-        # ✅ Patch Burst Scalping : suppression physique du TP
-        if trade_decision.get("rule_name") == "burst_scalping":
-            levels = normalize_levels(
-                entry_price=trade_decision.get("entry_price"),
-                action=trade_decision.get("action"),
-                pip_size=pip_size,
-                sl_pips=trade_decision.get("target_sl_pips"),
-                sl_price=trade_decision.get("sl_price"),
-                # 🚫 pas de tp_pips ni tp_price
-            )
-            trade_decision["sl_price"] = levels["sl"]
-            # pas de ligne trade_decision["tp_price"]
-        else:
             levels = normalize_levels(
                 entry_price=trade_decision.get("entry_price"),
                 action=trade_decision.get("action"),
@@ -1436,8 +1422,13 @@ class DecisionPipeline:
                 tp_price=trade_decision.get("tp_price"),
             )
             trade_decision["sl_price"] = levels["sl"]
-            trade_decision["tp_price"] = levels["tp"]
-                      
+
+            # 🚫 Burst scalping : pas de TP
+            if trade_decision.get("rule_name") == "burst_scalping":
+                trade_decision.pop("tp_price", None)
+            else:
+                trade_decision["tp_price"] = levels["tp"]
+                       
         self.logger.debug(
             f"[CORE] Niveaux normalisés pour {trade_decision['asset']} → SL={levels['sl']} | TP={levels['tp']}"
         )

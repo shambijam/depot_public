@@ -1313,13 +1313,7 @@ class TradeExecutor:
                 self.logger.info(
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
-            # ✅ Patch : suppression TP si burst_scalping
-            rule_name = str(trade_decision.get("rule_name", "")).lower()
-            if rule_name == "burst_scalping":
-                self.logger.info(f"[BURST] TP supprimé (trailing-only) pour {broker_symbol}")
-                tp_price = None
-                
-
+                        
             # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
                 import math
@@ -1431,10 +1425,7 @@ class TradeExecutor:
                     self.logger.info(
                         f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                     )
-            elif min_rr > 0.0 and tp_price is None and str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
-                self.logger.info("[BURST] RR check ignoré (pas de TP en mode trailing-only)")
-
-
+           
             # ---------- 9) Volume (uniquement via risk sizer) ----------
             # Note: on ignore explicitement tout volume fourni par la décision.
             if any(k in trade_decision for k in ("volume", "target_volume")):
@@ -1542,17 +1533,31 @@ class TradeExecutor:
                 )
 
             # ---------- 10) Construction requête ----------
-            return self._build_mt5_request(
-                {"action": action, "asset": broker_symbol, "order_type": order_type},
-                active_config,
-                volume_final,
-                entry_price_market,
-                sl_price,
-                tp_price,
-                symbol_info,
-                trigger_price,
-                order_type,
-            )
+            rule_name = str(trade_decision.get("rule_name", "")).lower()
+
+            if rule_name == "burst_scalping":
+                # 🚀 Redirection spécifique vers trailing stop
+                return self.build_burst_trailing_request(
+                    trade_decision,
+                    active_config,
+                    volume_final,
+                    entry_price_market,
+                    sl_price,
+                    symbol_info,
+                )
+            else:
+                # 🏦 Mode classique avec TP/SL
+                return self._build_mt5_request(
+                    {"action": action, "asset": broker_symbol, "order_type": order_type},
+                    active_config,
+                    volume_final,
+                    entry_price_market,
+                    sl_price,
+                    tp_price,
+                    symbol_info,
+                    trigger_price,
+                    order_type,
+                )
 
         except TradeExecutionError:
             raise
@@ -1998,53 +2003,7 @@ class TradeExecutor:
             tp_pips_now = tp_dist_points / points_per_pip
             if tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
-
-                # ========================= Burst Scalping (optionnel) =========================
-        burst_cfg = (
-            (config.get("burst_scalping") or {}) if isinstance(config, dict) else {}
-        )
-        if trade_decision.get("rule_name") == "burst_scalping" or burst_cfg.get(
-            "enabled", False
-        ):
-            burst_size = int(
-                trade_decision.get("burst_size") or burst_cfg.get("burst_size", 3)
-            )
-            sl_pips_burst = float(
-                trade_decision.get("burst_sl_pips") or burst_cfg.get("sl_pips", 5.0)
-            )
-            tp_pips_burst = float(
-                trade_decision.get("burst_tp_pips") or burst_cfg.get("tp_pips", 8.0)
-            )
-
-            sl_dist_price = sl_pips_burst * pip_size
-            tp_dist_price = tp_pips_burst * pip_size
-
-            stop_loss_price = (
-                entry_price - sl_dist_price
-                if action == "BUY"
-                else entry_price + sl_dist_price
-            )
-            take_profit_price = (
-                entry_price + tp_dist_price
-                if action == "BUY"
-                else entry_price - tp_dist_price
-            )
-
-            # Génération de TP multiples si besoin
-            trade_decision["burst_tp_prices"] = [
-                take_profit_price for _ in range(burst_size)
-            ]
-            trade_decision["burst_sl_price"] = stop_loss_price
-            trade_decision["burst_enabled"] = True
-
-            self.logger.info(
-                f"[BURST] SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} pour {burst_size} ordres"
-            )
-
-            stop_loss_price = round(float(stop_loss_price), digits)
-            take_profit_price = round(float(take_profit_price), digits)
-            return float(stop_loss_price), float(take_profit_price)
-
+              
         # Reconversion points -> prix
         sl_dist_price = sl_dist_points * point
         tp_dist_price = tp_dist_points * point
@@ -2608,10 +2567,10 @@ class TradeExecutor:
         on split le volume en plusieurs ordres (50/50 par défaut).
         Chaque ordre est construit via _build_mt5_request.
         """
-        # ✅ PATCH : pas de TP pour Burst
+                # 🚫 Cas spécial Burst → jamais de TP
         rule = str(trade_decision.get("rule_name", "")).lower()
         if rule == "burst_scalping":
-            trade_decision.pop("tp_price", None)  # on supprime toute trace de TP
+            trade_decision.pop("tp_price", None)  # nettoyage
             return [
                 self._build_mt5_request(
                     trade_decision,
@@ -2619,13 +2578,14 @@ class TradeExecutor:
                     volume,
                     entry_price_market,
                     sl_price,
-                    0.0,  # pas de TP
+                    None,  # pas de TP (trailing only)
                     symbol_info,
                     trigger_price,
                     order_type_str,
                 )
             ]
 
+       
         if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
             # un seul TP → on passe par _build_mt5_request classique
             return [
@@ -2767,11 +2727,7 @@ class TradeExecutor:
             sl_price = round(float(sl_price), digits)
             if tp_price is not None:
                 tp_price = round(float(tp_price), digits)
-            else:
-                # ✅ Patch : pas de TP en burst → on force à 0.0
-                tp_price = 0.0
-                if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
-                    self.logger.info("[BURST] TP forcé à 0.0 (trailing-only)")
+            
         except Exception as e:
             raise TradeExecutionError(f"SL/TP invalides: {e}")
 
@@ -2863,13 +2819,7 @@ class TradeExecutor:
             "deviation": deviation_points,
             "comment": "",  # rempli plus bas
         }
-
-        # ✅ PATCH : pas de TP pour burst_scalping
-        if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
-            request["tp"] = 0.0
-            self.logger.info(f"[BURST] TP supprimé → trailing-only pour {expected_symbol}")
-
-
+     
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
         use_mitigation = bool(trade_decision.get("use_mitigation", False))
@@ -2966,36 +2916,7 @@ class TradeExecutor:
                     request["type_time"] = ORDER_TIME_GTC
         else:
             raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
-
-        # ✅ Patch cohérence directionnelle
-        eps = max(point, 1e-12)
-        rule_name = str(trade_decision.get("rule_name", "")).lower()
-        if rule_name == "burst_scalping":
-            # En burst, on n'a pas de TP → on ne vérifie que le SL
-            if action_str == "BUY":
-                if not (price_ref > sl_price + eps):
-                    raise TradeExecutionError(
-                        f"[BURST] Incohérence BUY: SL({sl_price}) < Price({price_ref}) attendue (pas de TP)."
-                    )
-            else:  # SELL
-                if not (sl_price > price_ref + eps):
-                    raise TradeExecutionError(
-                        f"[BURST] Incohérence SELL: Price({price_ref}) < SL({sl_price}) attendue (pas de TP)."
-                    )
-        else:
-            # Logique normale avec TP
-            if action_str == "BUY":
-                if not (tp_price > price_ref + eps and price_ref > sl_price + eps):
-                    raise TradeExecutionError(
-                        f"Incohérence BUY: SL({sl_price}) < Price({price_ref}) < TP({tp_price}) attendue."
-                    )
-            else:  # SELL
-                if not (tp_price + eps < price_ref and price_ref + eps < sl_price):
-                    raise TradeExecutionError(
-                        f"Incohérence SELL: TP({tp_price}) < Price({price_ref}) < SL({sl_price}) attendue."
-                    )
-
-
+     
         # --- Distances min broker (SL/TP vs price_ref) ---
         if min_stop_distance_price > 0:
             if action_str == "BUY":
@@ -3058,8 +2979,184 @@ class TradeExecutor:
         request["meta_rr_projected"] = rr_proj
 
         self.logger.debug(f"Requête MT5 construite et validée : {request}")
-        request = enforce_no_tp_for_burst(request)
         return request
+    
+    def build_burst_trailing_request(
+        self,
+        trade_decision: dict,
+        config: dict,
+        volume: float,
+        entry_price: float,
+        sl_price: float,
+        symbol_info: Any,
+    ) -> dict:
+        """
+        DEV-DESK (banque privée) — Construction robuste d'une requête MT5 spécifique
+        pour la stratégie "burst_scalping" :
+        - PAS de TP logique (on n'essaie PAS de construire/valider un TP)
+        - SL obligatoire et validée (arrondie aux digits broker)
+        - Volume normalisé & floored selon contraintes broker (vmin/vstep/vmax)
+        - Trailing configuration incluse dans le meta (pour le position/pm manager)
+        - Tous les gardes métiers et logs pour audit/compliance
+
+        Retour : dict prêt à être transmis directement à l'étape d'exécution MT5.
+        Lève TradeExecutionError en cas d'anomalie bloquante.
+        """
+        import math
+
+        # Exceptions métier réutilisables depuis le module
+        TradeExecutionErrorCls = globals().get("TradeExecutionError") or getattr(
+            self, "TradeExecutionError", Exception
+        )
+
+        # Quick checks
+        if not isinstance(trade_decision, dict):
+            raise TradeExecutionErrorCls("trade_decision invalide (attendu dict).")
+
+        action = str((trade_decision.get("action") or "").upper()).strip()
+        if action not in {"BUY", "SELL"}:
+            raise TradeExecutionErrorCls(f"[BURST] Action invalide: '{action}'.")
+
+        # symbol_info sanity
+        if not symbol_info or not getattr(symbol_info, "name", None):
+            raise TradeExecutionErrorCls("[BURST] symbol_info invalide ou manquant.")
+
+        # digits & point
+        try:
+            digits = int(getattr(symbol_info, "digits", 0) or 0)
+            point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        except Exception:
+            raise TradeExecutionErrorCls("[BURST] Impossible de lire digits/point du symbol_info.")
+
+        if point <= 0:
+            raise TradeExecutionErrorCls("[BURST] symbol_info.point invalide (<=0).")
+
+        # Volume normalization (FLOOR)
+        try:
+            vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
+            vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+            vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
+        except Exception:
+            vmin, vmax, vstep = 0.0, float("inf"), 0.0
+
+        if not isinstance(volume, (int, float)) or volume <= 0:
+            raise TradeExecutionErrorCls(f"[BURST] Volume invalide ({volume}).")
+
+        vol = float(max(vmin, min(vmax, float(volume))))
+        if vstep and vstep > 0:
+            # FLOOR : on ne dépasse jamais la taille demandée
+            steps = math.floor((vol - vmin) / vstep + 1e-12)
+            vol = max(vmin, vmin + steps * vstep)
+            # si arrondi tombe à 0 -> fallback minimal
+            if vol < vmin:
+                vol = vmin
+
+        if vol <= 0 or vol < vmin:
+            raise TradeExecutionErrorCls(f"[BURST] Volume normalisé invalide ({vol}).")
+
+        # Entry & SL validation
+        if not isinstance(entry_price, (int, float)) or entry_price <= 0:
+            raise TradeExecutionErrorCls("[BURST] entry_price invalide.")
+        if not isinstance(sl_price, (int, float)) or sl_price <= 0:
+            raise TradeExecutionErrorCls("[BURST] sl_price invalide.")
+
+        entry_price = round(float(entry_price), digits)
+        sl_price = round(float(sl_price), digits)
+
+        # Broker stops_level check (min distance)
+        stops_lvl_points = float(
+            getattr(symbol_info, "trade_stops_level", 0)
+            or getattr(symbol_info, "stops_level", 0)
+            or 0
+        )
+        min_stop_distance_price = stops_lvl_points * point
+
+        # Ensure SL is at least min distance from entry (soft adjust if necessary)
+        if min_stop_distance_price > 0:
+            if action == "BUY" and (entry_price - sl_price) < min_stop_distance_price:
+                # shift SL below entry by min_stop_distance
+                sl_price = round(entry_price - min_stop_distance_price, digits)
+            elif action == "SELL" and (sl_price - entry_price) < min_stop_distance_price:
+                sl_price = round(entry_price + min_stop_distance_price, digits)
+
+        # Final directional coherence: only SL vs price for burst (no TP)
+        if action == "BUY":
+            if not (sl_price < entry_price):
+                raise TradeExecutionErrorCls(
+                    f"[BURST] Cohérence BUY : SL({sl_price}) doit être < entry({entry_price})."
+                )
+        else:  # SELL
+            if not (sl_price > entry_price):
+                raise TradeExecutionErrorCls(
+                    f"[BURST] Cohérence SELL : SL({sl_price}) doit être > entry({entry_price})."
+                )
+
+        # Build request. Use MT5 constants if available via connector, else fallback to numeric placeholders.
+        mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
+        if mt5 is None:
+            # try import but keep tolerant for testing
+            try:
+                import MetaTrader5 as _mt5  # type: ignore
+
+                mt5 = _mt5
+            except Exception:
+                mt5 = None
+
+        # determine type constant safely
+        order_type_const = None
+        action_const = None
+        try:
+            if mt5 is not None:
+                action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
+                order_type_const = getattr(mt5, f"ORDER_TYPE_{action}", None)
+        except Exception:
+            action_const = None
+            order_type_const = None
+
+        request = {
+            "symbol": getattr(symbol_info, "name"),
+            "volume": float(vol),
+            "sl": float(sl_price),
+            # NOTE: tp intentionally omitted as business rule — include explicit marker
+            "tp": None,
+            "price": float(entry_price),
+            "type": order_type_const,
+            "action": action_const,
+            "deviation": int(config.get("max_slippage_points", 20) or 20),
+            "magic": int(config.get("magic_number", 123456) or 123456),
+            "comment": str(trade_decision.get("rule_name", "burst_scalping_trailing")),
+            "strategy_type": "burst_scalping",
+            "rule_name": str(trade_decision.get("rule_name", "burst_scalping")),
+            # Explicit meta for downstream logic (position manager / executor)
+            "_meta_no_tp": True,
+            "_meta_trailing": trade_decision.get(
+                "trailing",
+                config.get("burst_scalping", {}).get("tp_sl", {}).get("trailing", {"enabled": True}),
+            ),
+            "_meta_entry_source": trade_decision.get("source", "core_decision"),
+            "_meta_stops_level_points": stops_lvl_points,
+            "_meta_point": point,
+            "_meta_digits": digits,
+        }
+
+        # Defensive: ensure numeric placeholders for MT5 wrappers that can't accept None tp.
+        # Downstream executor should check _meta_no_tp and skip TP-validation; if required by broker wrapper,
+        # set tp to 0.0 only at the last compatible layer (never rely on 0.0 for logic).
+        # We keep tp as None here and let caller/executor translate safely.
+        self.logger.info(
+            f"[BURST][DEV-DESK] Requête construite: {action} {request['symbol']} | vol={request['volume']} | "
+            f"entry={entry_price} | sl={sl_price} | trailing={request['_meta_trailing']}"
+        )
+
+        # Audit tag + lightweight sanity
+        request["_compliance_flags"] = {
+            "direction_ok": True,
+            "stops_ok": True,
+            "order_type": "MARKET_DEAL_BURST",
+        }
+
+        return request
+
 
     def _update_internal_position_state(
         self, mt5_result: Any, initial_risk: float
@@ -3332,10 +3429,7 @@ class TradeExecutor:
             vol = 0.0
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
-
-        # --- Dev Desk Rule: suppression TP pour Burst ---
-        request = enforce_no_tp_for_burst(request)
-
+     
         # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
         mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
         if mt5 is None:
@@ -3444,19 +3538,7 @@ class TradeExecutor:
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
 
-            # 🔧 PATCH (NO TP pour BURST) : suppression physique
-            try:
-                rn = str(request.get("rule_name", "")).lower()
-                if rn == "burst_scalping" or bool(request.get("no_tp", False)):
-                    if "tp" in request:
-                        del request["tp"]  # ✅ on enlève la clé complètement
-                    tp = None
-                    self.logger.info(
-                        f"[EXECUTOR][PATCH] TP supprimé physiquement pour Burst {symbol}"
-                    )
-            except Exception as _e:
-                self.logger.debug(f"[EXECUTOR][PATCH] Skip no_tp: {_e}")
-            # /PATCH
+            
 
             # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
             if price and point:
