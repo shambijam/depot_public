@@ -2967,18 +2967,34 @@ class TradeExecutor:
         else:
             raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
 
-        # --- Cohérence directionnelle des niveaux vs price_ref ---
+        # ✅ Patch cohérence directionnelle
         eps = max(point, 1e-12)
-        if action_str == "BUY":
-            if not (tp_price > price_ref + eps and price_ref > sl_price + eps):
-                raise TradeExecutionError(
-                    f"Incohérence BUY: SL({sl_price}) < Price({price_ref}) < TP({tp_price}) attendue."
-                )
-        else:  # SELL
-            if not (tp_price + eps < price_ref and price_ref + eps < sl_price):
-                raise TradeExecutionError(
-                    f"Incohérence SELL: TP({tp_price}) < Price({price_ref}) < SL({sl_price}) attendue."
-                )
+        rule_name = str(trade_decision.get("rule_name", "")).lower()
+        if rule_name == "burst_scalping":
+            # En burst, on n'a pas de TP → on ne vérifie que le SL
+            if action_str == "BUY":
+                if not (price_ref > sl_price + eps):
+                    raise TradeExecutionError(
+                        f"[BURST] Incohérence BUY: SL({sl_price}) < Price({price_ref}) attendue (pas de TP)."
+                    )
+            else:  # SELL
+                if not (sl_price > price_ref + eps):
+                    raise TradeExecutionError(
+                        f"[BURST] Incohérence SELL: Price({price_ref}) < SL({sl_price}) attendue (pas de TP)."
+                    )
+        else:
+            # Logique normale avec TP
+            if action_str == "BUY":
+                if not (tp_price > price_ref + eps and price_ref > sl_price + eps):
+                    raise TradeExecutionError(
+                        f"Incohérence BUY: SL({sl_price}) < Price({price_ref}) < TP({tp_price}) attendue."
+                    )
+            else:  # SELL
+                if not (tp_price + eps < price_ref and price_ref + eps < sl_price):
+                    raise TradeExecutionError(
+                        f"Incohérence SELL: TP({tp_price}) < Price({price_ref}) < SL({sl_price}) attendue."
+                    )
+
 
         # --- Distances min broker (SL/TP vs price_ref) ---
         if min_stop_distance_price > 0:
