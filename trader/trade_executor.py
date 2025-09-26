@@ -1369,24 +1369,26 @@ class TradeExecutor:
                 min_rr = 0.0
 
             rr_value = None
-            if min_rr > 0.0 and tp_price is not None:
-                if action == "BUY":
-                    risk = max(entry_price_market - sl_price, 0.0)
-                    reward = max(tp_price - entry_price_market, 0.0)
-                else:  # SELL
-                    risk = max(sl_price - entry_price_market, 0.0)
-                    reward = max(entry_price_market - tp_price, 0.0)
+            # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
+            if trade_decision.get("rule_name", "").lower() != "burst_scalping":
+                if min_rr > 0.0 and tp_price is not None:
+                    if action == "BUY":
+                        risk = max(entry_price_market - sl_price, 0.0)
+                        reward = max(tp_price - entry_price_market, 0.0)
+                    else:  # SELL
+                        risk = max(sl_price - entry_price_market, 0.0)
+                        reward = max(entry_price_market - tp_price, 0.0)
 
-                rr_value = (reward / risk) if risk > 0 else 0.0
+                    rr_value = (reward / risk) if risk > 0 else 0.0
 
-                if risk <= 0.0 or reward <= 0.0:
-                    self.logger.warning(
-                        f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
-                    )
-                elif rr_value < min_rr:
-                    self.logger.info(
-                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
-                    )
+                    if risk <= 0.0 or reward <= 0.0:
+                        self.logger.warning(
+                            f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
+                        )
+                    elif rr_value < min_rr:
+                        self.logger.info(
+                            f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
+                        )
            
             # ---------- 9) Volume (uniquement via risk sizer) ----------
             # Note: on ignore explicitement tout volume fourni par la décision.
