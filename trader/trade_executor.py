@@ -1533,9 +1533,15 @@ class TradeExecutor:
                         )
 
             # ---------- 9) Volume (uniquement via risk sizer) ----------
+            account_trade_settings = (
+                market_context.get("active_broker_account", {}).get("trade_settings", {})
+                or {}
+            )
+
             risk_pct = float(account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0)
 
             if risk_pct > 0 and sl_price and sl_price > 0:
+                # calcul du lot basé sur le risque
                 volume_final = compute_lot_from_risk(
                     symbol_info,
                     market_context.get("account_info", {}),
