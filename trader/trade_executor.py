@@ -51,7 +51,112 @@ class InvalidDecisionPackageError(ValueError):
     pass
 
 
-# --- Classe TradeExecutor ---
+# ==============================
+# === Helpers Trading Utils ====
+# ==============================
+
+def _normalize_stops(symbol_info, price, sl, tp):
+    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+    digits = int(getattr(symbol_info, "digits", 0) or 0)
+
+    # Arrondis sûrs si présents
+    if isinstance(sl, (int, float)):
+        sl = round(float(sl), digits)
+    else:
+        sl = None
+
+    if isinstance(tp, (int, float)):
+        tp = round(float(tp), digits)
+    else:
+        tp = None
+
+    # ⚠️ Ne fais des diffs que si la valeur existe
+    sl_dist = (price - sl) if (sl is not None) else None
+    tp_dist = (tp - price) if (tp is not None) else None
+
+    # Stops level broker
+    stops_lvl_pts = float(
+        getattr(symbol_info, "trade_stops_level", 0)
+        or getattr(symbol_info, "stops_level", 0) or 0
+    )
+    min_stop = stops_lvl_pts * point
+
+    # Ajustement SL si présent
+    if sl is not None and min_stop > 0:
+        # BUY: sl < price | SELL: sl > price
+        # On corrige seulement si trop proche
+        if sl < price and (price - sl) < min_stop:
+            sl = round(price - min_stop, digits)
+        elif sl > price and (sl - price) < min_stop:
+            sl = round(price + min_stop, digits)
+
+    # TP : ne rien faire si None (stratégie trailing-only)
+    return sl, tp
+
+
+
+def _precheck_and_split_burst(symbol_info, desired_vol_list, entry_price, sl_price, account_info):
+    # calc margin par 1 lot (ou par step), puis dimensionne
+    contract_size = float(getattr(symbol_info, "trade_contract_size", 0) or 100)
+    leverage = float(getattr(account_info, "leverage", 100) or 100)
+    # marge approx par lot = (prix * contract_size) / leverage
+    margin_per_lot = (entry_price * contract_size) / max(leverage, 1.0)
+
+    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
+
+    out = []
+    fm = free_margin
+    for vol in desired_vol_list:
+        need = vol * margin_per_lot
+        if need <= fm:
+            out.append(vol)
+            fm -= need
+        else:
+            # tente un downscale à la plus proche marche broker
+            vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+            vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+            vmax_afford = max(vmin, (fm // margin_per_lot) * 1.0)  # lot entier
+            # quantifie sur marche
+            steps = int((vmax_afford - vmin) // vstep)
+            vol_adj = max(vmin, vmin + steps * vstep) if steps >= 0 else 0.0
+            if vol_adj >= vmin and (vol_adj * margin_per_lot) <= fm:
+                out.append(vol_adj)
+                fm -= vol_adj * margin_per_lot
+            else:
+                out.append(0.0)  # on skippera cet ordre
+
+    return [v for v in out if v > 0.0]
+
+
+def compute_lot_from_risk(symbol_info, account_info, entry, sl, risk_pct):
+    balance = float(getattr(account_info, "balance", 0.0) or 0.0)
+    risk_usd = balance * (risk_pct / 100.0)
+
+    point = float(getattr(symbol_info, "point", 0.01) or 0.01)
+    contract_size = float(getattr(symbol_info, "trade_contract_size", 100) or 100)
+
+    sl_dist_price = abs(entry - sl)
+    if sl_dist_price <= 0:
+        return 0.0
+
+    # valeur d’1 point par 1 lot ≈ contract_size * point
+    value_per_price_unit_per_lot = contract_size
+    value_per_point_per_lot = contract_size * point
+
+    loss_per_lot = sl_dist_price * value_per_price_unit_per_lot
+    if loss_per_lot <= 0:
+        return 0.0
+
+    lots = risk_usd / loss_per_lot
+
+    # clamp & quantize
+    vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+    vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+    vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+
+    lots = max(vmin, min(vmax, lots))
+    steps = int((lots - vmin) // vstep)
+    return round(vmin + steps * vstep, 8)
 
 
 class TradeExecutor:

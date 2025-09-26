@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from sniper_patterns.pattern_engine import PatternEngine
+from core.strategy_manager import StrategyManager
+
+
 
 
 load_dotenv()
@@ -1003,8 +1006,9 @@ def run_single_pipeline_cycle(
             if current_positions:
                 from strategy.liquidity import LiquidityStrategy
 
-                liq_cfg = config_manager.get_strategy_config("liquidity") or {}
+                liq_cfg = config_manager.get("strategies", {}).get("liquidity", {}) or {}
                 liqui = LiquidityStrategy(config_manager, liq_cfg)
+
                 exit_decisions = liqui.evaluate_exit(global_context, current_positions)
                 if exit_decisions:
                     trade_executor.execute_exit_orders(
