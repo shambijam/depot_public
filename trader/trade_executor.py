@@ -1313,6 +1313,12 @@ class TradeExecutor:
                 self.logger.info(
                     f"[TPSL] Fallback _calculate_sl_tp_prices → SL={sl_price}, TP={tp_price}"
                 )
+            # ✅ Patch : suppression TP si burst_scalping
+            rule_name = str(trade_decision.get("rule_name", "")).lower()
+            if rule_name == "burst_scalping":
+                self.logger.info(f"[BURST] TP supprimé (trailing-only) pour {broker_symbol}")
+                tp_price = None
+                
 
             # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
@@ -2851,12 +2857,11 @@ class TradeExecutor:
             "comment": "",  # rempli plus bas
         }
 
-        # 🔧 PATCH (NO TP pour BURST)
+        # ✅ PATCH : pas de TP pour burst_scalping
         if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
             request["tp"] = 0.0
-            self.logger.info(
-                f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {expected_symbol}"
-            )
+            self.logger.info(f"[BURST] TP supprimé → trailing-only pour {expected_symbol}")
+
 
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)

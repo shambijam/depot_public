@@ -1257,15 +1257,30 @@ class DecisionPipeline:
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
 
-            # ✅ Patch : pas de TP pour burst
-            if trade_decision.get("rule_name") != "burst_scalping":
-                if risk_params.get("tp_price") is not None:
-                    trade_decision["tp_price"] = float(risk_params["tp_price"])
-                if risk_params.get("tp_pips") is not None:
-                    trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
-
-            if risk_params.get("sl_pips") is not None:
-                trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
+           # ✅ Patch : pas de TP pour burst
+            if trade_decision.get("rule_name") == "burst_scalping":
+                levels = normalize_levels(
+                    entry_price=trade_decision.get("entry_price"),
+                    action=trade_decision.get("action"),
+                    pip_size=pip_size,
+                    sl_pips=trade_decision.get("target_sl_pips"),
+                    sl_price=trade_decision.get("sl_price"),
+                    # 🚫 pas de tp_pips ni tp_price
+                )
+                trade_decision["sl_price"] = levels["sl"]
+                # volontairement pas de TP
+            else:
+                levels = normalize_levels(
+                    entry_price=trade_decision.get("entry_price"),
+                    action=trade_decision.get("action"),
+                    pip_size=pip_size,
+                    sl_pips=trade_decision.get("target_sl_pips"),
+                    tp_pips=trade_decision.get("target_tp_pips"),
+                    sl_price=trade_decision.get("sl_price"),
+                    tp_price=trade_decision.get("tp_price"),
+                )
+                trade_decision["sl_price"] = levels["sl"]
+                trade_decision["tp_price"] = levels["tp"]
 
 
                 # plancher volume soft

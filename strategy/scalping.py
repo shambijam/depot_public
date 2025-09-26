@@ -480,9 +480,11 @@ class ScalpingStrategy(BaseStrategy):
 
             if isinstance(sl_pips, (int, float)) and sl_pips > 0:
                 d["target_sl_pips"] = float(sl_pips)
-            if isinstance(tp_pips, (int, float)) and tp_pips > 0:
-                d["target_tp_pips"] = float(tp_pips)
+
+            # 🚫 Pas de TP pour burst_scalping → on ne met pas target_tp_pips
+
             decisions.append(d)
+
 
         self.logger.info(
             f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
