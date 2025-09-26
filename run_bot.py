@@ -932,6 +932,39 @@ def run_single_pipeline_cycle(
 
             for td in scalping_decisions:
                 action = str(td.get("action", "")).upper()
+
+                # 🔧 PATCH (NO TP pour BURST) — à INSÉRER AVANT l'appel _execute_single_decision
+                try:
+                    rule_name = str(td.get("rule_name", "")).lower()
+                    if rule_name == "burst_scalping":
+                        # 1) on supprime TOUT ce qui peut (ré)injecter un TP
+                        for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
+                            if k in td:
+                                td.pop(k, None)
+
+                        # 2) drapeau clair pour l’exécuteur
+                        td["no_tp"] = True
+
+                        # 3) trailing forcé si la config burst le prévoit
+                        trailing_cfg = (
+                            ((td.get("trailing") or {}) if td.get("trailing") else {})  # déjà présent ?
+                            or (((global_context.get("asset_configs", {}) or {})
+                                .get(td.get("asset",""), {})
+                                .get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("trailing", {})) or {})
+                        )
+                        if trailing_cfg.get("enabled", True):
+                            td["trailing"] = {
+                                "enabled": True,
+                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
+                                "step_pips": float(trailing_cfg.get("step_pips", 5)),
+                            }
+                except Exception:
+                    pass
+                # /PATCH
+
                 if action in {"BUY", "SELL"}:
                     _execute_single_decision(
                         td,

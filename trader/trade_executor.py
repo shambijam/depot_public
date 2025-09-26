@@ -3360,6 +3360,18 @@ class TradeExecutor:
             sl = request.get("sl")
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
+            
+            # 🔧 PATCH (NO TP pour BURST)
+            try:
+                rn = str(request.get("rule_name", "")).lower()
+                if rn == "burst_scalping" or bool(request.get("no_tp", False)):
+                    tp = None
+                    request["tp"] = 0.0  # MT5: 0.0 = pas de TP
+                    self.logger.info(f"[EXECUTOR][PATCH] Pas de TP appliqué pour Burst {symbol}")
+            except Exception as _e:
+                self.logger.debug(f"[EXECUTOR][PATCH] Skip no_tp: {_e}")
+            # /PATCH
+
 
             # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
             if price and point:
