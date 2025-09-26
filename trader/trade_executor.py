@@ -1408,14 +1408,12 @@ class TradeExecutor:
 
             # ---------- 8bis) RR minimum (SOFT permissif) ----------
             try:
-                min_rr = float(
-                    self.config_manager.get("risk_management.min_rr", 0) or 0.0
-                )
+                min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
             except Exception:
                 min_rr = 0.0
 
             rr_value = None
-            if min_rr > 0.0:
+            if min_rr > 0.0 and tp_price is not None:
                 if action == "BUY":
                     risk = max(entry_price_market - sl_price, 0.0)
                     reward = max(tp_price - entry_price_market, 0.0)
@@ -1433,6 +1431,9 @@ class TradeExecutor:
                     self.logger.info(
                         f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
                     )
+            elif min_rr > 0.0 and tp_price is None and str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
+                self.logger.info("[BURST] RR check ignoré (pas de TP en mode trailing-only)")
+
 
             # ---------- 9) Volume (uniquement via risk sizer) ----------
             # Note: on ignore explicitement tout volume fourni par la décision.
