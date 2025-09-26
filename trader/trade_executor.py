@@ -2765,9 +2765,15 @@ class TradeExecutor:
 
         try:
             sl_price = round(float(sl_price), digits)
-            tp_price = round(float(tp_price), digits)
-        except Exception:
-            raise TradeExecutionError("SL/TP non numériques.")
+            if tp_price is not None:
+                tp_price = round(float(tp_price), digits)
+            else:
+                # ✅ Patch : pas de TP en burst → on force à 0.0
+                tp_price = 0.0
+                if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
+                    self.logger.info("[BURST] TP forcé à 0.0 (trailing-only)")
+        except Exception as e:
+            raise TradeExecutionError(f"SL/TP invalides: {e}")
 
         # --- Override LiquidityStrategy: utiliser prix absolus si fournis ---
         if (
