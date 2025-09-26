@@ -156,7 +156,24 @@ def compute_lot_from_risk(symbol_info, account_info, entry, sl, risk_pct):
 
     lots = max(vmin, min(vmax, lots))
     steps = int((lots - vmin) // vstep)
-    return round(vmin + steps * vstep, 8)
+    lots = round(vmin + steps * vstep, 8)
+
+    # ✅ Vérification de la marge disponible
+    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
+    leverage = float(getattr(account_info, "leverage", 100) or 100)
+
+    margin_per_lot = (entry * contract_size) / max(leverage, 1.0)
+    required_margin = lots * margin_per_lot
+
+    if required_margin > free_margin:
+        # downscale proportionnel à la marge
+        max_affordable_lots = free_margin / margin_per_lot
+        lots = max(vmin, min(max_affordable_lots, lots))
+        steps = int((lots - vmin) // vstep)
+        lots = round(vmin + steps * vstep, 8)
+
+    return lots
+
 
 
 class TradeExecutor:
@@ -1516,44 +1533,38 @@ class TradeExecutor:
                         )
 
             # ---------- 9) Volume (uniquement via risk sizer) ----------
-            # Note: on ignore explicitement tout volume fourni par la décision.
-            if any(k in trade_decision for k in ("volume", "target_volume")):
-                try:
-                    self.logger.info(
-                        f"[VOLUME] volume fourni par la décision ignoré: "
-                        f"{trade_decision.get('volume') or trade_decision.get('target_volume')}"
-                    )
-                except Exception:
-                    pass
+            risk_pct = float(account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0)
 
-            account_trade_settings = (
-                market_context.get("active_broker_account", {}).get(
-                    "trade_settings", {}
-                )
-                or {}
-            )
-            volume_final = float(
-                self._calculate_risk_based_volume(
-                    {
-                        "action": action,
-                        "asset": broker_symbol,
-                        "order_type": order_type,
-                    },
-                    active_config,
-                    market_context,
+            if risk_pct > 0 and sl_price and sl_price > 0:
+                volume_final = compute_lot_from_risk(
                     symbol_info,
+                    market_context.get("account_info", {}),
                     entry_price_market,
                     sl_price,
-                    account_trade_settings,
+                    risk_pct,
                 )
-            )
-            self.logger.info(
-                f"[VOLUME] volume calculé par risk sizer (unique): {volume_final}"
-            )
-
-            if not isinstance(volume_final, (int, float)) or volume_final <= 0:
-                raise TradeExecutionError(
-                    f"Volume calculé invalide ({volume_final}) pour {broker_symbol}."
+                self.logger.info(
+                    f"[VOLUME] calcul basé sur le risque: risk%={risk_pct}, vol={volume_final}"
+                )
+            else:
+                # fallback: ancien système
+                volume_final = float(
+                    self._calculate_risk_based_volume(
+                        {
+                            "action": action,
+                            "asset": broker_symbol,
+                            "order_type": order_type,
+                        },
+                        active_config,
+                        market_context,
+                        symbol_info,
+                        entry_price_market,
+                        sl_price,
+                        account_trade_settings,
+                    )
+                )
+                self.logger.info(
+                    f"[VOLUME] fallback risk_sizer (pas de sl ou pas de risk% configuré): {volume_final}"
                 )
 
             # ---------- 9a) Normalisation par contraintes symbole ----------
