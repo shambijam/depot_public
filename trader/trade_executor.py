@@ -2039,19 +2039,35 @@ class TradeExecutor:
 
     def monitor_burst_baskets(
         self,
+        config: dict,
         max_loss_pips: float = 15.0,
         trail_trigger: float = 10.0,
         trail_step: float = 5.0,
     ):
         """
         Surveille tous les paniers burst en cours :
-        - Règle 1 (priorité) : si momentum fort (score >= 2) → on laisse courir (trailing gère)
-        - Règle 2 : si panier plein et pas de momentum fort → clôture immédiate
+        - Règle 1 (priorité) : si momentum fort (score >= momentum_score_min) → on laisse courir (trailing gère)
+        - Règle 2 : si panier plein et pas de momentum fort → clôture immédiate (si close_on_full_profit=True)
         - Ferme le panier si perte > max_loss_pips
         - Applique un trailing collectif :
         * Break-even atteint dès trail_trigger
         * Stop monte par paliers de trail_step/2
         """
+
+        # Charger config spécifique burst
+        closure_cfg = (
+            config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("closure_rules", {})
+        )
+
+        momentum_score_min = int(closure_cfg.get("momentum_score_min", 2))
+        breakout_lookback = int(closure_cfg.get("breakout_lookback", 20))
+        atr_factor = float(closure_cfg.get("atr_factor", 1.5))
+        enable_mtf_bias = bool(closure_cfg.get("enable_mtf_bias", True))
+        close_on_full_profit = bool(closure_cfg.get("close_on_full_profit", True))
+
         open_positions = getattr(self, "mt5_connector", None).get_open_positions()
         if not open_positions:
             return
@@ -2082,41 +2098,42 @@ class TradeExecutor:
                     else (avg_entry - avg_price) / pip_size
                 )
 
-                # --- DETECTION MOMENTUM (score basé sur plusieurs critères) ---
+                # --- DETECTION MOMENTUM ---
                 strong_momentum = False
                 momentum_score = 0
 
                 try:
-                    # Critère 1 : gain déjà 2x le déclencheur du trailing
+                    # Critère 1 : gain déjà >= 2x trigger trailing
                     if abs(pnl_pips) >= 2 * trail_trigger:
                         momentum_score += 1
 
-                    # Critère 2 : breakout structurel (20 dernières bougies)
+                    # Critère 2 : breakout structurel (lookback paramétrable)
                     highs = [p.get("high") for p in positions if "high" in p]
                     lows = [p.get("low") for p in positions if "low" in p]
-                    if highs and lows:
-                        if direction == "BUY" and avg_price > max(highs[-20:]):
+                    if highs and lows and len(highs) >= breakout_lookback:
+                        if direction == "BUY" and avg_price > max(highs[-breakout_lookback:]):
                             momentum_score += 1
-                        elif direction == "SELL" and avg_price < min(lows[-20:]):
+                        elif direction == "SELL" and avg_price < min(lows[-breakout_lookback:]):
                             momentum_score += 1
 
                     # Critère 3 : ATR fort (si dispo dans meta)
                     atr_m1 = positions[0].get("meta", {}).get("atr_m1_pips", 0)
                     atr_ref = positions[0].get("meta", {}).get("atr_ref_pips", 0)
-                    if atr_m1 and atr_ref and atr_m1 >= 1.5 * atr_ref:
+                    if atr_m1 and atr_ref and atr_m1 >= atr_factor * atr_ref:
                         momentum_score += 1
 
                     # Critère 4 : biais MTF aligné
-                    mtf_bias = str(positions[0].get("meta", {}).get("mtf_bias", "")).lower()
-                    if (direction == "BUY" and "up" in mtf_bias) or (
-                        direction == "SELL" and "down" in mtf_bias
-                    ):
-                        momentum_score += 1
+                    if enable_mtf_bias:
+                        mtf_bias = str(positions[0].get("meta", {}).get("mtf_bias", "")).lower()
+                        if (direction == "BUY" and "up" in mtf_bias) or (
+                            direction == "SELL" and "down" in mtf_bias
+                        ):
+                            momentum_score += 1
 
                 except Exception as e:
                     self.logger.debug(f"[{basket_id}] Erreur check momentum: {e}")
 
-                if momentum_score >= 2:
+                if momentum_score >= momentum_score_min:
                     strong_momentum = True
 
                 # --- REGLE 1 + 2 : Gestion panier plein ---
@@ -2125,8 +2142,7 @@ class TradeExecutor:
                         self.logger.info(
                             f"🚀 Burst {basket_id} panier plein + momentum fort (score={momentum_score}) → on laisse courir (trailing)."
                         )
-                        # ne pas clôturer → trailing continuera
-                    else:
+                    elif close_on_full_profit:
                         self.logger.info(
                             f"🎯 Burst {basket_id} toutes les positions gagnantes sans momentum fort → clôture immédiate."
                         )
