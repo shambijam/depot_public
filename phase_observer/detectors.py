@@ -10,7 +10,435 @@ from .features import (
     _get_swing_points,
     _get_trend,
 )
+LOG = logging.getLogger(__name__)
 
+# ============================================================
+# 🔹 Candle Detectors (single candle, doji, hammer, marubozu…)
+# ============================================================
+
+"""
+Détection factuelle de chandeliers individuels.
+Catalogue : Doji (et variantes), Hammer, Hanging Man, Inverted Hammer, Shooting Star,
+Marubozu, Spinning Top, Engulfing, Belt Hold, Kicker.
+Pas de scoring → sortie brute, descriptive et exploitable.
+"""
+
+
+def detect_single_candle(
+    df: pd.DataFrame,
+    i: int,
+    patterns: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+
+    try:
+        o, h, l, c = df["open"].iloc[i], df["high"].iloc[i], df["low"].iloc[i], df["close"].iloc[i]
+        body = abs(c - o)
+        size = h - l
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+        body_ratio = body / size if size > 0 else 0
+        is_bull = c > o
+
+        pattern, pattern_type = None, None
+
+        # === DOJI & VARIANTS ===
+        if body_ratio < 0.1:
+            if abs(upper_wick - lower_wick) < 0.1 * size:
+                pattern, pattern_type = "doji", "indecision"
+            elif upper_wick > 2 * body and lower_wick < 0.1 * size:
+                pattern, pattern_type = "gravestone_doji", "reversal"
+            elif lower_wick > 2 * body and upper_wick < 0.1 * size:
+                pattern, pattern_type = "dragonfly_doji", "reversal"
+            else:
+                pattern, pattern_type = "doji", "indecision"
+
+        # === SPINNING TOP ===
+        elif body_ratio < 0.3 and upper_wick > 0.3 * size and lower_wick > 0.3 * size:
+            pattern, pattern_type = "spinning_top", "indecision"
+
+        # === HAMMER FAMILY ===
+        elif lower_wick > 2 * body and upper_wick < body:
+            pattern, pattern_type = ("hammer" if is_bull else "hanging_man", "reversal")
+        elif upper_wick > 2 * body and lower_wick < body:
+            pattern, pattern_type = ("inverted_hammer" if is_bull else "shooting_star", "reversal")
+
+        # === MARUBOZU ===
+        elif body_ratio > 0.95 and upper_wick < 0.05 * size and lower_wick < 0.05 * size:
+            pattern, pattern_type = ("marubozu_bull" if is_bull else "marubozu_bear", "momentum")
+
+        # === ENGULFING SIMPLE ===
+        if i > 0 and body > abs(df["close"].iloc[i - 1] - df["open"].iloc[i - 1]):
+            prev_o, prev_c = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
+            if is_bull and c > prev_o and o < prev_c:
+                pattern, pattern_type = "bullish_engulfing", "reversal"
+            elif not is_bull and c < prev_o and o > prev_c:
+                pattern, pattern_type = "bearish_engulfing", "reversal"
+
+        # === BELT HOLD ===
+        if body_ratio > 0.7 and (upper_wick < 0.05 * size or lower_wick < 0.05 * size):
+            pattern, pattern_type = ("belt_hold_bull" if is_bull else "belt_hold_bear", "continuation")
+
+        # === KICKER (gap fort) ===
+        if i > 0:
+            prev_c = df["close"].iloc[i - 1]
+            if is_bull and o > prev_c and c > o:
+                pattern, pattern_type = "bullish_kicker", "reversal"
+            elif not is_bull and o < prev_c and c < o:
+                pattern, pattern_type = "bearish_kicker", "reversal"
+
+        # === RETOUR FACTUEL ===
+        if pattern:
+            enriched: Dict[str, Any] = {
+                "pattern": pattern,
+                "type": pattern_type,
+                "is_bullish": is_bull,
+                "body_ratio": round(body_ratio, 3),
+                "upper_wick": round(upper_wick, 5),
+                "lower_wick": round(lower_wick, 5),
+                "candle_size": round(size, 5),
+            }
+
+            # Ajout de contexte si dispo
+            if "volume_zscore" in df.columns:
+                enriched["volume_zscore"] = float(df["volume_zscore"].iloc[i])
+            if "phase" in df.columns:
+                enriched["phase"] = str(df["phase"].iloc[i])
+
+            return enriched
+
+        return None
+
+    except Exception:
+        return None
+
+# ============================================================
+# 🔹 Multi-Candle Detectors (engulfing, morning star…)
+# ============================================================
+
+"""
+Détection de patterns multi-bougies :
+- Morning Star
+- Evening Star
+- Three White Soldiers
+- Three Black Crows
+- Harami
+- Tweezers
+"""
+
+def is_morning_star(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 2:
+        return None
+    c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+    if (
+        c1["close"] < c1["open"]  # 1ère rouge
+        and abs(c2["close"] - c2["open"]) < (c1["open"] - c1["close"]) * 0.5  # petit corps
+        and c3["close"] > c3["open"]  # verte
+        and c3["close"] > (c1["open"] + c1["close"]) / 2
+    ):
+        return {"pattern": "morning_star", "type": "reversal", "is_bullish": True}
+    return None
+
+
+def is_evening_star(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 2:
+        return None
+    c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+    if (
+        c1["close"] > c1["open"]
+        and abs(c2["close"] - c2["open"]) < (c1["close"] - c1["open"]) * 0.5
+        and c3["close"] < c3["open"]
+        and c3["close"] < (c1["open"] + c1["close"]) / 2
+    ):
+        return {"pattern": "evening_star", "type": "reversal", "is_bullish": False}
+    return None
+
+
+def is_three_white_soldiers(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 2:
+        return None
+    c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+    if (
+        c1["close"] > c1["open"]
+        and c2["close"] > c2["open"]
+        and c3["close"] > c3["open"]
+        and c1["close"] < c2["close"] < c3["close"]
+    ):
+        return {"pattern": "three_white_soldiers", "type": "continuation", "is_bullish": True}
+    return None
+
+
+def is_three_black_crows(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 2:
+        return None
+    c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
+    if (
+        c1["close"] < c1["open"]
+        and c2["close"] < c2["open"]
+        and c3["close"] < c3["open"]
+        and c1["close"] > c2["close"] > c3["close"]
+    ):
+        return {"pattern": "three_black_crows", "type": "continuation", "is_bullish": False}
+    return None
+
+
+def is_harami(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 1:
+        return None
+    c1, c2 = df.iloc[i - 1], df.iloc[i]
+    if c1["close"] > c1["open"] and c2["close"] < c2["open"]:  # bull -> bear
+        if c2["open"] < c1["close"] and c2["close"] > c1["open"]:
+            return {"pattern": "bearish_harami", "type": "reversal", "is_bullish": False}
+    elif c1["close"] < c1["open"] and c2["close"] > c2["open"]:  # bear -> bull
+        if c2["open"] > c1["close"] and c2["close"] < c1["open"]:
+            return {"pattern": "bullish_harami", "type": "reversal", "is_bullish": True}
+    return None
+
+
+def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 1:
+        return None
+    c1, c2 = df.iloc[i - 1], df.iloc[i]
+    if abs(c1["high"] - c2["high"]) < 1e-5:  # sommets quasi identiques
+        return {"pattern": "tweezer_top", "type": "reversal", "is_bullish": False}
+    if abs(c1["low"] - c2["low"]) < 1e-5:  # creux quasi identiques
+        return {"pattern": "tweezer_bottom", "type": "reversal", "is_bullish": True}
+    return None
+
+
+# ============================================================
+# ===  Orchestrateurs ========================================
+# ============================================================
+
+def detect_multi_candle(
+    df: pd.DataFrame,
+    i: Optional[int] = None,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Détection d’un ensemble de patterns multi-bougies.
+    - Si `i` est fourni → détection ponctuelle à l'index i.
+    - Si `i` est None → parcourt tout le DataFrame.
+    """
+    results: List[Dict[str, Any]] = []
+
+    # Cas 1: on parcourt tout le DataFrame
+    if i is None:
+        for idx in range(len(df)):
+            results.extend(detect_multi_candle(df, idx, patterns))
+        return results
+
+    # Cas 2: détection ponctuelle
+    if i < 2:
+        return results
+
+    detectors = [
+        is_morning_star,
+        is_evening_star,
+        is_three_white_soldiers,
+        is_three_black_crows,
+        is_harami,
+        is_tweezer,
+    ]
+
+    for detector in detectors:
+        try:
+            res = detector(df, i)
+            if res:
+                enriched = res.copy()
+                enriched["index"] = i
+                enriched["timestamp"] = str(df.index[i])
+
+                if "phase" in df.columns:
+                    enriched["phase"] = str(df["phase"].iloc[i])
+                if "volume_zscore" in df.columns:
+                    enriched["volume_zscore"] = float(df["volume_zscore"].iloc[i])
+
+                results.append(enriched)
+        except Exception as e:
+            print(f"Erreur {detector.__name__} à l’index {i}: {e}")
+
+    return results
+
+
+def detect_multi_candle_patterns(
+    df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Détection des patterns multi-bougies sur tout le DataFrame.
+    Utilise detect_multi_candle(df) en mode global (i=None).
+    Retourne une liste à plat de tous les patterns détectés.
+    """
+    return detect_multi_candle(df, i=None, patterns=patterns)
+
+# ============================================================
+# 🔹 Combo Detectors (confluences, MTF confirmations)
+# ============================================================
+
+def detect_combos(
+    df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Optional[List[Dict[str, Any]]]]:
+    """
+    Détecteur desk-trader brut :
+    - Chandeliers individuels (Doji, Hammer, etc.)
+    - Patterns multi-bougies (Morning Star, Soldiers, Harami, etc.)
+    - Confluences structurelles (OB/FVG/BOS si colonnes dispo)
+    - Confirmations multi-timeframe (pattern_m5 / pattern_m15)
+
+    ❌ Aucun scoring → que du factuel.
+    ✅ Chaque bougie a 0, 1 ou plusieurs patterns alignés à son index.
+    """
+    if df is None or len(df) < 5:
+        return [None] * (len(df) if df is not None else 0)
+
+    signals: List[Optional[List[Dict[str, Any]]]] = []
+
+    for i in range(len(df)):
+        try:
+            sigs: List[Dict[str, Any]] = []
+
+            # 1) Pattern individuel
+            simple = detect_single_candle(df, i)
+            if simple:
+                sigs.append({"source": "single", **simple})
+
+            # 2) Pattern(s) multi-bougies (détection ponctuelle à l’index i)
+            multi_patterns = detect_multi_candle(df, i, patterns=patterns)
+            for m in multi_patterns:
+                sigs.append({"source": "multi", **m})
+
+            if not sigs:
+                signals.append(None)
+                continue
+
+            # 3) Confluences structurelles (OB/FVG/BOS si dispo)
+            for s in sigs:
+                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])
+                s["near_fvg"] = "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])
+                s["near_bos"] = "bos" in df.columns and not pd.isna(df["bos"].iloc[i])
+
+                # 4) Confirmations multi-timeframe
+                confirmed_tf = []
+                for tf in ["pattern_m5", "pattern_m15"]:
+                    if tf in df.columns and df[tf].iloc[i] == s.get("pattern"):
+                        confirmed_tf.append(tf.upper())
+                if confirmed_tf:
+                    s["confirmed_tf"] = confirmed_tf
+
+                # Ajout index + horodatage
+                s["index"] = i
+                s["timestamp"] = str(df.index[i]) if hasattr(df.index, "dtype") else None
+
+            signals.append(sigs)
+
+        except Exception as e:
+            LOG.error(f"[ComboDetector] Erreur à l'index {i}: {e}")
+            signals.append(None)
+
+    return signals
+
+# ============================================================
+# 🔹 Orderflow Detectors (absorptions, imbalances, exhaustion)
+# ============================================================
+
+"""
+OrderFlowDetector v2 (Desk Quant)
+--------------------------------------------------
+Lecture avancée du flux d’ordres :
+- Volume Delta & CVD
+- Footprint intra-bar (agression ask/bid)
+- Imbalances (buy/sell dominance, absorption)
+- Détection iceberg (volumes cachés suspects)
+
+Retourne un tableau brut de signaux factuels.
+"""
+
+def detect_orderflow(
+    df: pd.DataFrame,
+    patterns: Optional[Dict[str, Any]] = None
+) -> List[Optional[Dict[str, Any]]]:
+
+    signals: List[Optional[Dict[str, Any]]] = []
+
+    for i in range(len(df)):
+        try:
+            sig: Dict[str, Any] = {}
+            ts = str(df.index[i]) if hasattr(df.index, "dtype") else None
+
+            bid_vol = df["bid_volume"].iloc[i] if "bid_volume" in df.columns else None
+            ask_vol = df["ask_volume"].iloc[i] if "ask_volume" in df.columns else None
+            total = (bid_vol or 0) + (ask_vol or 0)
+
+            delta = (ask_vol - bid_vol) if (bid_vol is not None and ask_vol is not None) else None
+            imbalance = (ask_vol / total) if total > 0 else None
+            dominance = "buyers" if delta and delta > 0 else "sellers" if delta and delta < 0 else "neutral"
+
+            pattern = None
+            extra = {}
+
+            # === 1️⃣ Delta / Imbalance bruts ===
+            if imbalance is not None:
+                if imbalance > 0.7:
+                    pattern = "buy_imbalance"
+                elif imbalance < 0.3:
+                    pattern = "sell_imbalance"
+
+            if bid_vol and ask_vol:
+                if bid_vol > 2 * ask_vol:
+                    pattern = "sell_absorption"
+                elif ask_vol > 2 * bid_vol:
+                    pattern = "buy_absorption"
+
+            # === 2️⃣ CVD (Cumulative Volume Delta) ===
+            if "cvd" in df.columns:
+                sig["cvd"] = float(df["cvd"].iloc[i])
+
+            # === 3️⃣ Footprint intra-bar (si dispo) ===
+            if "aggressor_buy_vol" in df.columns and "aggressor_sell_vol" in df.columns:
+                buy_aggr = df["aggressor_buy_vol"].iloc[i]
+                sell_aggr = df["aggressor_sell_vol"].iloc[i]
+
+                if buy_aggr > 2 * sell_aggr:
+                    pattern = "aggressive_buying"
+                    extra["footprint"] = f"buy>{buy_aggr},sell>{sell_aggr}"
+                elif sell_aggr > 2 * buy_aggr:
+                    pattern = "aggressive_selling"
+                    extra["footprint"] = f"buy>{buy_aggr},sell>{sell_aggr}"
+
+            # === 4️⃣ Détection Iceberg ===
+            if "executions_count" in df.columns and "avg_exec_size" in df.columns:
+                exec_count = df["executions_count"].iloc[i]
+                avg_size = df["avg_exec_size"].iloc[i]
+
+                if exec_count > 50 and avg_size < 0.2 * (total or 1):
+                    pattern = "iceberg_order"
+                    extra["iceberg"] = {"exec_count": int(exec_count), "avg_size": float(avg_size)}
+
+            # === Assemblage final ===
+            if pattern:
+                sig.update(
+                    {
+                        "index": i,
+                        "timestamp": ts,
+                        "orderflow_pattern": pattern,
+                        "imbalance_pct": round(imbalance, 3) if imbalance is not None else None,
+                        "dominance": dominance,
+                        "delta": delta,
+                        "bid_volume": bid_vol,
+                        "ask_volume": ask_vol,
+                    }
+                )
+                sig.update(extra)
+                signals.append(sig)
+            else:
+                signals.append(None)
+
+        except Exception as e:
+            LOG.error(f"[OrderflowDetector] Erreur à l’index {i}: {e}")
+            signals.append(None)
+
+    return signals
 
 class Detectors:
     """
@@ -1247,3 +1675,5 @@ class Detectors:
         except Exception as e:
             self.logger.error(f"Erreur dans determine_phase : {e}", exc_info=True)
             return "uncertain"
+
+

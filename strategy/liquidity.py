@@ -5,7 +5,8 @@ from .base_strategy import BaseStrategy
 import math
 import pandas as pd
 import numpy as np
-from sniper_patterns.pattern_engine import PatternEngine
+from phase_observer.market_analyzer import MarketAnalyzer
+
 
 
 class LiquidityStrategy(BaseStrategy):
@@ -41,154 +42,251 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #      PUBLIC METHODS
     # =========================
-
     def evaluate_entry(
-        self, context: Dict[str, Any], signals: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self,
+        asset: str,
+        analyzed_context: Dict[str, Any],
+        asset_signals: Dict[str, Any],
+    ) -> Dict[str, Any]:
         """
-        Décide d'une entrée Liquidity par actif, puis sélectionne la meilleure.
-        Utilise les signaux: sweep_detected, absorption_confirmed, bos_mss_detected,
-        fvg_details, ob_details, eqh_eql_details, confidence_score.
-        100% dynamique (pas de valeurs codées en dur).
+        Version 'desk pro' compatible pipeline:
+        - Priorité: Marubozu (via MarketAnalyzer) > Range Accumulation MTF >
+        Range Accumulation simple > Burst scalping
+        - ATR/Spread n'affecte que le burst, jamais les règles indépendantes
+        - Retourne un dictionnaire décision normalisé ou {} si aucun setup valide
         """
-        tradeable_assets = self._cfg_list("tradeable_assets", default=[])
-        if not tradeable_assets:
-            self.logger.warning("[LIQ] Aucun asset tradable configuré.")
-            return None
-
-        from sniper_patterns.pattern_engine import PatternEngine
-
-        # Vérification stricte: ignorer les actifs hors whitelist
-        invalid_assets = [a for a in signals.keys() if a not in tradeable_assets]
-        if invalid_assets:
-            self.logger.info(
-                f"[LIQ] Ignorés (non autorisés): {invalid_assets} (whitelist={tradeable_assets})"
-            )
-            self.logger.debug(f"[LIQ][DEBUG] actifs ignorés car pas dans whitelist → {invalid_assets}")
-
-        # --- Chargement dynamique des conditions ---
-        guardrails_cfg = {}
         try:
-            guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-        except Exception:
-            guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
-
-        cond_cfg = (self.strategy_config or {}).get("conditions", {}) or {}
-        min_conf = float(
-            cond_cfg.get(
-                "min_confidence_for_entry",
-                guardrails_cfg.get("conditions", {}).get("min_confidence_for_entry", 0.0),
+            # --- 0) Données & config ---
+            ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+            df_m1 = (
+                ctx_md.get("df_m1")
+                or ctx_md.get("rates_df")
+                or ctx_md.get("annotated_rates_df")
+                or ctx_md.get("df")
             )
-        )
-        ignore_conf = bool(
-            cond_cfg.get(
-                "ignore_confidence",
-                guardrails_cfg.get("conditions", {}).get("ignore_confidence", False),
+            df_work = (
+                df_m1.copy()
+                if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
+                else None
             )
-        )
 
-        self.logger.debug(
-            f"[LIQ] Seuils utilisés → min_conf={min_conf} | ignore_conf={ignore_conf}"
-        )
-
-        best: Tuple[str, float, Dict[str, Any]] = ("", min_conf, {})
-
-        for asset in tradeable_assets:
-            sig = signals.get(asset) or {}
-            if not sig:
-                self.logger.debug(f"[LIQ][DEBUG] {asset} ignoré → aucun signal dispo")
-                continue
-
-            # Lecture patterns chandeliers
+            # --- 0b) Détection patterns via MarketAnalyzer ---
+            latest_pattern = None
             try:
-                md = (context.get("market_data") or {}).get(asset, {})
-                df_m1 = md.get("df_m1") or md.get("rates_df")
-                if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 20:
-                    pe = PatternEngine()
-                    pe.analyze(df_m1, with_combo=True)
-                    latest_pat = pe.latest_signal(df_m1)
-                    if latest_pat:
-                        sig["latest_pattern"] = latest_pat
-                        self.logger.info(
-                            f"[LIQ] {asset} | Dernier pattern: "
-                            f"{latest_pat.get('pattern')} ({latest_pat.get('signal_type')})"
-                        )
+                if isinstance(df_work, pd.DataFrame):
+                    analyzer = MarketAnalyzer(
+                        config_manager=self.config_manager, logger=self.logger
+                    )
+                    mres = analyzer.analyze(df_work.copy(), asset)
+                    if isinstance(mres, dict):
+                        # On prend le dernier signal pattern si dispo
+                        latest_pattern = mres.get("patterns", {}).get("candles", [])[-1] \
+                            if mres.get("patterns", {}).get("candles") else mres.get("latest")
             except Exception as e:
-                self.logger.debug(f"[LIQ] PatternEngine skipped for {asset}: {e}")
+                self.logger.debug(f"[{asset}] MarketAnalyzer skipped: {e}")
 
-            # Conditions cœur Liquidity
-            sweep = bool(sig.get("sweep_detected", False))
-            absorb = bool(sig.get("absorption_confirmed", False))
-            bos_ok = bool(sig.get("bos_mss_detected", False))  # impulsion/validation
-            switch_flag = bool(sig.get("switch_to_liquidity", False))
+            if latest_pattern:
+                asset_signals["latest_pattern"] = latest_pattern
 
-            if not (sweep or absorb or switch_flag or bos_ok):
-                self.logger.debug(f"[LIQ][DEBUG] {asset} refusé → aucun sweep/absorb/bos/switch")
-                continue
+            strat_cfg = (self.strategy_config or {}).copy()
 
-            # Confidence check (dynamique)
-            force_execute = bool((context or {}).get("force_execute", False))
-            confidence = float(sig.get("confidence_score", 0.0) or 0.0)
-
-            if not (force_execute or ignore_conf) and confidence < min_conf:
-                self.logger.debug(
-                    f"[LIQ][DEBUG] {asset} refusé → confidence {confidence:.3f} < seuil {min_conf:.3f}"
+            # Config burst_scalping
+            burst_cfg = (
+                strat_cfg.get("burst_scalping")
+                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                    "burst_scalping"
                 )
-                continue
-
-            # Construire une proposition d'ordre pour cet asset
-            try:
-                proposal = self._build_order_proposal(asset, context, sig)
-            except Exception as e:
-                self.logger.warning(
-                    f"[LIQ] Impossible de construire une proposition pour {asset}: {e}"
-                )
-                continue
-
-            if not proposal:
-                self.logger.debug(f"[LIQ][DEBUG] {asset} refusé → build_order_proposal a renvoyé None")
-                continue
-
-            # Scoring simple: confiance + RR
-            prop_score = confidence + 0.01 * float(proposal.get("rr_estimate", 0.0) or 0.0)
-            if prop_score > best[1]:
-                best = (asset, prop_score, proposal)
-
-        if not best[0]:
-            self.logger.info(
-                "[LIQ] Aucun actif Liquidity sélectionné (aucun signal valide après filtrage)."
+                or {}
             )
-            self.logger.debug("[LIQ][DEBUG] evaluate_entry a parcouru tous les assets → aucun retenu")
-            return None
 
-        asset, _, proposal = best
+            # --- 1) Métadonnées ---
+            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
+            pip_size = meta.get("pip_size", 0.0)
+            if pip_size <= 0:
+                self.logger.warning(f"[{asset}] pip_size invalide.")
+                return {}
 
-        # Logging détaillé Liquidity
-        def _fmt_price(v: Any) -> str:
+            # --- 2) Prix courant ---
+            price = self._safe_price_from_signals(asset_signals)
+            if not price:
+                self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
+                return {}
+
+            # --- 3) Marubozu Playbook ---
+            mp_cfg = (
+                (strat_cfg.get("entry_rules") or {})
+                .get("scalping", {})
+                .get("marubozu_playbook", {})
+            )
+            if (
+                mp_cfg.get("enabled", True)
+                and isinstance(df_work, pd.DataFrame)
+                and latest_pattern
+                and "marubozu" in str(latest_pattern.get("pattern", "")).lower()
+            ):
+                try:
+                    mp_decision = self._rule_marubozu_playbook(
+                        asset=asset,
+                        df=df_work,
+                        price=price,
+                        meta=meta,
+                        mtf_ctx=(analyzed_context.get("market_data") or {}).get(asset, {}),
+                        cfg=mp_cfg,
+                    )
+                    if mp_decision:
+                        return self._finalize_decision(mp_decision, analyzed_context)
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] marubozu_playbook erreur: {e}")
+
+            # --- 3b) Marubozu Impulse ---
+            imp_cfg = (
+                (strat_cfg.get("entry_rules") or {})
+                .get("scalping", {})
+                .get("marubozu_impulse", {})
+            )
+            if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
+                try:
+                    impulse_decision = self._rule_marubozu_impulse(
+                        df=df_work, asset=asset, price=price, meta=meta, cfg=imp_cfg
+                    )
+                    if impulse_decision:
+                        return self._finalize_decision(impulse_decision, analyzed_context)
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] marubozu_impulse erreur: {e}")
+
+            # --- 4) Biais directionnel ---
+            action = self._infer_action_from_signals(asset_signals)
+            if action is None and isinstance(df_work, pd.DataFrame) and len(df_work) >= 20:
+                try:
+                    sma = self._sma(df_work["close"].astype(float), 20).iloc[-1]
+                    action = "BUY" if float(price) >= float(sma) else "SELL"
+                except Exception:
+                    action = None
+            if action is None:
+                self.logger.info(f"[{asset}] Aucune direction claire.")
+                return {}
+
+            # --- 5) Range Accumulation MTF ---
             try:
-                return f"{float(v):.5f}"
+                mtf_cfg = strat_cfg.get("range_accumulation_mtf") or {}
+                mtf_decision = self._rule_range_accumulation_mtf(
+                    df_m1=df_work,
+                    asset=asset,
+                    price=price,
+                    meta=meta,
+                    cfg=mtf_cfg,
+                    analyzed_context=analyzed_context,
+                )
+                if mtf_decision:
+                    return self._finalize_decision(mtf_decision, analyzed_context)
+            except Exception as e:
+                self.logger.debug(f"[{asset}] MTF range-accum skipped: {e}")
+
+            # --- 6) Range simple ---
+            try:
+                range_decision = self._rule_range_accumulation(
+                    df=df_work,
+                    asset=asset,
+                    price=price,
+                    action=action,
+                    meta=meta,
+                    cfg=(strat_cfg.get("range_accumulation") or {}),
+                )
+                if range_decision:
+                    range_decision.setdefault("strategy_type", "scalping")
+                    range_decision.setdefault("rule_name", "range_accumulation")
+                    range_decision.setdefault("execution_status", "ready")
+                    return self._finalize_decision(range_decision, analyzed_context)
+            except Exception as e:
+                self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
+
+            # --- 7) Burst scalping ---
+            atr_m1_pips = None
+            if isinstance(df_work, pd.DataFrame):
+                try:
+                    atr_m1 = self._atr(df_work, period=14)
+                    atr_m1_pips = (atr_m1 / pip_size) if atr_m1 and pip_size > 0 else None
+                except Exception:
+                    atr_m1_pips = None
+
+            guardrails_cfg = {}
+            try:
+                guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
             except Exception:
-                return str(v)
+                guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-        action = proposal.get("action")
-        entry = proposal.get("entry_price")
-        sl = proposal.get("sl_price")
-        tp = proposal.get("tp_price")
-        rr_est = proposal.get("rr_estimate")
-        conf = float(proposal.get("confidence", 0.0) or 0.0)
+            try:
+                min_atr_req = float(
+                    burst_cfg.get(
+                        "min_atr_m1_pips",
+                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0),
+                    )
+                )
+            except Exception:
+                min_atr_req = 0.0
 
-        self.logger.info(
-            f"[LIQUIDITY] 🔍 {asset} | Side={action} | "
-            f"Entry={_fmt_price(entry)} | SL={_fmt_price(sl)} | TP={_fmt_price(tp)} | "
-            f"RR={rr_est if isinstance(rr_est,(int,float)) else rr_est} | Confiance={conf:.2f}"
-        )
-               
-        # Package final pour l’executor
-        decision = self._build_decision_package_from_proposal(asset, proposal) or {}
-        decision["strategy_type"] = "liquidity"
-        decision.setdefault("rule_name", "liquidity_entry")
-        decision.setdefault("execution_status", "ready")  # ✅ Normalisation obligatoire
-        return decision
+            try:
+                max_spread_burst = float(
+                    burst_cfg.get(
+                        "max_spread_pips",
+                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0),
+                    )
+                )
+            except Exception:
+                max_spread_burst = 999.0
+
+            ignore_all = bool(guardrails_cfg.get("ignore_all", False))
+            burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
+            effective_ignore_checks = ignore_all or burst_ignore_checks
+
+            self.logger.debug(
+                f"[{asset}][SCALPING] thresholds → min_atr_m1={min_atr_req}, "
+                f"max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
+            )
+
+            burst_allowed = True
+            if not effective_ignore_checks:
+                spread_now = float(meta.get("spread_pips", asset_signals.get("current_spread_points", float("inf"))))
+                if max_spread_burst and spread_now > max_spread_burst:
+                    self.logger.info(
+                        f"[{asset}] REFUS BURST → spread {spread_now:.2f}p > seuil {max_spread_burst:.2f}p"
+                    )
+                    burst_allowed = False
+
+                if min_atr_req > 0.0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
+                    self.logger.info(
+                        f"[{asset}] REFUS BURST → ATR M1 {atr_m1_pips or 0:.2f}p < seuil {min_atr_req:.2f}p"
+                    )
+                    burst_allowed = False
+
+            if bool(burst_cfg.get("enabled", True)) and burst_allowed:
+                try:
+                    burst_decision = self._rule_burst_scalping(
+                        asset=asset,
+                        action=action,
+                        entry_price=price,
+                        meta=meta,
+                        signals={**asset_signals, "atr_m1_pips": atr_m1_pips},
+                        burst_cfg=burst_cfg,
+                        context=analyzed_context,
+                    )
+                    if burst_decision:
+                        burst_decision.setdefault("strategy_type", "scalping")
+                        burst_decision.setdefault("rule_name", "burst_scalping")
+                        burst_decision.setdefault("execution_status", "ready")
+                        return self._finalize_decision(burst_decision, analyzed_context)
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] burst_scalping erreur: {e}")
+
+            # --- Aucun setup valide ---
+            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
+            return {}
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
+            return {}
+
+
 
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):

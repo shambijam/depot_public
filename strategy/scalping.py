@@ -9,7 +9,8 @@ from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
 from phase_observer.detectors import Detectors
-from sniper_patterns.pattern_engine import PatternEngine
+from phase_observer.market_analyzer import MarketAnalyzer
+
 
 
 class ScalpingStrategy(BaseStrategy):
@@ -34,6 +35,8 @@ class ScalpingStrategy(BaseStrategy):
         self.config_manager = config_manager
         self.strategy_config = strategy_config or {}
         self.logger = logger or getattr(config_manager, "logger", None)
+        market_analyzer = MarketAnalyzer(config_manager=self.config_manager, logger=self.logger)
+
 
         # Initialisation des détecteurs
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
@@ -78,8 +81,12 @@ class ScalpingStrategy(BaseStrategy):
         """
         Version 'desk pro' compatible pipeline:
         - Pas de fallback → uniquement des règles explicites
-        - Priorité: Marubozu (via PatternEngine + Playbook) > Range Accumulation MTF > Range Accumulation simple > Burst scalping
-        - ATR/Spread n'affecte que le burst, jamais les règles indépendantes
+        - Priorité:
+            1. Marubozu (MarketAnalyzer + Playbook)
+            2. Range Accumulation MTF
+            3. Range Accumulation simple
+            4. Burst scalping
+        - ATR/Spread n'affecte que le burst
         """
         try:
             # --- 0) Données & config ---
@@ -91,30 +98,36 @@ class ScalpingStrategy(BaseStrategy):
                 else None
             )
 
-            # --- 0b) Lecture patterns bougies via PatternEngine ---
-            patterns = []
-            latest_pattern = None
+            # --- 0b) Analyse via MarketAnalyzer ---
+            patterns, latest_pattern = [], None
             if isinstance(df_work, pd.DataFrame):
                 try:
-                    pe = PatternEngine()
-                    results = pe.analyze(df_work, with_combo=True)
-                    patterns = results.get("combo_signals", [])
-                    latest_pattern = pe.latest_signal(df_work)
+                    market_analyzer = MarketAnalyzer(
+                        config_manager=self.config_manager,
+                        logger=self.logger,
+                    )
+                    market_results = market_analyzer.analyze(df_work, asset)
 
+                    # On récupère les patterns détectés
+                    patterns = market_results.get("patterns", {}).get("combos", [])
+                    # Dernier pattern exploitable
+                    latest_pattern = (
+                        market_results.get("patterns", {})
+                        .get("candles", [None])[-1]
+                    )
                     if latest_pattern:
                         self.logger.info(
                             f"[{asset}] Dernier pattern détecté: "
                             f"{latest_pattern.get('pattern')} "
-                            f"(type={latest_pattern.get('signal_type')}, bullish={latest_pattern.get('is_bullish')})"
+                            f"(type={latest_pattern.get('type')}, bullish={latest_pattern.get('is_bullish')})"
                         )
-                        # ➕ Injection dans les signaux
                         asset_signals["latest_pattern"] = latest_pattern
                 except Exception as e:
-                    self.logger.warning(f"[{asset}] PatternEngine skipped: {e}")
+                    self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
 
             strat_cfg = (self.strategy_config or {}).copy()
 
-            # Compatibilité burst_scalping
+            # Config burst_scalping
             burst_cfg = (
                 strat_cfg.get("burst_scalping")
                 or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
@@ -140,7 +153,7 @@ class ScalpingStrategy(BaseStrategy):
                 mp_cfg.get("enabled", True)
                 and isinstance(df_work, pd.DataFrame)
                 and latest_pattern
-                and "marubozu" in latest_pattern.get("pattern", "")
+                and "marubozu" in str(latest_pattern.get("pattern", "")).lower()
             ):
                 mp_decision = self._rule_marubozu_playbook(
                     asset=asset,
@@ -199,12 +212,10 @@ class ScalpingStrategy(BaseStrategy):
                     cfg=(strat_cfg.get("range_accumulation") or {}),
                 )
                 if range_decision:
-                    # Normalisation + méta minimales
                     range_decision.setdefault("strategy_type", "scalping")
                     range_decision.setdefault("rule_name", "range_accumulation")
                     range_decision.setdefault("execution_status", "ready")
                     return self._finalize_decision(range_decision, analyzed_context)
-
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
@@ -225,7 +236,7 @@ class ScalpingStrategy(BaseStrategy):
             except Exception:
                 guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-            # Seuils dynamiques → burst_cfg > guardrails > fallback
+            # Seuils dynamiques
             try:
                 min_atr_req = float(
                     burst_cfg.get(
@@ -246,7 +257,6 @@ class ScalpingStrategy(BaseStrategy):
             except Exception:
                 max_spread_burst = 999.0
 
-            # Flags bypass
             ignore_all = bool(guardrails_cfg.get("ignore_all", False))
             burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
             effective_ignore_checks = ignore_all or burst_ignore_checks
@@ -281,20 +291,19 @@ class ScalpingStrategy(BaseStrategy):
                     context=analyzed_context,
                 )
                 if burst_decision:
-                    # ✅ MÉTA OBLIGATOIRES pour que le pipeline conserve la décision
                     burst_decision.setdefault("strategy_type", "scalping")
                     burst_decision.setdefault("rule_name", "burst_scalping")
                     burst_decision.setdefault("execution_status", "ready")
                     return self._finalize_decision(burst_decision, analyzed_context)
 
-
             # --- Aucun setup valide ---
-            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu (flux normal).")
+            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
             return {}
 
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
+
 
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================

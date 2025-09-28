@@ -18,10 +18,8 @@ import pandas as pd
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
-from sniper_patterns.pattern_engine import PatternEngine
 from core.strategy_manager import StrategyManager
-
-
+from phase_observer.market_analyzer import MarketAnalyzer
 
 
 load_dotenv()
@@ -412,8 +410,9 @@ def _load_po_config_safe(config_manager):
 
 
 def _mtf_readiness_gate(
-    mt5_connector, phase_observer, config_manager, tradeable_assets, cycle_count
+    mt5_connector, market_analyzer, config_manager, tradeable_assets, cycle_count
 ) -> bool:
+
     """
     Gate MTF BLOQUANT… mais *gracieux* :
     - Si 'readiness_gate.enabled' est False (ou absent) -> ON LAISSE PASSER.
@@ -563,16 +562,15 @@ def _mtf_readiness_gate(
                     except Exception:
                         # on reste permissif si le parse de temps pose souci
                         pass
-
-        # (4) Confluence via PhaseObserver (si dispo)
-        if hasattr(phase_observer, "ready_and_confluence_ok"):
-            ok, reason = phase_observer.ready_and_confluence_ok(
-                confluence_required=confluence_required
-            )
-            if not ok:
-                logger.info(f"[READINESS] skip -> {reason}")
-                return False
-
+                    # (4) Confluence via MarketAnalyzer
+                    if hasattr(market_analyzer, "ready_and_confluence_ok"):
+                        ok, reason = market_analyzer.ready_and_confluence_ok(
+                            confluence_required=confluence_required
+                        )
+                        if not ok:
+                            logger.info(f"[READINESS] skip -> {reason}")
+                            return False
+       
         return True
 
     except Exception as e:
@@ -630,40 +628,31 @@ def _execute_single_decision(
 
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
-    phase_observer: PhaseObserver,
     decision_pipeline: DecisionPipeline,
     trade_executor: TradeExecutor,
     config_manager: ConfigManager,
     mecano: Mecano,
-    strategy_manager: StrategyManager,   # ✅ ajout
+    strategy_manager: StrategyManager,  
     is_dry_run: bool,
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
 
     """
-    Exécute un cycle complet du pipeline de trading de SNIPER_X (version sans crypto + attente historique).
+    Exécute un cycle complet du pipeline de trading de SNIPER_X.
 
-    Corrections & améliorations incluses :
-    - ✅ Pas de double envoi : bloc d’exécution unique (suppression du “2e appel”).
-    - ✅ DEMO/DRY: simulation pure, aucun appel réel à MT5 → return immédiat depuis le bloc DEMO/DRY.
-    - ✅ LIVE: un seul appel à TradeExecutor.execute_order() + contrôle par 'status' (filled/placed).
-    - ✅ Normalisation robuste du 'magic' (entier non nul ; défaut 51001).
-    - ✅ Pas de raise "ticket nul".
-    - ✅ Import local protégé de get_tracker_from_context pour le finally.
-    - ✅ Signals consolidés (phase/confidence/point/spread) + logs pipeline.
-    - ✅ Compat avec nouveau pipeline: utilise 'config_used' (et plus 'active_config').
+    Nouveautés :
+    - ✅ Utilise MarketAnalyzer (fusion PhaseObserver + PatternEngine)
+    - ✅ Cycle basé sur un seul scan lourd par actif
+    - ✅ Simplification des signaux consolidés
     """
 
-    # import DIAG local (sécurisé)
     try:
         from core.diagnostics import get_tracker_from_context
     except Exception:
-
-        def get_tracker_from_context(_):  # no-op fallback
+        def get_tracker_from_context(_):
             class _N:
                 def emit_summary(self, *_args, **_kwargs): ...
-
             return _N()
 
     logger = logging.getLogger(__name__)
@@ -675,28 +664,25 @@ def run_single_pipeline_cycle(
     trade_executed_successfully = False
     global_context: Dict[str, Any] = {}
 
+    # ✅ MarketAnalyzer unifié
+    market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
+
     try:
-        # Connexion MT5 persistante requise
         if not getattr(mt5_connector, "is_connected", False):
             raise RuntimeError("MT5 a perdu la connexion persistante.")
 
-        # Configs globales
         base_config = config_manager.get_current_dynamic_config()
         execution_mode = str(base_config.get("mode_execution", "DEMO")).upper()
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
 
-        # Liste des symboles tradables (filtrage par compte si nécessaire)
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
-        account_allowed = set(
-            (active_mt5_account_details or {}).get("allowed_symbols", [])
-        )
+        account_allowed = set((active_mt5_account_details or {}).get("allowed_symbols", []))
         tradeable_assets = (
             [a for a in all_symbols if a in account_allowed]
-            if account_allowed
-            else all_symbols
+            if account_allowed else all_symbols
         )
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
@@ -704,7 +690,7 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
             return False
 
-        # Récupération données & signaux par actif
+        # === Nouveau bloc collecte + analyse unifiée ===
         all_assets_market_data: Dict[str, pd.DataFrame] = {}
         all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
 
@@ -730,18 +716,23 @@ def run_single_pipeline_cycle(
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
 
-                annotated_rates_df = phase_observer.analyze(
-                    rates_df.copy(), asset_symbol=asset
-                )
+                # ✅ Analyse avec MarketAnalyzer
+                market_results = market_analyzer.analyze(rates_df.copy(), asset)
+                
+                # 🔍 Debug : log des clés retournées par MarketAnalyzer
+                logger.debug(f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}")
+
+                annotated_rates_df = market_results["annotated_df"]
                 if annotated_rates_df is None or annotated_rates_df.empty:
-                    logger.warning(f"[{asset}] Annotated DF vide. Actif ignoré.")
+                    logger.warning(f"[{asset}] MarketAnalyzer → DF vide. Actif ignoré.")
                     continue
 
-                latest = annotated_rates_df.iloc[-1]
+                latest = market_results["latest"]
                 logger.info(
-                    f"[PhaseObserver] Actif: {asset} | Phase: {latest.get('phase', 'N/A')}"
+                    f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
 
+                # Signaux unifiés
                 signals: Dict[str, Any] = (
                     _build_asset_trading_signals(
                         latest,
@@ -751,84 +742,20 @@ def run_single_pipeline_cycle(
                     )
                     or {}
                 )
-                # ---------- Enrichissement via sniper_patterns.PatternEngine ----------
-                try:
-                    # Petit garde-fou sur la taille du DF (évite sur-traitement)
-                    if annotated_rates_df is not None and len(annotated_rates_df) >= 20:
-                        pe = PatternEngine()
-                        try:
-                            # analyse complète (combo/orderflow/multi-candle/structure)
-                            pe_results = pe.analyze(
-                                annotated_rates_df.copy(), with_combo=True
-                            )
-                        except TypeError:
-                            # fallback si l'API analyse attend d'autres paramètres
-                            pe_results = pe.analyze(annotated_rates_df.copy())
-
-                        # Merge contrôlé des résultats dans les signaux (préfixe pattern_)
-                        if isinstance(pe_results, dict):
-                            # Conserver les clés utiles sans écraser les champs existants
-                            if pe_results.get("combo_signals"):
-                                signals["pattern_combo_signals"] = pe_results.get(
-                                    "combo_signals"
-                                )
-                            if pe_results.get("orderflow_signals"):
-                                signals["pattern_orderflow"] = pe_results.get(
-                                    "orderflow_signals"
-                                )
-                            if pe_results.get("multi_candle_patterns"):
-                                signals["pattern_multi_candles"] = pe_results.get(
-                                    "multi_candle_patterns"
-                                )
-                            if pe_results.get("structure_signals"):
-                                signals["pattern_structure"] = pe_results.get(
-                                    "structure_signals"
-                                )
-                            # toute autre clé utile
-                            for k in ("confidence_overview", "quality_metrics"):
-                                if pe_results.get(k):
-                                    signals.setdefault("pattern_metrics", {})[k] = (
-                                        pe_results.get(k)
-                                    )
-
-                        # Latest single-pattern convenience (utilisé ailleurs)
-                        try:
-                            latest_pat = pe.latest_signal(annotated_rates_df)
-                            if latest_pat:
-                                signals["latest_pattern"] = latest_pat
-                        except Exception:
-                            # non bloquant
-                            pass
-                    else:
-                        logger.debug(
-                            f"[{asset}] PatternEngine skipped (DF trop petit)."
-                        )
-                except Exception as e:
-                    # Ne doit jamais casser le pipeline : on log et on continue
-                    logger.warning(f"[{asset}] PatternEngine non appliqué: {e}")
-
-                # Phase & score (avec fallbacks)
-                signals["phase"] = str(
-                    latest.get("phase", signals.get("phase", "neutral"))
+                signals.update(market_results.get("patterns", {}))
+                signals["phase"] = market_results.get("phase", signals.get("phase", "neutral"))
+                signals["confidence_score"] = market_results.get(
+                    "confidence", signals.get("confidence_score", 0.5)
                 )
-                signals["confidence_score"] = float(
-                    latest.get("confidence_score", signals.get("confidence_score", 0.5))
-                )
-                signals["phase_memory_stabilized"] = signals["phase"]
-                signals["confidence_stabilized"] = signals["confidence_score"]
+                signals["structure"] = market_results.get("structure", {})
 
                 # Spread robuste
-                spread_pts = (
-                    getattr(symbol_info_mt5, "spread", None)
-                    if symbol_info_mt5
-                    else None
-                )
+                spread_pts = getattr(symbol_info_mt5, "spread", None) if symbol_info_mt5 else None
                 if not spread_pts or spread_pts <= 0:
-                    spread_pts = mt5_connector.get_symbol_spread_points(asset) or float(
-                        "inf"
-                    )
+                    spread_pts = mt5_connector.get_symbol_spread_points(asset) or float("inf")
                 signals["current_spread_points"] = float(spread_pts)
 
+                # Sauvegarde
                 all_assets_trading_signals[asset] = signals
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
@@ -1227,7 +1154,6 @@ def main(args: argparse.Namespace) -> None:
 
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
-                phase_observer,
                 config_manager.decision_pipeline,
                 trade_executor,
                 config_manager,

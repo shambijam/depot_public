@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from core.utils import normalize_levels
-from sniper_patterns.pattern_engine import PatternEngine
+from phase_observer.market_analyzer import MarketAnalyzer
+
 
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
@@ -50,9 +51,9 @@ class DecisionPipeline:
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
         self.strategy_manager = strategy_manager_instance
-        self.pattern_engine = PatternEngine(
-            enable_context=True, enable_structure=True, enable_multi_tf=True
-        )
+        
+        enable_context=True, enable_structure=True, enable_multi_tf=True
+      
 
         # ✅ Cache local des configs assets (chargées une seule fois au démarrage)
         self.asset_configs: Dict[str, Dict[str, Any]] = {}
@@ -888,18 +889,20 @@ class DecisionPipeline:
         )
 
         # ==========================================================
-        # 📊 Analyse patterns / bougies (Desk Pro Mode)
+        # 📊 Analyse patterns / bougies (Desk Pro Mode via MarketAnalyzer)
         # ==========================================================
         try:
             md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
             df_patterns = md_asset.get("annotated_rates_df") or md_asset.get("rates_df")
 
             if isinstance(df_patterns, pd.DataFrame) and not df_patterns.empty:
-                analysis = self.pattern_engine.analyze(df_patterns)
-                last_sig = self.pattern_engine.latest_signal(df_patterns)
+                ma = MarketAnalyzer(config_manager=self.config_manager, logger=self.logger)
+                ma_results = ma.analyze(df_patterns.copy(), asset_raw)
+
+                last_sig = ma_results.get("latest", {})
 
                 context.setdefault("pattern_analysis", {})[asset_raw] = {
-                    "all_patterns": analysis,
+                    "all_patterns": ma_results.get("patterns", {}),
                     "latest_signal": last_sig,
                 }
 
@@ -921,7 +924,8 @@ class DecisionPipeline:
                         f"🕯️ [CORE] Pattern fort reconnu → {last_sig['pattern']} (confiance boostée)"
                     )
         except Exception as e:
-            self.logger.warning(f"Erreur PatternEngine: {e}")
+            self.logger.warning(f"Erreur MarketAnalyzer: {e}")
+
 
         # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)

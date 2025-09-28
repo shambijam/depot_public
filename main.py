@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from phase_observer.orchestrator import PhaseObserver
+
     from core.config_manager import ConfigManager
 
     importlib.reload(core.strategy_manager)
@@ -391,7 +391,7 @@ def main(args: argparse.Namespace) -> None:
             ai_interface_instance=ai_interface,
             strategy_manager_instance=strategy_manager,
         )
-        phase_observer = PhaseObserver(config_manager=config_manager)
+       
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
 
@@ -520,7 +520,6 @@ def main(args: argparse.Namespace) -> None:
             # 🔒 Gate readiness MTF vérifié à chaque cycle (avec liste dynamique cohérente)
             if not _mtf_readiness_gate(
                 mt5_connector,
-                phase_observer,
                 config_manager,
                 readiness_symbols,
                 cycle_count,
@@ -534,12 +533,11 @@ def main(args: argparse.Namespace) -> None:
             print("[Pipeline] Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
-                phase_observer,
                 decision_pipeline,
                 trade_executor,
                 config_manager,
                 mecano,
-                strategy_manager,   # ✅ ajoute-le ici
+                strategy_manager,   
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
