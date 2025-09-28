@@ -463,7 +463,20 @@ class ScalpingStrategy(BaseStrategy):
         # Niveaux pips (optionnels)
         sl_pips = burst_cfg.get("sl_pips")
         tp_pips = burst_cfg.get("tp_pips")
-
+        
+        # --- PATCH: Empêcher plusieurs bursts simultanés ---
+        open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
+        active_baskets = {
+            pos.get("basket_id")
+            for pos in open_positions
+            if pos.get("meta", {}).get("burst")
+        }
+        if active_baskets:
+            self.logger.warning(
+                f"[{asset}] Refus ouverture nouveau burst: déjà actif ({list(active_baskets)})"
+            )
+            return None
+        
         # Construire le panier
         basket_id = f"burst_{asset}_{uuid.uuid4().hex[:8]}"
         decisions: List[Dict[str, Any]] = []
