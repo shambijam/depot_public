@@ -51,11 +51,13 @@ class DecisionPipeline:
         self.config_manager = config_manager_instance
         self.ai_interface = ai_interface_instance
         self.strategy_manager = strategy_manager_instance
-        
-        enable_context=True, enable_structure=True, enable_multi_tf=True
-      
 
-        # ✅ Cache local des configs assets (chargées une seule fois au démarrage)
+        # ✅ Flags internes (hardcodés)
+        self.enable_context = True
+        self.enable_structure = True
+        self.enable_multi_tf = True
+
+        # ✅ Cache local des configs assets
         self.asset_configs: Dict[str, Dict[str, Any]] = {}
         for asset in ["EURUSD", "GBPUSD", "XAUUSD"]:
             try:
@@ -70,10 +72,10 @@ class DecisionPipeline:
 
         self.logger.info("DecisionPipeline initialisé avec cache asset_configs.")
 
-        # PhaseObserver optionnel (peut être attaché plus tard via attach_phase_observer)
+        # PhaseObserver optionnel
         self.phase_observer = phase_observer_instance
 
-        # Flag de debug (on ne force rien si pas de phase_observer)
+        # Flag debug
         debug_flag = (
             self.config_manager.get(
                 "debug_settings.phase_observer.debug_confidence_logging", None
@@ -85,19 +87,18 @@ class DecisionPipeline:
         )
         debug_flag = bool(debug_flag) if isinstance(debug_flag, bool) else False
 
-        # Si un PhaseObserver est fourni et expose l’attribut, on applique
         if self.phase_observer is not None and hasattr(
             self.phase_observer, "debug_confidence_logging"
         ):
             self.phase_observer.debug_confidence_logging = debug_flag
 
-        # Conserver le flag aussi côté pipeline pour logs internes éventuels
         self.debug_confidence_logging = debug_flag
 
         self.logger.info(
             f"DecisionPipeline initialisé (phase_observer={'present' if self.phase_observer else 'absent'}) "
             f"| debug_confidence_logging={self.debug_confidence_logging}"
         )
+
 
     def get_asset_config(self, asset: str) -> Dict[str, Any]:
         """Charge une config asset une seule fois et la met en cache."""
