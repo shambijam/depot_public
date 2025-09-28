@@ -103,6 +103,13 @@
           "trigger_pips": 15,
           "step_pips": 5,
           "activate_after_rr": 1.0
+        },
+        "closure_rules": {
+          "momentum_score_min": 2,
+          "breakout_lookback": 20,
+          "atr_factor": 1.5,
+          "enable_mtf_bias": true,
+          "close_on_full_profit": true
         }
       }
     }

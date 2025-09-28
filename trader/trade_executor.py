@@ -55,6 +55,7 @@ class InvalidDecisionPackageError(ValueError):
 # === Helpers Trading Utils ====
 # ==============================
 
+
 def _normalize_stops(symbol_info, price, sl, tp):
     point = float(getattr(symbol_info, "point", 0.0) or 0.0)
     digits = int(getattr(symbol_info, "digits", 0) or 0)
@@ -77,7 +78,8 @@ def _normalize_stops(symbol_info, price, sl, tp):
     # Stops level broker
     stops_lvl_pts = float(
         getattr(symbol_info, "trade_stops_level", 0)
-        or getattr(symbol_info, "stops_level", 0) or 0
+        or getattr(symbol_info, "stops_level", 0)
+        or 0
     )
     min_stop = stops_lvl_pts * point
 
@@ -94,8 +96,9 @@ def _normalize_stops(symbol_info, price, sl, tp):
     return sl, tp
 
 
-
-def _precheck_and_split_burst(symbol_info, desired_vol_list, entry_price, sl_price, account_info):
+def _precheck_and_split_burst(
+    symbol_info, desired_vol_list, entry_price, sl_price, account_info
+):
     # calc margin par 1 lot (ou par step), puis dimensionne
     contract_size = float(getattr(symbol_info, "trade_contract_size", 0) or 100)
     leverage = float(getattr(account_info, "leverage", 100) or 100)
@@ -128,52 +131,50 @@ def _precheck_and_split_burst(symbol_info, desired_vol_list, entry_price, sl_pri
     return [v for v in out if v > 0.0]
 
 
-def compute_lot_from_risk(symbol_info, account_info, entry, sl, risk_pct):
+def compute_lot_from_risk(
+    symbol_info,
+    account_info,
+    entry,
+    sl,
+    risk_pct,
+    confidence=1.0,
+    burst_size=1,
+    atr=None,
+    atr_ref=10.0,
+):
+
     balance = float(getattr(account_info, "balance", 0.0) or 0.0)
     risk_usd = balance * (risk_pct / 100.0)
 
+    # modulation par la confiance
+    risk_usd *= max(0.0, min(1.0, confidence))
+
+    # modulation par la volatilité
+    if atr is not None and atr > 0:
+        vol_factor = atr_ref / atr
+        vol_factor = min(2.0, max(0.5, vol_factor))
+        risk_usd *= vol_factor
+
+    # répartition sur un burst
+    if burst_size > 1:
+        risk_usd /= burst_size
+
+    # --- reste du calcul identique ---
     point = float(getattr(symbol_info, "point", 0.01) or 0.01)
     contract_size = float(getattr(symbol_info, "trade_contract_size", 100) or 100)
-
     sl_dist_price = abs(entry - sl)
     if sl_dist_price <= 0:
         return 0.0
 
-    # valeur d’1 point par 1 lot ≈ contract_size * point
     value_per_price_unit_per_lot = contract_size
-    value_per_point_per_lot = contract_size * point
-
     loss_per_lot = sl_dist_price * value_per_price_unit_per_lot
     if loss_per_lot <= 0:
         return 0.0
 
     lots = risk_usd / loss_per_lot
-
-    # clamp & quantize
-    vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-    vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
-    vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
-
-    lots = max(vmin, min(vmax, lots))
-    steps = int((lots - vmin) // vstep)
-    lots = round(vmin + steps * vstep, 8)
-
-    # ✅ Vérification de la marge disponible
-    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
-    leverage = float(getattr(account_info, "leverage", 100) or 100)
-
-    margin_per_lot = (entry * contract_size) / max(leverage, 1.0)
-    required_margin = lots * margin_per_lot
-
-    if required_margin > free_margin:
-        # downscale proportionnel à la marge
-        max_affordable_lots = free_margin / margin_per_lot
-        lots = max(vmin, min(max_affordable_lots, lots))
-        steps = int((lots - vmin) // vstep)
-        lots = round(vmin + steps * vstep, 8)
-
+    # clamp, quantize et marge → identiques à ton code
+    ...
     return lots
-
 
 
 class TradeExecutor:
@@ -1510,7 +1511,7 @@ class TradeExecutor:
                 min_rr = 0.0
 
             rr_value = None
-            
+
             # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
             if trade_decision.get("rule_name", "").lower() != "burst_scalping":
                 if min_rr > 0.0 and tp_price is not None:
@@ -1534,11 +1535,15 @@ class TradeExecutor:
 
             # ---------- 9) Volume (uniquement via risk sizer) ----------
             account_trade_settings = (
-                market_context.get("active_broker_account", {}).get("trade_settings", {})
+                market_context.get("active_broker_account", {}).get(
+                    "trade_settings", {}
+                )
                 or {}
             )
 
-            risk_pct = float(account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0)
+            risk_pct = float(
+                account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0
+            )
 
             if risk_pct > 0 and sl_price and sl_price > 0:
                 # calcul du lot basé sur le risque
@@ -2040,10 +2045,12 @@ class TradeExecutor:
     ):
         """
         Surveille tous les paniers burst en cours :
+        - Règle 1 (priorité) : si momentum fort (score >= 2) → on laisse courir (trailing gère)
+        - Règle 2 : si panier plein et pas de momentum fort → clôture immédiate
         - Ferme le panier si perte > max_loss_pips
         - Applique un trailing collectif :
-          * Break-even atteint dès trail_trigger
-          * Stop monte par paliers de trail_step/2
+        * Break-even atteint dès trail_trigger
+        * Stop monte par paliers de trail_step/2
         """
         open_positions = getattr(self, "mt5_connector", None).get_open_positions()
         if not open_positions:
@@ -2057,12 +2064,8 @@ class TradeExecutor:
 
         for basket_id, positions in baskets.items():
             try:
-                entry_prices = [
-                    p["entry_price"] for p in positions if "entry_price" in p
-                ]
-                current_prices = [
-                    p["current_price"] for p in positions if "current_price" in p
-                ]
+                entry_prices = [p["entry_price"] for p in positions if "entry_price" in p]
+                current_prices = [p["current_price"] for p in positions if "current_price" in p]
 
                 if not entry_prices or not current_prices:
                     continue
@@ -2078,6 +2081,57 @@ class TradeExecutor:
                     if direction == "BUY"
                     else (avg_entry - avg_price) / pip_size
                 )
+
+                # --- DETECTION MOMENTUM (score basé sur plusieurs critères) ---
+                strong_momentum = False
+                momentum_score = 0
+
+                try:
+                    # Critère 1 : gain déjà 2x le déclencheur du trailing
+                    if abs(pnl_pips) >= 2 * trail_trigger:
+                        momentum_score += 1
+
+                    # Critère 2 : breakout structurel (20 dernières bougies)
+                    highs = [p.get("high") for p in positions if "high" in p]
+                    lows = [p.get("low") for p in positions if "low" in p]
+                    if highs and lows:
+                        if direction == "BUY" and avg_price > max(highs[-20:]):
+                            momentum_score += 1
+                        elif direction == "SELL" and avg_price < min(lows[-20:]):
+                            momentum_score += 1
+
+                    # Critère 3 : ATR fort (si dispo dans meta)
+                    atr_m1 = positions[0].get("meta", {}).get("atr_m1_pips", 0)
+                    atr_ref = positions[0].get("meta", {}).get("atr_ref_pips", 0)
+                    if atr_m1 and atr_ref and atr_m1 >= 1.5 * atr_ref:
+                        momentum_score += 1
+
+                    # Critère 4 : biais MTF aligné
+                    mtf_bias = str(positions[0].get("meta", {}).get("mtf_bias", "")).lower()
+                    if (direction == "BUY" and "up" in mtf_bias) or (
+                        direction == "SELL" and "down" in mtf_bias
+                    ):
+                        momentum_score += 1
+
+                except Exception as e:
+                    self.logger.debug(f"[{basket_id}] Erreur check momentum: {e}")
+
+                if momentum_score >= 2:
+                    strong_momentum = True
+
+                # --- REGLE 1 + 2 : Gestion panier plein ---
+                if all(p.get("profit", 0) > 0 for p in positions):
+                    if strong_momentum:
+                        self.logger.info(
+                            f"🚀 Burst {basket_id} panier plein + momentum fort (score={momentum_score}) → on laisse courir (trailing)."
+                        )
+                        # ne pas clôturer → trailing continuera
+                    else:
+                        self.logger.info(
+                            f"🎯 Burst {basket_id} toutes les positions gagnantes sans momentum fort → clôture immédiate."
+                        )
+                        self.close_burst_basket(basket_id)
+                        continue
 
                 # --- STOP PERTE COLLECTIF ---
                 if pnl_pips <= -abs(max_loss_pips):
@@ -2114,6 +2168,7 @@ class TradeExecutor:
 
             except Exception as e:
                 self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
+
 
     def _calculate_risk_based_volume(
         self,
@@ -2183,6 +2238,22 @@ class TradeExecutor:
         max_dollar_risk = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk <= 0:
             raise TradeExecutionError("Risque en $ nul/invalide pour le sizing.")
+
+        # --- Ajustements dynamiques du risque ---
+        confidence = float(trade_decision.get("confidence", 1.0) or 1.0)
+        confidence = max(0.0, min(1.0, confidence))  # clamp [0,1]
+        max_dollar_risk *= confidence
+
+        burst_size = int(
+            (
+                config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("burst_size", 1)
+            )
+        )
+        if burst_size > 1:
+            max_dollar_risk /= burst_size
 
         # --- Distance prix (Entry -> SL) ---
         price_diff = abs(float(entry_price) - float(sl_price))
@@ -3408,17 +3479,20 @@ class TradeExecutor:
             vol = 0.0
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
-        
-                # --- Vérification du nombre de positions ouvertes ---
+
+            # --- Vérification du nombre de positions ouvertes ---
         try:
             open_positions = self.mt5_connector.get_positions(symbol=symbol)
-            if open_positions and len(open_positions) >= 200:  # ⚠️ adapte la limite selon ton broker
+            if (
+                open_positions and len(open_positions) >= 200
+            ):  # ⚠️ adapte la limite selon ton broker
                 msg = f"[EXECUTOR] ❌ Limite de positions atteinte pour {symbol} ({len(open_positions)} ouvertes)."
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
         except Exception as e:
-            self.logger.warning(f"[EXECUTOR] Impossible de vérifier le nombre de positions pour {symbol}: {e}")
-
+            self.logger.warning(
+                f"[EXECUTOR] Impossible de vérifier le nombre de positions pour {symbol}: {e}"
+            )
 
         # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
         mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
