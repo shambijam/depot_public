@@ -25,21 +25,33 @@ class ScalpingStrategy(BaseStrategy):
        laissés au moteur de SL/TP du TradeExecutor (_calculate_sl_tp_prices).
     """
 
-    def __init__(self, config_manager, strategy_config: Optional[Dict[str, Any]] = None, logger=None):
+    def __init__(
+        self,
+        config_manager,
+        strategy_config: Optional[Dict[str, Any]] = None,
+        mt5_connector=None,   # 👈 ajouté ici
+        logger=None,
+    ):
         """
         Initialise la stratégie Scalping.
         """
-        # Appel correct de BaseStrategy avec les deux arguments
         super().__init__(config_manager, strategy_config or {})
 
         self.config_manager = config_manager
         self.strategy_config = strategy_config or {}
+        self.mt5_connector = mt5_connector   # ✅ plus d'erreur
         self.logger = logger or getattr(config_manager, "logger", None)
-        market_analyzer = MarketAnalyzer(config_manager=self.config_manager, logger=self.logger)
-
+        self.market_analyzer = MarketAnalyzer(
+            config_manager=self.config_manager,
+            logger=self.logger
+        )
 
         # Initialisation des détecteurs
-        self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
+        self.detectors = Detectors(
+            logger=self.logger,
+            config_manager=config_manager
+        )
+
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 

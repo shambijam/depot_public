@@ -47,6 +47,7 @@ class PhaseObserver:
         """
         Initialise le PhaseObserver avec les paramètres de configuration.
         """
+        import logging
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
 
