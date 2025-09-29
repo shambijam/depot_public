@@ -20,6 +20,7 @@ import core.strategy_manager
 
 # Charger les variables d'environnement dès le début pour les chemins critiques/secrets
 from dotenv import load_dotenv
+from phase_observer.market_analyzer import MarketAnalyzer
 
 load_dotenv()
 
@@ -396,6 +397,10 @@ def main(args: argparse.Namespace) -> None:
         mecano.set_ai_analyzer(ai_decision)
 
         config_manager.ai_decision_instance = ai_decision
+        
+        market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
+        
+        
 
         # === Déclenchement des rapports au démarrage (Daily IA + Weekly Mecano) ===
         try:
@@ -520,6 +525,7 @@ def main(args: argparse.Namespace) -> None:
             # 🔒 Gate readiness MTF vérifié à chaque cycle (avec liste dynamique cohérente)
             if not _mtf_readiness_gate(
                 mt5_connector,
+                market_analyzer, 
                 config_manager,
                 readiness_symbols,
                 cycle_count,
