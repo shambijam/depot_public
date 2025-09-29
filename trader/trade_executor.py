@@ -1224,20 +1224,17 @@ class TradeExecutor:
                 "CLOSE": "CLOSE",
             }
             return mapping.get(a, "")
-
         def _normalize_volume(symbol_info, vol: float) -> float:
             """Clamp & round le volume selon les contraintes du symbole MT5."""
             try:
-                vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
-                vmax = float(
-                    getattr(symbol_info, "volume_max", float("inf")) or float("inf")
-                )
-                vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
+                vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+                vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+                vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
             except Exception:
-                vmin, vmax, vstep = 0.0, float("inf"), 0.0
+                vmin, vmax, vstep = 0.01, 100.0, 0.01
 
             if not isinstance(vol, (int, float)) or vol <= 0:
-                return 0.0
+                return vmin  # ⬅️ fallback min au lieu de 0
 
             vol = max(vmin, min(vmax, float(vol)))
             if vstep and vstep > 0:
@@ -1245,7 +1242,13 @@ class TradeExecutor:
                 vol = vmin + steps * vstep
                 if vol > vmax:
                     vol = max(vmin, vmax)
-            return float(vol)
+
+            # 🚑 Sécurité : jamais < vmin
+            if vol < vmin:
+                vol = vmin
+
+            return float(round(vol, 2))  # ⬅️ arrondi 2 décimales max
+
 
         # ---------- 1) Action ----------
         action_raw = _first_non_empty(
