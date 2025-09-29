@@ -387,105 +387,65 @@ class ScalpingStrategy(BaseStrategy):
         context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Ouvre un panier (burst) de N ordres d’un coup.
-        Garde-fous :
-            - ATR M1 min (soft)
-            - Spread max
-            - Confirmation directionnelle M1 (optionnelle)
-        Niveaux :
-            - SL/TP en pips si fournis, sinon laissés au TradeExecutor
+        Burst Scalping (risk-based):
+        - Ouvre un panier de N ordres d’un coup
+        - Volume calculé dynamiquement selon risk_per_trade_percent
+        - SL obligatoire, pas de TP (gestion via trailing stop)
         """
+        import math, uuid
+
         size = int(burst_cfg.get("size", 5))
         if size <= 0:
             return None
 
-        # ⚡ Patch robuste : calculer la vraie taille d'un pip depuis le broker
-        try:
-            symbol_info = context.get("symbol_info", {}) or {}
-            point = float(symbol_info.get("point", 0.01))
-            pip_size_value = point * 10.0  # 1 pip = 10 points
-        except Exception:
-            pip_size_value = 0.1  # fallback safe
+        # --- Infos broker ---
+        symbol_info = context.get("symbol_info", {}) or {}
+        point = float(symbol_info.get("point", 0.01))
+        pip_size_value = point * 10.0  # ex: 1 pip = 10 points
 
-        # ✅ Utilisation de la fonction refactorisée
-        atr_m1_pips = self._get_atr_m1_pips(asset, signals, context, pip_size_value)
+        contract_size = float(symbol_info.get("trade_contract_size", 100000))  # ex: 100k forex
+        tick_value = float(symbol_info.get("trade_tick_value", 1.0))
+        tick_size = float(symbol_info.get("trade_tick_size", 0.0001))
 
-               # --- PATCH dynamique pour min_atr_m1 et max_spread ---
-        try:
-            if "min_atr_m1_pips" in burst_cfg:
-                min_atr_m1 = float(burst_cfg.get("min_atr_m1_pips"))
-            else:
-                guardrails_cfg = {}
-                try:
-                    guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-                except Exception:
-                    guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
-                min_atr_m1 = float(
-                    guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0)
-                )
-        except Exception:
-            min_atr_m1 = 0.0
+        value_per_point = tick_value / tick_size if tick_size > 0 else 1.0
 
-        try:
-            if "max_spread_pips" in burst_cfg:
-                max_spread_burst = float(burst_cfg.get("max_spread_pips"))
-            else:
-                guardrails_cfg = {}
-                try:
-                    guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-                except Exception:
-                    guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
-                max_spread_burst = float(
-                    guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0)
-                )
-        except Exception:
-            max_spread_burst = 999.0
+        # --- Config risk management ---
+        account_info = context.get("account_info", {}) or {}
+        equity = float(account_info.get("equity", 0.0) or 0.0)
 
-        # optional bypass
-        try:
-            guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-        except Exception:
-            guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
-        ignore_all = bool(guardrails_cfg.get("ignore_all", False))
-        burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
-        effective_ignore_checks = ignore_all or burst_ignore_checks
+        risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
+        max_risk = equity * (risk_pct / 100.0)
 
-        self.logger.debug(
-            f"[SCALPING] seuils utilisés => min_atr_m1={min_atr_m1}, max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
-        )
-        # --- FIN PATCH ---
-
-        # Garde Spread (appliquer seulement si on ne bypasse pas)
-        if not effective_ignore_checks:
-            if meta.get("spread_pips", 0.0) > max_spread_burst:
-                self.logger.info(
-                    f"[{asset}] Burst refusé: spread {meta['spread_pips']:.2f}p > {max_spread_burst:.2f}p."
-                )
-                return None
-            # ATR guard
-            if (min_atr_m1 or 0.0) > 0 and (atr_m1_pips is None or atr_m1_pips < (min_atr_m1 or 0.0)):
-                self.logger.info(
-                    f"[{asset}] Burst refusé: ATR M1 {atr_m1_pips or 0:.1f}p < {min_atr_m1:.1f}p."
-                )
-                return None
-
-
-        # Confirmation directionnelle M1 (facultative)
-        if burst_cfg.get("require_m1_bias", False):
-            m1_bias = str(signals.get("m1_bias", "")).lower()
-            if (action == "BUY" and m1_bias != "up") or (
-                action == "SELL" and m1_bias != "down"
-            ):
-                self.logger.info(
-                    f"[{asset}] Burst refusé: m1_bias={m1_bias} incompatible avec action={action}."
-                )
-                return None
-
-        # Niveaux pips (optionnels)
         sl_pips = burst_cfg.get("sl_pips")
-        tp_pips = burst_cfg.get("tp_pips")
-        
-        # --- PATCH: Empêcher plusieurs bursts simultanés ---
+        if not isinstance(sl_pips, (int, float)) or sl_pips <= 0:
+            sl_pips = 5.0  # fallback minimal pour éviter division par zéro
+
+        # --- Distance SL en prix ---
+        if action == "BUY":
+            sl_price = entry_price - sl_pips * pip_size_value
+            sl_distance_price = entry_price - sl_price
+        else:
+            sl_price = entry_price + sl_pips * pip_size_value
+            sl_distance_price = sl_price - entry_price
+
+        sl_distance_price = abs(sl_distance_price)
+
+        # --- Risque par lot ---
+        risk_per_lot = sl_distance_price * value_per_point
+        volume = max_risk / risk_per_lot if risk_per_lot > 0 else 0.0
+
+        # --- Normalisation broker ---
+        min_lot = float(symbol_info.get("volume_min", 0.01))
+        lot_step = float(symbol_info.get("volume_step", 0.01))
+        max_lot = float(symbol_info.get("volume_max", 100.0))
+
+        volume = max(min_lot, min(max_lot, math.floor(volume / lot_step) * lot_step))
+
+        if volume <= 0:
+            self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
+            return None
+
+        # --- Vérif positions déjà actives (éviter burst multiples) ---
         open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
         active_baskets = {
             pos.get("basket_id")
@@ -497,50 +457,34 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Refus ouverture nouveau burst: déjà actif ({list(active_baskets)})"
             )
             return None
-        
-        # Construire le panier
+
+        # --- Construire le panier ---
         basket_id = f"burst_{asset}_{uuid.uuid4().hex[:8]}"
         decisions: List[Dict[str, Any]] = []
+
         for i in range(size):
             d: Dict[str, Any] = {
                 "action": action,
                 "asset": asset,
                 "order_type": "MARKET",
                 "entry_price": entry_price,
+                "sl_price": sl_price,  # ✅ obligatoire
+                "volume": volume,      # ✅ calcul dynamique
                 "rule_name": "burst_scalping",
-                "strategy_type": "scalping",  # ✅ cohérence
+                "strategy_type": "scalping",
                 "basket_id": basket_id,
                 "burst_index": i + 1,
                 "burst_size": size,
                 "meta": {"burst": True},
             }
-
-            if isinstance(sl_pips, (int, float)) and sl_pips > 0:
-                d["target_sl_pips"] = float(sl_pips)
-                
-                # ✅ Conversion pips → prix concret (sl_price attendu par TradeExecutor)
-                if action == "BUY":
-                    d["sl_price"] = entry_price - sl_pips * pip_size_value
-                else:
-                    d["sl_price"] = entry_price + sl_pips * pip_size_value
-            else:
-                # fallback minimal obligatoire (sinon build_burst_trailing_request plantera)
-                default_sl_pips = 5.0  # à paramétrer dans ton burst_cfg si tu veux
-                if action == "BUY":
-                    d["sl_price"] = entry_price - default_sl_pips * pip_size_value
-                else:
-                    d["sl_price"] = entry_price + default_sl_pips * pip_size_value
-
-            # 🚫 Pas de TP pour burst_scalping → on ne met pas target_tp_pips
-
             decisions.append(d)
 
         self.logger.info(
-            f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
+            f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | "
+            f"SL={sl_price} | volume={volume:.2f} | risk={risk_pct}% | basket_id={basket_id}"
         )
         return {"burst_decisions": decisions, "basket_id": basket_id}
 
-    # --- Helpers MTF pour la règle range/accumulation ---
 
     def _get_bars(self, asset: str, timeframe: str, count: int):
         """

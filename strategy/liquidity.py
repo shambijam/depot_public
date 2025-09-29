@@ -39,21 +39,46 @@ class LiquidityStrategy(BaseStrategy):
 
         self.logger.info("Moteur de stratégie Liquidity initialisé.")
 
-    # =========================
+       # =========================
     #      PUBLIC METHODS
     # =========================
     def evaluate_entry(
+        self,
+        analyzed_context: Dict[str, Any],
+        asset_signals: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Dispatcher multi-actifs :
+        - analyzed_context : contexte global
+        - asset_signals : {"EURUSD": {...}, "GBPUSD": {...}, ...}
+        Retourne un dict {asset: decision} (seuls les actifs avec setup valide sont présents).
+        """
+        results: Dict[str, Any] = {}
+        if not isinstance(asset_signals, dict):
+            return results
+
+        for asset, sig in asset_signals.items():
+            try:
+                dec = self._evaluate_single_asset(asset, analyzed_context, sig or {})
+                if dec:
+                    results[asset] = dec
+            except Exception as e:
+                self.logger.error(f"[LIQUIDITY] evaluate_entry error on {asset}: {e}", exc_info=True)
+
+        return results
+
+    # =========================
+    #   LOGIQUE PAR ACTIF
+    # =========================
+    def _evaluate_single_asset(
         self,
         asset: str,
         analyzed_context: Dict[str, Any],
         asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Version 'desk pro' compatible pipeline:
-        - Priorité: Marubozu (via MarketAnalyzer) > Range Accumulation MTF >
-        Range Accumulation simple > Burst scalping
-        - ATR/Spread n'affecte que le burst, jamais les règles indépendantes
-        - Retourne un dictionnaire décision normalisé ou {} si aucun setup valide
+        **Reprise 1:1 de ta logique d’origine**, mais en scope mono-actif.
+        Rien d’autre n’est modifié.
         """
         try:
             # --- 0) Données & config ---
@@ -79,7 +104,6 @@ class LiquidityStrategy(BaseStrategy):
                     )
                     mres = analyzer.analyze(df_work.copy(), asset)
                     if isinstance(mres, dict):
-                        # On prend le dernier signal pattern si dispo
                         latest_pattern = mres.get("patterns", {}).get("candles", [])[-1] \
                             if mres.get("patterns", {}).get("candles") else mres.get("latest")
             except Exception as e:
@@ -217,7 +241,7 @@ class LiquidityStrategy(BaseStrategy):
 
             try:
                 min_atr_req = float(
-                    burst_cfg.get(
+                    (strat_cfg.get("burst_scalping") or {}).get(
                         "min_atr_m1_pips",
                         guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0),
                     )
@@ -227,7 +251,7 @@ class LiquidityStrategy(BaseStrategy):
 
             try:
                 max_spread_burst = float(
-                    burst_cfg.get(
+                    (strat_cfg.get("burst_scalping") or {}).get(
                         "max_spread_pips",
                         guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0),
                     )
@@ -236,7 +260,7 @@ class LiquidityStrategy(BaseStrategy):
                 max_spread_burst = 999.0
 
             ignore_all = bool(guardrails_cfg.get("ignore_all", False))
-            burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
+            burst_ignore_checks = bool((strat_cfg.get("burst_scalping") or {}).get("ignore_checks", False))
             effective_ignore_checks = ignore_all or burst_ignore_checks
 
             self.logger.debug(
@@ -259,7 +283,7 @@ class LiquidityStrategy(BaseStrategy):
                     )
                     burst_allowed = False
 
-            if bool(burst_cfg.get("enabled", True)) and burst_allowed:
+            if bool((strat_cfg.get("burst_scalping") or {}).get("enabled", True)) and burst_allowed:
                 try:
                     burst_decision = self._rule_burst_scalping(
                         asset=asset,
@@ -267,7 +291,7 @@ class LiquidityStrategy(BaseStrategy):
                         entry_price=price,
                         meta=meta,
                         signals={**asset_signals, "atr_m1_pips": atr_m1_pips},
-                        burst_cfg=burst_cfg,
+                        burst_cfg=(strat_cfg.get("burst_scalping") or {}),
                         context=analyzed_context,
                     )
                     if burst_decision:
@@ -285,8 +309,6 @@ class LiquidityStrategy(BaseStrategy):
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
-
-
 
 
     def _apply_break_even(self, pos: dict, context: dict, rr_threshold: float = 1.0):
