@@ -209,15 +209,68 @@ class DecisionPipeline:
                     try:
                         dec = scalping.evaluate_entry("XAUUSD", analyzed_context, signals["XAUUSD"])
                         if isinstance(dec, dict):
-                            # Cas spécial BURST
-                            if "burst_decisions" in dec and isinstance(dec["burst_decisions"], list):
-                                for sub_dec in dec["burst_decisions"]:
-                                    sub_dec["strategy_type"] = "scalping"
-                                    _ensure_asset(sub_dec, "XAUUSD")
-                                    sub_dec.setdefault("execution_status", "ready")
-                                    if _is_valid(sub_dec):
-                                        scalping_decisions.append(sub_dec)
-                                        print(f"✅ [SCALPING] burst décision retenue: {sub_dec.get('action')} {sub_dec.get('asset')} idx={sub_dec.get('burst_index')}")
+
+                            # ====== CAS SPÉCIAL BURST ======
+                            if dec.get("rule_name") == "burst_scalping" \
+                            and isinstance(dec.get("burst_decisions"), list) \
+                            and dec["burst_decisions"]:
+                                sublist = dec["burst_decisions"]
+
+                                # Récupérer le basket_id s'il est présent dans les sous-ordres
+                                basket_id = None
+                                for sd in sublist:
+                                    if sd.get("basket_id"):
+                                        basket_id = sd["basket_id"]
+                                        break
+
+                                # Antidoublon: si un panier avec ce basket_id est déjà ouvert (d’après le contexte), on ignore
+                                def _ctx_has_basket(ctx, asset, bid):
+                                    try:
+                                        for pos in (ctx.get("open_positions") or []):
+                                            sym = pos.get("symbol") or pos.get("asset")
+                                            if str(sym) != str(asset):
+                                                continue
+                                            c = str(pos.get("comment") or "")
+                                            m = pos.get("meta") or {}
+                                            if bid and (bid == pos.get("basket_id") or bid == m.get("basket_id") or bid in c):
+                                                return True
+                                            # Support du tag générique "burst:<id>" dans comment
+                                            if c.startswith("burst:") and (not bid or bid in c):
+                                                return True
+                                    except Exception:
+                                        pass
+                                    return False
+
+                                if basket_id and _ctx_has_basket(analyzed_context, "XAUUSD", basket_id):
+                                    print(f"⛔ [SCALPING] burst ignoré: panier déjà ouvert ({basket_id})")
+                                else:
+                                    # On pousse UNE décision maître uniquement
+                                    master = sublist[0].copy()
+                                    master["strategy_type"] = "scalping"
+                                    _ensure_asset(master, "XAUUSD")
+                                    master.setdefault("execution_status", "ready")
+                                    master.setdefault("rule_name", "burst_scalping")
+
+                                    # Pack complet pour l'exécuteur (fan-out unique côté TradeExecutor)
+                                    meta_master = master.setdefault("meta", {})
+                                    meta_master["burst_package"] = sublist
+                                    if basket_id:
+                                        meta_master.setdefault("basket_id", basket_id)
+
+                                    # Tag pour traçage/anti-duplication côté broker/positions
+                                    if basket_id:
+                                        master.setdefault("comment", f"burst:{basket_id}")
+                                    else:
+                                        master.setdefault("comment", "burst:auto")
+
+                                    if _is_valid(master):
+                                        scalping_decisions.append(master)
+                                        print(
+                                            f"✅ [SCALPING] burst (maître) retenu: {master.get('action')} "
+                                            f"{master.get('asset')} size={len(sublist)} basket={basket_id}"
+                                        )
+
+                            # ====== CAS SCALPING NORMAL ======
                             else:
                                 dec["strategy_type"] = "scalping"
                                 _ensure_asset(dec, "XAUUSD")
@@ -228,6 +281,7 @@ class DecisionPipeline:
 
                     except Exception as e:
                         self.logger.error(f"[DECISION] Erreur scalping: {e}", exc_info=True)
+
 
             # --- LIQUIDITY (EURUSD/GBPUSD) ---
             liq_assets = [a for a in ("EURUSD", "GBPUSD") if a in signals]
@@ -1613,81 +1667,8 @@ class DecisionPipeline:
                     f"🚀 [EXECUTOR] Envoi ordre → {trade_decision.get('action')} {trade_decision.get('asset')} "
                     f"| vol={trade_decision.get('volume')} | SL={trade_decision.get('sl_price')} | TP={trade_decision.get('tp_price')}"
                 )
-                # --- PATCH: Construction et exécution directe via TradeExecutor ---
-                try:
-                    md_asset = (context.get("market_data", {}) or {}).get(
-                        asset_raw, {}
-                    ) or {}
-                    si = (
-                        md_asset.get("symbol_info")
-                        or current_config.get("symbol_info")
-                        or {}
-                    )
-
-                    point = float(si.get("point") or 0.0001)
-                    digits = int(si.get("digits") or 5)
-                    pip_points = 10.0 if digits in (3, 5) else 1.0
-                    pip_size = point * pip_points
-
-                    req = {
-                        "symbol": trade_decision["asset"],
-                        "type": getattr(
-                            te.mt5, f"ORDER_TYPE_{trade_decision['action']}"
-                        ),
-                        "volume": trade_decision.get("volume", 0.1),
-                        "price": trade_decision.get("entry_price"),
-                        "sl": trade_decision.get("sl_price"),
-                        "tp": trade_decision.get("tp_price"),
-                        "deviation": current_config.get("max_slippage_points", 20),
-                        "magic": current_config.get("magic_number", 123456),
-                        "comment": trade_decision.get("rule_name", "core_decision"),
-                        "strategy_type": trade_decision.get("strategy_type", "core"),
-                        "rule_name": trade_decision.get("rule_name", "core"),
-                        "pip_size": pip_size,
-                    }
-
-                    print(
-                        f"🚀 [EXECUTOR-PATCH] Envoi direct ordre → {req['symbol']} | {req['type']} "
-                        f"| vol={req['volume']} | SL={req['sl']} | TP={req['tp']}"
-                    )
-
-                    exec_res = te.execute_order(req)
-                    self.logger.info(
-                        f"[EXECUTOR-PATCH] Résultat exécution directe: {exec_res}"
-                    )
-
-                    # enrichir la décision avec le résultat
-                    trade_decision["execution_status"] = exec_res.get(
-                        "status", "unknown"
-                    )
-                    trade_decision["executed"] = trade_decision["execution_status"] in {
-                        "filled",
-                        "placed",
-                    }
-                    trade_decision["order_id"] = exec_res.get("order")
-                    trade_decision["deal_id"] = exec_res.get("deal")
-                    trade_decision["execution_price"] = exec_res.get("price")
-
-                    # logs humains
-                    if trade_decision["executed"]:
-                        print(
-                            f"🎉 [EXECUTOR-PATCH] TRADE EXÉCUTÉ → {trade_decision['action']} {trade_decision['asset']} "
-                            f"@{trade_decision['execution_price']} (vol={trade_decision['volume']})"
-                        )
-                    else:
-                        print(
-                            f"⚠️ [EXECUTOR-PATCH] Trade non exécuté: status={trade_decision['execution_status']}"
-                        )
-
-                except Exception as e:
-                    self.logger.error(
-                        f"[EXECUTOR-PATCH] Erreur envoi direct MT5: {e}", exc_info=True
-                    )
-                    print(f"💥 [EXECUTOR-PATCH] Erreur exécution: {e}")
-
-                exec_res = run_trade_execution_pipeline(
-                    te, decision_package, is_dry_run=False
-                )
+                # --- PATCH A: Centralisation exécution ---
+                exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
                 self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
 
                 # --- Enrichir la décision avec le résultat d'exécution ---
