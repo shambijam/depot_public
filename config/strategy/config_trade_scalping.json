@@ -98,7 +98,7 @@
         "burst_size": 5,
         "max_bursts": 1,
         "max_spread_pips": 30.0,
-        "min_atr_m1_pips": 0.0,
+        "min_atr_m1_pips": 0.20,
         "trailing": {
           "enabled": true,
           "trigger_pips": 15,
