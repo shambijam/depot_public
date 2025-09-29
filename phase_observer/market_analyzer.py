@@ -71,9 +71,9 @@ class MarketAnalyzer:
             "latest": latest,
             "patterns": {
                 "candles": candles,
-                "multi": multi,
-                "combos": combos,
-                "orderflow": orderflow,
+                "multi": multi_patterns,
+                "combos": combo_patterns,
+                "orderflow": orderflow_signals,
             },
             "phase": latest.get("phase"),
             "confidence": latest.get("confidence_score", 0.5),
@@ -81,6 +81,7 @@ class MarketAnalyzer:
             "quality_score": quality_score,
             "confluence": confluence,
         }
+
 
         self._last_results[asset] = results
         return results
@@ -150,3 +151,34 @@ class MarketAnalyzer:
         """Met à jour le cache multi-timeframe pour la confluence."""
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._confluence_cache[tf.upper()] = df.tail(200)
+            
+    def _compute_confluence(self) -> Dict[str, Any]:
+        """
+        Évalue la confluence multi-timeframes à partir du cache interne.
+        Retourne un dict simple: direction + score.
+        """
+        try:
+            bullish = 0
+            bearish = 0
+
+            # Parcours des DF stockés dans _confluence_cache
+            for tf, df in self._confluence_cache.items():
+                if df is None or df.empty:
+                    continue
+                last = df.iloc[-1].to_dict()
+                if last.get("phase") == "bullish":
+                    bullish += 1
+                elif last.get("phase") == "bearish":
+                    bearish += 1
+
+            if bullish > bearish:
+                return {"direction": "bullish", "count": bullish}
+            elif bearish > bullish:
+                return {"direction": "bearish", "count": bearish}
+            else:
+                return {"direction": "neutral", "count": 0}
+
+        except Exception as e:
+            self.logger.warning(f"[MarketAnalyzer] Erreur confluence: {e}")
+            return {"direction": "neutral", "count": 0}
+      
