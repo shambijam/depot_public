@@ -4,6 +4,12 @@ import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from .orchestrator import PhaseObserver
 from .detectors import Detectors   # classe regroupant les détecteurs
+from .detectors import (
+        detect_single_candle,
+        detect_multi_candle_patterns,
+        detect_combos,
+        detect_orderflow,
+    )
 
 LOG = logging.getLogger(__name__)
 
@@ -42,10 +48,13 @@ class MarketAnalyzer:
             return {"annotated_df": pd.DataFrame(), "latest": {}, "patterns": {}}
 
         # 2️⃣ Détecteurs factuels
-        candles = [self.detectors.detect_single_candle(annotated_df, i) for i in range(len(annotated_df))]
-        multi = self.detectors.detect_multi_candle_patterns(annotated_df)
-        combos = self.detectors.detect_combos(annotated_df)
-        orderflow = self.detectors.detect_orderflow(annotated_df)
+  
+
+        candles = [detect_single_candle(annotated_df, i) for i in range(len(annotated_df))]
+        multi_patterns = detect_multi_candle_patterns(annotated_df)
+        combo_patterns = detect_combos(annotated_df)
+        orderflow_signals = detect_orderflow(annotated_df)
+
 
         # 3️⃣ Résumé dernier point
         latest = annotated_df.iloc[-1].to_dict()
