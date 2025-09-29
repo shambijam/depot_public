@@ -478,6 +478,7 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
+    
     def _rule_burst_scalping(
         self,
         asset: str,
@@ -493,10 +494,13 @@ class ScalpingStrategy(BaseStrategy):
         - Ouvre un panier de N ordres d’un coup
         - Volume calculé dynamiquement selon risk_per_trade_percent
         - SL obligatoire, pas de TP (gestion via trailing stop)
+        - Respecte strictement burst_size et max_bursts de la config
         """
         import math, uuid
 
-        size = int(burst_cfg.get("size", 5))
+        # === Lecture config ===
+        size = int(burst_cfg.get("burst_size", 3))          # nombre d’ordres par burst
+        max_bursts = int(burst_cfg.get("max_bursts", 1))    # nombre de bursts autorisés en parallèle
         if size <= 0:
             return None
 
@@ -505,24 +509,23 @@ class ScalpingStrategy(BaseStrategy):
         point = float(symbol_info.get("point", 0.01))
         pip_size_value = point * 10.0  # ex: 1 pip = 10 points
 
-        contract_size = float(symbol_info.get("trade_contract_size", 100000))  # ex: 100k forex
+        contract_size = float(symbol_info.get("trade_contract_size", 100000))
         tick_value = float(symbol_info.get("trade_tick_value", 1.0))
         tick_size = float(symbol_info.get("trade_tick_size", 0.0001))
-
         value_per_point = tick_value / tick_size if tick_size > 0 else 1.0
 
         # --- Config risk management ---
         account_info = context.get("account_info", {}) or {}
         equity = float(account_info.get("equity", 0.0) or 0.0)
-
         risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
-        # ⬇️ PATCH : répartir le risque sur l’ensemble du panier
+
+        # Répartir le risque sur l’ensemble du panier
         max_risk = (equity * (risk_pct / 100.0)) / size
 
         # --- SL en pips depuis config ---
-        sl_pips = burst_cfg.get("sl_pips")
+        sl_pips = burst_cfg.get("sl_pips", 5.0)
         if not isinstance(sl_pips, (int, float)) or sl_pips <= 0:
-            sl_pips = 5.0  # fallback minimal pour éviter division par zéro
+            sl_pips = 5.0
 
         # --- Distance SL en prix ---
         if action == "BUY":
@@ -542,23 +545,23 @@ class ScalpingStrategy(BaseStrategy):
         min_lot = float(symbol_info.get("volume_min", 0.01))
         lot_step = float(symbol_info.get("volume_step", 0.01))
         max_lot = float(symbol_info.get("volume_max", 100.0))
-
         volume = max(min_lot, min(max_lot, math.floor(volume / lot_step) * lot_step))
 
         if volume <= 0:
             self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
             return None
 
-        # --- Vérif positions déjà actives (éviter burst multiples) ---
+        # --- Vérif bursts déjà actifs ---
         open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
         active_baskets = {
             pos.get("basket_id")
             for pos in open_positions
             if pos.get("meta", {}).get("burst")
         }
-        if active_baskets:
+
+        if len(active_baskets) >= max_bursts:
             self.logger.warning(
-                f"[{asset}] Refus ouverture nouveau burst: déjà actif ({list(active_baskets)})"
+                f"[{asset}] Refus nouveau burst: {len(active_baskets)}/{max_bursts} bursts déjà actifs."
             )
             return None
 
@@ -572,8 +575,8 @@ class ScalpingStrategy(BaseStrategy):
                 "asset": asset,
                 "order_type": "MARKET",
                 "entry_price": entry_price,
-                "sl_price": sl_price,  # ✅ obligatoire
-                "volume": volume,      # ✅ calcul dynamique
+                "sl_price": sl_price,
+                "volume": volume,
                 "rule_name": "burst_scalping",
                 "strategy_type": "scalping",
                 "basket_id": basket_id,

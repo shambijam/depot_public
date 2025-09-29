@@ -83,17 +83,17 @@ class LiquidityStrategy(BaseStrategy):
         try:
             # --- 0) Données & config ---
             ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-            df_m1 = (
-                ctx_md.get("df_m1")
-                or ctx_md.get("rates_df")
-                or ctx_md.get("annotated_rates_df")
-                or ctx_md.get("df")
-            )
-            df_work = (
-                df_m1.copy()
-                if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
-                else None
-            )
+
+            # Sélection sécurisée du DataFrame (évite les erreurs pandas en booléen)
+            df_m1 = None
+            for key in ("df_m1", "rates_df", "annotated_rates_df", "df"):
+                val = ctx_md.get(key)
+                if isinstance(val, pd.DataFrame) and not val.empty:
+                    df_m1 = val
+                    break
+
+            df_work = df_m1.copy() if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50 else None
+
 
             # --- 0b) Détection patterns via MarketAnalyzer ---
             latest_pattern = None
