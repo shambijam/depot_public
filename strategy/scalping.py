@@ -315,6 +315,109 @@ class ScalpingStrategy(BaseStrategy):
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
+        
+    def _compute_volume_from_risk(
+        self,
+        asset: str,
+        entry_price: float,
+        sl_price: float,
+        risk_perc: float,
+        context: Dict[str, Any],
+        signals: Dict[str, Any],
+        meta: Dict[str, Any],
+    ) -> Optional[float]:
+        """
+        Calcule le volume (lots) à ouvrir pour risquer `risk_perc` % du solde.
+        Retourne volume en lots (float) ou None si impossible.
+        Méthode robuste : essaie plusieurs sources d'information (context, signals, mt5_connector).
+        """
+        try:
+            # 1) Balance du compte
+            balance = None
+            try:
+                balance = float((context.get("account_info") or {}).get("balance"))
+            except Exception:
+                balance = None
+            if (balance is None or balance <= 0) and getattr(self, "mt5_connector", None):
+                try:
+                    acc = getattr(self.mt5_connector, "get_account_info", lambda: {})() or {}
+                    balance = float(acc.get("balance") or acc.get("equity") or balance or 0)
+                except Exception:
+                    balance = None
+            if not balance or balance <= 0:
+                self.logger.warning(f"[{asset}] impossible de lire le solde pour calcul risk (balance={balance})")
+                return None
+
+            # 2) Risk amount en monnaie du compte
+            risk_amount = balance * (float(risk_perc) / 100.0)
+            if risk_amount <= 0:
+                self.logger.warning(f"[{asset}] risk_amount <= 0 (risk_perc={risk_perc})")
+                return None
+
+            # 3) SL distance (prix)
+            if sl_price is None:
+                self.logger.warning(f"[{asset}] sl_price manquant, impossible calcul volume.")
+                return None
+            sl_distance = abs(float(entry_price) - float(sl_price))
+            if sl_distance <= 0:
+                self.logger.warning(f"[{asset}] sl_distance invalide: {sl_distance}")
+                return None
+
+            # 4) pip / tick / valeur par pip par lot
+            # Priorités : signals.tick_value / signals.trade_tick_value ; meta.trade_tick_value ;
+            # sinon estimer via contract_size * point.
+            pip_value_per_lot = None
+            try:
+                tick_value = signals.get("trade_tick_value") or signals.get("tick_value") or meta.get("trade_tick_value") or meta.get("tick_value")
+                if tick_value is not None:
+                    pip_value_per_lot = float(tick_value) * 10.0  # si tick_value est valeur pour 1 point
+            except Exception:
+                pip_value_per_lot = None
+
+            if pip_value_per_lot is None:
+                # essayer contract_size * ratio
+                try:
+                    contract_size = float(signals.get("trade_contract_size") or meta.get("trade_contract_size") or meta.get("contract_size") or 1.0)
+                    point = float(signals.get("point") or meta.get("point") or 0.0001)
+                    pip_size = point * 10.0
+                    # approximation : pip value per lot = contract_size * pip_size
+                    pip_value_per_lot = max(1e-6, contract_size * pip_size)
+                except Exception:
+                    pip_value_per_lot = None
+
+            if pip_value_per_lot is None or pip_value_per_lot <= 0:
+                self.logger.warning(f"[{asset}] impossible de déterminer pip_value_per_lot (tick/contract missing).")
+                return None
+
+            # 5) volume lots = risk_amount / (sl_distance * pip_value_per_lot)
+            volume_lots = risk_amount / (sl_distance * pip_value_per_lot)
+
+            # 6) Clamp respectant min/max/step du broker (meta)
+            min_lot = float(meta.get("min_volume", meta.get("min_lot", 0.01)))
+            step = float(meta.get("volume_step", meta.get("lot_step", 0.01)))
+            max_lot = float(meta.get("max_volume", meta.get("max_lot", 1000.0)))
+
+            # Arrondir à pas
+            try:
+                steps = math.floor(volume_lots / step)
+                volume_lots = steps * step
+            except Exception:
+                pass
+
+            volume_lots = max(min_lot, volume_lots)
+            volume_lots = min(max_lot, volume_lots)
+
+            # Sécurité : si volume_lots devient 0 (trop petit), on refuse
+            if volume_lots <= 0:
+                self.logger.warning(f"[{asset}] volume calculé <= 0 après normalisation.")
+                return None
+
+            self.logger.info(f"[{asset}] volume calculé: {volume_lots:.4f} lots (risk={risk_perc}%, balance={balance}, sl_dist={sl_distance:.5f}, pip_val={pip_value_per_lot:.6f})")
+            return float(round(volume_lots, 4))
+        except Exception as e:
+            self.logger.exception(f"[{asset}] erreur _compute_volume_from_risk: {e}")
+            return None
+
 
 
     # ==========================================================
@@ -375,7 +478,6 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
-
     def _rule_burst_scalping(
         self,
         asset: str,
@@ -414,8 +516,10 @@ class ScalpingStrategy(BaseStrategy):
         equity = float(account_info.get("equity", 0.0) or 0.0)
 
         risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
-        max_risk = equity * (risk_pct / 100.0)
+        # ⬇️ PATCH : répartir le risque sur l’ensemble du panier
+        max_risk = (equity * (risk_pct / 100.0)) / size
 
+        # --- SL en pips depuis config ---
         sl_pips = burst_cfg.get("sl_pips")
         if not isinstance(sl_pips, (int, float)) or sl_pips <= 0:
             sl_pips = 5.0  # fallback minimal pour éviter division par zéro
