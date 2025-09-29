@@ -70,6 +70,78 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #   LOGIQUE PAR ACTIF
     # =========================
+    
+        # --- helpers nécessaires par _evaluate_single_asset -----------------------
+    def _safe_asset_meta(
+        self,
+        asset: str,
+        signals: Dict[str, Any],
+        context: Dict[str, Any],
+        strat_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Assemble proprement les métadonnées utilisées par evaluate_single_asset.
+        Remplit pip_size et spread_pips (indispensables pour les gardes-fous).
+        """
+        md_all = (context.get("market_data") or {})
+        ctx_md = md_all.get(asset, {}) or {}
+        # Certaines implémentations stockent symbol_info dans le contexte global
+        symbol_info = ctx_md.get("symbol_info") or context.get("symbol_info") or {}
+
+        # Basics broker
+        point = float(symbol_info.get("point", 0.0001) or 0.0001)
+        digits = int(symbol_info.get("digits", 5) or 5)
+
+        # pip_size robuste : par défaut 10 * point (FX 5 digits → 0.0001 ; XAU point=0.01 → 0.1)
+        pip_size = float(symbol_info.get("pip_size", point * 10.0))
+
+        # spread en "points" côté broker; converti en pips pour les checks
+        # Ex: points_per_pip = pip_size / point (FX 5 digits: 0.0001 / 0.00001 = 10)
+        raw_spread_points = float(symbol_info.get("spread", signals.get("current_spread_points", 0.0)) or 0.0)
+        points_per_pip = (pip_size / point) if point > 0 else 10.0
+        spread_pips = float(raw_spread_points) / float(points_per_pip) if points_per_pip > 0 else raw_spread_points
+
+        return {
+            "asset": asset,
+            "phase": signals.get("phase") or "unknown",
+            "confidence": float(signals.get("confidence", 0.0) or 0.0),
+            "volatility": float(signals.get("volatility", 0.0) or 0.0),
+            "rule": signals.get("rule") or strat_cfg.get("rule", "default"),
+            # clés attendues par le code appelant :
+            "pip_size": float(pip_size),
+            "spread_pips": float(spread_pips),
+            "point": float(point),
+            "digits": int(digits),
+        }
+
+    def _safe_price_from_signals(self, signals: Dict[str, Any]) -> Optional[float]:
+        """
+        Récupère un prix exploitable depuis les signaux (sans lever d'exception).
+        Ordre de priorité: entry_price > price > last > mid > (ask+bid)/2 > close.
+        """
+        for k in ("entry_price", "price", "last", "mid", "close", "ask", "bid"):
+            v = signals.get(k)
+            try:
+                if v is not None:
+                    v = float(v)
+                    if k in ("ask", "bid") and k in ("ask", "bid"):
+                        # si un seul (ask ou bid) est dispo on le prend; si les deux existent mid sera mieux
+                        pass
+                    return v
+            except Exception:
+                continue
+
+        # mid si ask/bid dispo
+        ask = signals.get("ask")
+        bid = signals.get("bid")
+        try:
+            if ask is not None and bid is not None:
+                return (float(ask) + float(bid)) / 2.0
+        except Exception:
+            pass
+
+        return None
+
     def _evaluate_single_asset(
         self,
         asset: str,

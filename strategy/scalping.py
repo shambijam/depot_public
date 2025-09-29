@@ -478,7 +478,6 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
-    
     def _rule_burst_scalping(
         self,
         asset: str,
@@ -495,8 +494,9 @@ class ScalpingStrategy(BaseStrategy):
         - Volume calculé dynamiquement selon risk_per_trade_percent
         - SL obligatoire, pas de TP (gestion via trailing stop)
         - Respecte strictement burst_size et max_bursts de la config
+        - Refuse tout nouveau burst tant qu’un panier burst pour l’actif est encore ouvert
         """
-        import math, uuid
+        import math, uuid, re
 
         # === Lecture config ===
         size = int(burst_cfg.get("burst_size", 3))          # nombre d’ordres par burst
@@ -520,7 +520,7 @@ class ScalpingStrategy(BaseStrategy):
         risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
 
         # Répartir le risque sur l’ensemble du panier
-        max_risk = (equity * (risk_pct / 100.0)) / size
+        max_risk = (equity * (risk_pct / 100.0)) / max(1, size)
 
         # --- SL en pips depuis config ---
         sl_pips = burst_cfg.get("sl_pips", 5.0)
@@ -528,40 +528,52 @@ class ScalpingStrategy(BaseStrategy):
             sl_pips = 5.0
 
         # --- Distance SL en prix ---
-        if action == "BUY":
+        if action.upper() == "BUY":
             sl_price = entry_price - sl_pips * pip_size_value
             sl_distance_price = entry_price - sl_price
         else:
             sl_price = entry_price + sl_pips * pip_size_value
             sl_distance_price = sl_price - entry_price
-
         sl_distance_price = abs(sl_distance_price)
 
         # --- Risque par lot ---
         risk_per_lot = sl_distance_price * value_per_point
-        volume = max_risk / risk_per_lot if risk_per_lot > 0 else 0.0
+        volume = (max_risk / risk_per_lot) if risk_per_lot > 0 else 0.0
 
         # --- Normalisation broker ---
         min_lot = float(symbol_info.get("volume_min", 0.01))
         lot_step = float(symbol_info.get("volume_step", 0.01))
         max_lot = float(symbol_info.get("volume_max", 100.0))
-        volume = max(min_lot, min(max_lot, math.floor(volume / lot_step) * lot_step))
+
+        # arrondi au pas broker
+        if lot_step > 0:
+            volume = math.floor(volume / lot_step) * lot_step
+        volume = max(min_lot, min(max_lot, volume))
 
         if volume <= 0:
             self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
             return None
 
-        # --- Vérif bursts déjà actifs ---
+        # === Vérif bursts déjà actifs (via COMMENT MT5) =========================
+        # On lit les positions ouvertes et on détecte les paniers burst par le pattern de commentaire
+        # Format attendu côté envoi: "burst_scalping|BURST|basket=<basket_id>|<i>/<size>"
         open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
-        active_baskets = {
-            pos.get("basket_id")
-            for pos in open_positions
-            if pos.get("meta", {}).get("burst")
-        }
+        basket_pat = re.compile(r"burst_scalping\|BURST\|basket=([A-Za-z0-9_]+)", re.IGNORECASE)
 
-        if len(active_baskets) >= max_bursts:
+        active_baskets_for_asset = set()
+        for pos in open_positions or []:
+            # Certaines implémentations renvoient 'symbol', d'autres 'asset'
+            pos_sym = pos.get("symbol") or pos.get("asset")
+            if pos_sym and str(pos_sym).upper() == asset.upper():
+                comment = pos.get("comment", "") or ""
+                m = basket_pat.search(comment)
+                if m:
+                    active_baskets_for_asset.add(m.group(1))
+
+        # Refus strict si un burst existe déjà pour cet actif (et max_bursts=1)
+        if len(active_baskets_for_asset) >= max_bursts:
             self.logger.warning(
-                f"[{asset}] Refus nouveau burst: {len(active_baskets)}/{max_bursts} bursts déjà actifs."
+                f"[{asset}] Refus nouveau burst: {len(active_baskets_for_asset)}/{max_bursts} panier(s) déjà actif(s) pour {asset}."
             )
             return None
 
@@ -570,19 +582,22 @@ class ScalpingStrategy(BaseStrategy):
         decisions: List[Dict[str, Any]] = []
 
         for i in range(size):
+            comment = f"burst_scalping|BURST|basket={basket_id}|{i+1}/{size}"
             d: Dict[str, Any] = {
                 "action": action,
                 "asset": asset,
                 "order_type": "MARKET",
                 "entry_price": entry_price,
                 "sl_price": sl_price,
+                "tp_price": None,                         # pas de TP (trailing)
                 "volume": volume,
                 "rule_name": "burst_scalping",
                 "strategy_type": "scalping",
                 "basket_id": basket_id,
                 "burst_index": i + 1,
                 "burst_size": size,
-                "meta": {"burst": True},
+                "meta": {"burst": True, "entry_source": "core_decision"},
+                "comment": comment,                       # <<<< clé : on sérialise le basket dans le comment
             }
             decisions.append(d)
 

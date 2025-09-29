@@ -3634,6 +3634,25 @@ class TradeExecutor:
             sl = request.get("sl")
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
+            
+            # --- PATCH SÉCURITÉ SL (évite Invalid Stops) ---
+            if sl is not None:
+                sl = float(sl)
+                # Vérifie sens du SL
+                if action == "BUY" and sl >= price:
+                    sl = price - (tick_size or point)
+                elif action == "SELL" and sl <= price:
+                    sl = price + (tick_size or point)
+
+                # Vérifie distance minimale broker
+                if abs(price - sl) < stops_level_pts * point:
+                    buf = tick_size or point
+                    if action == "BUY":
+                        sl = price - max(stops_level_pts * point, buf)
+                    else:
+                        sl = price + max(stops_level_pts * point, buf)
+
+                request["sl"] = _round_to_tick(sl)
 
             # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
             if price and point:
