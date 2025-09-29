@@ -138,6 +138,31 @@ class ScalpingStrategy(BaseStrategy):
                     self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
 
             strat_cfg = (self.strategy_config or {}).copy()
+            
+            # --- Banque privée: décision patterns chandeliers ---
+            if latest_pattern and isinstance(df_work, pd.DataFrame) and len(df_work) > 0:
+                last_candle = df_work.iloc[-1]
+                pattern_action = self.decide_from_patterns(
+                    asset,
+                    latest_pattern,
+                    last_candle,
+                    ctx={
+                        "atr_m1_pips": None,
+                        "spread_pips": meta.get("spread_pips", 999.0),
+                        "trend_hint": None,  # ou ton biais SMA si dispo
+                        "near_resistance": meta.get("near_resistance"),
+                        "near_support": meta.get("near_support"),
+                        "sma_fast_up": meta.get("sma_fast_up"),
+                        "sma_fast_down": meta.get("sma_fast_down"),
+                    },
+                )
+                if pattern_action in ("BUY", "SELL"):
+                    action = pattern_action
+                    self.logger.info(
+                        f"[{asset}] 📊 decide_from_patterns → action={action} "
+                        f"(pattern={latest_pattern.get('pattern')})"
+                    )
+
 
             # Config burst_scalping
             burst_cfg = (
@@ -479,6 +504,147 @@ class ScalpingStrategy(BaseStrategy):
             )
         return None
     
+    # =====================================================
+    # BANQUE PRIVÉE — Décision via Patterns Chandeliers
+    # =====================================================
+    @staticmethod    
+    def decide_from_patterns(
+        asset: str,
+        latest_pattern: dict,
+        last_candle,
+        ctx: dict = None
+    ):
+        """
+        Renvoie 'BUY' | 'SELL' | None selon pattern + contexte.
+        Helpers _has et _candle_parts sont définis en local pour éviter les NameError.
+        """
+
+        # --- helpers locaux (aucune dépendance externe) ---
+        def _has(pname: str, *keys) -> bool:
+            pname = (pname or "").lower()
+            return any(k.lower() in pname for k in keys)
+
+        def _candle_parts(c):
+            # support objet OHLC (attributs) ou pandas Series (clés)
+            def _get(obj, key):
+                if hasattr(obj, key):
+                    return getattr(obj, key)
+                if isinstance(obj, dict) and key in obj:
+                    return obj[key]
+                # pandas Series
+                try:
+                    return obj[key]
+                except Exception:
+                    return None
+
+            o = float(_get(c, "open"))
+            h = float(_get(c, "high"))
+            l = float(_get(c, "low"))
+            cl = float(_get(c, "close"))
+
+            rng = max(1e-9, h - l)
+            body = abs(cl - o)
+            is_green = cl >= o
+            upper_wick = h - max(o, cl)
+            lower_wick = min(o, cl) - l
+            return o, h, l, cl, body, rng, upper_wick, lower_wick, is_green
+
+        # --- extraction candle + pattern ---
+        pname = str((latest_pattern or {}).get("pattern", "")).lower()
+        o, h, l, cl, body, rng, wu, wd, is_green = _candle_parts(last_candle)
+
+        # --- contexte/guardrails ---
+        ctx = ctx or {}
+        atr_pips      = ctx.get("atr_m1_pips")
+        min_atr_pips  = ctx.get("min_atr_pips", 0.1)
+        spread_pips   = ctx.get("spread_pips", 999.0)
+        max_spread    = ctx.get("max_spread_pips", 999.0)
+        trend_hint    = ctx.get("trend_hint")                # 'up' | 'down' | None
+        near_res      = bool(ctx.get("near_resistance", False))
+        near_sup      = bool(ctx.get("near_support", False))
+        sma_fast_up   = bool(ctx.get("sma_fast_up", False))
+        sma_fast_down = bool(ctx.get("sma_fast_down", False))
+
+        # Liquidity / ATR / spread
+        if atr_pips is not None and atr_pips < float(min_atr_pips):
+            return None
+        if float(spread_pips) > float(max_spread):
+            return None
+
+        # --- règles unitaires ---
+        action = None
+
+        # Engulfing
+        if _has(pname, "bullish engulfing", "engulfing_bull") and is_green:
+            action = "BUY"
+        if _has(pname, "bearish engulfing", "engulfing_bear") and not is_green:
+            action = "SELL"
+
+        # Marubozu
+        if _has(pname, "marubozu"):
+            action = "BUY" if is_green else "SELL"
+
+        # Doji/indécision → reject
+        if _has(pname, "doji", "spinning_top") or (body < 0.1 * rng):
+            return None
+
+        # Hammer / Hanging man
+        hammer_like = (wd > 2 * body and wu < body)
+        if _has(pname, "hammer") or hammer_like:
+            if is_green and not near_res:
+                action = "BUY"
+            else:
+                action = None
+
+        if _has(pname, "hanging man"):
+            if not is_green and not near_sup:
+                action = "SELL"
+
+        # Shooting star
+        shoot_like = (wu > 2 * body and wd < body)
+        if _has(pname, "shooting_star") or shoot_like:
+            if not is_green and not near_sup:
+                action = "SELL"
+
+        # --- combos ---
+        if _has(pname, "morning_star"): action = "BUY"
+        if _has(pname, "evening_star"): action = "SELL"
+        if _has(pname, "harami_bull") and is_green: action = "BUY"
+        if _has(pname, "harami_bear") and not is_green: action = "SELL"
+        if _has(pname, "tweezer_bottom"): action = "BUY"
+        if _has(pname, "tweezer_top"):    action = "SELL"
+        if _has(pname, "three_white_soldiers"): action = "BUY"
+        if _has(pname, "three_black_crows"):    action = "SELL"
+
+        # --- figures chartistes ---
+        if _has(pname, "double_bottom"): action = "BUY"
+        if _has(pname, "double_top"):    action = "SELL"
+        if _has(pname, "inverse_head_shoulders", "inv_head_shoulders"): action = "BUY"
+        if _has(pname, "head_shoulders", "head-and-shoulders"):          action = "SELL"
+        if _has(pname, "bull_flag", "bull_pennant"):  action = "BUY"
+        if _has(pname, "bear_flag", "bear_pennant"):  action = "SELL"
+        if _has(pname, "ascending_triangle"):  action = "BUY"
+        if _has(pname, "descending_triangle"): action = "SELL"
+        if _has(pname, "symmetrical_triangle"): action = None  # neutre
+
+        # --- confluences directionnelles ---
+        if action == "BUY"  and trend_hint == "down": action = None
+        if action == "SELL" and trend_hint == "up":   action = None
+        if action == "BUY"  and sma_fast_down:        action = None
+        if action == "SELL" and sma_fast_up:          action = None
+        if action == "BUY"  and near_res:             action = None
+        if action == "SELL" and near_sup:             action = None
+
+        # --- filtres finaux de cohérence (no BUY sur bougie rouge, etc.) ---
+        if action == "BUY"  and not is_green: return None
+        if action == "SELL" and is_green:      return None
+
+        return action
+
+    # =====================================================
+    # Tes règles scalping/liquidity existantes commencent ici
+    # =====================================================
+
     def _rule_burst_scalping(
         self,
         asset: str,
