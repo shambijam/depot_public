@@ -141,6 +141,33 @@ class LiquidityStrategy(BaseStrategy):
             pass
 
         return None
+    
+    def _infer_action_from_signals(self, signals: Dict[str, Any]) -> Optional[str]:
+        """
+        Déduit l'action (BUY / SELL) à partir des signaux fournis.
+        Cherche dans les clés communes, fallback sur None si pas clair.
+        """
+        if not isinstance(signals, dict):
+            return None
+
+        # Direct mapping
+        action = signals.get("action") or signals.get("direction") or signals.get("side")
+        if isinstance(action, str):
+            action = action.strip().upper()
+            if action in ("BUY", "SELL"):
+                return action
+
+        # Fallback: si 'bias' existe
+        bias = signals.get("bias")
+        if isinstance(bias, str):
+            bias = bias.strip().upper()
+            if "BULL" in bias or "LONG" in bias:
+                return "BUY"
+            if "BEAR" in bias or "SHORT" in bias:
+                return "SELL"
+
+        return None
+
 
     def _evaluate_single_asset(
         self,
