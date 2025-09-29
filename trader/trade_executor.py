@@ -2869,7 +2869,7 @@ class TradeExecutor:
                 tp_price = 0.0  # MT5 = pas de TP
                 self.logger.debug("[BURST] TP neutralisé → trailing stop only")
 
-        # --- Construction base requête ---
+         # --- Construction base requête ---
         order_type_str = str(order_type_str or "MARKET").upper()
         request = {
             "symbol": symbol_info.name,
@@ -2879,8 +2879,17 @@ class TradeExecutor:
             "tp": tp_price,
             "type_time": ORDER_TIME_GTC,
             "deviation": deviation_points,
-            "comment": "",  # rempli plus bas
+            # --- Propagation du basket_id / comment depuis la décision ---
+            "comment": (
+                trade_decision.get("comment")
+                or (
+                    f"burst_scalping|basket={trade_decision['basket_id']}|"
+                    f"{trade_decision.get('burst_index', 0)}/{trade_decision.get('burst_size', 0)}"
+                    if trade_decision.get("basket_id") else ""
+                )
+            ),
         }
+
 
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)

@@ -553,22 +553,21 @@ class ScalpingStrategy(BaseStrategy):
         if volume <= 0:
             self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
             return None
-
-        # === Vérif bursts déjà actifs (via COMMENT MT5) =========================
-        # On lit les positions ouvertes et on détecte les paniers burst par le pattern de commentaire
+       
         # Format attendu côté envoi: "burst_scalping|BURST|basket=<basket_id>|<i>/<size>"
         open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
-        basket_pat = re.compile(r"burst_scalping\|BURST\|basket=([A-Za-z0-9_]+)", re.IGNORECASE)
+        # --- Détection des paniers actifs via commentaire MT5 ---
+        basket_pat = re.compile(r"burst_scalping\|basket=([A-Za-z0-9_]+)", re.IGNORECASE)
 
         active_baskets_for_asset = set()
         for pos in open_positions or []:
-            # Certaines implémentations renvoient 'symbol', d'autres 'asset'
             pos_sym = pos.get("symbol") or pos.get("asset")
             if pos_sym and str(pos_sym).upper() == asset.upper():
-                comment = pos.get("comment", "") or ""
+                comment = str(pos.get("comment", "")) or ""
                 m = basket_pat.search(comment)
                 if m:
                     active_baskets_for_asset.add(m.group(1))
+
 
         # Refus strict si un burst existe déjà pour cet actif (et max_bursts=1)
         if len(active_baskets_for_asset) >= max_bursts:

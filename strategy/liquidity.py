@@ -144,29 +144,42 @@ class LiquidityStrategy(BaseStrategy):
     
     def _infer_action_from_signals(self, signals: Dict[str, Any]) -> Optional[str]:
         """
-        Déduit l'action (BUY / SELL) à partir des signaux fournis.
-        Cherche dans les clés communes, fallback sur None si pas clair.
+        Déduit BUY / SELL à partir des signaux.
+        - Cherche d'abord 'action' explicite
+        - Sinon mappe 'bias' ou 'regime' (bull → BUY, bear → SELL)
+        - Fallback None si pas clair
         """
         if not isinstance(signals, dict):
             return None
 
-        # Direct mapping
+        # 1) Action explicite
         action = signals.get("action") or signals.get("direction") or signals.get("side")
         if isinstance(action, str):
-            action = action.strip().upper()
-            if action in ("BUY", "SELL"):
-                return action
+            a = action.strip().upper()
+            if a in ("BUY", "SELL"):
+                return a
 
-        # Fallback: si 'bias' existe
+        # 2) Bias
         bias = signals.get("bias")
         if isinstance(bias, str):
-            bias = bias.strip().upper()
-            if "BULL" in bias or "LONG" in bias:
+            b = bias.strip().upper()
+            if "BULL" in b or "LONG" in b:
                 return "BUY"
-            if "BEAR" in bias or "SHORT" in bias:
+            if "BEAR" in b or "SHORT" in b:
                 return "SELL"
 
+        # 3) Régime du signal
+        regime = signals.get("regime") or signals.get("market_regime")
+        if isinstance(regime, str):
+            r = regime.lower()
+            if "bull" in r:
+                return "BUY"
+            if "bear" in r:
+                return "SELL"
+
+        # 4) Rien trouvé
         return None
+
 
 
     def _evaluate_single_asset(
