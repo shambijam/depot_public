@@ -20,7 +20,7 @@
   },
   "data_collection": {
     "default_timeframe": "M1",
-    "default_bars_count": 200
+    "default_bars_count": 500
   },
   "timeframe_mapping": {
     "M1": {

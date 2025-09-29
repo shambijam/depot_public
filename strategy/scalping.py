@@ -478,6 +478,7 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
+    
     def _rule_burst_scalping(
         self,
         asset: str,
@@ -545,7 +546,6 @@ class ScalpingStrategy(BaseStrategy):
         lot_step = float(symbol_info.get("volume_step", 0.01))
         max_lot = float(symbol_info.get("volume_max", 100.0))
 
-        # arrondi au pas broker
         if lot_step > 0:
             volume = math.floor(volume / lot_step) * lot_step
         volume = max(min_lot, min(max_lot, volume))
@@ -553,10 +553,9 @@ class ScalpingStrategy(BaseStrategy):
         if volume <= 0:
             self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
             return None
-       
-        # Format attendu côté envoi: "burst_scalping|BURST|basket=<basket_id>|<i>/<size>"
-        open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
+
         # --- Détection des paniers actifs via commentaire MT5 ---
+        open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
         basket_pat = re.compile(r"burst_scalping\|basket=([A-Za-z0-9_]+)", re.IGNORECASE)
 
         active_baskets_for_asset = set()
@@ -567,7 +566,6 @@ class ScalpingStrategy(BaseStrategy):
                 m = basket_pat.search(comment)
                 if m:
                     active_baskets_for_asset.add(m.group(1))
-
 
         # Refus strict si un burst existe déjà pour cet actif (et max_bursts=1)
         if len(active_baskets_for_asset) >= max_bursts:
@@ -581,14 +579,14 @@ class ScalpingStrategy(BaseStrategy):
         decisions: List[Dict[str, Any]] = []
 
         for i in range(size):
-            comment = f"burst_scalping|BURST|basket={basket_id}|{i+1}/{size}"
+            comment = f"burst_scalping|basket={basket_id}|{i+1}/{size}"
             d: Dict[str, Any] = {
                 "action": action,
                 "asset": asset,
                 "order_type": "MARKET",
                 "entry_price": entry_price,
                 "sl_price": sl_price,
-                "tp_price": None,                         # pas de TP (trailing)
+                "tp_price": None,  # pas de TP (trailing)
                 "volume": volume,
                 "rule_name": "burst_scalping",
                 "strategy_type": "scalping",
@@ -596,7 +594,7 @@ class ScalpingStrategy(BaseStrategy):
                 "burst_index": i + 1,
                 "burst_size": size,
                 "meta": {"burst": True, "entry_source": "core_decision"},
-                "comment": comment,                       # <<<< clé : on sérialise le basket dans le comment
+                "comment": comment,  # clé : on sérialise le basket dans le comment
             }
             decisions.append(d)
 
