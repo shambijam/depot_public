@@ -21,6 +21,9 @@ import core.strategy_manager
 # Charger les variables d'environnement dès le début pour les chemins critiques/secrets
 from dotenv import load_dotenv
 from phase_observer.market_analyzer import MarketAnalyzer
+from phase_observer.market_analyzer import MarketAnalyzer
+from phase_observer.orchestrator import PhaseObserver
+
 
 load_dotenv()
 
@@ -398,7 +401,9 @@ def main(args: argparse.Namespace) -> None:
 
         config_manager.ai_decision_instance = ai_decision
         
+        phase_observer = PhaseObserver(config_manager=config_manager)
         market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
+
         
         
 
