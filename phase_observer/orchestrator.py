@@ -39,18 +39,20 @@ from .memory import PhaseMemoryManager
 UTC = timezone.utc
 
 
+# ==== IMPORTS GLOBAUX (à placer en tête du fichier) ====
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime  # IMPORTANT: on importe la CLASSE, pas le module
 
-
-# ---------------------------
-# Helpers internes
-# ---------------------------
+# ==== HELPERS GLOBAUX (au niveau module, pas dans la classe) ====
 def _coerce_val(v):
-    """Remplace valeurs non-sérialisables par pd.NA"""
+    """
+    Remplace valeurs non sérialisables par pd.NA et laisse passer les scalaires propres.
+    NOTE: on utilise 'datetime' (classe) au lieu de 'datetime.datetime' pour éviter l'AttributeError.
+    """
     if v is None:
         return pd.NA
+    # np.generic couvre les scalaires numpy; pd.Timestamp et datetime (classe) pour les dates
     if isinstance(v, (float, int, str, bool, pd.Timestamp, datetime, np.generic)):
         return v
     try:
@@ -61,21 +63,21 @@ def _coerce_val(v):
 
 def _ensure_footprint_columns(df: pd.DataFrame):
     """
-    Crée/force les colonnes footprint en dtype object
-    (évite FutureWarning lors de l'insertion).
+    Crée/force les colonnes footprint en dtype 'object' pour éviter les FutureWarning lors des assignations mixtes.
     """
-    for col in [
+    cols = (
         "footprint_score",
         "footprint_status",
         "footprint_summary",
         "footprint_live_delta",
         "footprint_live_poc",
-    ]:
-        if col not in df.columns:
-            df[col] = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
-        else:
-            if df[col].dtype != object:
-                df[col] = df[col].astype("object")
+    )
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+        elif df[c].dtype != "object":
+            # uniformiser pour autoriser nombres/strings/dicts sérialisés
+            df[c] = df[c].astype("object")
     return df
 
 class PhaseObserver:
