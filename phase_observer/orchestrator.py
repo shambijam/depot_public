@@ -162,7 +162,8 @@ class PhaseObserver:
        
         # 1. Ajouter la nouvelle bougie fermée
         if self._history_df is None:
-            raise RuntimeError("History not initialised")
+            self._history_df = pd.DataFrame()
+
         self._history_df.loc[new_bar["time"]] = new_bar
 
         # 2. Footprint final

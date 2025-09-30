@@ -715,7 +715,10 @@ def run_single_pipeline_cycle(
                 if symbol_info_mt5:
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
-
+                # ✅ Initialiser l’historique du PhaseObserver si vide
+                if market_analyzer.phase_observer._history_df is None or market_analyzer.phase_observer._history_df.empty:
+                    market_analyzer.phase_observer.load_initial_history(rates_df.copy())
+   
                 # ✅ Mode "horloge suisse"
                 if cycle_count == 1:
                     # 1️⃣ Premier cycle : on fait une analyse complète (200 barres)

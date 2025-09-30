@@ -177,7 +177,7 @@
   "runtime_flags": {
     "gating_removed": true,
     "fallbacks_removed": true,
-    "readiness_gate_enabled": true,
+    "readiness_gate_enabled": false,
     "startup_skip_cycles": 1,
     "max_allowed_data_age_seconds": 0
   },
