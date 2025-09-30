@@ -37,54 +37,6 @@ from .memory import PhaseMemoryManager
 
 # Alias UTC
 UTC = timezone.utc
-
-
-# ==== IMPORTS GLOBAUX (à placer en tête du fichier) ====
-import pandas as pd
-import numpy as np
-from datetime import datetime  # IMPORTANT: on importe la CLASSE, pas le module
-
-# ================================================================
-# Helpers intégrés à la classe (UTILISER self._coerce_val / self._ensure_footprint_columns)
-# ================================================================
-def _coerce_val(self, v):
-    """
-    Remplace les valeurs non sérialisables ou NaN/inf par pd.NA.
-    Ne PAS appeler en global: utiliser self._coerce_val(...)
-    """
-    try:
-        # None, NaN, NaT, +/-inf -> pd.NA
-        if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
-            return pd.NA
-        # pd.isna gère aussi NaT/Nullable
-        if pd.isna(v):
-            return pd.NA
-    except Exception:
-        pass
-
-    # Types sûrs
-    if isinstance(v, (float, int, str, bool, pd.Timestamp, datetime, np.generic)):
-        return v
-
-    # Par défaut -> NA (évite dtype incompatibles)
-    return pd.NA
-
-
-def _ensure_footprint_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Crée/force les colonnes footprint en dtype object (évite FutureWarning lors de l'insertion).
-    Ne PAS appeler en global: utiliser self._ensure_footprint_columns(df)
-    """
-    needed = ("footprint_score", "footprint_status", "footprint_summary",
-              "footprint_live_delta", "footprint_live_poc")
-    for col in needed:
-        if col not in df.columns:
-            df[col] = pd.Series(pd.NA, index=df.index, dtype="object")
-        else:
-            # force en object si ce n'est pas déjà le cas
-            if df[col].dtype != object:
-                df[col] = df[col].astype("object")
-    return df
 class PhaseObserver:
     signal_weights: Dict[str, float]
     confluence_bonus: Dict[str, float]
@@ -159,6 +111,45 @@ class PhaseObserver:
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+        
+    def _coerce_val(self, v):
+        """
+        Remplace les valeurs non sérialisables ou NaN/inf par pd.NA.
+        Ne PAS appeler en global: utiliser self._coerce_val(...)
+        """
+        try:
+            # None, NaN, NaT, +/-inf -> pd.NA
+            if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+                return pd.NA
+            # pd.isna gère aussi NaT/Nullable
+            if pd.isna(v):
+                return pd.NA
+        except Exception:
+            pass
+
+        # Types sûrs
+        if isinstance(v, (float, int, str, bool, pd.Timestamp, datetime, np.generic)):
+            return v
+
+        # Par défaut -> NA (évite dtype incompatibles)
+        return pd.NA
+
+
+    def _ensure_footprint_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Crée/force les colonnes footprint en dtype object (évite FutureWarning lors de l'insertion).
+        Ne PAS appeler en global: utiliser self._ensure_footprint_columns(df)
+        """
+        needed = ("footprint_score", "footprint_status", "footprint_summary",
+                "footprint_live_delta", "footprint_live_poc")
+        for col in needed:
+            if col not in df.columns:
+                df[col] = pd.Series(pd.NA, index=df.index, dtype="object")
+            else:
+                # force en object si ce n'est pas déjà le cas
+                if df[col].dtype != object:
+                    df[col] = df[col].astype("object")
+        return df
 
     # ================================================================
     # Méthode 1: on_tick
