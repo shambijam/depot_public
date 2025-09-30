@@ -59,6 +59,13 @@ class PhaseObserver:
 
         # === Instance unique de Detectors ===
         self.detectors = Detectors(config_manager=config_manager)
+        
+         # ✅ Buffer pour accumuler les ticks de la bougie courante
+        from collections import deque
+        self._ticks_current_bar = deque(maxlen=10000)
+        
+        self._history_df = None  # sera rempli au démarrage avec 200 barres
+
 
         # DÉFINIR LES VALEURS PAR DÉFAUT D'ABORD
         self.lookback_window = 12
@@ -107,7 +114,84 @@ class PhaseObserver:
         self.logger.info(
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
+        
+    def on_tick(self, tick: dict):
+        """
+        Ajoute un tick dans le buffer courant.
+        tick = {"time": pd.Timestamp, "price": float, "size": float, "side": "buy"/"sell"}
+        """
+        self._ticks_current_bar.append(tick)
 
+        # Analyse footprint partielle (live, intra-minute)
+        try:
+            import pandas as pd
+            ticks_df = pd.DataFrame(self._ticks_current_bar)
+            footprint_partial = self.detectors.validate_last_candle_footprint(
+                self._history_df, ticks_df
+            )
+            if footprint_partial and not self._history_df.empty:
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_delta"] = footprint_partial["summary"]["delta_total"]
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_poc"] = footprint_partial["summary"]["poc"]
+
+                # Sauvegarde footprint live en mémoire
+                try:
+                    self.memory.store_footprint(
+                        asset_symbol="LIVE_ASSET",  # ⚠️ remplace par l’actif réel si dispo
+                        delta=footprint_partial["summary"].get("delta_total", 0.0),
+                        poc=footprint_partial["summary"].get("poc"),
+                        is_live=True,
+                    )
+                except Exception as e_mem:
+                    self.logger.warning(f"[on_tick] store_footprint live failed: {e_mem}")
+
+        except Exception as e:
+            self.logger.warning(f"[on_tick] footprint live failed: {e}")
+
+            
+    def load_initial_history(self, df: pd.DataFrame):
+        """
+        Charge l'historique initial (200 barres M1 par ex.).
+        """
+        self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
+        
+    def on_bar_close(self, new_bar: dict, asset_symbol: str):
+        """
+        Clôture la bougie courante, calcule le footprint final,
+        et ajoute la bougie scellée dans l'historique.
+        """
+       
+        # 1. Ajouter la nouvelle bougie fermée
+        if self._history_df is None:
+            raise RuntimeError("History not initialised")
+        self._history_df.loc[new_bar["time"]] = new_bar
+
+        # 2. Footprint final
+        ticks_df = pd.DataFrame(self._ticks_current_bar)
+        footprint_final = self.detectors.validate_last_candle_footprint(self._history_df, ticks_df)
+
+        if footprint_final:
+            self._history_df.loc[self._history_df.index[-1], "footprint_score"] = footprint_final.get("score", 0)
+            self._history_df.loc[self._history_df.index[-1], "footprint_status"] = footprint_final.get("status", "UNKNOWN")
+            self._history_df.loc[self._history_df.index[-1], "footprint_summary"] = str(footprint_final.get("summary", {}))
+
+            # Sauvegarde footprint final en mémoire
+            try:
+                self.memory.store_footprint(
+                    asset_symbol=asset_symbol,
+                    delta=footprint_final.get("summary", {}).get("delta_total", 0.0),
+                    poc=footprint_final.get("summary", {}).get("poc"),
+                    is_live=False,
+                )
+            except Exception as e_mem:
+                self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}")
+
+        # 3. Vider le buffer ticks pour la prochaine bougie
+        self._ticks_current_bar.clear()
+
+        # 4. Lancer analyse finale dernière bougie
+        return self.analyze_last_bar(self._history_df, asset_symbol=asset_symbol, ticks=ticks_df)
+
+ 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
 
@@ -994,6 +1078,158 @@ class PhaseObserver:
             self.logger.error(f"analyze() failure: {e}", exc_info=True)
             return None
 
+    def analyze_last_bar(
+        self, df: pd.DataFrame, asset_symbol: str, ticks: pd.DataFrame | None = None
+    ) -> dict | None:
+        """
+        Analyse uniquement la dernière bougie M1 (et ses ticks) avec TOUS les détecteurs,
+        puis renvoie un paquet compact de signaux pour cette bougie.
+        """
+        if df is None or df.empty:
+            return None
+
+        # Nettoyage rapide (réutilise ta pipeline existante)
+        df_an = self.features.clean_dataframe(df.copy())
+        if df_an is None or df_an.empty:
+            return None
+
+        # Sélection stricte dernière bougie
+        i_last = len(df_an) - 1
+        last_bar_df = df_an.iloc[[i_last]]
+
+        # --- Détecteurs (par bar) ---
+        res = {"asset": asset_symbol, "index": int(i_last)}
+        try:
+            # Patterns chandeliers / combos (ex: tes fonctions savent accepter un index)
+            res["candle_pattern"] = (
+                self.detectors.detect_candle_patterns(last_bar_df) or [None]
+            )[-1]
+        except Exception:
+            res["candle_pattern"] = None
+
+        try:
+            fvg_details = self.detectors.detect_fvg_enhanced(df_an)
+            res["fvg_details"] = (
+                fvg_details[i_last] if isinstance(fvg_details, list) else None
+            )
+            res["fvg_detected"] = bool(res["fvg_details"])
+        except Exception:
+            res["fvg_details"] = None
+            res["fvg_detected"] = False
+
+        try:
+            ob_details = self.detectors.detect_order_block_ml_enhanced(df_an)
+            res["ob_details"] = (
+                ob_details[i_last] if isinstance(ob_details, list) else None
+            )
+            res["ob_detected"] = bool(res["ob_details"])
+        except Exception:
+            res["ob_details"] = None
+            res["ob_detected"] = False
+
+        try:
+            bos_details = self.detectors.detect_bos_mss_enhanced(df_an)
+            res["bos_mss_details"] = (
+                bos_details[i_last] if isinstance(bos_details, list) else None
+            )
+            res["bos_mss_detected"] = bool(res["bos_mss_details"])
+        except Exception:
+            res["bos_mss_details"] = None
+            res["bos_mss_detected"] = False
+
+        # Liquidity light (sweep/absorption)
+        try:
+            res["sweep_detected"] = (
+                bool(df_an.get("sweep_detected", [False])[i_last])
+                if "sweep_detected" in df_an
+                else False
+            )
+            res["absorption_confirmed"] = (
+                bool(df_an.get("absorption_confirmed", [False])[i_last])
+                if "absorption_confirmed" in df_an
+                else False
+            )
+        except Exception:
+            res["sweep_detected"] = False
+            res["absorption_confirmed"] = False
+
+        # Footprint validateur (ticks de la minute)
+        try:
+            if ticks is not None and hasattr(
+                self.detectors, "validate_last_candle_footprint"
+            ):
+                fp = self.detectors.validate_last_candle_footprint(df_an, ticks)
+                res["footprint_score"] = fp.get("score", 0)
+                res["footprint_status"] = fp.get("status", "UNKNOWN")
+                res["footprint_summary"] = fp.get("summary", {})
+            else:
+                res["footprint_score"] = 0
+                res["footprint_status"] = "N/A"
+                res["footprint_summary"] = {}
+        except Exception:
+            res["footprint_score"] = 0
+            res["footprint_status"] = "ERROR"
+            res["footprint_summary"] = {}
+
+        # Phase + confiance sur la dernière bougie seulement
+        try:
+            phase_row = df_an.iloc[i_last].to_dict()
+            res["phase_primary"] = self.detectors.determine_optimized_phase(
+                pd.Series(phase_row)
+            )
+        except Exception:
+            res["phase_primary"] = "no_clear_phase"
+
+        try:
+            res["confidence_score"] = float(
+                self.calculate_optimized_confidence(df_an.iloc[i_last])
+            )
+        except Exception:
+            res["confidence_score"] = 0.0
+
+        # 🔥 Ajout footprints en mémoire
+        try:
+            footprints_hist = (
+                self.memory.get_memory(asset_symbol).caches.get("footprints", [])
+            )
+            res["footprints_history"] = footprints_hist[-5:]  # on garde les 5 derniers
+        except Exception as e_mem:
+            self.logger.warning(f"[analyze_last_bar] impossible de récupérer footprints: {e_mem}")
+            res["footprints_history"] = []
+
+        return res
+
+    
+    def analyze_live_bar(self, asset_symbol: str) -> Optional[dict]:
+        """
+        Analyse la bougie en cours (non fermée) avec les ticks accumulés.
+        Retourne un pré-signal basé sur le footprint live.
+        """
+        import pandas as pd
+
+        if not self._ticks_current_bar:
+            return None
+
+        try:
+            ticks_df = pd.DataFrame(self._ticks_current_bar)
+            footprint_partial = self.detectors.validate_last_candle_footprint(
+                self._history_df, ticks_df
+            )
+
+            pre_signal = {
+                "asset": asset_symbol,
+                "footprint_live": footprint_partial.get("summary", {}),
+                "footprint_delta": footprint_partial.get("summary", {}).get("delta_total", 0),
+                "footprint_poc": footprint_partial.get("summary", {}).get("poc"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+            return pre_signal
+        except Exception as e:
+            self.logger.warning(f"[{asset_symbol}] Erreur analyse bougie live: {e}")
+            return None
+
+
     def analyze_asset_multi_timeframe(
         self, asset: str, strategy_config: Dict
     ) -> Dict[str, Any]:
@@ -1210,40 +1446,64 @@ class PhaseObserver:
             original_params = self._backup_current_params()
             try:
                 self._load_settings(overrides=tf_config)
-                analyzed_data = self.analyze(tf_data, asset_symbol=asset)
-                if analyzed_data is None or analyzed_data.empty:
+                last_signals = self.analyze_last_bar(tf_data, asset_symbol=asset)
+                if not last_signals:
                     raise ValueError(f"Analyse {tf} vide")
+
 
                 # 🔥 Enrichissement Candle Patterns
                 try:
-                    candle_signals = self.detectors.detect_candle_patterns(
-                        analyzed_data
-                    )
+                    # On relance le détecteur de patterns chandeliers sur le DataFrame
+                    candle_signals = self.detectors.detect_candle_patterns(tf_data)
+
                     if candle_signals and isinstance(candle_signals, list):
                         last_candle = candle_signals[-1] if candle_signals else None
                         if last_candle:
-                            last_signals = self._extract_last_bar_signals(
-                                analyzed_data, tf
-                            )
+                            # On enrichit last_signals (déjà produit par analyze_last_bar)
                             last_signals.update(
                                 {
                                     "candle_pattern": last_candle.get("pattern"),
-                                    "candle_strength": last_candle.get(
-                                        "strength_score"
-                                    ),
+                                    "candle_strength": last_candle.get("strength_score"),
                                 }
                             )
                         else:
-                            last_signals = self._extract_last_bar_signals(
-                                analyzed_data, tf
+                            # Pas de pattern → on laisse vide
+                            last_signals.update(
+                                {
+                                    "candle_pattern": None,
+                                    "candle_strength": 0.0,
+                                }
                             )
                     else:
-                        last_signals = self._extract_last_bar_signals(analyzed_data, tf)
+                        last_signals.update(
+                            {
+                                "candle_pattern": None,
+                                "candle_strength": 0.0,
+                            }
+                        )
+
                 except Exception as e:
                     self.logger.warning(f"[{asset}] Erreur candle_patterns {tf}: {e}")
-                    last_signals = self._extract_last_bar_signals(analyzed_data, tf)
+                    last_signals.update(
+                        {
+                            "candle_pattern": None,
+                            "candle_strength": 0.0,
+                        }
+                    )
 
-                tf_analyses[tf] = last_signals
+                    tf_analyses[tf] = last_signals
+
+                # 🔥 Ajout footprints en mémoire (FIFO)
+                try:
+                    footprints_hist = (
+                        self.memory.get_memory(asset).caches.get("footprints", [])
+                    )
+                    tf_analyses[tf]["footprints_history"] = footprints_hist[-5:]
+                except Exception as e_mem:
+                    self.logger.warning(
+                        f"[{asset}] {tf} impossible de récupérer footprints: {e_mem}"
+                    )
+                    tf_analyses[tf]["footprints_history"] = []
 
                 # 🔥 Sauvegarde des zones HTF (OB/FVG) pour usage Liquidity
                 try:
@@ -1357,6 +1617,25 @@ class PhaseObserver:
             f"Temps={execution_time:.1f}ms"
         )
         return final_signals
+    
+    def recalibrate_full(self, asset_symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Ré-analyse complète de l'historique (200 barres par défaut) 
+        pour recalibrer tous les indicateurs/patterns.
+        """
+        if self._history_df is None or self._history_df.empty:
+            self.logger.warning(f"[{asset_symbol}] Impossible de recalibrer : historique vide.")
+            return None
+
+        try:
+            df_reanalyzed = self.analyze(self._history_df.copy(), asset_symbol=asset_symbol)
+            self._history_df = df_reanalyzed
+            self.logger.info(f"[{asset_symbol}] 🔄 Recalibration complète effectuée ({len(df_reanalyzed)} barres).")
+            return df_reanalyzed
+        except Exception as e:
+            self.logger.error(f"[{asset_symbol}] Erreur recalibration complète: {e}")
+            return None
+
 
     def process_multi_asset_config(self, config_filepath: Union[str, Path]):
         """

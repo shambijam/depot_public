@@ -716,8 +716,18 @@ def run_single_pipeline_cycle(
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
 
-                # ✅ Analyse avec MarketAnalyzer
-                market_results = market_analyzer.analyze(rates_df.copy(), asset)
+                # ✅ Mode "horloge suisse"
+                if cycle_count == 1:
+                    # 1️⃣ Premier cycle : on fait une analyse complète (200 barres)
+                    market_results = market_analyzer.analyze(rates_df.copy(), asset)
+                    # Initialiser l'historique dans PhaseObserver
+                    market_analyzer.phase_observer.load_initial_history(rates_df.copy())
+                else:
+                    # 2️⃣ Cycles suivants : analyse incrémentale dernière bougie
+                    # On scelle la bougie M1 en cours avec footprint final
+                    last_bar = rates_df.iloc[-1].to_dict()
+                    last_signals = market_analyzer.phase_observer.on_bar_close(last_bar, asset_symbol=asset)
+                    market_results = {"latest": last_signals}
                 
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}")

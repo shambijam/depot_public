@@ -80,13 +80,14 @@ def get_diff(
 def normalize_levels(
     entry_price: float,
     action: str,
-    pip_size: float,
+    pip_size: Optional[float] = None,
     sl_pips: Optional[float] = None,
     tp_pips: Optional[float] = None,
     sl_price: float | None = None,
     tp_price: float | None = None,
     rule_name: str | None = None,
 ) -> dict:
+    
     """
     Normalise SL/TP pour garantir des niveaux cohérents en prix absolus.
     - Si sl_price/tp_price sont donnés → priorité.
@@ -95,7 +96,10 @@ def normalize_levels(
     """
     if not isinstance(entry_price, (int, float)) or entry_price <= 0:
         return {"sl": None, "tp": None}
-
+    
+      # 🔧 Sécurisation du pip_size
+    pip_size = pip_size or 0.0001
+   
     action = str(action).upper()
     sl, tp = None, None
 

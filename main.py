@@ -12,8 +12,8 @@ import argparse
 import logging
 import json
 import sys
-import time
-from datetime import datetime
+from datetime import datetime, timezone
+import time 
 from pathlib import Path
 import importlib
 import core.strategy_manager
@@ -63,8 +63,14 @@ except ImportError as e:
         exc_info=True,
     )
     sys.exit(1)
-
-
+    
+  
+def sleep_until_next_minute():
+    now = datetime.now(timezone.utc)
+    to_sleep = 60.0 - (now.second + now.microsecond / 1e6)
+    if to_sleep > 0:
+        time.sleep(to_sleep)
+         
 # === Helper: déclenchement des rapports au démarrage (IA quotidien & Mecano hebdo) ===
 
 
@@ -522,6 +528,10 @@ def main(args: argparse.Namespace) -> None:
         readiness_symbols = ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"]  # fallback ultime
 
     try:
+    
+        # 🔔 Calage initial : premier cycle à la minute exacte
+        sleep_until_next_minute()
+
         while True:
             cycle_count += 1
             print(f"[Cycle] SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
@@ -538,8 +548,21 @@ def main(args: argparse.Namespace) -> None:
                 logger.info(
                     f"Cycle #{cycle_count}: readiness non validé, pas de trade ce tour."
                 )
-                time.sleep(cycle_interval)
+                sleep_until_next_minute()
                 continue
+            
+            # Préparer un dictionnaire de pré-signaux live pour ce cycle
+            live_pre_signals = {}
+            for asset in readiness_symbols:
+                try:
+                    live_signal = phase_observer.analyze_live_bar(asset)
+                    if live_signal:
+                        live_pre_signals[asset] = live_signal
+                except Exception as e:
+                    logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
+
+            # Injecter dans le contexte pipeline
+            decision_pipeline.extra_context = {"live_pre_signals": live_pre_signals}
 
             print("[Pipeline] Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
@@ -554,7 +577,6 @@ def main(args: argparse.Namespace) -> None:
                 daily_trade_count,
             )
 
-
             if trade_executed_in_cycle:
                 daily_trade_count += 1
 
@@ -562,6 +584,22 @@ def main(args: argparse.Namespace) -> None:
             logger.info(
                 f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f} secondes."
             )
+            # 🔍 Analyse live de la bougie en cours (pré-signal)
+            for asset in readiness_symbols:
+                try:
+                    live_signal = phase_observer.analyze_live_bar(asset)
+                    if live_signal:
+                        logger.debug(f"[{asset}] Pré-signal live: Δ={live_signal['footprint_delta']} | POC={live_signal['footprint_poc']}")
+                except Exception as e:
+                    logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
+            
+            # 🔄 Recalibration périodique toutes les 30 minutes
+            if cycle_count % 30 == 0:
+                for asset in readiness_symbols:
+                    try:
+                        phase_observer.recalibrate_full(asset)
+                    except Exception as e:
+                        logger.warning(f"[{asset}] Recalibration échouée: {e}")
 
             # ✅ Gestion sécurisée de get_account_info()
             current_account_info = {}
@@ -589,9 +627,8 @@ def main(args: argparse.Namespace) -> None:
                 }
             )
 
-            sleep_time = max(0.0, float(cycle_interval) - cycle_duration)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # ⏱️ Horloge suisse : attendre exactement la prochaine minute
+            sleep_until_next_minute()
 
     except KeyboardInterrupt:
         logger.warning("\nInterruption clavier détectée. Arrêt progressif...")

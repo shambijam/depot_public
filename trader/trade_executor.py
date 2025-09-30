@@ -1224,6 +1224,7 @@ class TradeExecutor:
                 "CLOSE": "CLOSE",
             }
             return mapping.get(a, "")
+
         def _normalize_volume(symbol_info, vol: float) -> float:
             """Clamp & round le volume selon les contraintes du symbole MT5."""
             try:
@@ -1248,7 +1249,6 @@ class TradeExecutor:
                 vol = vmin
 
             return float(round(vol, 2))  # ⬅️ arrondi 2 décimales max
-
 
         # ---------- 1) Action ----------
         action_raw = _first_non_empty(
@@ -2060,9 +2060,9 @@ class TradeExecutor:
         # Charger config spécifique burst
         closure_cfg = (
             config.get("entry_rules", {})
-                .get("scalping", {})
-                .get("burst_scalping", {})
-                .get("closure_rules", {})
+            .get("scalping", {})
+            .get("burst_scalping", {})
+            .get("closure_rules", {})
         )
 
         momentum_score_min = int(closure_cfg.get("momentum_score_min", 2))
@@ -2083,8 +2083,12 @@ class TradeExecutor:
 
         for basket_id, positions in baskets.items():
             try:
-                entry_prices = [p["entry_price"] for p in positions if "entry_price" in p]
-                current_prices = [p["current_price"] for p in positions if "current_price" in p]
+                entry_prices = [
+                    p["entry_price"] for p in positions if "entry_price" in p
+                ]
+                current_prices = [
+                    p["current_price"] for p in positions if "current_price" in p
+                ]
 
                 if not entry_prices or not current_prices:
                     continue
@@ -2114,9 +2118,13 @@ class TradeExecutor:
                     highs = [p.get("high") for p in positions if "high" in p]
                     lows = [p.get("low") for p in positions if "low" in p]
                     if highs and lows and len(highs) >= breakout_lookback:
-                        if direction == "BUY" and avg_price > max(highs[-breakout_lookback:]):
+                        if direction == "BUY" and avg_price > max(
+                            highs[-breakout_lookback:]
+                        ):
                             momentum_score += 1
-                        elif direction == "SELL" and avg_price < min(lows[-breakout_lookback:]):
+                        elif direction == "SELL" and avg_price < min(
+                            lows[-breakout_lookback:]
+                        ):
                             momentum_score += 1
 
                     # Critère 3 : ATR fort (si dispo dans meta)
@@ -2127,7 +2135,9 @@ class TradeExecutor:
 
                     # Critère 4 : biais MTF aligné
                     if enable_mtf_bias:
-                        mtf_bias = str(positions[0].get("meta", {}).get("mtf_bias", "")).lower()
+                        mtf_bias = str(
+                            positions[0].get("meta", {}).get("mtf_bias", "")
+                        ).lower()
                         if (direction == "BUY" and "up" in mtf_bias) or (
                             direction == "SELL" and "down" in mtf_bias
                         ):
@@ -2187,7 +2197,6 @@ class TradeExecutor:
 
             except Exception as e:
                 self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
-
 
     def _calculate_risk_based_volume(
         self,
@@ -2869,7 +2878,7 @@ class TradeExecutor:
                 tp_price = 0.0  # MT5 = pas de TP
                 self.logger.debug("[BURST] TP neutralisé → trailing stop only")
 
-         # --- Construction base requête ---
+        # --- Construction base requête ---
         order_type_str = str(order_type_str or "MARKET").upper()
         request = {
             "symbol": symbol_info.name,
@@ -2885,11 +2894,11 @@ class TradeExecutor:
                 or (
                     f"burst_scalping|basket={trade_decision['basket_id']}|"
                     f"{trade_decision.get('burst_index', 0)}/{trade_decision.get('burst_size', 0)}"
-                    if trade_decision.get("basket_id") else ""
+                    if trade_decision.get("basket_id")
+                    else ""
                 )
             ),
         }
-
 
         # Timeout bars & mitigation (meta only, pour exécutions différées)
         timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
@@ -3565,6 +3574,24 @@ class TradeExecutor:
         ORDER_TYPE_SELL_STOP = _const(
             "order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"
         )
+        # === Règles spéciales Burst Scalping ===
+        if request.get("is_burst_trade", False):
+            # Neutraliser TP fixe (MT5 = pas de TP si 0.0)
+            request["tp"] = 0.0
+
+            # Forcer un commentaire clair
+            old_comment = request.get("comment", "")
+            request["comment"] = f"{old_comment} | BURST"
+
+            # Log spécifique
+            self.logger.info(
+                f"[EXECUTOR] 🎯 Burst trade détecté → {symbol} (action={order_type}), TP supprimé, trailing attendu."
+            )
+            # === Tag Early Entry si autorisé ===
+            if request.get("early_entry_allowed", False):
+                old_comment = request.get("comment", "")
+                request["comment"] = f"{old_comment} | EARLY"
+                self.logger.info(f"[EXECUTOR] ⚡ Early entry activée pour {symbol}")
 
         try:
             ot_int = int(order_type)
@@ -3643,7 +3670,7 @@ class TradeExecutor:
             sl = request.get("sl")
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
-            
+
             # --- PATCH SÉCURITÉ SL (évite Invalid Stops) ---
             if sl is not None:
                 sl = float(sl)
@@ -3933,9 +3960,17 @@ class TradeExecutor:
                                 "rule_name": request.get("rule_name"),
                                 "magic_number": request.get("magic"),
                                 "request": request,
+                                "is_burst_trade": request.get("is_burst_trade", False),
+                                "early_entry_allowed": request.get(
+                                    "early_entry_allowed", False
+                                ),
+                                "footprint_score": request.get("footprint_score"),
+                                "footprint_status": request.get("footprint_status"),
+                                "footprint_summary": request.get("footprint_summary"),
                             },
                             audit_ctx,
                         )
+
                     except Exception:
                         pass
 
@@ -3981,6 +4016,9 @@ class TradeExecutor:
                     "type_filling": request.get("type_filling"),
                     "deviation": request.get("deviation"),
                     "magic": request.get("magic"),
+                    "footprint_score": request.get("footprint_score"),
+                    "footprint_status": request.get("footprint_status"),
+                    "footprint_summary": request.get("footprint_summary"),
                 },
             }
 
@@ -4034,6 +4072,13 @@ class TradeExecutor:
                                 "comment": comment,
                                 "order": order_id,
                                 "deal": deal_id,
+                                "is_burst_trade": request.get("is_burst_trade", False),
+                                "early_entry_allowed": request.get(
+                                    "early_entry_allowed", False
+                                ),
+                                "footprint_score": request.get("footprint_score"),
+                                "footprint_status": request.get("footprint_status"),
+                                "footprint_summary": request.get("footprint_summary"),
                             },
                         },
                         audit_ctx,
@@ -4089,6 +4134,9 @@ class TradeExecutor:
                             "request": request,
                             "error_code": "UNEXPECTED_EXCEPTION",
                             "error_message": str(e),
+                            "early_entry_allowed": request.get(
+                                "early_entry_allowed", False
+                            ),
                         },
                         audit_ctx,
                     )

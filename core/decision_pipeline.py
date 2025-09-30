@@ -17,8 +17,6 @@ from strategy.liquidity import LiquidityStrategy
 from core.utils import normalize_levels
 from phase_observer.market_analyzer import MarketAnalyzer
 
-
-
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
     from core.config_manager import (
@@ -175,7 +173,33 @@ class DecisionPipeline:
                     f"🔎 [DEBUG] {asset} → phase={sig.get('phase')} "
                     f"conf={sig.get('confidence_score')} spread_pts={spread_pts}"
                 )
+            # === Injection des pré-signaux live (footprint intra-minute) ===
+            live_pre_signals = context.get("live_pre_signals", {}) or {}
+            for asset, pre_sig in live_pre_signals.items():
+                if not isinstance(pre_sig, dict):
+                    continue
+                delta = pre_sig.get("footprint_delta")
+                poc = pre_sig.get("footprint_poc")
 
+                # Boost léger de confiance si signal footprint fort
+                if isinstance(delta, (int, float)) and abs(delta) > 100:  # seuil ajustable
+                    sig = signals.get(asset, {})
+                    old_conf = float(sig.get("confidence_score", 0.5))
+                    sig["confidence_score"] = min(1.0, old_conf + 0.1)
+                    sig["footprint_live_delta"] = delta
+                    sig["footprint_live_poc"] = poc
+                    print(
+                        f"📊 [LIVE] Pré-signal {asset}: Δ={delta}, POC={poc} "
+                        f"(confiance boostée {old_conf:.2f}→{sig['confidence_score']:.2f})"
+                    )
+                # --- Ajout PATCH: autoriser entrée anticipée si footprint extrême ---
+                early_entry_threshold = 300  # ajustable (Δ en volume)
+                if abs(delta) >= early_entry_threshold:
+                    sig["early_entry_allowed"] = True
+                    print(f"⚡ [LIVE] Early entry signal activé sur {asset} (Δ={delta})")
+                else:
+                    sig["early_entry_allowed"] = False
+   
             # Conteneurs séparés (séparation stricte des domaines)
             scalping_decisions: list = []
             liquidity_decisions: list = []
@@ -325,8 +349,47 @@ class DecisionPipeline:
                     td = final_decisions[0] if final_decisions else {}
                     chosen_strategy = td.get("strategy_type") if td else None
                     chosen_asset = td.get("asset") if td else None
-  
+                    
+                    # 🔥 PATCH: Intégrer les footprints dans la décision finale
+                    try:
+                        if td and chosen_asset and chosen_asset in signals:
+                            # 1) Récupère l'historique footprints poussé par analyze_last_bar / MTF
+                            fph = signals[chosen_asset].get("footprints_history", []) or []
+                            td["footprints_history"] = fph[-5:]  # garde une fenêtre courte pour décision
 
+                            # 2) Calcule un biais footprint simple sur les 3 derniers deltas
+                            last3 = [fp.get("delta", 0.0) for fp in fph[-3:] if isinstance(fp, dict)]
+                            bias = "neutral"
+                            if len(last3) == 3:
+                                if all(d > 0 for d in last3):
+                                    bias = "long"
+                                elif all(d < 0 for d in last3):
+                                    bias = "short"
+                            td["footprint_bias"] = bias
+
+                            # 3) Micro-boost de confiance si cohérence action ↔ biais footprint
+                            try:
+                                act = (td.get("action") or "").upper()
+                                old_conf = float(td.get("confidence_score", signals[chosen_asset].get("confidence_score", 0.5)))
+                                new_conf = old_conf
+                                if (bias == "long" and act == "BUY") or (bias == "short" and act == "SELL"):
+                                    new_conf = min(1.0, old_conf + 0.05)  # +5 bps
+                                td["confidence_score"] = new_conf
+                            except Exception:
+                                pass
+
+                            # 4) Propage aussi le flag early_entry si le signal l’autorise déjà
+                            if signals[chosen_asset].get("early_entry_allowed", False):
+                                td["early_entry_allowed"] = True
+
+                            # 5) Log clair pour traçabilité
+                            self.logger.info(
+                                f"[Decision] Footprints: asset={chosen_asset} bias={bias} "
+                                f"last3={last3} conf→{td.get('confidence_score')}"
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"[Decision] Intégration footprints impossible: {e}")
+  
             # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
             final_decisions = scalping_decisions + liquidity_decisions
 
@@ -823,6 +886,9 @@ class DecisionPipeline:
 
         # 3) CORE évalue directement les signaux (via stratégies dédiées)
         trade_decision = {}
+        
+        # 🔧 Init sécurité pour pip_size (utilisé plus bas même hors burst)
+        pip_size = 0.0001
 
         try:
             from strategy.scalping import ScalpingStrategy
@@ -1504,6 +1570,13 @@ class DecisionPipeline:
             f"{trade_decision.get('asset','?')} | vol={trade_decision.get('volume','?')} | "
             f"SL={trade_decision.get('sl_price','?')} | TP={trade_decision.get('tp_price','?')}"
         )
+        # === Tag spécial pour Burst Scalping ===
+        if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
+            trade_decision["is_burst_trade"] = True
+            trade_decision["no_tp"] = True  # sécurité supplémentaire
+        else:
+            trade_decision["is_burst_trade"] = False
+
 
         # ==========================================================
         # 📋 Log final enrichi avec analyse patterns (si dispo)

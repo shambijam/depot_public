@@ -238,6 +238,46 @@ class PhaseMemoryManager:
             self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
             # 🔥 fallback : jamais None
             return current_phase or self.get_last_phase(asset_symbol) or "UNKNOWN"
+    # === Gestion des Footprints (live & final) ===
+    def store_footprint(
+        self,
+        asset_symbol: str,
+        delta: float,
+        poc: Optional[float],
+        is_live: bool = False,
+        *,
+        keep_last: int = 50,
+    ) -> None:
+        """
+        Stocke un footprint (live ou final) dans la mémoire de l'actif.
+        - delta: déséquilibre acheteurs-vendeurs
+        - poc: Point of Control
+        - is_live: True = footprint intra-minute, False = footprint final
+        """
+        try:
+            memory = self.get_memory(asset_symbol)
+            memory.caches.setdefault("footprints", [])
+            footprints: List[Dict[str, Any]] = memory.caches["footprints"]
+
+            footprints.append(
+                {
+                    "time": datetime.utcnow().isoformat(),
+                    "delta": float(delta) if delta is not None else 0.0,
+                    "poc": float(poc) if poc is not None else None,
+                    "is_live": bool(is_live),
+                }
+            )
+
+            if len(footprints) > keep_last:
+                memory.caches["footprints"] = footprints[-keep_last:]
+
+            self._phase_counters[asset_symbol] = memory
+            self.logger.debug(
+                f"[Memory] 📝 Footprint stocké pour {asset_symbol} "
+                f"(delta={delta}, poc={poc}, live={is_live})"
+            )
+        except Exception as e:
+            self.logger.error(f"[Memory] store_footprint failed: {e}")
 
 
 def reset_memory(memory: PhaseMemory) -> None:

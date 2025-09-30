@@ -109,6 +109,39 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
+            # --- 0c) Intégration footprint ---
+            try:
+                fp_score = float(asset_signals.get("footprint_score", 0.0))
+                fp_status = str(asset_signals.get("footprint_status", "N/A")).upper()
+                fp_summary = asset_signals.get("footprint_summary", {})
+
+                # Boost confiance si footprint cohérent
+                if fp_status == "BULLISH" and fp_score > 0 and asset_signals.get("phase", "").lower().startswith("bull"):
+                    asset_signals["confidence_score"] = min(
+                        1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.15
+                    )
+                    self.logger.info(f"[{asset}] 📊 Footprint bullish → confiance renforcée")
+
+                if fp_status == "BEARISH" and fp_score > 0 and asset_signals.get("phase", "").lower().startswith("bear"):
+                    asset_signals["confidence_score"] = min(
+                        1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.15
+                    )
+                    self.logger.info(f"[{asset}] 📊 Footprint bearish → confiance renforcée")
+
+                # Early entry si déséquilibre extrême
+                delta = None
+                try:
+                    delta = fp_summary.get("delta_total")
+                except Exception:
+                    delta = None
+                if isinstance(delta, (int, float)) and abs(delta) >= 300:  # seuil ajustable
+                    asset_signals["early_entry_allowed"] = True
+                    self.logger.info(f"[{asset}] ⚡ Early entry activé (Δ={delta}) via footprint")
+                else:
+                    asset_signals["early_entry_allowed"] = False
+
+            except Exception as e:
+                self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
 
             # --- 0b) Analyse via MarketAnalyzer ---
             patterns, latest_pattern = [], None

@@ -20,7 +20,7 @@
   },
   "data_collection": {
     "default_timeframe": "M1",
-    "default_bars_count": 500
+    "default_bars_count": 200
   },
   "timeframe_mapping": {
     "M1": {
@@ -313,7 +313,7 @@
     }
   },
   "bot_behavior": {
-    "cycle_interval_seconds": 5,
+    "cycle_interval_seconds": 60,
     "ai_audit_interval_cycles": 5,
     "news_filter_enabled": false,
     "halt_on_major_news": false,
