@@ -10,6 +10,7 @@ from .features import (
     _get_swing_points,
     _get_trend,
 )
+
 LOG = logging.getLogger(__name__)
 
 # ============================================================
@@ -25,13 +26,16 @@ Pas de scoring → sortie brute, descriptive et exploitable.
 
 
 def detect_single_candle(
-    df: pd.DataFrame,
-    i: int,
-    patterns: Optional[Dict[str, Any]] = None
+    df: pd.DataFrame, i: int, patterns: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
 
     try:
-        o, h, l, c = df["open"].iloc[i], df["high"].iloc[i], df["low"].iloc[i], df["close"].iloc[i]
+        o, h, l, c = (
+            df["open"].iloc[i],
+            df["high"].iloc[i],
+            df["low"].iloc[i],
+            df["close"].iloc[i],
+        )
         body = abs(c - o)
         size = h - l
         upper_wick = h - max(o, c)
@@ -60,11 +64,19 @@ def detect_single_candle(
         elif lower_wick > 2 * body and upper_wick < body:
             pattern, pattern_type = ("hammer" if is_bull else "hanging_man", "reversal")
         elif upper_wick > 2 * body and lower_wick < body:
-            pattern, pattern_type = ("inverted_hammer" if is_bull else "shooting_star", "reversal")
+            pattern, pattern_type = (
+                "inverted_hammer" if is_bull else "shooting_star",
+                "reversal",
+            )
 
         # === MARUBOZU ===
-        elif body_ratio > 0.95 and upper_wick < 0.05 * size and lower_wick < 0.05 * size:
-            pattern, pattern_type = ("marubozu_bull" if is_bull else "marubozu_bear", "momentum")
+        elif (
+            body_ratio > 0.95 and upper_wick < 0.05 * size and lower_wick < 0.05 * size
+        ):
+            pattern, pattern_type = (
+                "marubozu_bull" if is_bull else "marubozu_bear",
+                "momentum",
+            )
 
         # === ENGULFING SIMPLE ===
         if i > 0 and body > abs(df["close"].iloc[i - 1] - df["open"].iloc[i - 1]):
@@ -76,7 +88,10 @@ def detect_single_candle(
 
         # === BELT HOLD ===
         if body_ratio > 0.7 and (upper_wick < 0.05 * size or lower_wick < 0.05 * size):
-            pattern, pattern_type = ("belt_hold_bull" if is_bull else "belt_hold_bear", "continuation")
+            pattern, pattern_type = (
+                "belt_hold_bull" if is_bull else "belt_hold_bear",
+                "continuation",
+            )
 
         # === KICKER (gap fort) ===
         if i > 0:
@@ -111,6 +126,7 @@ def detect_single_candle(
     except Exception:
         return None
 
+
 # ============================================================
 # 🔹 Multi-Candle Detectors (engulfing, morning star…)
 # ============================================================
@@ -125,13 +141,15 @@ Détection de patterns multi-bougies :
 - Tweezers
 """
 
+
 def is_morning_star(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 2:
         return None
     c1, c2, c3 = df.iloc[i - 2], df.iloc[i - 1], df.iloc[i]
     if (
         c1["close"] < c1["open"]  # 1ère rouge
-        and abs(c2["close"] - c2["open"]) < (c1["open"] - c1["close"]) * 0.5  # petit corps
+        and abs(c2["close"] - c2["open"])
+        < (c1["open"] - c1["close"]) * 0.5  # petit corps
         and c3["close"] > c3["open"]  # verte
         and c3["close"] > (c1["open"] + c1["close"]) / 2
     ):
@@ -163,7 +181,11 @@ def is_three_white_soldiers(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
         and c3["close"] > c3["open"]
         and c1["close"] < c2["close"] < c3["close"]
     ):
-        return {"pattern": "three_white_soldiers", "type": "continuation", "is_bullish": True}
+        return {
+            "pattern": "three_white_soldiers",
+            "type": "continuation",
+            "is_bullish": True,
+        }
     return None
 
 
@@ -177,7 +199,11 @@ def is_three_black_crows(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
         and c3["close"] < c3["open"]
         and c1["close"] > c2["close"] > c3["close"]
     ):
-        return {"pattern": "three_black_crows", "type": "continuation", "is_bullish": False}
+        return {
+            "pattern": "three_black_crows",
+            "type": "continuation",
+            "is_bullish": False,
+        }
     return None
 
 
@@ -187,7 +213,11 @@ def is_harami(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     c1, c2 = df.iloc[i - 1], df.iloc[i]
     if c1["close"] > c1["open"] and c2["close"] < c2["open"]:  # bull -> bear
         if c2["open"] < c1["close"] and c2["close"] > c1["open"]:
-            return {"pattern": "bearish_harami", "type": "reversal", "is_bullish": False}
+            return {
+                "pattern": "bearish_harami",
+                "type": "reversal",
+                "is_bullish": False,
+            }
     elif c1["close"] < c1["open"] and c2["close"] > c2["open"]:  # bear -> bull
         if c2["open"] > c1["close"] and c2["close"] < c1["open"]:
             return {"pattern": "bullish_harami", "type": "reversal", "is_bullish": True}
@@ -209,10 +239,9 @@ def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
 # ===  Orchestrateurs ========================================
 # ============================================================
 
+
 def detect_multi_candle(
-    df: pd.DataFrame,
-    i: Optional[int] = None,
-    patterns: Optional[Dict[str, Any]] = None
+    df: pd.DataFrame, i: Optional[int] = None, patterns: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
     Détection d’un ensemble de patterns multi-bougies.
@@ -261,8 +290,7 @@ def detect_multi_candle(
 
 
 def detect_multi_candle_patterns(
-    df: pd.DataFrame,
-    patterns: Optional[Dict[str, Any]] = None
+    df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
     Détection des patterns multi-bougies sur tout le DataFrame.
@@ -271,13 +299,14 @@ def detect_multi_candle_patterns(
     """
     return detect_multi_candle(df, i=None, patterns=patterns)
 
+
 # ============================================================
 # 🔹 Combo Detectors (confluences, MTF confirmations)
 # ============================================================
 
+
 def detect_combos(
-    df: pd.DataFrame,
-    patterns: Optional[Dict[str, Any]] = None
+    df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None
 ) -> List[Optional[List[Dict[str, Any]]]]:
     """
     Détecteur desk-trader brut :
@@ -314,7 +343,9 @@ def detect_combos(
 
             # 3) Confluences structurelles (OB/FVG/BOS si dispo)
             for s in sigs:
-                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])
+                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(
+                    df["ob_zone"].iloc[i]
+                )
                 s["near_fvg"] = "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])
                 s["near_bos"] = "bos" in df.columns and not pd.isna(df["bos"].iloc[i])
 
@@ -328,7 +359,9 @@ def detect_combos(
 
                 # Ajout index + horodatage
                 s["index"] = i
-                s["timestamp"] = str(df.index[i]) if hasattr(df.index, "dtype") else None
+                s["timestamp"] = (
+                    str(df.index[i]) if hasattr(df.index, "dtype") else None
+                )
 
             signals.append(sigs)
 
@@ -337,6 +370,7 @@ def detect_combos(
             signals.append(None)
 
     return signals
+
 
 # ============================================================
 # 🔹 Orderflow Detectors (absorptions, imbalances, exhaustion)
@@ -354,9 +388,9 @@ Lecture avancée du flux d’ordres :
 Retourne un tableau brut de signaux factuels.
 """
 
+
 def detect_orderflow(
-    df: pd.DataFrame,
-    patterns: Optional[Dict[str, Any]] = None
+    df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None
 ) -> List[Optional[Dict[str, Any]]]:
 
     signals: List[Optional[Dict[str, Any]]] = []
@@ -370,9 +404,17 @@ def detect_orderflow(
             ask_vol = df["ask_volume"].iloc[i] if "ask_volume" in df.columns else None
             total = (bid_vol or 0) + (ask_vol or 0)
 
-            delta = (ask_vol - bid_vol) if (bid_vol is not None and ask_vol is not None) else None
+            delta = (
+                (ask_vol - bid_vol)
+                if (bid_vol is not None and ask_vol is not None)
+                else None
+            )
             imbalance = (ask_vol / total) if total > 0 else None
-            dominance = "buyers" if delta and delta > 0 else "sellers" if delta and delta < 0 else "neutral"
+            dominance = (
+                "buyers"
+                if delta and delta > 0
+                else "sellers" if delta and delta < 0 else "neutral"
+            )
 
             pattern = None
             extra = {}
@@ -413,7 +455,10 @@ def detect_orderflow(
 
                 if exec_count > 50 and avg_size < 0.2 * (total or 1):
                     pattern = "iceberg_order"
-                    extra["iceberg"] = {"exec_count": int(exec_count), "avg_size": float(avg_size)}
+                    extra["iceberg"] = {
+                        "exec_count": int(exec_count),
+                        "avg_size": float(avg_size),
+                    }
 
             # === Assemblage final ===
             if pattern:
@@ -422,7 +467,9 @@ def detect_orderflow(
                         "index": i,
                         "timestamp": ts,
                         "orderflow_pattern": pattern,
-                        "imbalance_pct": round(imbalance, 3) if imbalance is not None else None,
+                        "imbalance_pct": (
+                            round(imbalance, 3) if imbalance is not None else None
+                        ),
                         "dominance": dominance,
                         "delta": delta,
                         "bid_volume": bid_vol,
@@ -440,6 +487,7 @@ def detect_orderflow(
 
     return signals
 
+
 def footprint_validator(
     candles: pd.DataFrame,
     ticks: pd.DataFrame,
@@ -449,46 +497,104 @@ def footprint_validator(
 ) -> Dict[str, Any]:
     """
     🏦 Footprint Validator (Dev Desk Edition)
-    ----------------------------------------------------
-    Validateur de la dernière bougie via footprint orderflow.
-    Standard "banque d'investissement" :
-      - Analyse tick granulaire
-      - Résumé institutionnel pour audit
-      - Score de validation
-    
-    Paramètres
-    ----------
-    candles : DataFrame avec colonnes ['time','open','high','low','close']
-    ticks   : DataFrame avec colonnes ['time','price','size','side'] (side = buy/sell)
-    candle_index : index de la bougie à valider (None = dernière bougie)
-    price_step : pas de prix (auto-détection si None)
-    imbalance_threshold : seuil d’imbalance pour flagger déséquilibres
-    
-    Retour
-    ------
-    dict avec :
-      - 'summary' : métriques clés (delta, POC, imbalances, absorption)
-      - 'score'   : validation [0-100]
-      - 'status'  : verdict "VALID" / "SUSPECT"
-      - 'footprint_df' : DF détaillé par niveau de prix
-      - 'candle'  : OHLC de la bougie validée
+    Robuste aux entrées incomplètes/incohérentes (time manquant, NaN, dtypes).
+    Retourne toujours une structure exploitable (pas d'exception en flux normal).
     """
-    # --- sélectionner la bougie cible
+    # ---------- 0) VALIDATIONS & COPIES SÉCURISÉES ----------
+    if candles is None or not isinstance(candles, pd.DataFrame) or candles.empty:
+        return {
+            "summary": {"comment": "Candles vide/invalide."},
+            "score": 0,
+            "status": "SUSPECT",
+            "footprint_df": pd.DataFrame(),
+            "candle": {},
+        }
+    if ticks is None or not isinstance(ticks, pd.DataFrame):
+        ticks = pd.DataFrame(columns=["time", "price", "size", "side"])  # safe default
+
+    candles = candles.copy()
+    ticks = ticks.copy()
+
+    # ---------- 1) NORMALISATION DES TEMPS (candles) ----------
+    # Bougie cible = dernière si non spécifié
     if candle_index is None:
         candle_index = len(candles) - 1
-    candle = candles.iloc[candle_index]
+    # Clip index pour éviter out-of-range
+    if candle_index < 0:
+        candle_index = 0
+    if candle_index >= len(candles):
+        candle_index = len(candles) - 1
 
+    # On veut pouvoir accéder au timestamp même si 'time' n'est pas une colonne
+    # - priorité: colonne 'time'; sinon index; sinon utcnow fallback
+    if "time" in candles.columns:
+        # si 'time' existe mais n'est pas datetime → coercition
+        if not pd.api.types.is_datetime64_any_dtype(candles["time"]):
+            candles["time"] = pd.to_datetime(candles["time"], errors="coerce")
+    else:
+        # pas de colonne 'time' → on dérive depuis l'index si possible
+        if not isinstance(candles.index, pd.DatetimeIndex):
+            try:
+                candles.index = pd.to_datetime(candles.index, errors="coerce")
+            except Exception:
+                pass  # on gèrera plus bas
+        # si on veut homogénéiser l’accès, créons 'time' à partir de l’index
+        candles["time"] = candles.index
+
+    # Sécurise: si tout est NaT → fallback
+    if candles["time"].isna().all():
+        candles["time"] = pd.Timestamp.utcnow()
+
+    # Candle courante
+    candle = candles.iloc[candle_index]
     start_ts = pd.to_datetime(candle.get("time", candle.name))
+    if pd.isna(start_ts):
+        start_ts = pd.Timestamp.utcnow()
+
+    # Fin de fenêtre = temps de la bougie suivante, sinon start_ts (fenêtre fermée)
     if candle_index + 1 < len(candles):
-        end_ts = pd.to_datetime(candles.iloc[candle_index + 1].get("time", candles.index[candle_index + 1]))
+        nxt = candles.iloc[candle_index + 1]
+        end_ts = pd.to_datetime(nxt.get("time", candles.index[candle_index + 1]))
+        if pd.isna(end_ts):
+            end_ts = start_ts
     else:
         end_ts = start_ts
 
-    # --- filtrer ticks dans la fenêtre
+    # ---------- 2) NORMALISATION DES TICKS ----------
+    # Colonnes minimales
+    for col in ("time", "price", "size", "side"):
+        if col not in ticks.columns:
+            # crée colonne neutre pour éviter KeyError
+            if col == "time":
+                ticks[col] = pd.Timestamp.utcnow()
+            elif col == "price":
+                ticks[col] = 0.0
+            elif col == "size":
+                ticks[col] = 0.0
+            elif col == "side":
+                ticks[col] = "unknown"
+
+    # Types & NaN
     if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
-        ticks["time"] = pd.to_datetime(ticks["time"])
-    mask = (ticks["time"] >= start_ts) & (ticks["time"] < end_ts)
-    df = ticks.loc[mask].copy()
+        ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce")
+    ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce")
+    ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce")
+    ticks["side"] = ticks["side"].astype(str)
+
+    # Remplacements de secours
+    ticks["time"] = ticks["time"].fillna(pd.Timestamp.utcnow())
+    ticks["price"] = ticks["price"].fillna(0.0)
+    ticks["size"] = ticks["size"].fillna(0.0)
+    ticks["side"] = ticks["side"].str.lower().fillna("unknown")
+
+    # ---------- 3) SÉLECTION DE LA FENÊTRE DE TICKS ----------
+    # Fenêtre [start_ts, end_ts)
+    try:
+        mask = (ticks["time"] >= start_ts) & (ticks["time"] < end_ts)
+        df = ticks.loc[mask].copy()
+    except Exception:
+        # si comparaison échoue, on prend au moins qqchose de cohérent
+        df = ticks.copy()
 
     if df.empty:
         return {
@@ -496,22 +602,31 @@ def footprint_validator(
             "score": 0,
             "status": "SUSPECT",
             "footprint_df": pd.DataFrame(),
-            "candle": candle.to_dict(),
+            "candle": candle.dropna().to_dict(),
         }
 
-    # --- normaliser side
-    df["side_norm"] = df["side"].str.lower().map(
-        {"buy": "buy", "sell": "sell", "b": "buy", "s": "sell"}
-    ).fillna("unknown")
+    # ---------- 4) SIDE NORMALISÉ ----------
+    df["side_norm"] = (
+        df["side"]
+        .map({"buy": "buy", "b": "buy", "sell": "sell", "s": "sell"})
+        .fillna("unknown")
+    )
 
-    # --- déterminer le pas de prix
-    if price_step is None:
-        diffs = np.diff(np.sort(df["price"].unique()))
-        price_step = np.min(diffs[diffs > 0]) if len(diffs[diffs > 0]) else 1e-5
+    # ---------- 5) DÉTERMINATION DU PAS DE PRIX ----------
+    if price_step is None or price_step <= 0:
+        # robust: calcule diff minimal strictement positif
+        uniq = np.sort(df["price"].dropna().unique())
+        if len(uniq) >= 2:
+            diffs = np.diff(uniq)
+            pos = diffs[diffs > 0]
+            price_step = float(np.min(pos)) if pos.size else 1e-5
+        else:
+            price_step = 1e-5  # fallback neutre
 
+    # Niveau de prix arrondi sur le pas
     df["price_level"] = (df["price"] / price_step).round() * price_step
 
-    # --- agrégation footprint
+    # ---------- 6) AGRÉGATION FOOTPRINT ----------
     agg = df.pivot_table(
         index="price_level",
         columns="side_norm",
@@ -519,49 +634,57 @@ def footprint_validator(
         aggfunc="sum",
         fill_value=0.0,
     )
-    for col in ["buy", "sell", "unknown"]:
+    for col in ("buy", "sell", "unknown"):
         if col not in agg.columns:
             agg[col] = 0.0
 
     agg["total"] = agg["buy"] + agg["sell"] + agg["unknown"]
     agg["delta"] = agg["buy"] - agg["sell"]
-    agg["buy_pct"] = np.where(
-        (agg["buy"] + agg["sell"]) > 0,
-        agg["buy"] / (agg["buy"] + agg["sell"]),
-        0.5,
+    denom = (agg["buy"] + agg["sell"]).replace(0.0, np.nan)
+    agg["buy_pct"] = (agg["buy"] / denom).fillna(0.5)
+
+    # Tri du haut vers le bas (comme une échelle de prix)
+    agg = (
+        agg.reset_index()
+        .sort_values("price_level", ascending=False)
+        .reset_index(drop=True)
     )
-    agg = agg.reset_index().sort_values("price_level", ascending=False).reset_index(drop=True)
 
-    # --- POC
-    poc_row = agg.loc[agg["total"].idxmax()]
-    poc = float(poc_row["price_level"])
+    # ---------- 7) POC ----------
+    if (agg["total"] > 0).any():
+        poc_row = agg.loc[agg["total"].idxmax()]
+        poc = float(poc_row["price_level"])
+    else:
+        poc = float(agg["price_level"].iloc[0])
 
-    # --- métriques
+    # ---------- 8) MÉTRIQUES CLÉS ----------
     delta_total = float(agg["delta"].sum())
     total_volume = float(agg["total"].sum())
-    imbalance_flags = (
-        (agg["buy_pct"] >= imbalance_threshold).sum(),
-        (agg["buy_pct"] <= (1 - imbalance_threshold)).sum(),
-    )
+    imbalance_buy = int((agg["buy_pct"] >= imbalance_threshold).sum())
+    imbalance_sell = int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
 
-    # --- détection absorption simple
+    # ---------- 9) ABSORPTION SIMPLE AUX EXTRÊMES ----------
     absorption_flag = False
-    if agg.iloc[0]["delta"] < 0:
-        absorption_flag = True
-    if agg.iloc[-1]["delta"] > 0:
-        absorption_flag = True
+    try:
+        if agg.iloc[0]["delta"] < 0:
+            absorption_flag = True
+        if agg.iloc[-1]["delta"] > 0:
+            absorption_flag = True
+    except Exception:
+        pass
 
-    # --- score institutionnel
+    # ---------- 10) SCORE & STATUT ----------
     score = 100
     comments = []
 
-    if total_volume < 1e-6:
+    if total_volume <= 0.0:
         score -= 60
-        comments.append("Volume négligeable.")
-    if abs(delta_total) < 0.01 * total_volume:
+        comments.append("Volume nul/négligeable.")
+    # éviter division par 0 : comparer au max(1, total_volume)
+    if abs(delta_total) < 0.01 * max(1.0, total_volume):
         score -= 15
-        comments.append("Delta trop neutre (pas de conviction).")
-    if imbalance_flags[0] + imbalance_flags[1] == 0:
+        comments.append("Delta trop neutre (peu de conviction).")
+    if (imbalance_buy + imbalance_sell) == 0:
         score -= 10
         comments.append("Aucun déséquilibre détecté.")
     if absorption_flag:
@@ -570,20 +693,23 @@ def footprint_validator(
 
     status = "VALID" if score >= 70 else "SUSPECT"
 
+    # ---------- 11) SORTIE ----------
     return {
         "summary": {
             "delta_total": delta_total,
             "total_volume": total_volume,
             "poc": poc,
-            "imbalance_buy": imbalance_flags[0],
-            "imbalance_sell": imbalance_flags[1],
-            "absorption_flag": absorption_flag,
+            "imbalance_buy": imbalance_buy,
+            "imbalance_sell": imbalance_sell,
+            "absorption_flag": bool(absorption_flag),
             "comments": "; ".join(comments),
+            "window_start": pd.Timestamp(start_ts).isoformat(),
+            "window_end": pd.Timestamp(end_ts).isoformat(),
         },
-        "score": max(score, 0),
+        "score": max(int(score), 0),
         "status": status,
         "footprint_df": agg,
-        "candle": candle.to_dict(),
+        "candle": candle.dropna().to_dict(),
     }
 
 
@@ -596,7 +722,7 @@ class Detectors:
     def __init__(self, logger=None, config_manager=None):
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
-        
+
     def validate_last_candle_footprint(
         self, candles: pd.DataFrame, ticks: pd.DataFrame
     ) -> Dict[str, Any]:
@@ -610,7 +736,7 @@ class Detectors:
                 "status": "SUSPECT",
                 "footprint_df": pd.DataFrame(),
                 "candle": {},
-            }   
+            }
 
     def detect_order_block_ml_enhanced(
         self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None
@@ -1435,7 +1561,6 @@ class Detectors:
 
         return results
 
-
     def detect_market_regime(self, df: pd.DataFrame) -> pd.Series:
         """
         🏛️ Market Regime Detection - Version améliorée avec mémoire de phase.
@@ -1837,5 +1962,3 @@ class Detectors:
         except Exception as e:
             self.logger.error(f"Erreur dans determine_phase : {e}", exc_info=True)
             return "uncertain"
-
-
