@@ -146,10 +146,12 @@ class PhaseObserver:
             )
 
             if footprint_partial is not None and not self._history_df.empty:
-                self._history_df.loc[self._history_df.index[-1], "footprint_live_delta"] = \
-                    footprint_partial["summary"].get("delta_total", 0.0)
-                self._history_df.loc[self._history_df.index[-1], "footprint_live_poc"] = \
-                    footprint_partial["summary"].get("poc")
+                self._history_df.loc[
+                    self._history_df.index[-1], "footprint_live_delta"
+                ] = footprint_partial["summary"].get("delta_total", 0.0)
+                self._history_df.loc[
+                    self._history_df.index[-1], "footprint_live_poc"
+                ] = footprint_partial["summary"].get("poc")
 
                 # Sauvegarde footprint live
                 try:
@@ -160,60 +162,81 @@ class PhaseObserver:
                         is_live=True,
                     )
                 except Exception as e_mem:
-                    self.logger.warning(f"[on_tick] store_footprint live failed: {e_mem}")
+                    self.logger.warning(
+                        f"[on_tick] store_footprint live failed: {e_mem}"
+                    )
 
         except Exception as e:
             self.logger.warning(f"[on_tick] footprint live failed: {e}")
 
-
     def on_bar_close(self, new_bar: dict, asset_symbol: str):
         """
-        Clôture la bougie courante de manière robuste, calcule footprint final,
+        Clôture la bougie courante, calcule le footprint final,
         et ajoute la bougie scellée dans l'historique.
         """
-        import pandas as pd
 
+        # 1. Initialiser l'historique si vide
         if self._history_df is None:
             self._history_df = pd.DataFrame()
 
-        # 🔧 Validation + nettoyage
-        if not isinstance(new_bar, dict):
-            self.logger.error(f"[on_bar_close] new_bar invalide: {new_bar}")
-            return None
-
-        if "time" not in new_bar or new_bar["time"] is None:
-            new_bar["time"] = pd.Timestamp.utcnow()
-            self.logger.warning("[on_bar_close] new_bar sans 'time' → forcé en utcnow()")
-
+        # 🔧 Nettoyage new_bar (évite NaN/dtypes incohérents)
         row = {k: (None if pd.isna(v) else v) for k, v in new_bar.items()}
 
-        # 🔧 Ajout
-        self._history_df.loc[pd.to_datetime(new_bar["time"])] = row
+        # 2. Préparer insertion safe (coercition type-aware)
+        safe_row = {}
+        for k, v in row.items():
+            if pd.isna(v):
+                if k in self._history_df.columns:
+                    col_dtype = self._history_df[k].dtype
+                    if col_dtype == bool:
+                        safe_row[k] = False
+                    elif np.issubdtype(col_dtype, np.number):
+                        safe_row[k] = 0.0
+                    else:
+                        safe_row[k] = None
+                else:
+                    safe_row[k] = None
+            else:
+                safe_row[k] = v
+
+        # 3. Ajouter la nouvelle bougie fermée
+        ts = pd.to_datetime(new_bar.get("time"))
+        self._history_df.loc[ts] = safe_row
+
+        # 🔧 Normalisation des types après insertion
         self._history_df = self._history_df.infer_objects(copy=False)
 
-        # 🔧 Index datetime garanti
+        # 🔧 Sécurité index → forcer DatetimeIndex
         if not isinstance(self._history_df.index, pd.DatetimeIndex):
-            self._history_df.index = pd.to_datetime(self._history_df.index, errors="coerce")
+            self._history_df.index = pd.to_datetime(
+                self._history_df.index, errors="coerce"
+            )
 
-        # 3. Footprint final
+        # 4. Footprint final
         ticks_df = pd.DataFrame(self._ticks_current_bar)
+
+        # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
         if "time" not in ticks_df.columns and not ticks_df.empty:
             ticks_df["time"] = pd.Timestamp.utcnow()
 
-        try:
-            footprint_final = self.detectors.validate_last_candle_footprint(
-                self._history_df, ticks_df
-            )
-        except Exception as e:
-            self.logger.warning(f"[on_bar_close] footprint validation failed: {e}")
-            footprint_final = None
+        footprint_final = self.detectors.validate_last_candle_footprint(
+            self._history_df, ticks_df
+        )
 
         if footprint_final:
             last_idx = self._history_df.index[-1]
-            self._history_df.loc[last_idx, "footprint_score"] = footprint_final.get("score", 0)
-            self._history_df.loc[last_idx, "footprint_status"] = footprint_final.get("status", "UNKNOWN")
-            self._history_df.loc[last_idx, "footprint_summary"] = str(footprint_final.get("summary", {}))
 
+            self._history_df.loc[last_idx, "footprint_score"] = footprint_final.get(
+                "score", 0
+            )
+            self._history_df.loc[last_idx, "footprint_status"] = footprint_final.get(
+                "status", "UNKNOWN"
+            )
+            self._history_df.loc[last_idx, "footprint_summary"] = str(
+                footprint_final.get("summary", {})
+            )
+
+            # Sauvegarde footprint final
             try:
                 self.memory.store_footprint(
                     asset_symbol=asset_symbol,
@@ -222,12 +245,17 @@ class PhaseObserver:
                     is_live=False,
                 )
             except Exception as e_mem:
-                self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}")
+                self.logger.warning(
+                    f"[on_bar_close] store_footprint final failed: {e_mem}"
+                )
 
+        # 5. Vider le buffer ticks
         self._ticks_current_bar.clear()
 
-        return self.analyze_last_bar(self._history_df, asset_symbol=asset_symbol, ticks=ticks_df)
-
+        # 6. Analyse finale dernière bougie
+        return self.analyze_last_bar(
+            self._history_df, asset_symbol=asset_symbol, ticks=ticks_df
+        )
 
     def load_initial_history(self, df: pd.DataFrame):
         """
@@ -245,11 +273,14 @@ class PhaseObserver:
             if "time" in df.columns:
                 df.index = pd.to_datetime(df["time"], errors="coerce")
             else:
-                df.index = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="T")
-                self.logger.warning("[load_initial_history] df sans 'time' → index généré artificiellement")
+                df.index = pd.date_range(
+                    end=pd.Timestamp.utcnow(), periods=len(df), freq="T"
+                )
+                self.logger.warning(
+                    "[load_initial_history] df sans 'time' → index généré artificiellement"
+                )
 
         self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
-
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
