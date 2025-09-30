@@ -39,13 +39,19 @@ from .memory import PhaseMemoryManager
 UTC = timezone.utc
 
 
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+
+# ---------------------------
+# Helpers internes
+# ---------------------------
 def _coerce_val(v):
-    """Remplace valeurs non sérialisables par pd.NA"""
+    """Remplace valeurs non-sérialisables par pd.NA"""
     if v is None:
         return pd.NA
-    if isinstance(
-        v, (float, int, str, bool, pd.Timestamp, datetime.datetime, np.number)
-    ):
+    if isinstance(v, (float, int, str, bool, pd.Timestamp, datetime, np.generic)):
         return v
     try:
         return v
@@ -53,22 +59,24 @@ def _coerce_val(v):
         return pd.NA
 
 
-def _ensure_footprint_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _ensure_footprint_columns(df: pd.DataFrame):
     """
-    Force la présence des colonnes footprint en dtype object
-    (évite FutureWarning et cast foireux).
+    Crée/force les colonnes footprint en dtype object
+    (évite FutureWarning lors de l'insertion).
     """
-    for col in (
+    for col in [
         "footprint_score",
         "footprint_status",
         "footprint_summary",
         "footprint_live_delta",
         "footprint_live_poc",
-    ):
+    ]:
         if col not in df.columns:
             df[col] = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+        else:
+            if df[col].dtype != object:
+                df[col] = df[col].astype("object")
     return df
-
 
 class PhaseObserver:
     signal_weights: Dict[str, float]
