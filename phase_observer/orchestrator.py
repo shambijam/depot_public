@@ -39,6 +39,37 @@ from .memory import PhaseMemoryManager
 UTC = timezone.utc
 
 
+def _coerce_val(v):
+    """Remplace valeurs non sérialisables par pd.NA"""
+    if v is None:
+        return pd.NA
+    if isinstance(
+        v, (float, int, str, bool, pd.Timestamp, datetime.datetime, np.number)
+    ):
+        return v
+    try:
+        return v
+    except Exception:
+        return pd.NA
+
+
+def _ensure_footprint_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Force la présence des colonnes footprint en dtype object
+    (évite FutureWarning et cast foireux).
+    """
+    for col in (
+        "footprint_score",
+        "footprint_status",
+        "footprint_summary",
+        "footprint_live_delta",
+        "footprint_live_poc",
+    ):
+        if col not in df.columns:
+            df[col] = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+    return df
+
+
 class PhaseObserver:
     signal_weights: Dict[str, float]
     confluence_bonus: Dict[str, float]
@@ -47,7 +78,6 @@ class PhaseObserver:
         """
         Initialise le PhaseObserver avec les paramètres de configuration.
         """
-        import logging
 
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
@@ -115,172 +145,403 @@ class PhaseObserver:
             f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
         )
 
-    def on_tick(self, tick: dict):
+    # ---------------------------
+    # Méthode 1: on_tick
+    # ---------------------------
+    def on_tick(self, tick: dict) -> None:
         """
-        Ajoute un tick dans le buffer courant avec robustesse.
-        tick attendu: {"time": pd.Timestamp, "price": float, "size": float, "side": "buy"/"sell"}
+        Ajoute un tick dans le buffer courant et tente une validation footprint 'live' (intra-bougie).
+        tick attendu: {"time": pd.Timestamp or str, "price": float, "size": float, "side": "buy"/"sell"}
+        Défensif : vérifications d'entrée, copies avant envoi au validator, protections d'assignation.
         """
-        import pandas as pd
-
-        # 🔧 Validation basique
-        if not isinstance(tick, dict):
-            self.logger.warning(f"[on_tick] tick invalide: {tick}")
-            return
-
-        # Sécurité: forcer un timestamp
-        tick = tick.copy()
-        if "time" not in tick or tick["time"] is None:
-            tick["time"] = pd.Timestamp.utcnow()
-
-        self._ticks_current_bar.append(tick)
-
         try:
-            ticks_df = pd.DataFrame(self._ticks_current_bar)
+            # validation minimale du tick
+            if not isinstance(tick, dict):
+                self.logger.warning("[on_tick] tick non-dict ignoré")
+                return
 
-            # 🔧 Garantir colonne time
-            if "time" not in ticks_df.columns:
-                ticks_df["time"] = pd.Timestamp.utcnow()
+            # Normaliser clés attendues
+            t_time = tick.get("time", pd.Timestamp.utcnow())
+            try:
+                t_time = pd.to_datetime(t_time)
+            except Exception:
+                t_time = pd.Timestamp.utcnow()
 
-            footprint_partial = self.detectors.validate_last_candle_footprint(
-                self._history_df, ticks_df
-            )
+            tick_safe = {
+                "time": t_time,
+                "price": (
+                    float(tick.get("price", np.nan))
+                    if tick.get("price") is not None
+                    else np.nan
+                ),
+                "size": (
+                    float(tick.get("size", np.nan))
+                    if tick.get("size") is not None
+                    else np.nan
+                ),
+                "side": (
+                    str(tick.get("side", "")).lower()
+                    if tick.get("side") is not None
+                    else ""
+                ),
+            }
 
-            if footprint_partial is not None and not self._history_df.empty:
-                self._history_df.loc[
-                    self._history_df.index[-1], "footprint_live_delta"
-                ] = footprint_partial["summary"].get("delta_total", 0.0)
-                self._history_df.loc[
-                    self._history_df.index[-1], "footprint_live_poc"
-                ] = footprint_partial["summary"].get("poc")
+            # Append au buffer (en mémoire, liste)
+            if (
+                not hasattr(self, "_ticks_current_bar")
+                or self._ticks_current_bar is None
+            ):
+                self._ticks_current_bar = []
+            self._ticks_current_bar.append(tick_safe)
 
-                # Sauvegarde footprint live
+            # Construire DataFrame de ticks — travail sur une copie
+            ticks_df = pd.DataFrame(self._ticks_current_bar).copy()
+            if not ticks_df.empty:
+                # garantir colonne time en datetime
+                if "time" not in ticks_df.columns:
+                    ticks_df["time"] = pd.Timestamp.utcnow()
+                else:
+                    ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
+
+                # normaliser side
+                if "side" in ticks_df.columns:
+                    ticks_df["side"] = (
+                        ticks_df["side"].astype(str).str.lower().fillna("unknown")
+                    )
+            else:
+                # pas de ticks -> rien à faire
+                return
+
+            # Appeler le validator en donnant des copies (defensive)
+            try:
+                # fournir copies pour éviter mutation côté validator
+                hp = None if self._history_df is None else self._history_df.copy()
+                footprint_partial = self.detectors.validate_last_candle_footprint(
+                    hp, ticks_df.copy()
+                )
+            except Exception as e_val:
+                self.logger.debug(
+                    f"[on_tick] validate_last_candle_footprint levé: {e_val}",
+                    exc_info=True,
+                )
+                footprint_partial = None
+
+            # Si on a un résultat et qu'on a déjà un historique, écrire les résultats 'live'
+            if (
+                footprint_partial is not None
+                and self._history_df is not None
+                and not self._history_df.empty
+            ):
+                # protéger colonnes footprint
+                self._history_df = _ensure_footprint_columns(self._history_df)
+
+                # dernier index sûr
+                last_idx = self._history_df.index[-1]
+
+                # assigner de façon safe (cast to object to avoid dtype mismatch)
+                try:
+                    self._history_df.at[last_idx, "footprint_live_delta"] = (
+                        footprint_partial["summary"].get("delta_total", pd.NA)
+                    )
+                    self._history_df.at[last_idx, "footprint_live_poc"] = (
+                        footprint_partial["summary"].get("poc", pd.NA)
+                    )
+                except Exception as e_assign:
+                    self.logger.warning(
+                        f"[on_tick] impossible d'assigner footprint_live -> {e_assign}",
+                        exc_info=True,
+                    )
+
+                # tenter sauvegarde mémoire (non bloquante)
                 try:
                     self.memory.store_footprint(
-                        asset_symbol="LIVE_ASSET",
+                        asset_symbol=getattr(
+                            self, "current_asset_symbol", "LIVE_ASSET"
+                        ),
                         delta=footprint_partial["summary"].get("delta_total", 0.0),
-                        poc=footprint_partial["summary"].get("poc"),
+                        poc=footprint_partial["summary"].get("poc", None),
                         is_live=True,
                     )
                 except Exception as e_mem:
                     self.logger.warning(
-                        f"[on_tick] store_footprint live failed: {e_mem}"
+                        f"[on_tick] store_footprint live failed: {e_mem}", exc_info=True
                     )
 
         except Exception as e:
-            self.logger.warning(f"[on_tick] footprint live failed: {e}")
+            self.logger.exception(f"[on_tick] erreur générale: {e}")
 
+    # ---------------------------
+    # Méthode 2: on_bar_close
+    # ---------------------------
     def on_bar_close(self, new_bar: dict, asset_symbol: str):
         """
-        Clôture la bougie courante, calcule le footprint final,
-        et ajoute la bougie scellée dans l'historique.
+        Traite la clôture d'une bougie :
+        - sanitize la ligne
+        - l'ajoute proprement à self._history_df (concat pour éviter dtype mismatch)
+        - calcule footprint final
+        - stocke et retourne l'analyse finale
+        Retourne : résultat de self.analyze_last_bar(...)
         """
+        try:
+            if not isinstance(new_bar, dict):
+                raise ValueError("on_bar_close: new_bar doit être un dict")
 
-        # 1. Initialiser l'historique si vide
-        if self._history_df is None:
-            self._history_df = pd.DataFrame()
+            # Timestamp de la bougie
+            ts = new_bar.get("time", None)
+            if ts is None:
+                ts = pd.Timestamp.utcnow()
+            try:
+                ts = pd.to_datetime(ts)
+            except Exception:
+                ts = pd.Timestamp.utcnow()
 
-        # 🔧 Nettoyage new_bar (évite NaN/dtypes incohérents)
-        row = {k: (None if pd.isna(v) else v) for k, v in new_bar.items()}
+            # Clean safe_row: remplacer NaN/inf/obj complexes par pd.NA
+            safe_row = {k: _coerce_val(v) for k, v in new_bar.items()}
 
-        # 2. Préparer insertion safe (coercition type-aware)
-        safe_row = {}
-        for k, v in row.items():
-            if pd.isna(v):
-                if k in self._history_df.columns:
-                    col_dtype = self._history_df[k].dtype
-                    if col_dtype == bool:
-                        safe_row[k] = False
-                    elif np.issubdtype(col_dtype, np.number):
-                        safe_row[k] = 0.0
-                    else:
-                        safe_row[k] = None
-                else:
-                    safe_row[k] = None
+            # Créer DataFrame 1-ligne indexée par ts
+            safe_row_df = pd.DataFrame([safe_row], index=[ts])
+
+            # Nettoyage colonnes (remplacer infinite par NA)
+            for c in safe_row_df.columns:
+                colv = safe_row_df[c]
+                # if numeric-like, coerce to numeric
+                if colv.dtype == object:
+                    try:
+                        safe_row_df[c] = pd.to_numeric(colv, errors="ignore")
+                    except Exception:
+                        pass
+
+            # Initialiser history si nécessaire
+            if getattr(self, "_history_df", None) is None or self._history_df is None:
+                # prendre safe_row_df as starting history
+                self._history_df = safe_row_df.copy()
+                # ensure consistent dtypes and index type
+                self._history_df.index = pd.to_datetime(self._history_df.index)
+                self._history_df = self._history_df.infer_objects(copy=False)
             else:
-                safe_row[k] = v
+                # Aligner colonnes : si history a colonnes absentes, ajouter en object
+                for col in safe_row_df.columns:
+                    if col not in self._history_df.columns:
+                        # add column to history with pd.NA (object)
+                        self._history_df[col] = pd.Series(
+                            [pd.NA] * len(self._history_df),
+                            index=self._history_df.index,
+                            dtype="object",
+                        )
+                for col in self._history_df.columns:
+                    if col not in safe_row_df.columns:
+                        safe_row_df[col] = pd.Series(
+                            [pd.NA], index=safe_row_df.index, dtype="object"
+                        )
 
-        # 3. Ajouter la nouvelle bougie fermée
-        ts = pd.to_datetime(new_bar.get("time"))
-        self._history_df.loc[ts] = safe_row
+                # tenter d'aligner types pour éviter warnings : cast safe_row_df cols to history dtypes where possible
+                for col in self._history_df.columns:
+                    try:
+                        hist_dtype = self._history_df[col].dtype
+                        # Only try to cast if dtype is not object (avoid forcing strings into numeric incorrectly)
+                        if hist_dtype != object:
+                            safe_row_df[col] = safe_row_df[col].astype(
+                                hist_dtype, errors="ignore"
+                            )
+                    except Exception:
+                        pass
 
-        # 🔧 Normalisation des types après insertion
-        self._history_df = self._history_df.infer_objects(copy=False)
+                # Concat sûr
+                try:
+                    self._history_df = pd.concat(
+                        [self._history_df, safe_row_df], sort=False
+                    )
+                except Exception:
+                    # fallback: rebuild history with reindex + concat
+                    self._history_df = pd.concat(
+                        [self._history_df.copy(), safe_row_df.copy()], sort=False
+                    )
 
-        # 🔧 Sécurité index → forcer DatetimeIndex
-        if not isinstance(self._history_df.index, pd.DatetimeIndex):
-            self._history_df.index = pd.to_datetime(
-                self._history_df.index, errors="coerce"
+                # ensure DatetimeIndex
+                self._history_df.index = pd.to_datetime(
+                    self._history_df.index, errors="coerce"
+                )
+                # remove possible duplicate index (keep last inserted)
+                if self._history_df.index.has_duplicates:
+                    self._history_df = self._history_df[
+                        ~self._history_df.index.duplicated(keep="last")
+                    ]
+                # normalize types
+                self._history_df = self._history_df.infer_objects(copy=False)
+
+            # Forcer les colonnes footprint dispo en dtype object pour assignations ultérieures
+            self._history_df = _ensure_footprint_columns(self._history_df)
+
+            # Préparer ticks_df (copie sûre)
+            ticks_df = pd.DataFrame(
+                self._ticks_current_bar
+                if getattr(self, "_ticks_current_bar", None)
+                else []
             )
+            if not ticks_df.empty:
+                if "time" not in ticks_df.columns:
+                    ticks_df["time"] = pd.Timestamp.utcnow()
+                ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
+            else:
+                # empty frame but with expected columns
+                ticks_df = pd.DataFrame(columns=["time", "price", "size", "side"])
 
-        # 4. Footprint final
-        ticks_df = pd.DataFrame(self._ticks_current_bar)
+            # Appeler validator (copies)
+            try:
+                footprint_final = self.detectors.validate_last_candle_footprint(
+                    self._history_df.copy(), ticks_df.copy()
+                )
+            except Exception as e_val:
+                self.logger.debug(
+                    f"[on_bar_close] validate_last_candle_footprint levé: {e_val}",
+                    exc_info=True,
+                )
+                footprint_final = None
 
-        # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
-        if "time" not in ticks_df.columns and not ticks_df.empty:
-            ticks_df["time"] = pd.Timestamp.utcnow()
-
-        footprint_final = self.detectors.validate_last_candle_footprint(
-            self._history_df, ticks_df
-        )
-
-        if footprint_final:
             last_idx = self._history_df.index[-1]
 
-            self._history_df.loc[last_idx, "footprint_score"] = footprint_final.get(
-                "score", 0
-            )
-            self._history_df.loc[last_idx, "footprint_status"] = footprint_final.get(
-                "status", "UNKNOWN"
-            )
-            self._history_df.loc[last_idx, "footprint_summary"] = str(
-                footprint_final.get("summary", {})
-            )
+            if footprint_final:
+                # assign safe values (object dtype columns avoid warnings)
+                try:
+                    self._history_df.at[last_idx, "footprint_score"] = (
+                        footprint_final.get("score", pd.NA)
+                    )
+                    self._history_df.at[last_idx, "footprint_status"] = (
+                        footprint_final.get("status", pd.NA)
+                    )
+                    self._history_df.at[last_idx, "footprint_summary"] = str(
+                        footprint_final.get("summary", {})
+                    )
+                except Exception as e_assign:
+                    self.logger.warning(
+                        f"[on_bar_close] assignment footprint final failed: {e_assign}",
+                        exc_info=True,
+                    )
 
-            # Sauvegarde footprint final
+                # sauvegarde mémoire (non-bloquant)
+                try:
+                    self.memory.store_footprint(
+                        asset_symbol=asset_symbol,
+                        delta=footprint_final.get("summary", {}).get(
+                            "delta_total", 0.0
+                        ),
+                        poc=footprint_final.get("summary", {}).get("poc", None),
+                        is_live=False,
+                    )
+                except Exception as e_mem:
+                    self.logger.warning(
+                        f"[on_bar_close] store_footprint final failed: {e_mem}",
+                        exc_info=True,
+                    )
+            else:
+                # aucun footprint -> marquer pour audit
+                try:
+                    self._history_df.at[last_idx, "footprint_status"] = "SUSPECT"
+                    self._history_df.at[last_idx, "footprint_summary"] = str(
+                        {"comment": "validator error or no ticks"}
+                    )
+                except Exception:
+                    pass
+
+            # Vider buffer ticks (préparer la prochaine bougie)
             try:
-                self.memory.store_footprint(
+                if hasattr(self, "_ticks_current_bar") and self._ticks_current_bar:
+                    self._ticks_current_bar.clear()
+            except Exception as e_clear:
+                self.logger.debug(f"[on_bar_close] clear ticks failed: {e_clear}")
+
+            # Enfin lancer l'analyse finale (analyse_last_bar doit être sûre aussi)
+            try:
+                return self.analyze_last_bar(
+                    self._history_df.copy(),
                     asset_symbol=asset_symbol,
-                    delta=footprint_final.get("summary", {}).get("delta_total", 0.0),
-                    poc=footprint_final.get("summary", {}).get("poc"),
-                    is_live=False,
+                    ticks=ticks_df.copy(),
                 )
-            except Exception as e_mem:
-                self.logger.warning(
-                    f"[on_bar_close] store_footprint final failed: {e_mem}"
-                )
+            except Exception as e_an:
+                self.logger.exception(f"[on_bar_close] analyse_last_bar levé: {e_an}")
+                return None
 
-        # 5. Vider le buffer ticks
-        self._ticks_current_bar.clear()
+        except Exception as e:
+            self.logger.exception(f"[on_bar_close] erreur générale: {e}")
+            return None
 
-        # 6. Analyse finale dernière bougie
-        return self.analyze_last_bar(
-            self._history_df, asset_symbol=asset_symbol, ticks=ticks_df
-        )
-
+    # ---------------------------
+    # Méthode 3: load_initial_history
+    # ---------------------------
     def load_initial_history(self, df: pd.DataFrame):
         """
-        Charge l'historique initial de manière robuste (200 barres M1 par ex.).
-        Garantit un DataFrame propre avec DatetimeIndex et colonnes homogènes.
+        Charge l'historique initial (robuste) :
+        - vérif, nettoyage NaN/inf, forcer DatetimeIndex,
+        - homogénéise colonnes et types.
         """
-        import pandas as pd
+        try:
+            if df is None:
+                raise ValueError("load_initial_history: df is None")
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError("load_initial_history: df must be a pandas.DataFrame")
 
-        if df is None or df.empty:
-            raise ValueError("load_initial_history: df vide ou None")
+            if df.empty:
+                raise ValueError("load_initial_history: df vide")
 
-        df = df.where(pd.notna(df), None).infer_objects(copy=False)
+            # Copy defensively
+            df = df.copy()
 
-        if not isinstance(df.index, pd.DatetimeIndex):
+            # remplacer inf par NA
+            df.replace([np.inf, -np.inf], pd.NA, inplace=True)
+
+            # si colonne time existe -> l'utiliser pour l'index
             if "time" in df.columns:
-                df.index = pd.to_datetime(df["time"], errors="coerce")
+                df["time"] = pd.to_datetime(df["time"], errors="coerce")
+                # si beaucoup de NaT, log warning
+                if df["time"].isna().sum() > 0:
+                    self.logger.warning(
+                        "[load_initial_history] certaines times n'ont pas pu être parsées -> remplacées par range"
+                    )
+                # set index and drop duplicates
+                df.set_index("time", inplace=True)
             else:
-                df.index = pd.date_range(
-                    end=pd.Timestamp.utcnow(), periods=len(df), freq="T"
-                )
+                # si index n'est pas datetime, essayer de to_datetime, sinon générer index minute-spaced
+                try:
+                    df.index = pd.to_datetime(df.index, errors="coerce")
+                except Exception:
+                    df.index = pd.to_datetime(df.index, errors="coerce")
+
+                if df.index.isna().any():
+                    # generate a safe DatetimeIndex (assume minute bars ending now)
+                    df.index = pd.date_range(
+                        end=pd.Timestamp.utcnow(), periods=len(df), freq="T"
+                    )
+                    self.logger.warning(
+                        "[load_initial_history] index non-datetime -> index artificiel créé"
+                    )
+
+            # drop rows with NaT index
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.isna().any():
+                df = df[~df.index.isna()]
                 self.logger.warning(
-                    "[load_initial_history] df sans 'time' → index généré artificiellement"
+                    "[load_initial_history] lignes avec index NaT supprimées"
                 )
 
-        self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
+            # Replace remaining NaN by pd.NA to avoid dtype mixing
+            df = df.where(pd.notna(df), pd.NA)
+
+            # infer types where safe
+            df = df.infer_objects(copy=False)
+
+            # ensure sorted unique index
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+
+            # ensure footprint columns exist (object dtype)
+            df = _ensure_footprint_columns(df)
+
+            # store analyzed history (use a copy)
+            self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
+
+            return self._history_df
+
+        except Exception as e:
+            self.logger.exception(f"[load_initial_history] erreur: {e}")
+            raise
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
