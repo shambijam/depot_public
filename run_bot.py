@@ -727,10 +727,18 @@ def run_single_pipeline_cycle(
                     market_analyzer.phase_observer.load_initial_history(rates_df.copy())
                 else:
                     # 2️⃣ Cycles suivants : analyse incrémentale dernière bougie
-                    # On scelle la bougie M1 en cours avec footprint final
                     last_bar = rates_df.iloc[-1].to_dict()
                     last_signals = market_analyzer.phase_observer.on_bar_close(last_bar, asset_symbol=asset)
-                    market_results = {"latest": last_signals}
+
+                    # ⚡ Corrigé : construire un market_results complet
+                    market_results = {
+                        "latest": last_signals,
+                        "annotated_df": market_analyzer.phase_observer._history_df.copy(),
+                        "patterns": {},   # à remplir si besoin (détecteurs patterns)
+                        "phase": last_signals.get("phase_primary", "neutral"),
+                        "confidence": last_signals.get("confidence_score", 0.5),
+                        "structure": {},  # placeholder si tu veux garder la cohérence
+                    }
                 
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}")
