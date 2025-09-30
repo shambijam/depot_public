@@ -1,4 +1,4 @@
-#phase_observer/features.py
+# phase_observer/features.py
 # --- MUST BE FIRST LINE ---
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ except Exception:
 
 
 class FeaturesExtractor:
-    def __init__(self, logger: Optional[logging.Logger] = None, config_manager: Any = None):
+    def __init__(
+        self, logger: Optional[logging.Logger] = None, config_manager: Any = None
+    ):
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
 
@@ -24,19 +26,22 @@ class FeaturesExtractor:
 
     def get_swing_points(self, df: pd.DataFrame, order: Optional[int] = None):
         return _get_swing_points(self, df, order)
-   
+
     def calculate_volatility_regime(self, df: pd.DataFrame) -> str:
         return _calculate_volatility_regime(self, df)
 
     def get_trend(self, df: pd.DataFrame) -> pd.Series:
         return _get_trend(self, df)
 
-    def calculate_quality_metrics(self, tf_analyses: Dict, confluence: Dict, divergences: Dict, start_time: float):
-        return _calculate_quality_metrics(self, tf_analyses, confluence, divergences, start_time)
+    def calculate_quality_metrics(
+        self, tf_analyses: Dict, confluence: Dict, divergences: Dict, start_time: float
+    ):
+        return _calculate_quality_metrics(
+            self, tf_analyses, confluence, divergences, start_time
+        )
 
     def fetch_timeframe_data(self, asset: str, timeframe: str, config: Dict):
         return _fetch_timeframe_data(self, asset, timeframe, config)
-
 
 
 def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -44,7 +49,7 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
     Nettoie et standardise un DataFrame OHLCV (issu MT5) pour le PhaseObserver.
     - Garantit un index datetime UTC trié (index='time')
     - Convertit/valide les colonnes numériques essentielles
-    - Supprime les timestamps dupliqués (garde la 1re occurrence)
+    - Supprime les timestamps dupliqués (FIFO : garde la plus récente)
     """
     self.logger.info("PhaseObserver: Nettoyage et standardisation du DataFrame...")
 
@@ -65,18 +70,27 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         if not pd.api.types.is_datetime64_any_dtype(df["time"]):
             try:
                 # MT5 renvoie souvent des timestamps en secondes
-                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+                df["time"] = pd.to_datetime(
+                    df["time"], unit="s", utc=True, errors="coerce"
+                )
             except Exception as e:
-                self.logger.error(f"PhaseObserver: erreur conversion 'time' en datetime: {e}", exc_info=True)
+                self.logger.error(
+                    f"PhaseObserver: erreur conversion 'time' en datetime: {e}",
+                    exc_info=True,
+                )
                 return pd.DataFrame()
 
             before = len(df)
             df.dropna(subset=["time"], inplace=True)
             dropped = before - len(df)
             if dropped > 0:
-                self.logger.warning(f"PhaseObserver: {dropped} lignes supprimées (timestamps invalides).")
+                self.logger.warning(
+                    f"PhaseObserver: {dropped} lignes supprimées (timestamps invalides)."
+                )
             if df.empty:
-                self.logger.warning("PhaseObserver: plus aucune ligne valide après conversion 'time'.")
+                self.logger.warning(
+                    "PhaseObserver: plus aucune ligne valide après conversion 'time'."
+                )
                 return pd.DataFrame()
 
         df.set_index("time", inplace=True)
@@ -91,7 +105,9 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
     numeric_cols_expected = ["open", "high", "low", "close", "tick_volume"]
     for col in numeric_cols_expected:
         if col not in df.columns:
-            self.logger.warning(f"PhaseObserver: colonne '{col}' absente. Ajoutée avec 0.0.")
+            self.logger.warning(
+                f"PhaseObserver: colonne '{col}' absente. Ajoutée avec 0.0."
+            )
             df[col] = 0.0
         # Conversion numérique robuste
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -102,21 +118,27 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
             if neg_mask.any():
                 n = int(neg_mask.sum())
                 df.loc[neg_mask, col] = 0.0
-                self.logger.warning(f"PhaseObserver: {n} volumes négatifs corrigés à 0.0 dans '{col}'.")
+                self.logger.warning(
+                    f"PhaseObserver: {n} volumes négatifs corrigés à 0.0 dans '{col}'."
+                )
         else:
             df[col] = df[col].fillna(0.00001)
             nonpos_mask = df[col] <= 0
             if nonpos_mask.any():
                 n = int(nonpos_mask.sum())
                 df.loc[nonpos_mask, col] = 0.00001
-                self.logger.warning(f"PhaseObserver: {n} valeurs ≤ 0 corrigées à 0.00001 dans '{col}'.")
+                self.logger.warning(
+                    f"PhaseObserver: {n} valeurs ≤ 0 corrigées à 0.00001 dans '{col}'."
+                )
 
-    # 5) Supprimer les timestamps dupliqués (garde la 1re)
+    # 5) Supprimer les timestamps dupliqués (FIFO)
     before = len(df)
-    df = df[~df.index.duplicated(keep="first")]
+    df = df[~df.index.duplicated(keep="last")]
     removed = before - len(df)
     if removed > 0:
-        self.logger.warning(f"PhaseObserver: {removed} entrées dupliquées supprimées (index time).")
+        self.logger.debug(
+            f"PhaseObserver: {removed} entrées dupliquées supprimées (index time, FIFO)."
+        )
 
     self.logger.info("PhaseObserver: Nettoyage du DataFrame terminé.")
     return df
@@ -139,10 +161,16 @@ def _get_swing_points(
             return pd.Series([], dtype=float), pd.Series([], dtype=float)
 
         highs_condition = (
-            df["high"] == df["high"].rolling(window=window_size, center=True, min_periods=window_size).max()
+            df["high"]
+            == df["high"]
+            .rolling(window=window_size, center=True, min_periods=window_size)
+            .max()
         )
         lows_condition = (
-            df["low"] == df["low"].rolling(window=window_size, center=True, min_periods=window_size).min()
+            df["low"]
+            == df["low"]
+            .rolling(window=window_size, center=True, min_periods=window_size)
+            .min()
         )
 
         swing_highs = df.loc[highs_condition, "high"]
@@ -151,8 +179,6 @@ def _get_swing_points(
 
     # Si aucun paramètre 'order' n'est fourni → pas de calcul swing en mode Burst
     return pd.Series([], dtype=float), pd.Series([], dtype=float)
-
-
 
 
 def _calculate_volatility_regime(self, df: pd.DataFrame) -> str:
@@ -170,35 +196,43 @@ def _calculate_volatility_regime(self, df: pd.DataFrame) -> str:
         # --- 1) Config flexible ------------------------------------------------
         cfg = {}
         try:
-            cfg = self.config_manager.get("phase_detection_defaults.volatility_regime", {}) or {}
+            cfg = (
+                self.config_manager.get(
+                    "phase_detection_defaults.volatility_regime", {}
+                )
+                or {}
+            )
         except Exception:
             pass
 
-        atr_period   = int(cfg.get("atr_period", 14))
-        lookback     = int(cfg.get("lookback", 100))
-        high_pct     = float(cfg.get("high_percentile", 75))   # top 25%
-        low_pct      = float(cfg.get("low_percentile", 25))    # bottom 25%
-        min_samples  = max(atr_period * 2, lookback // 2)
+        atr_period = int(cfg.get("atr_period", 14))
+        lookback = int(cfg.get("lookback", 100))
+        high_pct = float(cfg.get("high_percentile", 75))  # top 25%
+        low_pct = float(cfg.get("low_percentile", 25))  # bottom 25%
+        min_samples = max(atr_period * 2, lookback // 2)
 
         if len(df) < min_samples:
-            self.logger.warning("Pas assez de données pour calcul volatilité → normal_vol")
+            self.logger.warning(
+                "Pas assez de données pour calcul volatilité → normal_vol"
+            )
             return "normal_vol"
 
         # --- 2) ATR (Average True Range) --------------------------------------
         high, low, close = df["high"], df["low"], df["close"]
         prev_close = close.shift(1)
 
-        tr_components = pd.concat([
-            (high - low).abs(),
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1)
+        tr_components = pd.concat(
+            [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        )
 
         true_range = tr_components.max(axis=1)
         atr = true_range.rolling(window=atr_period, min_periods=1).mean()
 
         # --- 3) Log returns vol (complément) ----------------------------------
-        returns = close.pct_change().apply(lambda x: np.log(1 + x) if pd.notna(x) else 0.0)
+        returns = close.pct_change().apply(
+            lambda x: np.log(1 + x) if pd.notna(x) else 0.0
+        )
         ret_vol = returns.rolling(window=atr_period, min_periods=1).std()
 
         # --- 4) Score composite -----------------------------------------------
@@ -236,9 +270,6 @@ def _calculate_volatility_regime(self, df: pd.DataFrame) -> str:
         return "normal_vol"
 
 
-        
-
-
 def _get_trend(self, df: pd.DataFrame) -> pd.Series:
     """
     Détermine la tendance dominante pour chaque point (vectoriel).
@@ -246,12 +277,31 @@ def _get_trend(self, df: pd.DataFrame) -> pd.Series:
     """
     # Paramètres depuis config (fallbacks sûrs)
     try:
-        trend_window = int(getattr(self, "TREND_WINDOW",
-                                   self.config_manager.get("phase_detection_defaults.trend_window", 20)))
-        trend_sma_fast_ratio = float(getattr(self, "trend_sma_fast_ratio",
-                                             self.config_manager.get("phase_detection_defaults.trend_sma_fast_ratio", 0.3)))
-        trend_sma_slow_ratio = float(getattr(self, "trend_sma_slow_ratio",
-                                             self.config_manager.get("phase_detection_defaults.trend_sma_slow_ratio", 0.7)))
+        trend_window = int(
+            getattr(
+                self,
+                "TREND_WINDOW",
+                self.config_manager.get("phase_detection_defaults.trend_window", 20),
+            )
+        )
+        trend_sma_fast_ratio = float(
+            getattr(
+                self,
+                "trend_sma_fast_ratio",
+                self.config_manager.get(
+                    "phase_detection_defaults.trend_sma_fast_ratio", 0.3
+                ),
+            )
+        )
+        trend_sma_slow_ratio = float(
+            getattr(
+                self,
+                "trend_sma_slow_ratio",
+                self.config_manager.get(
+                    "phase_detection_defaults.trend_sma_slow_ratio", 0.7
+                ),
+            )
+        )
     except Exception:
         trend_window = 20
         trend_sma_fast_ratio = 0.3
@@ -272,7 +322,9 @@ def _get_trend(self, df: pd.DataFrame) -> pd.Series:
     trend_conditions = [sma_fast > sma_slow, sma_fast < sma_slow]
     trend_outcomes = ["bullish", "bearish"]
 
-    return pd.Series(np.select(trend_conditions, trend_outcomes, default="neutral"), index=df.index)
+    return pd.Series(
+        np.select(trend_conditions, trend_outcomes, default="neutral"), index=df.index
+    )
 
 
 def _calculate_quality_metrics(
@@ -288,47 +340,54 @@ def _calculate_quality_metrics(
     Signature conservée.
     """
 
-
     # ---------- Sécurisation des inputs ----------
-    tf_analyses   = tf_analyses or {}
-    confluence    = confluence or {}
-    divergences   = divergences or {}
+    tf_analyses = tf_analyses or {}
+    confluence = confluence or {}
+    divergences = divergences or {}
 
     # ---------- Couverture (0..1) ----------
     # Si confluence fournit 'weights_used', on s'en sert pour définir l'ensemble des TF attendus.
     weights_used = confluence.get("weights_used") or {}
-    expected_tfs = set(map(str, weights_used.keys())) if weights_used else {"M1", "M5", "M15"}
-    present_tfs  = set(map(str, tf_analyses.keys()))
-    denom_cov    = max(1, len(expected_tfs))
+    expected_tfs = (
+        set(map(str, weights_used.keys())) if weights_used else {"M1", "M5", "M15"}
+    )
+    present_tfs = set(map(str, tf_analyses.keys()))
+    denom_cov = max(1, len(expected_tfs))
     data_coverage = min(1.0, len(present_tfs.intersection(expected_tfs)) / denom_cov)
 
     # ---------- Confluence (0..1) ----------
     confluence_score = float(confluence.get("confluence_score", 0.0) or 0.0)
-    base_confluence  = float(confluence.get("base_confluence", confluence_score) or confluence_score)
+    base_confluence = float(
+        confluence.get("base_confluence", confluence_score) or confluence_score
+    )
 
     # ---------- Cohérence temporelle (phase/biais) (0..1) ----------
     # Phase: strict + bucket; Biais: poids du biais gagnant
     phase_consistency_strict = bool(confluence.get("phase_consistency", False))
-    phase_bucket_agreement   = float(confluence.get("phase_bucket_agreement", 0.0) or 0.0)
+    phase_bucket_agreement = float(confluence.get("phase_bucket_agreement", 0.0) or 0.0)
     bias = str(confluence.get("bias", "NEUTRAL") or "NEUTRAL")
     bias_weights = confluence.get("bias_weights", {}) or {}
     bias_agreement = float(bias_weights.get(bias, 0.0) or 0.0)
 
     # Combinaison cohérence: on valorise l'accord "large" (bucket) + biais
-    temporal_consistency = max(0.0, min(1.0, 0.6 * phase_bucket_agreement + 0.4 * bias_agreement))
+    temporal_consistency = max(
+        0.0, min(1.0, 0.6 * phase_bucket_agreement + 0.4 * bias_agreement)
+    )
     # Petit supplément si strictement identiques (capé)
     if phase_consistency_strict:
         temporal_consistency = min(1.0, temporal_consistency + 0.05)
 
     # ---------- Divergences (pénalités 0..0.35) ----------
     # On prend en compte le booléen, le nombre de conflits et une sévérité si disponible.
-    has_conflicts   = bool(divergences.get("has_conflicts", False))
-    conflict_count  = int(divergences.get("conflict_count", 0) or 0)
-    severity        = float(divergences.get("severity", 0.0) or 0.0)  # 0..1
+    has_conflicts = bool(divergences.get("has_conflicts", False))
+    conflict_count = int(divergences.get("conflict_count", 0) or 0)
+    severity = float(divergences.get("severity", 0.0) or 0.0)  # 0..1
     # Barème: chaque conflit coûte 0.05 jusqu'à 0.25 + sévérité jusqu'à 0.10 → cap 0.35
     divergence_penalty = 0.0
     if has_conflicts or conflict_count > 0 or severity > 0:
-        divergence_penalty = min(0.35, 0.05 * max(1, conflict_count) + 0.10 * max(0.0, min(1.0, severity)))
+        divergence_penalty = min(
+            0.35, 0.05 * max(1, conflict_count) + 0.10 * max(0.0, min(1.0, severity))
+        )
 
     # ---------- Performance (latence) (0..1) ----------
     execution_time_ms = (time.perf_counter() - float(start_time)) * 1000.0
@@ -344,23 +403,23 @@ def _calculate_quality_metrics(
 
     # ---------- Agrégation (poids explicites, somme≈1, puis pénalité divergences) ----------
     # Poids 'desk' (stables) :
-    w_cov   = 0.20
-    w_conf  = 0.45
-    w_temp  = 0.20
-    w_rt    = 0.15
+    w_cov = 0.20
+    w_conf = 0.45
+    w_temp = 0.20
+    w_rt = 0.15
 
     raw_score = (
-        w_cov  * data_coverage +
-        w_conf * confluence_score +
-        w_temp * temporal_consistency +
-        w_rt   * runtime_score
+        w_cov * data_coverage
+        + w_conf * confluence_score
+        + w_temp * temporal_consistency
+        + w_rt * runtime_score
     )
 
     overall_score = max(0.0, min(1.0, raw_score - divergence_penalty))
 
     # ---------- Grading ----------
     if overall_score >= 0.90:
-        grade = "S"   # superb
+        grade = "S"  # superb
     elif overall_score >= 0.80:
         grade = "A"
     elif overall_score >= 0.70:
@@ -393,7 +452,6 @@ def _calculate_quality_metrics(
         "execution_time_ms": float(round(execution_time_ms, 2)),
         "performance_grade": grade,
     }
-
 
 
 def _fetch_timeframe_data(
@@ -441,7 +499,9 @@ def _fetch_timeframe_data(
             mt5_timeframe = fallback_tf_mapping.get(tf_key)
 
         if mt5 is None:
-            self.logger.warning("MetaTrader5 (mt5) non disponible dans l'environnement.")
+            self.logger.warning(
+                "MetaTrader5 (mt5) non disponible dans l'environnement."
+            )
         if mt5_timeframe is None and mt5 is not None:
             raise ValueError(f"Timeframe {timeframe} non supporté")
 
@@ -455,8 +515,13 @@ def _fetch_timeframe_data(
             lookback_bars = max(lookback_bars, bars_min)
 
         # 4) Appel MT5Connector si disponible
-        if hasattr(self.config_manager, "mt5_connector") and self.config_manager.mt5_connector:
-            mt5_data = self.config_manager.mt5_connector.get_rates(asset, tf_key, lookback_bars)
+        if (
+            hasattr(self.config_manager, "mt5_connector")
+            and self.config_manager.mt5_connector
+        ):
+            mt5_data = self.config_manager.mt5_connector.get_rates(
+                asset, tf_key, lookback_bars
+            )
             if mt5_data is not None and not mt5_data.empty:
                 cleaned_data = _clean_dataframe(self, mt5_data)
                 self.logger.debug(
@@ -465,12 +530,10 @@ def _fetch_timeframe_data(
                 )
                 return cleaned_data
             else:
-                self.logger.warning(f"[{asset}] Données vides/None pour TF={tf_key}, lookback={lookback_bars}")
+                self.logger.warning(
+                    f"[{asset}] Données vides/None pour TF={tf_key}, lookback={lookback_bars}"
+                )
 
-       
     except Exception as e:
         self.logger.error(f"Erreur acquisition {asset} {timeframe}: {e}", exc_info=True)
         return None
-
-
-
