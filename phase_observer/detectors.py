@@ -440,6 +440,153 @@ def detect_orderflow(
 
     return signals
 
+def footprint_validator(
+    candles: pd.DataFrame,
+    ticks: pd.DataFrame,
+    candle_index: Optional[int] = None,
+    price_step: Optional[float] = None,
+    imbalance_threshold: float = 0.7,
+) -> Dict[str, Any]:
+    """
+    🏦 Footprint Validator (Dev Desk Edition)
+    ----------------------------------------------------
+    Validateur de la dernière bougie via footprint orderflow.
+    Standard "banque d'investissement" :
+      - Analyse tick granulaire
+      - Résumé institutionnel pour audit
+      - Score de validation
+    
+    Paramètres
+    ----------
+    candles : DataFrame avec colonnes ['time','open','high','low','close']
+    ticks   : DataFrame avec colonnes ['time','price','size','side'] (side = buy/sell)
+    candle_index : index de la bougie à valider (None = dernière bougie)
+    price_step : pas de prix (auto-détection si None)
+    imbalance_threshold : seuil d’imbalance pour flagger déséquilibres
+    
+    Retour
+    ------
+    dict avec :
+      - 'summary' : métriques clés (delta, POC, imbalances, absorption)
+      - 'score'   : validation [0-100]
+      - 'status'  : verdict "VALID" / "SUSPECT"
+      - 'footprint_df' : DF détaillé par niveau de prix
+      - 'candle'  : OHLC de la bougie validée
+    """
+    # --- sélectionner la bougie cible
+    if candle_index is None:
+        candle_index = len(candles) - 1
+    candle = candles.iloc[candle_index]
+
+    start_ts = pd.to_datetime(candle.get("time", candle.name))
+    if candle_index + 1 < len(candles):
+        end_ts = pd.to_datetime(candles.iloc[candle_index + 1].get("time", candles.index[candle_index + 1]))
+    else:
+        end_ts = start_ts
+
+    # --- filtrer ticks dans la fenêtre
+    if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
+        ticks["time"] = pd.to_datetime(ticks["time"])
+    mask = (ticks["time"] >= start_ts) & (ticks["time"] < end_ts)
+    df = ticks.loc[mask].copy()
+
+    if df.empty:
+        return {
+            "summary": {"comment": "Aucun tick trouvé pour la bougie."},
+            "score": 0,
+            "status": "SUSPECT",
+            "footprint_df": pd.DataFrame(),
+            "candle": candle.to_dict(),
+        }
+
+    # --- normaliser side
+    df["side_norm"] = df["side"].str.lower().map(
+        {"buy": "buy", "sell": "sell", "b": "buy", "s": "sell"}
+    ).fillna("unknown")
+
+    # --- déterminer le pas de prix
+    if price_step is None:
+        diffs = np.diff(np.sort(df["price"].unique()))
+        price_step = np.min(diffs[diffs > 0]) if len(diffs[diffs > 0]) else 1e-5
+
+    df["price_level"] = (df["price"] / price_step).round() * price_step
+
+    # --- agrégation footprint
+    agg = df.pivot_table(
+        index="price_level",
+        columns="side_norm",
+        values="size",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    for col in ["buy", "sell", "unknown"]:
+        if col not in agg.columns:
+            agg[col] = 0.0
+
+    agg["total"] = agg["buy"] + agg["sell"] + agg["unknown"]
+    agg["delta"] = agg["buy"] - agg["sell"]
+    agg["buy_pct"] = np.where(
+        (agg["buy"] + agg["sell"]) > 0,
+        agg["buy"] / (agg["buy"] + agg["sell"]),
+        0.5,
+    )
+    agg = agg.reset_index().sort_values("price_level", ascending=False).reset_index(drop=True)
+
+    # --- POC
+    poc_row = agg.loc[agg["total"].idxmax()]
+    poc = float(poc_row["price_level"])
+
+    # --- métriques
+    delta_total = float(agg["delta"].sum())
+    total_volume = float(agg["total"].sum())
+    imbalance_flags = (
+        (agg["buy_pct"] >= imbalance_threshold).sum(),
+        (agg["buy_pct"] <= (1 - imbalance_threshold)).sum(),
+    )
+
+    # --- détection absorption simple
+    absorption_flag = False
+    if agg.iloc[0]["delta"] < 0:
+        absorption_flag = True
+    if agg.iloc[-1]["delta"] > 0:
+        absorption_flag = True
+
+    # --- score institutionnel
+    score = 100
+    comments = []
+
+    if total_volume < 1e-6:
+        score -= 60
+        comments.append("Volume négligeable.")
+    if abs(delta_total) < 0.01 * total_volume:
+        score -= 15
+        comments.append("Delta trop neutre (pas de conviction).")
+    if imbalance_flags[0] + imbalance_flags[1] == 0:
+        score -= 10
+        comments.append("Aucun déséquilibre détecté.")
+    if absorption_flag:
+        score -= 20
+        comments.append("Absorption détectée aux extrêmes.")
+
+    status = "VALID" if score >= 70 else "SUSPECT"
+
+    return {
+        "summary": {
+            "delta_total": delta_total,
+            "total_volume": total_volume,
+            "poc": poc,
+            "imbalance_buy": imbalance_flags[0],
+            "imbalance_sell": imbalance_flags[1],
+            "absorption_flag": absorption_flag,
+            "comments": "; ".join(comments),
+        },
+        "score": max(score, 0),
+        "status": status,
+        "footprint_df": agg,
+        "candle": candle.to_dict(),
+    }
+
+
 class Detectors:
     """
     Classe regroupant tous les détecteurs de phases de marché.
@@ -449,6 +596,21 @@ class Detectors:
     def __init__(self, logger=None, config_manager=None):
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
+        
+    def validate_last_candle_footprint(
+        self, candles: pd.DataFrame, ticks: pd.DataFrame
+    ) -> Dict[str, Any]:
+        try:
+            return footprint_validator(candles, ticks, candle_index=None)
+        except Exception as e:
+            self.logger.error(f"[FootprintValidator] erreur: {e}")
+            return {
+                "summary": {"comment": f"error: {e}"},
+                "score": 0,
+                "status": "SUSPECT",
+                "footprint_df": pd.DataFrame(),
+                "candle": {},
+            }   
 
     def detect_order_block_ml_enhanced(
         self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None

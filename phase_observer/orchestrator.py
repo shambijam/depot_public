@@ -48,6 +48,7 @@ class PhaseObserver:
         Initialise le PhaseObserver avec les paramètres de configuration.
         """
         import logging
+
         self.config_manager = config_manager
         self.logger = logging.getLogger(__name__)
 
@@ -108,15 +109,18 @@ class PhaseObserver:
         )
 
     def calculate_optimized_confidence(self, row) -> float:
-        
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
 
         # --- 1) Lecture config ---
         try:
             cfg = (
                 self.config_manager.get("confidence_score_calculation", None)
-                or self.config_manager.get("phase_detection_defaults.confidence_score_calculation", None)
-                or self.config_manager.get("phase_detection_defaults.confidence_scoring", None)
+                or self.config_manager.get(
+                    "phase_detection_defaults.confidence_score_calculation", None
+                )
+                or self.config_manager.get(
+                    "phase_detection_defaults.confidence_scoring", None
+                )
                 or {}
             )
             cfg_path_used = "config_loaded"
@@ -128,18 +132,28 @@ class PhaseObserver:
         if not isinstance(signal_weights, dict):
             weights = cfg.get("weights", {})
             signal_weights = {
-                "fvg_detected": float(weights.get("fvg", weights.get("fvg_detected", 0.25))),
-                "ob_detected": float(weights.get("ob", weights.get("ob_detected", 0.35))),
-                "bos_mss_detected": float(weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))),
-                "regime_alignment": float(weights.get("regime", weights.get("regime_alignment", 0.15))),
+                "fvg_detected": float(
+                    weights.get("fvg", weights.get("fvg_detected", 0.25))
+                ),
+                "ob_detected": float(
+                    weights.get("ob", weights.get("ob_detected", 0.35))
+                ),
+                "bos_mss_detected": float(
+                    weights.get("bos_mss", weights.get("bos_mss_detected", 0.25))
+                ),
+                "regime_alignment": float(
+                    weights.get("regime", weights.get("regime_alignment", 0.15))
+                ),
                 "candle_pattern": 0.15,
             }
 
-        confluence_bonus    = cfg.get("confluence_bonus", cfg.get("confluence", {})) or {}
-        quality_multipliers = cfg.get("quality_factors", cfg.get("quality_multipliers", {})) or {}
+        confluence_bonus = cfg.get("confluence_bonus", cfg.get("confluence", {})) or {}
+        quality_multipliers = (
+            cfg.get("quality_factors", cfg.get("quality_multipliers", {})) or {}
+        )
 
         base_confidence = float(cfg.get("base_confidence", cfg.get("base", 0.2)))
-        max_confidence  = float(cfg.get("max_confidence_cap", cfg.get("cap", 0.95)))
+        max_confidence = float(cfg.get("max_confidence_cap", cfg.get("cap", 0.95)))
 
         # --- 3) Score de base ---
         score = float(base_confidence)
@@ -159,30 +173,51 @@ class PhaseObserver:
         if bool(row.get("sweep_detected", False)):
             score += float(cfg.get("liquidity_weights", {}).get("sweep_detected", 0.35))
         if bool(row.get("absorption_confirmed", False)):
-            score += float(cfg.get("liquidity_weights", {}).get("absorption_confirmed", 0.25))
+            score += float(
+                cfg.get("liquidity_weights", {}).get("absorption_confirmed", 0.25)
+            )
         if bool(row.get("eqh_eql_detected", False)):
-            score += float(cfg.get("liquidity_weights", {}).get("eqh_eql_detected", 0.20))
+            score += float(
+                cfg.get("liquidity_weights", {}).get("eqh_eql_detected", 0.20)
+            )
 
         # --- 4) Bonus confluence ---
         if bool(row.get("fvg_ob_confluence", False)):
             score += confluence_bonus.get("fvg_ob_confluence", 0.15)
-        if bool(row.get("high_quality_ob", False)) and bool(row.get("bos_mss_detected", False)):
+        if bool(row.get("high_quality_ob", False)) and bool(
+            row.get("bos_mss_detected", False)
+        ):
             score += confluence_bonus.get("ob_bos_confluence", 0.10)
         if bool(row.get("institutional_setup", False)):
             score += confluence_bonus.get("full_confluence_bonus", 0.20)
 
         # --- 5) Bougies ---
-        candle_type  = str(row.get("candle_pattern", "")).lower()
+        candle_type = str(row.get("candle_pattern", "")).lower()
         candle_score = float(row.get("candle_pattern_strength", 0.0) or 0.0)
         if candle_score > 0:
-            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(1.0, candle_score)
-            if candle_type in {"bullish_engulfing", "morning_star", "three_white_soldiers"}:
+            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(
+                1.0, candle_score
+            )
+            if candle_type in {
+                "bullish_engulfing",
+                "morning_star",
+                "three_white_soldiers",
+            }:
                 score += base_bonus * 1.3
-            elif candle_type in {"bearish_engulfing", "evening_star", "three_black_crows"}:
+            elif candle_type in {
+                "bearish_engulfing",
+                "evening_star",
+                "three_black_crows",
+            }:
                 score += base_bonus * 1.3
             elif candle_type in {"doji", "doji_cluster_consolidation"}:
                 score += base_bonus * 0.7
-            elif candle_type in {"hammer", "shooting_star", "bullish_pinbar", "bearish_pinbar"}:
+            elif candle_type in {
+                "hammer",
+                "shooting_star",
+                "bullish_pinbar",
+                "bearish_pinbar",
+            }:
                 score += base_bonus * 1.0
             else:
                 score += base_bonus
@@ -194,11 +229,17 @@ class PhaseObserver:
             score *= quality_multipliers.get("regime_strength", 1.10)
 
         try:
-            ob_details  = row.get("ob_details")
+            ob_details = row.get("ob_details")
             bos_details = row.get("bos_mss_details")
-            if isinstance(ob_details, dict) and float(ob_details.get("volume_spike", 0) or 0) > 1.5:
+            if (
+                isinstance(ob_details, dict)
+                and float(ob_details.get("volume_spike", 0) or 0) > 1.5
+            ):
                 score *= quality_multipliers.get("high_volume_confirmation", 1.15)
-            elif isinstance(bos_details, dict) and float(bos_details.get("volume_ratio", 0) or 0) > 1.5:
+            elif (
+                isinstance(bos_details, dict)
+                and float(bos_details.get("volume_ratio", 0) or 0) > 1.5
+            ):
                 score *= quality_multipliers.get("high_volume_confirmation", 1.15)
         except Exception:
             pass
@@ -226,7 +267,6 @@ class PhaseObserver:
                 pass
 
         return score
-
 
     def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
         """
@@ -288,7 +328,10 @@ class PhaseObserver:
         # TODO: Hot-reload si ConfigManager supporte des callbacks.
 
     def analyze(
-        self, df: pd.DataFrame, asset_symbol: Optional[str] = None
+        self,
+        df: pd.DataFrame,
+        asset_symbol: Optional[str] = None,
+        ticks: Optional[pd.DataFrame] = None,
     ) -> Optional[pd.DataFrame]:
         """
         🎯 PIPELINE D'ANALYSE OPTIMISÉ (STRICT / NO FALLBACK)
@@ -493,7 +536,6 @@ class PhaseObserver:
                         )
                         df_an["candle_pattern"] = None
                         df_an["candle_pattern_score"] = 0.0
-
 
             # === PHASE 3: LIQUIDITÉ ===
             try:
@@ -735,7 +777,7 @@ class PhaseObserver:
                 )
                 df_an["eqh_eql_details"] = None
                 df_an["eqh_eql_detected"] = False
-                
+
                 # === PHASE 4bis: MICRO-PHASE BURST SCALPING ===
             try:
                 if hasattr(self.detectors, "detect_micro_phase_m1"):
@@ -743,8 +785,12 @@ class PhaseObserver:
                     if micro and isinstance(micro, dict):
                         df_an["burst_signal"] = bool(micro.get("burst_signal", False))
                         df_an["burst_side"] = str(micro.get("burst_side", "NEUTRAL"))
-                        df_an["burst_strength"] = float(micro.get("burst_strength", 0.0))
-                        df_an["suggested_burst_size"] = int(micro.get("suggested_burst_size", 0))
+                        df_an["burst_strength"] = float(
+                            micro.get("burst_strength", 0.0)
+                        )
+                        df_an["suggested_burst_size"] = int(
+                            micro.get("suggested_burst_size", 0)
+                        )
                         df_an["burst_sl_pips"] = micro.get("sl_pips_suggestion")
                         df_an["burst_tp_pips"] = micro.get("tp_pips_suggestion")
                     else:
@@ -755,7 +801,9 @@ class PhaseObserver:
                         df_an["burst_sl_pips"] = None
                         df_an["burst_tp_pips"] = None
             except Exception as e:
-                self.logger.warning(f"[{current_asset_symbol}] Erreur detect_micro_phase_m1: {e}")
+                self.logger.warning(
+                    f"[{current_asset_symbol}] Erreur detect_micro_phase_m1: {e}"
+                )
                 df_an["burst_signal"] = False
                 df_an["burst_side"] = "NEUTRAL"
                 df_an["burst_strength"] = 0.0
@@ -763,6 +811,30 @@ class PhaseObserver:
                 df_an["burst_sl_pips"] = None
                 df_an["burst_tp_pips"] = None
 
+            # === PHASE 4ter: FOOTPRINT VALIDATOR (Dev Desk) ===
+            try:
+                if (
+                    hasattr(self.detectors, "validate_last_candle_footprint")
+                    and ticks is not None
+                ):
+                    fp_res = self.detectors.validate_last_candle_footprint(df_an, ticks)
+                    if fp_res:
+                        df_an.loc[df_an.index[-1], "footprint_score"] = fp_res.get(
+                            "score", 0
+                        )
+                        df_an.loc[df_an.index[-1], "footprint_status"] = fp_res.get(
+                            "status", "UNKNOWN"
+                        )
+                        df_an.loc[df_an.index[-1], "footprint_summary"] = str(
+                            fp_res.get("summary", {})
+                        )
+            except Exception as e:
+                self.logger.warning(
+                    f"[{current_asset_symbol}] Footprint validator failed: {e}"
+                )
+                df_an.loc[df_an.index[-1], "footprint_score"] = 0
+                df_an.loc[df_an.index[-1], "footprint_status"] = "ERROR"
+                df_an.loc[df_an.index[-1], "footprint_summary"] = "{}"
 
             # === PHASE 5: PHASE PRIMAIRE ===
             df_an["phase_primary"] = df_an.apply(
@@ -789,7 +861,7 @@ class PhaseObserver:
 
             # === PHASE 7bis: STRATEGY FLAGS ===
             try:
-              
+
                 # 2) Switch Liquidity dès qu'une zone est identifiée (sweep ou absorption)
                 has_sweep = (
                     bool(df_an["sweep_detected"].iloc[-1])
@@ -823,7 +895,7 @@ class PhaseObserver:
                     df_an["mtf_bias_aligned"] = False
 
                 # Logs explicites
-              
+
                 if bool(df_an["switch_to_liquidity"].iloc[-1]):
                     self.logger.info(
                         f"[{current_asset_symbol}] ⚡ Zone de liquidité détectée → Switch Liquidity."
@@ -882,8 +954,8 @@ class PhaseObserver:
                 if "candle_pattern" in df_an.columns:
                     last_candle = str(df_an["candle_pattern"].iloc[-1])
                     last_candle_strength = float(
-                    df_an.get("candle_pattern_score", [0.0])[-1]
-                )
+                        df_an.get("candle_pattern_score", [0.0])[-1]
+                    )
 
                     if last_candle and last_candle != "None":
                         self.logger.info(
@@ -895,7 +967,7 @@ class PhaseObserver:
                     self.logger.info(
                         f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
                     )
-                    
+
                 if last_phase == "no_clear_phase":
                     self.logger.info(
                         f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
@@ -1285,8 +1357,6 @@ class PhaseObserver:
             f"Temps={execution_time:.1f}ms"
         )
         return final_signals
-
-  
 
     def process_multi_asset_config(self, config_filepath: Union[str, Path]):
         """
