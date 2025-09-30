@@ -104,7 +104,20 @@ class PhaseObserver:
                 self.logger.warning(
                     f"Impossible de charger config: {e}. Utilisation des valeurs par défaut."
                 )
+        # === Config Footprint ===
+        try:
+            self.footprint_cfg = self.config_manager.get("footprint_settings", {}) or {}
+        except Exception:
+            self.footprint_cfg = {}
 
+        # Valeurs par défaut
+        self.footprint_cfg.setdefault("enable_live_footprint", True)
+        self.footprint_cfg.setdefault("enable_final_footprint", True)
+        self.footprint_cfg.setdefault("max_buffer_ticks", 500)
+        self.footprint_cfg.setdefault("delta_threshold", 0.0)
+        self.footprint_cfg.setdefault("poc_min_volume", 0)
+        self.footprint_cfg.setdefault("store_to_memory", True)
+     
         # === Ajout mémoire des phases ===
         from .memory import PhaseMemoryManager
 
@@ -177,93 +190,55 @@ class PhaseObserver:
 
             tick_safe = {
                 "time": t_time,
-                "price": (
-                    float(tick.get("price"))
-                    if tick.get("price") is not None
-                    else np.nan
-                ),
-                "size": (
-                    float(tick.get("size")) if tick.get("size") is not None else np.nan
-                ),
-                "side": str(tick.get("side") or "").lower(),
+                "price": float(tick.get("price")) if tick.get("price") is not None else np.nan,
+                "size":  float(tick.get("size"))  if tick.get("size")  is not None else np.nan,
+                "side":  str(tick.get("side") or "").lower(),
             }
 
-            # Buffer
-            if (
-                not hasattr(self, "_ticks_current_bar")
-                or self._ticks_current_bar is None
-            ):
+            # Buffer ticks limité par config
+            if not hasattr(self, "_ticks_current_bar") or self._ticks_current_bar is None:
                 self._ticks_current_bar = []
             self._ticks_current_bar.append(tick_safe)
 
-            # DataFrame des ticks
-            ticks_df = pd.DataFrame(self._ticks_current_bar).copy()
-            if ticks_df.empty:
-                return
+            max_buf = int(self.footprint_cfg.get("max_buffer_ticks", 500))
+            if len(self._ticks_current_bar) > max_buf:
+                self._ticks_current_bar = self._ticks_current_bar[-max_buf:]
 
-            if "time" not in ticks_df.columns:
-                ticks_df["time"] = pd.Timestamp.utcnow()
-            else:
-                ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
-
-            if "side" in ticks_df.columns:
-                ticks_df["side"] = (
-                    ticks_df["side"].astype(str).str.lower().fillna("unknown")
-                )
-
-            # Footprint live
-            try:
-                hist_copy = (
-                    None
-                    if getattr(self, "_history_df", None) is None
-                    else self._history_df.copy()
-                )
-                footprint_partial = self.detectors.validate_last_candle_footprint(
-                    hist_copy, ticks_df.copy()
-                )
-            except Exception as e_val:
-                self.logger.debug(
-                    f"[on_tick] validate_last_candle_footprint: {e_val}", exc_info=True
-                )
+            # Footprint live activé ?
+            if self.footprint_cfg.get("enable_live_footprint", True):
                 footprint_partial = None
-
-            if (
-                footprint_partial is not None
-                and self._history_df is not None
-                and not self._history_df.empty
-            ):
-                self._history_df = self._ensure_footprint_columns(self._history_df)
-                last_idx = self._history_df.index[-1]
                 try:
-                    self._history_df.at[last_idx, "footprint_live_delta"] = (
-                        footprint_partial["summary"].get("delta_total", pd.NA)
-                    )
-                    self._history_df.at[last_idx, "footprint_live_poc"] = (
-                        footprint_partial["summary"].get("poc", pd.NA)
-                    )
-                except Exception as e_assign:
-                    self.logger.warning(
-                        f"[on_tick] assign footprint_live failed: {e_assign}",
-                        exc_info=True,
-                    )
+                    hist_copy = None if getattr(self, "_history_df", None) is None else self._history_df.copy()
+                    ticks_df = pd.DataFrame(self._ticks_current_bar)
+                    footprint_partial = self.detectors.validate_last_candle_footprint(hist_copy, ticks_df)
+                except Exception as e_val:
+                    self.logger.debug(f"[on_tick] validate_last_candle_footprint: {e_val}", exc_info=True)
 
-                # Sauvegarde mémoire (non bloquante)
-                try:
-                    self.memory.store_footprint(
-                        asset_symbol=getattr(
-                            self, "current_asset_symbol", "LIVE_ASSET"
-                        ),
-                        delta=footprint_partial["summary"].get("delta_total", 0.0),
-                        poc=footprint_partial["summary"].get("poc", None),
-                        is_live=True,
-                    )
-                except Exception as e_mem:
-                    self.logger.warning(
-                        f"[on_tick] store_footprint live failed: {e_mem}", exc_info=True
-                    )
+                if footprint_partial and self._history_df is not None and not self._history_df.empty:
+                    self._history_df = self._ensure_footprint_columns(self._history_df)
+                    last_idx = self._history_df.index[-1]
+                    delta = footprint_partial["summary"].get("delta_total", pd.NA)
+                    poc = footprint_partial["summary"].get("poc", pd.NA)
+
+                    # Appliquer seuil delta
+                    if abs(delta) >= self.footprint_cfg.get("delta_threshold", 0.0):
+                        self._history_df.at[last_idx, "footprint_live_delta"] = delta
+                        self._history_df.at[last_idx, "footprint_live_poc"]   = poc
+
+                        if self.footprint_cfg.get("store_to_memory", True):
+                            try:
+                                self.memory.store_footprint(
+                                    asset_symbol=getattr(self, "current_asset_symbol", "LIVE_ASSET"),
+                                    delta=delta,
+                                    poc=poc,
+                                    is_live=True,
+                                )
+                            except Exception as e_mem:
+                                self.logger.warning(f"[on_tick] store_footprint live failed: {e_mem}", exc_info=True)
 
         except Exception as e:
             self.logger.exception(f"[on_tick] erreur générale: {e}")
+
 
     # ================================================================
     # Méthode 2: on_bar_close
@@ -312,32 +287,39 @@ class PhaseObserver:
             )
             ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
 
-            # Validation footprint final
-            footprint_final = None
-            try:
-                footprint_final = self.detectors.validate_last_candle_footprint(
-                    self._history_df.copy(), ticks_df.copy()
-                )
-            except Exception as e_val:
-                self.logger.debug(f"[on_bar_close] validate_last_candle_footprint: {e_val}", exc_info=True)
-
-            last_idx = self._history_df.index[-1]
-            if footprint_final:
-                self._history_df.at[last_idx, "footprint_score"] = footprint_final.get("score", pd.NA)
-                self._history_df.at[last_idx, "footprint_status"] = footprint_final.get("status", pd.NA)
-                self._history_df.at[last_idx, "footprint_summary"] = str(footprint_final.get("summary", {}))
+            # Validation footprint final (si activé)
+            if self.footprint_cfg.get("enable_final_footprint", True):
+                footprint_final = None
                 try:
-                    self.memory.store_footprint(
-                        asset_symbol=asset_symbol,
-                        delta=footprint_final.get("summary", {}).get("delta_total", 0.0),
-                        poc=footprint_final.get("summary", {}).get("poc", None),
-                        is_live=False,
+                    footprint_final = self.detectors.validate_last_candle_footprint(
+                        self._history_df.copy(), ticks_df.copy()
                     )
-                except Exception as e_mem:
-                    self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}", exc_info=True)
-            else:
-                self._history_df.at[last_idx, "footprint_status"] = "SUSPECT"
-                self._history_df.at[last_idx, "footprint_summary"] = str({"comment": "validator error or no ticks"})
+                except Exception as e_val:
+                    self.logger.debug(f"[on_bar_close] validate_last_candle_footprint: {e_val}", exc_info=True)
+
+                last_idx = self._history_df.index[-1]
+                if footprint_final:
+                    delta = footprint_final.get("summary", {}).get("delta_total", 0.0)
+                    poc = footprint_final.get("summary", {}).get("poc", None)
+
+                    if abs(delta) >= self.footprint_cfg.get("delta_threshold", 0.0):
+                        self._history_df.at[last_idx, "footprint_score"] = footprint_final.get("score", pd.NA)
+                        self._history_df.at[last_idx, "footprint_status"] = footprint_final.get("status", pd.NA)
+                        self._history_df.at[last_idx, "footprint_summary"] = str(footprint_final.get("summary", {}))
+
+                        if self.footprint_cfg.get("store_to_memory", True):
+                            try:
+                                self.memory.store_footprint(
+                                    asset_symbol=asset_symbol,
+                                    delta=delta,
+                                    poc=poc,
+                                    is_live=False,
+                                )
+                            except Exception as e_mem:
+                                self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}", exc_info=True)
+                else:
+                    self._history_df.at[last_idx, "footprint_status"] = "SUSPECT"
+                    self._history_df.at[last_idx, "footprint_summary"] = str({"comment": "validator error or no ticks"})
 
             # Clear buffer ticks
             self._ticks_current_bar.clear()
@@ -348,6 +330,7 @@ class PhaseObserver:
         except Exception as e:
             self.logger.exception(f"[on_bar_close] erreur générale: {e}")
             return None
+
 
     # ================================================================
     # Méthode 3: load_initial_history

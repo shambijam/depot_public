@@ -211,6 +211,15 @@
             "detect_eqh_eql": true,
             "detect_volume_anomaly": true,
             "detect_regime": true
+        },
+        "footprint_settings": {
+            "description": "Paramètres de gestion et validation footprint",
+            "enable_live_footprint": true,
+            "enable_final_footprint": true,
+            "max_buffer_ticks": 500,
+            "delta_threshold": 50,
+            "poc_min_volume": 10,
+            "store_to_memory": true
         }
     }
 }
