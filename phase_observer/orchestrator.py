@@ -120,15 +120,16 @@ class PhaseObserver:
         Ajoute un tick dans le buffer courant.
         tick = {"time": pd.Timestamp, "price": float, "size": float, "side": "buy"/"sell"}
         """
+        import pandas as pd
+
+        # 1. Ajouter le tick au buffer
         self._ticks_current_bar.append(tick)
 
-        # Analyse footprint partielle (live, intra-minute)
+        # 2. Analyse footprint partielle (live, intra-minute)
         try:
-            import pandas as pd
-
             ticks_df = pd.DataFrame(self._ticks_current_bar)
 
-            # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
+            # 🔧 Sécurité: garantir une colonne "time"
             if "time" not in ticks_df.columns and not ticks_df.empty:
                 ticks_df["time"] = pd.Timestamp.utcnow()
 
@@ -137,14 +138,14 @@ class PhaseObserver:
             )
 
             if footprint_partial is not None and not self._history_df.empty:
-                self._history_df.loc[
-                    self._history_df.index[-1], "footprint_live_delta"
-                ] = footprint_partial["summary"].get("delta_total", 0.0)
-                self._history_df.loc[
-                    self._history_df.index[-1], "footprint_live_poc"
-                ] = footprint_partial["summary"].get("poc")
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_delta"] = (
+                    footprint_partial["summary"].get("delta_total", 0.0)
+                )
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_poc"] = (
+                    footprint_partial["summary"].get("poc")
+                )
 
-                # Sauvegarde footprint live en mémoire
+                # Sauvegarde footprint live
                 try:
                     self.memory.store_footprint(
                         asset_symbol="LIVE_ASSET",  # ⚠️ à remplacer par l’actif réel si dispo
@@ -153,31 +154,11 @@ class PhaseObserver:
                         is_live=True,
                     )
                 except Exception as e_mem:
-                    self.logger.warning(
-                        f"[on_tick] store_footprint live failed: {e_mem}"
-                    )
+                    self.logger.warning(f"[on_tick] store_footprint live failed: {e_mem}")
 
         except Exception as e:
             self.logger.warning(f"[on_tick] footprint live failed: {e}")
-
-    def load_initial_history(self, df: pd.DataFrame):
-        """
-        Charge l'historique initial (200 barres M1 par ex.).
-        Nettoie les NaN et homogénéise les types pour éviter les warnings pandas.
-        """
-
-        if df is None or df.empty:
-            raise ValueError("load_initial_history: df vide ou None")
-
-        # 🔧 Nettoyage basique : remplacer NaN par None pour éviter dtype incohérent
-        df = df.where(pd.notna(df), None)
-
-        # 🔧 Normalisation des types
-        df = df.infer_objects(copy=False)
-
-        # Analyse et stockage
-        self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
-
+            
     def on_bar_close(self, new_bar: dict, asset_symbol: str):
         """
         Clôture la bougie courante, calcule le footprint final,
@@ -185,24 +166,24 @@ class PhaseObserver:
         """
         import pandas as pd
 
-        # 1. Ajouter la nouvelle bougie fermée
+        # 1. Initialiser si vide
         if self._history_df is None:
             self._history_df = pd.DataFrame()
 
-        # 🔧 Nettoyage new_bar : remplacer NaN / types incompatibles
-        row = {}
-        for k, v in new_bar.items():
-            if pd.isna(v):  # si NaN float
-                row[k] = None
-            else:
-                row[k] = v
+        # 🔧 Nettoyage new_bar (évite les NaN mal typés)
+        row = {k: (None if pd.isna(v) else v) for k, v in new_bar.items()}
 
+        # 2. Ajouter la nouvelle bougie fermée
         self._history_df.loc[new_bar["time"]] = row
 
-        # 🔧 Patch pandas dtype (optimisation des colonnes)
+        # 🔧 Normalisation des dtypes après insertion
         self._history_df = self._history_df.infer_objects(copy=False)
 
-        # 2. Footprint final
+        # 🔧 Sécurité index → doit être un DatetimeIndex
+        if not isinstance(self._history_df.index, pd.DatetimeIndex):
+            self._history_df.index = pd.to_datetime(self._history_df.index, errors="coerce")
+
+        # 3. Footprint final
         ticks_df = pd.DataFrame(self._ticks_current_bar)
 
         # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
@@ -224,7 +205,7 @@ class PhaseObserver:
                 footprint_final.get("summary", {})
             )
 
-            # Sauvegarde footprint final en mémoire
+            # Sauvegarde footprint final
             try:
                 self.memory.store_footprint(
                     asset_symbol=asset_symbol,
@@ -233,17 +214,43 @@ class PhaseObserver:
                     is_live=False,
                 )
             except Exception as e_mem:
-                self.logger.warning(
-                    f"[on_bar_close] store_footprint final failed: {e_mem}"
-                )
+                self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}")
 
-        # 3. Vider le buffer ticks pour la prochaine bougie
+        # 4. Vider le buffer ticks
         self._ticks_current_bar.clear()
 
-        # 4. Lancer analyse finale dernière bougie
+        # 5. Analyse finale dernière bougie
         return self.analyze_last_bar(
             self._history_df, asset_symbol=asset_symbol, ticks=ticks_df
         )
+                
+    def load_initial_history(self, df: pd.DataFrame):
+        """
+        Charge l'historique initial (200 barres M1 par ex.).
+        Nettoie les NaN et homogénéise les types pour éviter les warnings pandas.
+        """
+
+        import pandas as pd
+
+        if df is None or df.empty:
+            raise ValueError("load_initial_history: df vide ou None")
+
+        # 🔧 Nettoyage basique : remplacer NaN par None pour éviter dtype incohérent
+        df = df.where(pd.notna(df), None)
+
+        # 🔧 Normalisation des types
+        df = df.infer_objects(copy=False)
+
+        # 🔧 Vérifier/forcer que l’index est bien un DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if "time" in df.columns:
+                df.index = pd.to_datetime(df["time"], errors="coerce")
+            else:
+                raise ValueError("load_initial_history: df sans colonne 'time' ni DatetimeIndex")
+
+        # Analyse et stockage
+        self._history_df = self.analyze(df.copy(), asset_symbol="INIT")
+
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
