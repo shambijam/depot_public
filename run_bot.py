@@ -220,7 +220,6 @@ def _is_market_closed(rates_df: pd.DataFrame, active_config: dict) -> bool:
     return False
 
 
-# ------------------- FONCTION CORRIGÉE -------------------
 def _build_asset_trading_signals(
     latest_signals_row: pd.Series,
     symbol_info_mt5: Any,
@@ -230,17 +229,20 @@ def _build_asset_trading_signals(
     """
     Construit le dictionnaire de signaux pour un actif donné en conservant
     TOUTES les colonnes du PhaseObserver et en ajoutant:
-      - Spread robuste en points (fallback via (ask-bid)/point)
-      - Features MTF utiles au scalping: alignement M5/M15, direction, ATR M5
+      - Spread robuste en points (via broker ou (ask-bid)/point)
       - Micro-timing M1: break HH/LL & écart EMA20/EMA50
     """
     # 1) Tout le contenu PhaseObserver
     if isinstance(latest_signals_row, dict):
         signals = latest_signals_row.copy()
-    else:
+    elif hasattr(latest_signals_row, "to_dict"):
         signals = latest_signals_row.to_dict()
+    else:
+        raise TypeError(
+            "latest_signals_row doit être un dict ou un Series convertible en dict"
+        )
 
-    # 2) Infos broker de base (compatibilité avec le code existant)
+    # 2) Infos broker de base
     signals["current_price"] = latest_signals_row.get("close")
     signals["spread"] = (
         getattr(symbol_info_mt5, "spread", float("inf"))
@@ -267,26 +269,18 @@ def _build_asset_trading_signals(
         signals["last_update_timestamp"] = datetime.now(UTC).isoformat()
 
     # 4) Spread robuste (en points)
-    #    - si 'spread' vaut 0 / None, on calcule via MT5Connector (ask-bid)/point
     current_spread_points = None
-    try:
-        if (
-            isinstance(signals.get("spread"), (int, float))
-            and float(signals["spread"]) > 0
-        ):
-            current_spread_points = float(signals["spread"])
-        elif mt5_connector and asset:
-            current_spread_points = float(mt5_connector.get_symbol_spread_points(asset))
-    except Exception:
-        current_spread_points = None
+    if isinstance(signals.get("spread"), (int, float)) and float(signals["spread"]) > 0:
+        current_spread_points = float(signals["spread"])
+    elif mt5_connector and asset:
+        current_spread_points = float(mt5_connector.get_symbol_spread_points(asset))
     signals["current_spread_points"] = (
         current_spread_points if current_spread_points is not None else float("inf")
     )
 
-    # 5) Features MTF (si on a le connector et l'asset)
+    # 5) Micro-structure M1 uniquement (PAS de fallback MTF SMA/EMA)
     if mt5_connector and asset:
         import numpy as np
-        import pandas as pd
 
         def _ema(x: np.ndarray, n: int) -> np.ndarray:
             k = 2 / (n + 1.0)
@@ -296,57 +290,22 @@ def _build_asset_trading_signals(
                 ema[i] = k * x[i] + (1 - k) * ema[i - 1]
             return ema
 
-        def _atr(df: pd.DataFrame, n: int = 14) -> float:
-            h = df["high"].to_numpy()
-            l = df["low"].to_numpy()
-            c = df["close"].to_numpy()
-            prev = np.r_[c[0], c[:-1]]
-            tr = np.maximum.reduce([h - l, np.abs(h - prev), np.abs(l - prev)])
-            atr = np.empty_like(tr)
-            atr[0] = tr[0]
-            for i in range(1, len(tr)):
-                atr[i] = (atr[i - 1] * (n - 1) + tr[i]) / n
-            return float(atr[-1])
-
-        # M5 / M15 : sens et alignement
-        try:
-            m5 = mt5_connector.get_rates(asset, "M5", 200)
-            m15 = mt5_connector.get_rates(asset, "M15", 200)
-            if m5 is not None and not m5.empty and m15 is not None and not m15.empty:
-                e20_5 = _ema(m5["close"].to_numpy(), 20)[-1]
-                e50_5 = _ema(m5["close"].to_numpy(), 50)[-1]
-                e20_15 = _ema(m15["close"].to_numpy(), 20)[-1]
-                e50_15 = _ema(m15["close"].to_numpy(), 50)[-1]
-                up = (e20_5 > e50_5) and (e20_15 > e50_15)
-                down = (e20_5 < e50_5) and (e20_15 < e50_15)
-                signals["mtf_ema_align"] = bool(up or down)
-                signals["mtf_direction"] = "up" if up else ("down" if down else "none")
-                signals["atr_m5"] = _atr(m5, 14)
-        except Exception:
-            # En cas de souci data, on n'écrase rien
-            pass
-
-        # M1 : micro-structure & écart EMA
-        try:
-            m1 = mt5_connector.get_rates(asset, "M1", 200)
-            if m1 is not None and not m1.empty:
-                e20_1 = _ema(m1["close"].to_numpy(), 20)[-1]
-                e50_1 = _ema(m1["close"].to_numpy(), 50)[-1]
-                signals["m1_ema_spread"] = abs(float(e20_1 - e50_1))
-                # Break du plus haut/bas des 10 dernières barres (micro timing)
-                hh = m1["high"].rolling(10).max()
-                ll = m1["low"].rolling(10).min()
-                signals["m1_last_hh_break"] = bool(m1["close"].iloc[-1] > hh.iloc[-2])
-                signals["m1_last_ll_break"] = bool(m1["close"].iloc[-1] < ll.iloc[-2])
-                # Optionnel: ratio volume tick récent vs moyenne
-                if "tick_volume" in m1.columns and len(m1) >= 21:
-                    tv = m1["tick_volume"].to_numpy()
-                    signals.setdefault(
-                        "volume_zscore",
-                        float((tv[-1] - tv[-21:-1].mean()) / (tv[-21:-1].std() + 1e-9)),
-                    )
-        except Exception:
-            pass
+        m1 = mt5_connector.get_rates(asset, "M1", 200)
+        if m1 is not None and not m1.empty:
+            e20_1 = _ema(m1["close"].to_numpy(), 20)[-1]
+            e50_1 = _ema(m1["close"].to_numpy(), 50)[-1]
+            signals["m1_ema_spread"] = abs(float(e20_1 - e50_1))
+            # Break du plus haut/bas des 10 dernières barres
+            hh = m1["high"].rolling(10).max()
+            ll = m1["low"].rolling(10).min()
+            signals["m1_last_hh_break"] = bool(m1["close"].iloc[-1] > hh.iloc[-2])
+            signals["m1_last_ll_break"] = bool(m1["close"].iloc[-1] < ll.iloc[-2])
+            # Optionnel: ratio volume tick récent vs moyenne
+            if "tick_volume" in m1.columns and len(m1) >= 21:
+                tv = m1["tick_volume"].to_numpy()
+                signals["volume_zscore"] = float(
+                    (tv[-1] - tv[-21:-1].mean()) / (tv[-21:-1].std() + 1e-9)
+                )
 
     return signals
 
@@ -415,7 +374,6 @@ def _load_po_config_safe(config_manager):
 def _mtf_readiness_gate(
     mt5_connector, market_analyzer, config_manager, tradeable_assets, cycle_count
 ) -> bool:
-
     """
     Gate MTF BLOQUANT… mais *gracieux* :
     - Si 'readiness_gate.enabled' est False (ou absent) -> ON LAISSE PASSER.
@@ -573,7 +531,7 @@ def _mtf_readiness_gate(
                         if not ok:
                             logger.info(f"[READINESS] skip -> {reason}")
                             return False
-       
+
         return True
 
     except Exception as e:
@@ -629,18 +587,18 @@ def _execute_single_decision(
         )
         return False
 
+
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
     decision_pipeline: DecisionPipeline,
     trade_executor: TradeExecutor,
     config_manager: ConfigManager,
     mecano: Mecano,
-    strategy_manager: StrategyManager,  
+    strategy_manager: StrategyManager,
     is_dry_run: bool,
     cycle_count: int,
     daily_trade_count: int,
 ) -> bool:
-
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
 
@@ -653,9 +611,11 @@ def run_single_pipeline_cycle(
     try:
         from core.diagnostics import get_tracker_from_context
     except Exception:
+
         def get_tracker_from_context(_):
             class _N:
                 def emit_summary(self, *_args, **_kwargs): ...
+
             return _N()
 
     logger = logging.getLogger(__name__)
@@ -682,10 +642,13 @@ def run_single_pipeline_cycle(
 
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
-        account_allowed = set((active_mt5_account_details or {}).get("allowed_symbols", []))
+        account_allowed = set(
+            (active_mt5_account_details or {}).get("allowed_symbols", [])
+        )
         tradeable_assets = (
             [a for a in all_symbols if a in account_allowed]
-            if account_allowed else all_symbols
+            if account_allowed
+            else all_symbols
         )
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
@@ -719,9 +682,12 @@ def run_single_pipeline_cycle(
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
                 # ✅ Initialiser l’historique du PhaseObserver si vide
-                if market_analyzer.phase_observer._history_df is None or market_analyzer.phase_observer._history_df.empty:
+                if (
+                    market_analyzer.phase_observer._history_df is None
+                    or market_analyzer.phase_observer._history_df.empty
+                ):
                     market_analyzer.phase_observer.load_initial_history(rates_df.copy())
-   
+
                 # ✅ Mode "horloge suisse"
                 if cycle_count == 1:
                     # 1️⃣ Premier cycle : on fait une analyse complète (200 barres)
@@ -731,20 +697,24 @@ def run_single_pipeline_cycle(
                 else:
                     # 2️⃣ Cycles suivants : analyse incrémentale dernière bougie
                     last_bar = rates_df.iloc[-1].to_dict()
-                    last_signals = market_analyzer.phase_observer.on_bar_close(last_bar, asset_symbol=asset)
+                    last_signals = market_analyzer.phase_observer.on_bar_close(
+                        last_bar, asset_symbol=asset
+                    )
 
                     # ⚡ Corrigé : construire un market_results complet
                     market_results = {
                         "latest": last_signals,
                         "annotated_df": market_analyzer.phase_observer._history_df.copy(),
-                        "patterns": {},   # à remplir si besoin (détecteurs patterns)
+                        "patterns": {},  # à remplir si besoin (détecteurs patterns)
                         "phase": last_signals.get("phase_primary", "neutral"),
                         "confidence": last_signals.get("confidence_score", 0.5),
                         "structure": {},  # placeholder si tu veux garder la cohérence
                     }
-                
+
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
-                logger.debug(f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}")
+                logger.debug(
+                    f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}"
+                )
 
                 annotated_rates_df = market_results["annotated_df"]
                 if annotated_rates_df is None or annotated_rates_df.empty:
@@ -767,16 +737,24 @@ def run_single_pipeline_cycle(
                     or {}
                 )
                 signals.update(market_results.get("patterns", {}))
-                signals["phase"] = market_results.get("phase", signals.get("phase", "neutral"))
+                signals["phase"] = market_results.get(
+                    "phase", signals.get("phase", "neutral")
+                )
                 signals["confidence_score"] = market_results.get(
                     "confidence", signals.get("confidence_score", 0.5)
                 )
                 signals["structure"] = market_results.get("structure", {})
 
                 # Spread robuste
-                spread_pts = getattr(symbol_info_mt5, "spread", None) if symbol_info_mt5 else None
+                spread_pts = (
+                    getattr(symbol_info_mt5, "spread", None)
+                    if symbol_info_mt5
+                    else None
+                )
                 if not spread_pts or spread_pts <= 0:
-                    spread_pts = mt5_connector.get_symbol_spread_points(asset) or float("inf")
+                    spread_pts = mt5_connector.get_symbol_spread_points(asset) or float(
+                        "inf"
+                    )
                 signals["current_spread_points"] = float(spread_pts)
 
                 # Sauvegarde
@@ -902,18 +880,24 @@ def run_single_pipeline_cycle(
 
                         # 3) trailing forcé si la config burst le prévoit
                         trailing_cfg = (
-                            ((td.get("trailing") or {}) if td.get("trailing") else {})  # déjà présent ?
-                            or (((global_context.get("asset_configs", {}) or {})
-                                .get(td.get("asset",""), {})
+                            (td.get("trailing") or {}) if td.get("trailing") else {}
+                        ) or (  # déjà présent ?
+                            (
+                                (global_context.get("asset_configs", {}) or {})
+                                .get(td.get("asset", ""), {})
                                 .get("entry_rules", {})
                                 .get("scalping", {})
                                 .get("burst_scalping", {})
-                                .get("trailing", {})) or {})
+                                .get("trailing", {})
+                            )
+                            or {}
                         )
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
+                                "activate_after_rr": float(
+                                    trailing_cfg.get("activate_after_rr", 1.0)
+                                ),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
@@ -958,7 +942,9 @@ def run_single_pipeline_cycle(
             if current_positions:
                 from strategy.liquidity import LiquidityStrategy
 
-                liq_cfg = config_manager.get("strategies", {}).get("liquidity", {}) or {}
+                liq_cfg = (
+                    config_manager.get("strategies", {}).get("liquidity", {}) or {}
+                )
                 liqui = LiquidityStrategy(config_manager, liq_cfg)
 
                 exit_decisions = liqui.evaluate_exit(global_context, current_positions)
@@ -1071,14 +1057,13 @@ def main(args: argparse.Namespace) -> None:
         # Instancier Mecano
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
-        
+
         # Instancier StrategyManager
         strategy_manager = StrategyManager(
             config_loader_instance=config_manager.config_loader,
             config_manager_instance=config_manager,
         )
         strategy_manager.initialize_strategies()
-
 
     except Exception as e:
         logger.critical(
@@ -1182,7 +1167,7 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
-                strategy_manager,   # ✅ ici tu passes l’instance
+                strategy_manager,  # ✅ ici tu passes l’instance
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,

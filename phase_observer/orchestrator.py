@@ -126,17 +126,22 @@ class PhaseObserver:
         try:
             import pandas as pd
             ticks_df = pd.DataFrame(self._ticks_current_bar)
+
+            # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
+            if "time" not in ticks_df.columns and not ticks_df.empty:
+                ticks_df["time"] = pd.Timestamp.utcnow()
+
             footprint_partial = self.detectors.validate_last_candle_footprint(
                 self._history_df, ticks_df
             )
-            if footprint_partial and not self._history_df.empty:
-                self._history_df.loc[self._history_df.index[-1], "footprint_live_delta"] = footprint_partial["summary"]["delta_total"]
-                self._history_df.loc[self._history_df.index[-1], "footprint_live_poc"] = footprint_partial["summary"]["poc"]
+            if footprint_partial is not None and not self._history_df.empty:
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_delta"] = footprint_partial["summary"].get("delta_total", 0.0)
+                self._history_df.loc[self._history_df.index[-1], "footprint_live_poc"] = footprint_partial["summary"].get("poc")
 
                 # Sauvegarde footprint live en mémoire
                 try:
                     self.memory.store_footprint(
-                        asset_symbol="LIVE_ASSET",  # ⚠️ remplace par l’actif réel si dispo
+                        asset_symbol="LIVE_ASSET",  # ⚠️ à remplacer par l’actif réel si dispo
                         delta=footprint_partial["summary"].get("delta_total", 0.0),
                         poc=footprint_partial["summary"].get("poc"),
                         is_live=True,
@@ -159,15 +164,24 @@ class PhaseObserver:
         Clôture la bougie courante, calcule le footprint final,
         et ajoute la bougie scellée dans l'historique.
         """
-       
+        import pandas as pd
+
         # 1. Ajouter la nouvelle bougie fermée
         if self._history_df is None:
             self._history_df = pd.DataFrame()
 
         self._history_df.loc[new_bar["time"]] = new_bar
 
+        # 🔧 Patch pandas dtype
+        self._history_df = self._history_df.infer_objects(copy=False)
+
         # 2. Footprint final
         ticks_df = pd.DataFrame(self._ticks_current_bar)
+
+        # 🔧 Sécurité: s'assurer qu'une colonne "time" existe
+        if "time" not in ticks_df.columns and not ticks_df.empty:
+            ticks_df["time"] = pd.Timestamp.utcnow()
+
         footprint_final = self.detectors.validate_last_candle_footprint(self._history_df, ticks_df)
 
         if footprint_final:

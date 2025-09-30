@@ -292,15 +292,10 @@ class LiquidityStrategy(BaseStrategy):
 
             # --- 4) Biais directionnel ---
             action = self._infer_action_from_signals(asset_signals)
-            if action is None and isinstance(df_work, pd.DataFrame) and len(df_work) >= 20:
-                try:
-                    sma = self._sma(df_work["close"].astype(float), 20).iloc[-1]
-                    action = "BUY" if float(price) >= float(sma) else "SELL"
-                except Exception:
-                    action = None
             if action is None:
                 self.logger.info(f"[{asset}] Aucune direction claire.")
                 return {}
+
 
             # --- 5) Range Accumulation MTF ---
             try:
