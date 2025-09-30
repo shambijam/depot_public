@@ -235,7 +235,10 @@ def _build_asset_trading_signals(
       - Micro-timing M1: break HH/LL & écart EMA20/EMA50
     """
     # 1) Tout le contenu PhaseObserver
-    signals = latest_signals_row.to_dict()
+    if isinstance(latest_signals_row, dict):
+        signals = latest_signals_row.copy()
+    else:
+        signals = latest_signals_row.to_dict()
 
     # 2) Infos broker de base (compatibilité avec le code existant)
     signals["current_price"] = latest_signals_row.get("close")
