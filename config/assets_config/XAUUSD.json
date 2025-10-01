@@ -29,6 +29,7 @@
     }
   },
   "risk_management": {
+    "risk_per_trade_percent": 3.0,
     "base_lot_size": 0.05,
     "daily_loss_limit_percent": {
       "value": 2.5
@@ -39,6 +40,12 @@
     "performance_based_adjustments": {
       "enabled": true
     }
+  },
+  "symbol_info": {
+    "point": 0.01,
+    "digits": 2,
+    "trade_contract_size": 100,
+    "trade_tick_size": 0.01
   },
   "strategy_toggles": {
     "scalping": true,
