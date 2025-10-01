@@ -925,6 +925,55 @@ class MT5Connector:
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True)
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+        
+    def get_ticks_for_candle(
+        self,
+        symbol: str,
+        start_ts: datetime,
+        end_ts: datetime,
+    ) -> pd.DataFrame:
+        """
+        🎯 Récupère uniquement les ticks correspondant strictement à une bougie donnée.
+        Fenêtre stricte : [start_ts, end_ts)
+        """
+        import pandas as pd
+
+        if not getattr(self, "is_connected", False):
+            self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+
+        try:
+            ticks = self.mt5.copy_ticks_range(
+                symbol,
+                start_ts,
+                end_ts,
+                self.mt5.COPY_TICKS_ALL,
+            )
+
+            if ticks is None or len(ticks) == 0:
+                self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
+                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+
+            df = pd.DataFrame(ticks)
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+
+            for col in ["bid", "ask", "last", "volume"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+            df["mid"] = (df["bid"] + df["ask"]) / 2.0
+
+            self.logger.info(
+                f"[MT5C][{symbol}] ✅ {len(df)} ticks pour la bougie "
+                f"({df['time'].min()} → {df['time'].max()})"
+            )
+            return df
+
+        except Exception as e:
+            self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+  
 
 
 

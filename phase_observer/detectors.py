@@ -580,10 +580,12 @@ def footprint_validator(
 
     comment_fallback = False
     if df.empty and not ticks.empty:
-        # ⚡ PATCH : fallback nearest ticks
-        nearest = ticks.iloc[(ticks["time"] - start_ts).abs().argsort()[:50]].copy()
-        df = nearest
-        comment_fallback = True
+        # ⚡ PATCH : tolérance temporelle ±30s autour de start_ts
+        tol = pd.Timedelta(seconds=30)
+        mask_tol = (ticks["time"] >= start_ts - tol) & (ticks["time"] <= start_ts + tol)
+        df = ticks.loc[mask_tol].copy()
+        if not df.empty:
+            comment_fallback = True
 
     if df.empty:
         return {
