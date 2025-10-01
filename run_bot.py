@@ -10,7 +10,7 @@ import os
 import sys
 import json
 import time
-from datetime import datetime
+from datetime import datetime,timedelta, timezone
 from pathlib import Path
 from datetime import UTC
 from typing import Any
@@ -731,7 +731,16 @@ def run_single_pipeline_cycle(
                 )
                 # === PATCH FOOTPRINT ANALYSE ===
                 try:
-                    ticks_df = mt5_connector.get_ticks(asset, count=2000)
+                    from datetime import datetime, timedelta, timezone
+
+                    now = datetime.now(timezone.utc)
+                    ticks_df = mt5_connector.get_ticks(
+                        asset,
+                        start=now - timedelta(minutes=1),
+                        end=now,
+                        count=2000
+                    )
+
                     if ticks_df is not None and not ticks_df.empty:
                         fp_res = footprint_validator(annotated_rates_df, ticks_df)
                         logger.info(
@@ -747,6 +756,7 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+
 
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
