@@ -496,11 +496,12 @@ def footprint_validator(
     imbalance_threshold: float = 0.7,
 ) -> Dict[str, Any]:
     """
-    🏦 Footprint Validator (Dev Desk Edition)
-    Robuste aux entrées incomplètes/incohérentes (time manquant, NaN, dtypes).
-    Retourne toujours une structure exploitable (pas d'exception en flux normal).
+    🏦 Footprint Validator (Dev Desk Edition avec fallback nearest ticks)
+    - Robuste aux entrées incomplètes/incohérentes
+    - Retourne toujours une structure exploitable (pas d'exception en flux normal)
+    - Si aucun tick n'est trouvé dans la fenêtre exacte, fallback vers les ticks les plus proches du start_ts
     """
-    # ---------- 0) VALIDATIONS & COPIES SÉCURISÉES ----------
+    # ---------- 0) VALIDATIONS & COPIES ----------
     if candles is None or not isinstance(candles, pd.DataFrame) or candles.empty:
         return {
             "summary": {"comment": "Candles vide/invalide."},
@@ -516,42 +517,29 @@ def footprint_validator(
     ticks = ticks.copy()
 
     # ---------- 1) NORMALISATION DES TEMPS (candles) ----------
-    # Bougie cible = dernière si non spécifié
     if candle_index is None:
         candle_index = len(candles) - 1
-    # Clip index pour éviter out-of-range
-    if candle_index < 0:
-        candle_index = 0
-    if candle_index >= len(candles):
-        candle_index = len(candles) - 1
+    candle_index = max(0, min(candle_index, len(candles) - 1))
 
-    # On veut pouvoir accéder au timestamp même si 'time' n'est pas une colonne
-    # - priorité: colonne 'time'; sinon index; sinon utcnow fallback
     if "time" in candles.columns:
-        # si 'time' existe mais n'est pas datetime → coercition
         if not pd.api.types.is_datetime64_any_dtype(candles["time"]):
             candles["time"] = pd.to_datetime(candles["time"], errors="coerce")
     else:
-        # pas de colonne 'time' → on dérive depuis l'index si possible
         if not isinstance(candles.index, pd.DatetimeIndex):
             try:
                 candles.index = pd.to_datetime(candles.index, errors="coerce")
             except Exception:
-                pass  # on gèrera plus bas
-        # si on veut homogénéiser l’accès, créons 'time' à partir de l’index
+                pass
         candles["time"] = candles.index
 
-    # Sécurise: si tout est NaT → fallback
     if candles["time"].isna().all():
         candles["time"] = pd.Timestamp.utcnow()
 
-    # Candle courante
     candle = candles.iloc[candle_index]
     start_ts = pd.to_datetime(candle.get("time", candle.name))
     if pd.isna(start_ts):
         start_ts = pd.Timestamp.utcnow()
 
-    # Fin de fenêtre = temps de la bougie suivante, sinon start_ts (fenêtre fermée)
     if candle_index + 1 < len(candles):
         nxt = candles.iloc[candle_index + 1]
         end_ts = pd.to_datetime(nxt.get("time", candles.index[candle_index + 1]))
@@ -561,10 +549,8 @@ def footprint_validator(
         end_ts = start_ts
 
     # ---------- 2) NORMALISATION DES TICKS ----------
-    # Colonnes minimales
     for col in ("time", "price", "size", "side"):
         if col not in ticks.columns:
-            # crée colonne neutre pour éviter KeyError
             if col == "time":
                 ticks[col] = pd.Timestamp.utcnow()
             elif col == "price":
@@ -574,27 +560,30 @@ def footprint_validator(
             elif col == "side":
                 ticks[col] = "unknown"
 
-    # Types & NaN
     if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
         ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce")
     ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce")
     ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce")
     ticks["side"] = ticks["side"].astype(str)
 
-    # Remplacements de secours
     ticks["time"] = ticks["time"].fillna(pd.Timestamp.utcnow())
     ticks["price"] = ticks["price"].fillna(0.0)
     ticks["size"] = ticks["size"].fillna(0.0)
     ticks["side"] = ticks["side"].str.lower().fillna("unknown")
 
-    # ---------- 3) SÉLECTION DE LA FENÊTRE DE TICKS ----------
-    # Fenêtre [start_ts, end_ts)
+    # ---------- 3) SÉLECTION DE LA FENÊTRE ----------
     try:
         mask = (ticks["time"] >= start_ts) & (ticks["time"] < end_ts)
         df = ticks.loc[mask].copy()
     except Exception:
-        # si comparaison échoue, on prend au moins qqchose de cohérent
         df = ticks.copy()
+
+    comment_fallback = False
+    if df.empty and not ticks.empty:
+        # ⚡ PATCH : fallback nearest ticks
+        nearest = ticks.iloc[(ticks["time"] - start_ts).abs().argsort()[:50]].copy()
+        df = nearest
+        comment_fallback = True
 
     if df.empty:
         return {
@@ -612,21 +601,18 @@ def footprint_validator(
         .fillna("unknown")
     )
 
-    # ---------- 5) DÉTERMINATION DU PAS DE PRIX ----------
+    # ---------- 5) PAS DE PRIX ----------
     if price_step is None or price_step <= 0:
-        # robust: calcule diff minimal strictement positif
         uniq = np.sort(df["price"].dropna().unique())
         if len(uniq) >= 2:
             diffs = np.diff(uniq)
             pos = diffs[diffs > 0]
             price_step = float(np.min(pos)) if pos.size else 1e-5
         else:
-            price_step = 1e-5  # fallback neutre
-
-    # Niveau de prix arrondi sur le pas
+            price_step = 1e-5
     df["price_level"] = (df["price"] / price_step).round() * price_step
 
-    # ---------- 6) AGRÉGATION FOOTPRINT ----------
+    # ---------- 6) AGRÉGATION ----------
     agg = df.pivot_table(
         index="price_level",
         columns="side_norm",
@@ -643,7 +629,6 @@ def footprint_validator(
     denom = (agg["buy"] + agg["sell"]).replace(0.0, np.nan)
     agg["buy_pct"] = (agg["buy"] / denom).fillna(0.5)
 
-    # Tri du haut vers le bas (comme une échelle de prix)
     agg = (
         agg.reset_index()
         .sort_values("price_level", ascending=False)
@@ -652,18 +637,16 @@ def footprint_validator(
 
     # ---------- 7) POC ----------
     if (agg["total"] > 0).any():
-        poc_row = agg.loc[agg["total"].idxmax()]
-        poc = float(poc_row["price_level"])
+        poc = float(agg.loc[agg["total"].idxmax()]["price_level"])
     else:
         poc = float(agg["price_level"].iloc[0])
 
-    # ---------- 8) MÉTRIQUES CLÉS ----------
+    # ---------- 8) MÉTRIQUES ----------
     delta_total = float(agg["delta"].sum())
     total_volume = float(agg["total"].sum())
     imbalance_buy = int((agg["buy_pct"] >= imbalance_threshold).sum())
     imbalance_sell = int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
 
-    # ---------- 9) ABSORPTION SIMPLE AUX EXTRÊMES ----------
     absorption_flag = False
     try:
         if agg.iloc[0]["delta"] < 0:
@@ -673,14 +656,12 @@ def footprint_validator(
     except Exception:
         pass
 
-    # ---------- 10) SCORE & STATUT ----------
+    # ---------- 9) SCORE ----------
     score = 100
     comments = []
-
     if total_volume <= 0.0:
         score -= 60
         comments.append("Volume nul/négligeable.")
-    # éviter division par 0 : comparer au max(1, total_volume)
     if abs(delta_total) < 0.01 * max(1.0, total_volume):
         score -= 15
         comments.append("Delta trop neutre (peu de conviction).")
@@ -690,10 +671,12 @@ def footprint_validator(
     if absorption_flag:
         score -= 20
         comments.append("Absorption détectée aux extrêmes.")
+    if comment_fallback:
+        comments.append("⚠️ Ticks pris hors fenêtre exacte (fallback nearest).")
 
     status = "VALID" if score >= 70 else "SUSPECT"
 
-    # ---------- 11) SORTIE ----------
+    # ---------- 10) SORTIE ----------
     return {
         "summary": {
             "delta_total": delta_total,

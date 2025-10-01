@@ -729,7 +729,7 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
-                # === PATCH FOOTPRINT ANALYSE (corrigé UTC + copy-safe) ===
+                # === PATCH FOOTPRINT ANALYSE (corrigé UTC + copy-safe + fallback nearest) ===
                 try:
                     ticks_df = mt5_connector.get_ticks(asset, count=2000)
 
@@ -738,25 +738,42 @@ def run_single_pipeline_cycle(
                         annotated_rates_df["time"] = pd.to_datetime(
                             annotated_rates_df["time"], utc=True, errors="coerce"
                         )
-                    if ticks_df is not None and not ticks_df.empty:
-                        ticks_df["time"] = pd.to_datetime(ticks_df["time"], utc=True, errors="coerce")
 
-                        fp_res = footprint_validator(annotated_rates_df, ticks_df)
+                    if ticks_df is not None and not ticks_df.empty:
+                        ticks_df["time"] = pd.to_datetime(
+                            ticks_df["time"], utc=True, errors="coerce"
+                        )
+
+                        fp_res = footprint_validator(
+                            annotated_rates_df,
+                            ticks_df,
+                            candle_index=None,          # dernière bougie
+                            price_step=None,            # auto-calcul
+                            imbalance_threshold=0.7     # param ajustable
+                        )
+
+                        # ✅ Logging détaillé footprint
                         logger.info(
                             f"[FOOTPRINT][{asset}] Score={fp_res.get('score', 0)} | "
                             f"Status={fp_res.get('status', 'N/A')} | "
                             f"Summary={fp_res.get('summary', {})}"
                         )
 
+                        if fp_res.get("summary", {}).get("comments", "").startswith("Fallback nearest"):
+                            logger.warning(f"[FOOTPRINT][{asset}] ⚠️ Aucun tick dans la fenêtre — fallback sur ticks voisins.")
+
                         # ✅ Copy-safe (évite SettingWithCopyWarning)
                         latest = dict(latest)
                         latest["footprint_score"] = fp_res.get("score", 0)
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
+
                     else:
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
+
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+
 
 
                 # Signaux unifiés

@@ -1689,17 +1689,26 @@ class TradeExecutor:
             ) from e
 
     def apply_dynamic_trailing(
-        self, symbol: str, ticket: int, sl_pips: float, atr_pips: float
+        self, 
+        ticket: int, 
+        sl_pips: float, 
+        atr_pips: float, 
+        symbol: Optional[str] = None
     ) -> None:
         """
         Applique un trailing stop dynamique à une position.
         - sl_pips = distance minimale en pips
         - atr_pips = buffer additionnel lié à la volatilité (ex: ATR)
+        - symbol = symbole de la position (si None → récupéré depuis pos)
         """
         try:
             pos = self._open_positions.get(ticket)
             if not pos:
                 return
+
+            # ⚡ fallback si symbol n’est pas fourni
+            if not symbol:
+                symbol = pos.get("symbol")
 
             action = "BUY" if pos.get("type") == self.POSITION_TYPE_BUY else "SELL"
             current_price = self.mt5_connector.get_current_price(symbol, action)
