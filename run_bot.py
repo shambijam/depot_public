@@ -729,20 +729,27 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
-                # === PATCH FOOTPRINT ANALYSE ===
+                # === PATCH FOOTPRINT ANALYSE (corrigé UTC + copy-safe) ===
                 try:
-                    last_bar_time = annotated_rates_df.index[-1]  # UTC
-                    start = last_bar_time - pd.Timedelta(minutes=1)
-                    end = last_bar_time
+                    ticks_df = mt5_connector.get_ticks(asset, count=2000)
 
-                    ticks_df = mt5_connector.get_ticks(asset, start=start.to_pydatetime(), end=end.to_pydatetime())
+                    # ✅ Forcer UTC sur candles & ticks pour éviter mismatch
+                    if "time" in annotated_rates_df.columns:
+                        annotated_rates_df["time"] = pd.to_datetime(
+                            annotated_rates_df["time"], utc=True, errors="coerce"
+                        )
                     if ticks_df is not None and not ticks_df.empty:
+                        ticks_df["time"] = pd.to_datetime(ticks_df["time"], utc=True, errors="coerce")
+
                         fp_res = footprint_validator(annotated_rates_df, ticks_df)
                         logger.info(
                             f"[FOOTPRINT][{asset}] Score={fp_res.get('score', 0)} | "
                             f"Status={fp_res.get('status', 'N/A')} | "
                             f"Summary={fp_res.get('summary', {})}"
                         )
+
+                        # ✅ Copy-safe (évite SettingWithCopyWarning)
+                        latest = dict(latest)
                         latest["footprint_score"] = fp_res.get("score", 0)
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
@@ -750,7 +757,6 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
-
 
 
                 # Signaux unifiés
