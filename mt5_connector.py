@@ -935,31 +935,32 @@ class MT5Connector:
                 pass
             
                 # --- PATCH FALLBACK contract_size & tick_size ---
-            try:
-                contract_size = getattr(info, "trade_contract_size", None) or getattr(info, "contract_size", None)
+                info_dict = info._asdict() if hasattr(info, "_asdict") else info.__dict__.copy()
+
+                # Contract size fallback
+                contract_size = info_dict.get("trade_contract_size") or info_dict.get("contract_size")
                 if not contract_size or contract_size <= 0:
                     if symbol_norm.startswith("XAU"):  # Or
                         contract_size = 100.0
                         self.logger.warning(f"[FALLBACK] contract_size fixé à 100 pour {symbol_norm}")
-                    elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):  # Forex majeures
+                    elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):  # Forex
                         contract_size = 100000.0
                         self.logger.warning(f"[FALLBACK] contract_size fixé à 100000 pour {symbol_norm}")
                     else:
                         self.logger.error(f"[SECURITE] contract_size manquant pour {symbol_norm} → trade bloqué")
                         return None
-                info = info._replace(trade_contract_size=contract_size)
-            except Exception as e:
-                self.logger.error(f"[FALLBACK] Impossible d'appliquer contract_size fallback pour {symbol_norm}: {e}")
+                info_dict["trade_contract_size"] = contract_size
 
-            try:
-                tick_size = getattr(info, "trade_tick_size", None) or getattr(info, "point", None)
+                # Tick size fallback
+                tick_size = info_dict.get("trade_tick_size") or info_dict.get("point")
                 if not tick_size or tick_size <= 0:
-                    digits = getattr(info, "digits", 5)
+                    digits = info_dict.get("digits", 5)
                     tick_size = 10 ** (-digits)
                     self.logger.warning(f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}")
-                info = info._replace(trade_tick_size=tick_size)
-            except Exception as e:
-                self.logger.error(f"[FALLBACK] Impossible d'appliquer tick_size fallback pour {symbol_norm}: {e}")
+                info_dict["trade_tick_size"] = tick_size
+
+                return info_dict
+
 
             return info
 
