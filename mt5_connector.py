@@ -14,6 +14,11 @@ import MetaTrader5 as mt5
 from collections import namedtuple
 from datetime import datetime, timedelta, UTC
 
+from collections import namedtuple
+SymbolInfoFallback = namedtuple("SymbolInfoFallback", 
+    ["spread", "point", "digits", "trade_contract_size", "trade_tick_size"])
+
+
 # Import pour la configuration
 from core.config_manager import (
     ConfigManager,
@@ -960,7 +965,15 @@ class MT5Connector:
                     tick_size = 10 ** (-digits)
                     self.logger.warning(f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}")
                 info_dict["trade_tick_size"] = tick_size
-
+                
+                # Construire un wrapper si info est incomplet
+                return SymbolInfoFallback(
+                    spread = getattr(info, "spread", 0),
+                    point = getattr(info, "point", 0.00001),
+                    digits = getattr(info, "digits", 5),
+                    trade_contract_size = contract_size,
+                    trade_tick_size = tick_size
+)
                 return info_dict
 
             except Exception as e:
