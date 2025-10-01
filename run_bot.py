@@ -748,7 +748,6 @@ def run_single_pipeline_cycle(
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
 
-
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
                     _build_asset_trading_signals(
