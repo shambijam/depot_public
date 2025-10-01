@@ -44,12 +44,13 @@ class FeaturesExtractor:
         return _fetch_timeframe_data(self, asset, timeframe, config)
 
 
-def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+def _clean_dataframe(self, df: pd.DataFrame, asset: str = "UNKNOWN") -> pd.DataFrame:
     """
     Nettoie et standardise un DataFrame OHLCV (issu MT5) pour le PhaseObserver.
     - Garantit un index datetime UTC trié (index='time')
     - Convertit/valide les colonnes numériques essentielles
     - Supprime les timestamps dupliqués (FIFO : garde la plus récente)
+    - Ajoute contract_size / tick_size si manquants
     """
     self.logger.info("PhaseObserver: Nettoyage et standardisation du DataFrame...")
 
@@ -109,9 +110,8 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
                 f"PhaseObserver: colonne '{col}' absente. Ajoutée avec 0.0."
             )
             df[col] = 0.0
-        # Conversion numérique robuste
         df[col] = pd.to_numeric(df[col], errors="coerce")
-        # Remplir NaN
+
         if col == "tick_volume":
             df[col] = df[col].fillna(0.0)
             neg_mask = df[col] < 0
@@ -139,6 +139,26 @@ def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         self.logger.debug(
             f"PhaseObserver: {removed} entrées dupliquées supprimées (index time, FIFO)."
         )
+
+    # 6) Ajout contract_size / tick_size si absents
+    if "trade_contract_size" not in df.columns:
+        if asset.upper().startswith("XAU"):
+            df["trade_contract_size"] = 100.0
+        else:
+            df["trade_contract_size"] = 100000.0
+        self.logger.debug(f"[CLEAN] contract_size injecté pour {asset}")
+
+    if "trade_tick_size" not in df.columns:
+        tick_size = None
+        if "point" in df.columns:
+            try:
+                tick_size = float(df["point"].iloc[-1])
+            except Exception:
+                pass
+        if not tick_size or tick_size <= 0:
+            tick_size = 0.00001
+        df["trade_tick_size"] = tick_size
+        self.logger.debug(f"[CLEAN] tick_size injecté pour {asset}")
 
     self.logger.info("PhaseObserver: Nettoyage du DataFrame terminé.")
     return df
