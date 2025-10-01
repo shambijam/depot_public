@@ -699,21 +699,14 @@ def run_single_pipeline_cycle(
                     # Initialiser l'historique dans PhaseObserver
                     market_analyzer.phase_observer.load_initial_history(rates_df.copy())
                 else:
-                    # 2️⃣ Cycles suivants : analyse incrémentale dernière bougie
-                    last_bar = rates_df.iloc[-1].to_dict()
-                    last_signals = market_analyzer.phase_observer.on_bar_close(
-                        last_bar, asset_symbol=asset
-                    )
+                    # 🔄 Solution 1: Toujours réanalyser un bloc récent de barres (ex: 100 dernières)
+                    lookback_bars = 100  # tu peux ajuster (50, 100, 200 selon perf)
+                    subset_df = rates_df.tail(lookback_bars).copy()
 
-                    # ⚡ Corrigé : construire un market_results complet
-                    market_results = {
-                        "latest": last_signals,
-                        "annotated_df": market_analyzer.phase_observer._history_df.copy(),
-                        "patterns": {},  # à remplir si besoin (détecteurs patterns)
-                        "phase": last_signals.get("phase_primary", "neutral"),
-                        "confidence": last_signals.get("confidence_score", 0.5),
-                        "structure": {},  # placeholder si tu veux garder la cohérence
-                    }
+                    market_results = market_analyzer.analyze(subset_df, asset)
+
+                    # ⚡ Important: on recharge l’historique complet dans le PhaseObserver
+                    market_analyzer.phase_observer.load_initial_history(subset_df.copy())
 
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(
