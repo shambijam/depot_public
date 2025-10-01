@@ -934,24 +934,26 @@ class MT5Connector:
                 # Certains environnements peuvent ne pas supporter _asdict()
                 pass
             
-                # --- PATCH FALLBACK contract_size & tick_size ---
-                info_dict = info._asdict() if hasattr(info, "_asdict") else info.__dict__.copy()
+            # --- PATCH: transformer info en dict et injecter fallbacks ---
+            try:
+                # convertir en dict
+                if hasattr(info, "_asdict"):
+                    info_dict = info._asdict()
+                else:
+                    info_dict = info.__dict__.copy()
 
-                # Contract size fallback
+                # Contract size
                 contract_size = info_dict.get("trade_contract_size") or info_dict.get("contract_size")
                 if not contract_size or contract_size <= 0:
-                    if symbol_norm.startswith("XAU"):  # Or
+                    if symbol_norm.startswith("XAU"):
                         contract_size = 100.0
                         self.logger.warning(f"[FALLBACK] contract_size fixé à 100 pour {symbol_norm}")
-                    elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):  # Forex
+                    elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):
                         contract_size = 100000.0
                         self.logger.warning(f"[FALLBACK] contract_size fixé à 100000 pour {symbol_norm}")
-                    else:
-                        self.logger.error(f"[SECURITE] contract_size manquant pour {symbol_norm} → trade bloqué")
-                        return None
                 info_dict["trade_contract_size"] = contract_size
 
-                # Tick size fallback
+                # Tick size
                 tick_size = info_dict.get("trade_tick_size") or info_dict.get("point")
                 if not tick_size or tick_size <= 0:
                     digits = info_dict.get("digits", 5)
@@ -961,6 +963,9 @@ class MT5Connector:
 
                 return info_dict
 
+            except Exception as e:
+                self.logger.error(f"[FALLBACK] Erreur fallback pour {symbol_norm}: {e}")
+                return info
 
             return info
 
