@@ -187,7 +187,7 @@
     "volatility": {
       "enabled": true,
       "atr_period": 14,
-      "min_atr_m1_pips": 0.1,
+      "min_atr_m1_pips": 0.0,
       "soft_mode": true,
       "soft_floor_rr": 0.85
     },
@@ -219,7 +219,7 @@
       "max_trades_per_day": 20,
       "max_trades_per_symbol_per_day": 5,
       "max_open_positions": 10,
-      "max_risk_per_trade_percent": 1.0
+      "max_risk_per_trade_percent": 10.0
     },
     "cooldowns": {
       "enabled": true,
