@@ -725,6 +725,14 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
+                # ✅ PATCH FOOTPRINT LOGGER
+                if "footprint_score" in latest or "footprint_summary" in latest:
+                    logger.info(
+                        f"[FOOTPRINT][{asset}] "
+                        f"Score={latest.get('footprint_score', 0)} | "
+                        f"Status={latest.get('footprint_status', 'N/A')} | "
+                        f"Summary={latest.get('footprint_summary', {})}"
+                    )
 
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
