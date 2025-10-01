@@ -860,6 +860,63 @@ class MT5Connector:
                 f"[{symbol}] Exception pendant la récupération des rates (TF='{tf_key}')."
             )
             return None
+        
+    def get_ticks(
+        self,
+        symbol: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        count: int = 1000,
+    ) -> pd.DataFrame:
+        """
+        🏦 Récupère les ticks bruts depuis MT5 (Dev Desk Edition)
+        - Robuste aux erreurs MT5 / colonnes manquantes
+        - Retourne toujours un DataFrame exploitable (même vide)
+        - Colonnes standardisées: ["time", "bid", "ask", "last", "volume"]
+        """
+        import pandas as pd
+        from datetime import datetime, timezone
+
+        if not getattr(self, "is_connected", False):
+            self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer ticks '{symbol}'.")
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+
+        try:
+            # Choix API MT5 selon paramètres
+            if start and end:
+                ticks = self.mt5.copy_ticks_range(symbol, start, end, self.mt5.COPY_TICKS_ALL)
+            else:
+                # ⚡ fallback : ticks récents
+                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc), count, self.mt5.COPY_TICKS_ALL)
+
+            if ticks is None or len(ticks) == 0:
+                self.logger.warning(f"[MT5C] Aucun tick récupéré pour {symbol}.")
+                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+
+            df = pd.DataFrame(ticks)
+
+            # ✅ Normalisation robuste
+            if "time" not in df.columns:
+                df["time"] = datetime.now(timezone.utc)
+            else:
+                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce").fillna(datetime.now(timezone.utc))
+
+            for col in ["bid", "ask", "last", "volume"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+            # Ajout colonne mid_price pratique pour footprint
+            df["mid"] = (df["bid"] + df["ask"]) / 2.0
+
+            self.logger.debug(f"[MT5C] {len(df)} ticks récupérés pour {symbol}. "
+                            f"Tmin={df['time'].min()} → Tmax={df['time'].max()}")
+            return df
+
+        except Exception as e:
+            self.logger.error(f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True)
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+
 
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """

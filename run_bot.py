@@ -22,9 +22,13 @@ from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
 
 
+
+
+
 load_dotenv()
 
 try:
+    from phase_observer.detectors import footprint_validator
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
     from core.decision_pipeline import DecisionPipeline
@@ -725,14 +729,25 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
-                # ✅ PATCH FOOTPRINT LOGGER
-                if "footprint_score" in latest or "footprint_summary" in latest:
-                    logger.info(
-                        f"[FOOTPRINT][{asset}] "
-                        f"Score={latest.get('footprint_score', 0)} | "
-                        f"Status={latest.get('footprint_status', 'N/A')} | "
-                        f"Summary={latest.get('footprint_summary', {})}"
-                    )
+                # === PATCH FOOTPRINT ANALYSE ===
+                try:
+                    ticks_df = mt5_connector.get_ticks(asset, count=2000)
+                    if ticks_df is not None and not ticks_df.empty:
+                        fp_res = footprint_validator(annotated_rates_df, ticks_df)
+                        logger.info(
+                            f"[FOOTPRINT][{asset}] Score={fp_res.get('score', 0)} | "
+                            f"Status={fp_res.get('status', 'N/A')} | "
+                            f"Summary={fp_res.get('summary', {})}"
+                        )
+                        # On enrichit latest (sera intégré dans signals ensuite)
+                        latest["footprint_score"] = fp_res.get("score", 0)
+                        latest["footprint_status"] = fp_res.get("status", "N/A")
+                        latest["footprint_summary"] = fp_res.get("summary", {})
+                    else:
+                        logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
+                except Exception as e:
+                    logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+
 
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
