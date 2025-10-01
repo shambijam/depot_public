@@ -14,9 +14,16 @@ import MetaTrader5 as mt5
 from collections import namedtuple
 from datetime import datetime, timedelta, UTC
 
-from collections import namedtuple
-SymbolInfoFallback = namedtuple("SymbolInfoFallback", 
-    ["spread", "point", "digits", "trade_contract_size", "trade_tick_size"])
+
+# Wrapper fallback (comme un NamedTuple)
+SymbolInfoFallback = namedtuple("SymbolInfoFallback", [
+    "symbol",
+    "spread",
+    "point",
+    "digits",
+    "trade_contract_size",
+    "trade_tick_size"
+])
 
 
 # Import pour la configuration
@@ -857,159 +864,115 @@ class MT5Connector:
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """
         Récupère les informations d'un symbole (spread, point, visibilité, etc.)
-        avec sélection automatique dans la Market Watch et logs détaillés.
+        avec sélection automatique dans la Market Watch et fallback si MT5 ne fournit pas tout.
 
         Args:
             symbol (str): Le symbole MT5 (ex: "EURUSD", "XAUUSD").
 
         Returns:
-            Optional[Any]: MetaTrader5.SymbolInfo (NamedTuple) si OK, sinon None.
+            SymbolInfoFallback ou MetaTrader5.SymbolInfo
         """
         if not self.is_connected:
             self.logger.error(
-                f"MT5: Non connecté. Impossible de récupérer les informations du symbole '{symbol}'."
+                f"[MT5C] Non connecté. Impossible de récupérer les informations du symbole '{symbol}'."
             )
             return None
 
         symbol_norm = str(symbol).strip().upper()
-        self.logger.debug(
-            f"MT5: Tentative de récupération des informations pour le symbole '{symbol_norm}'..."
-        )
+        self.logger.debug(f"[MT5C] Tentative récupération infos pour '{symbol_norm}'...")
 
         try:
-            # S'assurer que le symbole est visible/actif dans la Market Watch
+            # Rendre le symbole visible si nécessaire
             try:
                 selected_ok = self.mt5.symbol_select(symbol_norm, True)
                 if not selected_ok:
                     self.logger.debug(
-                        f"MT5: symbol_select('{symbol_norm}', True) a retourné False (le symbole est peut-être déjà visible ou non disponible)."
+                        f"[MT5C] symbol_select('{symbol_norm}', True) a retourné False "
+                        f"(déjà visible ou symbole non dispo)."
                     )
             except Exception as sel_e:
-                self.logger.debug(
-                    f"MT5: Exception lors de symbol_select('{symbol_norm}'): {sel_e}"
-                )
+                self.logger.debug(f"[MT5C] Exception lors de symbol_select('{symbol_norm}'): {sel_e}")
 
+            # Récupération brute
             info = self.mt5.symbol_info(symbol_norm)
 
             if info is None:
                 last_mt5_error = self.mt5.last_error()
                 self.logger.error(
-                    f"MT5: Échec de la récupération des informations du symbole '{symbol_norm}'. "
+                    f"[MT5C] symbol_info('{symbol_norm}') a retourné None. "
                     f"Dernière erreur MT5: {last_mt5_error}."
-                )
-                self.logger.debug(
-                    f"MT5: symbol_info('{symbol_norm}') a retourné None. "
-                    f"Vérifiez la visibilité dans la Market Watch et que le symbole existe chez le broker."
                 )
                 return None
 
-            # Si récupéré mais marqué non visible, retente une sélection
-            if getattr(info, "visible", True) is False:
-                if self.mt5.symbol_select(symbol_norm, True):
-                    # Rafraîchir l'info après sélection
-                    info_refreshed = self.mt5.symbol_info(symbol_norm)
-                    if info_refreshed is not None:
-                        info = info_refreshed
-
-            # Calcule un point "fallback" pour le log si MT5 renvoie point=0
-            computed_point = None
+            # Récup fallback pour les valeurs critiques
             try:
-                if (getattr(info, "point", None) in (None, 0)) and hasattr(
-                    info, "digits"
-                ):
-                    computed_point = 10 ** (-int(info.digits))
-            except Exception:
-                computed_point = None
-
-            # Logs lisibles + debug complet
-            point_for_log = (
-                computed_point
-                if computed_point is not None
-                else getattr(info, "point", "N/A")
-            )
-            self.logger.info(
-                f"MT5: Informations du symbole '{symbol_norm}' récupérées. "
-                f"Spread: {getattr(info, 'spread', 'N/A')}, Point: {point_for_log}."
-            )
-            try:
-                self.logger.debug(
-                    f"MT5: Détails complets du symbole '{symbol_norm}': {info._asdict()}"
-                )
-            except Exception:
-                # Certains environnements peuvent ne pas supporter _asdict()
-                pass
-            
-            # --- PATCH: transformer info en dict et injecter fallbacks ---
-            try:
-                # convertir en dict
-                if hasattr(info, "_asdict"):
-                    info_dict = info._asdict()
-                else:
-                    info_dict = info.__dict__.copy()
-
-                # Contract size
-                contract_size = info_dict.get("trade_contract_size") or info_dict.get("contract_size")
+                # contract_size
+                contract_size = getattr(info, "trade_contract_size", None) or getattr(info, "contract_size", None)
                 if not contract_size or contract_size <= 0:
                     if symbol_norm.startswith("XAU"):
                         contract_size = 100.0
-                        self.logger.warning(f"[FALLBACK] contract_size fixé à 100 pour {symbol_norm}")
                     elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):
                         contract_size = 100000.0
-                        self.logger.warning(f"[FALLBACK] contract_size fixé à 100000 pour {symbol_norm}")
-                info_dict["trade_contract_size"] = contract_size
+                    else:
+                        contract_size = 1.0
+                    self.logger.warning(f"[FALLBACK] contract_size fixé à {contract_size} pour {symbol_norm}")
 
-                # Tick size
-                tick_size = info_dict.get("trade_tick_size") or info_dict.get("point")
+                # tick_size
+                tick_size = getattr(info, "trade_tick_size", None) or getattr(info, "point", None)
                 if not tick_size or tick_size <= 0:
-                    digits = info_dict.get("digits", 5)
+                    digits = getattr(info, "digits", 5)
                     tick_size = 10 ** (-digits)
                     self.logger.warning(f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}")
-                info_dict["trade_tick_size"] = tick_size
-                
-                # Construire un wrapper si info est incomplet
-                return SymbolInfoFallback(
-                    spread = getattr(info, "spread", 0),
-                    point = getattr(info, "point", 0.00001),
-                    digits = getattr(info, "digits", 5),
-                    trade_contract_size = contract_size,
-                    trade_tick_size = tick_size
-)
-                return info_dict
 
-            except Exception as e:
-                self.logger.error(f"[FALLBACK] Erreur fallback pour {symbol_norm}: {e}")
+                # point
+                point_val = getattr(info, "point", None)
+                if not point_val or point_val <= 0:
+                    point_val = 10 ** (-getattr(info, "digits", 5))
+
+                # Retour fallback toujours complet
+                wrapped = SymbolInfoFallback(
+                    symbol=symbol_norm,
+                    spread=getattr(info, "spread", 0),
+                    point=point_val,
+                    digits=getattr(info, "digits", 5),
+                    trade_contract_size=contract_size,
+                    trade_tick_size=tick_size,
+                )
+
+                self.logger.info(
+                    f"[MT5C] Infos '{symbol_norm}' récupérées. Spread={wrapped.spread}, "
+                    f"Point={wrapped.point}, Contract={wrapped.trade_contract_size}, TickSize={wrapped.trade_tick_size}"
+                )
+                return wrapped
+
+            except Exception as fe:
+                self.logger.error(f"[FALLBACK] Erreur fallback pour {symbol_norm}: {fe}")
                 return info
-
-            return info
 
         except Exception as e:
             self.logger.error(
-                f"Exception dans get_symbol_info pour '{symbol_norm}': {e}. "
-                f"Dernière erreur MT5: {self.mt5.last_error()}.",
+                f"[MT5C] Exception dans get_symbol_info('{symbol_norm}'): {e}. "
+                f"Dernière erreur MT5: {self.mt5.last_error()}",
                 exc_info=True,
-            )
-            self.logger.debug(
-                f"MT5: Une exception a interrompu la récupération des infos symbole pour '{symbol_norm}'. "
-                f"Vérifiez le terminal MT5 et la disponibilité du symbole."
             )
             return None
 
+
     def get_symbol_info_tick(self, symbol: str):
         """
-        Retourne le dernier tick du symbole depuis MetaTrader 5.
+        Retourne le dernier tick du symbole depuis MetaTrader 5 (bid/ask/last).
         """
         try:
-            
-            tick = mt5.symbol_info_tick(symbol)
+            tick = self.mt5.symbol_info_tick(symbol)
             if tick is None:
-                self.logger.error(
-                    f"[MT5C] Impossible de récupérer le tick pour {symbol}."
-                )
+                self.logger.error(f"[MT5C] Impossible de récupérer le tick pour {symbol}.")
+                return None
+            self.logger.debug(f"[MT5C] Tick {symbol} → bid={tick.bid}, ask={tick.ask}, last={tick.last}")
             return tick
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_symbol_info_tick pour {symbol}: {e}")
             return None
-
+    
     def get_symbol_spread_points(self, symbol: str) -> float:
         """
         Retourne le spread courant en *points* pour `symbol`.
