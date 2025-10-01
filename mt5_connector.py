@@ -870,28 +870,35 @@ class MT5Connector:
     ) -> pd.DataFrame:
         """
         🏦 Récupère les ticks bruts depuis MT5 (Dev Desk Edition)
-        - Robuste aux erreurs MT5 / colonnes manquantes
+        - Multi-fallback (range → from(now-5min) → from(now-60min))
         - Retourne toujours un DataFrame exploitable (même vide)
-        - Colonnes standardisées: ["time", "bid", "ask", "last", "volume"]
+        - Colonnes standardisées: ["time", "bid", "ask", "last", "volume", "mid"]
         """
         import pandas as pd
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer ticks '{symbol}'.")
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
         try:
-            # Choix API MT5 selon paramètres
+            ticks = None
+
+            # 1️⃣ Mode range si possible
             if start and end:
                 ticks = self.mt5.copy_ticks_range(symbol, start, end, self.mt5.COPY_TICKS_ALL)
-            else:
-                # ⚡ fallback : ticks récents
-                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc), count, self.mt5.COPY_TICKS_ALL)
+
+            # 2️⃣ Sinon fallback depuis maintenant
+            if ticks is None or len(ticks) == 0:
+                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc) - timedelta(minutes=5), count, self.mt5.COPY_TICKS_ALL)
+
+            # 3️⃣ Encore vide ? → fallback large
+            if ticks is None or len(ticks) == 0:
+                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc) - timedelta(hours=1), count, self.mt5.COPY_TICKS_ALL)
 
             if ticks is None or len(ticks) == 0:
-                self.logger.warning(f"[MT5C] Aucun tick récupéré pour {symbol}.")
-                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+                self.logger.warning(f"[MT5C] ❌ Aucun tick récupéré pour {symbol}.")
+                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
             df = pd.DataFrame(ticks)
 
@@ -906,16 +913,19 @@ class MT5Connector:
                     df[col] = 0.0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-            # Ajout colonne mid_price pratique pour footprint
             df["mid"] = (df["bid"] + df["ask"]) / 2.0
 
-            self.logger.debug(f"[MT5C] {len(df)} ticks récupérés pour {symbol}. "
-                            f"Tmin={df['time'].min()} → Tmax={df['time'].max()}")
+            self.logger.info(
+                f"[MT5C][{symbol}] ✅ {len(df)} ticks récupérés "
+                f"({df['time'].min()} → {df['time'].max()})"
+            )
+
             return df
 
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True)
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume"])
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+
 
 
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
