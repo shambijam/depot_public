@@ -933,6 +933,33 @@ class MT5Connector:
             except Exception:
                 # Certains environnements peuvent ne pas supporter _asdict()
                 pass
+            
+                # --- PATCH FALLBACK contract_size & tick_size ---
+            try:
+                contract_size = getattr(info, "trade_contract_size", None) or getattr(info, "contract_size", None)
+                if not contract_size or contract_size <= 0:
+                    if symbol_norm.startswith("XAU"):  # Or
+                        contract_size = 100.0
+                        self.logger.warning(f"[FALLBACK] contract_size fixé à 100 pour {symbol_norm}")
+                    elif len(symbol_norm) == 6 and symbol_norm.endswith("USD"):  # Forex majeures
+                        contract_size = 100000.0
+                        self.logger.warning(f"[FALLBACK] contract_size fixé à 100000 pour {symbol_norm}")
+                    else:
+                        self.logger.error(f"[SECURITE] contract_size manquant pour {symbol_norm} → trade bloqué")
+                        return None
+                info = info._replace(trade_contract_size=contract_size)
+            except Exception as e:
+                self.logger.error(f"[FALLBACK] Impossible d'appliquer contract_size fallback pour {symbol_norm}: {e}")
+
+            try:
+                tick_size = getattr(info, "trade_tick_size", None) or getattr(info, "point", None)
+                if not tick_size or tick_size <= 0:
+                    digits = getattr(info, "digits", 5)
+                    tick_size = 10 ** (-digits)
+                    self.logger.warning(f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}")
+                info = info._replace(trade_tick_size=tick_size)
+            except Exception as e:
+                self.logger.error(f"[FALLBACK] Impossible d'appliquer tick_size fallback pour {symbol_norm}: {e}")
 
             return info
 
