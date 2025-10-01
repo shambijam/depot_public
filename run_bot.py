@@ -731,16 +731,11 @@ def run_single_pipeline_cycle(
                 )
                 # === PATCH FOOTPRINT ANALYSE ===
                 try:
-                    from datetime import datetime, timedelta, timezone
+                    last_bar_time = annotated_rates_df.index[-1]  # UTC
+                    start = last_bar_time - pd.Timedelta(minutes=1)
+                    end = last_bar_time
 
-                    now = datetime.now(timezone.utc)
-                    ticks_df = mt5_connector.get_ticks(
-                        asset,
-                        start=now - timedelta(minutes=1),
-                        end=now,
-                        count=2000
-                    )
-
+                    ticks_df = mt5_connector.get_ticks(asset, start=start.to_pydatetime(), end=end.to_pydatetime())
                     if ticks_df is not None and not ticks_df.empty:
                         fp_res = footprint_validator(annotated_rates_df, ticks_df)
                         logger.info(
@@ -748,7 +743,6 @@ def run_single_pipeline_cycle(
                             f"Status={fp_res.get('status', 'N/A')} | "
                             f"Summary={fp_res.get('summary', {})}"
                         )
-                        # On enrichit latest (sera intégré dans signals ensuite)
                         latest["footprint_score"] = fp_res.get("score", 0)
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
@@ -756,6 +750,7 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+
 
 
                 # Signaux unifiés
