@@ -12,14 +12,15 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "XAUUSD"
+                "XAUUSD",
+                "XAAAUUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
                 "max_lot": 10.0,
                 "min_lot": 0.01,
                 "lot_step": 0.01,
-                "risk_per_trade_percent": 0.73
+                "risk_per_trade_percent": 3.0
             }
         },
         {
@@ -34,14 +35,15 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "XAUUSD"
+                "XAUUSD",
+                "XAAAUUSD"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
                 "max_lot": 50.0,
                 "min_lot": 0.01,
                 "lot_step": 0.01,
-                "risk_per_trade_percent": 0.73
+                "risk_per_trade_percent": 3.0
             }
         },
         {
@@ -56,11 +58,12 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "XAUUSD"
+                "XAUUSD",
+                "XAAAUUSD"
             ],
             "account_type": "RAW_SPREAD",
             "trade_settings": {
-                "risk_per_trade_percent": 0.73
+                "risk_per_trade_percent": 3.0
             }
         }
     ],
@@ -70,7 +73,7 @@
         "EURUSD": {
             "enabled": true,
             "digits": 5,
-            "point": 0.00001,
+            "point": 1e-05,
             "contract_size": 100000,
             "min_lot": 0.01,
             "max_lot": 100.0,
@@ -80,28 +83,18 @@
         "GBPUSD": {
             "enabled": true,
             "digits": 5,
-            "point": 0.00001,
+            "point": 1e-05,
             "contract_size": 100000,
             "min_lot": 0.01,
             "max_lot": 100.0,
             "lot_step": 0.01,
             "spread_points": 20
         },
-        "USDCHF": {
+        "XAUUSD": {
             "enabled": true,
-            "digits": 5,
-            "point": 0.00001,
-            "contract_size": 100000,
-            "min_lot": 0.01,
-            "max_lot": 100.0,
-            "lot_step": 0.01,
-            "spread_points": 20
-        },
-        "USDCAD": {
-            "enabled": true,
-            "digits": 5,
-            "point": 0.00001,
-            "contract_size": 100000,
+            "digits": 2,
+            "point": 0.01,
+            "contract_size": 100,
             "min_lot": 0.01,
             "max_lot": 100.0,
             "lot_step": 0.01,
