@@ -729,6 +729,22 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
+                # === LOG DIAGNOSTIQUE HISTORIQUE 200 BOUgies ===
+                try:
+                    last_200 = annotated_rates_df.tail(200)
+                    avg_vol = last_200["tick_volume"].mean() if "tick_volume" in last_200 else None
+                    avg_range = (last_200["high"] - last_200["low"]).mean() if {"high","low"} <= set(last_200.columns) else None
+                    bull_candles = int((last_200["close"] > last_200["open"]).sum()) if {"close","open"} <= set(last_200.columns) else 0
+                    bear_candles = int((last_200["close"] < last_200["open"]).sum()) if {"close","open"} <= set(last_200.columns) else 0
+
+                    logger.info(
+                        f"[{asset}] Historique(200 bougies) → "
+                        f"Bull={bull_candles}, Bear={bear_candles}, "
+                        f"VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}")
+                
                 # === PATCH FOOTPRINT ANALYSE (corrigé UTC + copy-safe + fallback nearest) ===
                 try:
                     ticks_df = mt5_connector.get_ticks(asset, count=2000)
