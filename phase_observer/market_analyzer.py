@@ -6,7 +6,7 @@ from .detectors import (
     detect_single_candle,
     detect_multi_candle_patterns,
     detect_combos,
-    detect_orderflow_v5,
+    detect_orderflow,
 )
 
 LOG = logging.getLogger(__name__)
