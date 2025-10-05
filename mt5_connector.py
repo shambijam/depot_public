@@ -974,9 +974,6 @@ class MT5Connector:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
   
-
-
-
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """
         Récupère les informations d'un symbole (spread, point, visibilité, etc.)

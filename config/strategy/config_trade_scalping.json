@@ -1,14 +1,13 @@
 {
   "strategy_name": "scalping",
   "version": "2.3",
-  "description": "Scalping Burst propre (XAUUSD only)",
+  "description": "Scalping Burst propre (XAUUSD only, trailing stop only, no TP)",
   "tradeable_assets": [
     "XAUUSD"
   ],
   "magic_number": 52001,
   "risk_per_trade_percent": 3.0,
-  "confidence_threshold": 0.30,
-  "take_profit_pips": 80,
+  "confidence_threshold": 0.3,
   "stop_loss_pips": 60,
   "max_spread_points": 50,
   "halt_on_major_news": false,
@@ -44,7 +43,6 @@
           "enabled": true,
           "pullback_frac_min": 0.2,
           "pullback_frac_max": 0.4,
-          "rr_target": 1.5,
           "use_trailing": false,
           "trailing": {
             "trigger_pips": 12,
@@ -53,7 +51,6 @@
         },
         "reversal": {
           "enabled": true,
-          "rr_target": 1.2,
           "use_trailing": true,
           "trailing": {
             "trigger_pips": 10,
@@ -67,7 +64,6 @@
           "min_avg_candle_atr": 0.9,
           "tolerance_frac": 0.15,
           "sl_pips": 30,
-          "tp_mode": "mid_or_opposite",
           "use_trailing": true,
           "trailing": {
             "trigger_pips": 15,
@@ -79,8 +75,7 @@
         "enabled": true,
         "lookback_bars": 20,
         "tolerance_frac": 0.15,
-        "sl_pips": 30,
-        "tp_pips": 30
+        "sl_pips": 30
       },
       "range_accumulation_mtf": {
         "enabled": true,
@@ -89,8 +84,7 @@
           "H1"
         ],
         "lookback_bars": 20,
-        "sl_pips": 25,
-        "tp_pips": 40
+        "sl_pips": 25
       },
       "burst_scalping": {
         "enabled": true,
@@ -99,6 +93,11 @@
         "max_bursts": 1,
         "max_spread_pips": 30.0,
         "min_atr_m1_pips": 0.0,
+        "burst_guardrails": {
+          "max_open_positions": 5,
+          "cooldown_seconds": 90,
+          "enforce_burst_closure": true
+        },
         "trailing": {
           "enabled": true,
           "trigger_pips": 15,
@@ -127,7 +126,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.20
+        "min_confidence": 0.2
       },
       "order_type": "MARKET",
       "action_logic": {
