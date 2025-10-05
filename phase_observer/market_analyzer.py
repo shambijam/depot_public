@@ -6,7 +6,7 @@ from .detectors import (
     detect_single_candle,
     detect_multi_candle_patterns,
     detect_combos,
-    detect_orderflow,
+    detect_orderflow_v5,
 )
 
 LOG = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class MarketAnalyzer:
         candles = [detect_single_candle(annotated_df, i) for i in range(len(annotated_df))]
         multi_patterns = detect_multi_candle_patterns(annotated_df)
         combo_patterns = detect_combos(annotated_df)
-        orderflow_signals = detect_orderflow(annotated_df)
+        orderflow_signals = detect_orderflow_v5(annotated_df)
 
         # 3️⃣ Dernier point brut (Series Pandas)
         latest = annotated_df.iloc[-1]  # ⚠️ garde la Series → pas de .to_dict()
