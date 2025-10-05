@@ -736,24 +736,38 @@ def run_single_pipeline_cycle(
                         f"VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
                     )
                 except Exception as e:
-                    logger.warning(f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}")
-                
+                    logger.warning(f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}") 
+                    
                 # === PATCH FOOTPRINT ANALYSE (ciblage ticks dernière bougie) ===
                 try:
+                    # ✅ Récupération de la dernière bougie fermée
                     last_candle = annotated_rates_df.iloc[-1]
-                    start_ts = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
-                    end_ts = start_ts + pd.Timedelta(minutes=1)  # car timeframe = M1
 
+                    # ✅ Gestion robuste du timestamp
+                    if "time" in annotated_rates_df.columns:
+                        start_ts = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                    else:
+                        start_ts = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+
+                    if pd.isna(start_ts):
+                        start_ts = pd.Timestamp.utcnow()
+
+                    # ✅ Calcul end_ts cohérent (M1 = +1 minute)
+                    end_ts = start_ts + pd.Timedelta(minutes=1)
+
+                    # ✅ Récupération des ticks pour cette bougie
                     ticks_df = mt5_connector.get_ticks_for_candle(
                         asset,
                         start_ts.to_pydatetime(),
                         end_ts.to_pydatetime(),
                     )
 
+                    # Normalisation du temps
                     if "time" in annotated_rates_df.columns:
                         annotated_rates_df["time"] = pd.to_datetime(
                             annotated_rates_df["time"], utc=True, errors="coerce"
                         )
+
                     if ticks_df is not None and not ticks_df.empty:
                         ticks_df["time"] = pd.to_datetime(ticks_df["time"], utc=True, errors="coerce")
 
@@ -778,6 +792,7 @@ def run_single_pipeline_cycle(
 
                     else:
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
+
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
 
