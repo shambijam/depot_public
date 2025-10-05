@@ -28,6 +28,7 @@ from phase_observer.market_analyzer import MarketAnalyzer
 load_dotenv()
 
 try:
+    from phase_observer.detectors import detect_orderflow_v5
     from phase_observer.detectors import footprint_validator
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
@@ -795,6 +796,56 @@ def run_single_pipeline_cycle(
 
                 except Exception as e:
                     logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+                    
+                # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
+                try:
+                    # ✅ On récupère les 5 dernières bougies pour l'analyse d'orderflow
+                    last_candles_df = annotated_rates_df.tail(5).copy()
+
+                    # Normalisation du temps
+                    if "time" in last_candles_df.columns:
+                        last_candles_df["time"] = pd.to_datetime(
+                            last_candles_df["time"], utc=True, errors="coerce"
+                        )
+                        last_candles_df.set_index("time", inplace=True)
+
+                    # ✅ Appel du nouvel analyseur OrderFlow V5
+                    of_res = detect_orderflow_v5(last_candles_df)
+
+                    # ✅ Log complet et formaté
+                    logger.info(
+                        f"[ORDERFLOW][{asset}] Score={of_res.get('score', 0)} | "
+                        f"Status={of_res.get('status', 'N/A')} | "
+                        f"Δ={of_res['summary'].get('delta_total', 0):.2f} | "
+                        f"Vol={of_res['summary'].get('volume_total', 0):.2f} | "
+                        f"ImbMoy={of_res['summary'].get('mean_imbalance', 0):.2f} | "
+                        f"CVD={of_res['summary'].get('cvd_final', 0):.2f} | "
+                        f"Patterns={of_res.get('summary', {}).get('pattern_count', 0)}"
+                    )
+
+                    # ✅ Log des patterns si existants
+                    patterns = of_res.get("patterns", [])
+                    if patterns:
+                        logger.debug(f"[ORDERFLOW][{asset}] Patterns détectés:")
+                        for p in patterns:
+                            logger.debug(
+                                f"   ↳ {p.get('timestamp', '?')} | {p.get('pattern', '?')} | "
+                                f"Δ={p.get('delta', 0)} | Imb={p.get('imbalance', 0):.2f} | "
+                                f"Dom={p.get('dominance', '?')}"
+                            )
+                    else:
+                        logger.debug(f"[ORDERFLOW][{asset}] Aucun pattern détecté.")
+
+                    # ✅ Enregistrement dans latest (pour exploitation décisionnelle)
+                    latest = dict(latest)
+                    latest["orderflow_score"] = of_res.get("score", 0)
+                    latest["orderflow_status"] = of_res.get("status", "N/A")
+                    latest["orderflow_summary"] = of_res.get("summary", {})
+                    latest["orderflow_patterns"] = of_res.get("patterns", [])
+
+                except Exception as e:
+                    logger.error(f"[ORDERFLOW][{asset}] Erreur analyse Orderflow: {e}", exc_info=True)
+
 
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
@@ -972,8 +1023,7 @@ def run_single_pipeline_cycle(
                             }
                 except Exception:
                     pass
-                # /PATCH
-
+               
                 if action in {"BUY", "SELL"}:
                     _execute_single_decision(
                         td,

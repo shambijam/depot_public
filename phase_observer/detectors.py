@@ -376,116 +376,181 @@ def detect_combos(
 # 🔹 Orderflow Detectors (absorptions, imbalances, exhaustion)
 # ============================================================
 
-"""
-OrderFlowDetector v2 (Desk Quant)
---------------------------------------------------
-Lecture avancée du flux d’ordres :
-- Volume Delta & CVD
-- Footprint intra-bar (agression ask/bid)
-- Imbalances (buy/sell dominance, absorption)
-- Détection iceberg (volumes cachés suspects)
 
-Retourne un tableau brut de signaux factuels.
-"""
+def detect_orderflow_v5(
+    df: pd.DataFrame,
+    imbalance_threshold: float = 0.7,
+    cvd_smoothing: int = 5,
+) -> Dict[str, Any]:
+    """
+    🏦 Orderflow V5 (Dev Desk Banque Privée)
+    ---------------------------------------------------
+    Nouvelle version avancée et scorée du module de détection d'ordre.
+    - Analyse multi-métriques : delta, CVD, absorption, agressivité.
+    - Structure de sortie unifiée (score + patterns + stats).
+    - Compatible footprint_validator et DecisionPipeline.
+    """
 
+    import numpy as np
+    import pandas as pd
 
-def detect_orderflow(
-    df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None
-) -> List[Optional[Dict[str, Any]]]:
+    LOG = logging.getLogger("OrderflowDetector")
 
-    signals: List[Optional[Dict[str, Any]]] = []
+    # ---------- 0️⃣ VALIDATION ----------
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {
+            "score": 0,
+            "status": "SUSPECT",
+            "patterns": [],
+            "summary": {"comment": "DataFrame vide ou invalide"},
+        }
 
+    df = df.copy().reset_index(drop=True)
+
+    # Normalisation des colonnes nécessaires
+    for col in ["bid_volume", "ask_volume", "aggressor_buy_vol", "aggressor_sell_vol"]:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    # ---------- 1️⃣ MÉTRIQUES DE BASE ----------
+    df["bid_volume"] = pd.to_numeric(df["bid_volume"], errors="coerce").fillna(0.0)
+    df["ask_volume"] = pd.to_numeric(df["ask_volume"], errors="coerce").fillna(0.0)
+    df["total_volume"] = df["bid_volume"] + df["ask_volume"]
+
+    df["delta"] = df["ask_volume"] - df["bid_volume"]
+    df["imbalance"] = np.where(
+        df["total_volume"] > 0, df["ask_volume"] / df["total_volume"], 0.5
+    )
+    df["dominance"] = np.select(
+        [
+            df["delta"] > 0,
+            df["delta"] < 0,
+        ],
+        ["buyers", "sellers"],
+        default="neutral",
+    )
+
+    # ---------- 2️⃣ CVD (Cumulative Volume Delta) ----------
+    df["cvd"] = df["delta"].cumsum()
+    if cvd_smoothing > 1:
+        df["cvd_smoothed"] = (
+            df["cvd"].rolling(window=cvd_smoothing, min_periods=1).mean()
+        )
+    else:
+        df["cvd_smoothed"] = df["cvd"]
+
+    # ---------- 3️⃣ Aggressivité footprint ----------
+    df["aggressor_ratio"] = np.where(
+        (df["aggressor_buy_vol"] + df["aggressor_sell_vol"]) > 0,
+        df["aggressor_buy_vol"] / (df["aggressor_buy_vol"] + df["aggressor_sell_vol"]),
+        0.5,
+    )
+
+    # ---------- 4️⃣ DÉTECTION DE PATTERNS ----------
+    patterns = []
     for i in range(len(df)):
         try:
-            sig: Dict[str, Any] = {}
-            ts = str(df.index[i]) if hasattr(df.index, "dtype") else None
-
-            bid_vol = df["bid_volume"].iloc[i] if "bid_volume" in df.columns else None
-            ask_vol = df["ask_volume"].iloc[i] if "ask_volume" in df.columns else None
-            total = (bid_vol or 0) + (ask_vol or 0)
-
-            delta = (
-                (ask_vol - bid_vol)
-                if (bid_vol is not None and ask_vol is not None)
-                else None
-            )
-            imbalance = (ask_vol / total) if total > 0 else None
-            dominance = (
-                "buyers"
-                if delta and delta > 0
-                else "sellers" if delta and delta < 0 else "neutral"
-            )
-
-            pattern = None
+            p = None
             extra = {}
 
-            # === 1️⃣ Delta / Imbalance bruts ===
-            if imbalance is not None:
-                if imbalance > 0.7:
-                    pattern = "buy_imbalance"
-                elif imbalance < 0.3:
-                    pattern = "sell_imbalance"
+            imb = df["imbalance"].iloc[i]
+            delta = df["delta"].iloc[i]
+            bid = df["bid_volume"].iloc[i]
+            ask = df["ask_volume"].iloc[i]
+            total = df["total_volume"].iloc[i]
+            aggr_ratio = df["aggressor_ratio"].iloc[i]
 
-            if bid_vol and ask_vol:
-                if bid_vol > 2 * ask_vol:
-                    pattern = "sell_absorption"
-                elif ask_vol > 2 * bid_vol:
-                    pattern = "buy_absorption"
+            # === Déséquilibre structurel ===
+            if imb > imbalance_threshold:
+                p = "buy_imbalance"
+            elif imb < (1 - imbalance_threshold):
+                p = "sell_imbalance"
 
-            # === 2️⃣ CVD (Cumulative Volume Delta) ===
-            if "cvd" in df.columns:
-                sig["cvd"] = float(df["cvd"].iloc[i])
+            # === Absorptions ===
+            if bid > 2 * ask:
+                p = "sell_absorption"
+            elif ask > 2 * bid:
+                p = "buy_absorption"
 
-            # === 3️⃣ Footprint intra-bar (si dispo) ===
-            if "aggressor_buy_vol" in df.columns and "aggressor_sell_vol" in df.columns:
-                buy_aggr = df["aggressor_buy_vol"].iloc[i]
-                sell_aggr = df["aggressor_sell_vol"].iloc[i]
+            # === Aggressive footprints ===
+            if aggr_ratio >= 0.75:
+                p = "aggressive_buying"
+                extra["footprint"] = f"buy_ratio={aggr_ratio:.2f}"
+            elif aggr_ratio <= 0.25:
+                p = "aggressive_selling"
+                extra["footprint"] = f"buy_ratio={aggr_ratio:.2f}"
 
-                if buy_aggr > 2 * sell_aggr:
-                    pattern = "aggressive_buying"
-                    extra["footprint"] = f"buy>{buy_aggr},sell>{sell_aggr}"
-                elif sell_aggr > 2 * buy_aggr:
-                    pattern = "aggressive_selling"
-                    extra["footprint"] = f"buy>{buy_aggr},sell>{sell_aggr}"
-
-            # === 4️⃣ Détection Iceberg ===
+            # === Icebergs (si données exec disponibles) ===
             if "executions_count" in df.columns and "avg_exec_size" in df.columns:
                 exec_count = df["executions_count"].iloc[i]
                 avg_size = df["avg_exec_size"].iloc[i]
-
                 if exec_count > 50 and avg_size < 0.2 * (total or 1):
-                    pattern = "iceberg_order"
+                    p = "iceberg_order"
                     extra["iceberg"] = {
                         "exec_count": int(exec_count),
                         "avg_size": float(avg_size),
                     }
 
-            # === Assemblage final ===
-            if pattern:
-                sig.update(
+            if p:
+                patterns.append(
                     {
                         "index": i,
-                        "timestamp": ts,
-                        "orderflow_pattern": pattern,
-                        "imbalance_pct": (
-                            round(imbalance, 3) if imbalance is not None else None
+                        "timestamp": (
+                            str(df.index[i]) if hasattr(df.index, "dtype") else None
                         ),
-                        "dominance": dominance,
-                        "delta": delta,
-                        "bid_volume": bid_vol,
-                        "ask_volume": ask_vol,
+                        "pattern": p,
+                        "imbalance": float(imb),
+                        "delta": float(delta),
+                        "dominance": df["dominance"].iloc[i],
+                        "bid_volume": float(bid),
+                        "ask_volume": float(ask),
+                        **extra,
                     }
                 )
-                sig.update(extra)
-                signals.append(sig)
-            else:
-                signals.append(None)
-
         except Exception as e:
-            LOG.error(f"[OrderflowDetector] Erreur à l’index {i}: {e}")
-            signals.append(None)
+            LOG.error(f"[OrderflowV5] Erreur à la ligne {i}: {e}")
 
-    return signals
+    # ---------- 5️⃣ MÉTRIQUES GLOBALES ----------
+    total_ticks = len(df)
+    buys = int((df["dominance"] == "buyers").sum())
+    sells = int((df["dominance"] == "sellers").sum())
+    buy_ratio = buys / max(1, (buys + sells))
+    imbalance_mean = df["imbalance"].mean()
+
+    delta_total = float(df["delta"].sum())
+    vol_total = float(df["total_volume"].sum())
+
+    # ---------- 6️⃣ SCORE GLOBALE ----------
+    score = 50
+
+    # Volume + delta fort → bonus
+    if vol_total > 0:
+        score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100)
+    if abs(imbalance_mean - 0.5) > 0.15:
+        score += 10
+    if len(patterns) > 3:
+        score += 10
+
+    score = int(np.clip(score, 0, 100))
+    status = "VALID" if score >= 70 else "SUSPECT"
+
+    # ---------- 7️⃣ SORTIE STRUCTURÉE ----------
+    summary = {
+        "delta_total": delta_total,
+        "volume_total": vol_total,
+        "mean_imbalance": imbalance_mean,
+        "cvd_final": float(df["cvd_smoothed"].iloc[-1]),
+        "buy_ratio": float(buy_ratio),
+        "pattern_count": len(patterns),
+    }
+
+    return {
+        "score": score,
+        "status": status,
+        "summary": summary,
+        "patterns": patterns,
+        "df": df,
+    }
 
 
 def footprint_validator(
