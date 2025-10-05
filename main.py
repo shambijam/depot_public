@@ -49,7 +49,6 @@ try:
     
 
     from run_bot import (
-        _mtf_readiness_gate,
         verify_environment_and_config,
         run_single_pipeline_cycle,
     )
@@ -468,9 +467,7 @@ def main(args: argparse.Namespace) -> None:
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
         trade_executor.reconcile_state_with_broker()
-
-        logger.info("🔒 Gate readiness MTF activé : il sera vérifié à chaque cycle.")
-
+      
     except (SystemExit, RuntimeError, Exception) as e:
         logger.critical(
             f"FATAL: Erreur critique lors du démarrage du bot: {e}", exc_info=True
@@ -536,21 +533,7 @@ def main(args: argparse.Namespace) -> None:
             cycle_count += 1
             print(f"[Cycle] SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
             cycle_start_time = time.time()
-
-            # 🔒 Gate readiness MTF vérifié à chaque cycle (avec liste dynamique cohérente)
-            if not _mtf_readiness_gate(
-                mt5_connector,
-                market_analyzer, 
-                config_manager,
-                readiness_symbols,
-                cycle_count,
-            ):
-                logger.info(
-                    f"Cycle #{cycle_count}: readiness non validé, pas de trade ce tour."
-                )
-                sleep_until_next_minute()
-                continue
-            
+                      
             # Préparer un dictionnaire de pré-signaux live pour ce cycle
             live_pre_signals = {}
             for asset in readiness_symbols:
