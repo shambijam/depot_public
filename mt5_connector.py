@@ -933,67 +933,67 @@ class MT5Connector:
         end_ts: datetime,
     ) -> pd.DataFrame:
         """
-        🎯 Récupère uniquement les ticks correspondant strictement à une bougie donnée.
-        Inclut maintenant les flags MT5 pour détecter BUY / SELL / UNKNOWN.
-        Fenêtre stricte : [start_ts, end_ts)
+        🎯 Récupère les ticks exacts pour une bougie donnée (strictement sur [start_ts, end_ts)).
+        🔹 Pas de fallback
+        🔹 Décodage direct des flags MT5 (BUY/SELL)
+        🔹 Fenêtre garantie 60 secondes UTC
         """
         import pandas as pd
         import numpy as np
         from datetime import timedelta, timezone
 
         if not getattr(self, "is_connected", False):
-            self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
+            self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer les ticks '{symbol}'.")
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
 
         try:
-            # Normalisation stricte UTC
+            # --- Normalisation stricte UTC ---
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
             if end_ts.tzinfo is None:
                 end_ts = end_ts.replace(tzinfo=timezone.utc)
 
-            # Forcer 60s si la fenêtre est plus courte
-            if (end_ts - start_ts).total_seconds() < 59.0:
+            # --- Sécurisation de la fenêtre (exactement 60s) ---
+            duration = (end_ts - start_ts).total_seconds()
+            if duration != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
+                self.logger.debug(f"[MT5C] Fenêtre normalisée à 60s pour {symbol}: {start_ts} → {end_ts}")
 
-            # --- Requête MT5 avec les flags ---
+            # --- Requête directe : uniquement les ticks de transaction ---
             ticks = self.mt5.copy_ticks_range(
                 symbol,
                 start_ts,
                 end_ts,
-                self.mt5.COPY_TICKS_ALL,
+                self.mt5.COPY_TICKS_TRADE,  # ⚡ strict : uniquement les vrais trades avec flags BUY/SELL
             )
 
+            # --- Vérification stricte ---
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
                 return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
 
+            # --- Conversion propre ---
             df = pd.DataFrame(ticks)
-
-            # Conversion et nettoyage
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+
             for col in ["bid", "ask", "last", "volume"]:
                 if col not in df.columns:
                     df[col] = 0.0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-            # Ajouter flags et décoder les côtés
             if "flags" not in df.columns:
                 df["flags"] = 0
 
+            # --- Décodage brut des flags BUY / SELL ---
             df["is_buy"] = ((df["flags"] & 1) > 0) | ((df["flags"] & 16) > 0)
             df["is_sell"] = ((df["flags"] & 2) > 0) | ((df["flags"] & 32) > 0)
+            df["side"] = np.where(df["is_buy"], "buy", np.where(df["is_sell"], "sell", "unknown"))
 
-            df["side"] = np.where(
-                df["is_buy"], "buy",
-                np.where(df["is_sell"], "sell", "unknown")
-            )
-
-            # Calculs dérivés utiles
+            # --- Calculs dérivés ---
             df["mid"] = (df["bid"] + df["ask"]) / 2.0
             df["spread"] = df["ask"] - df["bid"]
 
-            # Statistiques pour logs
+            # --- Statistiques claires ---
             total_ticks = len(df)
             buy_ticks = int(df["is_buy"].sum())
             sell_ticks = int(df["is_sell"].sum())
@@ -1001,7 +1001,7 @@ class MT5Connector:
 
             self.logger.info(
                 f"[MT5C][{symbol}] ✅ {total_ticks} ticks pour la bougie demandée "
-                f"(fenêtre: {start_ts} → {end_ts}) | dernier_tick={df['time'].max()} | "
+                f"({start_ts} → {end_ts}) | dernier_tick={df['time'].max()} | "
                 f"BUY={buy_ticks} | SELL={sell_ticks} | couverture={coverage:.1f}s"
             )
 
