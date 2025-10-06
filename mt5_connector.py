@@ -950,8 +950,7 @@ class MT5Connector:
             if end_ts.tzinfo is None:
                 end_ts = end_ts.replace(tzinfo=timezone.utc)
 
-            # 🔒 Forcer une durée minimale de 60 secondes si la bougie est M1
-            # (évite le cas 13:17:00 → 13:17:03)
+            # 🔒 Forcer une durée minimale de 60 secondes
             if (end_ts - start_ts).total_seconds() < 59.0:
                 self.logger.debug(
                     f"[MT5C] Correction auto de fenêtre candle pour {symbol}: "
