@@ -928,10 +928,10 @@ class MT5Connector:
         
     def get_ticks_for_candle(self, symbol: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame:
         """
-        🎯 Récupère *strictement* les ticks de la bougie M1 fermée sur l’intervalle [start_ts, end_ts)
+        🎯 Ticks exacts de la bougie M1 fermée : intervalle strict [start_ts, end_ts)
         - AUCUN fallback temporel
-        - Récupération via COPY_TICKS_ALL puis filtrage strict par horodatage
-        - Décodage des flags MT5 (1/2 et 16/32) → BUY / SELL ; fallback tick-rule (Δmid) pour UNKNOWN
+        - COPY_TICKS_ALL + filtrage strict sur l'horodatage (time_msc si dispo, sinon time)
+        - Décodage flags 16/32 (BUY/SELL) ; fallback tick-rule (Δmid) ; ultime secours mapping 1/2
         - Fenêtre verrouillée à 60s en UTC
         Retourne les colonnes: ["time","bid","ask","last","volume","flags","side","mid","spread"]
         """
@@ -941,13 +941,13 @@ class MT5Connector:
 
         ret_cols = ["time", "bid", "ask", "last", "volume", "flags", "side", "mid", "spread"]
 
-        # ── Garde-fou connexion ─────────────────────────────────────────────────────
+        # ── Garde-fou connexion
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
             return pd.DataFrame(columns=ret_cols)
 
         try:
-            # ── Normalisation UTC + verrou 60s ─────────────────────────────────────
+            # ── Normalisation UTC + verrou 60s
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
             if end_ts.tzinfo is None:
@@ -955,7 +955,7 @@ class MT5Connector:
             if (end_ts - start_ts).total_seconds() != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
 
-            # ── Requête brute (tout type de ticks) ─────────────────────────────────
+            # ── Requête brute
             ticks = self.mt5.copy_ticks_range(symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL)
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
@@ -963,56 +963,79 @@ class MT5Connector:
 
             df = pd.DataFrame(ticks)
 
-            # ── Typage/colonnes minimales ──────────────────────────────────────────
-            # time / time_msc
+            # ── Typage / colonnes minimales
             df["time"] = pd.to_datetime(df.get("time", pd.NaT), unit="s", utc=True, errors="coerce")
             if "time_msc" in df.columns:
                 df["time_msc"] = pd.to_datetime(df["time_msc"], unit="ms", utc=True, errors="coerce")
 
-            # numériques
             for c in ("bid", "ask", "last", "volume", "flags"):
                 if c not in df.columns:
                     df[c] = 0
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-            # si volume inexistant (FX), on peut compter chaque tick comme 1
+            # Si pas de volume réel (classique FX/CFD), on pondère par 1 tick = 1
             if (df["volume"] == 0).all():
                 df["volume"] = 1.0
 
-            # ── Filtre temporel STRICT sur la meilleure horloge ────────────────────
+            # ── Filtre temporel STRICT (time_msc prioritaire)
             tcol = "time_msc" if "time_msc" in df.columns else "time"
             df = df[(df[tcol] >= start_ts) & (df[tcol] < end_ts)].copy()
             if df.empty:
                 self.logger.warning(f"[MT5C] Aucun tick dans la fenêtre stricte pour {symbol} [{start_ts} → {end_ts}]")
                 return pd.DataFrame(columns=ret_cols)
 
-            # ── mid & spread ───────────────────────────────────────────────────────
+            # ── mid & spread
             df["mid"] = (df["bid"] + df["ask"]) / 2.0
             df["spread"] = df["ask"] - df["bid"]
 
-            # ── Décode flags → BUY/SELL (1/16 = buy, 2/32 = sell) ─────────────────
+            # ── Epsilon pour la tick-rule (demi-point du symbole)
+            try:
+                info = self.mt5.symbol_info(symbol)
+                point = float(getattr(info, "point", 0.0) or 0.0)
+            except Exception:
+                point = 0.0
+            eps = max(point * 0.5, 1e-12)
+
+            # ── Décodage des flags : 16=BUY, 32=SELL (prioritaires)
             flags = df["flags"].astype(int)
-            side_flags = np.where((flags & 1) > 0, "buy",
-                        np.where((flags & 2) > 0, "sell",
-                        np.where((flags & 16) > 0, "buy",
-                        np.where((flags & 32) > 0, "sell", "unknown"))))
+            is_buy_flag = (flags & 16) > 0
+            is_sell_flag = (flags & 32) > 0
 
-            df["side"] = side_flags
+            side = np.where(is_buy_flag, "buy",
+                np.where(is_sell_flag, "sell", "unknown"))
 
-            # ── Fallback tick-rule pour les UNKNOWN (Lee–Ready simplifié) ──────────
-            unk_mask = df["side"] == "unknown"
+            # ── Fallback 1 : tick-rule (Lee–Ready simplifié sur Δmid)
+            unk_mask = (side == "unknown")
             if unk_mask.any():
                 dmid = df["mid"].diff().fillna(0.0)
                 dbid = df["bid"].diff().fillna(0.0)
                 dask = df["ask"].diff().fillna(0.0)
 
-                side_tick = np.where(dmid > 0, "buy",
-                            np.where(dmid < 0, "sell",
-                            np.where((dbid > 0) & (dask >= 0), "buy",
-                            np.where((dask < 0) & (dbid <= 0), "sell", "unknown"))))
-                df.loc[unk_mask, "side"] = side_tick[unk_mask]
+                side_tick = np.where(dmid >  eps, "buy",
+                            np.where(dmid < -eps, "sell",
+                            np.where((dask > 0) & (dbid >= 0), "buy",
+                            np.where((dbid < 0) & (dask <= 0), "sell", "unknown"))))
+                tmp = side.copy()
+                tmp[unk_mask] = side_tick[unk_mask]
+                side = tmp
 
-            # ── Stats & log ────────────────────────────────────────────────────────
+            # ── Fallback 2 (ultime) : lecture légère des bits 1/2 (ASK↑ ≈ buy, BID↓ ≈ sell)
+            #    ⚠️ Ce n'est pas une "volonté d'agresseur", juste un dernier filet pour classer.
+            unk_mask = (side == "unknown")
+            if unk_mask.any():
+                is_ask_bit = (flags & 1) > 0  # BID_CHANGED (1) ? (convention MT5) — on garde la compat compat utilisateur
+                is_bid_bit = (flags & 2) > 0  # ASK_CHANGED (2)
+                # Remarque: selon broker, la sémantique 1/2 varie; on applique un mapping minimaliste:
+                side_bits = np.where(is_ask_bit & ~is_bid_bit, "sell",   # BID_CHANGED seul → pression vendeuse (prix côté bid)
+                            np.where(is_bid_bit & ~is_ask_bit, "buy",    # ASK_CHANGED seul → pression acheteuse
+                                    "unknown"))
+                tmp = side.copy()
+                tmp[unk_mask] = side_bits[unk_mask]
+                side = tmp
+
+            df["side"] = side
+
+            # ── Stats & log
             total = len(df)
             buy_n = int((df["side"] == "buy").sum())
             sell_n = int((df["side"] == "sell").sum())
@@ -1024,9 +1047,8 @@ class MT5Connector:
                 f"dernier_tick={df[tcol].max()} | BUY={buy_n} | SELL={sell_n} | UNK={unk_n} | couverture={coverage:.1f}s"
             )
 
-            # ── Sortie ordonnée ────────────────────────────────────────────────────
+            # ── Sortie ordonnée
             out = df.copy()
-            # Assure les colonnes attendues
             for c in ret_cols:
                 if c not in out.columns:
                     out[c] = np.nan if c in ("mid", "spread") else 0
@@ -1035,6 +1057,7 @@ class MT5Connector:
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
             return pd.DataFrame(columns=ret_cols)
+
 
 
   
