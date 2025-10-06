@@ -736,64 +736,84 @@ def footprint_validator(
         end_ts = start_ts + pd.Timedelta(minutes=1)
 
     # ---------- 2) NORMALISATION DES TICKS ----------
+    # Colonnes minimales
     for col in ("time", "price", "size", "side"):
         if col not in ticks.columns:
             if col == "time":
                 ticks[col] = pd.NaT
-            elif col == "price":
+            elif col in ("price", "size"):
                 ticks[col] = np.nan
-            elif col == "size":
-                ticks[col] = np.nan
-            elif col == "side":
+            else:  # side
                 ticks[col] = "unknown"
 
+    # Time -> UTC
     if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
         ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce", utc=True)
     ticks["time"] = ticks["time"].fillna(pd.Timestamp.now(tz="UTC"))
 
-    # prix de secours
-    if ticks["price"].isna().all() or (ticks["price"].fillna(0) == 0).all():
-        if "last" in ticks.columns and not ticks["last"].isna().all():
+    # Prix de secours si 'price' inexploitable
+    price_raw = pd.to_numeric(ticks["price"], errors="coerce")
+    if price_raw.isna().all() or (price_raw.fillna(0) == 0).all():
+        if "last" in ticks.columns and not pd.to_numeric(ticks["last"], errors="coerce").isna().all():
             ticks["price"] = pd.to_numeric(ticks["last"], errors="coerce")
-        elif "mid" in ticks.columns and not ticks["mid"].isna().all():
+        elif "mid" in ticks.columns and not pd.to_numeric(ticks["mid"], errors="coerce").isna().all():
             ticks["price"] = pd.to_numeric(ticks["mid"], errors="coerce")
         elif {"bid", "ask"}.issubset(ticks.columns):
-            ticks["price"] = (pd.to_numeric(ticks["bid"], errors="coerce") + pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
+            ticks["price"] = (pd.to_numeric(ticks["bid"], errors="coerce") +
+                            pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
         elif "bid" in ticks.columns:
             ticks["price"] = pd.to_numeric(ticks["bid"], errors="coerce")
         elif "ask" in ticks.columns:
             ticks["price"] = pd.to_numeric(ticks["ask"], errors="coerce")
         else:
             ticks["price"] = 0.0
+
+    # Normalisation 1 (pré-fallback fin)
     ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce").fillna(0.0)
 
-    # --- PATCH: calcule 'mid' si absent mais bid/ask présents (pour servir de fallback) ---
+    # Calcule 'mid' si absent mais bid/ask présents (pour fallback)
     if "mid" not in ticks.columns and {"bid", "ask"}.issubset(ticks.columns):
         ticks["mid"] = (pd.to_numeric(ticks["bid"], errors="coerce") +
                         pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
 
-    # --- PATCH: remplissage robuste des prix nuls/invalides avec priorité last > mid > bid > ask ---
+    # Remplissage robuste des prix nuls/invalides (priorité: last > mid > bid > ask)
     zero_mask = (~np.isfinite(ticks["price"])) | (ticks["price"] <= 0)
     if zero_mask.any():
         filler = None
         for col in ("last", "mid", "bid", "ask"):
             if col in ticks.columns:
                 s = pd.to_numeric(ticks[col], errors="coerce")
+                # ignore valeurs non positives
+                s = s.where(s > 0)
                 filler = s if filler is None else filler.combine_first(s)
         if filler is not None:
             ticks.loc[zero_mask, "price"] = filler.loc[zero_mask]
 
-    # revalide proprement
+    # Normalisation 2 (post-fallback) + filtre prix valides
     ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce").fillna(0.0)
+    valid_price_mask = np.isfinite(ticks["price"]) & (ticks["price"] > 0)
+    ticks = ticks.loc[valid_price_mask].copy()
+    if ticks.empty:
+        return {
+            "summary": {
+                "comment": "Aucun tick exploitable (prix <= 0 ou NaN).",
+                "window_start": pd.Timestamp(start_ts).isoformat(),
+                "window_end": pd.Timestamp(end_ts).isoformat(),
+            },
+            "score": 0,
+            "status": "SUSPECT",
+            "footprint_df": pd.DataFrame(),
+            "candle": candle.dropna().to_dict(),
+        }
 
-    # --- PATCH: taille (proxy) — corrige ligne par ligne ---
+    # Taille (proxy) — corrige ligne par ligne
     if "size" not in ticks.columns:
         ticks["size"] = 1.0
     ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce")
     bad_sz = ~np.isfinite(ticks["size"]) | (ticks["size"] <= 0)
     ticks.loc[bad_sz, "size"] = 1.0
 
-    # side + flags (évite de transformer NaN en "nan")
+    # Side + flags (évite de transformer NaN en "nan")
     ticks["side"] = ticks["side"].astype("string").str.lower()
     ticks["side"] = ticks["side"].replace({"b": "buy", "s": "sell"}).fillna("unknown")
 
