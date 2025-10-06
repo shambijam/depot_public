@@ -375,7 +375,122 @@ def detect_combos(
 # ============================================================
 # 🔹 Orderflow Detectors (absorptions, imbalances, exhaustion)
 # ============================================================
+def reconstruct_tick_side_mt5(ticks: pd.DataFrame) -> pd.DataFrame:
+    """
+    🏦 Dev Desk Banque Privée – Reconstruction microstructurelle MT5
+    ----------------------------------------------------------------
+    Objectif :
+        Transformer le flux brut MT5 (bid/ask/last/volume_real) en données
+        directionnelles exploitables par footprint_validator() et detect_orderflow_v5().
 
+    Principe :
+        - Recalcule le midprice, déduit le côté (buy/sell) du tick.
+        - Affecte les volumes directionnels (bid_volume / ask_volume).
+        - Construit les métriques d’agressivité (aggressor_buy_vol / aggressor_sell_vol).
+        - Garantit la compatibilité structurelle avec le pipeline orderflow.
+
+    Entrée :
+        ticks : DataFrame issu de mt5.copy_ticks_range() ou copy_ticks_from()
+            Colonnes minimales attendues : ["time", "bid", "ask", "last", "volume_real"]
+
+    Sortie :
+        DataFrame enrichi :
+            ["time","price","size","side","bid_volume","ask_volume",
+             "aggressor_buy_vol","aggressor_sell_vol","mid","spread"]
+    """
+
+    LOG = logging.getLogger("MT5TickRebuilder")
+    if ticks is None or not isinstance(ticks, pd.DataFrame) or ticks.empty:
+        LOG.warning("[Rebuilder] Flux ticks vide/invalide – retour DataFrame neutre.")
+        return pd.DataFrame(
+            columns=[
+                "time",
+                "price",
+                "size",
+                "side",
+                "bid_volume",
+                "ask_volume",
+                "aggressor_buy_vol",
+                "aggressor_sell_vol",
+                "mid",
+                "spread",
+            ]
+        )
+
+    df = ticks.copy().reset_index(drop=True)
+
+    # --- Normalisation des colonnes essentielles
+    for col in ("bid", "ask", "last", "volume_real"):
+        if col not in df.columns:
+            df[col] = np.nan
+    if "time" not in df.columns:
+        df["time"] = pd.Timestamp.utcnow()
+
+    # --- Nettoyage et typage
+    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+    df["last"] = pd.to_numeric(df["last"], errors="coerce")
+    df["volume_real"] = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0.0)
+
+    if not pd.api.types.is_datetime64_any_dtype(df["time"]):
+        df["time"] = pd.to_datetime(df["time"], errors="coerce").fillna(
+            pd.Timestamp.utcnow()
+        )
+
+    # --- Recalcul du midprice et du spread
+    df["mid"] = (df["bid"] + df["ask"]) / 2
+    df["spread"] = df["ask"] - df["bid"]
+
+    # --- Reconstruction du côté d’agresseur
+    # Si last >= ask → acheteur agressif
+    # Si last <= bid → vendeur agressif
+    # Sinon → neutre/inconnu
+    df["side"] = np.where(
+        df["last"] >= df["ask"],
+        "buy",
+        np.where(df["last"] <= df["bid"], "sell", "unknown"),
+    )
+
+    # --- Volume directionnel
+    df["size"] = df["volume_real"].replace(0, np.nan).fillna(1.0)
+    df["bid_volume"] = np.where(df["side"] == "sell", df["size"], 0.0)
+    df["ask_volume"] = np.where(df["side"] == "buy", df["size"], 0.0)
+    df["aggressor_buy_vol"] = df["ask_volume"]
+    df["aggressor_sell_vol"] = df["bid_volume"]
+
+    # --- Sécurité : si tout est neutre, tenter une heuristique de direction
+    if (df["side"] == "unknown").all():
+        price_diff = df["last"].diff().fillna(0.0)
+        df.loc[price_diff > 0, "side"] = "buy"
+        df.loc[price_diff < 0, "side"] = "sell"
+        LOG.info("[Rebuilder] Côté reconstruit par dérivée du prix (diff successive).")
+
+    # --- Nettoyage final
+    cols = [
+        "time",
+        "last",
+        "size",
+        "side",
+        "bid_volume",
+        "ask_volume",
+        "aggressor_buy_vol",
+        "aggressor_sell_vol",
+        "mid",
+        "spread",
+    ]
+    df.rename(columns={"last": "price"}, inplace=True)
+    df = df[cols]
+
+    # --- Statistiques rapides pour log
+    total = len(df)
+    buys = int((df["side"] == "buy").sum())
+    sells = int((df["side"] == "sell").sum())
+    LOG.info(
+        f"[Rebuilder] Flux reconstruit : {total} ticks → {buys} buys / {sells} sells "
+        f"(spread médian={df['spread'].median():.1e})"
+    )
+
+    return df
 
 def detect_orderflow_v5(
     df: pd.DataFrame,
@@ -761,126 +876,6 @@ def footprint_validator(
         "footprint_df": agg,
         "candle": candle.dropna().to_dict(),
     }
-
-
-def reconstruct_tick_side_mt5(ticks: pd.DataFrame) -> pd.DataFrame:
-    """
-    🏦 Dev Desk Banque Privée – Reconstruction microstructurelle MT5
-    ----------------------------------------------------------------
-    Objectif :
-        Transformer le flux brut MT5 (bid/ask/last/volume_real) en données
-        directionnelles exploitables par footprint_validator() et detect_orderflow_v5().
-
-    Principe :
-        - Recalcule le midprice, déduit le côté (buy/sell) du tick.
-        - Affecte les volumes directionnels (bid_volume / ask_volume).
-        - Construit les métriques d’agressivité (aggressor_buy_vol / aggressor_sell_vol).
-        - Garantit la compatibilité structurelle avec le pipeline orderflow.
-
-    Entrée :
-        ticks : DataFrame issu de mt5.copy_ticks_range() ou copy_ticks_from()
-            Colonnes minimales attendues : ["time", "bid", "ask", "last", "volume_real"]
-
-    Sortie :
-        DataFrame enrichi :
-            ["time","price","size","side","bid_volume","ask_volume",
-             "aggressor_buy_vol","aggressor_sell_vol","mid","spread"]
-    """
-
-    LOG = logging.getLogger("MT5TickRebuilder")
-    if ticks is None or not isinstance(ticks, pd.DataFrame) or ticks.empty:
-        LOG.warning("[Rebuilder] Flux ticks vide/invalide – retour DataFrame neutre.")
-        return pd.DataFrame(
-            columns=[
-                "time",
-                "price",
-                "size",
-                "side",
-                "bid_volume",
-                "ask_volume",
-                "aggressor_buy_vol",
-                "aggressor_sell_vol",
-                "mid",
-                "spread",
-            ]
-        )
-
-    df = ticks.copy().reset_index(drop=True)
-
-    # --- Normalisation des colonnes essentielles
-    for col in ("bid", "ask", "last", "volume_real"):
-        if col not in df.columns:
-            df[col] = np.nan
-    if "time" not in df.columns:
-        df["time"] = pd.Timestamp.utcnow()
-
-    # --- Nettoyage et typage
-    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
-    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
-    df["last"] = pd.to_numeric(df["last"], errors="coerce")
-    df["volume_real"] = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0.0)
-
-    if not pd.api.types.is_datetime64_any_dtype(df["time"]):
-        df["time"] = pd.to_datetime(df["time"], errors="coerce").fillna(
-            pd.Timestamp.utcnow()
-        )
-
-    # --- Recalcul du midprice et du spread
-    df["mid"] = (df["bid"] + df["ask"]) / 2
-    df["spread"] = df["ask"] - df["bid"]
-
-    # --- Reconstruction du côté d’agresseur
-    # Si last >= ask → acheteur agressif
-    # Si last <= bid → vendeur agressif
-    # Sinon → neutre/inconnu
-    df["side"] = np.where(
-        df["last"] >= df["ask"],
-        "buy",
-        np.where(df["last"] <= df["bid"], "sell", "unknown"),
-    )
-
-    # --- Volume directionnel
-    df["size"] = df["volume_real"].replace(0, np.nan).fillna(1.0)
-    df["bid_volume"] = np.where(df["side"] == "sell", df["size"], 0.0)
-    df["ask_volume"] = np.where(df["side"] == "buy", df["size"], 0.0)
-    df["aggressor_buy_vol"] = df["ask_volume"]
-    df["aggressor_sell_vol"] = df["bid_volume"]
-
-    # --- Sécurité : si tout est neutre, tenter une heuristique de direction
-    if (df["side"] == "unknown").all():
-        price_diff = df["last"].diff().fillna(0.0)
-        df.loc[price_diff > 0, "side"] = "buy"
-        df.loc[price_diff < 0, "side"] = "sell"
-        LOG.info("[Rebuilder] Côté reconstruit par dérivée du prix (diff successive).")
-
-    # --- Nettoyage final
-    cols = [
-        "time",
-        "last",
-        "size",
-        "side",
-        "bid_volume",
-        "ask_volume",
-        "aggressor_buy_vol",
-        "aggressor_sell_vol",
-        "mid",
-        "spread",
-    ]
-    df.rename(columns={"last": "price"}, inplace=True)
-    df = df[cols]
-
-    # --- Statistiques rapides pour log
-    total = len(df)
-    buys = int((df["side"] == "buy").sum())
-    sells = int((df["side"] == "sell").sum())
-    LOG.info(
-        f"[Rebuilder] Flux reconstruit : {total} ticks → {buys} buys / {sells} sells "
-        f"(spread médian={df['spread'].median():.1e})"
-    )
-
-    return df
-
-
 class Detectors:
     """
     Classe regroupant tous les détecteurs de phases de marché.

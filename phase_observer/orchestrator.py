@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from .memory import PhaseMemoryManager
 
 
+
 # Alias UTC
 UTC = timezone.utc
 
@@ -286,6 +287,19 @@ class PhaseObserver:
                 list(self._ticks_current_bar) or [], columns=["time", "price", "size", "side"]
             )
             ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
+            
+            # ✅ Reconstruction microstructurelle MT5 avant validation footprint
+            try:
+                from .detectors import reconstruct_tick_side_mt5              
+                # Reconstruit le côté (achat/vente) + volumes directionnels
+                ticks_df = reconstruct_tick_side_mt5(ticks_df)
+
+                self.logger.debug(
+                    f"[on_bar_close] reconstruction ticks OK -> {len(ticks_df)} lignes reconstruites "
+                    f"({(ticks_df['side'] == 'buy').sum()} buys / {(ticks_df['side'] == 'sell').sum()} sells)"
+                )
+            except Exception as e_rebuild:
+                self.logger.warning(f"[on_bar_close] reconstruction ticks échouée: {e_rebuild}", exc_info=True)
 
             # Validation footprint final (si activé)
             if self.footprint_cfg.get("enable_final_footprint", True):
