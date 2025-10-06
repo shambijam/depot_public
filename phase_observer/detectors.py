@@ -648,6 +648,10 @@ def detect_orderflow_v5(
         score += 10
 
     score = int(np.clip(score, 0, 100))
+    # --- NORMALISATION DU SCORE ---
+    score = int(round(score))
+    score = max(0, min(100, score))
+
     status = "VALID" if score >= 70 else "SUSPECT"
 
     # ---------- 7️⃣ SORTIE STRUCTURÉE ----------
@@ -918,9 +922,19 @@ def footprint_validator(
     if tick_count < MIN_TICKS:
         score -= PEN_TICKS
         comments.append(f"Peu de ticks (<{MIN_TICKS}).")
+        # Atténuation si burst élevé (ticks/s)
+    HIGH_BURST_TICK_RATE = 2.0  # ex. ≥ 2 ticks/seconde
     if coverage_s < MIN_COVERAGE_S:
-        score -= PEN_COVER
-        comments.append(f"Couverture temporelle faible (<{MIN_COVERAGE_S:.0f}s).")
+        tick_rate = tick_count / max(coverage_s, 1.0)
+        if tick_count >= MIN_TICKS and tick_rate >= HIGH_BURST_TICK_RATE:
+            score -= max(PEN_COVER // 2, 1)
+            comments.append(
+                f"Couverture courte mais burst élevé (≥{HIGH_BURST_TICK_RATE:.1f} t/s) — malus réduit."
+            )
+        else:
+            score -= PEN_COVER
+            comments.append(f"Couverture temporelle faible (<{MIN_COVERAGE_S:.0f}s).")
+
     # --- GARDE-FOU: échantillon trop court ---
     if tick_count < 3 or coverage_s < 2:
         score = min(score, 60)  # forcera status="SUSPECT" plus bas
