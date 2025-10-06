@@ -934,101 +934,83 @@ class MT5Connector:
     ) -> pd.DataFrame:
         """
         🎯 Récupère uniquement les ticks correspondant strictement à une bougie donnée.
+        Inclut maintenant les flags MT5 pour détecter BUY / SELL / UNKNOWN.
         Fenêtre stricte : [start_ts, end_ts)
-        - Normalise en UTC
-        - Garantit 60s si end_ts - start_ts < 60s (59/60 accepté)
-        - Récupère large avec copy_ticks_from puis TRIM dans la fenêtre
-        - Log clair : fenêtre demandée + couverture réelle (sec et %)
         """
         import pandas as pd
-        from datetime import datetime, timedelta, timezone
-
-        # Colonnes de retour standard
-        _EMPTY = pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+        import numpy as np
+        from datetime import timedelta, timezone
 
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
-            return _EMPTY
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
 
         try:
-            # --- 1) Normalisation UTC + fenêtre 60s minimale
+            # Normalisation stricte UTC
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
-            else:
-                start_ts = start_ts.astimezone(timezone.utc)
-
             if end_ts.tzinfo is None:
                 end_ts = end_ts.replace(tzinfo=timezone.utc)
-            else:
-                end_ts = end_ts.astimezone(timezone.utc)
 
-            # Forcer au moins ~60s si on nous passe moins
+            # Forcer 60s si la fenêtre est plus courte
             if (end_ts - start_ts).total_seconds() < 59.0:
                 end_ts = start_ts + timedelta(seconds=60)
 
-            # --- 2) Récupération large puis TRIM
-            # On prend large (jusqu'à maintenant) et on filtre après. 
-            # Un count élevé est OK: on TRIM ensuite dans [start_ts, end_ts)
-            MAX_COUNT = 50000
-            ticks = self.mt5.copy_ticks_from(
+            # --- Requête MT5 avec les flags ---
+            ticks = self.mt5.copy_ticks_range(
                 symbol,
                 start_ts,
-                MAX_COUNT,
+                end_ts,
                 self.mt5.COPY_TICKS_ALL,
             )
 
             if ticks is None or len(ticks) == 0:
-                self.logger.warning(f"[MT5C] Aucun tick brut récupéré pour {symbol} (from={start_ts}).")
-                # Log fenêtre demandée avec couverture nulle
-                self.logger.info(
-                    f"[MT5C][{symbol}] ✅ 0 ticks pour la bougie demandée "
-                    f"(fenêtre: {start_ts} → {end_ts}) | couverture=0.0s (0.0%)"
-                )
-                return _EMPTY
+                self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
+                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
 
             df = pd.DataFrame(ticks)
-            # time MT5 est en secondes epoch → UTC
-            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
 
-            # Typage/sécurisation
-            for col in ("bid", "ask", "last", "volume"):
+            # Conversion et nettoyage
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+            for col in ["bid", "ask", "last", "volume"]:
                 if col not in df.columns:
                     df[col] = 0.0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-            # TRIM strict de la fenêtre 1 minute
-            df = df[(df["time"] >= start_ts) & (df["time"] < end_ts)].copy()
+            # Ajouter flags et décoder les côtés
+            if "flags" not in df.columns:
+                df["flags"] = 0
 
-            # Mid
-            if "bid" in df.columns and "ask" in df.columns:
-                df["mid"] = (pd.to_numeric(df["bid"], errors="coerce").fillna(0.0) +
-                            pd.to_numeric(df["ask"], errors="coerce").fillna(0.0)) / 2.0
-            else:
-                df["mid"] = pd.to_numeric(df.get("last", 0.0), errors="coerce").fillna(0.0)
+            df["is_buy"] = ((df["flags"] & 1) > 0) | ((df["flags"] & 16) > 0)
+            df["is_sell"] = ((df["flags"] & 2) > 0) | ((df["flags"] & 32) > 0)
 
-            # --- 3) Log fenêtre demandée + couverture réelle
-            if not df.empty:
-                last_tick_in_win = df["time"].max()
-                # couverture en secondes par rapport au début de fenêtre
-                cov_sec = max(0.0, min(60.0, (last_tick_in_win - start_ts).total_seconds()))
-                cov_pct = (cov_sec / 60.0) * 100.0
-                self.logger.info(
-                    f"[MT5C][{symbol}] ✅ {len(df)} ticks pour la bougie demandée "
-                    f"(fenêtre: {start_ts} → {end_ts}) | dernier_tick={last_tick_in_win} | "
-                    f"couverture={cov_sec:.1f}s ({cov_pct:.0f}%)"
-                )
-            else:
-                self.logger.info(
-                    f"[MT5C][{symbol}] ✅ 0 ticks pour la bougie demandée "
-                    f"(fenêtre: {start_ts} → {end_ts}) | couverture=0.0s (0.0%)"
-                )
+            df["side"] = np.where(
+                df["is_buy"], "buy",
+                np.where(df["is_sell"], "sell", "unknown")
+            )
 
-            # Retour standardisé (même si vide)
-            return df[["time", "bid", "ask", "last", "volume", "mid"]]
+            # Calculs dérivés utiles
+            df["mid"] = (df["bid"] + df["ask"]) / 2.0
+            df["spread"] = df["ask"] - df["bid"]
+
+            # Statistiques pour logs
+            total_ticks = len(df)
+            buy_ticks = int(df["is_buy"].sum())
+            sell_ticks = int(df["is_sell"].sum())
+            coverage = (df["time"].max() - df["time"].min()).total_seconds()
+
+            self.logger.info(
+                f"[MT5C][{symbol}] ✅ {total_ticks} ticks pour la bougie demandée "
+                f"(fenêtre: {start_ts} → {end_ts}) | dernier_tick={df['time'].max()} | "
+                f"BUY={buy_ticks} | SELL={sell_ticks} | couverture={coverage:.1f}s"
+            )
+
+            return df
 
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
-            return _EMPTY
+            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
+
 
   
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
