@@ -845,6 +845,10 @@ def footprint_validator(
             "footprint_df": pd.DataFrame(),
             "candle": candle.dropna().to_dict(),
         }
+    # --- PATCH 2.A: granularité des ticks (nb & couverture) ---
+    tick_count = int(df.shape[0])
+    # sécurité: si un seul tick → couverture = 0s
+    coverage_s = float((df["time"].max() - df["time"].min()).total_seconds()) if tick_count > 1 else 0.0
 
     # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
     df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
@@ -875,8 +879,21 @@ def footprint_validator(
     denom = (agg["buy"] + agg["sell"]).replace(0.0, np.nan)
     agg["buy_pct"] = (agg["buy"] / denom).fillna(0.5)
     agg = agg.reset_index().sort_values("price_level", ascending=False).reset_index(drop=True)
+    
+    # --- PATCH: quantification propre aux ticks (arrondis stables) ---
+    if price_step is None or price_step <= 0:
+        # garde un fallback raisonnable si le pas a été inféré
+        step_for_dec = float(agg["price_level"].diff().abs().replace(0, np.nan).min() or 1e-5)
+    else:
+        step_for_dec = float(price_step)
 
+    step_str = f"{step_for_dec:.10f}".rstrip("0")
+    decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+
+    # arrondis harmonisés
+    agg["price_level"] = agg["price_level"].round(decimals)
     poc = float(agg.loc[agg["total"].idxmax(), "price_level"]) if (agg["total"] > 0).any() else float(agg.loc[0, "price_level"])
+    poc = round(poc, decimals)
     delta_total   = float(agg["delta"].sum())
     total_volume  = float(agg["total"].sum())
     imbalance_buy = int((agg["buy_pct"] >= imbalance_threshold).sum())
@@ -891,6 +908,15 @@ def footprint_validator(
 
     score = 100
     comments = []
+    
+    # --- PATCH 2.B: pénalités faible granularité ---
+    if tick_count < 10:
+        score -= 15
+        comments.append("Peu de ticks (<10).")
+    if coverage_s < 30:
+        score -= 10
+        comments.append("Couverture temporelle faible (<30s).")
+
     if total_volume <= 0.0:
         score -= 60
         comments.append("Volume nul/négligeable.")
@@ -917,6 +943,9 @@ def footprint_validator(
             "comments": "; ".join(comments),
             "window_start": pd.Timestamp(start_ts).isoformat(),
             "window_end": pd.Timestamp(end_ts).isoformat(),
+            "tick_count": int(tick_count),
+            "coverage_s": float(coverage_s),
+
         },
         "score": max(int(score), 0),
         "status": status,
