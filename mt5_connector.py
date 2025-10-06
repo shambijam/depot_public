@@ -928,79 +928,114 @@ class MT5Connector:
         
     def get_ticks_for_candle(self, symbol: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame:
         """
-        🎯 Ticks exacts de la bougie M1 fermée : [start_ts, end_ts)
-        - Pas de fallback time
-        - Flags 16/32 si dispo, sinon tick rule (Δmid) pour BUY/SELL
-        - Fenêtre 60s UTC pile
+        🎯 Récupère *strictement* les ticks de la bougie M1 fermée sur l’intervalle [start_ts, end_ts)
+        - AUCUN fallback temporel
+        - Récupération via COPY_TICKS_ALL puis filtrage strict par horodatage
+        - Décodage des flags MT5 (1/2 et 16/32) → BUY / SELL ; fallback tick-rule (Δmid) pour UNKNOWN
+        - Fenêtre verrouillée à 60s en UTC
+        Retourne les colonnes: ["time","bid","ask","last","volume","flags","side","mid","spread"]
         """
         import pandas as pd
         import numpy as np
         from datetime import timedelta, timezone
 
-        cols = ["time","bid","ask","last","volume","flags","side","mid","spread"]
+        ret_cols = ["time", "bid", "ask", "last", "volume", "flags", "side", "mid", "spread"]
+
+        # ── Garde-fou connexion ─────────────────────────────────────────────────────
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
-            return pd.DataFrame(columns=cols)
+            return pd.DataFrame(columns=ret_cols)
 
         try:
-            # UTC + fenêtre 60s pile
-            if start_ts.tzinfo is None: start_ts = start_ts.replace(tzinfo=timezone.utc)
-            if end_ts.tzinfo is None:   end_ts   = end_ts.replace(tzinfo=timezone.utc)
+            # ── Normalisation UTC + verrou 60s ─────────────────────────────────────
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.replace(tzinfo=timezone.utc)
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.replace(tzinfo=timezone.utc)
             if (end_ts - start_ts).total_seconds() != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
 
+            # ── Requête brute (tout type de ticks) ─────────────────────────────────
             ticks = self.mt5.copy_ticks_range(symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL)
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
-                return pd.DataFrame(columns=cols)
+                return pd.DataFrame(columns=ret_cols)
 
             df = pd.DataFrame(ticks)
-            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
-            for c in ("bid","ask","last","volume","flags"):
-                if c not in df.columns: df[c] = 0
+
+            # ── Typage/colonnes minimales ──────────────────────────────────────────
+            # time / time_msc
+            df["time"] = pd.to_datetime(df.get("time", pd.NaT), unit="s", utc=True, errors="coerce")
+            if "time_msc" in df.columns:
+                df["time_msc"] = pd.to_datetime(df["time_msc"], unit="ms", utc=True, errors="coerce")
+
+            # numériques
+            for c in ("bid", "ask", "last", "volume", "flags"):
+                if c not in df.columns:
+                    df[c] = 0
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-            # mid & spread
-            df["mid"]    = (df["bid"] + df["ask"]) / 2.0
-            df["spread"] =  df["ask"] - df["bid"]
+            # si volume inexistant (FX), on peut compter chaque tick comme 1
+            if (df["volume"] == 0).all():
+                df["volume"] = 1.0
 
-            # --- SIDE: 1) flags 16/32 si dispo; 2) sinon Δmid (tick rule) ---
-            flags = df["flags"].astype(int) if "flags" in df.columns else 0
-            by_flags = np.where((flags & 16) > 0, "buy",
-                        np.where((flags & 32) > 0, "sell", "unknown"))
+            # ── Filtre temporel STRICT sur la meilleure horloge ────────────────────
+            tcol = "time_msc" if "time_msc" in df.columns else "time"
+            df = df[(df[tcol] >= start_ts) & (df[tcol] < end_ts)].copy()
+            if df.empty:
+                self.logger.warning(f"[MT5C] Aucun tick dans la fenêtre stricte pour {symbol} [{start_ts} → {end_ts}]")
+                return pd.DataFrame(columns=ret_cols)
 
-            # Tick rule (Lee–Ready simplifié sur quotes) si still unknown
-            # sign(Δmid) : >0 => buy ; <0 => sell ; =0 => heuristique sur Δbid/Δask sinon unknown
-            dmid = df["mid"].diff().fillna(0.0)
-            dbid = df["bid"].diff().fillna(0.0)
-            dask = df["ask"].diff().fillna(0.0)
-            by_tick = np.where(dmid > 0, "buy",
-                    np.where(dmid < 0, "sell",
-                        np.where((dbid > 0) & (dask >= 0), "buy",
-                        np.where((dask < 0) & (dbid <= 0), "sell", "unknown")
-                        )
-                    ))
+            # ── mid & spread ───────────────────────────────────────────────────────
+            df["mid"] = (df["bid"] + df["ask"]) / 2.0
+            df["spread"] = df["ask"] - df["bid"]
 
-            df["side"] = by_flags
-            mask_unk = (df["side"] == "unknown")
-            if mask_unk.any():
-                df.loc[mask_unk, "side"] = by_tick[mask_unk]
+            # ── Décode flags → BUY/SELL (1/16 = buy, 2/32 = sell) ─────────────────
+            flags = df["flags"].astype(int)
+            side_flags = np.where((flags & 1) > 0, "buy",
+                        np.where((flags & 2) > 0, "sell",
+                        np.where((flags & 16) > 0, "buy",
+                        np.where((flags & 32) > 0, "sell", "unknown"))))
 
-            total   = len(df)
-            buy_n   = int((df["side"] == "buy").sum())
-            sell_n  = int((df["side"] == "sell").sum())
-            unk_n   = int((df["side"] == "unknown").sum())
-            cov_s   = float((df["time"].max() - df["time"].min()).total_seconds())
+            df["side"] = side_flags
+
+            # ── Fallback tick-rule pour les UNKNOWN (Lee–Ready simplifié) ──────────
+            unk_mask = df["side"] == "unknown"
+            if unk_mask.any():
+                dmid = df["mid"].diff().fillna(0.0)
+                dbid = df["bid"].diff().fillna(0.0)
+                dask = df["ask"].diff().fillna(0.0)
+
+                side_tick = np.where(dmid > 0, "buy",
+                            np.where(dmid < 0, "sell",
+                            np.where((dbid > 0) & (dask >= 0), "buy",
+                            np.where((dask < 0) & (dbid <= 0), "sell", "unknown"))))
+                df.loc[unk_mask, "side"] = side_tick[unk_mask]
+
+            # ── Stats & log ────────────────────────────────────────────────────────
+            total = len(df)
+            buy_n = int((df["side"] == "buy").sum())
+            sell_n = int((df["side"] == "sell").sum())
+            unk_n = int((df["side"] == "unknown").sum())
+            coverage = float((df[tcol].max() - df[tcol].min()).total_seconds())
 
             self.logger.info(
                 f"[MT5C][{symbol}] ✅ {total} ticks (bougie close) {start_ts} → {end_ts} | "
-                f"dernier_tick={df['time'].max()} | BUY={buy_n} | SELL={sell_n} | UNK={unk_n} | couverture={cov_s:.1f}s"
+                f"dernier_tick={df[tcol].max()} | BUY={buy_n} | SELL={sell_n} | UNK={unk_n} | couverture={coverage:.1f}s"
             )
-            return df[cols]
+
+            # ── Sortie ordonnée ────────────────────────────────────────────────────
+            out = df.copy()
+            # Assure les colonnes attendues
+            for c in ret_cols:
+                if c not in out.columns:
+                    out[c] = np.nan if c in ("mid", "spread") else 0
+            return out[ret_cols]
 
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
-            return pd.DataFrame(columns=cols)
+            return pd.DataFrame(columns=ret_cols)
+
 
   
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
