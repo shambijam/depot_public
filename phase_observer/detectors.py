@@ -682,7 +682,7 @@ def footprint_validator(
     - price: utilise 'price' sinon 'last' → 'mid' → 'bid'/'ask'
     - size: si manquant/0 → 1.0 (tick-count proxy)
     - side: utilise 'side' fourni ; si 'unknown' et 'flags' dispo → decode (1/16 buy, 2/32 sell)
-    - Pas de fallback temporel (±30s) pour éviter les hors-fenêtre
+    - Pas de fallback temporel
     """
     import numpy as np
     import pandas as pd
@@ -711,7 +711,6 @@ def footprint_validator(
         if not pd.api.types.is_datetime64_any_dtype(candles["time"]):
             candles["time"] = pd.to_datetime(candles["time"], errors="coerce", utc=True)
     else:
-        # index → datetime
         if not isinstance(candles.index, pd.DatetimeIndex):
             try:
                 candles.index = pd.to_datetime(candles.index, errors="coerce", utc=True)
@@ -720,28 +719,23 @@ def footprint_validator(
         candles["time"] = candles.index
 
     if candles["time"].isna().all():
-        candles["time"] = pd.Timestamp.utcnow()
+        candles["time"] = pd.Timestamp.now(tz="UTC")
 
     candle = candles.iloc[candle_index]
-    start_ts = pd.to_datetime(
-        candle.get("time", candle.name), utc=True, errors="coerce"
-    )
+    start_ts = pd.to_datetime(candle.get("time", candle.name), utc=True, errors="coerce")
     if pd.isna(start_ts):
-        start_ts = pd.Timestamp.utcnow(tz="UTC")
+        start_ts = pd.Timestamp.now(tz="UTC")
 
-    # fenêtre M1 stricte : si pas de prochaine bougie, on force +1 minute
+    # fenêtre M1 stricte
     if candle_index + 1 < len(candles):
         nxt = candles.iloc[candle_index + 1]
-        end_ts = pd.to_datetime(
-            nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce"
-        )
+        end_ts = pd.to_datetime(nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce")
         if pd.isna(end_ts) or end_ts <= start_ts:
             end_ts = start_ts + pd.Timedelta(minutes=1)
     else:
         end_ts = start_ts + pd.Timedelta(minutes=1)
 
     # ---------- 2) NORMALISATION DES TICKS ----------
-    # colonnes minimales
     for col in ("time", "price", "size", "side"):
         if col not in ticks.columns:
             if col == "time":
@@ -753,65 +747,51 @@ def footprint_validator(
             elif col == "side":
                 ticks[col] = "unknown"
 
-    # time
     if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
         ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce", utc=True)
-    ticks["time"] = ticks["time"].fillna(pd.Timestamp.utcnow(tz="UTC"))
+    ticks["time"] = ticks["time"].fillna(pd.Timestamp.now(tz="UTC"))
 
-    # prix de secours si 'price' vide/absent
+    # prix de secours
     if ticks["price"].isna().all() or (ticks["price"].fillna(0) == 0).all():
-        # cascade: last → mid → (bid+ask)/2 → bid → ask
         if "last" in ticks.columns and not ticks["last"].isna().all():
             ticks["price"] = pd.to_numeric(ticks["last"], errors="coerce")
         elif "mid" in ticks.columns and not ticks["mid"].isna().all():
             ticks["price"] = pd.to_numeric(ticks["mid"], errors="coerce")
         elif {"bid", "ask"}.issubset(ticks.columns):
-            ticks["price"] = (
-                pd.to_numeric(ticks["bid"], errors="coerce")
-                + pd.to_numeric(ticks["ask"], errors="coerce")
-            ) / 2.0
+            ticks["price"] = (pd.to_numeric(ticks["bid"], errors="coerce") + pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
         elif "bid" in ticks.columns:
             ticks["price"] = pd.to_numeric(ticks["bid"], errors="coerce")
         elif "ask" in ticks.columns:
             ticks["price"] = pd.to_numeric(ticks["ask"], errors="coerce")
         else:
             ticks["price"] = 0.0
-
     ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce").fillna(0.0)
 
-    # taille: si manquante ou 0 partout → 1.0 par tick (proxy volume)
+    # taille (proxy)
     if "size" not in ticks.columns:
         ticks["size"] = 1.0
     ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce").fillna(0.0)
     if (ticks["size"] <= 0).all():
         ticks["size"] = 1.0
 
-    # side : normalise + fallback flags si dispo
-    ticks["side"] = (
-        ticks["side"]
-        .astype(str)
-        .str.lower()
-        .replace({"b": "buy", "s": "sell"})
-        .fillna("unknown")
-    )
+    # side + flags
+    ticks["side"] = ticks["side"].astype(str).str.lower().replace({"b": "buy", "s": "sell"}).fillna("unknown")
     if "flags" in ticks.columns:
         flags = pd.to_numeric(ticks["flags"], errors="coerce").fillna(0).astype(int)
-        # applique flags seulement quand side encore unknown
         unk_mask = ticks["side"].eq("unknown")
         if unk_mask.any():
-            buy_mask = ((flags & 1) > 0) | ((flags & 16) > 0)
+            buy_mask  = ((flags & 1) > 0) | ((flags & 16) > 0)
             sell_mask = ((flags & 2) > 0) | ((flags & 32) > 0)
-            ticks.loc[unk_mask & buy_mask, "side"] = "buy"
+            ticks.loc[unk_mask & buy_mask,  "side"] = "buy"
             ticks.loc[unk_mask & sell_mask, "side"] = "sell"
 
-    # ---------- 3) SÉLECTION DE LA FENÊTRE (STRICTE) ----------
+    # ---------- 3) FENÊTRE STRICTE ----------
     try:
         mask = (ticks["time"] >= start_ts) & (ticks["time"] < end_ts)
         df = ticks.loc[mask].copy()
     except Exception:
         df = ticks.copy()
 
-    # strict: pas de fallback ±30s
     if df.empty:
         return {
             "summary": {
@@ -825,21 +805,18 @@ def footprint_validator(
             "candle": candle.dropna().to_dict(),
         }
 
-    # ---------- 4) SIDE NORMALISÉ ----------
+    # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
     df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
 
-    # ---------- 5) PAS DE PRIX ----------
     if price_step is None or price_step <= 0:
         uniq = np.sort(df["price"].dropna().unique())
         if uniq.size >= 2:
-            diffs = np.diff(uniq)
-            pos = diffs[diffs > 0]
+            diffs = np.diff(uniq); pos = diffs[diffs > 0]
             price_step = float(np.min(pos)) if pos.size else 1e-5
         else:
             price_step = 1e-5
     df["price_level"] = (df["price"] / price_step).round() * price_step
 
-    # ---------- 6) AGRÉGATION ----------
     agg = df.pivot_table(
         index="price_level",
         columns="side_norm",
@@ -855,53 +832,28 @@ def footprint_validator(
     agg["delta"] = agg["buy"] - agg["sell"]
     denom = (agg["buy"] + agg["sell"]).replace(0.0, np.nan)
     agg["buy_pct"] = (agg["buy"] / denom).fillna(0.5)
+    agg = agg.reset_index().sort_values("price_level", ascending=False).reset_index(drop=True)
 
-    agg = (
-        agg.reset_index()
-        .sort_values("price_level", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    # ---------- 7) POC ----------
-    if (agg["total"] > 0).any():
-        poc = float(agg.loc[agg["total"].idxmax(), "price_level"])
-    else:
-        poc = float(agg.loc[0, "price_level"])
-
-    # ---------- 8) MÉTRIQUES ----------
-    delta_total = float(agg["delta"].sum())
-    total_volume = float(agg["total"].sum())  # proxy: nb ticks si size=1
+    poc = float(agg.loc[agg["total"].idxmax(), "price_level"]) if (agg["total"] > 0).any() else float(agg.loc[0, "price_level"])
+    delta_total   = float(agg["delta"].sum())
+    total_volume  = float(agg["total"].sum())
     imbalance_buy = int((agg["buy_pct"] >= imbalance_threshold).sum())
-    imbalance_sell = int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
+    imbalance_sell= int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
 
     absorption_flag = False
     try:
-        if agg.iloc[0]["delta"] < 0:  # haut de la bougie dominé par vendeurs
-            absorption_flag = True
-        if agg.iloc[-1]["delta"] > 0:  # bas de la bougie dominé par acheteurs
-            absorption_flag = True
+        if agg.iloc[0]["delta"] < 0: absorption_flag = True
+        if agg.iloc[-1]["delta"] > 0: absorption_flag = True
     except Exception:
         pass
 
-    # ---------- 9) SCORE ----------
-    score = 100
-    comments = []
-    if total_volume <= 0.0:
-        score -= 60
-        comments.append("Volume nul/négligeable.")
-    if abs(delta_total) < 0.01 * max(1.0, total_volume):
-        score -= 15
-        comments.append("Delta trop neutre (peu de conviction).")
-    if (imbalance_buy + imbalance_sell) == 0:
-        score -= 10
-        comments.append("Aucun déséquilibre détecté.")
-    if absorption_flag:
-        score -= 20
-        comments.append("Absorption détectée aux extrêmes.")
-
+    score = 100; comments = []
+    if total_volume <= 0.0: score -= 60; comments.append("Volume nul/négligeable.")
+    if abs(delta_total) < 0.01 * max(1.0, total_volume): score -= 15; comments.append("Delta trop neutre (peu de conviction).")
+    if (imbalance_buy + imbalance_sell) == 0: score -= 10; comments.append("Aucun déséquilibre détecté.")
+    if absorption_flag: score -= 20; comments.append("Absorption détectée aux extrêmes.")
     status = "VALID" if score >= 70 else "SUSPECT"
 
-    # ---------- 10) SORTIE ----------
     return {
         "summary": {
             "delta_total": delta_total,
