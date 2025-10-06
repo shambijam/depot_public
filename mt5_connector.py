@@ -928,9 +928,9 @@ class MT5Connector:
         
     def get_ticks_for_candle(self, symbol: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame:
         """
-        🎯 Ticks stricts de la bougie M1 close : [start_ts, end_ts)
-        - Pas de fallback
-        - Flags MT5: BUY=16, SELL=32 (⚠ ne pas confondre avec 1/2 qui sont BID/ASK updates)
+        🎯 Ticks exacts de la bougie M1 fermée : [start_ts, end_ts)
+        - Pas de fallback time
+        - Flags 16/32 si dispo, sinon tick rule (Δmid) pour BUY/SELL
         - Fenêtre 60s UTC pile
         """
         import pandas as pd
@@ -939,19 +939,17 @@ class MT5Connector:
 
         cols = ["time","bid","ask","last","volume","flags","side","mid","spread"]
         if not getattr(self, "is_connected", False):
-            self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer les ticks '{symbol}'.")
+            self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
             return pd.DataFrame(columns=cols)
 
         try:
-            # --- UTC strict + fenêtre 60s ---
+            # UTC + fenêtre 60s pile
             if start_ts.tzinfo is None: start_ts = start_ts.replace(tzinfo=timezone.utc)
             if end_ts.tzinfo is None:   end_ts   = end_ts.replace(tzinfo=timezone.utc)
             if (end_ts - start_ts).total_seconds() != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
 
-            # --- Requête brute (ALL = quotes + last). Les flags sont renvoyés si dispo. ---
             ticks = self.mt5.copy_ticks_range(symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL)
-
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
                 return pd.DataFrame(columns=cols)
@@ -962,36 +960,41 @@ class MT5Connector:
                 if c not in df.columns: df[c] = 0
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-            # --- Décodage CORRECT du côté (uniquement 16/32) ---
-            # bits: 16 = BUY trade, 32 = SELL trade  (1=BID update, 2=ASK update → pas un côté)
-            has_flags = "flags" in df.columns
-            is_buy   = has_flags & ((df["flags"].astype(int) & 16) > 0)
-            is_sell  = has_flags & ((df["flags"].astype(int) & 32) > 0)
-
-            df["side"] = np.where(is_buy, "buy", np.where(is_sell, "sell", "unknown"))
-
-            # Fallback léger si aucun 16/32 n’apparaît (démo/serveur muet) :
-            # Utiliser la relation last vs bid/ask quand last>0
-            mask_unknown = (df["side"] == "unknown")
-            if mask_unknown.any():
-                last_pos = (df["last"] > 0)
-                buy_infer  = (df["last"] >= df["ask"]) & last_pos
-                sell_infer = (df["last"] <= df["bid"]) & last_pos
-                df.loc[mask_unknown & buy_infer,  "side"] = "buy"
-                df.loc[mask_unknown & sell_infer, "side"] = "sell"
-                # le reste reste "unknown" (quotes purs)
-
+            # mid & spread
             df["mid"]    = (df["bid"] + df["ask"]) / 2.0
             df["spread"] =  df["ask"] - df["bid"]
 
-            total = len(df)
-            buy_n = int((df["side"] == "buy").sum())
-            sell_n= int((df["side"] == "sell").sum())
-            cov_s = float((df["time"].max() - df["time"].min()).total_seconds())
+            # --- SIDE: 1) flags 16/32 si dispo; 2) sinon Δmid (tick rule) ---
+            flags = df["flags"].astype(int) if "flags" in df.columns else 0
+            by_flags = np.where((flags & 16) > 0, "buy",
+                        np.where((flags & 32) > 0, "sell", "unknown"))
+
+            # Tick rule (Lee–Ready simplifié sur quotes) si still unknown
+            # sign(Δmid) : >0 => buy ; <0 => sell ; =0 => heuristique sur Δbid/Δask sinon unknown
+            dmid = df["mid"].diff().fillna(0.0)
+            dbid = df["bid"].diff().fillna(0.0)
+            dask = df["ask"].diff().fillna(0.0)
+            by_tick = np.where(dmid > 0, "buy",
+                    np.where(dmid < 0, "sell",
+                        np.where((dbid > 0) & (dask >= 0), "buy",
+                        np.where((dask < 0) & (dbid <= 0), "sell", "unknown")
+                        )
+                    ))
+
+            df["side"] = by_flags
+            mask_unk = (df["side"] == "unknown")
+            if mask_unk.any():
+                df.loc[mask_unk, "side"] = by_tick[mask_unk]
+
+            total   = len(df)
+            buy_n   = int((df["side"] == "buy").sum())
+            sell_n  = int((df["side"] == "sell").sum())
+            unk_n   = int((df["side"] == "unknown").sum())
+            cov_s   = float((df["time"].max() - df["time"].min()).total_seconds())
 
             self.logger.info(
                 f"[MT5C][{symbol}] ✅ {total} ticks (bougie close) {start_ts} → {end_ts} | "
-                f"dernier_tick={df['time'].max()} | BUY={buy_n} | SELL={sell_n} | couverture={cov_s:.1f}s"
+                f"dernier_tick={df['time'].max()} | BUY={buy_n} | SELL={sell_n} | UNK={unk_n} | couverture={cov_s:.1f}s"
             )
             return df[cols]
 
