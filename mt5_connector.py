@@ -937,12 +937,29 @@ class MT5Connector:
         Fenêtre stricte : [start_ts, end_ts)
         """
         import pandas as pd
+        from datetime import timedelta, timezone
 
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
         try:
+            # ✅ Normalisation stricte de la fenêtre 1 minute (sécurité UTC)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.replace(tzinfo=timezone.utc)
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.replace(tzinfo=timezone.utc)
+
+            # 🔒 Forcer une durée minimale de 60 secondes si la bougie est M1
+            # (évite le cas 13:17:00 → 13:17:03)
+            if (end_ts - start_ts).total_seconds() < 59.0:
+                self.logger.debug(
+                    f"[MT5C] Correction auto de fenêtre candle pour {symbol}: "
+                    f"{(end_ts - start_ts).total_seconds():.2f}s → 60.00s"
+                )
+                end_ts = start_ts + timedelta(seconds=60)
+
+            # --- Requête principale MT5 ---
             ticks = self.mt5.copy_ticks_range(
                 symbol,
                 start_ts,
@@ -973,6 +990,7 @@ class MT5Connector:
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+
   
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """
