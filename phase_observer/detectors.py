@@ -522,6 +522,21 @@ def detect_orderflow_v5(
         }
 
     df = df.copy().reset_index(drop=True)
+    # PATCH1 — auto-mapping pour DF issu du footprint (colonnes 'buy'/'sell')
+    if "ask_volume" not in df.columns and "buy" in df.columns:
+        df["ask_volume"] = pd.to_numeric(df["buy"], errors="coerce")
+    if "bid_volume" not in df.columns and "sell" in df.columns:
+        df["bid_volume"] = pd.to_numeric(df["sell"], errors="coerce")
+
+    # Colonnes agresseurs : fallback = mêmes volumes
+    if "aggressor_buy_vol" not in df.columns:
+        df["aggressor_buy_vol"] = df.get("ask_volume", 0.0)
+    if "aggressor_sell_vol" not in df.columns:
+        df["aggressor_sell_vol"] = df.get("bid_volume", 0.0)
+
+    # Nettoyage minimal
+    df["ask_volume"] = pd.to_numeric(df.get("ask_volume", 0.0), errors="coerce").fillna(0.0)
+    df["bid_volume"] = pd.to_numeric(df.get("bid_volume", 0.0), errors="coerce").fillna(0.0)
 
     # Normalisation des colonnes nécessaires
     for col in ["bid_volume", "ask_volume", "aggressor_buy_vol", "aggressor_sell_vol"]:
@@ -566,72 +581,88 @@ def detect_orderflow_v5(
     patterns = []
     for i in range(len(df)):
         try:
-            p = None
-            extra = {}
+            labels = []      # PATCH3 — on cumule
+            extras = []      # une liste d'objets extra pour chaque label
 
-            imb = df["imbalance"].iloc[i]
-            delta = df["delta"].iloc[i]
-            bid = df["bid_volume"].iloc[i]
-            ask = df["ask_volume"].iloc[i]
-            total = df["total_volume"].iloc[i]
-            aggr_ratio = df["aggressor_ratio"].iloc[i]
+            imb = float(df["imbalance"].iloc[i])
+            delta = float(df["delta"].iloc[i]) if "delta" in df.columns else float(df["ask_volume"].iloc[i] - df["bid_volume"].iloc[i])
+            bid = float(df["bid_volume"].iloc[i])
+            ask = float(df["ask_volume"].iloc[i])
+            total = float(df["total_volume"].iloc[i])
+            aggr_ratio = float(df["aggressor_ratio"].iloc[i]) if "aggressor_ratio" in df.columns else 0.5
 
             # === Déséquilibre structurel ===
             if imb > imbalance_threshold:
-                p = "buy_imbalance"
-            elif imb < (1 - imbalance_threshold):
-                p = "sell_imbalance"
+                labels.append("buy_imbalance")
+            if imb < (1.0 - imbalance_threshold):
+                labels.append("sell_imbalance")
 
             # === Absorptions ===
-            if bid > 2 * ask:
-                p = "sell_absorption"
-            elif ask > 2 * bid:
-                p = "buy_absorption"
+            if ask > 2.0 * (bid + 1e-9):
+                labels.append("buy_absorption")
+            if bid > 2.0 * (ask + 1e-9):
+                labels.append("sell_absorption")
 
             # === Aggressive footprints ===
             if aggr_ratio >= 0.75:
-                p = "aggressive_buying"
-                extra["footprint"] = f"buy_ratio={aggr_ratio:.2f}"
-            elif aggr_ratio <= 0.25:
-                p = "aggressive_selling"
-                extra["footprint"] = f"buy_ratio={aggr_ratio:.2f}"
+                labels.append("aggressive_buying")
+                extras.append({"footprint": f"buy_ratio={aggr_ratio:.2f}"})
+            if aggr_ratio <= 0.25:
+                labels.append("aggressive_selling")
+                extras.append({"footprint": f"buy_ratio={aggr_ratio:.2f}"})
 
             # === Icebergs (si données exec disponibles) ===
             if "executions_count" in df.columns and "avg_exec_size" in df.columns:
-                exec_count = df["executions_count"].iloc[i]
-                avg_size = df["avg_exec_size"].iloc[i]
-                if exec_count > 50 and avg_size < 0.2 * (total or 1):
-                    p = "iceberg_order"
-                    extra["iceberg"] = {
-                        "exec_count": int(exec_count),
-                        "avg_size": float(avg_size),
-                    }
+                exec_count = float(df["executions_count"].iloc[i])
+                avg_size = float(df["avg_exec_size"].iloc[i])
+                if exec_count > 50.0 and avg_size < 0.2 * max(total, 1.0):
+                    labels.append("iceberg_order")
+                    extras.append({"iceberg": {"exec_count": int(exec_count), "avg_size": float(avg_size)}})
 
-            if p:
-                patterns.append(
-                    {
-                        "index": i,
-                        "timestamp": (
-                            str(df.index[i]) if hasattr(df.index, "dtype") else None
-                        ),
-                        "pattern": p,
-                        "imbalance": float(imb),
-                        "delta": float(delta),
-                        "dominance": df["dominance"].iloc[i],
-                        "bid_volume": float(bid),
-                        "ask_volume": float(ask),
-                        **extra,
-                    }
-                )
+            # Contexte utile
+            ts = None
+            if "timestamp" in df.columns:
+                ts = str(df["timestamp"].iloc[i])
+            elif hasattr(df.index, "dtype"):
+                ts = str(df.index[i])
+
+            price_level = None
+            if "price_level" in df.columns:
+                price_level = float(df["price_level"].iloc[i])
+
+            # Empilement : un event par label (si tu préfères 1 event multi-labels, on peut grouper)
+            for k, label in enumerate(labels):
+                base = {
+                    "index": i,
+                    "timestamp": ts,
+                    "pattern": label,
+                    "price_level": price_level,
+                    "imbalance": imb,
+                    "delta": delta,
+                    "dominance": "buyers" if delta > 0 else ("sellers" if delta < 0 else "neutral"),
+                    "bid_volume": bid,
+                    "ask_volume": ask,
+                    "row_total": total,
+                }
+                # merge éventuel d'un extra correspondant (si présent)
+                if k < len(extras):
+                    base.update(extras[k])
+                patterns.append(base)
+
         except Exception as e:
-            LOG.error(f"[OrderflowV5] Erreur à la ligne {i}: {e}")
+            LOG.error(f"[OrderflowV5] Erreur à la ligne {i}: {e}", exc_info=False)
 
     # ---------- 5️⃣ MÉTRIQUES GLOBALES ----------
     total_ticks = len(df)
     buys = int((df["dominance"] == "buyers").sum())
     sells = int((df["dominance"] == "sellers").sum())
     buy_ratio = buys / max(1, (buys + sells))
-    imbalance_mean = df["imbalance"].mean()
+
+    # PATCH2 — moyenne d'imbalance pondérée par le volume total
+    if (df["total_volume"] > 0).any():
+        imbalance_mean = df["ask_volume"].sum() / (df["total_volume"].sum() + 1e-9)
+    else:
+        imbalance_mean = 0.5
 
     delta_total = float(df["delta"].sum())
     vol_total = float(df["total_volume"].sum())
@@ -639,13 +670,24 @@ def detect_orderflow_v5(
     # ---------- 6️⃣ SCORE GLOBALE ----------
     score = 50
 
-    # Volume + delta fort → bonus
+    # Bonus : ratio |delta|/volume, déséquilibre moyen, richesse en patterns
     if vol_total > 0:
-        score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100)
+        score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100)   # borné à +30
     if abs(imbalance_mean - 0.5) > 0.15:
         score += 10
-    if len(patterns) > 3:
+    if len(patterns) >= 3:
         score += 10
+
+    # Malus : échantillon trop pauvre
+    rows = int(len(df))
+    if rows < 10:
+        score -= 15
+    if vol_total < 1e-6:
+        score -= 25
+
+    # Normalisation
+    score = int(np.clip(round(score), 0, 100))
+
 
     score = int(np.clip(score, 0, 100))
     # --- NORMALISATION DU SCORE ---
@@ -659,7 +701,7 @@ def detect_orderflow_v5(
         "delta_total": delta_total,
         "volume_total": vol_total,
         "mean_imbalance": imbalance_mean,
-        "cvd_final": float(df["cvd_smoothed"].iloc[-1]),
+        "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if "cvd_smoothed" in df.columns and len(df) else 0.0,
         "buy_ratio": float(buy_ratio),
         "pattern_count": len(patterns),
     }
