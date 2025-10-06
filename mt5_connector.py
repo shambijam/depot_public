@@ -926,91 +926,78 @@ class MT5Connector:
             self.logger.error(f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True)
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
         
-    def get_ticks_for_candle(
-        self,
-        symbol: str,
-        start_ts: datetime,
-        end_ts: datetime,
-    ) -> pd.DataFrame:
+    def get_ticks_for_candle(self, symbol: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame:
         """
-        🎯 Récupère les ticks exacts pour une bougie donnée (strictement sur [start_ts, end_ts)).
-        🔹 Pas de fallback
-        🔹 Décodage direct des flags MT5 (BUY/SELL)
-        🔹 Fenêtre garantie 60 secondes UTC
+        🎯 Ticks stricts de la bougie M1 close : [start_ts, end_ts)
+        - Pas de fallback
+        - Flags MT5: BUY=16, SELL=32 (⚠ ne pas confondre avec 1/2 qui sont BID/ASK updates)
+        - Fenêtre 60s UTC pile
         """
         import pandas as pd
         import numpy as np
         from datetime import timedelta, timezone
 
+        cols = ["time","bid","ask","last","volume","flags","side","mid","spread"]
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer les ticks '{symbol}'.")
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
+            return pd.DataFrame(columns=cols)
 
         try:
-            # --- Normalisation stricte UTC ---
-            if start_ts.tzinfo is None:
-                start_ts = start_ts.replace(tzinfo=timezone.utc)
-            if end_ts.tzinfo is None:
-                end_ts = end_ts.replace(tzinfo=timezone.utc)
-
-            # --- Sécurisation de la fenêtre (exactement 60s) ---
-            duration = (end_ts - start_ts).total_seconds()
-            if duration != 60.0:
+            # --- UTC strict + fenêtre 60s ---
+            if start_ts.tzinfo is None: start_ts = start_ts.replace(tzinfo=timezone.utc)
+            if end_ts.tzinfo is None:   end_ts   = end_ts.replace(tzinfo=timezone.utc)
+            if (end_ts - start_ts).total_seconds() != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
-                self.logger.debug(f"[MT5C] Fenêtre normalisée à 60s pour {symbol}: {start_ts} → {end_ts}")
 
-            # --- Requête directe : uniquement les ticks de transaction ---
-            ticks = self.mt5.copy_ticks_range(
-                symbol,
-                start_ts,
-                end_ts,
-                self.mt5.COPY_TICKS_TRADE,  # ⚡ strict : uniquement les vrais trades avec flags BUY/SELL
-            )
+            # --- Requête brute (ALL = quotes + last). Les flags sont renvoyés si dispo. ---
+            ticks = self.mt5.copy_ticks_range(symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL)
 
-            # --- Vérification stricte ---
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
-                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
+                return pd.DataFrame(columns=cols)
 
-            # --- Conversion propre ---
             df = pd.DataFrame(ticks)
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+            for c in ("bid","ask","last","volume","flags"):
+                if c not in df.columns: df[c] = 0
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-            for col in ["bid", "ask", "last", "volume"]:
-                if col not in df.columns:
-                    df[col] = 0.0
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            # --- Décodage CORRECT du côté (uniquement 16/32) ---
+            # bits: 16 = BUY trade, 32 = SELL trade  (1=BID update, 2=ASK update → pas un côté)
+            has_flags = "flags" in df.columns
+            is_buy   = has_flags & ((df["flags"].astype(int) & 16) > 0)
+            is_sell  = has_flags & ((df["flags"].astype(int) & 32) > 0)
 
-            if "flags" not in df.columns:
-                df["flags"] = 0
+            df["side"] = np.where(is_buy, "buy", np.where(is_sell, "sell", "unknown"))
 
-            # --- Décodage brut des flags BUY / SELL ---
-            df["is_buy"] = ((df["flags"] & 1) > 0) | ((df["flags"] & 16) > 0)
-            df["is_sell"] = ((df["flags"] & 2) > 0) | ((df["flags"] & 32) > 0)
-            df["side"] = np.where(df["is_buy"], "buy", np.where(df["is_sell"], "sell", "unknown"))
+            # Fallback léger si aucun 16/32 n’apparaît (démo/serveur muet) :
+            # Utiliser la relation last vs bid/ask quand last>0
+            mask_unknown = (df["side"] == "unknown")
+            if mask_unknown.any():
+                last_pos = (df["last"] > 0)
+                buy_infer  = (df["last"] >= df["ask"]) & last_pos
+                sell_infer = (df["last"] <= df["bid"]) & last_pos
+                df.loc[mask_unknown & buy_infer,  "side"] = "buy"
+                df.loc[mask_unknown & sell_infer, "side"] = "sell"
+                # le reste reste "unknown" (quotes purs)
 
-            # --- Calculs dérivés ---
-            df["mid"] = (df["bid"] + df["ask"]) / 2.0
-            df["spread"] = df["ask"] - df["bid"]
+            df["mid"]    = (df["bid"] + df["ask"]) / 2.0
+            df["spread"] =  df["ask"] - df["bid"]
 
-            # --- Statistiques claires ---
-            total_ticks = len(df)
-            buy_ticks = int(df["is_buy"].sum())
-            sell_ticks = int(df["is_sell"].sum())
-            coverage = (df["time"].max() - df["time"].min()).total_seconds()
+            total = len(df)
+            buy_n = int((df["side"] == "buy").sum())
+            sell_n= int((df["side"] == "sell").sum())
+            cov_s = float((df["time"].max() - df["time"].min()).total_seconds())
 
             self.logger.info(
-                f"[MT5C][{symbol}] ✅ {total_ticks} ticks pour la bougie demandée "
-                f"({start_ts} → {end_ts}) | dernier_tick={df['time'].max()} | "
-                f"BUY={buy_ticks} | SELL={sell_ticks} | couverture={coverage:.1f}s"
+                f"[MT5C][{symbol}] ✅ {total} ticks (bougie close) {start_ts} → {end_ts} | "
+                f"dernier_tick={df['time'].max()} | BUY={buy_n} | SELL={sell_n} | couverture={cov_s:.1f}s"
             )
-
-            return df
+            return df[cols]
 
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "flags", "side"])
-
+            return pd.DataFrame(columns=cols)
 
   
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
