@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from .memory import PhaseMemoryManager
 
 
-
 # Alias UTC
 UTC = timezone.utc
 
@@ -118,7 +117,7 @@ class PhaseObserver:
         self.footprint_cfg.setdefault("delta_threshold", 0.0)
         self.footprint_cfg.setdefault("poc_min_volume", 0)
         self.footprint_cfg.setdefault("store_to_memory", True)
-     
+
         # === Ajout mémoire des phases ===
         from .memory import PhaseMemoryManager
 
@@ -191,13 +190,22 @@ class PhaseObserver:
 
             tick_safe = {
                 "time": t_time,
-                "price": float(tick.get("price")) if tick.get("price") is not None else np.nan,
-                "size":  float(tick.get("size"))  if tick.get("size")  is not None else np.nan,
-                "side":  str(tick.get("side") or "").lower(),
+                "price": (
+                    float(tick.get("price"))
+                    if tick.get("price") is not None
+                    else np.nan
+                ),
+                "size": (
+                    float(tick.get("size")) if tick.get("size") is not None else np.nan
+                ),
+                "side": str(tick.get("side") or "").lower(),
             }
 
             # Buffer ticks limité par config
-            if not hasattr(self, "_ticks_current_bar") or self._ticks_current_bar is None:
+            if (
+                not hasattr(self, "_ticks_current_bar")
+                or self._ticks_current_bar is None
+            ):
                 self._ticks_current_bar = []
             self._ticks_current_bar.append(tick_safe)
 
@@ -209,13 +217,26 @@ class PhaseObserver:
             if self.footprint_cfg.get("enable_live_footprint", True):
                 footprint_partial = None
                 try:
-                    hist_copy = None if getattr(self, "_history_df", None) is None else self._history_df.copy()
+                    hist_copy = (
+                        None
+                        if getattr(self, "_history_df", None) is None
+                        else self._history_df.copy()
+                    )
                     ticks_df = pd.DataFrame(self._ticks_current_bar)
-                    footprint_partial = self.detectors.validate_last_candle_footprint(hist_copy, ticks_df)
+                    footprint_partial = self.detectors.validate_last_candle_footprint(
+                        hist_copy, ticks_df
+                    )
                 except Exception as e_val:
-                    self.logger.debug(f"[on_tick] validate_last_candle_footprint: {e_val}", exc_info=True)
+                    self.logger.debug(
+                        f"[on_tick] validate_last_candle_footprint: {e_val}",
+                        exc_info=True,
+                    )
 
-                if footprint_partial and self._history_df is not None and not self._history_df.empty:
+                if (
+                    footprint_partial
+                    and self._history_df is not None
+                    and not self._history_df.empty
+                ):
                     self._history_df = self._ensure_footprint_columns(self._history_df)
                     last_idx = self._history_df.index[-1]
                     delta = footprint_partial["summary"].get("delta_total", pd.NA)
@@ -224,26 +245,31 @@ class PhaseObserver:
                     # Appliquer seuil delta
                     if abs(delta) >= self.footprint_cfg.get("delta_threshold", 0.0):
                         self._history_df.at[last_idx, "footprint_live_delta"] = delta
-                        self._history_df.at[last_idx, "footprint_live_poc"]   = poc
+                        self._history_df.at[last_idx, "footprint_live_poc"] = poc
 
                         if self.footprint_cfg.get("store_to_memory", True):
                             try:
                                 self.memory.store_footprint(
-                                    asset_symbol=getattr(self, "current_asset_symbol", "LIVE_ASSET"),
+                                    asset_symbol=getattr(
+                                        self, "current_asset_symbol", "LIVE_ASSET"
+                                    ),
                                     delta=delta,
                                     poc=poc,
                                     is_live=True,
                                 )
                             except Exception as e_mem:
-                                self.logger.warning(f"[on_tick] store_footprint live failed: {e_mem}", exc_info=True)
+                                self.logger.warning(
+                                    f"[on_tick] store_footprint live failed: {e_mem}",
+                                    exc_info=True,
+                                )
 
         except Exception as e:
             self.logger.exception(f"[on_tick] erreur générale: {e}")
 
-
     # ================================================================
     # Méthode 2: on_bar_close
     # ================================================================
+
     def on_bar_close(self, new_bar: dict, asset_symbol: str):
         """
         Clôture une bougie M1 :
@@ -258,7 +284,9 @@ class PhaseObserver:
                 raise ValueError("on_bar_close: new_bar doit être un dict")
 
             # Horodatage
-            ts = pd.to_datetime(new_bar.get("time", pd.Timestamp.utcnow()), errors="coerce")
+            ts = pd.to_datetime(
+                new_bar.get("time", pd.Timestamp.utcnow()), errors="coerce"
+            )
             if ts is pd.NaT:
                 ts = pd.Timestamp.utcnow()
 
@@ -284,13 +312,15 @@ class PhaseObserver:
 
             # Ticks associés
             ticks_df = pd.DataFrame(
-                list(self._ticks_current_bar) or [], columns=["time", "price", "size", "side"]
+                list(self._ticks_current_bar) or [],
+                columns=["time", "price", "size", "side"],
             )
             ticks_df["time"] = pd.to_datetime(ticks_df["time"], errors="coerce")
-            
+
             # ✅ Reconstruction microstructurelle MT5 avant validation footprint
             try:
-                from .detectors import reconstruct_tick_side_mt5              
+                from .detectors import reconstruct_tick_side_mt5
+
                 # Reconstruit le côté (achat/vente) + volumes directionnels
                 ticks_df = reconstruct_tick_side_mt5(ticks_df)
 
@@ -299,7 +329,10 @@ class PhaseObserver:
                     f"({(ticks_df['side'] == 'buy').sum()} buys / {(ticks_df['side'] == 'sell').sum()} sells)"
                 )
             except Exception as e_rebuild:
-                self.logger.warning(f"[on_bar_close] reconstruction ticks échouée: {e_rebuild}", exc_info=True)
+                self.logger.warning(
+                    f"[on_bar_close] reconstruction ticks échouée: {e_rebuild}",
+                    exc_info=True,
+                )
 
             # Validation footprint final (si activé)
             if self.footprint_cfg.get("enable_final_footprint", True):
@@ -309,7 +342,10 @@ class PhaseObserver:
                         self._history_df.copy(), ticks_df.copy()
                     )
                 except Exception as e_val:
-                    self.logger.debug(f"[on_bar_close] validate_last_candle_footprint: {e_val}", exc_info=True)
+                    self.logger.debug(
+                        f"[on_bar_close] validate_last_candle_footprint: {e_val}",
+                        exc_info=True,
+                    )
 
                 last_idx = self._history_df.index[-1]
                 if footprint_final:
@@ -317,9 +353,15 @@ class PhaseObserver:
                     poc = footprint_final.get("summary", {}).get("poc", None)
 
                     if abs(delta) >= self.footprint_cfg.get("delta_threshold", 0.0):
-                        self._history_df.at[last_idx, "footprint_score"] = footprint_final.get("score", pd.NA)
-                        self._history_df.at[last_idx, "footprint_status"] = footprint_final.get("status", pd.NA)
-                        self._history_df.at[last_idx, "footprint_summary"] = str(footprint_final.get("summary", {}))
+                        self._history_df.at[last_idx, "footprint_score"] = (
+                            footprint_final.get("score", pd.NA)
+                        )
+                        self._history_df.at[last_idx, "footprint_status"] = (
+                            footprint_final.get("status", pd.NA)
+                        )
+                        self._history_df.at[last_idx, "footprint_summary"] = str(
+                            footprint_final.get("summary", {})
+                        )
 
                         if self.footprint_cfg.get("store_to_memory", True):
                             try:
@@ -330,26 +372,36 @@ class PhaseObserver:
                                     is_live=False,
                                 )
                             except Exception as e_mem:
-                                self.logger.warning(f"[on_bar_close] store_footprint final failed: {e_mem}", exc_info=True)
+                                self.logger.warning(
+                                    f"[on_bar_close] store_footprint final failed: {e_mem}",
+                                    exc_info=True,
+                                )
                 else:
                     self._history_df.at[last_idx, "footprint_status"] = "SUSPECT"
-                    self._history_df.at[last_idx, "footprint_summary"] = str({"comment": "validator error or no ticks"})
+                    self._history_df.at[last_idx, "footprint_summary"] = str(
+                        {"comment": "validator error or no ticks"}
+                    )
 
             # Clear buffer ticks
             self._ticks_current_bar.clear()
 
             # Analyse uniquement la dernière bougie
-            return self.analyze_last_bar(self._history_df.copy(), asset_symbol=asset_symbol, ticks=ticks_df.copy())
+            return self.analyze_last_bar(
+                self._history_df.copy(),
+                asset_symbol=asset_symbol,
+                ticks=ticks_df.copy(),
+            )
 
         except Exception as e:
             self.logger.exception(f"[on_bar_close] erreur générale: {e}")
             return None
 
-
     # ================================================================
     # Méthode 3: load_initial_history
     # ================================================================
-    def load_initial_history(self, df: pd.DataFrame, asset_symbol: str = "INIT", max_bars: int = 200):
+    def load_initial_history(
+        self, df: pd.DataFrame, asset_symbol: str = "INIT", max_bars: int = 200
+    ):
         """
         Charge un historique initial propre (pour démarrage ou resync périodique) :
         - conversion datetime
@@ -374,8 +426,12 @@ class PhaseObserver:
             else:
                 df.index = pd.to_datetime(df.index, errors="coerce")
                 if df.index.isna().any():
-                    df.index = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="T")
-                    self.logger.warning("[load_initial_history] index non-datetime -> remplacé par range minute")
+                    df.index = pd.date_range(
+                        end=pd.Timestamp.utcnow(), periods=len(df), freq="T"
+                    )
+                    self.logger.warning(
+                        "[load_initial_history] index non-datetime -> remplacé par range minute"
+                    )
 
             # Nettoyage index
             df = df.sort_index()
@@ -396,7 +452,6 @@ class PhaseObserver:
         except Exception as e:
             self.logger.exception(f"[load_initial_history] erreur: {e}")
             raise
-
 
     def calculate_optimized_confidence(self, row) -> float:
         """Score de confiance unifié (core + confluence + bougies + signaux liquidity + qualité + lissage mémoire)."""
@@ -1420,21 +1475,31 @@ class PhaseObserver:
         try:
             ticks_df = pd.DataFrame(self._ticks_current_bar)
 
-            # --- Reconstruction du flux tick MT5 (ajout des sides buy/sell) ---
+            if ticks_df.empty:
+                self.logger.debug(
+                    f"[{asset_symbol}] Aucun tick live à analyser (ticks_df vide)."
+                )
+                return None
+
+            # ✅ Reconstruction microstructurelle du flux MT5
             try:
-                from detectors import reconstruct_tick_side_mt5  # adapter si besoin
+                from .detectors import (
+                    reconstruct_tick_side_mt5,
+                )  # chemin relatif correct
 
-                if not ticks_df.empty:
-                    ticks_df = reconstruct_tick_side_mt5(ticks_df)
-                    self.logger.debug(
-                        f"[{asset_symbol}] reconstruct_tick_side_mt5 appliqué sur {len(ticks_df)} ticks (live)"
-                    )
-                else:
-                    self.logger.debug(f"[{asset_symbol}] Aucun tick live à reconstruire (ticks_df vide).")
-            except Exception as e_recon:
-                self.logger.warning(f"[analyze_live_bar] reconstruction tick side échouée: {e_recon}")
+                ticks_df = reconstruct_tick_side_mt5(ticks_df)
+                self.logger.debug(
+                    f"[{asset_symbol}] reconstruction ticks OK (live) -> "
+                    f"{len(ticks_df)} lignes ({(ticks_df['side'] == 'buy').sum()} buys / "
+                    f"{(ticks_df['side'] == 'sell').sum()} sells)"
+                )
+            except Exception as e_reb:
+                self.logger.warning(
+                    f"[{asset_symbol}] reconstruction tick side échouée: {e_reb}",
+                    exc_info=True,
+                )
 
-            # --- Validation footprint live ---
+            # ✅ Validation footprint live
             footprint_partial = self.detectors.validate_last_candle_footprint(
                 self._history_df, ticks_df
             )
@@ -1442,14 +1507,19 @@ class PhaseObserver:
             pre_signal = {
                 "asset": asset_symbol,
                 "footprint_live": footprint_partial.get("summary", {}),
-                "footprint_delta": footprint_partial.get("summary", {}).get("delta_total", 0),
+                "footprint_delta": footprint_partial.get("summary", {}).get(
+                    "delta_total", 0.0
+                ),
                 "footprint_poc": footprint_partial.get("summary", {}).get("poc"),
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
             return pre_signal
+
         except Exception as e:
-            self.logger.warning(f"[{asset_symbol}] Erreur analyse bougie live: {e}")
+            self.logger.warning(
+                f"[{asset_symbol}] Erreur analyse bougie live: {e}", exc_info=True
+            )
             return None
 
     def analyze_asset_multi_timeframe(
