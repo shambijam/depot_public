@@ -680,7 +680,7 @@ def footprint_validator(
     🏦 Footprint Validator (strict M1)
     - Fenêtre strictement [start_ts, end_ts) ; si pas de bougie suivante → end_ts = start_ts + 1min
     - price: utilise 'price' sinon 'last' → 'mid' → 'bid'/'ask'
-    - size: si manquant/0 → 1.0 (tick-count proxy)
+    - size: si manquant/0 → 1.0 (tick-count proxy) — correction ligne par ligne
     - side: utilise 'side' fourni ; si 'unknown' et 'flags' dispo → decode (1/16 buy, 2/32 sell)
     - Pas de fallback temporel
     """
@@ -767,15 +767,36 @@ def footprint_validator(
             ticks["price"] = 0.0
     ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce").fillna(0.0)
 
-    # taille (proxy)
+    # --- PATCH: calcule 'mid' si absent mais bid/ask présents (pour servir de fallback) ---
+    if "mid" not in ticks.columns and {"bid", "ask"}.issubset(ticks.columns):
+        ticks["mid"] = (pd.to_numeric(ticks["bid"], errors="coerce") +
+                        pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
+
+    # --- PATCH: remplissage robuste des prix nuls/invalides avec priorité last > mid > bid > ask ---
+    zero_mask = (~np.isfinite(ticks["price"])) | (ticks["price"] <= 0)
+    if zero_mask.any():
+        filler = None
+        for col in ("last", "mid", "bid", "ask"):
+            if col in ticks.columns:
+                s = pd.to_numeric(ticks[col], errors="coerce")
+                filler = s if filler is None else filler.combine_first(s)
+        if filler is not None:
+            ticks.loc[zero_mask, "price"] = filler.loc[zero_mask]
+
+    # revalide proprement
+    ticks["price"] = pd.to_numeric(ticks["price"], errors="coerce").fillna(0.0)
+
+    # --- PATCH: taille (proxy) — corrige ligne par ligne ---
     if "size" not in ticks.columns:
         ticks["size"] = 1.0
-    ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce").fillna(0.0)
-    if (ticks["size"] <= 0).all():
-        ticks["size"] = 1.0
+    ticks["size"] = pd.to_numeric(ticks["size"], errors="coerce")
+    bad_sz = ~np.isfinite(ticks["size"]) | (ticks["size"] <= 0)
+    ticks.loc[bad_sz, "size"] = 1.0
 
-    # side + flags
-    ticks["side"] = ticks["side"].astype(str).str.lower().replace({"b": "buy", "s": "sell"}).fillna("unknown")
+    # side + flags (évite de transformer NaN en "nan")
+    ticks["side"] = ticks["side"].astype("string").str.lower()
+    ticks["side"] = ticks["side"].replace({"b": "buy", "s": "sell"}).fillna("unknown")
+
     if "flags" in ticks.columns:
         flags = pd.to_numeric(ticks["flags"], errors="coerce").fillna(0).astype(int)
         unk_mask = ticks["side"].eq("unknown")
@@ -811,7 +832,8 @@ def footprint_validator(
     if price_step is None or price_step <= 0:
         uniq = np.sort(df["price"].dropna().unique())
         if uniq.size >= 2:
-            diffs = np.diff(uniq); pos = diffs[diffs > 0]
+            diffs = np.diff(uniq)
+            pos = diffs[diffs > 0]
             price_step = float(np.min(pos)) if pos.size else 1e-5
         else:
             price_step = 1e-5
@@ -847,11 +869,21 @@ def footprint_validator(
     except Exception:
         pass
 
-    score = 100; comments = []
-    if total_volume <= 0.0: score -= 60; comments.append("Volume nul/négligeable.")
-    if abs(delta_total) < 0.01 * max(1.0, total_volume): score -= 15; comments.append("Delta trop neutre (peu de conviction).")
-    if (imbalance_buy + imbalance_sell) == 0: score -= 10; comments.append("Aucun déséquilibre détecté.")
-    if absorption_flag: score -= 20; comments.append("Absorption détectée aux extrêmes.")
+    score = 100
+    comments = []
+    if total_volume <= 0.0:
+        score -= 60
+        comments.append("Volume nul/négligeable.")
+    if abs(delta_total) < 0.01 * max(1.0, total_volume):
+        score -= 15
+        comments.append("Delta trop neutre (peu de conviction).")
+    if (imbalance_buy + imbalance_sell) == 0:
+        score -= 10
+        comments.append("Aucun déséquilibre détecté.")
+    if absorption_flag:
+        score -= 20
+        comments.append("Absorption détectée aux extrêmes.")
+
     status = "VALID" if score >= 70 else "SUSPECT"
 
     return {
@@ -871,6 +903,7 @@ def footprint_validator(
         "footprint_df": agg,
         "candle": candle.dropna().to_dict(),
     }
+
 
 
 class Detectors:
