@@ -1419,6 +1419,22 @@ class PhaseObserver:
 
         try:
             ticks_df = pd.DataFrame(self._ticks_current_bar)
+
+            # --- Reconstruction du flux tick MT5 (ajout des sides buy/sell) ---
+            try:
+                from detectors import reconstruct_tick_side_mt5  # adapter si besoin
+
+                if not ticks_df.empty:
+                    ticks_df = reconstruct_tick_side_mt5(ticks_df)
+                    self.logger.debug(
+                        f"[{asset_symbol}] reconstruct_tick_side_mt5 appliqué sur {len(ticks_df)} ticks (live)"
+                    )
+                else:
+                    self.logger.debug(f"[{asset_symbol}] Aucun tick live à reconstruire (ticks_df vide).")
+            except Exception as e_recon:
+                self.logger.warning(f"[analyze_live_bar] reconstruction tick side échouée: {e_recon}")
+
+            # --- Validation footprint live ---
             footprint_partial = self.detectors.validate_last_candle_footprint(
                 self._history_df, ticks_df
             )
@@ -1426,9 +1442,7 @@ class PhaseObserver:
             pre_signal = {
                 "asset": asset_symbol,
                 "footprint_live": footprint_partial.get("summary", {}),
-                "footprint_delta": footprint_partial.get("summary", {}).get(
-                    "delta_total", 0
-                ),
+                "footprint_delta": footprint_partial.get("summary", {}).get("delta_total", 0),
                 "footprint_poc": footprint_partial.get("summary", {}).get("poc"),
                 "timestamp": datetime.utcnow().isoformat(),
             }
