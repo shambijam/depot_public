@@ -935,60 +935,100 @@ class MT5Connector:
         """
         🎯 Récupère uniquement les ticks correspondant strictement à une bougie donnée.
         Fenêtre stricte : [start_ts, end_ts)
+        - Normalise en UTC
+        - Garantit 60s si end_ts - start_ts < 60s (59/60 accepté)
+        - Récupère large avec copy_ticks_from puis TRIM dans la fenêtre
+        - Log clair : fenêtre demandée + couverture réelle (sec et %)
         """
         import pandas as pd
-        from datetime import timedelta, timezone
+        from datetime import datetime, timedelta, timezone
+
+        # Colonnes de retour standard
+        _EMPTY = pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
         if not getattr(self, "is_connected", False):
             self.logger.warning(f"[MT5C] Non connecté. Impossible ticks '{symbol}'.")
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+            return _EMPTY
 
         try:
-            # ✅ Normalisation stricte de la fenêtre 1 minute (sécurité UTC)
+            # --- 1) Normalisation UTC + fenêtre 60s minimale
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
+            else:
+                start_ts = start_ts.astimezone(timezone.utc)
+
             if end_ts.tzinfo is None:
                 end_ts = end_ts.replace(tzinfo=timezone.utc)
+            else:
+                end_ts = end_ts.astimezone(timezone.utc)
 
-            # 🔒 Forcer une durée minimale de 60 secondes
+            # Forcer au moins ~60s si on nous passe moins
             if (end_ts - start_ts).total_seconds() < 59.0:
-                self.logger.debug(
-                    f"[MT5C] Correction auto de fenêtre candle pour {symbol}: "
-                    f"{(end_ts - start_ts).total_seconds():.2f}s → 60.00s"
-                )
                 end_ts = start_ts + timedelta(seconds=60)
 
-            # --- Requête principale MT5 ---
-            ticks = self.mt5.copy_ticks_range(
+            # --- 2) Récupération large puis TRIM
+            # On prend large (jusqu'à maintenant) et on filtre après. 
+            # Un count élevé est OK: on TRIM ensuite dans [start_ts, end_ts)
+            MAX_COUNT = 50000
+            ticks = self.mt5.copy_ticks_from(
                 symbol,
                 start_ts,
-                end_ts,
+                MAX_COUNT,
                 self.mt5.COPY_TICKS_ALL,
             )
 
             if ticks is None or len(ticks) == 0:
-                self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
-                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+                self.logger.warning(f"[MT5C] Aucun tick brut récupéré pour {symbol} (from={start_ts}).")
+                # Log fenêtre demandée avec couverture nulle
+                self.logger.info(
+                    f"[MT5C][{symbol}] ✅ 0 ticks pour la bougie demandée "
+                    f"(fenêtre: {start_ts} → {end_ts}) | couverture=0.0s (0.0%)"
+                )
+                return _EMPTY
 
             df = pd.DataFrame(ticks)
+            # time MT5 est en secondes epoch → UTC
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
 
-            for col in ["bid", "ask", "last", "volume"]:
+            # Typage/sécurisation
+            for col in ("bid", "ask", "last", "volume"):
                 if col not in df.columns:
                     df[col] = 0.0
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-            df["mid"] = (df["bid"] + df["ask"]) / 2.0
+            # TRIM strict de la fenêtre 1 minute
+            df = df[(df["time"] >= start_ts) & (df["time"] < end_ts)].copy()
 
-            self.logger.info(
-                f"[MT5C][{symbol}] ✅ {len(df)} ticks pour la bougie "
-                f"({df['time'].min()} → {df['time'].max()})"
-            )
-            return df
+            # Mid
+            if "bid" in df.columns and "ask" in df.columns:
+                df["mid"] = (pd.to_numeric(df["bid"], errors="coerce").fillna(0.0) +
+                            pd.to_numeric(df["ask"], errors="coerce").fillna(0.0)) / 2.0
+            else:
+                df["mid"] = pd.to_numeric(df.get("last", 0.0), errors="coerce").fillna(0.0)
+
+            # --- 3) Log fenêtre demandée + couverture réelle
+            if not df.empty:
+                last_tick_in_win = df["time"].max()
+                # couverture en secondes par rapport au début de fenêtre
+                cov_sec = max(0.0, min(60.0, (last_tick_in_win - start_ts).total_seconds()))
+                cov_pct = (cov_sec / 60.0) * 100.0
+                self.logger.info(
+                    f"[MT5C][{symbol}] ✅ {len(df)} ticks pour la bougie demandée "
+                    f"(fenêtre: {start_ts} → {end_ts}) | dernier_tick={last_tick_in_win} | "
+                    f"couverture={cov_sec:.1f}s ({cov_pct:.0f}%)"
+                )
+            else:
+                self.logger.info(
+                    f"[MT5C][{symbol}] ✅ 0 ticks pour la bougie demandée "
+                    f"(fenêtre: {start_ts} → {end_ts}) | couverture=0.0s (0.0%)"
+                )
+
+            # Retour standardisé (même si vide)
+            return df[["time", "bid", "ask", "last", "volume", "mid"]]
 
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
-            return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+            return _EMPTY
 
   
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
