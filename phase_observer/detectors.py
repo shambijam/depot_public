@@ -908,15 +908,24 @@ def footprint_validator(
 
     score = 100
     comments = []
+        # --- CONFIG QUALITÉ TICKS (paramétrable) ---
+    MIN_TICKS = 10          # ex. 10 ticks
+    MIN_COVERAGE_S = 30.0   # ex. 30 secondes
+    PEN_TICKS = 15          # -15 points si tick_count < MIN_TICKS
+    PEN_COVER = 10          # -10 points si coverage_s < MIN_COVERAGE_S
     
-    # --- PATCH 2.B: pénalités faible granularité ---
-    if tick_count < 10:
-        score -= 15
-        comments.append("Peu de ticks (<10).")
-    if coverage_s < 30:
-        score -= 10
-        comments.append("Couverture temporelle faible (<30s).")
-
+      # --- PATCH 2.B: pénalités faible granularité (paramétrées) ---
+    if tick_count < MIN_TICKS:
+        score -= PEN_TICKS
+        comments.append(f"Peu de ticks (<{MIN_TICKS}).")
+    if coverage_s < MIN_COVERAGE_S:
+        score -= PEN_COVER
+        comments.append(f"Couverture temporelle faible (<{MIN_COVERAGE_S:.0f}s).")
+    # --- GARDE-FOU: échantillon trop court ---
+    if tick_count < 3 or coverage_s < 2:
+        score = min(score, 60)  # forcera status="SUSPECT" plus bas
+        comments.append("Échantillon trop court — statut dégradé.")
+ 
     if total_volume <= 0.0:
         score -= 60
         comments.append("Volume nul/négligeable.")
@@ -945,7 +954,7 @@ def footprint_validator(
             "window_end": pd.Timestamp(end_ts).isoformat(),
             "tick_count": int(tick_count),
             "coverage_s": float(coverage_s),
-
+            "tick_rate": float(tick_count / max(coverage_s, 1.0)),  # ticks par seconde
         },
         "score": max(int(score), 0),
         "status": status,
