@@ -56,37 +56,69 @@
   ],
   "overrides": {
     "scalping": {
-      "min_confidence": 0.48,
-      "direction_votes": {
-        "vote_threshold": 2
+      "max_spread_points": 30,
+      "phase_conf_gate": {
+        "min_confidence": 0.45
       },
-      "entry_filters": {
-        "fp_min_ticks": 12,
-        "fp_min_coverage_s": 3,
-        "max_spread_points": 25
-      },
-      "allow_no_clear_phase_if_strong": true,
-      "fallback_if_no_clear_phase": "use_orderflow_and_cvd"
-    },
-    "footprint": {
-      "min_ticks_per_window": 12,
-      "min_coverage_seconds": 3,
-      "allow_burst_mode": true,
-      "ignore_absorption_penalty": true
-    },
-    "orderflow": {
-      "cvd_min_abs": 30.0,
-      "delta_min_abs": 60.0,
-      "min_patterns": 6,
-      "min_imbalance_avg": 0.4
-    },
-    "diagnostics": {
-      "why_no_trade_verbose": true,
-      "debug_confidence_logging": true
-    },
-    "guardrails": {
-      "sessions": {
-        "news_blackout": false
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "dir_gate": {
+              "min_slope": 0.10,
+              "min_bias": 0.51
+            },
+            "orderflow_gate": {
+              "min_ticks": 10,
+              "min_tick_rate": 1.5,
+              "min_imbalance": 0.48
+            },
+            "fp_gate": {
+              "min_ticks": 10,
+              "allow_short_coverage": true,
+              "min_score": 70
+            }
+          },
+          "range_accumulation": {
+            "dir_gate": {
+              "min_slope": 0.08,
+              "min_bias": 0.50
+            },
+            "orderflow_gate": {
+              "min_ticks": 8,
+              "min_tick_rate": 0.7,
+              "min_imbalance": 0.42
+            },
+            "fp_gate": {
+              "min_ticks": 8,
+              "allow_short_coverage": true,
+              "min_score": 65
+            }
+          },
+          "of_micro_burst": {
+            "enabled": true,
+            "when": {
+              "phase": [
+                "liquidity_eqh_eql"
+              ]
+            },
+            "dir_gate": {
+              "use_of_fallback": true,
+              "cvd_min_delta": 100,
+              "imbalance_min": 0.55
+            },
+            "orderflow_gate": {
+              "min_ticks": 10,
+              "min_tick_rate": 3.0,
+              "min_score": 60
+            },
+            "fp_gate": {
+              "min_score": 80
+            },
+            "risk": {
+              "use_default": true
+            }
+          }
+        }
       }
     }
   }
