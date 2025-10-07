@@ -507,6 +507,7 @@ def detect_orderflow_v5(
     """
 
     LOG = logging.getLogger("OrderflowDetector")
+    rescue_mode = False  # ← flag pour scoring/summary
 
     # ---------- 0) VALIDATION ----------
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -576,67 +577,72 @@ def detect_orderflow_v5(
     # ---------- 1.bis) ZERO-VOLUME RESCUE (évite Vol=0, Δ=0, Imb=0.50) ----------
     # Si la somme ask+bid est nulle sur la fenêtre, on reconstruit des volumes proxy.
     if float((df["ask_volume"].sum() + df["bid_volume"].sum())) == 0.0:
-        # 1) Si on a des compteurs de ticks buy/sell (selon tes flux)
-        buy_ticks = _alias_series(
-            ("buy_ticks", "ticks_buy", "t_buy", "buys", "BUY"), default=np.nan
-        )
-        sell_ticks = _alias_series(
-            ("sell_ticks", "ticks_sell", "t_sell", "sells", "SELL"), default=np.nan
-        )
+        # 1) Si on a des compteurs de ticks buy/sell
+        buy_ticks = _safe_series("buy_ticks", aliases=("ticks_buy", "t_buy", "buys", "BUY"), default=np.nan)
+        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell", "t_sell", "sells", "SELL"), default=np.nan)
 
         if not buy_ticks.isna().all() or not sell_ticks.isna().all():
             df["ask_volume"] = buy_ticks.fillna(0.0).astype("float64")
-            df["bid_volume"] = sell_ticks.fillna(0.0).astype("float64")
+            df["bid_volume"]  = sell_ticks.fillna(0.0).astype("float64")
+            df["aggressor_buy_vol"]  = df["ask_volume"].copy()
+            df["aggressor_sell_vol"] = df["bid_volume"].copy()
+            rescue_mode = True
             LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
 
         else:
-            # 2) Sinon, si on a un volume total par ligne (MT5: 'tick_volume')
-            vol_total_row = _alias_series(
-                ("tick_volume", "volume", "vol"), default=np.nan
-            )
+            # 2) Sinon, si on a un volume total par ligne (ex: MT5 'tick_volume')
+            vol_total_row = _safe_series("tick_volume", aliases=("volume", "vol"), default=np.nan)
 
-            # Déterminer un prix de référence pour le sens (close > close[-1] ?)
+            # Déterminer un prix de référence pour le sens (close ou mid bid/ask ou last)
             price = None
             if "close" in df.columns:
                 price = pd.to_numeric(df["close"], errors="coerce")
             elif {"bid", "ask"}.issubset(df.columns):
-                price = (
-                    pd.to_numeric(df["bid"], errors="coerce")
-                    + pd.to_numeric(df["ask"], errors="coerce")
-                ) / 2.0
+                price = (pd.to_numeric(df["bid"], errors="coerce") + pd.to_numeric(df["ask"], errors="coerce")) / 2.0
             elif "last" in df.columns:
                 price = pd.to_numeric(df["last"], errors="coerce")
 
             if price is not None and not vol_total_row.isna().all():
-                up = price.diff().fillna(0.0)
+                # Split dynamique : si OHLC dispo => pondération par taille de corps,
+                # sinon fallback directionnel (↑=0.80 / ↓=0.20 / =0.50)
+                dyn_w = None
+                if {"open", "high", "low", "close"}.issubset(df.columns):
+                    o = pd.to_numeric(df["open"],  errors="coerce")
+                    h = pd.to_numeric(df["high"],  errors="coerce")
+                    l = pd.to_numeric(df["low"],   errors="coerce")
+                    c = pd.to_numeric(df["close"], errors="coerce")
+                    rng = (h - l).replace(0.0, np.nan)
+                    body_frac = ((c - o) / rng).clip(-1.0, 1.0).fillna(0.0)   # ∈ [-1..1]
+                    dyn_w = (0.5 + 0.4 * body_frac).clip(0.10, 0.90)          # ∈ [0.10..0.90]
 
-                # Split biaisé 80/20 pour faire ressortir l'agressivité (et déclencher des patterns)
-                long_w = np.where(up > 0, 0.80, np.where(up < 0, 0.20, 0.50))
-                short_w = 1.0 - long_w
+                if dyn_w is None:
+                    up = price.diff().fillna(0.0)
+                    dyn_w = pd.Series(
+                        np.where(up > 0, 0.80, np.where(up < 0, 0.20, 0.50)),
+                        index=df.index
+                    )
 
-                df["ask_volume"] = (vol_total_row.fillna(0.0) * long_w).astype(
-                    "float64"
-                )
-                df["bid_volume"] = (vol_total_row.fillna(0.0) * short_w).astype(
-                    "float64"
-                )
+                long_w  = dyn_w
+                short_w = (1.0 - dyn_w)
 
-                # Aligner les agresseurs sur la même logique (sinon ratio=0.5 constant)
-                df["aggressor_buy_vol"] = df["ask_volume"].copy()
+                df["ask_volume"] = (vol_total_row.fillna(0.0) * long_w).astype("float64")
+                df["bid_volume"] = (vol_total_row.fillna(0.0) * short_w).astype("float64")
+                df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
 
-                LOG.info(
-                    "[OrderflowV5] zero-volume rescue: split 80/20 via direction du prix."
-                )
+                rescue_mode = True
+                LOG.info("[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc.")
 
             else:
-                # 3) Fallback neutre si on n'a rien d'exploitable : 1 unité / ligne, 50/50
+                # 3) Fallback neutre si rien d'exploitable : 1 unité / ligne, 50/50
                 proxy = pd.Series(1.0, index=df.index, dtype="float64")
                 df["ask_volume"] = (proxy * 0.5).astype("float64")
                 df["bid_volume"] = (proxy * 0.5).astype("float64")
-                df["aggressor_buy_vol"] = df["ask_volume"].copy()
+                df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
+                rescue_mode = True
                 LOG.info("[OrderflowV5] zero-volume rescue: proxy neutre 50/50.")
+
 
     # ---------- 2) MÉTRIQUES DE BASE ----------
     df["total_volume"] = (df["bid_volume"] + df["ask_volume"]).astype("float64")
@@ -770,31 +776,72 @@ def detect_orderflow_v5(
 
     # ---------- 7) SCORE GLOBAL ----------
     score = 50
+
+    # Intensité directionnelle
     if vol_total > 0:
         score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100.0)  # +0..30
+
+    # Déséquilibre moyen net
     if abs(imbalance_mean - 0.5) > 0.15:
         score += 10
+
+    # Patterns détectés
     if len(patterns) >= 3:
         score += 10
 
+    # Pénalités/bonus échantillon selon rows + coverage/tick_rate si dispo
     rows = len(df)
-    if rows < 10:
-        score -= 15
+    coverage_s = None
+    tick_rate  = None
+    try:
+        if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
+            coverage_s = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
+        if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
+            tick_rate = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
+    except Exception:
+        pass
+
+    # Pénalité échantillon court, adoucie si bonne couverture
+    row_pen = max(0.0, (10 - rows) * 1.5) if rows < 10 else 0.0  # max ~15
+    if coverage_s is not None and coverage_s >= 30.0:
+        row_pen *= 0.5  # demi-pénalité si la fenêtre couvre >= 30s
+    score -= row_pen
+
+    # Très faible volume total → grosse pénalité
     if vol_total < 1e-6:
         score -= 25
+
+    # Bonus activité si burst élevé malgré peu de lignes
+    if tick_rate is not None and tick_rate >= 2.0:
+        score += 5
+    elif coverage_s is not None and coverage_s >= 45.0:
+        score += 3
+
+    # Prudence si volumes reconstruits (rescue_mode)
+    if rescue_mode:
+        score -= 5          # petit malus de prudence
+        score = min(score, 85)  # on évite >85 en mode reconstruit
 
     score = int(np.clip(round(score), 0, 100))
     status = "VALID" if score >= 70 else "SUSPECT"
 
+
     # ---------- 8) SORTIE ----------
     summary = {
-        "delta_total": delta_total,
-        "volume_total": vol_total,
-        "mean_imbalance": imbalance_mean,
-        "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
-        "buy_ratio": float(buy_ratio),
-        "pattern_count": len(patterns),
+    "delta_total": delta_total,
+    "volume_total": vol_total,
+    "mean_imbalance": imbalance_mean,
+    "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
+    "buy_ratio": float(buy_ratio),
+    "pattern_count": len(patterns),
+    "rescue": bool(rescue_mode),
     }
+    # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
+    if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
+        summary["coverage_s"] = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
+    if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
+        summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
+
 
     return {
         "score": score,
