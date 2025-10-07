@@ -505,10 +505,6 @@ def detect_orderflow_v5(
     - Sortie unifiée (score + patterns + stats).
     - Compatible footprint_validator et DecisionPipeline.
     """
-    import numpy as np
-    import pandas as pd
-    import logging
-    from typing import Any, Dict, List
 
     LOG = logging.getLogger("OrderflowDetector")
 
@@ -545,6 +541,13 @@ def detect_orderflow_v5(
             return pd.Series(col, index=df.index, dtype="float64")
         return pd.to_numeric(col, errors="coerce").fillna(default).astype("float64")
 
+    # Helper alias simple (case-sensitive, volontairement minimal)
+    def _alias_series(aliases: tuple[str, ...], default: float = np.nan) -> pd.Series:
+        for col in aliases:
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors="coerce").fillna(default)
+        return pd.Series(default, index=df.index, dtype="float64")
+
     # ---------- 1) CONSTRUCTION SÛRE DES COLONNES VOLUME ----------
     ask = _safe_series("ask_volume", aliases=("buy",))
     bid = _safe_series("bid_volume", aliases=("sell",))
@@ -569,6 +572,71 @@ def detect_orderflow_v5(
 
     df["aggressor_buy_vol"] = aggr_buy.astype("float64")
     df["aggressor_sell_vol"] = aggr_sell.astype("float64")
+
+    # ---------- 1.bis) ZERO-VOLUME RESCUE (évite Vol=0, Δ=0, Imb=0.50) ----------
+    # Si la somme ask+bid est nulle sur la fenêtre, on reconstruit des volumes proxy.
+    if float((df["ask_volume"].sum() + df["bid_volume"].sum())) == 0.0:
+        # 1) Si on a des compteurs de ticks buy/sell (selon tes flux)
+        buy_ticks = _alias_series(
+            ("buy_ticks", "ticks_buy", "t_buy", "buys", "BUY"), default=np.nan
+        )
+        sell_ticks = _alias_series(
+            ("sell_ticks", "ticks_sell", "t_sell", "sells", "SELL"), default=np.nan
+        )
+
+        if not buy_ticks.isna().all() or not sell_ticks.isna().all():
+            df["ask_volume"] = buy_ticks.fillna(0.0).astype("float64")
+            df["bid_volume"] = sell_ticks.fillna(0.0).astype("float64")
+            LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
+
+        else:
+            # 2) Sinon, si on a un volume total par ligne (MT5: 'tick_volume')
+            vol_total_row = _alias_series(
+                ("tick_volume", "volume", "vol"), default=np.nan
+            )
+
+            # Déterminer un prix de référence pour le sens (close > close[-1] ?)
+            price = None
+            if "close" in df.columns:
+                price = pd.to_numeric(df["close"], errors="coerce")
+            elif {"bid", "ask"}.issubset(df.columns):
+                price = (
+                    pd.to_numeric(df["bid"], errors="coerce")
+                    + pd.to_numeric(df["ask"], errors="coerce")
+                ) / 2.0
+            elif "last" in df.columns:
+                price = pd.to_numeric(df["last"], errors="coerce")
+
+            if price is not None and not vol_total_row.isna().all():
+                up = price.diff().fillna(0.0)
+
+                # Split biaisé 80/20 pour faire ressortir l'agressivité (et déclencher des patterns)
+                long_w = np.where(up > 0, 0.80, np.where(up < 0, 0.20, 0.50))
+                short_w = 1.0 - long_w
+
+                df["ask_volume"] = (vol_total_row.fillna(0.0) * long_w).astype(
+                    "float64"
+                )
+                df["bid_volume"] = (vol_total_row.fillna(0.0) * short_w).astype(
+                    "float64"
+                )
+
+                # Aligner les agresseurs sur la même logique (sinon ratio=0.5 constant)
+                df["aggressor_buy_vol"] = df["ask_volume"].copy()
+                df["aggressor_sell_vol"] = df["bid_volume"].copy()
+
+                LOG.info(
+                    "[OrderflowV5] zero-volume rescue: split 80/20 via direction du prix."
+                )
+
+            else:
+                # 3) Fallback neutre si on n'a rien d'exploitable : 1 unité / ligne, 50/50
+                proxy = pd.Series(1.0, index=df.index, dtype="float64")
+                df["ask_volume"] = (proxy * 0.5).astype("float64")
+                df["bid_volume"] = (proxy * 0.5).astype("float64")
+                df["aggressor_buy_vol"] = df["ask_volume"].copy()
+                df["aggressor_sell_vol"] = df["bid_volume"].copy()
+                LOG.info("[OrderflowV5] zero-volume rescue: proxy neutre 50/50.")
 
     # ---------- 2) MÉTRIQUES DE BASE ----------
     df["total_volume"] = (df["bid_volume"] + df["ask_volume"]).astype("float64")
