@@ -501,109 +501,124 @@ def detect_orderflow_v5(
     """
     🏦 Orderflow V5 (Dev Desk Banque Privée)
     ---------------------------------------------------
-    Nouvelle version avancée et scorée du module de détection d'ordre.
     - Analyse multi-métriques : delta, CVD, absorption, agressivité.
-    - Structure de sortie unifiée (score + patterns + stats).
+    - Sortie unifiée (score + patterns + stats).
     - Compatible footprint_validator et DecisionPipeline.
     """
-
     import numpy as np
     import pandas as pd
+    import logging
+    from typing import Any, Dict, List
 
     LOG = logging.getLogger("OrderflowDetector")
 
-    # ---------- 0️⃣ VALIDATION ----------
+    # ---------- 0) VALIDATION ----------
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return {
             "score": 0,
             "status": "SUSPECT",
             "patterns": [],
             "summary": {"comment": "DataFrame vide ou invalide"},
+            "df": pd.DataFrame(),
         }
 
-    df = df.copy().reset_index(drop=True)
-    # PATCH1 — auto-mapping pour DF issu du footprint (colonnes 'buy'/'sell')
-    if "ask_volume" not in df.columns and "buy" in df.columns:
-        df["ask_volume"] = pd.to_numeric(df["buy"], errors="coerce")
-    if "bid_volume" not in df.columns and "sell" in df.columns:
-        df["bid_volume"] = pd.to_numeric(df["sell"], errors="coerce")
+    # On travaille sur une copie, index propre
+    df = df.copy()
+    df.reset_index(drop=True, inplace=True)
 
-    # Colonnes agresseurs : fallback = mêmes volumes
-    if "aggressor_buy_vol" not in df.columns:
-        df["aggressor_buy_vol"] = df.get("ask_volume", 0.0)
-    if "aggressor_sell_vol" not in df.columns:
-        df["aggressor_sell_vol"] = df.get("bid_volume", 0.0)
+    # ---------- Helper: toujours renvoyer une Series float ----------
+    def _safe_series(
+        primary: str, aliases: tuple[str, ...] = (), default: float = 0.0
+    ) -> pd.Series:
+        # Trouve la première colonne existante parmi primary + aliases
+        name = None
+        for col in (primary, *aliases):
+            if col in df.columns:
+                name = col
+                break
+        if name is None:
+            # Pas de colonne → Series constante
+            return pd.Series(default, index=df.index, dtype="float64")
+        col = df[name]
+        # Si jamais c'est un scalaire (défensif)
+        if not isinstance(col, pd.Series):
+            return pd.Series(col, index=df.index, dtype="float64")
+        return pd.to_numeric(col, errors="coerce").fillna(default).astype("float64")
 
-    # Nettoyage minimal
-    df["ask_volume"] = pd.to_numeric(df.get("ask_volume", 0.0), errors="coerce").fillna(0.0)
-    df["bid_volume"] = pd.to_numeric(df.get("bid_volume", 0.0), errors="coerce").fillna(0.0)
+    # ---------- 1) CONSTRUCTION SÛRE DES COLONNES VOLUME ----------
+    ask = _safe_series("ask_volume", aliases=("buy",))
+    bid = _safe_series("bid_volume", aliases=("sell",))
 
-    # Normalisation des colonnes nécessaires
-    for col in ["bid_volume", "ask_volume", "aggressor_buy_vol", "aggressor_sell_vol"]:
-        if col not in df.columns:
-            df[col] = 0.0
+    df["ask_volume"] = ask
+    df["bid_volume"] = bid
 
-    # ---------- 1️⃣ MÉTRIQUES DE BASE ----------
-    df["bid_volume"] = pd.to_numeric(df["bid_volume"], errors="coerce").fillna(0.0)
-    df["ask_volume"] = pd.to_numeric(df["ask_volume"], errors="coerce").fillna(0.0)
-    df["total_volume"] = df["bid_volume"] + df["ask_volume"]
+    # Aggresseurs → fallback sur ask/bid si absents
+    aggr_buy = _safe_series("aggressor_buy_vol", aliases=(), default=np.nan)
+    aggr_sell = _safe_series("aggressor_sell_vol", aliases=(), default=np.nan)
 
-    df["delta"] = df["ask_volume"] - df["bid_volume"]
-    df["imbalance"] = np.where(
-        df["total_volume"] > 0, df["ask_volume"] / df["total_volume"], 0.5
-    )
-    df["dominance"] = np.select(
-        [
-            df["delta"] > 0,
-            df["delta"] < 0,
-        ],
-        ["buyers", "sellers"],
-        default="neutral",
-    )
-
-    # ---------- 2️⃣ CVD (Cumulative Volume Delta) ----------
-    df["cvd"] = df["delta"].cumsum()
-    if cvd_smoothing > 1:
-        df["cvd_smoothed"] = (
-            df["cvd"].rolling(window=cvd_smoothing, min_periods=1).mean()
-        )
+    # Si NaN (colonne manquante), remplace par ask/bid
+    if aggr_buy.isna().all():
+        aggr_buy = ask.copy()
     else:
-        df["cvd_smoothed"] = df["cvd"]
+        aggr_buy = aggr_buy.fillna(ask)
 
-    # ---------- 3️⃣ Aggressivité footprint ----------
-    df["aggressor_ratio"] = np.where(
-        (df["aggressor_buy_vol"] + df["aggressor_sell_vol"]) > 0,
-        df["aggressor_buy_vol"] / (df["aggressor_buy_vol"] + df["aggressor_sell_vol"]),
-        0.5,
+    if aggr_sell.isna().all():
+        aggr_sell = bid.copy()
+    else:
+        aggr_sell = aggr_sell.fillna(bid)
+
+    df["aggressor_buy_vol"] = aggr_buy.astype("float64")
+    df["aggressor_sell_vol"] = aggr_sell.astype("float64")
+
+    # ---------- 2) MÉTRIQUES DE BASE ----------
+    df["total_volume"] = (df["bid_volume"] + df["ask_volume"]).astype("float64")
+    df["delta"] = (df["ask_volume"] - df["bid_volume"]).astype("float64")
+
+    denom = df["total_volume"].replace(0.0, np.nan)
+    df["imbalance"] = (df["ask_volume"] / denom).fillna(0.5)
+
+    df["dominance"] = np.where(
+        df["delta"] > 0, "buyers", np.where(df["delta"] < 0, "sellers", "neutral")
     )
 
-    # ---------- 4️⃣ DÉTECTION DE PATTERNS ----------
-    patterns = []
+    # ---------- 3) CVD (Cumulative Volume Delta) ----------
+    df["cvd"] = df["delta"].cumsum()
+    win = max(int(cvd_smoothing), 1)
+    df["cvd_smoothed"] = df["cvd"].rolling(window=win, min_periods=1).mean()
+
+    # ---------- 4) Aggressivité footprint ----------
+    aggr_denom = (df["aggressor_buy_vol"] + df["aggressor_sell_vol"]).replace(
+        0.0, np.nan
+    )
+    df["aggressor_ratio"] = (df["aggressor_buy_vol"] / aggr_denom).fillna(0.5)
+
+    # ---------- 5) DÉTECTION DE PATTERNS (multi-label / ligne) ----------
+    patterns: List[Dict[str, Any]] = []
     for i in range(len(df)):
         try:
-            labels = []      # PATCH3 — on cumule
-            extras = []      # une liste d'objets extra pour chaque label
+            labels: List[str] = []
+            extras: List[Dict[str, Any]] = []
 
-            imb = float(df["imbalance"].iloc[i])
-            delta = float(df["delta"].iloc[i]) if "delta" in df.columns else float(df["ask_volume"].iloc[i] - df["bid_volume"].iloc[i])
-            bid = float(df["bid_volume"].iloc[i])
-            ask = float(df["ask_volume"].iloc[i])
-            total = float(df["total_volume"].iloc[i])
-            aggr_ratio = float(df["aggressor_ratio"].iloc[i]) if "aggressor_ratio" in df.columns else 0.5
+            imb = float(df.at[i, "imbalance"])
+            delta = float(df.at[i, "delta"])
+            bidv = float(df.at[i, "bid_volume"])
+            askv = float(df.at[i, "ask_volume"])
+            total = float(df.at[i, "total_volume"])
+            aggr_ratio = float(df.at[i, "aggressor_ratio"])
 
-            # === Déséquilibre structurel ===
+            # Déséquilibres structurels
             if imb > imbalance_threshold:
                 labels.append("buy_imbalance")
             if imb < (1.0 - imbalance_threshold):
                 labels.append("sell_imbalance")
 
-            # === Absorptions ===
-            if ask > 2.0 * (bid + 1e-9):
+            # Absorptions (heuristique simple)
+            if askv > 2.0 * (bidv + 1e-9):
                 labels.append("buy_absorption")
-            if bid > 2.0 * (ask + 1e-9):
+            if bidv > 2.0 * (askv + 1e-9):
                 labels.append("sell_absorption")
 
-            # === Aggressive footprints ===
+            # Agressivité
             if aggr_ratio >= 0.75:
                 labels.append("aggressive_buying")
                 extras.append({"footprint": f"buy_ratio={aggr_ratio:.2f}"})
@@ -611,97 +626,104 @@ def detect_orderflow_v5(
                 labels.append("aggressive_selling")
                 extras.append({"footprint": f"buy_ratio={aggr_ratio:.2f}"})
 
-            # === Icebergs (si données exec disponibles) ===
+            # Icebergs (si colonnes présentes)
             if "executions_count" in df.columns and "avg_exec_size" in df.columns:
-                exec_count = float(df["executions_count"].iloc[i])
-                avg_size = float(df["avg_exec_size"].iloc[i])
-                if exec_count > 50.0 and avg_size < 0.2 * max(total, 1.0):
-                    labels.append("iceberg_order")
-                    extras.append({"iceberg": {"exec_count": int(exec_count), "avg_size": float(avg_size)}})
+                exec_count = pd.to_numeric(
+                    df.at[i, "executions_count"], errors="coerce"
+                )
+                avg_size = pd.to_numeric(df.at[i, "avg_exec_size"], errors="coerce")
+                if pd.notna(exec_count) and pd.notna(avg_size):
+                    if float(exec_count) > 50.0 and float(avg_size) < 0.2 * max(
+                        total, 1.0
+                    ):
+                        labels.append("iceberg_order")
+                        extras.append(
+                            {
+                                "iceberg": {
+                                    "exec_count": int(float(exec_count)),
+                                    "avg_size": float(avg_size),
+                                }
+                            }
+                        )
 
-            # Contexte utile
-            ts = None
-            if "timestamp" in df.columns:
-                ts = str(df["timestamp"].iloc[i])
-            elif hasattr(df.index, "dtype"):
-                ts = str(df.index[i])
+            # Timestamp (priorité 'time' > 'timestamp' > index)
+            if "time" in df.columns:
+                ts = str(df.at[i, "time"])
+            elif "timestamp" in df.columns:
+                ts = str(df.at[i, "timestamp"])
+            else:
+                ts = str(i)
 
             price_level = None
-            if "price_level" in df.columns:
-                price_level = float(df["price_level"].iloc[i])
+            if "price_level" in df.columns and pd.notna(df.at[i, "price_level"]):
+                try:
+                    price_level = float(df.at[i, "price_level"])
+                except Exception:
+                    price_level = None
 
-            # Empilement : un event par label (si tu préfères 1 event multi-labels, on peut grouper)
             for k, label in enumerate(labels):
-                base = {
+                event = {
                     "index": i,
                     "timestamp": ts,
                     "pattern": label,
                     "price_level": price_level,
                     "imbalance": imb,
                     "delta": delta,
-                    "dominance": "buyers" if delta > 0 else ("sellers" if delta < 0 else "neutral"),
-                    "bid_volume": bid,
-                    "ask_volume": ask,
+                    "dominance": (
+                        "buyers"
+                        if delta > 0
+                        else ("sellers" if delta < 0 else "neutral")
+                    ),
+                    "bid_volume": bidv,
+                    "ask_volume": askv,
                     "row_total": total,
                 }
-                # merge éventuel d'un extra correspondant (si présent)
                 if k < len(extras):
-                    base.update(extras[k])
-                patterns.append(base)
+                    event.update(extras[k])
+                patterns.append(event)
 
         except Exception as e:
             LOG.error(f"[OrderflowV5] Erreur à la ligne {i}: {e}", exc_info=False)
 
-    # ---------- 5️⃣ MÉTRIQUES GLOBALES ----------
-    total_ticks = len(df)
+    # ---------- 6) MÉTRIQUES GLOBALES ----------
     buys = int((df["dominance"] == "buyers").sum())
     sells = int((df["dominance"] == "sellers").sum())
-    buy_ratio = buys / max(1, (buys + sells))
+    buy_ratio = buys / max(1, buys + sells)
 
-    # PATCH2 — moyenne d'imbalance pondérée par le volume total
     if (df["total_volume"] > 0).any():
-        imbalance_mean = df["ask_volume"].sum() / (df["total_volume"].sum() + 1e-9)
+        imbalance_mean = float(
+            df["ask_volume"].sum() / (df["total_volume"].sum() + 1e-9)
+        )
     else:
         imbalance_mean = 0.5
 
     delta_total = float(df["delta"].sum())
     vol_total = float(df["total_volume"].sum())
 
-    # ---------- 6️⃣ SCORE GLOBALE ----------
+    # ---------- 7) SCORE GLOBAL ----------
     score = 50
-
-    # Bonus : ratio |delta|/volume, déséquilibre moyen, richesse en patterns
     if vol_total > 0:
-        score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100)   # borné à +30
+        score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100.0)  # +0..30
     if abs(imbalance_mean - 0.5) > 0.15:
         score += 10
     if len(patterns) >= 3:
         score += 10
 
-    # Malus : échantillon trop pauvre
-    rows = int(len(df))
+    rows = len(df)
     if rows < 10:
         score -= 15
     if vol_total < 1e-6:
         score -= 25
 
-    # Normalisation
     score = int(np.clip(round(score), 0, 100))
-
-
-    score = int(np.clip(score, 0, 100))
-    # --- NORMALISATION DU SCORE ---
-    score = int(round(score))
-    score = max(0, min(100, score))
-
     status = "VALID" if score >= 70 else "SUSPECT"
 
-    # ---------- 7️⃣ SORTIE STRUCTURÉE ----------
+    # ---------- 8) SORTIE ----------
     summary = {
         "delta_total": delta_total,
         "volume_total": vol_total,
         "mean_imbalance": imbalance_mean,
-        "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if "cvd_smoothed" in df.columns and len(df) else 0.0,
+        "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
         "buy_ratio": float(buy_ratio),
         "pattern_count": len(patterns),
     }
@@ -768,14 +790,18 @@ def footprint_validator(
         candles["time"] = pd.Timestamp.now(tz="UTC")
 
     candle = candles.iloc[candle_index]
-    start_ts = pd.to_datetime(candle.get("time", candle.name), utc=True, errors="coerce")
+    start_ts = pd.to_datetime(
+        candle.get("time", candle.name), utc=True, errors="coerce"
+    )
     if pd.isna(start_ts):
         start_ts = pd.Timestamp.now(tz="UTC")
 
     # fenêtre M1 stricte
     if candle_index + 1 < len(candles):
         nxt = candles.iloc[candle_index + 1]
-        end_ts = pd.to_datetime(nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce")
+        end_ts = pd.to_datetime(
+            nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce"
+        )
         if pd.isna(end_ts) or end_ts <= start_ts:
             end_ts = start_ts + pd.Timedelta(minutes=1)
     else:
@@ -800,13 +826,21 @@ def footprint_validator(
     # Prix de secours si 'price' inexploitable
     price_raw = pd.to_numeric(ticks["price"], errors="coerce")
     if price_raw.isna().all() or (price_raw.fillna(0) == 0).all():
-        if "last" in ticks.columns and not pd.to_numeric(ticks["last"], errors="coerce").isna().all():
+        if (
+            "last" in ticks.columns
+            and not pd.to_numeric(ticks["last"], errors="coerce").isna().all()
+        ):
             ticks["price"] = pd.to_numeric(ticks["last"], errors="coerce")
-        elif "mid" in ticks.columns and not pd.to_numeric(ticks["mid"], errors="coerce").isna().all():
+        elif (
+            "mid" in ticks.columns
+            and not pd.to_numeric(ticks["mid"], errors="coerce").isna().all()
+        ):
             ticks["price"] = pd.to_numeric(ticks["mid"], errors="coerce")
         elif {"bid", "ask"}.issubset(ticks.columns):
-            ticks["price"] = (pd.to_numeric(ticks["bid"], errors="coerce") +
-                            pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
+            ticks["price"] = (
+                pd.to_numeric(ticks["bid"], errors="coerce")
+                + pd.to_numeric(ticks["ask"], errors="coerce")
+            ) / 2.0
         elif "bid" in ticks.columns:
             ticks["price"] = pd.to_numeric(ticks["bid"], errors="coerce")
         elif "ask" in ticks.columns:
@@ -819,8 +853,10 @@ def footprint_validator(
 
     # Calcule 'mid' si absent mais bid/ask présents (pour fallback)
     if "mid" not in ticks.columns and {"bid", "ask"}.issubset(ticks.columns):
-        ticks["mid"] = (pd.to_numeric(ticks["bid"], errors="coerce") +
-                        pd.to_numeric(ticks["ask"], errors="coerce")) / 2.0
+        ticks["mid"] = (
+            pd.to_numeric(ticks["bid"], errors="coerce")
+            + pd.to_numeric(ticks["ask"], errors="coerce")
+        ) / 2.0
 
     # Remplissage robuste des prix nuls/invalides (priorité: last > mid > bid > ask)
     zero_mask = (~np.isfinite(ticks["price"])) | (ticks["price"] <= 0)
@@ -867,9 +903,9 @@ def footprint_validator(
         flags = pd.to_numeric(ticks["flags"], errors="coerce").fillna(0).astype(int)
         unk_mask = ticks["side"].eq("unknown")
         if unk_mask.any():
-            buy_mask  = ((flags & 1) > 0) | ((flags & 16) > 0)
+            buy_mask = ((flags & 1) > 0) | ((flags & 16) > 0)
             sell_mask = ((flags & 2) > 0) | ((flags & 32) > 0)
-            ticks.loc[unk_mask & buy_mask,  "side"] = "buy"
+            ticks.loc[unk_mask & buy_mask, "side"] = "buy"
             ticks.loc[unk_mask & sell_mask, "side"] = "sell"
 
     # ---------- 3) FENÊTRE STRICTE ----------
@@ -894,7 +930,11 @@ def footprint_validator(
     # --- PATCH 2.A: granularité des ticks (nb & couverture) ---
     tick_count = int(df.shape[0])
     # sécurité: si un seul tick → couverture = 0s
-    coverage_s = float((df["time"].max() - df["time"].min()).total_seconds()) if tick_count > 1 else 0.0
+    coverage_s = (
+        float((df["time"].max() - df["time"].min()).total_seconds())
+        if tick_count > 1
+        else 0.0
+    )
 
     # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
     df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
@@ -924,12 +964,18 @@ def footprint_validator(
     agg["delta"] = agg["buy"] - agg["sell"]
     denom = (agg["buy"] + agg["sell"]).replace(0.0, np.nan)
     agg["buy_pct"] = (agg["buy"] / denom).fillna(0.5)
-    agg = agg.reset_index().sort_values("price_level", ascending=False).reset_index(drop=True)
-    
+    agg = (
+        agg.reset_index()
+        .sort_values("price_level", ascending=False)
+        .reset_index(drop=True)
+    )
+
     # --- PATCH: quantification propre aux ticks (arrondis stables) ---
     if price_step is None or price_step <= 0:
         # garde un fallback raisonnable si le pas a été inféré
-        step_for_dec = float(agg["price_level"].diff().abs().replace(0, np.nan).min() or 1e-5)
+        step_for_dec = float(
+            agg["price_level"].diff().abs().replace(0, np.nan).min() or 1e-5
+        )
     else:
         step_for_dec = float(price_step)
 
@@ -938,29 +984,35 @@ def footprint_validator(
 
     # arrondis harmonisés
     agg["price_level"] = agg["price_level"].round(decimals)
-    poc = float(agg.loc[agg["total"].idxmax(), "price_level"]) if (agg["total"] > 0).any() else float(agg.loc[0, "price_level"])
+    poc = (
+        float(agg.loc[agg["total"].idxmax(), "price_level"])
+        if (agg["total"] > 0).any()
+        else float(agg.loc[0, "price_level"])
+    )
     poc = round(poc, decimals)
-    delta_total   = float(agg["delta"].sum())
-    total_volume  = float(agg["total"].sum())
+    delta_total = float(agg["delta"].sum())
+    total_volume = float(agg["total"].sum())
     imbalance_buy = int((agg["buy_pct"] >= imbalance_threshold).sum())
-    imbalance_sell= int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
+    imbalance_sell = int((agg["buy_pct"] <= (1.0 - imbalance_threshold)).sum())
 
     absorption_flag = False
     try:
-        if agg.iloc[0]["delta"] < 0: absorption_flag = True
-        if agg.iloc[-1]["delta"] > 0: absorption_flag = True
+        if agg.iloc[0]["delta"] < 0:
+            absorption_flag = True
+        if agg.iloc[-1]["delta"] > 0:
+            absorption_flag = True
     except Exception:
         pass
 
     score = 100
     comments = []
-        # --- CONFIG QUALITÉ TICKS (paramétrable) ---
-    MIN_TICKS = 10          # ex. 10 ticks
-    MIN_COVERAGE_S = 30.0   # ex. 30 secondes
-    PEN_TICKS = 15          # -15 points si tick_count < MIN_TICKS
-    PEN_COVER = 10          # -10 points si coverage_s < MIN_COVERAGE_S
-    
-      # --- PATCH 2.B: pénalités faible granularité (paramétrées) ---
+    # --- CONFIG QUALITÉ TICKS (paramétrable) ---
+    MIN_TICKS = 10  # ex. 10 ticks
+    MIN_COVERAGE_S = 30.0  # ex. 30 secondes
+    PEN_TICKS = 15  # -15 points si tick_count < MIN_TICKS
+    PEN_COVER = 10  # -10 points si coverage_s < MIN_COVERAGE_S
+
+    # --- PATCH 2.B: pénalités faible granularité (paramétrées) ---
     if tick_count < MIN_TICKS:
         score -= PEN_TICKS
         comments.append(f"Peu de ticks (<{MIN_TICKS}).")
@@ -981,7 +1033,7 @@ def footprint_validator(
     if tick_count < 3 or coverage_s < 2:
         score = min(score, 60)  # forcera status="SUSPECT" plus bas
         comments.append("Échantillon trop court — statut dégradé.")
- 
+
     if total_volume <= 0.0:
         score -= 60
         comments.append("Volume nul/négligeable.")
@@ -1017,7 +1069,6 @@ def footprint_validator(
         "footprint_df": agg,
         "candle": candle.dropna().to_dict(),
     }
-
 
 
 class Detectors:
