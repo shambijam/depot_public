@@ -56,32 +56,37 @@
   ],
   "overrides": {
     "scalping": {
-      "common": {
-        "direction_votes_required": 1,
-        "min_confidence_for_entry_m1": 0.50
+      "min_confidence": 0.48,
+      "direction_votes": {
+        "vote_threshold": 2
       },
-      "phase_detection": {
-        "allow_no_clear_phase_if_strong": {
-          "enabled": true,
-          "of_delta_abs_min": 100.0,
-          "tickrate_min": 4.0
-        }
+      "entry_filters": {
+        "fp_min_ticks": 12,
+        "fp_min_coverage_s": 3,
+        "max_spread_points": 25
       },
-      "footprint": {
-        "m1_min_ticks": 10,
-        "m1_min_coverage_s": 3,
-        "burst_tolerance": {
-          "enabled": true,
-          "tickrate_min": 4.0,
-          "coverage_s_min_burst": 2
-        }
-      },
-      "marubozu_playbook": {
-        "mtf_bias": {
-          "use": true,
-          "prefer_h1": true,
-          "block_against_both": false
-        }
+      "allow_no_clear_phase_if_strong": true,
+      "fallback_if_no_clear_phase": "use_orderflow_and_cvd"
+    },
+    "footprint": {
+      "min_ticks_per_window": 12,
+      "min_coverage_seconds": 3,
+      "allow_burst_mode": true,
+      "ignore_absorption_penalty": true
+    },
+    "orderflow": {
+      "cvd_min_abs": 30.0,
+      "delta_min_abs": 60.0,
+      "min_patterns": 6,
+      "min_imbalance_avg": 0.4
+    },
+    "diagnostics": {
+      "why_no_trade_verbose": true,
+      "debug_confidence_logging": true
+    },
+    "guardrails": {
+      "sessions": {
+        "news_blackout": false
       }
     }
   }
