@@ -553,8 +553,8 @@ def detect_orderflow_v5(
         return pd.Series(default, index=df.index, dtype="float64")
 
     # ---------- 1) CONSTRUCTION SÛRE DES COLONNES VOLUME ----------
-    ask = _safe_series("ask_volume", aliases=("buy",))
-    bid = _safe_series("bid_volume", aliases=("sell",))
+    ask = _safe_series("ask_volume", aliases=("buy","BUY","buys","buy_ticks","ticks_buy","t_buy"))
+    bid = _safe_series("bid_volume", aliases=("sell","SELL","sells","sell_ticks","ticks_sell","t_sell"))
 
     df["ask_volume"] = ask
     df["bid_volume"] = bid
@@ -581,18 +581,25 @@ def detect_orderflow_v5(
     # Si la somme ask+bid est nulle sur la fenêtre, on reconstruit des volumes proxy.
     if float((df["ask_volume"].sum() + df["bid_volume"].sum())) == 0.0:
         # 1) Si on a des compteurs de ticks buy/sell
-        buy_ticks  = _safe_series("buy_ticks",  aliases=("ticks_buy", "t_buy",  "buys",  "BUY"),  default=np.nan)
-        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell","t_sell", "sells", "SELL"), default=np.nan)
+        buy_ticks  = _safe_series("buy_ticks",  aliases=("ticks_buy","t_buy","buys","BUY"),  default=np.nan)
+        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell","t_sell","sells","SELL"), default=np.nan)
+
+        # Si encore NaN mais colonnes BUY/SELL présentes, on les force
+        if buy_ticks.isna().all() and "BUY" in df.columns:
+            buy_ticks = pd.to_numeric(df["BUY"], errors="coerce")
+        if sell_ticks.isna().all() and "SELL" in df.columns:
+            sell_ticks = pd.to_numeric(df["SELL"], errors="coerce")
 
         if not buy_ticks.isna().all() or not sell_ticks.isna().all():
-            df["ask_volume"]  = buy_ticks.fillna(0.0).astype("float64")
-            df["bid_volume"]  = sell_ticks.fillna(0.0).astype("float64")
+            df["ask_volume"] = buy_ticks.fillna(0.0).astype("float64")
+            df["bid_volume"] = sell_ticks.fillna(0.0).astype("float64")
             df["aggressor_buy_vol"]  = df["ask_volume"].copy()
             df["aggressor_sell_vol"] = df["bid_volume"].copy()
             rescue_mode, rescue_note = True, "tick_counters"
             LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
-
         else:
+            # laisse inchangé le reste (vol_total_row -> split -> proxy)
+
             # 2) Sinon, si on a un volume total par ligne (ex: MT5 'tick_volume')
             vol_total_row = _safe_series("tick_volume", aliases=("volume", "vol"), default=np.nan)
 
