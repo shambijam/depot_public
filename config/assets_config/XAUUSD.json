@@ -53,5 +53,41 @@
   },
   "strategy_whitelist": [
     "scalping"
-  ]
+  ],
+  "overrides": {
+    "scalping": {
+      "phase_detection": {
+        "allowed_phases": [
+          "liquidity_eqh_eql",
+          "range_retail",
+          "transitional",
+          "no_clear_phase"
+        ],
+        "allow_no_clear_phase_if_strong": {
+          "enabled": true,
+          "of_delta_abs_min": 150.0,
+          "tickrate_min": 5.0
+        }
+      },
+      "footprint": {
+        "m1_min_ticks": 15,
+        "m1_min_coverage_s": 20,
+        "burst_tolerance": {
+          "enabled": true,
+          "tickrate_min": 5.0,
+          "coverage_s_min_burst": 3
+        }
+      },
+      "common": {
+        "direction_votes_required": 2
+      },
+      "marubozu_playbook": {
+        "mtf_bias": {
+          "use": true,
+          "prefer_h1": true,
+          "block_against_both": false
+        }
+      }
+    }
+  }
 }

@@ -16,7 +16,8 @@
     "allowed_phases": [
       "liquidity_eqh_eql",
       "range_retail",
-      "transitional"
+      "transitional",
+      "no_clear_phase"
     ],
     "lookback_window": 12,
     "volatility_threshold": 0.0,
@@ -31,7 +32,7 @@
         "mtf_bias": {
           "use": true,
           "prefer_h1": true,
-          "block_against_both": true
+          "block_against_both": false
         },
         "detection": {
           "atr_period": 14,
