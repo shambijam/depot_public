@@ -507,6 +507,10 @@ def detect_orderflow_v5(
     """
 
     LOG = logging.getLogger("OrderflowDetector")
+    # --- FLAGS RESCUE ---
+    rescue_mode: bool = False
+    rescue_note: str = ""
+
     rescue_mode = False  # ← flag pour scoring/summary
 
     # ---------- 0) VALIDATION ----------
@@ -578,15 +582,15 @@ def detect_orderflow_v5(
     # Si la somme ask+bid est nulle sur la fenêtre, on reconstruit des volumes proxy.
     if float((df["ask_volume"].sum() + df["bid_volume"].sum())) == 0.0:
         # 1) Si on a des compteurs de ticks buy/sell
-        buy_ticks = _safe_series("buy_ticks", aliases=("ticks_buy", "t_buy", "buys", "BUY"), default=np.nan)
-        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell", "t_sell", "sells", "SELL"), default=np.nan)
+        buy_ticks  = _safe_series("buy_ticks",  aliases=("ticks_buy", "t_buy",  "buys",  "BUY"),  default=np.nan)
+        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell","t_sell", "sells", "SELL"), default=np.nan)
 
         if not buy_ticks.isna().all() or not sell_ticks.isna().all():
-            df["ask_volume"] = buy_ticks.fillna(0.0).astype("float64")
+            df["ask_volume"]  = buy_ticks.fillna(0.0).astype("float64")
             df["bid_volume"]  = sell_ticks.fillna(0.0).astype("float64")
             df["aggressor_buy_vol"]  = df["ask_volume"].copy()
             df["aggressor_sell_vol"] = df["bid_volume"].copy()
-            rescue_mode = True
+            rescue_mode, rescue_note = True, "tick_counters"
             LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
 
         else:
@@ -625,23 +629,24 @@ def detect_orderflow_v5(
                 long_w  = dyn_w
                 short_w = (1.0 - dyn_w)
 
-                df["ask_volume"] = (vol_total_row.fillna(0.0) * long_w).astype("float64")
-                df["bid_volume"] = (vol_total_row.fillna(0.0) * short_w).astype("float64")
+                df["ask_volume"]  = (vol_total_row.fillna(0.0) * long_w).astype("float64")
+                df["bid_volume"]  = (vol_total_row.fillna(0.0) * short_w).astype("float64")
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
 
-                rescue_mode = True
+                rescue_mode, rescue_note = True, "split_dynamic_price_ohlc"
                 LOG.info("[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc.")
 
             else:
                 # 3) Fallback neutre si rien d'exploitable : 1 unité / ligne, 50/50
                 proxy = pd.Series(1.0, index=df.index, dtype="float64")
-                df["ask_volume"] = (proxy * 0.5).astype("float64")
-                df["bid_volume"] = (proxy * 0.5).astype("float64")
+                df["ask_volume"]  = (proxy * 0.5).astype("float64")
+                df["bid_volume"]  = (proxy * 0.5).astype("float64")
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
-                rescue_mode = True
+                rescue_mode, rescue_note = True, "proxy_50_50"
                 LOG.info("[OrderflowV5] zero-volume rescue: proxy neutre 50/50.")
+
 
 
     # ---------- 2) MÉTRIQUES DE BASE ----------
@@ -819,8 +824,18 @@ def detect_orderflow_v5(
 
     # Prudence si volumes reconstruits (rescue_mode)
     if rescue_mode:
-        score -= 5          # petit malus de prudence
-        score = min(score, 85)  # on évite >85 en mode reconstruit
+        # malus léger + plafonnement
+        score -= 5
+        score = min(score, 85)
+
+        # adoucir la pénalité d'échantillon si <10 lignes (on rend la pénalité moitié moins sévère)
+        if rows < 10:
+            score += 0.5 * row_pen  # on rend une partie de la pénalité
+
+        # bonus si signal vraiment clair malgré rescue
+        if (abs(imbalance_mean - 0.5) >= 0.20) or (vol_total > 0 and abs(delta_total) >= 0.20 * vol_total):
+            score += 5
+
 
     score = int(np.clip(round(score), 0, 100))
     status = "VALID" if score >= 70 else "SUSPECT"
@@ -835,6 +850,8 @@ def detect_orderflow_v5(
     "buy_ratio": float(buy_ratio),
     "pattern_count": len(patterns),
     "rescue": bool(rescue_mode),
+    "rescue_note": rescue_note,
+
     }
     # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
     if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
