@@ -857,33 +857,54 @@ def detect_orderflow_v5(
     if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
         summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
 
-    # --- LOG [ORDERFLOW] ICI (à l'intérieur de la fonction) ---
+    # --- LOG [ORDERFLOW] (interne, anti-UNKNOWN & anti-doublon) ---
     try:
-        _symbol = None
-        if "symbol" in df.columns and pd.notna(df["symbol"]).any():
-            _symbol = str(df["symbol"].iloc[-1])
-        elif hasattr(df, "attrs") and "symbol" in df.attrs:
-            _symbol = str(df.attrs["symbol"])
-        else:
-            _symbol = "UNKNOWN"
+        # 1) Résolution robuste du symbole
+        symbol = None
+        # a) colonnes possibles
+        for key in ("symbol", "SYMBOL", "asset", "Asset", "instrument", "ticker", "pair"):
+            if key in df.columns and pd.notna(df[key]).any():
+                symbol = str(df[key].iloc[-1])
+                break
+        # b) attributs possibles (df.attrs)
+        if symbol is None and hasattr(df, "attrs"):
+            for key in ("symbol", "SYMBOL", "asset", "Asset", "instrument", "ticker", "pair"):
+                if key in df.attrs and df.attrs[key]:
+                    symbol = str(df.attrs[key])
+                    break
 
-        _cov  = f" | coverage_s={float(summary['coverage_s']):.1f}" if 'coverage_s' in summary else ""
-        _rate = f" | tick_rate={float(summary['tick_rate']):.2f}"    if 'tick_rate'  in summary else ""
+        # 2) si pas de symbole → on NE LOG PAS (évite [ORDERFLOW][UNKNOWN])
+        if symbol:
+            # 3) anti-doublon: on ne log que si la signature change
+            sig = (
+                symbol,
+                int(score),
+                status,
+                round(summary["delta_total"], 2),
+                round(summary["volume_total"], 2),
+                bool(summary["rescue"]),
+            )
+            if not hasattr(detect_orderflow_v5, "_last_log_sig") or detect_orderflow_v5._last_log_sig != sig:
+                detect_orderflow_v5._last_log_sig = sig
 
-        LOG.info(
-            f"[ORDERFLOW][{_symbol}] "
-            f"Score={int(score)} | Status={status} | "
-            f"Δ={float(summary['delta_total']):.2f} | "
-            f"Vol={float(summary['volume_total']):.2f} | "
-            f"ImbMoy={float(summary['mean_imbalance']):.2f} | "
-            f"CVD={float(summary['cvd_final']):.2f} | "
-            f"Patterns={int(summary['pattern_count'])} | "
-            f"rescue={bool(summary['rescue'])} note={str(summary['rescue_note'])}"
-            f"{_cov}{_rate}"
-        )
+                cov  = f" | coverage_s={float(summary['coverage_s']):.1f}" if 'coverage_s' in summary else ""
+                rate = f" | tick_rate={float(summary['tick_rate']):.2f}"    if 'tick_rate'  in summary else ""
+                rescue_txt = f" | rescue=True note={summary.get('rescue_note','')}" if summary.get('rescue') else ""
+
+                LOG.info(
+                    f"[ORDERFLOW][{symbol}] "
+                    f"Score={int(score)} | Status={status} | "
+                    f"Δ={float(summary['delta_total']):.2f} | "
+                    f"Vol={float(summary['volume_total']):.2f} | "
+                    f"ImbMoy={float(summary['mean_imbalance']):.2f} | "
+                    f"CVD={float(summary['cvd_final']):.2f} | "
+                    f"Patterns={int(summary['pattern_count'])}"
+                    f"{rescue_txt}{cov}{rate}"
+                )
     except Exception:
-        # on ne bloque jamais la détection si le log échoue
+        # ne jamais bloquer la détection si le log échoue
         pass
+
 
     return {
         "score": score,
