@@ -561,6 +561,15 @@ def detect_orderflow_v5(
             if col in df.columns:
                 return pd.to_numeric(df[col], errors="coerce").fillna(default)
         return pd.Series(default, index=df.index, dtype="float64")
+    
+    def _resolve_symbol(_df: pd.DataFrame) -> str:
+        for key in ("symbol","SYMBOL","asset","Asset","instrument","ticker","pair"):
+            if key in _df.columns and pd.notna(_df[key]).any():
+                return str(_df[key].iloc[-1])
+        if hasattr(_df, "attrs") and _df.attrs.get("symbol"):
+            return str(_df.attrs["symbol"])
+        return ""
+
 
     # ---------- 1) CONSTRUCTION SÛRE DES COLONNES VOLUME ----------
     ask = _safe_series("ask_volume", aliases=("buy","BUY","buys","buy_ticks","ticks_buy","t_buy"))
@@ -607,7 +616,8 @@ def detect_orderflow_v5(
             df["aggressor_buy_vol"]  = df["ask_volume"].copy()
             df["aggressor_sell_vol"] = df["bid_volume"].copy()
             rescue_level, rescue_note = max(rescue_level, 1), "tick_counters"
-            LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
+            LOG.debug(f"[OrderflowV5] zero-volume rescue: tick counters utilisés. sym={_resolve_symbol(df)}")
+
         else:
             # laisse inchangé le reste (vol_total_row -> split -> proxy)
 
@@ -651,7 +661,7 @@ def detect_orderflow_v5(
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
                 rescue_level, rescue_note = max(rescue_level, 1), "split_dynamic_price_ohlc"
-                LOG.info("[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc.")
+                LOG.debug(f"[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc. sym={_resolve_symbol(df)}")
 
             else:
                 # 3) Fallback neutre si rien d'exploitable : 1 unité / ligne, 50/50
@@ -661,7 +671,8 @@ def detect_orderflow_v5(
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
                 rescue_level, rescue_note = 2, "proxy_50_50"
-                LOG.info("[OrderflowV5] zero-volume rescue: proxy neutre 50/50.")
+                LOG.debug(f"[OrderflowV5] zero-volume rescue: proxy neutre 50/50. sym={_resolve_symbol(df)}")
+
 
 
 
