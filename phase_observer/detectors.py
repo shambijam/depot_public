@@ -511,10 +511,9 @@ def detect_orderflow_v5(
     rescue_mode: bool = False
     rescue_note: str = ""
 
-    rescue_mode = False  # ← flag pour scoring/summary
-
     # ---------- 0) VALIDATION ----------
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        
         return {
             "score": 0,
             "status": "SUSPECT",
@@ -843,15 +842,14 @@ def detect_orderflow_v5(
 
     # ---------- 8) SORTIE ----------
     summary = {
-    "delta_total": delta_total,
-    "volume_total": vol_total,
-    "mean_imbalance": imbalance_mean,
-    "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
-    "buy_ratio": float(buy_ratio),
-    "pattern_count": len(patterns),
-    "rescue": bool(rescue_mode),
-    "rescue_note": rescue_note,
-
+        "delta_total": delta_total,
+        "volume_total": vol_total,
+        "mean_imbalance": imbalance_mean,
+        "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
+        "buy_ratio": float(buy_ratio),
+        "pattern_count": len(patterns),
+        "rescue": bool(rescue_mode),
+        "rescue_note": rescue_note,
     }
     # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
     if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
@@ -859,6 +857,33 @@ def detect_orderflow_v5(
     if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
         summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
 
+    # --- LOG [ORDERFLOW] ICI (à l'intérieur de la fonction) ---
+    try:
+        _symbol = None
+        if "symbol" in df.columns and pd.notna(df["symbol"]).any():
+            _symbol = str(df["symbol"].iloc[-1])
+        elif hasattr(df, "attrs") and "symbol" in df.attrs:
+            _symbol = str(df.attrs["symbol"])
+        else:
+            _symbol = "UNKNOWN"
+
+        _cov  = f" | coverage_s={float(summary['coverage_s']):.1f}" if 'coverage_s' in summary else ""
+        _rate = f" | tick_rate={float(summary['tick_rate']):.2f}"    if 'tick_rate'  in summary else ""
+
+        LOG.info(
+            f"[ORDERFLOW][{_symbol}] "
+            f"Score={int(score)} | Status={status} | "
+            f"Δ={float(summary['delta_total']):.2f} | "
+            f"Vol={float(summary['volume_total']):.2f} | "
+            f"ImbMoy={float(summary['mean_imbalance']):.2f} | "
+            f"CVD={float(summary['cvd_final']):.2f} | "
+            f"Patterns={int(summary['pattern_count'])} | "
+            f"rescue={bool(summary['rescue'])} note={str(summary['rescue_note'])}"
+            f"{_cov}{_rate}"
+        )
+    except Exception:
+        # on ne bloque jamais la détection si le log échoue
+        pass
 
     return {
         "score": score,
@@ -867,7 +892,6 @@ def detect_orderflow_v5(
         "patterns": patterns,
         "df": df,
     }
-
 
 def footprint_validator(
     candles: pd.DataFrame,
