@@ -673,9 +673,6 @@ def detect_orderflow_v5(
                 rescue_level, rescue_note = 2, "proxy_50_50"
                 LOG.debug(f"[OrderflowV5] zero-volume rescue: proxy neutre 50/50. sym={_resolve_symbol(df)}")
 
-
-
-
     # ---------- 2) MÉTRIQUES DE BASE ----------
     df["total_volume"] = (df["bid_volume"] + df["ask_volume"]).astype("float64")
     df["delta"] = (df["ask_volume"] - df["bid_volume"]).astype("float64")
