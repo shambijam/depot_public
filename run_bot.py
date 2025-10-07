@@ -710,6 +710,10 @@ def run_single_pipeline_cycle(
                         "inf"
                     )
                 signals["current_spread_points"] = float(spread_pts)
+                # === PATCH A: expose FP/OF dans les signaux pour debug ultérieur ===
+                signals["footprint_summary"] = latest.get("footprint_summary")
+                signals["orderflow_summary"] = latest.get("orderflow_summary")
+
 
                 # Sauvegarde
                 all_assets_trading_signals[asset] = signals
@@ -733,6 +737,43 @@ def run_single_pipeline_cycle(
                 f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
             )
         print("=" * 60)
+        # === PATCH B: GATECHECK (XAUUSD only) — imprime métriques vs seuils ===
+        try:
+            sig = (all_assets_trading_signals or {}).get("XAUUSD", {})
+            if sig:
+                fp = sig.get("footprint_summary") or {}
+                of = sig.get("orderflow_summary") or {}
+
+                xcfg = (((asset_configs or {}).get("XAUUSD", {}) or {})
+                        .get("overrides", {}) or {}).get("scalping", {}) or {}
+                fpc = xcfg.get("footprint", {}) or {}
+                bt  = fpc.get("burst_tolerance", {}) or {}
+                ncp = ((xcfg.get("phase_detection", {}) or {})
+                    .get("allow_no_clear_phase_if_strong", {}) or {})
+
+                phase   = sig.get("phase")
+                conf    = sig.get("confidence_score")
+                spread  = sig.get("current_spread_points")
+                ticks   = fp.get("tick_count")
+                cov     = fp.get("coverage_s")
+                trate   = fp.get("tick_rate")
+                dlt     = (of.get("delta_total")
+                        if isinstance(of.get("delta_total"), (int, float)) else None)
+                imb     = (of.get("mean_imbalance")
+                        if isinstance(of.get("mean_imbalance"), (int, float)) else None)
+
+                print(
+                    "[GATECHECK][XAUUSD] "
+                    f"phase={phase} conf={conf:.3f if isinstance(conf,(int,float)) else conf} spread={spread} | "
+                    f"FP ticks={ticks} cov={cov}s rate={round(trate,2) if isinstance(trate,(int,float)) else trate}/s "
+                    f"(TH: ticks≥{fpc.get('m1_min_ticks','?')}, cov≥{fpc.get('m1_min_coverage_s','?')}s "
+                    f"OR burst≥{bt.get('tickrate_min','?')}/s & ≥{bt.get('coverage_s_min_burst','?')}s) | "
+                    f"OF Δ={dlt} imb={round(imb,2) if isinstance(imb,(int,float)) else imb} "
+                    f"(NCP-strong: Δ≥{ncp.get('of_delta_abs_min','?')} & rate≥{ncp.get('tickrate_min','?')}/s)"
+                )
+        except Exception as _e:
+            logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
+
 
         # Charger configs des assets (une seule fois via cache du ConfigManager)
         asset_configs = {}
