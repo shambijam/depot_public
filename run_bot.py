@@ -687,6 +687,9 @@ def run_single_pipeline_cycle(
                     )
                     or {}
                 )
+                # --- WNT-1: attacher 'latest' pour diagnostic WHY_NO_TRADE (lecture seule)
+                signals["__latest"] = latest  # permet d'accéder à footprint/orderflow summaries si non recopiés par _build_asset_trading_signals
+
                 signals.update(market_results.get("patterns", {}))
                 signals["phase"] = market_results.get(
                     "phase", signals.get("phase", "neutral")
@@ -802,6 +805,78 @@ def run_single_pipeline_cycle(
         liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
 
         if not scalping_decisions and not liquidity_decisions:
+         # --- WNT-2: WHY_NO_TRADE (une ligne par actif) ---
+            try:
+                SPREAD_MAX = {"EURUSD": 12, "GBPUSD": 18, "XAUUSD": 40}
+                # seuils minimums footprint M1 + tolérance burst (lecture seule, ne bloque rien)
+                FP_MIN = {"EURUSD": (15, 20), "GBPUSD": (15, 20), "XAUUSD": (20, 10)}  # (ticks_min, coverage_s_min)
+                BURST_TR_MIN = 2.0
+                BURST_COV_MIN = 6.0  # 5–6s ok pour XAUUSD burst court
+
+                for asset, sig in all_assets_trading_signals.items():
+                    try:
+                        phase = sig.get("phase")
+                        conf  = float(sig.get("confidence_score", 0.0))
+                        spread = float(sig.get("current_spread_points", float("inf")))
+
+                        # récupérer résumés footprint/orderflow (depuis signals ou fallback __latest)
+                        latest = sig.get("__latest", {}) or {}
+                        fp_sum = sig.get("footprint_summary") or latest.get("footprint_summary") or {}
+                        of_sum = sig.get("orderflow_summary")  or latest.get("orderflow_summary")  or {}
+
+                        ticks = int(fp_sum.get("tick_count", 0) or 0)
+                        cov   = float(fp_sum.get("coverage_s", 0.0) or 0.0)
+                        tr    = float(fp_sum.get("tick_rate", 0.0) or 0.0)
+
+                        # 1) qualité footprint M1
+                        tmin, cmin = FP_MIN.get(asset, (15, 20))
+                        reasons = []
+                        if ticks < 3:
+                            reasons.append("FP_HARD_FAIL")
+                        elif (ticks < tmin or cov < cmin) and not (tr >= BURST_TR_MIN and cov >= BURST_COV_MIN):
+                            reasons.append("FP_LOW_SAMPLE")
+
+                        # 2) spread
+                        if spread > SPREAD_MAX.get(asset, 999):
+                            reasons.append("SPREAD_TOO_WIDE")
+
+                        # 3) confiance phase
+                        if conf < 0.52:
+                            reasons.append("CONF_LOW")
+
+                        # 4) direction (vote simple CVD/Δ OF + Δ FP)
+                        votes = 0
+                        try:
+                            cvd = float(of_sum.get("cvd_final", of_sum.get("CVD", 0.0)) or 0.0)
+                            if cvd != 0: votes += 1 if cvd > 0 else -1
+                        except Exception:
+                            pass
+                        try:
+                            delt_of = float(of_sum.get("delta_total", of_sum.get("Δ", 0.0)) or 0.0)
+                            if delt_of != 0: votes += 1 if delt_of > 0 else -1
+                        except Exception:
+                            pass
+                        try:
+                            delt_fp = float(fp_sum.get("delta_total", 0.0) or 0.0)
+                            if delt_fp != 0: votes += 1 if delt_fp > 0 else -1
+                        except Exception:
+                            pass
+                        if abs(votes) < 2:
+                            reasons.append("DIR_UNCLEAR")
+
+                        if not reasons:
+                            reasons = ["NO_SETUP"]
+
+                        logger.info(
+                            f"[WHY_NO_TRADE][{asset}] phase={phase} conf={conf:.3f} spread={spread} | "
+                            f"FP(ticks={ticks},win={cov:.0f}s,tr={tr:.2f}/s) | reasons=" + ",".join(reasons)
+                        )
+                    except Exception as _e:
+                        logger.info(f"[WHY_NO_TRADE][{asset}] DIAG_ERROR: {_e}")
+            except Exception:
+                pass
+            # --- /WNT-2 ---
+   
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
