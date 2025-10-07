@@ -529,13 +529,7 @@ def detect_orderflow_v5(
     for _col in ("BUY","SELL","buy_ticks","sell_ticks","ticks_buy","ticks_sell","t_buy","t_sell","buys","sells"):
         if _col in df.columns:
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
-
-    # Alias standards si seul BUY/SELL sont fournis
-    if "BUY" in df.columns and "buy_ticks" not in df.columns:
-        df["buy_ticks"] = df["BUY"]
-    if "SELL" in df.columns and "sell_ticks" not in df.columns:
-        df["sell_ticks"] = df["SELL"]
-
+   
     # Crée les alias standards si on a uniquement BUY/SELL
     if "BUY" in df.columns and "buy_ticks" not in df.columns:
         df["buy_ticks"] = df["BUY"]
@@ -801,12 +795,11 @@ def detect_orderflow_v5(
     vol_total = float(df["total_volume"].sum())
 
     # ---------- 7) SCORE GLOBAL ----------
+    score = 50
     # fallback safe si le haut de la fonction n'a pas encore migré vers rescue_level
     rescue_level = int(locals().get("rescue_level", 1 if locals().get("rescue_mode", False) else 0))
     rescue_note = locals().get("rescue_note", "")
-
-    score = 50
-
+    
     # Intensité directionnelle
     if vol_total > 0:
         score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100.0)  # +0..30
@@ -941,7 +934,10 @@ def detect_orderflow_v5(
 
                 cov  = f" | coverage_s={float(summary['coverage_s']):.1f}" if 'coverage_s' in summary else ""
                 rate = f" | tick_rate={float(summary['tick_rate']):.2f}"    if 'tick_rate'  in summary else ""
-                rescue_txt = f" | rescue=True note={summary.get('rescue_note','')}" if summary.get('rescue') else ""
+                rescue_txt = (
+                    f" | rescue=True level={summary.get('rescue_level')} kind={summary.get('rescue_kind')}"
+                    f" note={summary.get('rescue_note','')}"
+                ) if summary.get('rescue') else ""
 
                 LOG.info(
                     f"[ORDERFLOW][{symbol}] "
