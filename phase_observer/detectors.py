@@ -835,10 +835,13 @@ def detect_orderflow_v5(
         if (abs(imbalance_mean - 0.5) >= 0.20) or (vol_total > 0 and abs(delta_total) >= 0.20 * vol_total):
             score += 5
 
-
     score = int(np.clip(round(score), 0, 100))
     status = "VALID" if score >= 70 else "SUSPECT"
 
+    # Garde-fou strict : si volumes reconstruits → jamais VALID
+    if rescue_mode:
+        status = "SUSPECT"
+        score = min(score, 69)  # on évite tout “VALID” maquillé
 
     # ---------- 8) SORTIE ----------
     summary = {
@@ -851,6 +854,13 @@ def detect_orderflow_v5(
         "rescue": bool(rescue_mode),
         "rescue_note": rescue_note,
     }
+    # Biais de flux et conviction (0..1) pour le DecisionPipeline
+    bias = "SELL" if imbalance_mean <= 0.48 else ("BUY" if imbalance_mean >= 0.52 else "NEUTRAL")
+    conviction = float(min(1.0, abs(imbalance_mean - 0.5) / 0.25))  # 0.0 à 1.0 (0.25 = 25pts d’écart)
+
+    summary["bias"] = bias
+    summary["conviction"] = round(conviction, 3)
+    
     # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
     if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
         summary["coverage_s"] = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
