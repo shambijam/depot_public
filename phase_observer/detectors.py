@@ -589,7 +589,8 @@ def detect_orderflow_v5(
 
     # ---------- 1.bis) ZERO-VOLUME RESCUE (évite Vol=0, Δ=0, Imb=0.50) ----------
     # Si la somme ask+bid est nulle sur la fenêtre, on reconstruit des volumes proxy.
-    if float((df["ask_volume"].sum() + df["bid_volume"].sum())) == 0.0:
+    if float((df["ask_volume"].sum() + df["bid_volume"].sum())) <= 1e-12:
+
         # 1) Si on a des compteurs de ticks buy/sell
         buy_ticks  = _safe_series("buy_ticks",  aliases=("ticks_buy","t_buy","buys","BUY"),  default=np.nan)
         sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell","t_sell","sells","SELL"), default=np.nan)
@@ -782,7 +783,8 @@ def detect_orderflow_v5(
     # ---------- 6) MÉTRIQUES GLOBALES ----------
     buys = int((df["dominance"] == "buyers").sum())
     sells = int((df["dominance"] == "sellers").sum())
-    buy_ratio = buys / max(1, buys + sells)
+    bs = buys + sells
+    buy_ratio = (buys / bs) if bs > 0 else 0.5
 
     if (df["total_volume"] > 0).any():
         imbalance_mean = float(
@@ -895,7 +897,10 @@ def detect_orderflow_v5(
             if c in df.columns:
                 ticks_total += pd.to_numeric(df[c], errors="coerce").fillna(0.0).sum()
 
-        if summary.get("rescue_level") == 1 and has_tick_cols and ticks_total > 0:
+        if (summary.get("rescue_level") == 1
+        and summary.get("rescue_note") != "tick_counters"
+        and has_tick_cols and ticks_total > 0):
+
             LOG.warning("[OrderflowV5] ALERT: rescue SOFT utilisé alors que des compteurs de ticks sont présents. "
                         "Vérifie la construction d'ask/bid_volume en amont.")
     except Exception:
@@ -922,13 +927,16 @@ def detect_orderflow_v5(
         if symbol:
             # 3) anti-doublon: on ne log que si la signature change
             sig = (
-                symbol,
-                int(score),
-                status,
-                round(summary["delta_total"], 2),
-                round(summary["volume_total"], 2),
-                bool(summary["rescue"]),
-            )
+            symbol,
+            int(score),
+            status,
+            round(summary["delta_total"], 2),
+            round(summary["volume_total"], 2),
+            bool(summary["rescue"]),
+            int(summary.get("rescue_level", 0)),
+            str(summary.get("rescue_kind", "none")),
+        )
+
             if not hasattr(detect_orderflow_v5, "_last_log_sig") or detect_orderflow_v5._last_log_sig != sig:
                 detect_orderflow_v5._last_log_sig = sig
 
@@ -938,6 +946,7 @@ def detect_orderflow_v5(
                     f" | rescue=True level={summary.get('rescue_level')} kind={summary.get('rescue_kind')}"
                     f" note={summary.get('rescue_note','')}"
                 ) if summary.get('rescue') else ""
+
 
                 LOG.info(
                     f"[ORDERFLOW][{symbol}] "
