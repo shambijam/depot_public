@@ -525,6 +525,16 @@ def detect_orderflow_v5(
     # On travaille sur une copie, index propre
     df = df.copy()
     df.reset_index(drop=True, inplace=True)
+    # --- NORMALISATION TÔT DES COMPTEURS TICKS ---
+    for _col in ("BUY","SELL","buy_ticks","sell_ticks","ticks_buy","ticks_sell","t_buy","t_sell","buys","sells"):
+        if _col in df.columns:
+            df[_col] = pd.to_numeric(df[_col], errors="coerce")
+
+    # Crée les alias standards si on a uniquement BUY/SELL
+    if "BUY" in df.columns and "buy_ticks" not in df.columns:
+        df["buy_ticks"] = df["BUY"]
+    if "SELL" in df.columns and "sell_ticks" not in df.columns:
+        df["sell_ticks"] = df["SELL"]
 
     # ---------- Helper: toujours renvoyer une Series float ----------
     def _safe_series(
@@ -873,7 +883,22 @@ def detect_orderflow_v5(
         summary["coverage_s"] = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
     if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
         summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
+    # --- SELF-CHECK : alerte si rescue alors que des ticks existent ---
+    try:
+        has_tick_cols = any(c in df.columns for c in (
+            "buy_ticks","ticks_buy","t_buy","buys","BUY",
+            "sell_ticks","ticks_sell","t_sell","sells","SELL"
+        ))
+        ticks_total = 0.0
+        for c in ("buy_ticks","ticks_buy","t_buy","buys","BUY","sell_ticks","ticks_sell","t_sell","sells","SELL"):
+            if c in df.columns:
+                ticks_total += pd.to_numeric(df[c], errors="coerce").fillna(0.0).sum()
 
+        if summary.get("rescue") and has_tick_cols and ticks_total > 0:
+            LOG.warning("[OrderflowV5] ALERT: rescue=True alors que des compteurs de ticks sont présents et non-nuls. Vérifie l'injection des colonnes en amont.")
+    except Exception:
+        pass
+           
     # --- LOG [ORDERFLOW] (interne, anti-UNKNOWN & anti-doublon) ---
     try:
         # 1) Résolution robuste du symbole
