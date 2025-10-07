@@ -508,7 +508,7 @@ def detect_orderflow_v5(
 
     LOG = logging.getLogger("OrderflowDetector")
     # --- FLAGS RESCUE ---
-    rescue_mode: bool = False
+    rescue_level: int = 0
     rescue_note: str = ""
 
     # ---------- 0) VALIDATION ----------
@@ -525,10 +525,16 @@ def detect_orderflow_v5(
     # On travaille sur une copie, index propre
     df = df.copy()
     df.reset_index(drop=True, inplace=True)
-    # --- NORMALISATION TÔT DES COMPTEURS TICKS ---
+   # --- [PATCH A] NORMALISATION TÔT DES COMPTEURS TICKS ---
     for _col in ("BUY","SELL","buy_ticks","sell_ticks","ticks_buy","ticks_sell","t_buy","t_sell","buys","sells"):
         if _col in df.columns:
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
+
+    # Alias standards si seul BUY/SELL sont fournis
+    if "BUY" in df.columns and "buy_ticks" not in df.columns:
+        df["buy_ticks"] = df["BUY"]
+    if "SELL" in df.columns and "sell_ticks" not in df.columns:
+        df["sell_ticks"] = df["SELL"]
 
     # Crée les alias standards si on a uniquement BUY/SELL
     if "BUY" in df.columns and "buy_ticks" not in df.columns:
@@ -605,7 +611,7 @@ def detect_orderflow_v5(
             df["bid_volume"] = sell_ticks.fillna(0.0).astype("float64")
             df["aggressor_buy_vol"]  = df["ask_volume"].copy()
             df["aggressor_sell_vol"] = df["bid_volume"].copy()
-            rescue_mode, rescue_note = True, "tick_counters"
+            rescue_level, rescue_note = max(rescue_level, 1), "tick_counters"
             LOG.info("[OrderflowV5] zero-volume rescue: tick counters utilisés.")
         else:
             # laisse inchangé le reste (vol_total_row -> split -> proxy)
@@ -649,8 +655,7 @@ def detect_orderflow_v5(
                 df["bid_volume"]  = (vol_total_row.fillna(0.0) * short_w).astype("float64")
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
-
-                rescue_mode, rescue_note = True, "split_dynamic_price_ohlc"
+                rescue_level, rescue_note = max(rescue_level, 1), "split_dynamic_price_ohlc"
                 LOG.info("[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc.")
 
             else:
@@ -660,7 +665,7 @@ def detect_orderflow_v5(
                 df["bid_volume"]  = (proxy * 0.5).astype("float64")
                 df["aggressor_buy_vol"]  = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
-                rescue_mode, rescue_note = True, "proxy_50_50"
+                rescue_level, rescue_note = 2, "proxy_50_50"
                 LOG.info("[OrderflowV5] zero-volume rescue: proxy neutre 50/50.")
 
 
@@ -796,6 +801,10 @@ def detect_orderflow_v5(
     vol_total = float(df["total_volume"].sum())
 
     # ---------- 7) SCORE GLOBAL ----------
+    # fallback safe si le haut de la fonction n'a pas encore migré vers rescue_level
+    rescue_level = int(locals().get("rescue_level", 1 if locals().get("rescue_mode", False) else 0))
+    rescue_note = locals().get("rescue_note", "")
+
     score = 50
 
     # Intensité directionnelle
@@ -838,27 +847,23 @@ def detect_orderflow_v5(
     elif coverage_s is not None and coverage_s >= 45.0:
         score += 3
 
-    # Prudence si volumes reconstruits (rescue_mode)
-    if rescue_mode:
-        # malus léger + plafonnement
-        score -= 5
-        score = min(score, 85)
-
-        # adoucir la pénalité d'échantillon si <10 lignes (on rend la pénalité moitié moins sévère)
-        if rows < 10:
-            score += 0.5 * row_pen  # on rend une partie de la pénalité
-
-        # bonus si signal vraiment clair malgré rescue
-        if (abs(imbalance_mean - 0.5) >= 0.20) or (vol_total > 0 and abs(delta_total) >= 0.20 * vol_total):
-            score += 5
+    # Ajustements selon le niveau de rescue
+    if rescue_level == 1:
+        # SOFT (tick_counters ou split OHLC) : léger malus, VALID autorisé
+        score -= 3
+        score = min(score, 90)
+    elif rescue_level == 2:
+        # HARD (proxy 50/50) : gros malus + plafonnement
+        score -= 8
+        score = min(score, 69)
 
     score = int(np.clip(round(score), 0, 100))
     status = "VALID" if score >= 70 else "SUSPECT"
 
-    # Garde-fou strict : si volumes reconstruits → jamais VALID
-    if rescue_mode:
+    # Garde-fou strict UNIQUEMENT pour rescue hard
+    if rescue_level == 2:
         status = "SUSPECT"
-        score = min(score, 69)  # on évite tout “VALID” maquillé
+        score = min(score, 69)
 
     # ---------- 8) SORTIE ----------
     summary = {
@@ -868,22 +873,25 @@ def detect_orderflow_v5(
         "cvd_final": float(df["cvd_smoothed"].iloc[-1]) if len(df) else 0.0,
         "buy_ratio": float(buy_ratio),
         "pattern_count": len(patterns),
-        "rescue": bool(rescue_mode),
+        "rescue": bool(rescue_level > 0),
         "rescue_note": rescue_note,
+        "rescue_level": int(rescue_level),
+        "rescue_kind": ("none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard")),
     }
+
     # Biais de flux et conviction (0..1) pour le DecisionPipeline
     bias = "SELL" if imbalance_mean <= 0.48 else ("BUY" if imbalance_mean >= 0.52 else "NEUTRAL")
-    conviction = float(min(1.0, abs(imbalance_mean - 0.5) / 0.25))  # 0.0 à 1.0 (0.25 = 25pts d’écart)
-
+    conviction = float(min(1.0, abs(imbalance_mean - 0.5) / 0.25))  # 0.0 → 1.0 (0.25 = 25pts d’écart)
     summary["bias"] = bias
     summary["conviction"] = round(conviction, 3)
-    
+
     # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
     if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
         summary["coverage_s"] = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
     if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
         summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
-    # --- SELF-CHECK : alerte si rescue alors que des ticks existent ---
+
+    # --- SELF-CHECK : alerte si rescue SOFT alors que des ticks existent et non-nuls ---
     try:
         has_tick_cols = any(c in df.columns for c in (
             "buy_ticks","ticks_buy","t_buy","buys","BUY",
@@ -894,10 +902,12 @@ def detect_orderflow_v5(
             if c in df.columns:
                 ticks_total += pd.to_numeric(df[c], errors="coerce").fillna(0.0).sum()
 
-        if summary.get("rescue") and has_tick_cols and ticks_total > 0:
-            LOG.warning("[OrderflowV5] ALERT: rescue=True alors que des compteurs de ticks sont présents et non-nuls. Vérifie l'injection des colonnes en amont.")
+        if summary.get("rescue_level") == 1 and has_tick_cols and ticks_total > 0:
+            LOG.warning("[OrderflowV5] ALERT: rescue SOFT utilisé alors que des compteurs de ticks sont présents. "
+                        "Vérifie la construction d'ask/bid_volume en amont.")
     except Exception:
         pass
+
            
     # --- LOG [ORDERFLOW] (interne, anti-UNKNOWN & anti-doublon) ---
     try:
