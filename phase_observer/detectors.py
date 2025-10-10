@@ -1322,6 +1322,62 @@ class Detectors:
     def __init__(self, logger=None, config_manager=None):
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
+        
+    def detect_combos(self, df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Wrapper classe pour la fonction de module `detect_combos(df, patterns)`.
+        Retourne un dict compatible avec le pipeline:
+            {
+              "raw": List[Optional[List[Dict]]],  # liste alignée sur df
+              "latest": Dict | None,              # dernier signal (le + récent)
+              "latest_index": int | None,         # index df du dernier signal
+              "candles": List[Dict],              # tous les signaux à latest_index
+              "count": int                        # total d'événements
+            }
+        """
+        try:
+            raw = detect_combos(df, patterns)  # fonction de module déjà définie
+        except Exception as e:
+            self.logger.warning(f"[Detectors.detect_combos] erreur: {e}", exc_info=False)
+            return {"raw": [], "latest": None, "latest_index": None, "candles": [], "count": 0}
+
+        latest_idx = None
+        latest_sig = None
+
+        if isinstance(raw, list) and raw:
+            # Parcourt en arrière pour trouver la dernière bougie qui a des signaux
+            for i in range(len(raw) - 1, -1, -1):
+                row_sigs = raw[i]
+                if isinstance(row_sigs, list) and row_sigs:
+                    latest_idx = i
+                    # Heuristique: on prend le dernier élément de la liste (le plus "récent" pour cette bougie)
+                    latest_sig = row_sigs[-1] if isinstance(row_sigs[-1], dict) else None
+                    break
+
+        total_count = sum(len(x) for x in raw if isinstance(x, list))
+
+        return {
+            "raw": raw,
+            "latest": latest_sig,
+            "latest_index": latest_idx,
+            "candles": (raw[latest_idx] if (latest_idx is not None and isinstance(raw[latest_idx], list)) else []),
+            "count": int(total_count),
+        }
+        
+    def detect_orderflow_v5(self, ticks_df: pd.DataFrame, imbalance_threshold: float = 0.7, cvd_smoothing: int = 5) -> Dict[str, Any]:
+        try:
+            return detect_orderflow_v5(ticks_df, imbalance_threshold=imbalance_threshold, cvd_smoothing=cvd_smoothing)
+        except Exception as e:
+            self.logger.warning(f"[Detectors.detect_orderflow_v5] erreur: {e}", exc_info=False)
+            return {"score": 0, "status": "SUSPECT", "summary": {"error": str(e)}, "patterns": [], "df": pd.DataFrame()}
+
+    def validate_last_candle_footprint_safe(self, candles: pd.DataFrame, ticks: pd.DataFrame) -> Dict[str, Any]:
+        try:
+            return footprint_validator(candles, ticks, candle_index=None)
+        except Exception as e:
+            self.logger.warning(f"[Detectors.footprint] erreur: {e}", exc_info=False)
+            return {"score": 0, "status": "SUSPECT", "summary": {"error": str(e)}, "footprint_df": pd.DataFrame(), "candle": {}}
+  
 
     def validate_last_candle_footprint(
         self, candles: pd.DataFrame, ticks: pd.DataFrame

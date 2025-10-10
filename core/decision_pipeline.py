@@ -10,12 +10,18 @@ from datetime import datetime, UTC, timezone
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from core.ai_interface import AIInterface
-from core.utils import ConfigValidationError, TradeStatus
-from typing import Any, Dict, List, Optional, Tuple
+from core.utils import ConfigValidationError, TradeStatus, normalize_levels
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
-from core.utils import normalize_levels
 from phase_observer.market_analyzer import MarketAnalyzer
+
+# PATCH PIPE-IMP-1 — import du pipeline (chemin: strategy/pipeline.py)
+try:
+    from strategy.pipeline import ScalpingPipeline
+except Exception:
+    ScalpingPipeline = None
+
+
 
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
@@ -96,6 +102,34 @@ class DecisionPipeline:
             f"DecisionPipeline initialisé (phase_observer={'present' if self.phase_observer else 'absent'}) "
             f"| debug_confidence_logging={self.debug_confidence_logging}"
         )
+        # --- PATCH A: Features + hook Arbiter (scalping sans PhaseObserver) ---
+        try:
+            self.features = (self.config_manager.get("features") or {})
+        except Exception:
+            self.features = {}
+
+        # True = on laisse le PhaseObserver côté scalping ; False = on le bypasse
+        self.scalping_phase_observer_enabled = bool(
+            self.features.get("scalping_phase_observer", False)
+        )
+
+        # Hook optionnel : si un Arbiter est attaché ailleurs (ex: bootstrap), récupère-le
+        # (sinon, laisse à None: le code en tiendra compte plus bas)
+        self.arbiter = getattr(self, "arbiter", None)
+
+        self.logger.info(
+            f"[INIT] scalping_phase_observer_enabled={self.scalping_phase_observer_enabled} | arbiter={'present' if self.arbiter else 'absent'}"
+        )
+        # --- SCALPING PIPELINE (phase-free) ---
+        try:
+            self.scalping_pipeline = ScalpingPipeline(
+                config_manager=self.config_manager,
+                arbiter=getattr(self, "arbiter", None),
+                logger=self.logger
+            )
+        except Exception as _e:
+            self.logger.warning(f"[INIT] ScalpingPipeline indisponible: {_e}")
+            self.scalping_pipeline = None
 
 
     def get_asset_config(self, asset: str) -> Dict[str, Any]:
@@ -217,18 +251,21 @@ class DecisionPipeline:
 
             # --- SCALPING (XAUUSD only) ---
             if "XAUUSD" in signals:
+                # --- PATCH B: PhaseObserver conditionnel pour scalping ---
+                inject_phase = self.phase_observer if self.scalping_phase_observer_enabled else None
                 scalping = self.strategy_manager.get_strategy_instance(
                     "scalping",
                     per_asset="XAUUSD",
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
-                        "phase_observer": getattr(self, "phase_observer", None),
+                        "phase_observer": inject_phase,  # <-- conditionnel
                         "ai_interface": getattr(self, "ai_interface", None),
                         "risk_manager": getattr(self, "risk_manager", None),
                         "audit_logger": logging.getLogger("AuditLogger"),
                     },
                     strict=False,
                 )
+
                 if scalping:
                     try:
                         dec = scalping.evaluate_entry("XAUUSD", analyzed_context, signals["XAUUSD"])
@@ -796,9 +833,26 @@ class DecisionPipeline:
     ) -> Optional[int]:
         """
         Compte les bougies M1 écoulées depuis l'ouverture (si DF indexé en datetime).
-        Fallback: None si impossible.
+        Renvoie None si impossible (données manquantes / open_time None).
         """
-        df = mkt.get
+        try:
+            df = mkt.get("annotated_rates_df_m1") or mkt.get("annotated_rates_df")
+            if df is None or len(df) == 0 or open_time is None:
+                return None
+
+            # Timestamps
+            if "time" in df.columns:
+                ts = pd.to_datetime(df["time"], errors="coerce", utc=True)
+            elif isinstance(df.index, pd.DatetimeIndex):
+                ts = df.index.tz_localize("UTC") if df.index.tz is None else df.index
+            else:
+                return None
+
+            start = pd.to_datetime(open_time, unit="s", utc=True)
+            return int((ts >= start).sum())
+        except Exception:
+            return None
+
 
     def _quantize_volume(
         self, vol: float, vmin: float, vmax: float, vstep: float
@@ -898,23 +952,25 @@ class DecisionPipeline:
             print(f"⚠️ [CORE] Erreur import stratégie: {e}")
             return {}
 
-        # --- Priorité 1 : Scalping sur XAUUSD ---
+        # --- Priorité 1 : Scalping via Pipeline (phase-free) ---
         if "XAUUSD" in signals:
             try:
-                strat = ScalpingStrategy(self.config_manager, current_config)
-                decision = strat.evaluate_entry(
-                    "XAUUSD",
-                    context.get("market_data", {}).get("XAUUSD", {}).get("rates_df"),
-                    signals.get("XAUUSD", {}),
-                    context,
-                    current_config,
+                if getattr(self, "scalping_pipeline", None) is None:
+                    # Fallback ultra-sécurisé au cas où l'init a échoué
+                    from strategy.pipeline import ScalpingPipeline as _SP
+                    self.scalping_pipeline = _SP(self.config_manager, arbiter=getattr(self, "arbiter", None), logger=self.logger)
+
+                decision = self.scalping_pipeline.run(
+                    asset="XAUUSD",
+                    context=context,
+                    current_config=current_config
                 )
-                if decision:
+                if isinstance(decision, dict) and decision:
                     trade_decision = decision
-                    self.logger.info("[CORE] Signal scalping retenu sur XAUUSD")
-                    print("✅ [CORE] Décision scalping détectée sur XAUUSD")
+                    self.logger.info("[CORE] Signal scalping (pipeline) retenu sur XAUUSD")
+                    print("✅ [CORE] Décision scalping (pipeline) détectée sur XAUUSD")
             except Exception as e:
-                self.logger.error(f"[CORE] Erreur evaluate_entry scalping: {e}")
+                self.logger.error(f"[CORE] Erreur ScalpingPipeline.run: {e}")
 
         # --- Priorité 2 : Liquidity sur EURUSD / GBPUSD ---
         if not trade_decision:
@@ -1008,6 +1064,21 @@ class DecisionPipeline:
         print(
             f"📝 [CORE] Décision normalisée → {normalized_action} {asset_raw} | type={order_type}"
         )
+        # --- PATCH C (ARB-01): Gate Arbiter avant exécution ---
+        try:
+            chosen_strategy_name = str(current_config.get("strategy_name", "unknown")).lower()
+        except Exception:
+            chosen_strategy_name = "unknown"
+
+        if self.arbiter and normalized_action in {"BUY", "SELL"}:
+            try:
+                ok, reason = self.arbiter.can_open(asset_raw, normalized_action, chosen_strategy_name)
+            except Exception as _e:
+                ok, reason = True, f"ARB_ERROR:{_e}"
+            if not ok:
+                self.logger.info(f"[ARB.BLOCK] {asset_raw} {normalized_action} par '{chosen_strategy_name}' refusé: {reason}")
+                print(f"⛔ [ARB] Blocage: {asset_raw} {normalized_action} ({reason})")
+                return {}
 
         # ==========================================================
         # 📊 Analyse patterns / bougies (Desk Pro Mode via MarketAnalyzer)
@@ -1257,12 +1328,13 @@ class DecisionPipeline:
                 md_asset = (context.get("market_data", {}) or {}).get(
                     asset_raw, {}
                 ) or {}
+                # --- PATCH E: utiliser uniquement `si` (asset_sig supprimé) ---
                 si = (
                     md_asset.get("symbol_info")
                     or current_config.get("symbol_info")
                     or {}
                 ) or {}
-                point = float(si.get("point") or asset_sig.get("point") or 0.0001)
+                point = float(si.get("point") or 0.0001)
                 digits = int(si.get("digits") or 5)
                 pip_points = 10.0 if digits in (3, 5) else 1.0
                 pip_size = point * pip_points
@@ -1535,6 +1607,18 @@ class DecisionPipeline:
 
                     trade_decision["execution_status"] = status
                     trade_decision["executed"] = status in {"filled", "placed"}
+                    # --- PATCH D (ARB-02): Register trade auprès de l’Arbiter quand exécuté ---
+                    try:
+                        if self.arbiter and trade_decision.get("executed"):
+                            self.arbiter.register_trade(
+                                asset_raw,
+                                normalized_action,
+                                chosen_strategy_name
+                            )
+                            self.logger.info(f"[ARB.REG] {asset_raw} {normalized_action} enregistré (owner={chosen_strategy_name})")
+                    except Exception as _e:
+                        self.logger.debug(f"[ARB.REG] Ignoré (err={_e})")
+
                     meta = trade_decision.setdefault("meta", {})
                     meta["execution_result"] = {
                         k: exec_res.get(k)

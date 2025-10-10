@@ -6,6 +6,7 @@ import sys
 import yaml
 import os
 import shutil
+import time
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, UTC, timedelta
@@ -55,8 +56,11 @@ class AuditLogger:
         self.backup_dir = Path(self.config_manager.get("paths.backup_dir", self.reports_dir / "backups")) if self.config_manager else self.reports_dir / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
-
         self.logger.info("AuditLogger initialisé.")
+        # PATCH G1.2: registres internes
+        self._named_loggers: Dict[str, logging.Logger] = {}
+        self._dedup_cache: Dict[str, float] = {}  # key -> last_ts (monotonic)
+
 
     def _setup_logger(self) -> None:
         """
@@ -603,3 +607,45 @@ class AuditLogger:
                     # Après avoir pivoté un fichier par taille, le système devra écrire un nouveau log propre.
 
         self.logger.info(f"Rotation des logs d'audit terminée. Nombre de fichiers restants : {len(list(log_dir.glob(f'{audit_file_name_pattern}*')))}")
+        
+         # === PATCH G1.3: Fabrique de loggers dédiés (pas de nouveau module) ===
+    def get_named_logger(self, name: str, relative_path: str, level: str = "INFO") -> logging.Logger:
+        """
+        Retourne (et crée si nécessaire) un logger dédié écrivant dans logs/<relative_path>.
+        Exemple: get_named_logger("SCALPING", "scalping/scalping_pipeline.log")
+        """
+        if name in self._named_loggers:
+            return self._named_loggers[name]
+
+        lg = logging.getLogger(f"AuditLogger.{name}")
+        # éviter les handlers dupliqués
+        if lg.hasHandlers():
+            lg.handlers.clear()
+
+        target_path = self.logs_dir / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fh = logging.FileHandler(target_path, mode="a", encoding="utf-8")
+        fmt = logging.Formatter("%(asctime)s - %(levelname)s - [" + name + "] %(message)s")
+        fh.setFormatter(fmt)
+        lg.addHandler(fh)
+
+        lg.setLevel(getattr(logging, level.upper(), logging.INFO))
+        lg.propagate = False
+
+        self._named_loggers[name] = lg
+        self.logger.info(f"[NamedLogger] '{name}' prêt → {target_path}")
+        return lg
+
+    def allow_once(self, key: str, ttl_s: int = 10) -> bool:
+        """
+        Anti-spam simple: retourne True si on doit loguer maintenant, False si un log identique
+        a déjà eu lieu dans les ttl_s dernières secondes.
+        """
+        now = time.monotonic()
+        last = self._dedup_cache.get(key, 0.0)
+        if now - last >= ttl_s:
+            self._dedup_cache[key] = now
+            return True
+        return False
+   

@@ -18,6 +18,10 @@
     "backup_dir": "output/backups/",
     "ai_audit": "config/ai_audit/"
   },
+  "features": {
+    "scalping_phase_observer": false,
+    "liquidity_phase_observer": true
+  },
   "data_collection": {
     "default_timeframe": "M1",
     "default_bars_count": 200
