@@ -88,6 +88,23 @@ class ScalpingPipeline:
 
             # 0) Dataframes marché (M1)
             df_m1 = self._extract_df_m1(context, asset)
+            # --- PATCH CFG-MERGE-01: merge config de l'actif dans current_config ---
+            try:
+                asset_cfg = (context.get("asset_configs", {}) or {}).get(asset, {}) or {}
+                if asset_cfg:
+                    from copy import deepcopy
+                    def _deep_merge(a, b):
+                        for k, v in (b or {}).items():
+                            if isinstance(v, dict) and isinstance(a.get(k), dict):
+                                a[k] = _deep_merge(a[k], v)
+                            else:
+                                a[k] = v
+                        return a
+                    # on merge pour que guardrails/spread/ticks/conviction soient bien pris depuis la conf de l'actif
+                    current_config = _deep_merge(deepcopy(current_config or {}), asset_cfg)
+            except Exception as _e:
+                self.logger.debug(f"[CFG] Merge asset_cfg skipped: {_e}")
+
 
             # 1) Signaux déjà présents
             raw_sig = self._get_existing_signals(context, asset)

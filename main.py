@@ -547,7 +547,6 @@ def main(args: argparse.Namespace) -> None:
             # Injecter dans le contexte pipeline
             decision_pipeline.extra_context = {"live_pre_signals": live_pre_signals}
 
-            print("[Pipeline] Lancement du pipeline de décision...")
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
                 decision_pipeline,

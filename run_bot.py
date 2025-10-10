@@ -454,11 +454,6 @@ def run_single_pipeline_cycle(
             return _N()
 
     logger = logging.getLogger(__name__)
-    print(f"🔍 [PIPELINE] Cycle #{cycle_count} - Début de run_single_pipeline_cycle")
-    logger.info(
-        f"--- Démarrage du Cycle de Pipeline #{cycle_count} (Trades Aujourd'hui: {daily_trade_count}) ---"
-    )
-
     trade_executed_successfully = False
     global_context: Dict[str, Any] = {}
 
@@ -1035,9 +1030,7 @@ def run_single_pipeline_cycle(
             get_tracker_from_context(global_context).emit_summary(logger)
         except Exception:
             pass
-        logger.info(f"--- Fin du Cycle de Pipeline #{cycle_count} ---")
         return trade_executed_successfully
-
 
 def main(args: argparse.Namespace) -> None:
     """
