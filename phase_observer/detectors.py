@@ -2832,13 +2832,7 @@ class Detectors:
         if row.get("eqh_eql_detected", False):
             return "liquidity_eqh_eql"
 
-        # --- Fallback divers ---
-        if row.get("institutional_setup", False):
-            return "smc_setup"
-        elif row.get("fvg_detected", False):
-            return "fvg_opportunity"
-
-        return "no_clear_phase"
+       
 
     def determine_phase(self, market_data: pd.DataFrame) -> str:
         """

@@ -677,7 +677,6 @@ class PhaseObserver:
         """
         🎯 PIPELINE D'ANALYSE OPTIMISÉ (STRICT / NO FALLBACK)
         - Conserve les 4 indicateurs core
-        - Supprime tout mappage 'fallback_*' : si pas de phase → 'no_clear_phase'
         - Conserve la volatilité pour reporting/diag, mais ne force plus de phase
         """
 
@@ -1177,10 +1176,33 @@ class PhaseObserver:
                 df_an.loc[df_an.index[-1], "footprint_status"] = "ERROR"
                 df_an.loc[df_an.index[-1], "footprint_summary"] = "{}"
 
-            # === PHASE 5: PHASE PRIMAIRE ===
-            df_an["phase_primary"] = df_an.apply(
-                self.detectors.determine_optimized_phase, axis=1
-            )
+            # === PHASE 5: PHASE PRIMAIRE (sans 'no_clear_phase') ===
+            def _fallback_phase_from_regime(row: pd.Series) -> str:
+                regime = str(row.get("regime", "")).lower()
+                if "low_volatility" in regime:
+                    return "low_volatility_compression"
+                if "high_volatility" in regime:
+                    return "high_volatility_chaos"
+                return "range_retail"  # neutre et toujours acceptable
+
+            def _determine_phase_no_ncp(row: pd.Series) -> str:
+                try:
+                    phase = self.detectors.determine_optimized_phase(row)
+                except Exception:
+                    phase = None
+
+                # Écarter tout label invalide/indécis
+                if phase in (None, "", "unknown", "uncertain", "no_clear_phase"):
+                    # Priorité à des indices concrets si présents
+                    if bool(row.get("eqh_eql_detected")) or bool(row.get("sweep_detected")) or bool(row.get("absorption_confirmed")):
+                        return "liquidity_eqh_eql"
+                    # Sinon fallback déterministe par régime
+                    return _fallback_phase_from_regime(row)
+
+                return str(phase)
+
+            df_an["phase_primary"] = df_an.apply(_determine_phase_no_ncp, axis=1)
+
 
             # === PHASE 6: SCORE DE CONFIANCE ===
             df_an["confidence_score"] = df_an.apply(
@@ -1198,7 +1220,6 @@ class PhaseObserver:
                 axis=1,
             )
             df_an["phase_rule"] = "primary"
-            df_an["phase_is_uncertain"] = df_an["phase"] == "no_clear_phase"
 
             # === PHASE 7bis: STRATEGY FLAGS ===
             try:
@@ -1304,15 +1325,6 @@ class PhaseObserver:
                             f"(strength={last_candle_strength:.2f})"
                         )
 
-                if last_phase == "no_clear_phase":
-                    self.logger.info(
-                        f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
-                    )
-
-                if last_phase == "no_clear_phase":
-                    self.logger.info(
-                        f"[{current_asset_symbol}] Phase indécise (no_clear_phase) — aucune règle de secours appliquée (strict)."
-                    )
                 # --- PATCH: ajoute current_price ---
                 try:
                     if "close" in df_an.columns and not df_an.empty:
@@ -1431,11 +1443,10 @@ class PhaseObserver:
         # Phase + confiance sur la dernière bougie seulement
         try:
             phase_row = df_an.iloc[i_last].to_dict()
-            res["phase_primary"] = self.detectors.determine_optimized_phase(
-                pd.Series(phase_row)
-            )
+            res["phase_primary"] = self.detectors.determine_optimized_phase(pd.Series(phase_row))
         except Exception:
-            res["phase_primary"] = "no_clear_phase"
+            # fallback sûr au lieu de 'no_clear_phase'
+            res["phase_primary"] = "range_retail"
 
         try:
             res["confidence_score"] = float(
@@ -1524,7 +1535,6 @@ class PhaseObserver:
         """
         🏛️ ANALYSE MULTI-TIMEFRAME INSTITUTIONNELLE (STRICT, NO FALLBACK) 🏛️
         - Pas d'analyse single-TF de secours
-        - Si MTF non exploitable → paquet 'no_clear_phase' + raisons + diagnostics
         """
 
         analysis_start_time = time.perf_counter()

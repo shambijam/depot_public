@@ -16,8 +16,7 @@
     "allowed_phases": [
       "liquidity_eqh_eql",
       "range_retail",
-      "transitional",
-      "no_clear_phase"
+      "transitional"
     ],
     "lookback_window": 12,
     "volatility_threshold": 0.0,
