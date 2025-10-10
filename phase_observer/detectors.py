@@ -257,8 +257,10 @@ def detect_multi_candle(
         return results
 
     # Cas 2: détection ponctuelle
-    if i < 2:
+    # Laisse les détecteurs gérer leur propre seuil (i<1 pour 2 bougies, i<2 pour 3, i<4 pour 5…)
+    if i < 1:
         return results
+
 
     detectors = [
         is_morning_star,
@@ -267,7 +269,16 @@ def detect_multi_candle(
         is_three_black_crows,
         is_harami,
         is_tweezer,
+        # --- nouveaux 5–8 bougies ---
+        is_rising_three_methods,
+        is_falling_three_methods,
+        is_mat_hold_bull,
+        is_mat_hold_bear,
+        is_bull_flag_or_pennant,
+        is_bear_flag_or_pennant,
+        is_one_two_three_reversal,
     ]
+
 
     for detector in detectors:
         try:
@@ -370,6 +381,223 @@ def detect_combos(
             signals.append(None)
 
     return signals
+
+# === 5-candle: Rising / Falling Three Methods =====================
+
+def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    # besoin des 5 dernières bougies: i-4..i
+    if i < 4:
+        return None
+    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+
+    # 1) grande bougie haussière initiale
+    body1 = abs(c1["close"] - c1["open"])
+    size1 = c1["high"] - c1["low"]
+    if body1 < 0.6 * size1 or c1["close"] <= c1["open"]:
+        return None
+
+    # 2) trois petites bougies correctives dans le range de c1 (corps petits)
+    def _is_small_inside(c):
+        body = abs(c["close"] - c["open"])
+        return (body < 0.5 * body1) and (c["high"] <= c1["high"]) and (c["low"] >= c1["low"])
+
+    if not (_is_small_inside(c2) and _is_small_inside(c3) and _is_small_inside(c4)):
+        return None
+
+    # 3) 5e bougie de relance haussière qui clôture au-delà du corps de c1
+    if c5["close"] > max(c1["close"], c1["open"]) and c5["close"] > c5["open"]:
+        return {"pattern": "rising_three_methods", "type": "continuation", "is_bullish": True}
+    return None
+
+
+def is_falling_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 4:
+        return None
+    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+
+    body1 = abs(c1["close"] - c1["open"])
+    size1 = c1["high"] - c1["low"]
+    if body1 < 0.6 * size1 or c1["close"] >= c1["open"]:
+        return None
+
+    def _is_small_inside(c):
+        body = abs(c["close"] - c["open"])
+        return (body < 0.5 * body1) and (c["high"] <= c1["high"]) and (c["low"] >= c1["low"])
+
+    if not (_is_small_inside(c2) and _is_small_inside(c3) and _is_small_inside(c4)):
+        return None
+
+    if c5["close"] < min(c1["close"], c1["open"]) and c5["close"] < c5["open"]:
+        return {"pattern": "falling_three_methods", "type": "continuation", "is_bullish": False}
+    return None
+
+
+# === 5-candle: Mat Hold (version simplifiée) ======================
+
+def is_mat_hold_bull(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 4:
+        return None
+    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    # c1 impulsion haussière
+    if c1["close"] <= c1["open"]:
+        return None
+    # c2 gap up + petite bougie (ou doji)
+    if not (c2["open"] > c1["close"] and abs(c2["close"] - c2["open"]) <= (c1["close"] - c1["open"]) * 0.5):
+        return None
+    # c3,c4 petites bougies qui ne comblent pas réellement le gap initial
+    if min(c3["low"], c4["low"]) <= c1["close"]:
+        return None
+    # c5 relance haussière qui close > max(c2..c4)
+    if c5["close"] > max(c2["high"], c3["high"], c4["high"]) and c5["close"] > c5["open"]:
+        return {"pattern": "mat_hold_bull", "type": "continuation", "is_bullish": True}
+    return None
+
+
+def is_mat_hold_bear(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    if i < 4:
+        return None
+    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    if c1["close"] >= c1["open"]:
+        return None
+    if not (c2["open"] < c1["close"] and abs(c2["close"] - c2["open"]) <= (c1["open"] - c1["close"]) * 0.5):
+        return None
+    if max(c3["high"], c4["high"]) >= c1["close"]:
+        return None
+    if c5["close"] < min(c2["low"], c3["low"], c4["low"]) and c5["close"] < c5["open"]:
+        return {"pattern": "mat_hold_bear", "type": "continuation", "is_bullish": False}
+    return None
+
+
+# === 5–8-candle: Flag / Pennant (heuristique OHLC) ================
+
+def _channel_slope(values: np.ndarray) -> float:
+    # slope par régression linéaire simple
+    x = np.arange(len(values))
+    x_mean = x.mean()
+    y_mean = values.mean()
+    num = ((x - x_mean) * (values - y_mean)).sum()
+    den = ((x - x_mean) ** 2).sum()
+    return float(num / den) if den != 0 else 0.0
+
+
+def _is_flag_consolidation(highs: np.ndarray, lows: np.ndarray, max_bars: int = 8) -> Dict[str, Any]:
+    """
+    Retourne { 'ok': bool, 'type': 'flag'|'pennant', 'slope_high':..., 'slope_low':..., 'contracting': bool }
+    Hypothèses:
+      - canal quasi // => slopes de highs et lows de même signe et proche
+      - pennant => amplitudes qui rétrécissent (contracting)
+    """
+    if len(highs) < 3 or len(lows) < 3:
+        return {"ok": False}
+
+    slope_h = _channel_slope(highs)
+    slope_l = _channel_slope(lows)
+    contracting = (highs.max() - highs.min()) > 0 and (lows.max() - lows.min()) > 0 and (highs[-1] - lows[-1]) < (highs[0] - lows[0]) * 0.8
+
+    # flag: pentes proches (même signe), faible écart
+    parallelish = (np.sign(slope_h) == np.sign(slope_l)) and (abs(slope_h - slope_l) < 2 * (abs(slope_h) + abs(slope_l) + 1e-9))
+    shape = "pennant" if contracting and not parallelish else "flag"
+    ok = parallelish or contracting
+
+    return {"ok": bool(ok), "type": shape, "slope_high": slope_h, "slope_low": slope_l, "contracting": contracting}
+
+
+def is_bull_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    """
+    Heuristique:
+      - impulsion haussière avant la consolidation (bar i-4..i-1)
+      - consolidation de 3–6 barres canalisées (flag) ou convergentes (pennant)
+      - retracement peu profond (≤50 % de l'impulsion)
+      - bar i = breakout haussier (close > max highs de la consolidation)
+    """
+    lookback = 7  # examine ~7 barres total
+    if i < lookback:
+        return None
+    window = df.iloc[i-lookback:i+1].copy()
+
+    # décomposer
+    # on prend les 1-2 premières barres pour l'impulsion, puis 3–6 pour consolidation, dernière = breakout
+    impulse = window.iloc[0:2]
+    cons = window.iloc[2:-1]
+    brk = window.iloc[-1]
+
+    # impulsion haussière forte (close2 >> open0)
+    if impulse["close"].iloc[-1] <= impulse["open"].iloc[0]:
+        return None
+    impulse_range = impulse["close"].iloc[-1] - impulse["open"].iloc[0]
+
+    highs = cons["high"].to_numpy()
+    lows = cons["low"].to_numpy()
+
+    ch = _is_flag_consolidation(highs, lows)
+    if not ch.get("ok"):
+        return None
+
+    # retracement max: close cons min >= open0 + 0.5 * impulse_range
+    if (cons["low"].min() < impulse["open"].iloc[0] + 0.5 * impulse_range):
+        return None
+
+    # breakout: close dernier > max(cons highs)
+    if brk["close"] > cons["high"].max():
+        return {"pattern": f"bull_{ch['type']}", "type": "continuation", "is_bullish": True}
+    return None
+
+
+def is_bear_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    lookback = 7
+    if i < lookback:
+        return None
+    window = df.iloc[i-lookback:i+1].copy()
+
+    impulse = window.iloc[0:2]
+    cons = window.iloc[2:-1]
+    brk = window.iloc[-1]
+
+    if impulse["close"].iloc[-1] >= impulse["open"].iloc[0]:
+        return None
+    impulse_range = impulse["open"].iloc[0] - impulse["close"].iloc[-1]
+
+    highs = cons["high"].to_numpy()
+    lows = cons["low"].to_numpy()
+    ch = _is_flag_consolidation(highs, lows)
+    if not ch.get("ok"):
+        return None
+
+    if (cons["high"].max() > impulse["close"].iloc[-1] + 0.5 * impulse_range):
+        return None
+
+    if brk["close"] < cons["low"].min():
+        return {"pattern": f"bear_{ch['type']}", "type": "continuation", "is_bullish": False}
+    return None
+
+
+# === 1-2-3 Reversal (compact) =====================================
+
+def is_one_two_three_reversal(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
+    """
+    Détection très simplifiée:
+      - haussier: higher high (1) → pullback (2) > low précédent → cassure au-dessus de (1) sur la bougie i
+      - baissier: lower low (1) → pullback (2) < high précédent → cassure en-dessous de (1) sur la bougie i
+    """
+    if i < 4:
+        return None
+    w = df.iloc[i-4:i+1]
+    # bull
+    hh = w["high"].iloc[1] > w["high"].iloc[0] and w["high"].iloc[1] > w["high"].iloc[2]
+    pullback_ok = w["low"].iloc[3] > w["low"].iloc[2]
+    breakout_bull = w["close"].iloc[4] > w["high"].iloc[1]
+    if hh and pullback_ok and breakout_bull:
+        return {"pattern": "one_two_three_bull", "type": "reversal", "is_bullish": True}
+
+    # bear
+    ll = w["low"].iloc[1] < w["low"].iloc[0] and w["low"].iloc[1] < w["low"].iloc[2]
+    pullback_ok_b = w["high"].iloc[3] < w["high"].iloc[2]
+    breakout_bear = w["close"].iloc[4] < w["low"].iloc[1]
+    if ll and pullback_ok_b and breakout_bear:
+        return {"pattern": "one_two_three_bear", "type": "reversal", "is_bullish": False}
+
+    return None
+
 
 
 # ============================================================

@@ -122,11 +122,7 @@ class PhaseObserver:
         from .memory import PhaseMemoryManager
 
         self.memory = PhaseMemoryManager()
-
-        self.logger.info(
-            f"PhaseObserver initialisé. Lookback window: {self.lookback_window}."
-        )
-
+      
     def _coerce_val(self, v):
         """
         Normalise une valeur en sortie "propre".
