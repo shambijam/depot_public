@@ -384,11 +384,14 @@ def detect_combos(
 
 # === 5-candle: Rising / Falling Three Methods =====================
 
+# === 5-candle: Rising / Falling Three Methods =====================
+
 def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     # besoin des 5 dernières bougies: i-4..i
     if i < 4:
         return None
-    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    w = df.iloc[i-4:i+1]
+    c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     # 1) grande bougie haussière initiale
     body1 = abs(c1["close"] - c1["open"])
@@ -413,7 +416,8 @@ def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
 def is_falling_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    w = df.iloc[i-4:i+1]
+    c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     body1 = abs(c1["close"] - c1["open"])
     size1 = c1["high"] - c1["low"]
@@ -437,7 +441,9 @@ def is_falling_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any
 def is_mat_hold_bull(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    w = df.iloc[i-4:i+1]
+    c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
+
     # c1 impulsion haussière
     if c1["close"] <= c1["open"]:
         return None
@@ -456,7 +462,9 @@ def is_mat_hold_bull(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
 def is_mat_hold_bear(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    c1, c2, c3, c4, c5 = df.iloc[i-4:i+1]
+    w = df.iloc[i-4:i+1]
+    c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
+
     if c1["close"] >= c1["open"]:
         return None
     if not (c2["open"] < c1["close"] and abs(c2["close"] - c2["open"]) <= (c1["open"] - c1["close"]) * 0.5):
@@ -466,6 +474,7 @@ def is_mat_hold_bear(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if c5["close"] < min(c2["low"], c3["low"], c4["low"]) and c5["close"] < c5["open"]:
         return {"pattern": "mat_hold_bear", "type": "continuation", "is_bullish": False}
     return None
+
 
 
 # === 5–8-candle: Flag / Pennant (heuristique OHLC) ================
