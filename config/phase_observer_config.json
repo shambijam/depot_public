@@ -220,6 +220,12 @@
             "delta_threshold": 50,
             "poc_min_volume": 10,
             "store_to_memory": true
+        },
+        "data_collection": {
+            "default_timeframe": "M1",
+            "default_bars_count": 500,
+            "rolling_lookback_bars": 50,
+            "recalibration_every_n_cycles": 10
         }
     }
 }

@@ -518,22 +518,23 @@ def run_single_pipeline_cycle(
                 ):
                     market_analyzer.phase_observer.load_initial_history(rates_df.copy())
 
-                # ✅ Mode "horloge suisse"
-                if cycle_count == 1:
-                    # 1️⃣ Premier cycle : on fait une analyse complète (200 barres)
-                    market_results = market_analyzer.analyze(rates_df.copy(), asset)
-                    # Initialiser l'historique dans PhaseObserver
-                    market_analyzer.phase_observer.load_initial_history(rates_df.copy())
-                else:
-                    # 🔄 Solution 1: Toujours réanalyser un bloc récent de barres (ex: 100 dernières)
-                    lookback_bars = 100  # tu peux ajuster (50, 100, 200 selon perf)
-                    subset_df = rates_df.tail(lookback_bars).copy()
+                # ✅ Mode "horloge suisse" — 200 au 1er cycle, puis rolling 50, avec recalibration périodique
+                dcfg = base_config.get("data_collection", {}) or {}
+                rolling_lookback = int(dcfg.get("rolling_lookback_bars", 50))   # ex: 50
+                full_refresh_bars = int(dcfg.get("full_refresh_bars", 200))     # ex: 200
+                recalib_n = int(dcfg.get("recalibration_every_n_cycles", 10))   # ex: toutes les 10 itérations
 
-                    market_results = market_analyzer.analyze(subset_df, asset)
+                do_full_refresh = (cycle_count == 1) or (recalib_n > 0 and cycle_count % recalib_n == 0)
+                subset_df = rates_df.tail(full_refresh_bars if do_full_refresh else rolling_lookback).copy()
 
-                    # ⚡ Important: on recharge l’historique complet dans le PhaseObserver
+                market_results = market_analyzer.analyze(subset_df, asset)
+
+                # ⚠️ Ne réinitialise pas l’historique à chaque cycle → limite les doublons de logs
+                if cycle_count == 1 or do_full_refresh:
                     market_analyzer.phase_observer.load_initial_history(subset_df.copy())
-
+                elif hasattr(market_analyzer.phase_observer, "update_with_new_data"):
+                    market_analyzer.phase_observer.update_with_new_data(subset_df.copy())
+              
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(
                     f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}"
