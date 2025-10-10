@@ -195,12 +195,6 @@
         "require_all_timeframes": true,
         "reject_asset_if_any_tf_below_min": true
     },
-    "readiness_gate": {
-        "description": "Garde-fou de d\u00e9marrage pour \u00e9viter les trades sans historique suffisant (durci)",
-        "enabled": true,
-        "block_signals_first_n_cycles": 8,
-        "max_allowed_data_age_seconds": 90
-    },
     "strategy_profiles": {},
     "phase_detection_defaults": {
         "detection_toggles": {
@@ -226,6 +220,88 @@
             "default_bars_count": 500,
             "rolling_lookback_bars": 50,
             "recalibration_every_n_cycles": 10
+        },
+        "entry_gates": {
+            "description": "Seuils de validation d'entrée (assouplis)",
+            "min_conf_for_entry": 0.48,
+            "allow_trade_when_dir_unclear": false,
+            "dir_unclear_force_if": {
+                "enabled": true,
+                "tight_spread_points_max": 10,
+                "strong_orderflow_delta_min": 150,
+                "need_any": 1
+            },
+            "direction_bias_settings": {
+                "description": "Résolution explicite du biais pour éviter DIR_UNCLEAR",
+                "min_trend_slope": 0.0,
+                "votes": {
+                    "use_trend": true,
+                    "use_momentum": true,
+                    "use_cvd_slope": true,
+                    "use_bos_count": true
+                },
+                "thresholds": {
+                    "cvd_slope_min": 0.0,
+                    "min_bos_same_direction": 1
+                },
+                "decision_rule": {
+                    "min_votes_for_bias": 2,
+                    "tie_breaker": "last_bar_close_change"
+                }
+            },
+            "footprint_requirements": {
+                "description": "Seuils explicites pour FP_LOW_SAMPLE",
+                "min_ticks": 20,
+                "min_coverage_seconds": 8,
+                "min_tick_rate": 0.8,
+                "burst_override": {
+                    "enabled": true,
+                    "tick_rate_threshold": 2.0,
+                    "apply_penalty_points": 10
+                }
+            },
+            "dynamic_relaxation": {
+                "description": "Assouplissements contextuels (runtime)",
+                "enabled": true,
+                "low_volatility": {
+                    "relax_confidence_by": 0.03,
+                    "lower_min_ticks_by": 10
+                },
+                "tight_spread": {
+                    "spread_points_le": 10,
+                    "relax_confidence_by": 0.02
+                },
+                "regime_overrides": {
+                    "low_volatility_compression": {
+                        "min_conf_for_entry": 0.46,
+                        "min_ticks": 15
+                    }
+                },
+                "runmode_overrides": {
+                    "DEMO": {
+                        "min_conf_for_entry": 0.47
+                    },
+                    "LIVE": {
+                        "min_conf_for_entry": 0.50
+                    }
+                }
+            },
+            "asset_overrides": {
+                "XAUUSD": {
+                    "footprint_requirements": {
+                        "min_ticks": 25,
+                        "min_coverage_seconds": 8,
+                        "min_tick_rate": 1.0,
+                        "burst_override": {
+                            "enabled": true,
+                            "tick_rate_threshold": 3.0
+                        }
+                    },
+                    "entry_gates": {
+                        "min_conf_for_entry": 0.50
+                    }
+                }
+            }
         }
     }
 }
