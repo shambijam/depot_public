@@ -804,6 +804,32 @@ class PhaseObserver:
                 )
                 df_an["volume_zscore"] = 0.0
                 df_an["volume_momentum"] = 0.0
+                
+                # === PHASE 1bis: RANGE POSITION (accumulation/distribution en range) ===
+                try:
+                    pos_win = int(
+                        self.config_manager.get(
+                            "phase_detection_defaults.range_position.position_window", 50
+                        )
+                    ) if getattr(self, "config_manager", None) else 50
+                except Exception:
+                    pos_win = 50
+
+                rolling_high = df_an["high"].rolling(pos_win, min_periods=1).max()
+                rolling_low  = df_an["low"].rolling(pos_win, min_periods=1).min()
+                rng = (rolling_high - rolling_low).replace(0, np.nan)
+
+                df_an["range_pos_pct"] = ((df_an["close"] - rolling_low) / rng).clip(0.0, 1.0).fillna(0.5)
+
+                lower_thr = float(
+                    self.config_manager.get("phase_detection_defaults.range_position.lower_threshold", 0.33)
+                ) if getattr(self, "config_manager", None) else 0.33
+                upper_thr = float(
+                    self.config_manager.get("phase_detection_defaults.range_position.upper_threshold", 0.67)
+                ) if getattr(self, "config_manager", None) else 0.67
+
+                df_an["in_lower_tercile"] = df_an["range_pos_pct"] <= lower_thr
+                df_an["in_upper_tercile"] = df_an["range_pos_pct"] >= upper_thr
 
             # === PHASE 2: CORE INDICATORS ===
             toggles = {}
@@ -1176,30 +1202,122 @@ class PhaseObserver:
                 df_an.loc[df_an.index[-1], "footprint_status"] = "ERROR"
                 df_an.loc[df_an.index[-1], "footprint_summary"] = "{}"
 
-            # === PHASE 5: PHASE PRIMAIRE (sans 'no_clear_phase') ===
+            # === PHASE 5: PHASE PRIMAIRE (déterministe) ===
+            df_an["phase_primary"] = df_an.apply(
+                lambda row: str(self.detectors.determine_optimized_phase(row)), axis=1
+)
+
+
+            ALLOWED_PHASES = {
+                "trending_institutional_bull", "trending_institutional_bear",
+                "trending_retail_bull", "trending_retail_bear",
+                "range_accumulation", "range_distribution", "range_institutional", "range_retail",
+                "high_volatility_chaos", "low_volatility_compression",
+                "liquidity_eqh_eql", "liquidity_sweep", "liquidity_absorption",
+                "distribution_breakout", "accumulation_zone", "institutional_setup", "institutional_setup_premium",
+                "volatility_breakout"
+            }
+            
             def _fallback_phase_from_regime(row: pd.Series) -> str:
+                """
+                Fallback déterministe basé sur le régime courant de la ligne.
+                Utilisé UNIQUEMENT si un label invalide remonte (sanitizer/PhaseGuard).
+                """
                 regime = str(row.get("regime", "")).lower()
-                if "low_volatility" in regime:
-                    return "low_volatility_compression"
-                if "high_volatility" in regime:
+
+                # Trending (bull/bear)
+                if "trending" in regime:
+                    if "bear" in regime:
+                        return "trending_institutional_bear"
+                    if "bull" in regime:
+                        return "trending_institutional_bull"
+
+                # Range → tranche acc/dist via la position récente dans le range
+                if "range" in regime:
+                    pos = float(row.get("range_pos_pct", 0.5))
+                    return "range_accumulation" if pos <= 0.5 else "range_distribution"
+
+                # Volatilité
+                if "high_volatility" in regime or "high_vol" in regime:
                     return "high_volatility_chaos"
-                return "range_retail"  # neutre et toujours acceptable
+                if "low_volatility" in regime or "low_vol" in regime:
+                    return "low_volatility_compression"
+
+                # Par défaut (jamais 'unknown')
+                close_ = float(row.get("close", 0.0))
+                open_  = float(row.get("open",  0.0))
+                return "range_accumulation" if close_ >= open_ else "range_distribution"
+
+
+            def _sanitize_phase_label(row: pd.Series, phase: str) -> str:
+                """Évite tout label indécis et remappe vers une phase autorisée."""
+                p = (phase or "").strip().lower()
+                if p in ("", "unknown", "uncertain", "no_clear_phase", None):
+                    return _fallback_phase_from_regime(row)
+                mapping = {
+                     "trending_institutional_bull", "trending_institutional_bear",
+                    "trending_retail_bull", "trending_retail_bear",
+                    "range_accumulation", "range_distribution", "range_institutional", "range_retail",
+                    "high_volatility_chaos", "low_volatility_compression",
+                    "liquidity_eqh_eql", "liquidity_sweep", "liquidity_absorption",
+                    "distribution_breakout", "accumulation_zone",
+                    "institutional_setup", "institutional_setup_premium",
+                    "volatility_breakout"
+                }
+                p = mapping.get(p, p)
+                return p if p in ALLOWED_PHASES else _fallback_phase_from_regime(row)
+
+            def _liquidity_persist_ok(row: pd.Series, asset: str, *, min_bars: int, conf_thr: float):
+                """
+                Persistance minimale des signaux Liquidity.
+                Retourne (ok: bool, label: str). Utilise memory.caches['liq_persist'].
+                """
+                mem = self.memory.get_memory(asset)
+                mem.caches.setdefault("liq_persist", {"eqh": 0, "sweep": 0, "abs": 0})
+                lp = mem.caches["liq_persist"]
+
+                eqh = bool(row.get("eqh_eql_detected"))
+                swp = bool(row.get("sweep_detected"))
+                absb = bool(row.get("absorption_confirmed"))
+                conf = float(row.get("confidence_score", 0.0))
+                has_bos = bool(row.get("bos_mss_detected", False))
+
+                lp["eqh"] = lp["eqh"] + 1 if eqh else 0
+                lp["sweep"] = lp["sweep"] + 1 if swp else 0
+                lp["abs"] = lp["abs"] + 1 if absb else 0
+
+                self.memory.save_memory(asset, mem)
+
+                # Acceptation: persistance OU (confiance élevée OU BOS/MSS)
+                if lp["sweep"] >= min_bars or (swp and (conf >= conf_thr or has_bos)):
+                    return True, "liquidity_sweep"
+                if lp["abs"] >= min_bars or (absb and (conf >= conf_thr or has_bos)):
+                    return True, "liquidity_absorption"
+                if lp["eqh"] >= min_bars or (eqh and (conf >= conf_thr or has_bos)):
+                    return True, "liquidity_eqh_eql"
+                return False, ""
+
 
             def _determine_phase_no_ncp(row: pd.Series) -> str:
+                # 1) détermination brute par la taxonomie existante
                 try:
-                    phase = self.detectors.determine_optimized_phase(row)
+                    raw = self.detectors.determine_optimized_phase(row)
                 except Exception:
-                    phase = None
+                    raw = None
 
-                # Écarter tout label invalide/indécis
-                if phase in (None, "", "unknown", "uncertain", "no_clear_phase"):
-                    # Priorité à des indices concrets si présents
-                    if bool(row.get("eqh_eql_detected")) or bool(row.get("sweep_detected")) or bool(row.get("absorption_confirmed")):
-                        return "liquidity_eqh_eql"
-                    # Sinon fallback déterministe par régime
-                    return _fallback_phase_from_regime(row)
+                # 2) priorité Liquidity MAIS avec persistance minimale configurable
+                ok_liq, liq_label = _liquidity_persist_ok(
+                    row, current_asset_symbol,
+                    min_bars=int(self.config_manager.get("phase_observer.liquidity_persist", default=2))
+                    if getattr(self, "config_manager", None) else 2,
+                    conf_thr=float(self.config_manager.get("phase_observer.liquidity_confidence", default=0.65))
+                    if getattr(self, "config_manager", None) else 0.65,
+                )
+                if ok_liq:
+                    return liq_label
 
-                return str(phase)
+                # 3) sanitize & fallback déterministe par régime → zéro label indécis
+                return _sanitize_phase_label(row, raw)
 
             df_an["phase_primary"] = df_an.apply(_determine_phase_no_ncp, axis=1)
 
@@ -1220,6 +1338,32 @@ class PhaseObserver:
                 axis=1,
             )
             df_an["phase_rule"] = "primary"
+            
+            # --- PATCH D1: PhaseGuard (clamp + métriques) ---
+            # 1) liste blanche centralisée (réutilise ALLOWED_PHASES défini plus haut)
+            invalid_mask = ~df_an["phase"].isin(ALLOWED_PHASES)
+            if invalid_mask.any():
+                bad = sorted(set(df_an.loc[invalid_mask, "phase"].astype(str).tolist()))
+                self.logger.error(f"[PhaseGuard] Phases invalides détectées et corrigées: {bad}")
+
+                # 2) remap déterministe par régime (filet ultime)
+                df_an.loc[invalid_mask, "phase"] = df_an.loc[invalid_mask].apply(
+                    lambda r: _fallback_phase_from_regime(r),
+                    axis=1
+                )
+
+            # 3) métriques: nombre de corrections pour monitoring/alerting
+            try:
+                corrections = int(invalid_mask.sum())
+                df_an.attrs["phase_guard_corrections"] = corrections
+                # (optionnel) exposer aussi côté objet si tu as un exporter de stats
+                setattr(self, "_phase_guard_last_corrections", corrections)
+            except Exception:
+                pass
+
+            # --- PATCH A3: clamp final (aucun label indésirable ne passe)
+            df_an["phase"] = df_an.apply(lambda r: _sanitize_phase_label(r, r.get("phase")), axis=1)
+
 
             # === PHASE 7bis: STRATEGY FLAGS ===
             try:

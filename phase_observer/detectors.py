@@ -2523,6 +2523,12 @@ class Detectors:
             return adx, di_plus.fillna(0.0), di_minus.fillna(0.0)
 
         adx, di_plus, di_minus = calculate_adx(df, adx_period)
+        # --- PATCH C1: ADX quantiles (auto-calibration) ---
+        win = int(adx_config.get("quantile_window", 200))
+        trend_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.70)\
+                    .fillna(method="bfill").fillna(adx.median())
+        range_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.30)\
+                    .fillna(method="bfill").fillna(adx.median())
 
         # === 2. VOLATILITÉ GARMAN-KLASS ===
         vol_period = int(vol_config.get("calculation_period", 20))
@@ -2577,7 +2583,7 @@ class Detectors:
             is_institutional = bool(institutional_activity.iloc[i])
 
             # --- Phase trending
-            if current_adx > trending_threshold:
+            if current_adx >= float(trend_q.iloc[i]):
                 if current_di_plus > current_di_minus:
                     regimes.iloc[i] = (
                         "trending_institutional_bull"
@@ -2592,7 +2598,7 @@ class Detectors:
                     )
 
             # --- Phase range
-            elif current_adx < ranging_threshold:
+            elif current_adx <= float(range_q.iloc[i]):
                 if is_institutional:
                     recent_closes = df["close"].iloc[max(0, i - 10) : i + 1]
                     if len(recent_closes) > 5:
@@ -2614,15 +2620,7 @@ class Detectors:
                     regimes.iloc[i] = "low_volatility_compression"
                 else:
                     regimes.iloc[i] = "transitional"
-
-            # --- AMÉLIORATION : conserver la phase précédente si ambigu
-            if regimes.iloc[i] == "unknown":
-                if hasattr(self, "_last_regime") and self._last_regime:
-                    regimes.iloc[i] = self._last_regime
-                    self.logger.debug(
-                        f"Ambigu → on conserve l'ancien régime: {self._last_regime}"
-                    )
-
+           
             # Mettre à jour la mémoire
             self._last_regime = regimes.iloc[i]
 
@@ -2674,6 +2672,8 @@ class Detectors:
             self.logger.debug(
                 f"Distribution régimes: {dict(regimes.value_counts().head(3))}"
             )
+            # --- PATCH C4: clamp régimes (zéro 'unknown') ---
+            regimes = regimes.replace("unknown", "range_retail")
 
         return regimes
 
@@ -2783,55 +2783,75 @@ class Detectors:
                 "tp_pips_suggestion": None,
                 "diagnostics": {"error": str(e)},
             }
-
-    def determine_optimized_phase(self, row: Dict[str, Any]) -> str:
+    def determine_optimized_phase(self, row: pd.Series) -> str:
         """
-        Classification de phase basée uniquement sur les 4 indicateurs core
-        + signaux liquidity (sweep, absorption, eqh/eql).
-        Nettoyée de toute dépendance Bollinger.
+        Toujours rendre un label déterministe, sans 'unknown/uncertain/no_clear_phase'.
+        Règles de tie-break en range basées sur la position dans le range + indices concrets.
         """
-        regime = str(row.get("regime", "unknown"))
+        regime = str(row.get("regime", "")).lower()
 
-        # --- Institutional trending regimes ---
-        if "trending_institutional" in regime:
-            if row.get("fvg_ob_confluence", False):
-                return "institutional_setup_premium"
-            elif row.get("ob_detected", False):
-                return "institutional_setup"
-            elif "bull" in regime:
-                return "trending_institutional_bull"
-            else:
-                return "trending_institutional_bear"
-
-        # --- Ranges (accumulation/distribution) ---
-        elif "range_accumulation" in regime:
-            if row.get("high_quality_ob", False):
-                return "accumulation_zone"
-            return "range_accumulation"
-
-        elif "range_distribution" in regime:
-            if row.get("confirmed_structure_break", False):
-                return "distribution_breakout"
-            return "range_distribution"
-
-        # --- High vol / chaos ---
-        elif "high_volatility" in regime:
-            if row.get("bos_mss_detected", False):
-                return "volatility_breakout"
-            return "high_volatility_chaos"
-
-        # --- Low vol / compression ---
-        elif "low_volatility" in regime:
-            return "low_volatility_compression"
-
-        # --- Liquidity-driven signals ---
-        if row.get("sweep_detected", False):
-            return "liquidity_sweep"
-        if row.get("absorption_confirmed", False):
-            return "liquidity_absorption"
-        if row.get("eqh_eql_detected", False):
+        # 0) Priorité signal liquidité explicite (si présent)
+        if bool(row.get("sweep_detected")) or bool(row.get("absorption_confirmed")) or bool(row.get("eqh_eql_detected")):
             return "liquidity_eqh_eql"
 
+        # 1) Volatilité (déterministe)
+        if "low_volatility" in regime or "low_vol" in regime:
+            return "low_volatility_compression"
+        if "high_volatility" in regime or "high_vol" in regime:
+            return "high_volatility_chaos"
+
+        # 2) Trending → bull/bear
+        if "trending" in regime:
+            if "bear" in regime:
+                return "trending_distribution"
+            if "bull" in regime:
+                return "trending_accumulation"
+            # Si pas explicite, tenter BOS/MSS → direction
+            bos = row.get("bos_mss_details") or {}
+            d = str(getattr(bos, "get", lambda *_: "")("direction", "")).lower() if isinstance(bos, dict) else ""
+            if d in ("up", "bull", "bullish"):
+                return "trending_accumulation"
+            if d in ("down", "bear", "bearish"):
+                return "trending_distribution"
+            # Dernier recours trending : biais de clôture
+            return "trending_accumulation" if float(row.get("close", 0)) >= float(row.get("open", 0)) else "trending_distribution"
+
+        # 3) Range → déterminisme accumulation vs distribution
+        if ("range" in regime) or ("sideways" in regime) or ("institutional" in regime and "range" in regime):
+            pos   = float(row.get("range_pos_pct", 0.5))
+            lower = bool(row.get("in_lower_tercile", pos <= 0.33))
+            upper = bool(row.get("in_upper_tercile", pos >= 0.67))
+            vol_m = float(row.get("volume_momentum", 0.0))
+            sweep = bool(row.get("sweep_detected", False))
+            absor = bool(row.get("absorption_confirmed", False))
+
+            # A) Absorption/Sweep + zone
+            if (sweep or absor) and lower:
+                return "range_accumulation"
+            if (sweep or absor) and upper:
+                return "range_distribution"
+
+            # B) Pure position
+            if lower:
+                return "range_accumulation"
+            if upper:
+                return "range_distribution"
+
+            # C) Centre du range → direction BOS si dispo, sinon signe de momentum volume
+            bos = row.get("bos_mss_details") or {}
+            d = str(getattr(bos, "get", lambda *_: "")("direction", "")).lower() if isinstance(bos, dict) else ""
+            if d in ("up", "bull", "bullish"):
+                return "range_accumulation"
+            if d in ("down", "bear", "bearish"):
+                return "range_distribution"
+            return "range_accumulation" if vol_m >= 0 else "range_distribution"
+
+        # 4) Setup institutionnel (OB/BOS/FVG) hors trending/range
+        if bool(row.get("institutional_setup", False)):
+            return "institutional_drive"
+
+        # 5) Défaut strictement déterministe (jamais 'unknown')
+        return "range_accumulation" if float(row.get("close", 0)) >= float(row.get("open", 0)) else "range_distribution"
        
 
     def determine_phase(self, market_data: pd.DataFrame) -> str:

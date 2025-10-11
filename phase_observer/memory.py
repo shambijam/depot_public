@@ -213,6 +213,15 @@ class PhaseMemoryManager:
                     )
                 except Exception as cfg_err:
                     self.logger.warning(f"[Memory] Erreur chargement config: {cfg_err}")
+            # --- PATCH B2: Ajustement contextuel selon la phase candidate ---
+            cp = (current_phase or "").lower()
+            # En très forte volatilité : durcir (éviter les faux basculements)
+            if "high_volatility" in cp:
+                threshold = min(0.90, threshold + 0.10)
+                persistence_required = persistence_required + 1
+            # En range : assouplir légèrement (réactivité)
+            elif "range_" in cp or cp == "range_retail":
+                threshold = max(0.40, threshold - 0.05)
 
             if current_phase == last_phase:
                 memory.persistence += 1
@@ -237,7 +246,8 @@ class PhaseMemoryManager:
         except Exception as e:
             self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
             # 🔥 fallback : jamais None
-            return current_phase or self.get_last_phase(asset_symbol) or "UNKNOWN"
+            return current_phase or self.get_last_phase(asset_symbol) or "range_retail"
+        
     # === Gestion des Footprints (live & final) ===
     def store_footprint(
         self,

@@ -104,7 +104,8 @@
         "adx_settings": {
             "period": 14,
             "trending_threshold": 25,
-            "ranging_threshold": 20
+            "ranging_threshold": 20,
+            "quantile_window": 200
         },
         "volatility_regimes": {
             "calculation_period": 15,
@@ -180,6 +181,14 @@
             "M5": 0.4,
             "M15": 0.2
         }
+    },
+    "phase_observer": {
+        "description": "Paramètres runtime pour la phase primaire",
+        "liquidity_persist": 2,
+        "liquidity_confidence": 0.65,
+        "memory_threshold": 0.55,
+        "persistence_required": 2,
+        "strict_mode": true
     },
     "data_requirements": {
         "description": "Exigences minimales d'historique/qualit\u00e9 pour produire des signaux",
