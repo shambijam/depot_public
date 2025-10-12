@@ -1197,57 +1197,11 @@ class TradeExecutor:
         import math
 
         self.logger.info("Préparation de l'ordre MT5...")
-        
-        # ---------- [BURST GUARDRAILS] ----------
-        try:
-            rule_name = str(trade_decision.get("rule_name", "")).lower()
-            if rule_name == "burst_scalping":
-                burst_cfg = (
-                    (active_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}))
-                    or {}
-                )
-                guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
-                max_open_positions = int(guard_cfg.get("max_open_positions", 5))
-                cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
-                enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
-
-                # Récupérer positions MT5 actuelles
-                open_positions = self.mt5_connector.get_open_positions(symbol=broker_symbol) or []
-                open_scalping = [
-                    p for p in open_positions
-                    if str(p.comment).startswith("SCALPING_BURST") or str(p.magic) == str(self.config_manager.get("magic_number"))
-                ]
-                now_ts = time.time()
-
-                # Contrôle du nombre de positions
-                if len(open_scalping) >= max_open_positions:
-                    raise TradeExecutionError(
-                        f"⛔ Burst guard: {len(open_scalping)} positions ouvertes ≥ limite {max_open_positions}. Panier plein."
-                    )
-
-                # Cooldown burst : éviter déclenchements trop rapprochés
-                last_burst_time = getattr(self, "_last_burst_time", 0)
-                if (now_ts - last_burst_time) < cooldown_seconds:
-                    raise TradeExecutionError(
-                        f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s). Attente avant prochain burst."
-                    )
-
-                # Contrôle fermeture panier (optionnel)
-                if enforce_closure and len(open_scalping) > 0:
-                    raise TradeExecutionError(
-                        "⛔ Impossible de déclencher un nouveau burst tant que le panier actuel n’est pas entièrement clôturé."
-                    )
-
-                # Si tout est OK → on valide le démarrage d’un nouveau burst
-                self._last_burst_time = now_ts
-                self.logger.info(
-                    f"[BURST GUARD] Démarrage burst autorisé ({len(open_scalping)} positions existantes, cooldown OK)."
-                )
-        except TradeExecutionError:
-            raise
-        except Exception as e:
-            self.logger.warning(f"[BURST GUARD] Vérification partielle échouée: {e}")
-
+        # --- Unpack sûrs pour éviter les UnboundLocalError ---
+        trade_decision = (decision_package or {}).get("trade_decision", {}) or {}
+        market_context = (decision_package or {}).get("market_context", {}) or {}
+        active_config  = (decision_package or {}).get("active_config", {}) or {}
+              
         # --- Raccourcis locaux ---
         trade_decision = decision_package.get("trade_decision", {}) or {}
         active_config = (
@@ -1371,6 +1325,56 @@ class TradeExecutor:
             raise TradeExecutionError(
                 f"Hors fenêtre horaire UTC ({start_h:02d}-{end_h:02d})."
             )
+            
+        # ---------- [BURST GUARDRAILS] ----------
+        try:
+            rule_name = str(trade_decision.get("rule_name", "")).lower()
+            if rule_name == "burst_scalping":
+                burst_cfg = (
+                    (active_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}))
+                    or {}
+                )
+                guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+                max_open_positions = int(guard_cfg.get("max_open_positions", 5))
+                cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
+                enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
+
+                # Récupérer positions MT5 actuelles
+                open_positions = self.mt5_connector.get_open_positions(symbol=broker_symbol) or []
+                open_scalping = [
+                    p for p in open_positions
+                    if str(p.comment).startswith("SCALPING_BURST") or str(p.magic) == str(self.config_manager.get("magic_number"))
+                ]
+                now_ts = time.time()
+
+                # Contrôle du nombre de positions
+                if len(open_scalping) >= max_open_positions:
+                    raise TradeExecutionError(
+                        f"⛔ Burst guard: {len(open_scalping)} positions ouvertes ≥ limite {max_open_positions}. Panier plein."
+                    )
+
+                # Cooldown burst : éviter déclenchements trop rapprochés
+                last_burst_time = getattr(self, "_last_burst_time", 0)
+                if (now_ts - last_burst_time) < cooldown_seconds:
+                    raise TradeExecutionError(
+                        f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s). Attente avant prochain burst."
+                    )
+
+                # Contrôle fermeture panier (optionnel)
+                if enforce_closure and len(open_scalping) > 0:
+                    raise TradeExecutionError(
+                        "⛔ Impossible de déclencher un nouveau burst tant que le panier actuel n’est pas entièrement clôturé."
+                    )
+
+                # Si tout est OK → on valide le démarrage d’un nouveau burst
+                self._last_burst_time = now_ts
+                self.logger.info(
+                    f"[BURST GUARD] Démarrage burst autorisé ({len(open_scalping)} positions existantes, cooldown OK)."
+                )
+        except TradeExecutionError:
+            raise
+        except Exception as e:
+            self.logger.warning(f"[BURST GUARD] Vérification partielle échouée: {e}") 
 
         # ---------- 4) Cas CLOSE ----------
         if action == "CLOSE":
