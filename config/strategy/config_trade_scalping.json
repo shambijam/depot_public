@@ -9,7 +9,6 @@
   "risk_per_trade_percent": 3.0,
   "confidence_threshold": 0.2,
   "stop_loss_pips": 60,
-  "max_spread_points": 15,
   "halt_on_major_news": false,
   "phase_detection": {
     "use_phase_observer": false,
@@ -23,26 +22,6 @@
     "volume_zscore": 0.0,
     "eq_level_tolerance": 0.0,
     "impulse_threshold": 0.0
-  },
-  "guardrails": {
-    "enabled": true,
-    "spread": {
-      "max_pips": 1.5
-    },
-    "ticks": {
-      "min_count": 10,
-      "min_rate": 2.0
-    },
-    "orderflow": {
-      "min_conviction": 0.2
-    },
-    "per_symbol": {
-      "XAUUSD": {
-        "spread": {
-          "max_pips": 1.5
-        }
-      }
-    }
   },
   "entry_rules": {
     "scalping": {
@@ -111,7 +90,6 @@
         "sl_pips": 5,
         "burst_size": 5,
         "max_bursts": 1,
-        "max_spread_pips": 30.0,
         "min_atr_m1_pips": 0.0,
         "burst_guardrails": {
           "max_open_positions": 5,
@@ -159,13 +137,6 @@
       }
     }
   ],
-  "data_quality": {
-    "min_tick_count": 10,
-    "min_tick_rate": 2.0
-  },
-  "orderflow": {
-    "min_conviction": 0.2
-  },
   "cooldown_after_exit_s": 20,
   "risk": {
     "max_positions_per_symbol": 1,

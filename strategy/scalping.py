@@ -171,7 +171,14 @@ class ScalpingStrategy(BaseStrategy):
                     self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
 
             strat_cfg = (self.strategy_config or {}).copy()
-            
+            # --- 1) Métadonnées --- (déplacé plus haut pour decide_from_patterns)
+            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
+            pip_size = meta["pip_size"]
+            if pip_size <= 0:
+                self.logger.warning(f"[{asset}] pip_size invalide.")
+                return {}
+
+                    
             # --- Banque privée: décision patterns chandeliers ---
             if latest_pattern and isinstance(df_work, pd.DataFrame) and len(df_work) > 0:
                 last_candle = df_work.iloc[-1]
@@ -203,14 +210,7 @@ class ScalpingStrategy(BaseStrategy):
                 or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
                 or {}
             )
-
-            # --- 1) Métadonnées ---
-            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
-            pip_size = meta["pip_size"]
-            if pip_size <= 0:
-                self.logger.warning(f"[{asset}] pip_size invalide.")
-                return {}
-
+           
             # --- 2) Prix courant ---
             price = self._safe_price_from_signals(asset_signals)
             if not price:
