@@ -804,33 +804,7 @@ class PhaseObserver:
                 )
                 df_an["volume_zscore"] = 0.0
                 df_an["volume_momentum"] = 0.0
-                
-                # === PHASE 1bis: RANGE POSITION (accumulation/distribution en range) ===
-                try:
-                    pos_win = int(
-                        self.config_manager.get(
-                            "phase_detection_defaults.range_position.position_window", 50
-                        )
-                    ) if getattr(self, "config_manager", None) else 50
-                except Exception:
-                    pos_win = 50
-
-                rolling_high = df_an["high"].rolling(pos_win, min_periods=1).max()
-                rolling_low  = df_an["low"].rolling(pos_win, min_periods=1).min()
-                rng = (rolling_high - rolling_low).replace(0, np.nan)
-
-                df_an["range_pos_pct"] = ((df_an["close"] - rolling_low) / rng).clip(0.0, 1.0).fillna(0.5)
-
-                lower_thr = float(
-                    self.config_manager.get("phase_detection_defaults.range_position.lower_threshold", 0.33)
-                ) if getattr(self, "config_manager", None) else 0.33
-                upper_thr = float(
-                    self.config_manager.get("phase_detection_defaults.range_position.upper_threshold", 0.67)
-                ) if getattr(self, "config_manager", None) else 0.67
-
-                df_an["in_lower_tercile"] = df_an["range_pos_pct"] <= lower_thr
-                df_an["in_upper_tercile"] = df_an["range_pos_pct"] >= upper_thr
-
+                               
             # === PHASE 2: CORE INDICATORS ===
             toggles = {}
             try:
@@ -902,6 +876,32 @@ class PhaseObserver:
                         )
                         df_an["candle_pattern"] = None
                         df_an["candle_pattern_score"] = 0.0
+                        
+            # === PHASE 2bis: RANGE POSITION (accumulation/distribution en range) ===
+            try:
+                pos_win = int(
+                    self.config_manager.get(
+                        "phase_detection_defaults.range_position.position_window", 50
+                    )
+                ) if getattr(self, "config_manager", None) else 50
+            except Exception:
+                pos_win = 50
+
+            rolling_high = df_an["high"].rolling(pos_win, min_periods=1).max()
+            rolling_low  = df_an["low"].rolling(pos_win, min_periods=1).min()
+            rng = (rolling_high - rolling_low).replace(0, np.nan)
+
+            df_an["range_pos_pct"] = ((df_an["close"] - rolling_low) / rng).clip(0.0, 1.0).fillna(0.5)
+
+            lower_thr = float(
+                self.config_manager.get("phase_detection_defaults.range_position.lower_threshold", 0.33)
+            ) if getattr(self, "config_manager", None) else 0.33
+            upper_thr = float(
+                self.config_manager.get("phase_detection_defaults.range_position.upper_threshold", 0.67)
+            ) if getattr(self, "config_manager", None) else 0.67
+
+            df_an["in_lower_tercile"] = df_an["range_pos_pct"] <= lower_thr
+            df_an["in_upper_tercile"] = df_an["range_pos_pct"] >= upper_thr
 
             # === PHASE 3: LIQUIDITÉ ===
             try:
@@ -1203,11 +1203,7 @@ class PhaseObserver:
                 df_an.loc[df_an.index[-1], "footprint_summary"] = "{}"
 
             # === PHASE 5: PHASE PRIMAIRE (déterministe) ===
-            df_an["phase_primary"] = df_an.apply(
-                lambda row: str(self.detectors.determine_optimized_phase(row)), axis=1
-)
-
-
+ 
             ALLOWED_PHASES = {
                 "trending_institutional_bull", "trending_institutional_bear",
                 "trending_retail_bull", "trending_retail_bear",
@@ -1254,18 +1250,16 @@ class PhaseObserver:
                 p = (phase or "").strip().lower()
                 if p in ("", "unknown", "uncertain", "no_clear_phase", None):
                     return _fallback_phase_from_regime(row)
-                mapping = {
-                     "trending_institutional_bull", "trending_institutional_bear",
-                    "trending_retail_bull", "trending_retail_bear",
-                    "range_accumulation", "range_distribution", "range_institutional", "range_retail",
-                    "high_volatility_chaos", "low_volatility_compression",
-                    "liquidity_eqh_eql", "liquidity_sweep", "liquidity_absorption",
-                    "distribution_breakout", "accumulation_zone",
-                    "institutional_setup", "institutional_setup_premium",
-                    "volatility_breakout"
+                PHASE_SYNONYM_MAP = {
+                    "bullish": "trending_institutional_bull",
+                    "bearish": "trending_institutional_bear",
+                    "range": "range_retail",
+                    "vol_high": "high_volatility_chaos",
+                    "vol_low": "low_volatility_compression",
                 }
-                p = mapping.get(p, p)
+                p = PHASE_SYNONYM_MAP.get(p, p)
                 return p if p in ALLOWED_PHASES else _fallback_phase_from_regime(row)
+
 
             def _liquidity_persist_ok(row: pd.Series, asset: str, *, min_bars: int, conf_thr: float):
                 """
@@ -1589,8 +1583,8 @@ class PhaseObserver:
             phase_row = df_an.iloc[i_last].to_dict()
             res["phase_primary"] = self.detectors.determine_optimized_phase(pd.Series(phase_row))
         except Exception:
-            # fallback sûr au lieu de 'no_clear_phase'
-            res["phase_primary"] = "range_retail"
+            pos = float(df_an.get("range_pos_pct", [0.5])[i_last] if "range_pos_pct" in df_an else 0.5)
+            res["phase_primary"] = "range_accumulation" if pos <= 0.5 else "range_distribution"
 
         try:
             res["confidence_score"] = float(
