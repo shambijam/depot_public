@@ -1328,32 +1328,7 @@ class TradeExecutor:
             msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
-
-        # On s’assure que le symbole est bien présent/actif côté MT5.
-        # On teste des alias courants (suffixes) si nécessaire.
-        candidates = [broker_symbol]
-        if not broker_symbol.endswith((".A", ".I", ".r", ".m")):
-            candidates += [f"{broker_symbol}.A", f"{broker_symbol}.I", f"{broker_symbol}.r", f"{broker_symbol}.m"]
-
-        symbol_info = None
-        for sym in candidates:
-            try:
-                info = self.mt5_connector.get_symbol_info(sym)  # fait un symbol_select() en interne
-                if info and getattr(info, "name", None):
-                    broker_symbol = sym
-                    symbol_info = info
-                    break
-            except Exception:
-                pass
-
-        if not symbol_info:
-            tried = ", ".join(candidates)
-            msg = (f"Symbole MT5 introuvable pour '{raw_symbol}'. "
-                   f"Testés: {tried}. Vérifie le mapping broker / suffixe exact dans le Market Watch.")
-            self.logger.error(msg)
-            raise TradeExecutionError(msg)
-
-
+        
         # ---------- 3bis) Fenêtre/Calendrier de trading (hard block) ----------
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
