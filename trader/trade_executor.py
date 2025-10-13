@@ -931,13 +931,11 @@ class TradeExecutor:
         if allowed and raw_symbol not in allowed:
             return _reject(f"asset_not_allowed:{raw_symbol}", sym=raw_symbol)
 
-        # 3) Mapping broker
-        broker_symbol = (self.config_manager.get("asset_symbol_mapping", {}) or {}).get(
-            raw_symbol, raw_symbol
-        )
-        if not broker_symbol or str(broker_symbol).strip().upper() == "UNKNOWN":
+        # 3) Mapping broker (unique & cohérent : compte actif)
+        broker_symbol = self._map_symbol_for_broker(raw_symbol, market_context)
+        if not broker_symbol or broker_symbol.strip().upper() == "UNKNOWN":
             return _reject(f"invalid_broker_mapping:{raw_symbol}", sym=raw_symbol)
-        broker_symbol = str(broker_symbol).strip().upper()
+        broker_symbol = broker_symbol.strip().upper()
 
         # 4) Connexion MT5
         if not _mt5_is_connected():
