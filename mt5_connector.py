@@ -1162,24 +1162,20 @@ class MT5Connector:
                 exc_info=True,
             )
             return None
-        
+            
     def resolve_broker_symbol(self, base_symbol: str) -> str:
-        """
-        Essaie d'abord le symbole tel quel (ex: XAUUSD).
-        N’essaie les suffixes que si la base échoue.
-        Utilise la get_symbol_info() existante (pas de redondance).
-        """
+        """Retourne le symbole broker résolu. N’essaie les suffixes QUE si la base échoue."""
         base = str(base_symbol).strip().upper()
         tested = [base]
 
-        # 1) Base d’abord → arrêt immédiat si OK
+        # 1) Base d'abord (et on s'arrête si OK)
         if self.get_symbol_info(base):
             return base
 
-        # 2) Suffixes uniquement si base échoue
+        # 2) Sinon seulement, tester les suffixes (config ou défaut)
         suffixes = self.config_manager.get("mt5_symbol_suffixes", [".A", ".I", ".R", ".M"])
         for suf in suffixes:
-            cand = f"{base}{str(suf).upper()}"
+            cand = f"{base}{str(suf)}".upper()
             tested.append(cand)
             if self.get_symbol_info(cand):
                 return cand

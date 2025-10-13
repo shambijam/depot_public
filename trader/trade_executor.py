@@ -1446,7 +1446,7 @@ class TradeExecutor:
             order_type = "MARKET"
 
         try:
-            # ---------- 6) Infos symbole + résolution broker ----------
+            # ---------- 6) Résolution + infos symbole ----------
             resolved_symbol = self.mt5_connector.resolve_broker_symbol(broker_symbol)
             if not resolved_symbol:
                 msg = (f"Symbole MT5 introuvable pour '{broker_symbol}'. "
@@ -1455,11 +1455,15 @@ class TradeExecutor:
                 raise TradeExecutionError(msg)
 
             symbol_info = self.mt5_connector.get_symbol_info(resolved_symbol)
-            if not symbol_info or not getattr(symbol_info, "symbol", None):
+            if not symbol_info:
                 msg = (f"Symbole MT5 invalide ou introuvable ({resolved_symbol}). "
                     f"Vérifie la correspondance broker.")
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
+
+            # Utiliser le symbole résolu pour TOUT le reste
+            broker_symbol = resolved_symbol
+
 
             # ⚠️ À partir d’ici on travaille UNIQUEMENT avec resolved_symbol
             broker_symbol = resolved_symbol
