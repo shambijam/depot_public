@@ -230,17 +230,38 @@ class TradeExecutor:
 
         # La réconciliation initiale est gérée par main.py, ce qui est la bonne approche.
 
-    def get_open_positions(self) -> List[Dict[str, Any]]:
+    def get_positions(self, symbol: str | None = None):
         """
-        Retourne la liste des positions ouvertes actuellement suivies par le TradeExecutor.
-        Cette méthode est utilisée par le cycle principal pour récupérer les positions
-        à évaluer pour des conditions de sortie.
+        Retourne les positions ouvertes (liste de dicts). Filtre par symbole si fourni.
+        """
+        
+        try:
+            positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+            out = []
+            for p in positions or []:
+                info = mt5.symbol_info(getattr(p, "symbol", "") or "")
+                out.append({
+                    "ticket":     getattr(p, "ticket", None),
+                    "symbol":     getattr(p, "symbol", None),
+                    "magic":      getattr(p, "magic", None),
+                    "comment":    getattr(p, "comment", ""),
+                    "type":       getattr(p, "type", None),  # 0=BUY, 1=SELL
+                    "volume":     float(getattr(p, "volume", 0) or 0),
+                    "price_open": float(getattr(p, "price_open", 0) or 0),
+                    "sl":         float(getattr(p, "sl", 0) or 0),
+                    "tp":         float(getattr(p, "tp", 0) or 0),
+                    "point":      float(getattr(info, "point", 0.0001) or 0.0001),
+                })
+            return out
+        except Exception as e:
+            self.logger.warning(f"[MT5C] get_positions() a échoué: {e}")
+            return []
 
-        Returns:
-            List[Dict[str, Any]]: Une liste de dictionnaires représentant les positions ouvertes.
-                                Peut être vide si aucune position n'est ouverte.
-        """
-        return list(self._open_positions.values())
+    # Compatibilité arrière (ancien appel)
+    def get_open_positions(self, symbol: str | None = None):
+        self.logger.warning("get_open_positions() est obsolète. Utilise get_positions().")
+        return self.get_positions(symbol)
+
 
     def execute_exit_orders(
         self, exit_decisions: List[Dict[str, Any]], is_dry_run: bool = False
@@ -1296,14 +1317,42 @@ class TradeExecutor:
             raise TradeExecutionError(msg)
 
         # ---------- 3) Mapping broker ----------
-        broker_symbol = self.config_manager.get("asset_symbol_mapping", {}).get(
-            raw_symbol, raw_symbol
-        )
-        if not broker_symbol or str(broker_symbol).upper() == "UNKNOWN":
+        # 1) mapping de compte (prioritaire)  2) mapping global  3) défaut = raw
+        broker_map_acct   = (market_context.get("active_broker_account", {}).get("symbol_map") or {})
+        broker_map_global = (self.config_manager.get("asset_symbol_mapping", {}) or {})
+        broker_symbol = str(
+            broker_map_acct.get(raw_symbol, broker_map_global.get(raw_symbol, raw_symbol))
+        ).strip().upper()
+
+        if not broker_symbol or broker_symbol == "UNKNOWN":
             msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
-        broker_symbol = str(broker_symbol).upper()
+
+        # On s’assure que le symbole est bien présent/actif côté MT5.
+        # On teste des alias courants (suffixes) si nécessaire.
+        candidates = [broker_symbol]
+        if not broker_symbol.endswith((".A", ".I", ".r", ".m")):
+            candidates += [f"{broker_symbol}.A", f"{broker_symbol}.I", f"{broker_symbol}.r", f"{broker_symbol}.m"]
+
+        symbol_info = None
+        for sym in candidates:
+            try:
+                info = self.mt5_connector.get_symbol_info(sym)  # fait un symbol_select() en interne
+                if info and getattr(info, "name", None):
+                    broker_symbol = sym
+                    symbol_info = info
+                    break
+            except Exception:
+                pass
+
+        if not symbol_info:
+            tried = ", ".join(candidates)
+            msg = (f"Symbole MT5 introuvable pour '{raw_symbol}'. "
+                   f"Testés: {tried}. Vérifie le mapping broker / suffixe exact dans le Market Watch.")
+            self.logger.error(msg)
+            raise TradeExecutionError(msg)
+
 
         # ---------- 3bis) Fenêtre/Calendrier de trading (hard block) ----------
         try:
@@ -1338,7 +1387,7 @@ class TradeExecutor:
                 enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
 
                 # Récupérer positions MT5 actuelles
-                open_positions = self.mt5_connector.get_open_positions(symbol=broker_symbol) or []
+                open_positions = self.mt5_connector.get_positions(symbol=broker_symbol) or []
                 open_scalping = [
                     p for p in open_positions
                     if str(p.comment).startswith("SCALPING_BURST") or str(p.magic) == str(self.config_manager.get("magic_number"))
@@ -2074,7 +2123,7 @@ class TradeExecutor:
         Si oui → on les marque comme complets pour suivi, sans les fermer immédiatement.
         La fermeture se fera uniquement via monitor_burst_baskets() quand toutes les positions seront gagnantes.
         """
-        open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
+        open_positions = getattr(self.mt5_connector, "get_positions", lambda: [])()
         if not open_positions:
             return
 
@@ -2112,7 +2161,7 @@ class TradeExecutor:
             self.logger.warning("close_burst_basket appelé sans basket_id")
             return
 
-        open_positions = getattr(self, "mt5_connector", None).get_open_positions()
+        open_positions = getattr(self, "mt5_connector", None).get_positions()
         if not open_positions:
             self.logger.info(f"Aucune position ouverte pour le basket {basket_id}")
             return
@@ -2162,7 +2211,7 @@ class TradeExecutor:
         enable_mtf_bias = bool(closure_cfg.get("enable_mtf_bias", True))
         close_on_full_profit = bool(closure_cfg.get("close_on_full_profit", True))
 
-        open_positions = getattr(self, "mt5_connector", None).get_open_positions()
+        open_positions = getattr(self, "mt5_connector", None).get_positions()
         if not open_positions:
             return
 

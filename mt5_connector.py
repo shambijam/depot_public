@@ -666,6 +666,12 @@ class MT5Connector:
             return (
                 []
             )  # Retourne une liste vide au lieu de None pour la clarté et la facilité de manipulation
+            
+    def get_open_positions(self, symbol: Optional[str] = None):
+        """Alias de compatibilité pour le TradeExecutor (évite la redondance)."""
+        positions = self.get_positions(symbol)
+        return positions or []
+ 
 
     def get_orders(
         self, symbol: Optional[str] = None
