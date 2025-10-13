@@ -433,12 +433,13 @@ class TradeExecutor:
                         trailing_params = pos.get("trailing_params", {})
                         trigger_pips = float(trailing_params.get("trigger_pips", 15))
                         step_pips = float(trailing_params.get("step_pips", 5))
-
+                        
+                        # sl_pips = distance mini ; atr_pips = buffer volatilité
                         self.apply_dynamic_trailing(
-                            symbol=symbol,
                             ticket=ticket,
-                            trigger_pips=trigger_pips,
-                            step_pips=step_pips,
+                            sl_pips=trigger_pips,
+                            atr_pips=step_pips,
+                            symbol=symbol,
                         )
                     else:
                         # ✅ Fallback technique de sécurité :
@@ -453,11 +454,12 @@ class TradeExecutor:
                         )
 
                         self.apply_dynamic_trailing(
-                            symbol=symbol,
                             ticket=ticket,
-                            trigger_pips=sl_pips,
-                            step_pips=atr_pips,
+                            sl_pips=sl_pips,
+                            atr_pips=atr_pips,
+                            symbol=symbol,
                         )
+
 
                 except Exception as e:
                     self.logger.warning(
@@ -3614,50 +3616,7 @@ class TradeExecutor:
             return int(elapsed_minutes // bar_size_min)
         except Exception:
             return 0
-
-    def apply_dynamic_trailing(
-        self, ticket: int, trailing_cfg: dict, current_price: float
-    ):
-        """
-        Applique un trailing stop dynamique sur une position existante.
-        - trailing_cfg peut définir 'atr_mult', 'lock_pips', 'step_pips'
-        - Déplace le SL uniquement dans le sens du trade et jamais en arrière
-        """
-        try:
-            pos = self._open_positions.get(ticket)
-            if not pos:
-                return
-
-            entry_price = float(pos.get("entry_price", 0))
-            sl_price = float(pos.get("sl", 0))
-            symbol = pos.get("symbol")
-
-            if not symbol or entry_price <= 0 or current_price <= 0:
-                return
-
-            # BUY → SL doit monter / SELL → SL doit descendre
-            if pos["type"] == self.POSITION_TYPE_BUY:
-                new_sl = max(
-                    sl_price,
-                    current_price
-                    - trailing_cfg.get("lock_pips", 5)
-                    * self.mt5_connector.get_point(symbol),
-                )
-                if new_sl > sl_price:
-                    self._modify_sl(ticket, new_sl)
-            else:  # SELL
-                new_sl = min(
-                    sl_price,
-                    current_price
-                    + trailing_cfg.get("lock_pips", 5)
-                    * self.mt5_connector.get_point(symbol),
-                )
-                if new_sl < sl_price:
-                    self._modify_sl(ticket, new_sl)
-
-        except Exception as e:
-            self.logger.error(f"Erreur trailing stop dynamique: {e}", exc_info=True)
-
+   
     def _modify_sl(self, ticket: int, new_sl: float):
         """Envoie une requête de modification de SL au broker."""
         try:
