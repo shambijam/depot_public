@@ -1561,57 +1561,45 @@ class TradeExecutor:
                     return round(math.floor(x / tick) * tick, digits)
 
                 # Ajustements selon le type d'ordre
+                rule_name_local = str(trade_decision.get("rule_name", "")).lower()
+                has_tp = (tp_price is not None) and (rule_name_local != "burst_scalping")
+
                 if action == "BUY":
-                    # SL en-dessous avec gap minimal
+                    # SL en-dessous, TP au-dessus (si TP existe)
                     if (entry_price_market - sl_price) < min_gap_price:
                         sl_price = entry_price_market - min_gap_price
-
-                    # TP facultatif (ex: burst: tp_price == None)
-                    if tp_price is not None:
-                        if (tp_price - entry_price_market) < min_gap_price:
-                            tp_price = entry_price_market + min_gap_price
+                    if has_tp and (tp_price - entry_price_market) < min_gap_price:
+                        tp_price = entry_price_market + min_gap_price
 
                     # Arrondi à la grille
                     sl_price = _floor_to_tick(sl_price)
-                    if tp_price is not None:
+                    if has_tp:
                         tp_price = _ceil_to_tick(tp_price)
 
-                    # Cohérence finale
-                    if tp_price is None:
-                        # En burst: on valide juste SL < entry
-                        if not (sl_price < entry_price_market):
-                            sl_price = _floor_to_tick(entry_price_market - min_gap_price)
-                    else:
-                        # Classique: SL < entry < TP
-                        if not (sl_price < entry_price_market < tp_price):
-                            sl_price = _floor_to_tick(entry_price_market - min_gap_price)
-                            tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                    # Cohérence finale (sans TP en burst)
+                    if not (sl_price < entry_price_market):
+                        sl_price = _floor_to_tick(entry_price_market - min_gap_price)
+                    if has_tp and not (entry_price_market < tp_price):
+                        tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
 
                 elif action == "SELL":
-                    # SL au-dessus avec gap minimal
+                    # SL au-dessus, TP en-dessous (si TP existe)
                     if (sl_price - entry_price_market) < min_gap_price:
                         sl_price = entry_price_market + min_gap_price
-
-                    # TP facultatif (ex: burst: tp_price == None)
-                    if tp_price is not None:
-                        if (entry_price_market - tp_price) < min_gap_price:
-                            tp_price = entry_price_market - min_gap_price
+                    if has_tp and (entry_price_market - tp_price) < min_gap_price:
+                        tp_price = entry_price_market - min_gap_price
 
                     # Arrondi à la grille
                     sl_price = _ceil_to_tick(sl_price)
-                    if tp_price is not None:
+                    if has_tp:
                         tp_price = _floor_to_tick(tp_price)
 
-                    # Cohérence finale
-                    if tp_price is None:
-                        # En burst: on valide juste entry < SL
-                        if not (entry_price_market < sl_price):
-                            sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
-                    else:
-                        # Classique: TP < entry < SL
-                        if not (tp_price < entry_price_market < sl_price):
-                            sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
-                            tp_price = _floor_to_tick(entry_price_market - min_gap_price)
+                    # Cohérence finale (sans TP en burst)
+                    if not (entry_price_market < sl_price):
+                        sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                    if has_tp and not (tp_price < entry_price_market):
+                        tp_price = _floor_to_tick(entry_price_market - min_gap_price)
+
 
                 # 🔍 Log clair pour comprendre en cas d'erreur
                 self.logger.info(
@@ -3407,7 +3395,7 @@ class TradeExecutor:
             order_type_const = None
 
         request = {
-            "symbol": getattr(symbol_info, "name"),
+            "symbol": str(getattr(symbol_info, "name", None) or getattr(symbol_info, "symbol", None)),
             "symbol": symbol_name,
             "volume": float(vol),
             "sl": float(sl_price),
