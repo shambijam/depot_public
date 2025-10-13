@@ -1562,36 +1562,56 @@ class TradeExecutor:
 
                 # Ajustements selon le type d'ordre
                 if action == "BUY":
-                    # SL en-dessous, TP au-dessus
+                    # SL en-dessous avec gap minimal
                     if (entry_price_market - sl_price) < min_gap_price:
                         sl_price = entry_price_market - min_gap_price
-                    if (tp_price - entry_price_market) < min_gap_price:
-                        tp_price = entry_price_market + min_gap_price
+
+                    # TP facultatif (ex: burst: tp_price == None)
+                    if tp_price is not None:
+                        if (tp_price - entry_price_market) < min_gap_price:
+                            tp_price = entry_price_market + min_gap_price
 
                     # Arrondi à la grille
                     sl_price = _floor_to_tick(sl_price)
-                    tp_price = _ceil_to_tick(tp_price)
+                    if tp_price is not None:
+                        tp_price = _ceil_to_tick(tp_price)
 
                     # Cohérence finale
-                    if not (sl_price < entry_price_market < tp_price):
-                        sl_price = _floor_to_tick(entry_price_market - min_gap_price)
-                        tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                    if tp_price is None:
+                        # En burst: on valide juste SL < entry
+                        if not (sl_price < entry_price_market):
+                            sl_price = _floor_to_tick(entry_price_market - min_gap_price)
+                    else:
+                        # Classique: SL < entry < TP
+                        if not (sl_price < entry_price_market < tp_price):
+                            sl_price = _floor_to_tick(entry_price_market - min_gap_price)
+                            tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
 
                 elif action == "SELL":
-                    # SL au-dessus, TP en-dessous
+                    # SL au-dessus avec gap minimal
                     if (sl_price - entry_price_market) < min_gap_price:
                         sl_price = entry_price_market + min_gap_price
-                    if (entry_price_market - tp_price) < min_gap_price:
-                        tp_price = entry_price_market - min_gap_price
+
+                    # TP facultatif (ex: burst: tp_price == None)
+                    if tp_price is not None:
+                        if (entry_price_market - tp_price) < min_gap_price:
+                            tp_price = entry_price_market - min_gap_price
 
                     # Arrondi à la grille
                     sl_price = _ceil_to_tick(sl_price)
-                    tp_price = _floor_to_tick(tp_price)
+                    if tp_price is not None:
+                        tp_price = _floor_to_tick(tp_price)
 
                     # Cohérence finale
-                    if not (tp_price < entry_price_market < sl_price):
-                        sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
-                        tp_price = _floor_to_tick(entry_price_market - min_gap_price)
+                    if tp_price is None:
+                        # En burst: on valide juste entry < SL
+                        if not (entry_price_market < sl_price):
+                            sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                    else:
+                        # Classique: TP < entry < SL
+                        if not (tp_price < entry_price_market < sl_price):
+                            sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                            tp_price = _floor_to_tick(entry_price_market - min_gap_price)
 
                 # 🔍 Log clair pour comprendre en cas d'erreur
                 self.logger.info(
@@ -3273,9 +3293,11 @@ class TradeExecutor:
         if action not in {"BUY", "SELL"}:
             raise TradeExecutionErrorCls(f"[BURST] Action invalide: '{action}'.")
 
-        # symbol_info sanity
-        if not symbol_info or not getattr(symbol_info, "name", None):
-            raise TradeExecutionErrorCls("[BURST] symbol_info invalide ou manquant.")
+        # symbol_info sanity (accepte MT5 natif OU notre SymbolInfoFallback)
+        if not symbol_info:
+            raise TradeExecutionErrorCls("[BURST] symbol_info manquant.")
+        if getattr(symbol_info, "point", None) in (None, 0, 0.0) or getattr(symbol_info, "digits", None) is None:
+            raise TradeExecutionErrorCls("[BURST] symbol_info invalide: digits/point manquants.")
 
         # digits & point
         try:
@@ -3288,6 +3310,15 @@ class TradeExecutor:
 
         if point <= 0:
             raise TradeExecutionErrorCls("[BURST] symbol_info.point invalide (<=0).")
+        
+        # Résolution du nom du symbole (fallback .symbol si .name absent)
+        symbol_name = getattr(symbol_info, "name", None) or getattr(symbol_info, "symbol", None)
+        if not symbol_name:
+            # dernier recours : prendre l’asset de la décision (si fourni)
+            symbol_name = str(trade_decision.get("asset") or trade_decision.get("symbol") or "").strip()
+            if not symbol_name:
+                raise TradeExecutionErrorCls("[BURST] Impossible de déterminer le symbole (name/symbol manquants).")
+
 
         # Volume normalization (FLOOR)
         try:
@@ -3377,6 +3408,7 @@ class TradeExecutor:
 
         request = {
             "symbol": getattr(symbol_info, "name"),
+            "symbol": symbol_name,
             "volume": float(vol),
             "sl": float(sl_price),
             # NOTE: tp intentionally omitted as business rule — include explicit marker
