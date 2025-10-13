@@ -437,8 +437,8 @@ class TradeExecutor:
                         # sl_pips = distance mini ; atr_pips = buffer volatilité
                         self.apply_dynamic_trailing(
                             ticket=ticket,
-                            sl_pips=trigger_pips,
-                            atr_pips=step_pips,
+                            sl_pips=trigger_pips,   
+                            atr_pips=step_pips,     
                             symbol=symbol,
                         )
                     else:
@@ -1391,7 +1391,6 @@ class TradeExecutor:
                     )
 
                 # Si tout est OK → on valide le démarrage d’un nouveau burst
-                self._last_burst_time = now_ts
                 self.logger.info(
                     f"[BURST GUARD] Démarrage burst autorisé ({len(open_scalping)} positions existantes, cooldown OK)."
                 )
@@ -1810,8 +1809,14 @@ class TradeExecutor:
             if not current_price:
                 return
 
-            point = float(pos.get("point") or 0.0001)
-            pip_size = 10.0 * point  # ⚠️ FX/XAU: 1 pip = 10 points
+            # Récup info symbole pour des pips corrects (FX vs XAU…)
+            info = self.mt5_connector.get_symbol_info(symbol)
+            digits = int(getattr(info, "digits", 5) or 5) if info else 5
+
+            # Pour FX 3/5 digits → 1 pip = 10 points ; sinon (ex: XAUUSD 2 digits) → 1 pip = 1 point
+            points_per_pip = 10.0 if digits in (3, 5) else 1.0
+            point = float(getattr(info, "point", point)) if info else point
+            pip_size = point * points_per_pip
 
             # Distance trailing
             trailing_dist = (sl_pips + atr_pips) * pip_size
@@ -1819,14 +1824,14 @@ class TradeExecutor:
             if action == "BUY":
                 new_sl = current_price - trailing_dist
                 if not pos.get("sl") or new_sl > pos.get("sl"):
-                    self.mt5_connector.modify_position(ticket, sl=new_sl)
+                    self._modify_sl(ticket, round(new_sl, digits))
                     self.logger.info(
                         f"[TRAILING] BUY {symbol} ticket={ticket}: SL relevé → {new_sl:.5f}"
                     )
             else:  # SELL
                 new_sl = current_price + trailing_dist
                 if not pos.get("sl") or new_sl < pos.get("sl"):
-                    self.mt5_connector.modify_position(ticket, sl=new_sl)
+                    self._modify_sl(ticket, round(new_sl, digits))
                     self.logger.info(
                         f"[TRAILING] SELL {symbol} ticket={ticket}: SL abaissé → {new_sl:.5f}"
                     )
