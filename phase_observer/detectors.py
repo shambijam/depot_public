@@ -2526,9 +2526,9 @@ class Detectors:
         # --- PATCH C1: ADX quantiles (auto-calibration) ---
         win = int(adx_config.get("quantile_window", 200))
         trend_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.70)\
-                    .fillna(method="bfill").fillna(adx.median())
+                    .bfill().fillna(adx.median())
         range_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.30)\
-                    .fillna(method="bfill").fillna(adx.median())
+                    .bfill().fillna(adx.median())
 
         # === 2. VOLATILITÉ GARMAN-KLASS ===
         vol_period = int(vol_config.get("calculation_period", 20))

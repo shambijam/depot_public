@@ -1446,12 +1446,23 @@ class TradeExecutor:
             order_type = "MARKET"
 
         try:
-            # ---------- 6) Infos symbole ----------
-            symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
-            if not symbol_info or not getattr(symbol_info, "name", None):
-                raise TradeExecutionError(
-                    f"Symbole MT5 invalide ou introuvable ({broker_symbol}). Vérifie la correspondance broker."
-                )
+            # ---------- 6) Infos symbole + résolution broker ----------
+            resolved_symbol = self.mt5_connector.resolve_broker_symbol(broker_symbol)
+            if not resolved_symbol:
+                msg = (f"Symbole MT5 introuvable pour '{broker_symbol}'. "
+                    f"Vérifie la correspondance broker / Market Watch.")
+                self.logger.error(msg)
+                raise TradeExecutionError(msg)
+
+            symbol_info = self.mt5_connector.get_symbol_info(resolved_symbol)
+            if not symbol_info or not getattr(symbol_info, "symbol", None):
+                msg = (f"Symbole MT5 invalide ou introuvable ({resolved_symbol}). "
+                    f"Vérifie la correspondance broker.")
+                self.logger.error(msg)
+                raise TradeExecutionError(msg)
+
+            # ⚠️ À partir d’ici on travaille UNIQUEMENT avec resolved_symbol
+            broker_symbol = resolved_symbol
 
             # log contraintes volume broker
             try:
