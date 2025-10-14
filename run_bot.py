@@ -796,6 +796,25 @@ def run_single_pipeline_cycle(
         global_context["diag_tracker"] = get_tracker_from_context(global_context)
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
+        
+        # === [BURST EXIT MANAGEMENT] Fermer les paniers avant toute nouvelle décision ===
+        try:
+            burst_cfg  = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+            trail_cfg  = burst_cfg.get("trailing", {}) or {}
+            closure_cfg = burst_cfg.get("closure_rules", {}) or {}
+
+            # 1) Hard rule: si un panier est 'plein & tout vert' → fermer immédiatement (ou après court hold)
+            trade_executor.check_and_close_full_baskets()
+
+            # 2) Monitoring collectif (perte max + trailing collectif)
+            trade_executor.monitor_burst_baskets(
+                config=base_config,
+                max_loss_pips=float(closure_cfg.get("max_loss_pips", 15.0)),
+                trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
+                trail_step=float(trail_cfg.get("step_pips", 5.0)),
+            )
+        except Exception as e:
+            logger.warning(f"[BURST EXIT] Contrôle fermeture panier: {e}")
 
         # Appel pipeline de décision
         print("🤖 [PIPELINE] Appel du decision_pipeline...")
@@ -922,52 +941,101 @@ def run_single_pipeline_cycle(
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
-                print(
-                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
-                )
+                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+
+            # === [BURST GUARD PIPELINE] bloque tout nouveau burst si un panier est actif (scope global) ===
+            try:
+                burst_cfg = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+                enforce_closure     = bool(guard_cfg.get("enforce_burst_closure", True))
+                single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+
+                if enforce_closure and single_burst_global:
+                    import re
+                    def _field(obj, key, default=None):
+                        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                    def _open_burst_ids(positions):
+                        ids = set()
+                        for p in (positions or []):
+                            c = str(_field(p, "comment", "") or "")
+                            m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                            if m:
+                                ids.add(m.group(1))
+                        return ids
+
+                    all_open = mt5_connector.get_positions() or []
+                    open_bursts = _open_burst_ids(all_open)
+                    if open_bursts:
+                        logger.info(f"⛔ [BURST GUARD] Panier(s) actif(s): {', '.join(sorted(open_bursts))} → aucune exécution scalping ce cycle.")
+                        return False
+            except Exception as e:
+                logger.warning(f"[BURST GUARD][pipeline] check global échoué: {e}")
 
             for td in scalping_decisions:
                 action = str(td.get("action", "")).upper()
 
-                # 🔧 PATCH (NO TP pour BURST) — à INSÉRER AVANT l'appel _execute_single_decision
+                # 🔧 (NO TP pour BURST) — à laisser avant l'exécution
                 try:
                     rule_name = str(td.get("rule_name", "")).lower()
                     if rule_name == "burst_scalping":
-                        # 1) on supprime TOUT ce qui peut (ré)injecter un TP
+                        # 1) empêcher toute réinjection de TP
                         for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
-                            if k in td:
-                                td.pop(k, None)
-
-                        # 2) drapeau clair pour l’exécuteur
+                            td.pop(k, None)
                         td["no_tp"] = True
-
-                        # 3) trailing forcé si la config burst le prévoit
+                        # 2) trailing CNF
                         trailing_cfg = (
                             (td.get("trailing") or {}) if td.get("trailing") else {}
-                        ) or (  # déjà présent ?
-                            (
-                                (global_context.get("asset_configs", {}) or {})
-                                .get(td.get("asset", ""), {})
-                                .get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                .get("trailing", {})
-                            )
+                        ) or (
+                            (global_context.get("asset_configs", {}) or {})
+                            .get(td.get("asset", ""), {})
+                            .get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("trailing", {})
                             or {}
                         )
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(
-                                    trailing_cfg.get("activate_after_rr", 1.0)
-                                ),
+                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
                     pass
-               
+
                 if action in {"BUY", "SELL"}:
-                    _execute_single_decision(
+                    # [SYMBOL GUARD] si verrou par symbole (single_burst_global = False)
+                    try:
+                        rule_name_local = str(td.get("rule_name", "")).lower()
+                        if rule_name_local == "burst_scalping":
+                            burst_cfg = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                            guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+                            enforce_closure     = bool(guard_cfg.get("enforce_burst_closure", True))
+                            single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+
+                            if enforce_closure and not single_burst_global:
+                                import re
+                                def _field(obj, key, default=None):
+                                    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                                def _open_burst_ids(positions):
+                                    ids = set()
+                                    for _p in (positions or []):
+                                        c = str(_field(_p, "comment", "") or "")
+                                        m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                                        if m:
+                                            ids.add(m.group(1))
+                                    return ids
+
+                                sym = str(td.get("asset") or td.get("symbol") or "").upper()
+                                pos_sym = mt5_connector.get_positions(symbol=sym) or []
+                                burst_ids_sym = _open_burst_ids(pos_sym)
+                                if burst_ids_sym:
+                                    logger.info(f"⛔ [BURST GUARD][{sym}] Panier(s) actif(s): {', '.join(sorted(burst_ids_sym))} → skip décision.")
+                                    continue
+                    except Exception as e:
+                        logger.warning(f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}")
+
+                    if _execute_single_decision(
                         td,
                         trade_executor,
                         mt5_connector,
@@ -975,7 +1043,9 @@ def run_single_pipeline_cycle(
                         decision_package,
                         execution_mode,
                         logger,
-                    )
+                    ):
+                        trade_executed_successfully = True
+
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:

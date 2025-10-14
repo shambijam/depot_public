@@ -94,7 +94,8 @@
         "burst_guardrails": {
           "max_open_positions": 5,
           "cooldown_seconds": 90,
-          "enforce_burst_closure": true
+          "enforce_burst_closure": true,
+          "single_burst_global": true
         },
         "trailing": {
           "enabled": true,
@@ -107,7 +108,10 @@
           "breakout_lookback": 20,
           "atr_factor": 1.5,
           "enable_mtf_bias": true,
-          "close_on_full_profit": false
+          "close_on_full_profit": true,
+          "require_full_count_for_profit_close": true,
+          "full_green_hold_seconds": 3.0,
+          "full_green_grace_trail_pips": 1.0
         }
       }
     }
