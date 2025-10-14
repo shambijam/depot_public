@@ -110,8 +110,11 @@
           "enable_mtf_bias": true,
           "close_on_full_profit": true,
           "require_full_count_for_profit_close": true,
-          "full_green_hold_seconds": 3.0,
-          "full_green_grace_trail_pips": 1.0
+          "min_green_pnl_pips": 0.2,
+          "rt_fast_window_ms": 2500,
+          "rt_poll_interval_ms": 150,
+          "full_green_hold_seconds": 0.0,
+          "full_green_grace_trail_pips": 0.0
         }
       }
     }

@@ -2169,241 +2169,205 @@ class TradeExecutor:
         trail_step: float = 5.0,
     ):
         """
-        Surveille tous les paniers burst en cours :
-        PRIORITÉ ABSOLUE :
-        - Si 'panier plein' + 'toutes positions gagnantes' ('tout vert') :
-            * si full_green_hold_seconds == 0   -> fermeture immédiate
-            * sinon on 'laisse courir' quelques secondes
-                + micro-trailing (full_green_grace_trail_pips) pendant ce hold
-                + fermeture à la fin du hold si toujours 'tout vert'
-        AUTRES RÈGLES :
-        - Si perte collective <= -max_loss_pips -> fermeture immédiate
-        - Trailing collectif si pnl >= trail_trigger
+        Surveillance 'chirurgicale' des paniers burst.
+
+        Phase A — FAST WATCHDOG (temps réel sur courte fenêtre) :
+        - Pendant rt_fast_window_ms, on re-scanne toutes les rt_poll_interval_ms.
+        - Si un panier est 'plein' ET toutes ses positions sont > 0 (avec seuil optionnel),
+            on le ferme IMMÉDIATEMENT, sans momentum ni hold.
+
+        Phase B — Contrôles classiques (1 passe) :
+        - stop perte collectif si pnl_pips <= -max_loss_pips
+        - trailing collectif si pnl_pips >= trail_trigger
+
+        Paramètres (closure_rules):
+        close_on_full_profit: bool           (doit être True)
+        require_full_count_for_profit_close: bool (vrai pour exiger panier 'plein')
+        min_green_pnl_pips: float            (>=0, mini pips par position pour éviter le 'flicker')  [optionnel]
+        rt_fast_window_ms: int               (ex: 2500)
+        rt_poll_interval_ms: int             (ex: 150)
         """
-       
+        import re, time
+
         # ---- Chargement config fermeture ----
         closure_cfg = (
             config.get("entry_rules", {})
                 .get("scalping", {})
                 .get("burst_scalping", {})
                 .get("closure_rules", {})
-        )
-        # Nouveaux paramètres
-        require_full_count_for_profit_close = bool(closure_cfg.get("require_full_count_for_profit_close", True))
-        full_green_hold_seconds = float(closure_cfg.get("full_green_hold_seconds", 0.0))            # ex: 3.0s
-        full_green_grace_trail_pips = float(closure_cfg.get("full_green_grace_trail_pips", 0.0))    # ex: 1.0p
+        ) or {}
 
-        # Déjà existants
-        momentum_score_min = int(closure_cfg.get("momentum_score_min", 2))
-        atr_factor = float(closure_cfg.get("atr_factor", 1.5))
-        enable_mtf_bias = bool(closure_cfg.get("enable_mtf_bias", True))
         close_on_full_profit = bool(closure_cfg.get("close_on_full_profit", True))
+        require_full_count   = bool(closure_cfg.get("require_full_count_for_profit_close", True))
+        # mini marge pour éviter de fermer sur +0.01 bruit : 0.1–0.3 pip recommandé
+        min_green_pnl_pips   = float(closure_cfg.get("min_green_pnl_pips", 0.0))
+        # boucle temps réel courte
+        rt_fast_window_ms    = int(closure_cfg.get("rt_fast_window_ms", 2500))
+        rt_poll_interval_ms  = int(closure_cfg.get("rt_poll_interval_ms", 150))
 
-        # ---- Récup positions ouvertes ----
+        # ---- Récup connector ----
         mt5c = getattr(self, "mt5_connector", None)
-        open_positions = mt5c.get_positions() if mt5c else []
-        if not open_positions:
+        if not mt5c:
             return
 
-        # ---- Regroupement en paniers via basket_id (ou parsing du comment) ----
-        baskets = {}
-        for pos in open_positions:
-            bid = pos.get("basket_id")
-            if not bid:
-                c = str(pos.get("comment", ""))
-                m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
-                if m:
-                    bid = m.group(1)
-            if not bid:
-                continue
-            baskets.setdefault(bid, []).append(pos)
-
-        # États internes pour le hold 'tout vert'
-        if not hasattr(self, "_full_green_since"):
-            self._full_green_since = {}
-        if not hasattr(self, "_full_green_peak"):
-            self._full_green_peak = {}
-
-        # ---- Parcours des paniers ----
-        for basket_id, positions in baskets.items():
+        def _snapshot_positions():
             try:
-                # ---- Tailles & statut 'plein' ----
-                expected = 0
-                for p in positions:
-                    if p.get("burst_size"):
+                return mt5c.get_positions() or []
+            except Exception:
+                return []
+
+        def _group_baskets(open_positions):
+            baskets = {}
+            for pos in open_positions:
+                bid = pos.get("basket_id")
+                if not bid:
+                    c = str(pos.get("comment", ""))
+                    m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                    if m:
+                        bid = m.group(1)
+                if not bid:
+                    continue
+                baskets.setdefault(bid, []).append(pos)
+            return baskets
+
+        def _pip_size_from(pos):
+            pip = pos.get("pip_size")
+            if pip:
+                try:
+                    pip = float(pip)
+                    if pip > 0:
+                        return pip
+                except Exception:
+                    pass
+            # fallback via point
+            point = float(pos.get("point", 0.0001) or 0.0001)
+            return point * 10.0
+
+        def _pos_pnl_pips(pos):
+            """PnL en pips par position ; si prix indispo, fallback sur 'profit'>0 logique binaire."""
+            try:
+                action = str(pos.get("action", "") or ("BUY" if pos.get("type", 0) == 0 else "SELL")).upper()
+                ep = float(pos.get("entry_price"))
+                cp = float(pos.get("current_price"))
+                pip = _pip_size_from(pos)
+                raw = (cp - ep) / pip if action == "BUY" else (ep - cp) / pip
+                return float(raw)
+            except Exception:
+                # si on ne peut pas calculer les pips, retourne +inf si profit>0, sinon -inf
+                return float("inf") if float(pos.get("profit", 0.0) or 0.0) > 0.0 else float("-inf")
+
+        # ==============
+        # Phase A — FAST WATCHDOG: fermer instantanément 'plein & tout vert'
+        # ==============
+        if close_on_full_profit and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
+            deadline = time.time() + (rt_fast_window_ms / 1000.0)
+            while True:
+                open_positions = _snapshot_positions()
+                if not open_positions:
+                    break
+                baskets = _group_baskets(open_positions)
+                if not baskets:
+                    break
+
+                any_closed = False
+                for basket_id, positions in baskets.items():
+                    # attendu (N)
+                    expected = 0
+                    for p in positions:
                         try:
-                            expected = max(expected, int(p["burst_size"]))
+                            if p.get("burst_size"):
+                                expected = max(expected, int(p["burst_size"]))
                         except Exception:
                             pass
-                if expected == 0:
-                    # Fallback: parse i/N depuis le comment
-                    for p in positions:
-                        c = str(p.get("comment", ""))
-                        m = re.search(r"\|(\d+)/(\d+)", c)
-                        if m:
+                    if expected == 0:
+                        # fallback: parse i/N dans le comment
+                        try:
+                            c0 = str(positions[0].get("comment", ""))
+                            m = re.search(r"\|(\d+)/(\d+)", c0)
+                            if m:
+                                expected = int(m.group(2))
+                        except Exception:
+                            expected = 0
+
+                    is_full = (expected > 0) and (len(positions) >= expected) if require_full_count else True
+
+                    # toutes > min_green_pnl_pips ?
+                    if is_full:
+                        per_pos_pips = [_pos_pnl_pips(p) for p in positions]
+                        if per_pos_pips and all(pv > float(min_green_pnl_pips) for pv in per_pos_pips):
+                            # FERMETURE IMMÉDIATE — aucune attente, aucun momentum/hold
+                            self.logger.info(f"🎯 [FAST] Burst {basket_id} PLEIN & TOUT VERT (≥{min_green_pnl_pips}p) → fermeture immédiate.")
                             try:
-                                expected = max(expected, int(m.group(2)))
-                            except Exception:
-                                pass
+                                self.close_burst_basket(basket_id)
+                                any_closed = True
+                            except Exception as e:
+                                self.logger.error(f"[FAST] Échec fermeture {basket_id}: {e}")
 
-                is_full = (expected > 0) and (len(positions) >= expected)
+                if time.time() >= deadline or not baskets:
+                    break
+                # si on vient de fermer, on re-snap tout de suite pour voir s'il reste encore un autre panier
+                if any_closed:
+                    continue
+                # sinon petite sieste et on re-check
+                time.sleep(rt_poll_interval_ms / 1000.0)
 
-                # ---- Direction & pip_size ----
-                # action explicite si dispo, sinon déduit du type (0=BUY,1=SELL)
+        # ==============
+        # Phase B — Contrôles classiques (1 passe)
+        # ==============
+        open_positions = _snapshot_positions()
+        if not open_positions:
+            return
+        baskets = _group_baskets(open_positions)
+        if not baskets:
+            return
+
+        for basket_id, positions in baskets.items():
+            try:
+                # Direction & pip_size
                 direction = positions[0].get("action")
                 if not direction:
                     t = positions[0].get("type", None)
                     direction = "BUY" if t == 0 else "SELL" if t == 1 else "BUY"
                 direction = str(direction).upper()
+                pip_size = _pip_size_from(positions[0])
 
-                pip_size = positions[0].get("pip_size")
-                if not pip_size:
-                    point = float(positions[0].get("point", 0.0001) or 0.0001)
-                    pip_size = point * 10.0
-                pip_size = float(pip_size or 0.01)
-                if pip_size <= 0:
-                    pip_size = 0.01
-
-                # ---- PnL collectif (en pips) ----
+                # PnL collectif (pips)
                 entry_prices = [float(p["entry_price"]) for p in positions if "entry_price" in p]
                 current_prices = [float(p["current_price"]) for p in positions if "current_price" in p]
                 if not entry_prices or not current_prices:
-                    # données insuffisantes
                     continue
-
                 avg_entry = sum(entry_prices) / len(entry_prices)
                 avg_price = sum(current_prices) / len(current_prices)
                 pnl_pips = (avg_price - avg_entry) / pip_size if direction == "BUY" else (avg_entry - avg_price) / pip_size
 
-                # ---- 'Tout vert' ? ----
-                all_green = all(float(p.get("profit", 0.0)) > 0.0 for p in positions)
-                must_close_check = (is_full and all_green) if require_full_count_for_profit_close else all_green
-
-                # ---- Momentum (léger, robuste aux données dispo) ----
-                momentum_score = 0
-                # Critère 1 : PnL >= 2x trigger trailing
-                if abs(pnl_pips) >= 2 * float(trail_trigger):
-                    momentum_score += 1
-                # Critère 2 : ATR fort (si dispo)
-                try:
-                    atr_m1 = float(positions[0].get("meta", {}).get("atr_m1_pips", 0.0) or 0.0)
-                    atr_ref = float(positions[0].get("meta", {}).get("atr_ref_pips", 0.0) or 0.0)
-                    if atr_m1 and atr_ref and atr_m1 >= atr_factor * atr_ref:
-                        momentum_score += 1
-                except Exception:
-                    pass
-                # Critère 3 : biais MTF aligné (si activé)
-                if enable_mtf_bias:
-                    try:
-                        mtf_bias = str(positions[0].get("meta", {}).get("mtf_bias", "")).lower()
-                        if (direction == "BUY" and "up" in mtf_bias) or (direction == "SELL" and "down" in mtf_bias):
-                            momentum_score += 1
-                    except Exception:
-                        pass
-                strong_momentum = momentum_score >= momentum_score_min
-
-                # ==== RÈGLE PRIORITAIRE : 'plein & tout vert' (+ délai optionnel) ====
-                if close_on_full_profit and must_close_check:
-                    now = time.time()
-                    first_ts = self._full_green_since.get(basket_id)
-
-                    # Sans délai -> fermeture immédiate
-                    if full_green_hold_seconds <= 0.0:
-                        self.logger.info(f"🎯 Burst {basket_id} PLEIN & TOUT VERT → fermeture immédiate.")
-                        self.close_burst_basket(basket_id)
-                        self._full_green_since.pop(basket_id, None)
-                        self._full_green_peak.pop(basket_id, None)
-                        continue
-
-                    # Avec délai -> on 'laisse courir' quelques secondes
-                    if first_ts is None:
-                        self._full_green_since[basket_id] = now
-                        self._full_green_peak[basket_id] = float(pnl_pips)
-                        self.logger.info(
-                            f"🟦 Burst {basket_id} 'tout vert' détecté → hold {full_green_hold_seconds:.1f}s "
-                            f"(grace {full_green_grace_trail_pips:.1f}p)."
-                        )
-                        # on repassera au cycle suivant
-                        continue
-                    else:
-                        # MAJ du pic & micro-trailing
-                        peak = float(self._full_green_peak.get(basket_id, pnl_pips))
-                        if pnl_pips > peak:
-                            peak = pnl_pips
-                            self._full_green_peak[basket_id] = peak
-                        drawdown = peak - pnl_pips
-
-                        # Si on rend trop pendant le hold -> fermer
-                        if full_green_grace_trail_pips > 0.0 and drawdown >= full_green_grace_trail_pips:
-                            self.logger.info(
-                                f"🔒 Burst {basket_id} micro-trailing touché ({drawdown:.1f}p ≥ "
-                                f"{full_green_grace_trail_pips:.1f}p) → fermeture."
-                            )
-                            self.close_burst_basket(basket_id)
-                            self._full_green_since.pop(basket_id, None)
-                            self._full_green_peak.pop(basket_id, None)
-                            continue
-
-                        # Fin du délai -> fermer si toujours tout vert
-                        elapsed = now - first_ts
-                        if elapsed >= full_green_hold_seconds:
-                            # On revérifie 'tout vert' (au cas où)
-                            still_all_green = all(float(p.get("profit", 0.0)) > 0.0 for p in positions)
-                            if still_all_green:
-                                self.logger.info(
-                                    f"✅ Burst {basket_id} 'tout vert' maintenu {elapsed:.1f}s → fermeture."
-                                )
-                                self.close_burst_basket(basket_id)
-                                self._full_green_since.pop(basket_id, None)
-                                self._full_green_peak.pop(basket_id, None)
-                                continue
-                            else:
-                                # Sinon reset, on retombera dans les autres règles
-                                self._full_green_since.pop(basket_id, None)
-                                self._full_green_peak.pop(basket_id, None)
-
-                else:
-                    # Si on n'est plus en condition 'tout vert', reset l'état
-                    self._full_green_since.pop(basket_id, None)
-                    self._full_green_peak.pop(basket_id, None)
-
-                # ==== STOP PERTE COLLECTIF ====
+                # STOP PERTE COLLECTIF
                 if pnl_pips <= -abs(float(max_loss_pips)):
-                    self.logger.warning(
-                        f"❌ Burst {basket_id} perte max {pnl_pips:.1f}p ≤ -{abs(float(max_loss_pips)):.1f}p → fermeture immédiate."
-                    )
+                    self.logger.warning(f"❌ Burst {basket_id} perte max {pnl_pips:.1f}p ≤ -{abs(float(max_loss_pips)):.1f}p → fermeture immédiate.")
                     self.close_burst_basket(basket_id)
                     continue
 
-                # ==== TRAILING COLLECTIF (simple & robuste) ====
-                # (Note: si tu veux persister l'état entre cycles, déporter dans self._burst_trail_state[basket_id])
+                # TRAILING COLLECTIF (simple)
                 trail_state = positions[0].get("meta", {}).get("burst_trail", {})
                 last_trail = float(trail_state.get("stop_level_pips", 0.0) or 0.0)
 
                 if pnl_pips >= float(trail_trigger):
-                    # break-even à trail_trigger/2, puis paliers de trail_step/2
                     extra_gain = pnl_pips - float(trail_trigger)
                     steps = int(extra_gain // float(trail_step)) if trail_step > 0 else 0
                     new_trail = (float(trail_trigger) / 2.0) + (steps * float(trail_step) / 2.0)
                     new_trail = max(last_trail, new_trail)
 
                     if new_trail > last_trail:
-                        self.logger.info(
-                            f"📈 Burst {basket_id} trailing relevé: {new_trail:.1f}p (gain {pnl_pips:.1f}p)"
-                        )
+                        self.logger.info(f"📈 Burst {basket_id} trailing relevé: {new_trail:.1f}p (gain {pnl_pips:.1f}p)")
                         for pos in positions:
                             pos.setdefault("meta", {})["burst_trail"] = {"stop_level_pips": new_trail}
 
                     if pnl_pips <= new_trail:
-                        self.logger.warning(
-                            f"🔒 Burst {basket_id} stop collectif touché ({new_trail:.1f}p) → fermeture."
-                        )
+                        self.logger.warning(f"🔒 Burst {basket_id} stop collectif touché ({new_trail:.1f}p) → fermeture.")
                         self.close_burst_basket(basket_id)
                         continue
 
             except Exception as e:
                 self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
-
 
     def _calculate_risk_based_volume(
         self,

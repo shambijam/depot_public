@@ -1042,7 +1042,14 @@ def run_single_pipeline_cycle(
                         logger,
                     ):
                         trade_executed_successfully = True
-
+                        burst_cfg  = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                        trail_cfg  = burst_cfg.get("trailing", {}) or {}
+                        trade_executor.monitor_burst_baskets(
+                            config=base_config,
+                            max_loss_pips=15.0,
+                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
+                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
+                        )
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:
