@@ -2546,13 +2546,29 @@ class TradeExecutor:
                 return mt5c.get_symbol_info(sym) or {}
             except Exception:
                 return {}
+        
+        def _gv(si, key, default=None):
+            """Get value from dict OR attribute from object."""
+            if si is None:
+                return default
+            if isinstance(si, dict):
+                return si.get(key, default)
+            return getattr(si, key, default)
 
         def _pip_size_for_symbol(sym: str) -> float:
-            si = _symbol_info(sym)
-            point  = _safe_float(si.get("point"), 0.0001) or 0.0001
-            digits = int(si.get("digits", 5) or 5)
-            ppp = 10.0 if digits in (3, 5) else 1.0
-            return point * ppp
+            """
+            Renvoie la taille d'1 pip à partir de symbol_info, en gérant dict/objet.
+            EURUSD/GBPUSD (digits=5) -> 1 pip = 10 points
+            XAUUSD (digits=2) -> 1 pip = 1 point
+            """
+            try:
+                si = mt5c.get_symbol_info(sym)
+            except Exception:
+                si = None
+            point  = _safe_float(_gv(si, "point", 0.0001), 0.0001) or 0.0001
+            digits = int(_gv(si, "digits", 5) or 5)
+            points_per_pip = 10.0 if digits in (3, 5) else 1.0
+            return point * points_per_pip
 
         def _digits_for_symbol(sym: str) -> int:
             si = _symbol_info(sym)
@@ -4685,11 +4701,16 @@ class TradeExecutor:
                     request["sl"] = _round_to_tick(sl)
 
                 # Log de debug complet
+                try:
+                    _px_dbg = round(float(price), int(digits))
+                except Exception:
+                    _px_dbg = price
                 self.logger.info(
-                    f"[EXECUTOR][STOPS] {symbol} action={action} price={round(price, digits)} "
+                    f"[EXECUTOR][STOPS] {symbol} action={action} price={_px_dbg} "
                     f"sl={request.get('sl')} tp={request.get('tp')} "
                     f"| stops_level_pts={stops_level_pts} point={point} tick_size={tick_size}"
                 )
+
         except Exception as _e:
             self.logger.warning(f"[EXECUTOR][STOPS] Normalisation SL/TP ignorée: {_e}")
        
