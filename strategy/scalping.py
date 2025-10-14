@@ -715,7 +715,7 @@ class ScalpingStrategy(BaseStrategy):
 
         for i in range(size):
             # Format comment aligné avec close/monitor: "burst_scalping|BURST|i/N|basket=<id>"
-            comment = f"burst_scalping|BURST|{i+1}/{size}|basket={basket_id}"
+            comment = basket_id  # ex: 'burst_XAUUSD_c56e2a3f'
             d: Dict[str, Any] = {
                 "action": action,
                 "asset": asset,
