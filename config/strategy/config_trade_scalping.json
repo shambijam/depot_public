@@ -114,7 +114,10 @@
           "rt_fast_window_ms": 2500,
           "rt_poll_interval_ms": 150,
           "full_green_hold_seconds": 0.0,
-          "full_green_grace_trail_pips": 0.0
+          "full_green_grace_trail_pips": 0.0,
+          "trail_trigger_pips": 1.0,
+          "trail_distance_pips": 3.0,
+          "trail_require_full_count": false
         }
       }
     }

@@ -2361,29 +2361,33 @@ class TradeExecutor:
         max_loss_pips: float = 15.0,
         trail_trigger: float = 10.0,
         trail_step: float = 5.0,
-    ):
+    ) -> None:
         """
         Surveillance 'chirurgicale' des paniers burst.
 
-        Phase A — FAST WATCHDOG (temps réel sur courte fenêtre) :
-        - Pendant rt_fast_window_ms, on re-scanne toutes les rt_poll_interval_ms.
-        - Si un panier est 'plein' ET toutes ses positions sont > 0 (avec seuil optionnel),
-        on le ferme IMMÉDIATEMENT, sans momentum ni hold.
+        Phase A — FAST WATCHDOG (temps réel) :
+        - Pendant rt_fast_window_ms, re-scan toutes les rt_poll_interval_ms.
+        - Si un panier est 'plein' (optionnel) ET toutes ses positions sont > min_green_pnl_pips,
+            on le ferme IMMÉDIATEMENT.
 
-        Phase B — Contrôles classiques (1 passe) :
+        Phase B — Contrôles classiques (une passe) :
         - stop perte collectif si pnl_pips <= -max_loss_pips
-        - trailing PANIER en mode peak→drawdown (laisser courir, fermer dès que ça retrace d'un delta)
+        - trailing PANIER en mode peak→drawdown :
+            * armer quand PnL >= trail_trigger_pips (et éventuellement 'panier plein')
+            * fermer dès que drawdown >= trail_distance_pips
 
-        Paramètres (closure_rules):
-        close_on_full_profit: bool
-        require_full_count_for_profit_close: bool
-        min_green_pnl_pips: float
-        rt_fast_window_ms: int
-        rt_poll_interval_ms: int
-        trail_distance_pips: float        # distance de retracement depuis le pic pour fermer (défaut: 5.0)
-        trail_require_full_count: bool    # armer le trailing uniquement quand le panier est 'plein' (défaut: False)
+        Paramètres attendus dans config.entry_rules.scalping.burst_scalping.closure_rules :
+        - close_on_full_profit: bool
+        - require_full_count_for_profit_close: bool
+        - min_green_pnl_pips: float
+        - rt_fast_window_ms: int
+        - rt_poll_interval_ms: int
+        - max_loss_pips: float
+        - trail_trigger_pips: float
+        - trail_distance_pips: float
+        - trail_require_full_count: bool
         """
-        import re, time, math
+        import re, time
 
         # ---- Chargement config fermeture ----
         closure_cfg = (
@@ -2392,6 +2396,7 @@ class TradeExecutor:
             .get("burst_scalping", {})
             .get("closure_rules", {})
         ) or {}
+
         close_on_full_profit = bool(closure_cfg.get("close_on_full_profit", True))
         require_full_count = bool(
             closure_cfg.get("require_full_count_for_profit_close", True)
@@ -2399,7 +2404,14 @@ class TradeExecutor:
         min_green_pnl_pips = float(closure_cfg.get("min_green_pnl_pips", 0.0))
         rt_fast_window_ms = int(closure_cfg.get("rt_fast_window_ms", 2500))
         rt_poll_interval_ms = int(closure_cfg.get("rt_poll_interval_ms", 150))
-        # Peak-drawdown (hyper réactif)
+
+        # Filet de sécu (perte max)
+        max_loss_pips = float(closure_cfg.get("max_loss_pips", float(max_loss_pips)))
+
+        # Trailing peak→drawdown
+        trail_trigger_pips = float(
+            closure_cfg.get("trail_trigger_pips", float(trail_trigger))
+        )
         trail_distance_pips = float(
             closure_cfg.get(
                 "trail_distance_pips", (trail_step if float(trail_step) > 0 else 5.0)
@@ -2407,19 +2419,20 @@ class TradeExecutor:
         )
         trail_require_full = bool(closure_cfg.get("trail_require_full_count", False))
 
+        # Garde-fous
+        trail_trigger_pips = max(0.0, trail_trigger_pips)
+        trail_distance_pips = max(0.0, trail_distance_pips)
+
         # ---- Récup connector ----
         mt5c = getattr(self, "mt5_connector", None)
         if not mt5c:
             return
 
         # ---- États persistants de trailing par panier ----
-        # - _basket_peak_pips: plus haut PnL (en pips) atteint par le panier
-        # - _basket_trail_armed: le trailing est armé (True) quand pnl >= trail_trigger (et éventuellement panier plein)
         if not hasattr(self, "_basket_peak_pips"):
             self._basket_peak_pips = {}
         if not hasattr(self, "_basket_trail_armed"):
             self._basket_trail_armed = {}
-        # rétro-compat local
         if not hasattr(self, "_burst_trailing_state"):
             self._burst_trailing_state = {}
 
@@ -2459,14 +2472,12 @@ class TradeExecutor:
             cp = _safe_float(_v(pos, "current_price"))
             if cp is not None:
                 return cp
-            # fallback MT5: price_current
             cp = _safe_float(_v(pos, "price_current"))
             if cp is not None:
                 return cp
-            # dernier recours: Bid/Ask selon direction
             bid = _safe_float(_v(pos, "bid"))
             ask = _safe_float(_v(pos, "ask"))
-            typ = _v(pos, "type")
+            typ = _v(pos, "type")  # 0=BUY, 1=SELL
             if str(_v(pos, "action", "")).upper() == "BUY" or typ == 0:
                 return ask if ask is not None else bid
             else:
@@ -2493,15 +2504,13 @@ class TradeExecutor:
             d = _direction(pos)
             if ep is None or cp is None or pip is None or pip <= 0:
                 prof = _safe_float(_v(pos, "profit"), 0.0)
-                return (
-                    float("inf") if (prof is not None and prof > 0.0) else float("-inf")
-                )
+                return float("inf") if (prof is not None and prof > 0.0) else float("-inf")
             raw = (cp - ep) / pip if d == "BUY" else (ep - cp) / pip
             return float(raw)
 
         def _extract_basket_id(pos):
             """
-            Cherche un identifiant de panier robuste:
+            Identifiant de panier robuste:
             - champ 'basket_id' ou 'burst_id'
             - commentaire 'burst_scalping|basket=<ID>'
             - motif 'burst_<SYMBOL>_<hash>'
@@ -2512,15 +2521,13 @@ class TradeExecutor:
                 return str(bid)
 
             c = str(_v(pos, "comment", "") or "")
-            # 1) comment 'basket='
             m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
             if m:
                 return m.group(1)
-            # 2) motif type 'burst_XAUUSD_c9b56fbb'
             m = re.search(r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", c, re.IGNORECASE)
             if m:
                 return m.group(1)
-            # 3) motif '|i/N' (pas d'ID explicite) -> ID synthétique
+
             sym = str(_v(pos, "symbol", "") or "").upper()
             magic = _v(pos, "magic") or ""
             ep = _safe_float(_entry_price(pos), 0.0)
@@ -2564,7 +2571,6 @@ class TradeExecutor:
             try:
                 if hasattr(self, "close_burst_basket"):
                     self.close_burst_basket(basket_id)
-                    # purge l'état trailing pour ce panier
                     self._basket_peak_pips.pop(basket_id, None)
                     self._basket_trail_armed.pop(basket_id, None)
                     self._burst_trailing_state.pop(basket_id, None)
@@ -2572,7 +2578,6 @@ class TradeExecutor:
             except Exception as e:
                 self.logger.error(f"[CLOSE] Échec close_burst_basket({basket_id}): {e}")
 
-            # Fallbacks (best-effort, non bloquants)
             try:
                 if hasattr(self, "close_positions_bulk"):
                     self.close_positions_bulk(positions)
@@ -2610,9 +2615,7 @@ class TradeExecutor:
             except Exception as e:
                 self.logger.error(f"[CLOSE] Échec close_position loop: {e}")
 
-            self.logger.error(
-                f"[CLOSE] Aucun fallback de fermeture n'a abouti pour {basket_id}."
-            )
+            self.logger.error(f"[CLOSE] Aucun fallback de fermeture n'a abouti pour {basket_id}.")
             return False
 
         # ==============
@@ -2630,16 +2633,12 @@ class TradeExecutor:
 
                 any_closed = False
                 for basket_id, positions in baskets.items():
-                    expected = (
-                        _expected_count_from(positions) if require_full_count else None
-                    )
+                    expected = _expected_count_from(positions) if require_full_count else None
                     is_full = (expected is None) or (len(positions) >= expected)
 
                     if is_full:
                         per_pos_pips = [_pos_pnl_pips(p) for p in positions]
-                        if per_pos_pips and all(
-                            pv > float(min_green_pnl_pips) for pv in per_pos_pips
-                        ):
+                        if per_pos_pips and all(pv > float(min_green_pnl_pips) for pv in per_pos_pips):
                             self.logger.info(
                                 f"🎯 [FAST] Burst {basket_id} PLEIN & TOUT VERT (≥{min_green_pnl_pips}p) → fermeture immédiate."
                             )
@@ -2649,7 +2648,7 @@ class TradeExecutor:
                 if time.time() >= deadline or not baskets:
                     break
                 if any_closed:
-                    # re-scan immédiat après fermeture pour capturer d'autres paniers
+                    # re-scan immédiat après fermeture
                     continue
                 time.sleep(rt_poll_interval_ms / 1000.0)
 
@@ -2665,9 +2664,9 @@ class TradeExecutor:
 
         for basket_id, positions in baskets.items():
             try:
-                # Direction & pip_size via première position (toutes devraient partager la même direction)
+                # Direction & pip_size via première position
                 direction = _direction(positions[0])
-                pip_size = _pip_size_from(positions[0])
+                pip_size = _pip_size_from(positions[0]) or 1e-6
 
                 # PnL collectif (pips) — moyenne des prix pour robustesse
                 entry_prices = [_safe_float(_entry_price(p)) for p in positions]
@@ -2679,8 +2678,7 @@ class TradeExecutor:
                 avg_entry = sum(entry_prices) / max(len(entry_prices), 1)
                 avg_price = sum(current_prices) / max(len(current_prices), 1)
                 pnl_pips = (
-                    (avg_price - avg_entry) / pip_size
-                    if direction == "BUY"
+                    (avg_price - avg_entry) / pip_size if direction == "BUY"
                     else (avg_entry - avg_price) / pip_size
                 )
 
@@ -2693,33 +2691,33 @@ class TradeExecutor:
                     _close_basket(basket_id, positions)
                     continue
 
-                # ---- TRAILING PANIER — mode peak→drawdown (hyper réactif) ----
+                # ---- TRAILING PANIER — mode peak→drawdown ----
                 expected = _expected_count_from(positions)
                 is_full = expected is not None and len(positions) >= expected
 
                 # Armer le trailing ?
-                if pnl_pips >= float(trail_trigger):
+                if pnl_pips >= trail_trigger_pips:
                     if (not trail_require_full) or is_full:
                         if not self._basket_trail_armed.get(basket_id, False):
                             self._basket_trail_armed[basket_id] = True
                             self._basket_peak_pips[basket_id] = pnl_pips
                             self.logger.info(
-                                f"🛡️  Burst {basket_id} trailing ARMÉ à {pnl_pips:.1f}p (trigger={float(trail_trigger):.1f}p, full={is_full})."
+                                f"🛡️  Burst {basket_id} trailing ARMÉ à {pnl_pips:.1f}p "
+                                f"(trigger={trail_trigger_pips:.1f}p, full={is_full})."
                             )
                         else:
-                            # mettre à jour le pic si on progresse
-                            if pnl_pips > float(
-                                self._basket_peak_pips.get(basket_id, pnl_pips)
-                            ):
+                            # Nouveau pic ?
+                            if pnl_pips > float(self._basket_peak_pips.get(basket_id, pnl_pips)):
                                 self._basket_peak_pips[basket_id] = pnl_pips
 
                 # Si armé: fermer dès que drawdown >= trail_distance_pips
                 if self._basket_trail_armed.get(basket_id, False):
                     peak = float(self._basket_peak_pips.get(basket_id, pnl_pips))
-                    dd = peak - pnl_pips  # drawdown courant depuis le pic
+                    dd = peak - pnl_pips  # drawdown depuis le pic
                     if dd >= float(trail_distance_pips):
                         self.logger.warning(
-                            f"🔒 Burst {basket_id} drawdown {dd:.1f}p ≥ {float(trail_distance_pips):.1f}p (peak={peak:.1f}p, pnl={pnl_pips:.1f}p) → fermeture."
+                            f"🔒 Burst {basket_id} drawdown {dd:.1f}p ≥ {float(trail_distance_pips):.1f}p "
+                            f"(peak={peak:.1f}p, pnl={pnl_pips:.1f}p) → fermeture."
                         )
                         _close_basket(basket_id, positions)
                         continue
@@ -2728,16 +2726,17 @@ class TradeExecutor:
                         if pnl_pips > peak:
                             self._basket_peak_pips[basket_id] = pnl_pips
 
-                # (Optionnel) rétro-compat: on conserve la mémoire simple si d'autres routines y font référence
+                # État pour debug / UI
                 self._burst_trailing_state[basket_id] = {
                     "armed": self._basket_trail_armed.get(basket_id, False),
                     "peak_pips": self._basket_peak_pips.get(basket_id, 0.0),
-                    "trigger": float(trail_trigger),
+                    "trigger": trail_trigger_pips,
                     "distance": float(trail_distance_pips),
                 }
 
             except Exception as e:
-                self.logger.error(f"Erreur monitor burst {basket_id}: {e}")
+                self.logger.error(f"Erreur monitor burst {basket_id}: {e}", exc_info=True)
+
 
     def _calculate_risk_based_volume(
         self,
