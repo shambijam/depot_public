@@ -3087,17 +3087,44 @@ class TradeExecutor:
         confidence = max(0.0, min(1.0, confidence))
         max_dollar_risk = max_dollar_risk_base * confidence
 
-        # 2) burst_size : partage du risque sur le panier (priorité au champ de décision si présent)
+        # 2) burst_size : partage du risque sur le panier (détection robuste)
         burst_size = None
-        bs_from_decision = _try_float(trade_decision.get("burst_size"))
-        if bs_from_decision and int(bs_from_decision) > 0:
-            burst_size = int(bs_from_decision)
-        else:
-            burst_size = int(
-                ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
-                .get("burst_scalping", {})
-                .get("burst_size", 1)
+
+        def _to_int_pos(x):
+            try:
+                xi = int(float(x))
+                return xi if xi > 0 else None
+            except Exception:
+                return None
+
+        # a) Décision
+        burst_size = _to_int_pos(trade_decision.get("burst_size"))
+        # b) Contexte (plusieurs clés possibles selon tes couches)
+        if burst_size is None and isinstance(context, dict):
+            for k in (
+                "burst_size",
+                "burst.count",
+                "burst.size",
+                "current_burst_size",
+                "basket_size",
+            ):
+                v = context
+                for part in k.split("."):
+                    v = v.get(part) if isinstance(v, dict) else None
+                burst_size = _to_int_pos(v)
+                if burst_size:
+                    break
+        # c) Config strat
+        if burst_size is None:
+            burst_size = (
+                _to_int_pos(
+                    ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
+                    .get("burst_scalping", {})
+                    .get("burst_size", 1)
+                )
+                or 1
             )
+
         if burst_size > 1:
             max_dollar_risk /= burst_size
 
@@ -3125,7 +3152,7 @@ class TradeExecutor:
             price_diff_raw = abs(float(entry_price) - float(sl_price))
         except Exception:
             raise TradeExecutionError("Entry/SL invalides pour sizing.")
-        # (on valide/force la distance effective après lecture du symbol_info)
+        # (la distance effective sera fixée après lecture des contraintes broker)
 
         # --- Récup symbol_info robuste ---
         def _sget(obj, *names, default=None):
@@ -3156,6 +3183,21 @@ class TradeExecutor:
         spread_pts = int(_sget(symbol_info, "spread", default=0) or 0)
         one_tick_pts = max(1, int(round((tick_size or point) / (point or 1.0))))
         _min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
+
+        if action == "BUY":
+            sl_eff = min(
+                float(sl_price), float(entry_price) - _min_buf_pts * float(point)
+            )
+        else:
+            sl_eff = max(
+                float(sl_price), float(entry_price) + _min_buf_pts * float(point)
+            )
+
+        price_diff = abs(float(entry_price) - float(sl_eff))
+        if price_diff <= 0 or not math.isfinite(price_diff):
+            raise TradeExecutionError(
+                "Distance Entry-SL effective nulle/invalide pour sizing."
+            )
 
         # SL effectif utilisé pour le sizing (l’executor peut décaler le SL réel si trop proche)
         if action == "BUY":
