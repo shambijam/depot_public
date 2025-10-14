@@ -3041,40 +3041,87 @@ class TradeExecutor:
             raise TradeExecutionError("Équité du compte non positive ou manquante.")
 
         # --- Risque % (unique, côté compte) ---
+
         def _try_float(x, default=None):
             try:
                 return float(x)
             except Exception:
                 return default
 
-        risk_pct = _try_float(
-            (account_trade_settings or {}).get("risk_per_trade_percent")
-        )
+        risk_pct = None
+        risk_source = None
+
+        # 0) Override explicite (si présent dans la décision)
+        ovr = _try_float((trade_decision or {}).get("risk_pct_override"))
+        if ovr and ovr > 0:
+            risk_pct = ovr
+            risk_source = "decision.override"
+
+        # 1) Paramètre passé par l'appelant (source privilégiée)
+        if risk_pct is None:
+            r = _try_float((account_trade_settings or {}).get("risk_per_trade_percent"))
+            if r and r > 0:
+                risk_pct = r
+                risk_source = "account_trade_settings"
+
+        # 2) Contexte (active_broker_account.trade_settings.risk_per_trade_percent)
         if risk_pct is None:
             aba = ((context or {}).get("active_broker_account") or {}).get(
                 "trade_settings", {}
             ) or {}
-            risk_pct = _try_float(aba.get("risk_per_trade_percent"))
-        if risk_pct is None:
-            # compat globale (clé legacy côté config manager)
-            risk_pct = _try_float(
-                self.config_manager.get("risk_management.risk_per_trade_pct", None)
-            )
+            r = _try_float(aba.get("risk_per_trade_percent"))
+            if r and r > 0:
+                risk_pct = r
+                risk_source = "context.active_broker_account"
 
+        # 3) ENV rapide (permet un réglage express au runtime, ex: SNIPER_RISK_PCT=0.35)
+        if risk_pct is None:
+            r = _try_float(os.getenv("SNIPER_RISK_PCT"))
+            if r and r > 0:
+                risk_pct = r
+                risk_source = "env.SNIPER_RISK_PCT"
+
+        # 4) (Option) Legacy – seulement pour compat & avec warning unique, non utilisée pour le calcul
         legacy_risk_local = config.get("risk_per_trade_percent") or (
-            (config.get("risk_management") or {}).get("risk_per_trade_pct")
-        )
-        if legacy_risk_local is not None:
+            config.get("risk_management") or {}
+        ).get("risk_per_trade_pct")
+        if legacy_risk_local is not None and not getattr(
+            self, "_warned_legacy_risk", False
+        ):
             self.logger.warning(
                 "Legacy key détectée pour le risque (%s) dans la stratégie/actif — ignorée. "
                 "Utiliser broker_accounts.trade_settings.risk_per_trade_percent.",
                 legacy_risk_local,
             )
+            setattr(self, "_warned_legacy_risk", True)
 
+        # 5) Erreur si rien trouvé
         if risk_pct is None or risk_pct <= 0:
             raise TradeExecutionError(
-                "Risque en % manquant/invalide (compte + config)."
+                "Risque en % manquant/invalide (source unique requise)."
             )
+
+        # 6) Clip dans une plage safe (évite saisies délirantes)
+        min_risk = _try_float(
+            self.config_manager.get("risk_management_settings.min_risk_pct", 0.01), 0.01
+        )
+        max_risk = _try_float(
+            self.config_manager.get("risk_management_settings.max_risk_pct", 5.0), 5.0
+        )
+        risk_pct_clipped = max(min_risk, min(max_risk, float(risk_pct)))
+        if risk_pct_clipped != risk_pct:
+            self.logger.warning(
+                f"[RISK%%] Clip: {risk_pct:.4f}%% -> {risk_pct_clipped:.4f}%% (bounds {min_risk}-{max_risk})"
+            )
+        risk_pct = risk_pct_clipped
+
+        # Log explicite de la source
+        try:
+            self.logger.info(
+                f"[RISK%%] Utilisé: {risk_pct:.4f}%% (source={risk_source})"
+            )
+        except Exception:
+            pass
 
         # --- Budget de risque en $ ---
         max_dollar_risk_base = float(equity) * (risk_pct / 100.0)
@@ -3324,8 +3371,7 @@ class TradeExecutor:
                     raw_max = float(free_margin) / float(m1)
                     if raw_max > 0 and raw_volume > raw_max:
                         self.logger.warning(
-                            f"[SIZING] Cap par marge: {raw_volume:.4f} -> {raw_max:.4f} "
-                            f"(free={float(free_margin):.2f}, m1={float(m1):.2f})"
+                            f"[SIZING] Cap par marge: {raw_volume:.4f} -> {raw_max:.4f} (free={float(free_margin):.2f}, m1={float(m1):.2f})"
                         )
                         raw_volume = raw_max
         except Exception as e:
