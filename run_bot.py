@@ -802,10 +802,7 @@ def run_single_pipeline_cycle(
             burst_cfg  = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
             trail_cfg  = burst_cfg.get("trailing", {}) or {}
             closure_cfg = burst_cfg.get("closure_rules", {}) or {}
-
-            # 1) Hard rule: si un panier est 'plein & tout vert' → fermer immédiatement (ou après court hold)
-            trade_executor.check_and_close_full_baskets()
-
+           
             # 2) Monitoring collectif (perte max + trailing collectif)
             trade_executor.monitor_burst_baskets(
                 config=base_config,

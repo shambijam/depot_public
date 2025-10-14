@@ -2133,43 +2133,7 @@ class TradeExecutor:
         trade_decision.setdefault("meta", {})["burst"] = True
 
         return trade_decision
-
-    def check_and_close_full_baskets(self, burst_size: int = None):
-        """
-        Vérifie si des paniers sont 'pleins' (tous les ordres du burst ouverts).
-        Si oui → on les marque comme complets pour suivi, sans les fermer immédiatement.
-        La fermeture se fera uniquement via monitor_burst_baskets() quand toutes les positions seront gagnantes.
-        """
-        open_positions = getattr(self.mt5_connector, "get_positions", lambda: [])()
-        if not open_positions:
-            return
-
-        # Grouper par basket_id
-        baskets = {}
-        for pos in open_positions:
-            bid = pos.get("basket_id")
-            if not bid:
-                continue
-            baskets.setdefault(bid, []).append(pos)
-
-        for basket_id, positions in baskets.items():
-            try:
-                expected_size = int(positions[0].get("burst_size", 0))
-            except Exception:
-                expected_size = burst_size or 0
-
-            if expected_size > 0 and len(positions) >= expected_size:
-                # ✅ Ne pas fermer immédiatement — marquer comme complet
-                self.logger.info(
-                    f"[BURST] Panier {basket_id} est complet ({len(positions)}/{expected_size}) → suivi actif jusqu'à bénéfice total."
-                )
-
-                # Enregistrer le panier complet pour suivi par monitor_burst_baskets()
-                completed = getattr(self, "_completed_baskets", set())
-                completed.add(basket_id)
-                self._completed_baskets = completed
-
-
+   
     def close_burst_basket(self, basket_id: str):
         """
         Ferme immédiatement toutes les positions appartenant à un même burst basket_id.
