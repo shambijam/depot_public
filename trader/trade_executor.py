@@ -4595,9 +4595,11 @@ class TradeExecutor:
             digits = getattr(info, "digits", None) or 0
             tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
             contract_size = getattr(info, "trade_contract_size", None) or 1.0
-            stops_level_pts = int(
-                getattr(info, "trade_stops_level", 0) or 0
-            )  # en "points" MT5
+            stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)  # points MT5
+            freeze_level_pts = int(getattr(info, "trade_freeze_level", 0) or 0)
+            spread_pts = int(getattr(info, "spread", 0) or 0)
+            one_tick_pts = int(round((tick_size or point) / (point or 1.0))) or 1
+            _min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
 
             # Prix courant pour contrôle de distance (si pas fourni dans request)
             def _get_market_price(sym: str, side: str) -> float:
@@ -4611,110 +4613,70 @@ class TradeExecutor:
                     m = self.mt5.symbol_info_tick(sym)
                 if not m:
                     return 0.0
-                # Pour une exécution MARKET :
-                #   BUY → prix = ask ; SELL → prix = bid
                 bid = getattr(m, "bid", None)
                 ask = getattr(m, "ask", None)
                 if side == "BUY" and ask is not None:
                     return float(ask)
                 if side == "SELL" and bid is not None:
                     return float(bid)
-                # fallback
                 return float(ask or bid or 0.0)
 
             def _round_to_tick(px: float) -> float:
                 if not tick_size or tick_size <= 0:
-                    # arrondi à "digits" si pas de tick_size
                     return round(float(px), int(digits))
-                # quantification au tick
                 steps = round(float(px) / tick_size)
                 return round(steps * tick_size, int(digits))
+
+            def _ensure_min_buffer(sl_target: float, px_ref: float, side: str):
+                """Vérifie si SL respecte le buffer mini; sinon, on déferre (post-fill)."""
+                if px_ref is None or point <= 0:
+                    return True, sl_target
+                dist_pts = abs(px_ref - sl_target) / point
+                need_defer = dist_pts < float(_min_buf_pts)
+                if not need_defer:
+                    if side == "BUY" and sl_target >= px_ref:
+                        need_defer = True
+                    if side == "SELL" and sl_target <= px_ref:
+                        need_defer = True
+                return (not need_defer), _round_to_tick(sl_target)
 
             # Lis les SL/TP souhaités
             sl = request.get("sl")
             tp = request.get("tp")
             price = _get_market_price(symbol, action)
 
-            # --- PATCH SÉCURITÉ SL (évite Invalid Stops) ---
-            if sl is not None:
+            # ---------- SL avec gestion "defer" ----------
+            defer_sl = False
+            if sl is not None and price and point:
                 sl = float(sl)
-                # Vérifie sens du SL
+                # sens logique
                 if action == "BUY" and sl >= price:
                     sl = price - (tick_size or point)
                 elif action == "SELL" and sl <= price:
                     sl = price + (tick_size or point)
 
-                # Vérifie distance minimale broker
-                if abs(price - sl) < stops_level_pts * point:
-                    buf = tick_size or point
-                    if action == "BUY":
-                        sl = price - max(stops_level_pts * point, buf)
-                    else:
-                        sl = price + max(stops_level_pts * point, buf)
+                ok_now, sl_ok = _ensure_min_buffer(sl, price, action)
+                if ok_now:
+                    request["sl"] = _round_to_tick(sl_ok)
+                else:
+                    # Trop serré → on envoie SANS SL puis on l’attachera post-fill
+                    request["_deferred_sl"] = _round_to_tick(sl_ok)
+                    request["sl"] = 0.0  # MT5: 0.0 = pas de SL à l'envoi
 
-                request["sl"] = _round_to_tick(sl)
-
-            # Si pas de prix dispo, on ne peut pas contrôler : on laisse passer
-            if price and point:
-                # Sens attendu des stops selon action
-                #   BUY  → SL < price, TP > price
-                #   SELL → SL > price, TP < price
-                def _min_distance_ok(px_a: float, px_b: float) -> bool:
-                    # distance en points MT5
-                    return abs(px_a - px_b) / point >= max(stops_level_pts, 0)
-
-                # Buffer de sécurité : +1 tick au-delà du stops_level
-                def _apply_buffer(
-                    target: float, ref: float, side: str, is_sl: bool
-                ) -> float:
-                    # pousse d'un tick dans la bonne direction si trop proche
-                    buf = tick_size or (point or 0.0)
-                    if is_sl:
-                        if side == "BUY" and target >= ref:
-                            target = ref - buf
-                        elif side == "SELL" and target <= ref:
-                            target = ref + buf
-                    else:  # TP
-                        if side == "BUY" and target <= ref:
-                            target = ref + buf
-                        elif side == "SELL" and target >= ref:
-                            target = ref - buf
-                    # si encore trop près, pousse d’assez de ticks pour dépasser stops_level
-                    while not _min_distance_ok(target, ref):
-                        if side == "BUY":
-                            target = target - buf if is_sl else target + buf
-                        else:  # SELL
-                            target = target + buf if is_sl else target - buf
-                    return _round_to_tick(target)
-
-                # Corrige SL si présent
-                if sl is not None:
-                    sl = float(sl)
-                    # sens
-                    if action == "BUY" and sl >= price:
-                        sl = price - (tick_size or point)
-                    elif action == "SELL" and sl <= price:
-                        sl = price + (tick_size or point)
-                    # distance mini
-                    if not _min_distance_ok(sl, price):
-                        sl = _apply_buffer(sl, price, action, is_sl=True)
-                    request["sl"] = _round_to_tick(sl)
-
-                # Log de debug complet
-                try:
-                    _px_dbg = round(float(price), int(digits))
-                except Exception:
-                    _px_dbg = price
-                self.logger.info(
-                    f"[EXECUTOR][STOPS] {symbol} action={action} price={_px_dbg} "
-                    f"sl={request.get('sl')} tp={request.get('tp')} "
-                    f"| stops_level_pts={stops_level_pts} point={point} tick_size={tick_size}"
-                )
+            # Log de debug complet (protégé)
+            try:
+                _px_dbg = round(float(price), int(digits))
+            except Exception:
+                _px_dbg = price
+            self.logger.info(
+                f"[EXECUTOR][STOPS] {symbol} action={action} price={_px_dbg} "
+                f"sl={request.get('sl')} tp={request.get('tp')} "
+                f"| stops={stops_level_pts} freeze={freeze_level_pts} spread={spread_pts} "
+                f"point={point} tick_size={tick_size}"
+            )
 
         except Exception as _e:
             self.logger.warning(f"[EXECUTOR][STOPS] Normalisation SL/TP ignorée: {_e}")
-       
-            # en cas de problème, on tronque "brutalement" pour ne pas bloquer l'envoi
             try:
                 c = str(request.get("comment", "") or "")[:31]
                 request["comment"] = c.encode("ascii", "ignore").decode("ascii")
@@ -5020,6 +4982,94 @@ class TradeExecutor:
                     )
             except Exception:
                 pass
+            # --- Attache du SL post-fill si on a dû l'omettre à l'envoi ---
+            try:
+                if request.get("_deferred_sl") is not None and execution_summary["status"] in ("filled", "partially_filled"):
+                    # relire une position récente du symbole
+                    positions = None
+                    if hasattr(self, "mt5") and self.mt5:
+                        positions = self.mt5.positions_get(symbol=symbol)
+                    if not positions and hasattr(self.mt5_connector, "mt5"):
+                        positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
+                    pos = None
+                    if positions:
+                        try:
+                            pos = sorted(positions, key=lambda p: getattr(p, "time_update", 0))[-1]
+                        except Exception:
+                            pos = positions[-1]
+
+                    if pos:
+                        # Recalcule un buffer mini avec la snapshot courante
+                        info2 = info
+                        if not info2 and hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                            info2 = self.mt5_connector.mt5.symbol_info(symbol)
+
+                        point2  = getattr(info2, "point", None) or 0.0
+                        digits2 = getattr(info2, "digits", None) or 0
+                        tick2   = getattr(info2, "trade_tick_size", None) or point2 or 0.0
+                        spread2 = int(getattr(info2, "spread", 0) or 0)
+                        freeze2 = int(getattr(info2, "trade_freeze_level", 0) or 0)
+                        stops2  = int(getattr(info2, "trade_stops_level", 0) or 0)
+                        one_tick2 = int(round((tick2 or point2) / (point2 or 1.0))) or 1
+                        min_buf2 = max(spread2, freeze2, stops2) + one_tick2
+
+                        def _round2(px):
+                            if not tick2 or tick2 <= 0:
+                                return round(float(px), int(digits2))
+                            steps = round(float(px) / tick2)
+                            return round(steps * tick2, int(digits2))
+
+                        # prix marché actuel (ask/bid)
+                        def _mkt(sym, side):
+                            m = None
+                            if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+                                m = self.mt5_connector.mt5.symbol_info_tick(sym)
+                            if not m and hasattr(self, "mt5") and self.mt5:
+                                m = self.mt5.symbol_info_tick(sym)
+                            if not m:
+                                return None
+                            bid = getattr(m, "bid", None)
+                            ask = getattr(m, "ask", None)
+                            if side == "BUY" and ask is not None:
+                                return float(ask)
+                            if side == "SELL" and bid is not None:
+                                return float(bid)
+                            return float(ask or bid or 0.0)
+
+                        px_now = _mkt(symbol, action)
+                        sl_target = float(request["_deferred_sl"])
+
+                        if px_now and point2:
+                            if action == "BUY":
+                                max_sl = px_now - (min_buf2 * point2)
+                                sl_target = min(sl_target, max_sl)
+                            else:
+                                min_sl = px_now + (min_buf2 * point2)
+                                sl_target = max(sl_target, min_sl)
+
+                        sl_target = _round2(sl_target)
+
+                        # attacher via connecteur
+                        ticket = getattr(pos, "ticket", None)
+                        if ticket is None and isinstance(pos, dict):
+                            ticket = pos.get("ticket")
+                        if ticket is not None:
+                            modified = False
+                            for fn_name in ("position_modify", "modify_position", "set_sl_tp"):
+                                fn = getattr(self.mt5_connector, fn_name, None)
+                                if callable(fn):
+                                    try:
+                                        fn(ticket=int(ticket), sl=sl_target, tp=execution_summary.get("tp", 0.0))
+                                        modified = True
+                                        self.logger.info(f"[EXECUTOR] SL attaché post-fill (ticket={ticket}, sl={sl_target}).")
+                                        break
+                                    except Exception as e:
+                                        self.logger.warning(f"[EXECUTOR] {fn_name} a échoué (ticket={ticket}): {e}")
+                            if not modified:
+                                self.logger.warning("[EXECUTOR] Impossible d’attacher le SL post-fill (aucune méthode disponible).")
+            except Exception as e:
+                self.logger.warning(f"[EXECUTOR] Post-fill SL attach ignoré: {e}")
+
 
                 # --- Audit succès ---
             if hasattr(self, "audit_logger"):
