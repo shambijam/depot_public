@@ -590,9 +590,9 @@ class ScalpingStrategy(BaseStrategy):
         - Volume calculé dynamiquement selon risk_per_trade_percent
         - SL obligatoire, pas de TP (gestion via trailing stop)
         - Respecte strictement burst_size et max_bursts de la config
-        - Refuse tout nouveau burst tant qu’un panier burst pour l’actif est encore ouvert
+        - Refuse tout nouveau burst tant qu’un panier burst pour l’actif est encore ouvert (verrou mémoire + scan MT5)
         """
-        import math, uuid, re
+        import math, uuid, re, time
 
         # === Lecture config ===
         size = int(burst_cfg.get("burst_size", 3))          # nombre d’ordres par burst
@@ -603,16 +603,17 @@ class ScalpingStrategy(BaseStrategy):
         # --- Infos broker ---
         symbol_info = context.get("symbol_info", {}) or {}
         point = float(symbol_info.get("point", 0.01))
-        pip_size_value = point * 10.0  # ex: 1 pip = 10 points
+        pip_size_value = point * (10.0 if int(symbol_info.get("digits", 5)) in (3, 5) else 1.0)
 
-        contract_size = float(symbol_info.get("trade_contract_size", 100000))
-        tick_value = float(symbol_info.get("trade_tick_value", 1.0))
-        tick_size = float(symbol_info.get("trade_tick_size", 0.0001))
+        contract_size = float(symbol_info.get("trade_contract_size", 100000) or 100000)
+        tick_value = float(symbol_info.get("trade_tick_value", 1.0) or 1.0)
+        tick_size = float(symbol_info.get("trade_tick_size", 0.0001) or 0.0001)
         value_per_point = tick_value / tick_size if tick_size > 0 else 1.0
 
         # --- Config risk management ---
         account_info = context.get("account_info", {}) or {}
         equity = float(account_info.get("equity", 0.0) or 0.0)
+        # NB: sizing final sera recalculé côté executor via risk_per_trade_percent (source broker_accounts)
         risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
 
         # Répartir le risque sur l’ensemble du panier
@@ -637,9 +638,9 @@ class ScalpingStrategy(BaseStrategy):
         volume = (max_risk / risk_per_lot) if risk_per_lot > 0 else 0.0
 
         # --- Normalisation broker ---
-        min_lot = float(symbol_info.get("volume_min", 0.01))
-        lot_step = float(symbol_info.get("volume_step", 0.01))
-        max_lot = float(symbol_info.get("volume_max", 100.0))
+        min_lot = float(symbol_info.get("volume_min", 0.01) or 0.01)
+        lot_step = float(symbol_info.get("volume_step", 0.01) or 0.01)
+        max_lot = float(symbol_info.get("volume_max", 100.0) or 100.0)
 
         if lot_step > 0:
             volume = math.floor(volume / lot_step) * lot_step
@@ -649,32 +650,72 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
             return None
 
-        # --- Détection des paniers actifs via commentaire MT5 ---
-        open_positions = getattr(self.mt5_connector, "get_open_positions", lambda: [])()
-        basket_pat = re.compile(r"burst_scalping\|basket=([A-Za-z0-9_]+)", re.IGNORECASE)
+        # ================================
+        # 🔒 GATING "ONE BURST AT A TIME"
+        # ================================
+        # 1) Registre mémoire (indépendant de MT5) pour survivre aux trous de positions_get()
+        if not hasattr(self, "_active_burst_locks"):
+            self._active_burst_locks = {}  # {asset: {"basket_id": str, "expected": int, "ts": float}}
 
-        active_baskets_for_asset = set()
-        for pos in open_positions or []:
-            pos_sym = pos.get("symbol") or pos.get("asset")
-            if pos_sym and str(pos_sym).upper() == asset.upper():
-                comment = str(pos.get("comment", "")) or ""
-                m = basket_pat.search(comment)
-                if m:
-                    active_baskets_for_asset.add(m.group(1))
+        # 2) Nettoyage/verrou: si plus aucune position pour ce basket → purge le lock
+        def _extract_basket_id_from_comment(c: str) -> Optional[str]:
+            # tolérant: 'burst_scalping|BURST|i/N|basket=ID' OU 'burst_scalping|basket=ID|i/N'
+            m = re.search(r"burst_scalping\|(?:[^|]*\|){0,3}basket=([A-Za-z0-9_]+)", c)
+            return m.group(1) if m else None
 
-        # Refus strict si un burst existe déjà pour cet actif (et max_bursts=1)
-        if len(active_baskets_for_asset) >= max_bursts:
+        def _scan_active_baskets_for_asset() -> set:
+            active = set()
+            mt5c = getattr(self, "mt5_connector", None)
+            positions = []
+            # priorité au connecteur normalisé
+            if mt5c and hasattr(mt5c, "get_positions"):
+                try:
+                    positions = mt5c.get_positions() or []
+                except Exception:
+                    positions = []
+            elif hasattr(self, "mt5_connector") and hasattr(self.mt5_connector, "get_open_positions"):
+                try:
+                    positions = self.mt5_connector.get_open_positions() or []
+                except Exception:
+                    positions = []
+
+            for pos in positions:
+                try:
+                    sym = (pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", None)) or ""
+                    if str(sym).upper() != asset.upper():
+                        continue
+                    comment = (pos.get("comment") if isinstance(pos, dict) else getattr(pos, "comment", "")) or ""
+                    bid = _extract_basket_id_from_comment(str(comment))
+                    if bid:
+                        active.add(bid)
+                except Exception:
+                    continue
+            return active
+
+        # Purge éventuelle d'un lock orphelin
+        if asset in self._active_burst_locks:
+            locked_id = self._active_burst_locks[asset].get("basket_id")
+            active_now = _scan_active_baskets_for_asset()
+            if locked_id and locked_id not in active_now:
+                # panier fermé côté broker → on libère le lock
+                self._active_burst_locks.pop(asset, None)
+
+        # 3) Garde stricte: refuser si lock mémoire OU si on détecte déjà des paniers actifs côté broker
+        active_baskets_for_asset = _scan_active_baskets_for_asset()
+        if (asset in self._active_burst_locks) or (len(active_baskets_for_asset) >= max_bursts):
             self.logger.warning(
-                f"[{asset}] Refus nouveau burst: {len(active_baskets_for_asset)}/{max_bursts} panier(s) déjà actif(s) pour {asset}."
+                f"[{asset}] Refus nouveau burst: lock={asset in self._active_burst_locks}, "
+                f"brokers_baskets={len(active_baskets_for_asset)}/{max_bursts} actif(s)."
             )
             return None
 
         # --- Construire le panier ---
-        basket_id = f"burst_{asset}_{uuid.uuid4().hex[:8]}"
+        basket_id = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
         decisions: List[Dict[str, Any]] = []
 
         for i in range(size):
-            comment = f"burst_scalping|basket={basket_id}|{i+1}/{size}"
+            # Format comment aligné avec close/monitor: "burst_scalping|BURST|i/N|basket=<id>"
+            comment = f"burst_scalping|BURST|{i+1}/{size}|basket={basket_id}"
             d: Dict[str, Any] = {
                 "action": action,
                 "asset": asset,
@@ -689,15 +730,19 @@ class ScalpingStrategy(BaseStrategy):
                 "burst_index": i + 1,
                 "burst_size": size,
                 "meta": {"burst": True, "entry_source": "core_decision"},
-                "comment": comment,  # clé : on sérialise le basket dans le comment
+                "comment": comment,  # clé : sérialise le basket dans le comment (watchdog-friendly)
             }
             decisions.append(d)
+
+        # Enregistrer le VERROU mémoire immédiatement (évite double-burst si positions_get() lag)
+        self._active_burst_locks[asset] = {"basket_id": basket_id, "expected": size, "ts": time.time()}
 
         self.logger.info(
             f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | "
             f"SL={sl_price} | volume={volume:.2f} | risk={risk_pct}% | basket_id={basket_id}"
         )
         return {"burst_decisions": decisions, "basket_id": basket_id}
+
 
 
     def _get_bars(self, asset: str, timeframe: str, count: int):
