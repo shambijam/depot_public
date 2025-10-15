@@ -88,7 +88,7 @@
       "burst_scalping": {
         "enabled": true,
         "sl_pips": 5,
-        "burst_size": 5,
+        "burst_size": 8,
         "max_bursts": 1,
         "min_atr_m1_pips": 0.0,
         "burst_guardrails": {

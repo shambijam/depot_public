@@ -243,8 +243,8 @@
       "slippage_points": 20
     },
     "volume_safety_enabled": true,
-    "max_absolute_volume_safety": 1.00,
-    "absolute_volume_failsafe": 1.00,
+    "max_absolute_volume_safety": 2.00,
+    "absolute_volume_failsafe": 2.00,
     "abort_on_excess_volume": true,
     "fat_finger_check": {
       "enabled": true,
@@ -252,7 +252,7 @@
       "avg_volume_lookback": 20,
       "max_volume_multiplier_from_avg": 5.0,
       "max_absolute_volume_for_asset": {
-        "XAUUSD": 0.50
+        "XAUUSD": 2.0
       },
       "execution": {
         "allow_demo_send": true
@@ -262,6 +262,8 @@
       "min_sizing_stop_pts": 100,
       "min_sizing_stop_atr_mult": 0.5,
       "min_dollar_risk_per_lot_fallback": 5.0,
+      "min_risk_pct": 0.01,
+      "max_risk_pct": 5.0,
       "per_asset_min_dollar_risk_per_lot_fallback": {
         "XAUUSD": 25.0
       }
