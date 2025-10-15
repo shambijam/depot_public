@@ -218,6 +218,12 @@ class MT5Connector:
                     "RETURN", "ORDER_FILLING_RETURN"
                 ),
             )
+            self.ORDER_FILLING_IOC = getattr(
+                mt5,
+                self.mt5_mappings.get("order_filling_policies", {}).get(
+                    "IOC", "ORDER_FILLING_IOC"
+                ),
+            )
 
             self.TIMEFRAMES = {
                 key: getattr(mt5, value)
@@ -346,74 +352,142 @@ class MT5Connector:
 
     def close_position(self, ticket: int, *, retry: int = 1) -> bool:
         """
-        Ferme une position par son ticket (wrapper attendu par le TradeExecutor).
-        Utilise un ordre DEAL inverse avec type_filling=RETURN.
+        Ferme une position par ticket avec un DEAL inverse.
+        - Choisit automatiquement un filling autorisé (RETURN/IOC/FOK) pour éviter 10030.
+        - Arrondit le prix aux digits du symbole.
         """
         import time
 
         pos = self._get_position_by_ticket(ticket)
         if not pos:
-            self.logger.warning(
-                f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)"
-            )
+            self.logger.warning(f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)")
             return True  # considéré comme fermé
 
-        # Déterminer l'ordre inverse (BUY -> SELL ; SELL -> BUY)
+        # Sens inverse (BUY -> SELL ; SELL -> BUY)
         order_type = self.ORDER_TYPE_FROM_POSITION.get(getattr(pos, "type", None))
         if order_type is None:
-            self.logger.error(
-                f"[MT5C] close_position: mapping inverse indisponible pour type={getattr(pos,'type',None)}"
-            )
+            self.logger.error(f"[MT5C] close_position: mapping inverse indisponible pour type={getattr(pos,'type',None)}")
             return False
 
-        # Prix côté bid/ask en fonction du sens inverse
+        # Infos symbole (pour digits & filling)
+        try:
+            si = self.get_symbol_info(pos.symbol)
+        except Exception:
+            si = None
+
+        # Resolve filling autorisé (fallback IOC/RETURN si pas d'info)
+        try:
+            type_filling = self._resolve_order_filling(si, preferred="RETURN") if si else getattr(self, "ORDER_FILLING_IOC", self.ORDER_FILLING_RETURN)
+        except Exception:
+            type_filling = getattr(self, "ORDER_FILLING_IOC", self.ORDER_FILLING_RETURN)
+
+        # Prix côté inverse
         tick = self.mt5.symbol_info_tick(pos.symbol)
         if not tick:
-            self.logger.error(
-                f"[MT5C] close_position: tick indisponible pour {pos.symbol}"
-            )
+            self.logger.error(f"[MT5C] close_position: tick indisponible pour {pos.symbol}")
             return False
         price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
 
-        req = {
+        # Arrondi prix aux digits du symbole si dispo
+        digits = getattr(si, "digits", None)
+        if isinstance(digits, int):
+            try:
+                price = round(float(price), digits)
+            except Exception:
+                pass
+
+        # Normalisation volume sur le step du symbole (sécurité)
+        try:
+            volume = float(getattr(pos, "volume", 0.0))
+        except Exception:
+            volume = 0.0
+        if volume <= 0.0:
+            self.logger.error(f"[MT5C] close_position: volume non valide ({volume}) pour ticket {ticket}")
+            return False
+        if si:
+            step = getattr(si, "volume_step", None)
+            vmin = getattr(si, "volume_min", None)
+            vmax = getattr(si, "volume_max", None)
+            try:
+                if step and step > 0:
+                    volume = round(volume / step) * step
+                if vmin is not None and volume < vmin:
+                    volume = vmin
+                if vmax is not None and volume > vmax:
+                    volume = vmax
+            except Exception:
+                pass
+
+        deviation = getattr(self, "deviation", 50)
+        try:
+            deviation = int(deviation)
+        except Exception:
+            deviation = 50
+
+        base_req = {
             "action": self.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
             "type": order_type,
-            "position": int(pos.ticket),  # ⚠️ indispensable pour clore la position
-            "volume": float(pos.volume),
+            "position": int(pos.ticket),   # indispensable pour clore la position
+            "volume": float(volume),
             "price": float(price),
-            "deviation": 50,
-            "type_filling": self.ORDER_FILLING_RETURN,
+            "deviation": deviation,
             "type_time": self.ORDER_TIME_GTC,
             "comment": "SNIPER_X close by ticket",
         }
 
-        res = self.mt5.order_send(req)
-        if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
-            self.logger.info(
-                f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')})."
-            )
-            return True
+        # Ordre d’essai des fillings: résolu -> IOC -> FOK -> RETURN (sans doublons)
+        filling_candidates = []
+        for tf in [
+            type_filling,
+            getattr(self, "ORDER_FILLING_IOC", None),
+            getattr(self, "ORDER_FILLING_FOK", None),
+            getattr(self, "ORDER_FILLING_RETURN", None),
+        ]:
+            if tf and tf not in filling_candidates:
+                filling_candidates.append(tf)
 
-        self.logger.warning(
-            f"[MT5C] close_position: échec ticket {ticket} retcode={getattr(res, 'retcode', '?')} comment={getattr(res, 'comment', '?')}"
-        )
+        last_res = None
+        for tf in filling_candidates:
+            req = dict(base_req)
+            req["type_filling"] = tf
 
-        # Retry (requote/latence)
-        if retry > 0 and getattr(res, "retcode", None) in (self.TRADE_RETCODE_REQUOTE,):
-            time.sleep(0.15)
-            return self.close_position(ticket, retry=retry - 1)
+            res = self.mt5.order_send(req)
+            last_res = res
+
+            if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
+                self.logger.info(f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')}, filling={tf}).")
+                return True
+
+            ret = getattr(res, "retcode", None)
+            com = getattr(res, "comment", "?")
+            self.logger.warning(f"[MT5C] close_position: tentative échouée ticket {ticket} retcode={ret} comment={com} filling={tf}")
+
+            # Requote -> petit retry immédiat sur le même filling
+            if retry > 0 and ret == getattr(self, "TRADE_RETCODE_REQUOTE", None):
+                time.sleep(0.15)
+                retry -= 1
+                continue
+
+            # Invalid/Unsupported filling -> on essaie le filling suivant
+            if ret in (getattr(self, "TRADE_RETCODE_INVALID_FILL", 10030), 10030):
+                continue
+
+            # Autre erreur -> on ne s’acharne pas, on passera au post-check
+            break
 
         # Post-check tardif (latence serveur)
         time.sleep(0.15)
         still = self._get_position_by_ticket(ticket)
         if not still:
-            self.logger.info(
-                f"[MT5C] close_position: #{ticket} confirmé fermé après post-check."
-            )
+            self.logger.info(f"[MT5C] close_position: #{ticket} confirmé fermé après post-check.")
             return True
 
+        self.logger.warning(
+            f"[MT5C] close_position: échec final ticket {ticket} retcode={getattr(last_res, 'retcode', '?')} comment={getattr(last_res, 'comment', '?')}"
+        )
         return False
+
 
     def close_positions(self, tickets: list[int]) -> dict:
         """
@@ -1823,91 +1897,112 @@ class MT5Connector:
             f"MT5: Envoi de l'ordre: {action_str} {request.get('volume')} {symbol} "
             f"@ {request.get('price')} (ID Interne: {request.get('order_id', 'N/A')})..."
         )
+        
+        # Retcodes de succès
+        RET_DONE = getattr(
+            mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE", "TRADE_RETCODE_DONE"), None
+        )
+        RET_PLACED = getattr(
+            mt5, (maps.get("trade_retcodes", {}) or {}).get("PLACED", "TRADE_RETCODE_PLACED"), None
+        )
+        RET_DONE_PARTIAL = getattr(
+            mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"), None
+        )
+        # Retcode “filling non supporté”
+        RET_INVALID_FILL = getattr(
+            mt5,
+            (maps.get("trade_retcodes", {}) or {}).get("INVALID_FILL", "TRADE_RETCODE_INVALID_FILL"),
+            None,
+        ) or 10030
 
-        # --- 6) Envoi MT5 ---
-        try:
-            result = mt5.order_send(request)
-        except Exception as ex:
-            self.logger.exception(f"MT5: Exception lors de order_send(): {ex}")
-            self.config_manager.send_alert(
-                f"MT5: Exception order_send(): {ex}", "telegram_critical"
-            )
-            return None
+        # Ordre des fillings à essayer (sans doublons)
+        filling_candidates = []
+        for tf in [
+            request.get("type_filling"),
+            getattr(mt5, "ORDER_FILLING_IOC", None),
+            getattr(mt5, "ORDER_FILLING_FOK", None),
+            getattr(mt5, "ORDER_FILLING_RETURN", None),
+        ]:
+            if tf and tf not in filling_candidates:
+                filling_candidates.append(tf)
 
-        # --- 7) Gestion de la réponse ---
-        if result is not None:
-            retcode_val = getattr(result, "retcode", None)
-            comment_val = getattr(result, "comment", "N/A")
-            deal_val = getattr(result, "deal", "N/A")
-            order_id_val = getattr(result, "order", "N/A")
+        last_res = None
+        result = None
+
+        for tf in filling_candidates:
+            req = dict(request)
+            req["type_filling"] = tf
+
+            try:
+                res = mt5.order_send(req)
+            except Exception as ex:
+                self.logger.exception(f"MT5: Exception lors de order_send() (filling={tf}): {ex}")
+                self.config_manager.send_alert(f"MT5: Exception order_send() (filling={tf}): {ex}", "telegram_critical")
+                res = None
+
+            last_res = res
+
+            if res is None:
+                # on tente le filling suivant
+                continue
+
+            retcode_val = getattr(res, "retcode", None)
+            comment_val = getattr(res, "comment", "N/A")
+            deal_val = getattr(res, "deal", "N/A")
+            order_id_val = getattr(res, "order", "N/A")
 
             self.logger.info(
                 f"MT5: Réponse API. Retcode: {retcode_val}, Commentaire: {comment_val}, "
-                f"Deal: {deal_val}, Ordre: {order_id_val}"
-            )
-
-            # Succès possibles: DONE (exécuté), PLACED (pending placé), PARTIAL (exécution partielle)
-            RET_DONE = getattr(
-                mt5,
-                (maps.get("trade_retcodes", {}) or {}).get(
-                    "DONE", "TRADE_RETCODE_DONE"
-                ),
-                None,
-            )
-            RET_PLACED = getattr(
-                mt5,
-                (maps.get("trade_retcodes", {}) or {}).get(
-                    "PLACED", "TRADE_RETCODE_PLACED"
-                ),
-                None,
-            )
-            RET_DONE_PARTIAL = getattr(
-                mt5,
-                (maps.get("trade_retcodes", {}) or {}).get(
-                    "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"
-                ),
-                None,
+                f"Deal: {deal_val}, Ordre: {order_id_val} (filling={tf})"
             )
 
             if retcode_val in (RET_DONE, RET_PLACED, RET_DONE_PARTIAL):
                 label = (
-                    "exécuté"
-                    if retcode_val == RET_DONE
-                    else (
-                        "partiellement exécuté"
-                        if retcode_val == RET_DONE_PARTIAL
-                        else "placé"
-                    )
+                    "exécuté" if retcode_val == RET_DONE
+                    else ("partiellement exécuté" if retcode_val == RET_DONE_PARTIAL else "placé")
                 )
                 self.logger.info(
                     f"MT5: Ordre {label} avec succès. Deal #{deal_val}, Ordre #{order_id_val} pour {symbol}."
                 )
-            else:
-                # Retcode → libellé humain
-                retcode_str = ""
-                for k, v in (maps.get("trade_retcodes", {}) or {}).items():
-                    if getattr(mt5, v, None) == retcode_val:
-                        retcode_str = k
-                        break
-                # mt5.last_error() peut renvoyer tuple -> rendre lisible
-                try:
-                    last_err = mt5.last_error()
-                    last_err_str = (
-                        f"{last_err}"
-                        if not isinstance(last_err, (tuple, list))
-                        else " | ".join(map(str, last_err))
-                    )
-                except Exception:
-                    last_err_str = "N/A"
-                self.logger.warning(
-                    f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str or 'UNKNOWN'}), "
-                    f"Commentaire: {comment_val}. Erreur système: {last_err_str}."
-                )
-                self.config_manager.send_alert(
-                    f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). Commentaire: {comment_val}",
-                    "telegram_critical",
-                )
+                result = res
+                break
+
+            # Filling non supporté -> on essaie le suivant
+            if retcode_val in (RET_INVALID_FILL, 10030) or "Unsupported filling mode" in str(comment_val):
+                self.logger.warning(f"MT5: Filling {tf} non supporté → on essaie un autre.")
+                continue
+
+            # Autre erreur → on s’arrête pour laisser le post-traitement
+            break
+
+        # Si au moins une tentative a renvoyé quelque chose (mais pas succès), log lisible et retourne
+        if result is not None:
             return result
+
+        if last_res is not None:
+            retcode_val = getattr(last_res, "retcode", None)
+            # Retcode → libellé humain
+            retcode_str = ""
+            for k, v in (maps.get("trade_retcodes", {}) or {}).items():
+                if getattr(mt5, v, None) == retcode_val:
+                    retcode_str = k
+                    break
+            # mt5.last_error() en clair
+            try:
+                last_err = mt5.last_error()
+                last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+            except Exception:
+                last_err_str = "N/A"
+
+            self.logger.warning(
+                f"MT5: Ordre non exécuté. Retcode: {retcode_val} ({retcode_str or 'UNKNOWN'}), "
+                f"Commentaire: {getattr(last_res, 'comment', 'N/A')}. Erreur système: {last_err_str}."
+            )
+            self.config_manager.send_alert(
+                f"MT5: Ordre non exécuté ({retcode_str or retcode_val}). Commentaire: {getattr(last_res, 'comment', 'N/A')}",
+                "telegram_critical",
+            )
+            return last_res
 
         # --- 8) Aucun résultat ---
         try:
