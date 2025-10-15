@@ -1645,12 +1645,13 @@ class TradeExecutor:
                     if has_tp and not (tp_price < entry_price_market):
                         tp_price = _floor_to_tick(entry_price_market - min_gap_price)
 
-                # 🔍 Log clair pour comprendre en cas d'erreur
+                def _fmt(v):
+                    return f"{float(v):.{digits}f}" if isinstance(v, (int, float)) else "None"
+
                 self.logger.info(
-                    f"[SAFETY] SL/TP normalisés | symbol={broker_symbol}, entry={entry_price_market:.{digits}f}, "
-                    f"SL={sl_price:.{digits}f}, TP={tp_price:.{digits}f}, "
-                    f"min_gap={min_gap_price:.{digits}f}, stops_level={stops_level_pts}, freeze_level={freeze_level_pts}, "
-                    f"dist_SL={abs(sl_price-entry_price_market):.{digits}f}, dist_TP={abs(tp_price-entry_price_market):.{digits}f}"
+                    "[SAFETY] SL/TP normalisés | symbol=%s, entry=%s, SL=%s, TP=%s, min_gap=%s, stops_level=%s, freeze_level=%s",
+                    broker_symbol, _fmt(entry_price_market), _fmt(sl_price), _fmt(tp_price),
+                    _fmt(min_gap_price), str(stops_level_pts), str(freeze_level_pts)
                 )
 
             except Exception as e:
