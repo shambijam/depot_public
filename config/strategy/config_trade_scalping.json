@@ -104,20 +104,15 @@
           "activate_after_rr": 1.0
         },
         "closure_rules": {
-          "momentum_score_min": 2,
-          "breakout_lookback": 20,
-          "atr_factor": 1.5,
-          "enable_mtf_bias": true,
-          "close_on_full_profit": true,
+          "close_on_full_profit": false,
           "require_full_count_for_profit_close": true,
           "min_green_pnl_pips": 0.2,
           "rt_fast_window_ms": 2500,
           "rt_poll_interval_ms": 150,
-          "full_green_hold_seconds": 0.0,
-          "full_green_grace_trail_pips": 0.0,
+          "max_loss_pips": 20.0,
           "trail_trigger_pips": 1.0,
           "trail_distance_pips": 3.0,
-          "trail_require_full_count": false
+          "trail_require_full_count": true
         }
       }
     }
