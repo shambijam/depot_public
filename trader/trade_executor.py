@@ -3557,7 +3557,7 @@ class TradeExecutor:
                 raw_volume = float(max_volume_safety)
 
             # Cap par actif (optionnel)
-            per_asset_caps = ff_cfg.get("per_asset_caps", {}) or {}
+            per_asset_caps = ff_cfg.get("max_absolute_volume_for_asset", {}) or {}
             asset_cap = per_asset_caps.get(sym_name)
             if (
                 safety_enabled

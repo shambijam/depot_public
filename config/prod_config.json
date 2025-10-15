@@ -242,106 +242,129 @@
       "dry_run": false,
       "slippage_points": 20
     },
-    "execution": {
-      "allow_demo_send": true
+    "volume_safety_enabled": true,
+    "max_absolute_volume_safety": 1.00,
+    "absolute_volume_failsafe": 1.00,
+    "abort_on_excess_volume": true,
+    "fat_finger_check": {
+      "enabled": true,
+      "enable_dynamic_check": true,
+      "avg_volume_lookback": 20,
+      "max_volume_multiplier_from_avg": 5.0,
+      "max_absolute_volume_for_asset": {
+        "XAUUSD": 0.50
+      },
+      "execution": {
+        "allow_demo_send": true
+      }
+    },
+    "risk_management_settings": {
+      "min_sizing_stop_pts": 100,
+      "min_sizing_stop_atr_mult": 0.5,
+      "min_dollar_risk_per_lot_fallback": 5.0,
+      "per_asset_min_dollar_risk_per_lot_fallback": {
+        "XAUUSD": 25.0
+      }
+    },
+    "news_settings": {
+      "detection_window": {
+        "before_event_minutes": 15,
+        "after_event_minutes": 60,
+        "cooldown_after_event_minutes": 120
+      },
+      "impact_levels": {
+        "low": 1,
+        "medium": 2,
+        "high": 3
+      },
+      "impact_duration_minutes": 30,
+      "min_impact_for_cooldown": 3
+    },
+    "alert_settings": {
+      "global_blacklist_channel": "telegram_critical"
+    },
+    "mecano_settings": {
+      "mock_ai_delay_seconds": 1.5,
+      "ai_prompt_settings": {
+        "max_length": 3500
+      },
+      "resource_alerts": {
+        "cpu_threshold": 80.0,
+        "ram_threshold": 85.0
+      },
+      "config_snapshot_file_prefix": "config_snapshot_",
+      "ia_analysis_log_file_prefix": "ai_audit_analysis_",
+      "weekly_report_file_prefix": "ai_audit_weekly_",
+      "ia_prompt_top_n_slowest_steps": 5,
+      "report_period_days": 7,
+      "performance_log_file_name": "performance.log",
+      "errors_log_file_name": "errors.log",
+      "alert_on_exception_channel": "telegram_critical"
+    },
+    "mt5_connector_settings": {
+      "log_file_name": "mt5_connector.log",
+      "trade_history_start_date": "2020-01-01",
+      "enable_console_logging": true,
+      "csv_separators_to_test": [
+        ";",
+        ",",
+        "\t"
+      ]
+    },
+    "account_settings": {
+      "currency": "USD"
+    },
+    "telegram": {
+      "enabled": false,
+      "debug": false,
+      "channels": {
+        "telegram": false,
+        "telegram_market_phase": false,
+        "telegram_trade_confirmed": false,
+        "telegram_trade_closed": false,
+        "telegram_critical": false,
+        "telegram_manual_override": false,
+        "telegram_summary": false,
+        "telegram_error": false,
+        "telegram_info": false
+      }
+    },
+    "bot_behavior": {
+      "cycle_interval_seconds": 60,
+      "ai_audit_interval_cycles": 5,
+      "news_filter_enabled": false,
+      "halt_on_major_news": false,
+      "market_phases_enabled": true,
+      "min_liquidity_threshold": 0,
+      "closed_market_check_bars": 15,
+      "trading_start_hour_utc": 5,
+      "trading_end_hour_utc": 22,
+      "allowed_weekdays": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "blacklist_durations_by_reason": {
+        "low_liquidity": 15,
+        "high_spread": 30,
+        "market_closed": 120,
+        "api_error": 60
+      },
+      "blacklist_duration_minutes": 60
+    },
+    "risk_management": {
+      "risk_per_trade_pct": 3.0,
+      "min_rr": 1.8,
+      "max_tp_to_sl_ratio": 3.5,
+      "default_sl_pips": 8.0,
+      "atr_target_min": 3.0,
+      "atr_target_max": 20.0,
+      "low_atr_factor": 0.7,
+      "min_factor": 0.9,
+      "min_sizing_stop_pts": 100,
+      "min_sizing_stop_atr_mult": 0.5
     }
-  },
-  "news_settings": {
-    "detection_window": {
-      "before_event_minutes": 15,
-      "after_event_minutes": 60,
-      "cooldown_after_event_minutes": 120
-    },
-    "impact_levels": {
-      "low": 1,
-      "medium": 2,
-      "high": 3
-    },
-    "impact_duration_minutes": 30,
-    "min_impact_for_cooldown": 3
-  },
-  "alert_settings": {
-    "global_blacklist_channel": "telegram_critical"
-  },
-  "mecano_settings": {
-    "mock_ai_delay_seconds": 1.5,
-    "ai_prompt_settings": {
-      "max_length": 3500
-    },
-    "resource_alerts": {
-      "cpu_threshold": 80.0,
-      "ram_threshold": 85.0
-    },
-    "config_snapshot_file_prefix": "config_snapshot_",
-    "ia_analysis_log_file_prefix": "ai_audit_analysis_",
-    "weekly_report_file_prefix": "ai_audit_weekly_",
-    "ia_prompt_top_n_slowest_steps": 5,
-    "report_period_days": 7,
-    "performance_log_file_name": "performance.log",
-    "errors_log_file_name": "errors.log",
-    "alert_on_exception_channel": "telegram_critical"
-  },
-  "mt5_connector_settings": {
-    "log_file_name": "mt5_connector.log",
-    "trade_history_start_date": "2020-01-01",
-    "enable_console_logging": true,
-    "csv_separators_to_test": [
-      ";",
-      ",",
-      "\t"
-    ]
-  },
-  "account_settings": {
-    "currency": "USD"
-  },
-  "telegram": {
-    "enabled": false,
-    "debug": false,
-    "channels": {
-      "telegram": false,
-      "telegram_market_phase": false,
-      "telegram_trade_confirmed": false,
-      "telegram_trade_closed": false,
-      "telegram_critical": false,
-      "telegram_manual_override": false,
-      "telegram_summary": false,
-      "telegram_error": false,
-      "telegram_info": false
-    }
-  },
-  "bot_behavior": {
-    "cycle_interval_seconds": 60,
-    "ai_audit_interval_cycles": 5,
-    "news_filter_enabled": false,
-    "halt_on_major_news": false,
-    "market_phases_enabled": true,
-    "min_liquidity_threshold": 0,
-    "closed_market_check_bars": 15,
-    "trading_start_hour_utc": 5,
-    "trading_end_hour_utc": 22,
-    "allowed_weekdays": [
-      0,
-      1,
-      2,
-      3,
-      4
-    ],
-    "blacklist_durations_by_reason": {
-      "low_liquidity": 15,
-      "high_spread": 30,
-      "market_closed": 120,
-      "api_error": 60
-    },
-    "blacklist_duration_minutes": 60
-  },
-  "risk_management": {
-    "risk_per_trade_pct": 3.0,
-    "min_rr": 1.8,
-    "max_tp_to_sl_ratio": 3.5,
-    "default_sl_pips": 8.0,
-    "atr_target_min": 3.0,
-    "atr_target_max": 20.0,
-    "low_atr_factor": 0.7,
-    "min_factor": 0.9
   }
 }
