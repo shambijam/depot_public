@@ -315,6 +315,111 @@ class MT5Connector:
         except Exception as e:
             self.logger.exception("close_position_market: %s", e)
             return False
+            # --- AJOUT: helpers de clôture par ticket(s) -----------------------------
+
+    def _get_position_by_ticket(self, ticket: int):
+        """Retourne la position MT5 portant ce ticket, ou None."""
+        try:
+            positions = self.get_open_positions() or []
+            for p in positions:
+                if int(getattr(p, "ticket", -1)) == int(ticket):
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def close_position(self, ticket: int, *, retry: int = 1) -> bool:
+        """
+        Ferme une position par son ticket (wrapper attendu par le TradeExecutor).
+        Utilise un ordre DEAL inverse avec type_filling=RETURN.
+        """
+        import time
+
+        pos = self._get_position_by_ticket(ticket)
+        if not pos:
+            self.logger.warning(f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)")
+            return True  # considéré comme fermé
+
+        # Déterminer l'ordre inverse (BUY -> SELL ; SELL -> BUY)
+        order_type = self.ORDER_TYPE_FROM_POSITION.get(getattr(pos, "type", None))
+        if order_type is None:
+            self.logger.error(f"[MT5C] close_position: mapping inverse indisponible pour type={getattr(pos,'type',None)}")
+            return False
+
+        # Prix côté bid/ask en fonction du sens inverse
+        tick = self.mt5.symbol_info_tick(pos.symbol)
+        if not tick:
+            self.logger.error(f"[MT5C] close_position: tick indisponible pour {pos.symbol}")
+            return False
+        price = (tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask)
+
+        req = {
+            "action": self.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "type": order_type,
+            "position": int(pos.ticket),   # ⚠️ indispensable pour clore la position
+            "volume": float(pos.volume),
+            "price": float(price),
+            "deviation": 50,
+            "type_filling": self.ORDER_FILLING_RETURN,
+            "type_time": self.ORDER_TIME_GTC,
+            "comment": "SNIPER_X close by ticket",
+        }
+
+        res = self.mt5.order_send(req)
+        if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
+            self.logger.info(f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')}).")
+            return True
+
+        self.logger.warning(
+            f"[MT5C] close_position: échec ticket {ticket} retcode={getattr(res, 'retcode', '?')} comment={getattr(res, 'comment', '?')}"
+        )
+
+        # Retry (requote/latence)
+        if retry > 0 and getattr(res, "retcode", None) in (self.TRADE_RETCODE_REQUOTE,):
+            time.sleep(0.15)
+            return self.close_position(ticket, retry=retry - 1)
+
+        # Post-check tardif (latence serveur)
+        time.sleep(0.15)
+        still = self._get_position_by_ticket(ticket)
+        if not still:
+            self.logger.info(f"[MT5C] close_position: #{ticket} confirmé fermé après post-check.")
+            return True
+
+        return False
+
+    def close_positions(self, tickets: list[int]) -> dict:
+        """
+        Ferme en série une liste de tickets. Retourne un petit rapport.
+        Attendues par close_burst_basket(...).
+        """
+        import time
+
+        total = len(tickets or [])
+        ok = ko = 0
+        tickets = [int(t) for t in (tickets or []) if t is not None]
+
+        for t in tickets:
+            if self.close_position(t):
+                ok += 1
+            else:
+                ko += 1
+            time.sleep(0.05)  # micro-throttle
+
+        # post-vérification: certaines fermetures sont async côté serveur
+        time.sleep(0.15)
+        still_open = []
+        open_now = {int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])}
+        for t in tickets:
+            if t in open_now:
+                still_open.append(t)
+
+        if still_open:
+            self.logger.warning(f"[MT5C] close_positions: restants non fermés: {still_open}")
+
+        return {"total": total, "closed": ok, "failed": ko, "still_open": still_open}
+
 
  
     def get_spread_pips(self, symbol: str) -> float:
@@ -1144,6 +1249,11 @@ class MT5Connector:
                     trade_contract_size=contract_size,
                     trade_tick_size=tick_size,
                 )
+                # --- AJOUT: alias attendu par order_send() -------------------------------
+                def symbol_info(self, symbol: str):
+                    """Alias vers get_symbol_info pour compatibilité interne."""
+                    return self.get_symbol_info(symbol)
+
 
                 self.logger.info(
                     f"[MT5C] Infos '{symbol_norm}' récupérées. Spread={wrapped.spread}, "

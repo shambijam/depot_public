@@ -2232,27 +2232,21 @@ class TradeExecutor:
             return ep if ep is not None else _safe_float(_v(p, "price_open"))
 
         def _extract_basket_id(pos):
-            """
-            Extraction stricte et cohérente avec monitor:
-            - champs basket_id / burst_id
-            - commentaire contenant 'burst_scalping|...|basket=<ID>' (regex tolérante)
-            - motif 'burst_<SYMBOL>_<hash>'
-            (AUCUN fallback 'synthetic' ici pour éviter d’attraper ce qui n’est pas ce panier.)
-            """
             bid = _v(pos, "basket_id") or _v(pos, "burst_id")
             if bid:
                 return str(bid)
-
             c = str(_v(pos, "comment", "") or "")
-            m = re.search(r"burst_scalping\|(?:[^|]*\|)*basket=([A-Za-z0-9_]+)", c)
+            m = re.search(r"burst_scalping\|(?:[^|]*\|){0,3}?basket=([A-Za-z0-9_]+)", c)
             if m:
                 return m.group(1)
-
             m = re.search(r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", c, re.IGNORECASE)
             if m:
                 return m.group(1)
-
-            return None  # <- on ne prend pas le risque de fermer autre chose
+            sym = str(_v(pos, "symbol", "") or "").upper()
+            magic = _v(pos, "magic") or ""
+            ep = _safe_float(_entry_price(pos), 0.0)
+            ep_key = f"{ep:.2f}" if ep is not None else "na"
+            return f"synthetic|{sym}|{magic}|{ep_key}"
 
         def _list_open_positions():
             try:
