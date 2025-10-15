@@ -16,14 +16,10 @@ from datetime import datetime, timedelta, UTC
 
 
 # Wrapper fallback (comme un NamedTuple)
-SymbolInfoFallback = namedtuple("SymbolInfoFallback", [
-    "symbol",
-    "spread",
-    "point",
-    "digits",
-    "trade_contract_size",
-    "trade_tick_size"
-])
+SymbolInfoFallback = namedtuple(
+    "SymbolInfoFallback",
+    ["symbol", "spread", "point", "digits", "trade_contract_size", "trade_tick_size"],
+)
 
 
 # Import pour la configuration
@@ -276,27 +272,47 @@ class MT5Connector:
                 )
                 return False
 
-            # tick & prix
-            tick = mt5.symbol_info_tick(position.symbol)
+            # --- Récupération symbol info (nécessaire pour filling & arrondis) ---
+            si = self.get_symbol_info(position.symbol)
+            if not si:
+                self.logger.error("Symbol info introuvable pour %s.", position.symbol)
+                return False
+
+            # --- Tick & prix ---
+            tick = self.mt5.symbol_info_tick(position.symbol)
             if not tick:
                 self.logger.error("Tick introuvable pour %s.", position.symbol)
                 return False
+
             price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
+
+            # Normalisation du prix selon digits du symbole
+            digits = getattr(si, "digits", None)
+            if isinstance(digits, int):
+                price = round(price, digits)
+
+            # --- Filling mode, résolu à partir du symbol info ---
+            try:
+                type_filling = self._resolve_order_filling(si, preferred="RETURN")
+            except Exception:
+                # Fallback doux (si utilitaire indisponible)
+                type_filling = getattr(self, "ORDER_FILLING_RETURN", None)
 
             req = {
                 "action": self.TRADE_ACTION_DEAL,
                 "symbol": position.symbol,
                 "type": order_type,
-                "position": position.ticket,  # très important pour clôture
+                "position": position.ticket,  # indispensable pour clôture
                 "volume": position.volume,
                 "price": price,
                 "deviation": 50,
                 "magic": getattr(self, "magic", 0),
                 "comment": "SNIPER_X close market",
-                "type_filling": self.ORDER_FILLING_RETURN,
+                "type_filling": type_filling,
                 "type_time": self.ORDER_TIME_GTC,
             }
-            res = mt5.order_send(req)
+
+            res = self.mt5.order_send(req)
             if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
                 self.logger.info(
                     "Position #%s fermée (deal=%s).",
@@ -312,10 +328,10 @@ class MT5Connector:
                 getattr(res, "comment", "?"),
             )
             return False
+
         except Exception as e:
             self.logger.exception("close_position_market: %s", e)
             return False
-            # --- AJOUT: helpers de clôture par ticket(s) -----------------------------
 
     def _get_position_by_ticket(self, ticket: int):
         """Retourne la position MT5 portant ce ticket, ou None."""
@@ -337,27 +353,33 @@ class MT5Connector:
 
         pos = self._get_position_by_ticket(ticket)
         if not pos:
-            self.logger.warning(f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)")
+            self.logger.warning(
+                f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)"
+            )
             return True  # considéré comme fermé
 
         # Déterminer l'ordre inverse (BUY -> SELL ; SELL -> BUY)
         order_type = self.ORDER_TYPE_FROM_POSITION.get(getattr(pos, "type", None))
         if order_type is None:
-            self.logger.error(f"[MT5C] close_position: mapping inverse indisponible pour type={getattr(pos,'type',None)}")
+            self.logger.error(
+                f"[MT5C] close_position: mapping inverse indisponible pour type={getattr(pos,'type',None)}"
+            )
             return False
 
         # Prix côté bid/ask en fonction du sens inverse
         tick = self.mt5.symbol_info_tick(pos.symbol)
         if not tick:
-            self.logger.error(f"[MT5C] close_position: tick indisponible pour {pos.symbol}")
+            self.logger.error(
+                f"[MT5C] close_position: tick indisponible pour {pos.symbol}"
+            )
             return False
-        price = (tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask)
+        price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
 
         req = {
             "action": self.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
             "type": order_type,
-            "position": int(pos.ticket),   # ⚠️ indispensable pour clore la position
+            "position": int(pos.ticket),  # ⚠️ indispensable pour clore la position
             "volume": float(pos.volume),
             "price": float(price),
             "deviation": 50,
@@ -368,7 +390,9 @@ class MT5Connector:
 
         res = self.mt5.order_send(req)
         if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
-            self.logger.info(f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')}).")
+            self.logger.info(
+                f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')})."
+            )
             return True
 
         self.logger.warning(
@@ -384,7 +408,9 @@ class MT5Connector:
         time.sleep(0.15)
         still = self._get_position_by_ticket(ticket)
         if not still:
-            self.logger.info(f"[MT5C] close_position: #{ticket} confirmé fermé après post-check.")
+            self.logger.info(
+                f"[MT5C] close_position: #{ticket} confirmé fermé après post-check."
+            )
             return True
 
         return False
@@ -410,18 +436,49 @@ class MT5Connector:
         # post-vérification: certaines fermetures sont async côté serveur
         time.sleep(0.15)
         still_open = []
-        open_now = {int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])}
+        open_now = {
+            int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])
+        }
         for t in tickets:
             if t in open_now:
                 still_open.append(t)
 
         if still_open:
-            self.logger.warning(f"[MT5C] close_positions: restants non fermés: {still_open}")
+            self.logger.warning(
+                f"[MT5C] close_positions: restants non fermés: {still_open}"
+            )
 
         return {"total": total, "closed": ok, "failed": ko, "still_open": still_open}
 
+    def _resolve_order_filling(self, symbol_info, preferred: str | None = None):
+        """
+        Choisit un type_filling accepté par le symbole.
+        preferred: "RETURN" | "IOC" | "FOK" | None (on respecte si compatible)
+        Remarque MetaTrader: symbol_info.filling_mode retourne int: 0=FOK, 1=IOC, 2=RETURN.
+        """
+        fm = getattr(symbol_info, "filling_mode", None)
 
- 
+        # Valeur sûre par défaut si l’info n’est pas disponible
+        allowed = self.ORDER_FILLING_IOC
+
+        if isinstance(fm, int):
+            if fm == 2:
+                allowed = self.ORDER_FILLING_RETURN
+            elif fm == 1:
+                allowed = self.ORDER_FILLING_IOC
+            else:
+                allowed = self.ORDER_FILLING_FOK
+
+        # Si on a une préférence et qu’elle est compatible, on la garde
+        if preferred == "RETURN" and allowed == self.ORDER_FILLING_RETURN:
+            return self.ORDER_FILLING_RETURN
+        if preferred == "IOC" and allowed == self.ORDER_FILLING_IOC:
+            return self.ORDER_FILLING_IOC
+        if preferred == "FOK" and allowed == self.ORDER_FILLING_FOK:
+            return self.ORDER_FILLING_FOK
+
+        return allowed
+
     def get_spread_pips(self, symbol: str) -> float:
         """Retourne le spread en pips avec garde-fous robustes."""
         try:
@@ -457,7 +514,6 @@ class MT5Connector:
             return round(sp, 5)
         except Exception:
             return float("inf")
-
 
     # --- AJOUT 3: wrapper order_calc_profit sans "unpack" -----------------------
 
@@ -771,12 +827,11 @@ class MT5Connector:
             return (
                 []
             )  # Retourne une liste vide au lieu de None pour la clarté et la facilité de manipulation
-            
+
     def get_open_positions(self, symbol: Optional[str] = None):
         """Alias de compatibilité pour le TradeExecutor (évite la redondance)."""
         positions = self.get_positions(symbol)
         return positions or []
- 
 
     def get_orders(
         self, symbol: Optional[str] = None
@@ -831,17 +886,23 @@ class MT5Connector:
         et logging explicite.
         """
         if not self.is_connected:
-            self.logger.warning(f"MT5: Non connecté. Impossible de récupérer le prix actuel pour '{symbol}'.")
+            self.logger.warning(
+                f"MT5: Non connecté. Impossible de récupérer le prix actuel pour '{symbol}'."
+            )
             return None
 
         try:
             tick = self.mt5.symbol_info_tick(symbol)
         except Exception as e:
-            self.logger.error(f"MT5: Exception lors de la récupération du tick pour '{symbol}': {e}")
+            self.logger.error(
+                f"MT5: Exception lors de la récupération du tick pour '{symbol}': {e}"
+            )
             return None
 
         if not tick:
-            self.logger.error(f"MT5: Aucune donnée de tick pour '{symbol}'. Last_error={self.mt5.last_error()}")
+            self.logger.error(
+                f"MT5: Aucune donnée de tick pour '{symbol}'. Last_error={self.mt5.last_error()}"
+            )
             return None
 
         ask = getattr(tick, "ask", None)
@@ -871,13 +932,17 @@ class MT5Connector:
                 self.logger.warning(f"MT5: Bid manquant pour '{symbol}', fallback Ask.")
                 return ask
         else:
-            self.logger.warning(f"MT5: Action non reconnue '{action}' -> fallback mid-price si dispo.")
-        
+            self.logger.warning(
+                f"MT5: Action non reconnue '{action}' -> fallback mid-price si dispo."
+            )
+
         # Fallback mid-price
         if ask is not None and bid is not None:
             return (ask + bid) / 2.0
 
-        self.logger.error(f"MT5: Impossible de déterminer un prix valide pour '{symbol}' (ask={ask}, bid={bid}).")
+        self.logger.error(
+            f"MT5: Impossible de déterminer un prix valide pour '{symbol}' (ask={ask}, bid={bid})."
+        )
         return None
 
     def get_account_info(
@@ -971,7 +1036,7 @@ class MT5Connector:
                 f"[{symbol}] Exception pendant la récupération des rates (TF='{tf_key}')."
             )
             return None
-        
+
     def get_ticks(
         self,
         symbol: str,
@@ -989,7 +1054,9 @@ class MT5Connector:
         from datetime import datetime, timedelta, timezone
 
         if not getattr(self, "is_connected", False):
-            self.logger.warning(f"[MT5C] Non connecté. Impossible de récupérer ticks '{symbol}'.")
+            self.logger.warning(
+                f"[MT5C] Non connecté. Impossible de récupérer ticks '{symbol}'."
+            )
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
         try:
@@ -997,19 +1064,33 @@ class MT5Connector:
 
             # 1️⃣ Mode range si possible
             if start and end:
-                ticks = self.mt5.copy_ticks_range(symbol, start, end, self.mt5.COPY_TICKS_ALL)
+                ticks = self.mt5.copy_ticks_range(
+                    symbol, start, end, self.mt5.COPY_TICKS_ALL
+                )
 
             # 2️⃣ Sinon fallback depuis maintenant
             if ticks is None or len(ticks) == 0:
-                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc) - timedelta(minutes=5), count, self.mt5.COPY_TICKS_ALL)
+                ticks = self.mt5.copy_ticks_from(
+                    symbol,
+                    datetime.now(timezone.utc) - timedelta(minutes=5),
+                    count,
+                    self.mt5.COPY_TICKS_ALL,
+                )
 
             # 3️⃣ Encore vide ? → fallback large
             if ticks is None or len(ticks) == 0:
-                ticks = self.mt5.copy_ticks_from(symbol, datetime.now(timezone.utc) - timedelta(hours=1), count, self.mt5.COPY_TICKS_ALL)
+                ticks = self.mt5.copy_ticks_from(
+                    symbol,
+                    datetime.now(timezone.utc) - timedelta(hours=1),
+                    count,
+                    self.mt5.COPY_TICKS_ALL,
+                )
 
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(f"[MT5C] ❌ Aucun tick récupéré pour {symbol}.")
-                return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
+                return pd.DataFrame(
+                    columns=["time", "bid", "ask", "last", "volume", "mid"]
+                )
 
             df = pd.DataFrame(ticks)
 
@@ -1017,7 +1098,9 @@ class MT5Connector:
             if "time" not in df.columns:
                 df["time"] = datetime.now(timezone.utc)
             else:
-                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce").fillna(datetime.now(timezone.utc))
+                df["time"] = pd.to_datetime(
+                    df["time"], unit="s", utc=True, errors="coerce"
+                ).fillna(datetime.now(timezone.utc))
 
             for col in ["bid", "ask", "last", "volume"]:
                 if col not in df.columns:
@@ -1034,10 +1117,14 @@ class MT5Connector:
             return df
 
         except Exception as e:
-            self.logger.error(f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True)
+            self.logger.error(
+                f"[MT5C] Erreur get_ticks pour {symbol}: {e}", exc_info=True
+            )
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
-        
-    def get_ticks_for_candle(self, symbol: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame:
+
+    def get_ticks_for_candle(
+        self, symbol: str, start_ts: datetime, end_ts: datetime
+    ) -> pd.DataFrame:
         """
         🎯 Ticks exacts de la bougie M1 fermée : intervalle strict [start_ts, end_ts)
         - AUCUN fallback temporel
@@ -1050,7 +1137,17 @@ class MT5Connector:
         import numpy as np
         from datetime import timedelta, timezone
 
-        ret_cols = ["time", "bid", "ask", "last", "volume", "flags", "side", "mid", "spread"]
+        ret_cols = [
+            "time",
+            "bid",
+            "ask",
+            "last",
+            "volume",
+            "flags",
+            "side",
+            "mid",
+            "spread",
+        ]
 
         # ── Garde-fou connexion
         if not getattr(self, "is_connected", False):
@@ -1067,17 +1164,25 @@ class MT5Connector:
                 end_ts = start_ts + timedelta(seconds=60)
 
             # ── Requête brute
-            ticks = self.mt5.copy_ticks_range(symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL)
+            ticks = self.mt5.copy_ticks_range(
+                symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL
+            )
             if ticks is None or len(ticks) == 0:
-                self.logger.warning(f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]")
+                self.logger.warning(
+                    f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]"
+                )
                 return pd.DataFrame(columns=ret_cols)
 
             df = pd.DataFrame(ticks)
 
             # ── Typage / colonnes minimales
-            df["time"] = pd.to_datetime(df.get("time", pd.NaT), unit="s", utc=True, errors="coerce")
+            df["time"] = pd.to_datetime(
+                df.get("time", pd.NaT), unit="s", utc=True, errors="coerce"
+            )
             if "time_msc" in df.columns:
-                df["time_msc"] = pd.to_datetime(df["time_msc"], unit="ms", utc=True, errors="coerce")
+                df["time_msc"] = pd.to_datetime(
+                    df["time_msc"], unit="ms", utc=True, errors="coerce"
+                )
 
             for c in ("bid", "ask", "last", "volume", "flags"):
                 if c not in df.columns:
@@ -1092,7 +1197,9 @@ class MT5Connector:
             tcol = "time_msc" if "time_msc" in df.columns else "time"
             df = df[(df[tcol] >= start_ts) & (df[tcol] < end_ts)].copy()
             if df.empty:
-                self.logger.warning(f"[MT5C] Aucun tick dans la fenêtre stricte pour {symbol} [{start_ts} → {end_ts}]")
+                self.logger.warning(
+                    f"[MT5C] Aucun tick dans la fenêtre stricte pour {symbol} [{start_ts} → {end_ts}]"
+                )
                 return pd.DataFrame(columns=ret_cols)
 
             # ── mid & spread
@@ -1112,34 +1219,52 @@ class MT5Connector:
             is_buy_flag = (flags & 16) > 0
             is_sell_flag = (flags & 32) > 0
 
-            side = np.where(is_buy_flag, "buy",
-                np.where(is_sell_flag, "sell", "unknown"))
+            side = np.where(
+                is_buy_flag, "buy", np.where(is_sell_flag, "sell", "unknown")
+            )
 
             # ── Fallback 1 : tick-rule (Lee–Ready simplifié sur Δmid)
-            unk_mask = (side == "unknown")
+            unk_mask = side == "unknown"
             if unk_mask.any():
                 dmid = df["mid"].diff().fillna(0.0)
                 dbid = df["bid"].diff().fillna(0.0)
                 dask = df["ask"].diff().fillna(0.0)
 
-                side_tick = np.where(dmid >  eps, "buy",
-                            np.where(dmid < -eps, "sell",
-                            np.where((dask > 0) & (dbid >= 0), "buy",
-                            np.where((dbid < 0) & (dask <= 0), "sell", "unknown"))))
+                side_tick = np.where(
+                    dmid > eps,
+                    "buy",
+                    np.where(
+                        dmid < -eps,
+                        "sell",
+                        np.where(
+                            (dask > 0) & (dbid >= 0),
+                            "buy",
+                            np.where((dbid < 0) & (dask <= 0), "sell", "unknown"),
+                        ),
+                    ),
+                )
                 tmp = side.copy()
                 tmp[unk_mask] = side_tick[unk_mask]
                 side = tmp
 
             # ── Fallback 2 (ultime) : lecture légère des bits 1/2 (ASK↑ ≈ buy, BID↓ ≈ sell)
             #    ⚠️ Ce n'est pas une "volonté d'agresseur", juste un dernier filet pour classer.
-            unk_mask = (side == "unknown")
+            unk_mask = side == "unknown"
             if unk_mask.any():
-                is_ask_bit = (flags & 1) > 0  # BID_CHANGED (1) ? (convention MT5) — on garde la compat compat utilisateur
+                is_ask_bit = (
+                    flags & 1
+                ) > 0  # BID_CHANGED (1) ? (convention MT5) — on garde la compat compat utilisateur
                 is_bid_bit = (flags & 2) > 0  # ASK_CHANGED (2)
                 # Remarque: selon broker, la sémantique 1/2 varie; on applique un mapping minimaliste:
-                side_bits = np.where(is_ask_bit & ~is_bid_bit, "sell",   # BID_CHANGED seul → pression vendeuse (prix côté bid)
-                            np.where(is_bid_bit & ~is_ask_bit, "buy",    # ASK_CHANGED seul → pression acheteuse
-                                    "unknown"))
+                side_bits = np.where(
+                    is_ask_bit & ~is_bid_bit,
+                    "sell",  # BID_CHANGED seul → pression vendeuse (prix côté bid)
+                    np.where(
+                        is_bid_bit & ~is_ask_bit,
+                        "buy",  # ASK_CHANGED seul → pression acheteuse
+                        "unknown",
+                    ),
+                )
                 tmp = side.copy()
                 tmp[unk_mask] = side_bits[unk_mask]
                 side = tmp
@@ -1166,12 +1291,11 @@ class MT5Connector:
             return out[ret_cols]
 
         except Exception as e:
-            self.logger.error(f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True)
+            self.logger.error(
+                f"[MT5C] Erreur get_ticks_for_candle {symbol}: {e}", exc_info=True
+            )
             return pd.DataFrame(columns=ret_cols)
 
-
-
-  
     def get_symbol_info(self, symbol: str) -> Optional[Any]:
         """
         Récupère les informations d'un symbole (spread, point, visibilité, etc.)
@@ -1190,7 +1314,9 @@ class MT5Connector:
             return None
 
         symbol_norm = str(symbol).strip().upper()
-        self.logger.debug(f"[MT5C] Tentative récupération infos pour '{symbol_norm}'...")
+        self.logger.debug(
+            f"[MT5C] Tentative récupération infos pour '{symbol_norm}'..."
+        )
 
         try:
             # Rendre le symbole visible si nécessaire
@@ -1202,7 +1328,9 @@ class MT5Connector:
                         f"(déjà visible ou symbole non dispo)."
                     )
             except Exception as sel_e:
-                self.logger.debug(f"[MT5C] Exception lors de symbol_select('{symbol_norm}'): {sel_e}")
+                self.logger.debug(
+                    f"[MT5C] Exception lors de symbol_select('{symbol_norm}'): {sel_e}"
+                )
 
             # Récupération brute
             info = self.mt5.symbol_info(symbol_norm)
@@ -1218,7 +1346,9 @@ class MT5Connector:
             # Récup fallback pour les valeurs critiques
             try:
                 # contract_size
-                contract_size = getattr(info, "trade_contract_size", None) or getattr(info, "contract_size", None)
+                contract_size = getattr(info, "trade_contract_size", None) or getattr(
+                    info, "contract_size", None
+                )
                 if not contract_size or contract_size <= 0:
                     if symbol_norm.startswith("XAU"):
                         contract_size = 100.0
@@ -1226,14 +1356,20 @@ class MT5Connector:
                         contract_size = 100000.0
                     else:
                         contract_size = 1.0
-                    self.logger.warning(f"[FALLBACK] contract_size fixé à {contract_size} pour {symbol_norm}")
+                    self.logger.warning(
+                        f"[FALLBACK] contract_size fixé à {contract_size} pour {symbol_norm}"
+                    )
 
                 # tick_size
-                tick_size = getattr(info, "trade_tick_size", None) or getattr(info, "point", None)
+                tick_size = getattr(info, "trade_tick_size", None) or getattr(
+                    info, "point", None
+                )
                 if not tick_size or tick_size <= 0:
                     digits = getattr(info, "digits", 5)
                     tick_size = 10 ** (-digits)
-                    self.logger.warning(f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}")
+                    self.logger.warning(
+                        f"[FALLBACK] tick_size dérivé de digits={digits} pour {symbol_norm}"
+                    )
 
                 # point
                 point_val = getattr(info, "point", None)
@@ -1249,11 +1385,11 @@ class MT5Connector:
                     trade_contract_size=contract_size,
                     trade_tick_size=tick_size,
                 )
+
                 # --- AJOUT: alias attendu par order_send() -------------------------------
                 def symbol_info(self, symbol: str):
                     """Alias vers get_symbol_info pour compatibilité interne."""
                     return self.get_symbol_info(symbol)
-
 
                 self.logger.info(
                     f"[MT5C] Infos '{symbol_norm}' récupérées. Spread={wrapped.spread}, "
@@ -1262,7 +1398,9 @@ class MT5Connector:
                 return wrapped
 
             except Exception as fe:
-                self.logger.error(f"[FALLBACK] Erreur fallback pour {symbol_norm}: {fe}")
+                self.logger.error(
+                    f"[FALLBACK] Erreur fallback pour {symbol_norm}: {fe}"
+                )
                 return info
 
         except Exception as e:
@@ -1272,7 +1410,7 @@ class MT5Connector:
                 exc_info=True,
             )
             return None
-            
+
     def resolve_broker_symbol(self, base_symbol: str) -> str:
         """Retourne le symbole broker résolu. N’essaie les suffixes QUE si la base échoue."""
         base = str(base_symbol).strip().upper()
@@ -1283,7 +1421,9 @@ class MT5Connector:
             return base
 
         # 2) Sinon seulement, tester les suffixes (config ou défaut)
-        suffixes = self.config_manager.get("mt5_symbol_suffixes", [".A", ".I", ".R", ".M"])
+        suffixes = self.config_manager.get(
+            "mt5_symbol_suffixes", [".A", ".I", ".R", ".M"]
+        )
         for suf in suffixes:
             cand = f"{base}{str(suf)}".upper()
             tested.append(cand)
@@ -1296,7 +1436,6 @@ class MT5Connector:
         )
         return ""
 
-
     def get_symbol_info_tick(self, symbol: str):
         """
         Retourne le dernier tick du symbole depuis MetaTrader 5 (bid/ask/last).
@@ -1304,14 +1443,18 @@ class MT5Connector:
         try:
             tick = self.mt5.symbol_info_tick(symbol)
             if tick is None:
-                self.logger.error(f"[MT5C] Impossible de récupérer le tick pour {symbol}.")
+                self.logger.error(
+                    f"[MT5C] Impossible de récupérer le tick pour {symbol}."
+                )
                 return None
-            self.logger.debug(f"[MT5C] Tick {symbol} → bid={tick.bid}, ask={tick.ask}, last={tick.last}")
+            self.logger.debug(
+                f"[MT5C] Tick {symbol} → bid={tick.bid}, ask={tick.ask}, last={tick.last}"
+            )
             return tick
         except Exception as e:
             self.logger.error(f"[MT5C] Erreur get_symbol_info_tick pour {symbol}: {e}")
             return None
-    
+
     def get_symbol_spread_points(self, symbol: str) -> float:
         """
         Retourne le spread courant en *points* pour `symbol`.
@@ -1353,7 +1496,11 @@ class MT5Connector:
                 if p > 0:
                     point = p
                 else:
-                    tts = float(getattr(info, "trade_tick_size", 0.0) or 0.0) if info else 0.0
+                    tts = (
+                        float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+                        if info
+                        else 0.0
+                    )
                     if tts > 0:
                         point = tts
                     else:
@@ -1401,16 +1548,33 @@ class MT5Connector:
                             if not isinstance(price, (int, float)) or price <= 0:
                                 continue
                             if t == getattr(self.mt5, "BOOK_TYPE_SELL", 1):
-                                best_ask = price if (best_ask is None or price < best_ask) else best_ask
+                                best_ask = (
+                                    price
+                                    if (best_ask is None or price < best_ask)
+                                    else best_ask
+                                )
                             elif t == getattr(self.mt5, "BOOK_TYPE_BUY", 2):
-                                best_bid = price if (best_bid is None or price > best_bid) else best_bid
-                        if isinstance(best_ask, (int, float)) and isinstance(best_bid, (int, float)) and best_ask > best_bid:
+                                best_bid = (
+                                    price
+                                    if (best_bid is None or price > best_bid)
+                                    else best_bid
+                                )
+                        if (
+                            isinstance(best_ask, (int, float))
+                            and isinstance(best_bid, (int, float))
+                            and best_ask > best_bid
+                        ):
                             ask, bid = float(best_ask), float(best_bid)
                 except Exception:
                     pass
 
             # Calcul final
-            if isinstance(ask, (int, float)) and isinstance(bid, (int, float)) and ask > bid and point > 0:
+            if (
+                isinstance(ask, (int, float))
+                and isinstance(bid, (int, float))
+                and ask > bid
+                and point > 0
+            ):
                 spread_pts = (ask - bid) / point
                 # garde-fous num
                 if not (spread_pts == spread_pts) or spread_pts <= 0:
@@ -1419,11 +1583,12 @@ class MT5Connector:
                 return float(round(spread_pts, 2))
 
         except Exception as e:
-            self.logger.debug(f"[get_symbol_spread_points] erreur pour {symbol}: {e}", exc_info=True)
+            self.logger.debug(
+                f"[get_symbol_spread_points] erreur pour {symbol}: {e}", exc_info=True
+            )
 
         # Jamais inf/NaN
         return 0.0
-
 
     def order_send(self, request: Dict[str, Any]) -> Optional[Any]:
         """
@@ -1441,7 +1606,11 @@ class MT5Connector:
 
         # --- 0) Connexion ---
         try:
-            connected = bool(self.is_connected if isinstance(self.is_connected, bool) else self.is_connected())  # support prop/fn
+            connected = bool(
+                self.is_connected
+                if isinstance(self.is_connected, bool)
+                else self.is_connected()
+            )  # support prop/fn
         except TypeError:
             connected = bool(getattr(self, "is_connected", False))
         if not connected:
@@ -1476,13 +1645,19 @@ class MT5Connector:
                     return _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL")
                 # pendings
                 if s == "BUY_LIMIT":
-                    return _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT")
+                    return _mt5_const(
+                        "order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"
+                    )
                 if s == "SELL_LIMIT":
-                    return _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT")
+                    return _mt5_const(
+                        "order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
+                    )
                 if s == "BUY_STOP":
                     return _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP")
                 if s == "SELL_STOP":
-                    return _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
+                    return _mt5_const(
+                        "order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"
+                    )
             return None
 
         def _resolve_action(a):
@@ -1494,7 +1669,9 @@ class MT5Connector:
                 if s in ("MARKET", "DEAL"):
                     return _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
                 if s in ("PENDING", "ORDER"):
-                    return _mt5_const("trade_actions", "PENDING", "TRADE_ACTION_PENDING")
+                    return _mt5_const(
+                        "trade_actions", "PENDING", "TRADE_ACTION_PENDING"
+                    )
                 if s in ("MODIFY", "SLTP"):
                     return _mt5_const("trade_actions", "SLTP", "TRADE_ACTION_SLTP")
                 if s in ("CLOSE", "DEAL_CLOSE"):
@@ -1516,17 +1693,23 @@ class MT5Connector:
 
         # Sanity checks de base
         if not symbol or not isinstance(symbol, str):
-            self.logger.error(f"MT5: Requête invalide — 'symbol' manquant ou invalide. Req={request}")
+            self.logger.error(
+                f"MT5: Requête invalide — 'symbol' manquant ou invalide. Req={request}"
+            )
             return None
         try:
             volume = float(volume)
         except Exception:
             volume = 0.0
         if not (volume > 0):
-            self.logger.error(f"MT5: Requête invalide — 'volume' <= 0 pour {symbol}. Req={request}")
+            self.logger.error(
+                f"MT5: Requête invalide — 'volume' <= 0 pour {symbol}. Req={request}"
+            )
             return None
         if order_type is None:
-            self.logger.error(f"MT5: Requête invalide — 'type' (ORDER_TYPE_*) manquant/illégal. Req={request}")
+            self.logger.error(
+                f"MT5: Requête invalide — 'type' (ORDER_TYPE_*) manquant/illégal. Req={request}"
+            )
             return None
         if action is None:
             # Par défaut, si type = BUY/SELL on force un DEAL
@@ -1537,19 +1720,28 @@ class MT5Connector:
         if "magic" not in request:
             # fallback safe ; la vraie valeur doit venir de la stratégie/TradeExecutor
             try:
-                request["magic"] = int(self.config_manager.get("defaults.magic_number", 0) or 0)
+                request["magic"] = int(
+                    self.config_manager.get("defaults.magic_number", 0) or 0
+                )
             except Exception:
                 request["magic"] = 0
 
         if "deviation" not in request:
             try:
-                request["deviation"] = int(self.config_manager.get("trade_executor_settings.slippage_points", 5) or 5)
+                request["deviation"] = int(
+                    self.config_manager.get(
+                        "trade_executor_settings.slippage_points", 5
+                    )
+                    or 5
+                )
             except Exception:
                 request["deviation"] = 5
 
         if "type_filling" not in request:
             # IOC par défaut (plus permissif pour les brokers qui refusent FOK)
-            request["type_filling"] = _mt5_const("type_filling", "IOC", "ORDER_FILLING_IOC")
+            request["type_filling"] = _mt5_const(
+                "type_filling", "IOC", "ORDER_FILLING_IOC"
+            )
 
         if "type_time" not in request:
             request["type_time"] = getattr(mt5, "ORDER_TIME_GTC", None)
@@ -1569,7 +1761,11 @@ class MT5Connector:
 
         # récupérer digits pour arrondis éventuels
         try:
-            si = self.symbol_info(symbol) if callable(getattr(self, "symbol_info", None)) else None
+            si = (
+                self.symbol_info(symbol)
+                if callable(getattr(self, "symbol_info", None))
+                else None
+            )
         except Exception:
             si = None
         digits = 5
@@ -1579,19 +1775,29 @@ class MT5Connector:
         except Exception:
             digits = 5
 
-        is_market_action = action == _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
+        is_market_action = action == _mt5_const(
+            "trade_actions", "DEAL", "TRADE_ACTION_DEAL"
+        )
         if is_market_action and (not price or not math.isfinite(price) or price <= 0):
             # Déduire BUY/SELL depuis order_type
-            side = "BUY" if order_type == _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY") else "SELL"
+            side = (
+                "BUY"
+                if order_type == _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY")
+                else "SELL"
+            )
             try:
                 px = self.get_current_price(symbol, side)
                 if isinstance(px, (int, float)) and px > 0:
                     request["price"] = round(float(px), digits)
                 else:
-                    self.logger.error(f"MT5: Prix market indisponible pour {symbol} ({side}).")
+                    self.logger.error(
+                        f"MT5: Prix market indisponible pour {symbol} ({side})."
+                    )
                     return None
             except Exception as ex:
-                self.logger.exception(f"MT5: Exception get_current_price({symbol},{side}): {ex}")
+                self.logger.exception(
+                    f"MT5: Exception get_current_price({symbol},{side}): {ex}"
+                )
                 return None
         elif is_market_action and price > 0:
             request["price"] = round(float(price), digits)
@@ -1606,7 +1812,9 @@ class MT5Connector:
             _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY"): "BUY",
             _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL"): "SELL",
             _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"): "BUY_LIMIT",
-            _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"): "SELL_LIMIT",
+            _mt5_const(
+                "order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
+            ): "SELL_LIMIT",
             _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP"): "BUY_STOP",
             _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"): "SELL_STOP",
         }
@@ -1639,26 +1847,56 @@ class MT5Connector:
             )
 
             # Succès possibles: DONE (exécuté), PLACED (pending placé), PARTIAL (exécution partielle)
-            RET_DONE = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE", "TRADE_RETCODE_DONE"), None)
-            RET_PLACED = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("PLACED", "TRADE_RETCODE_PLACED"), None)
-            RET_DONE_PARTIAL = getattr(mt5, (maps.get("trade_retcodes", {}) or {}).get("DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"), None)
+            RET_DONE = getattr(
+                mt5,
+                (maps.get("trade_retcodes", {}) or {}).get(
+                    "DONE", "TRADE_RETCODE_DONE"
+                ),
+                None,
+            )
+            RET_PLACED = getattr(
+                mt5,
+                (maps.get("trade_retcodes", {}) or {}).get(
+                    "PLACED", "TRADE_RETCODE_PLACED"
+                ),
+                None,
+            )
+            RET_DONE_PARTIAL = getattr(
+                mt5,
+                (maps.get("trade_retcodes", {}) or {}).get(
+                    "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"
+                ),
+                None,
+            )
 
             if retcode_val in (RET_DONE, RET_PLACED, RET_DONE_PARTIAL):
-                label = "exécuté" if retcode_val == RET_DONE else ("partiellement exécuté" if retcode_val == RET_DONE_PARTIAL else "placé")
+                label = (
+                    "exécuté"
+                    if retcode_val == RET_DONE
+                    else (
+                        "partiellement exécuté"
+                        if retcode_val == RET_DONE_PARTIAL
+                        else "placé"
+                    )
+                )
                 self.logger.info(
                     f"MT5: Ordre {label} avec succès. Deal #{deal_val}, Ordre #{order_id_val} pour {symbol}."
                 )
             else:
                 # Retcode → libellé humain
                 retcode_str = ""
-                for k, v in ((maps.get("trade_retcodes", {}) or {}).items()):
+                for k, v in (maps.get("trade_retcodes", {}) or {}).items():
                     if getattr(mt5, v, None) == retcode_val:
                         retcode_str = k
                         break
                 # mt5.last_error() peut renvoyer tuple -> rendre lisible
                 try:
                     last_err = mt5.last_error()
-                    last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+                    last_err_str = (
+                        f"{last_err}"
+                        if not isinstance(last_err, (tuple, list))
+                        else " | ".join(map(str, last_err))
+                    )
                 except Exception:
                     last_err_str = "N/A"
                 self.logger.warning(
@@ -1674,16 +1912,21 @@ class MT5Connector:
         # --- 8) Aucun résultat ---
         try:
             last_err = mt5.last_error()
-            last_err_str = f"{last_err}" if not isinstance(last_err, (tuple, list)) else " | ".join(map(str, last_err))
+            last_err_str = (
+                f"{last_err}"
+                if not isinstance(last_err, (tuple, list))
+                else " | ".join(map(str, last_err))
+            )
         except Exception:
             last_err_str = "N/A"
-        self.logger.error(f"MT5: order_send a échoué. Aucune réponse. Erreur système: {last_err_str}.")
+        self.logger.error(
+            f"MT5: order_send a échoué. Aucune réponse. Erreur système: {last_err_str}."
+        )
         self.config_manager.send_alert(
             f"MT5: Échec envoi ordre: Aucune réponse. {last_err_str}",
             "telegram_critical",
         )
         return None
-
 
     def get_trade_history(self) -> pd.DataFrame:
         """
