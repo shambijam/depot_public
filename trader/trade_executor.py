@@ -3945,36 +3945,68 @@ class TradeExecutor:
             if tp_price is None or tp_price <= 0:
                 tp_price = 0.0  # MT5 = pas de TP
                 self.logger.debug("[BURST] TP neutralisé → trailing stop only")
+                      
+        _raw_comment = str(trade_decision.get("comment") or "")
+        _basket_id = str(trade_decision.get("basket_id") or "").strip() or None
 
-        # --- Construction base requête ---
+        # 1) si non fourni, essaie d’extraire "basket=XXX" du commentaire
+        if not _basket_id and _raw_comment:
+            m = re.search(r"basket=([A-Za-z0-9_]+)", _raw_comment)
+            if m:
+                _basket_id = m.group(1)
+
+        # 2) sinon, fabrique un id court & stable (ex: "burst_XAUUSD")
+        if not _basket_id:
+            sym_name = getattr(symbol_info, "name", "") or expected_symbol
+            _basket_id = f"burst_{str(sym_name).upper()}"
+
+        # 3) commentaire MT5 court (≤31), ASCII sûr
+        _comment = _raw_comment.strip() or _basket_id
+        _comment = _comment.replace(" ", "").replace("|", "")
+        _comment = re.sub(r"[^A-Za-z0-9._-]", "", _comment)[:31]
+
+       
+        def _normalize_mt5_comment(text: str, fallback: str, max_len: int = 31) -> str:
+            raw = (text or fallback or "").strip()
+            raw = raw.replace("|", "").replace(" ", "")
+            raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+            return raw[:max_len]
+
+        _sym_upper = str(getattr(symbol_info, "name", "") or "").upper()
+        _basket_id = str(trade_decision.get("basket_id") or "").strip()
+        _comment = _normalize_mt5_comment(_basket_id, fallback=f"burst_{_sym_upper}")
+    
+
+        # --- Construction base requête (comment court + tags utiles) ---
         order_type_str = str(order_type_str or "MARKET").upper()
+
         request = {
             "symbol": symbol_info.name,
             "volume": float(vol),
             "magic": trade_decision.get("magic_number", config.get("magic_number")),
-            "sl": sl_price,
-            "tp": tp_price,
+            "sl": float(sl_price),
+            # TP déjà neutralisé si rule == "burst_scalping" plus haut, sinon tp_price
+            "tp": float(tp_price),
             "type_time": ORDER_TIME_GTC,
-            "deviation": deviation_points,
-            # --- Propagation du basket_id / comment depuis la décision ---
-            "comment": (
-                trade_decision.get("comment")
-                or (
-                    f"burst_scalping|basket={trade_decision['basket_id']}|"
-                    f"{trade_decision.get('burst_index', 0)}/{trade_decision.get('burst_size', 0)}"
-                    if trade_decision.get("basket_id")
-                    else ""
-                )
+            "deviation": int(deviation_points),
+            "comment": _comment,  # court, stable, contient le basket_id
+
+            # --- champs métier / logs (ignorés par MT5) ---
+            "strategy_type": str(config.get("strategy_name", "unknown")).lower(),
+            "rule_name": str(trade_decision.get("rule_name", "")),
+            "meta_rr_projected": (
+                trade_decision.get("meta_rr_projected")
+                or trade_decision.get("rr")
+                or trade_decision.get("rr_effective")
             ),
+            "basket_id": (_basket_id or None),
+            "is_burst_trade": (rule == "burst_scalping"),
         }
 
-        # Timeout bars & mitigation (meta only, pour exécutions différées)
-        timeout_bars = int(trade_decision.get("timeout_bars", 0) or 0)
-        use_mitigation = bool(trade_decision.get("use_mitigation", False))
-
-        request["_meta_timeout_bars"] = timeout_bars
-        request["_meta_use_mitigation"] = use_mitigation
-
+        # --- Timeout & mitigation (meta uniquement, pour l'orchestrateur) ---
+        request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
+        request["_meta_use_mitigation"] = bool(trade_decision.get("use_mitigation", False))
+      
         # --- Détermination du type d’ordre et prix de référence ---
         if order_type_str == "MARKET":
             request["action"] = mt5_action_deal
