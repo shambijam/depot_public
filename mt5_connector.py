@@ -1812,30 +1812,7 @@ class MT5Connector:
                 "freeze_level": int(getattr(si, "freeze_level", 0) or 0),  # en points
             }
             return ctx
-
-        # >>> NEW: round volume to step + clamp + optional cap
-        def _normalize_volume(vol: float, ctx: dict):
-            try:
-                vol = float(vol)
-            except Exception:
-                return None
-            step = ctx["vol_step"]
-            minv = ctx["min_vol"]
-            maxv = ctx["max_vol"]
-            # arrondi au pas (évite dépassement)
-            steps = round(vol / step)
-            vol_r = steps * step
-            # clamp broker
-            vol_r = max(minv, min(maxv, vol_r))
-            # cap soft config
-            try:
-                cap = float(self.config_manager.get("risk.max_volume_cap", 0) or 0)
-                if cap > 0:
-                    vol_r = min(vol_r, cap)
-            except Exception:
-                pass
-            # normaliser à 2/3 décimales selon pas
-            return float(f"{vol_r:.3f}")
+      
 
         # >>> NEW: enforce distance mini SL/TP + tampon selon Bid/Ask
         def _enforce_sltp_constraints(
@@ -1964,17 +1941,7 @@ class MT5Connector:
                 f"MT5: Impossible de récupérer symbol_info pour {symbol}."
             )
             return None
-        # volume normalisé
-        vol_norm = _normalize_volume(volume, ctx)  # >>> NEW
-        if vol_norm is None or vol_norm <= 0:
-            self.logger.error(f"MT5: Volume invalide pour {symbol}. Req={request}")
-            return None
-        if abs(vol_norm - volume) > 1e-9:
-            self.logger.warning(
-                f"MT5: Volume ajusté {volume} -> {vol_norm} (min/max/step/cap)."
-            )
-        request["volume"] = vol_norm
-
+       
         # --- 4) Prix & digits ----------------------------------------------------
         digits = ctx["digits"]
         price_req = request.get("price")

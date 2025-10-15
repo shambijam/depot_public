@@ -16,6 +16,59 @@ LOG = logging.getLogger(__name__)
 # ============================================================
 # 🔹 Candle Detectors (single candle, doji, hammer, marubozu…)
 # ============================================================
+# === Helpers Contexte & Paramètres (à placer au-dessus de detect_single_candle) ===
+
+def _p(patterns: Optional[Dict[str, Any]], key: str, default):
+    try:
+        return default if not patterns else patterns.get(key, default)
+    except Exception:
+        return default
+
+def _ensure_context_cols(df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20) -> None:
+    """
+    Enrichit df in-place avec:
+      _tr, _atr, _ema, _trend_slope, _range, _body, _range_atr, _body_atr
+    Si déjà présents, ne recalcule pas.
+    """
+    import numpy as np
+    import pandas as pd
+
+    need_ohlc = {"open", "high", "low", "close"}.issubset(df.columns)
+    if not need_ohlc:
+        return
+
+    if "_range" not in df.columns:
+        df["_range"] = (pd.to_numeric(df["high"], errors="coerce") -
+                        pd.to_numeric(df["low"], errors="coerce")).astype("float64")
+    if "_body" not in df.columns:
+        o = pd.to_numeric(df["open"], errors="coerce")
+        c = pd.to_numeric(df["close"], errors="coerce")
+        df["_body"] = (c - o).abs().astype("float64")
+
+    if "_tr" not in df.columns or "_atr" not in df.columns:
+        h = pd.to_numeric(df["high"], errors="coerce")
+        l = pd.to_numeric(df["low"], errors="coerce")
+        c = pd.to_numeric(df["close"], errors="coerce")
+        prev_c = c.shift(1)
+        tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+        df["_tr"] = tr.fillna(h - l).astype("float64")
+        df["_atr"] = df["_tr"].rolling(window=max(int(atr_len), 1), min_periods=1).mean().astype("float64")
+
+    if "_ema" not in df.columns:
+        c = pd.to_numeric(df["close"], errors="coerce")
+        span = max(int(ema_len), 1)
+        df["_ema"] = c.ewm(span=span, adjust=False).mean().astype("float64")
+
+    if "_trend_slope" not in df.columns:
+        ema = pd.to_numeric(df["_ema"], errors="coerce")
+        df["_trend_slope"] = ema.diff().fillna(0.0).astype("float64")
+
+    if "_range_atr" not in df.columns:
+        atr = pd.to_numeric(df.get("_atr", pd.Series(0, index=df.index)), errors="coerce").replace(0, np.nan)
+        df["_range_atr"] = (df["_range"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if "_body_atr" not in df.columns:
+        atr = pd.to_numeric(df.get("_atr", pd.Series(0, index=df.index)), errors="coerce").replace(0, np.nan)
+        df["_body_atr"] = (df["_body"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 """
 Détection factuelle de chandeliers individuels.
@@ -30,6 +83,15 @@ def detect_single_candle(
 ) -> Optional[Dict[str, Any]]:
 
     try:
+        # Prépare le contexte si absent
+        _ensure_context_cols(df, atr_len=_p(patterns, "atr_len", 14), ema_len=_p(patterns, "ema_len", 20))
+
+        # Seuils paramétrables (par 'patterns' si fourni)
+        MIN_RANGE_ATR = float(_p(patterns, "min_range_atr", 0.15))   # filtre micro-bougies
+        MIN_BODY_ATR  = float(_p(patterns, "min_body_atr", 0.05))    # évite les corps ridicules
+        ENGULF_PAD    = float(_p(patterns, "engulf_pad", 0.05))      # % du range précédent pour valider l'avalement
+        VOL_Z_MIN     = float(_p(patterns, "volume_z_min", -9.0))    # si volume_zscore existe, seuil mini (par défaut inactif)
+
         o, h, l, c = (
             df["open"].iloc[i],
             df["high"].iloc[i],
@@ -44,6 +106,16 @@ def detect_single_candle(
         is_bull = c > o
 
         pattern, pattern_type = None, None
+        
+        # Filtre micro-bougies (M1 bruyant) : si range/ATR trop faible -> ignore
+        range_atr = float(df["_range_atr"].iloc[i]) if "_range_atr" in df.columns else 1.0
+        body_atr  = float(df["_body_atr"].iloc[i])  if "_body_atr"  in df.columns else body / (size + 1e-12)
+        if range_atr < MIN_RANGE_ATR or body_atr < MIN_BODY_ATR:
+            return None
+
+        # Si volume_zscore dispo : évite signaux sur volume anémique
+        if "volume_zscore" in df.columns and float(df["volume_zscore"].iloc[i]) < VOL_Z_MIN:
+            return None
 
         # === DOJI & VARIANTS ===
         if body_ratio < 0.1:
@@ -78,13 +150,21 @@ def detect_single_candle(
                 "momentum",
             )
 
-        # === ENGULFING SIMPLE ===
-        if i > 0 and body > abs(df["close"].iloc[i - 1] - df["open"].iloc[i - 1]):
+        # === ENGULFING (renforcé) ===
+        if i > 0:
             prev_o, prev_c = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
-            if is_bull and c > prev_o and o < prev_c:
-                pattern, pattern_type = "bullish_engulfing", "reversal"
-            elif not is_bull and c < prev_o and o > prev_c:
-                pattern, pattern_type = "bearish_engulfing", "reversal"
+            prev_h, prev_l = df["high"].iloc[i - 1], df["low"].iloc[i - 1]
+            prev_body_high = max(prev_o, prev_c)
+            prev_body_low  = min(prev_o, prev_c)
+            prev_range = max(1e-12, prev_h - prev_l)
+
+            # Corps actuel > corps précédent et "avale" le corps précédent + marge
+            if body > abs(prev_c - prev_o):
+                if is_bull and (o <= prev_body_low) and (c >= prev_body_high + ENGULF_PAD * prev_range):
+                    pattern, pattern_type = "bullish_engulfing", "reversal"
+                elif (not is_bull) and (o >= prev_body_high) and (c <= prev_body_low - ENGULF_PAD * prev_range):
+                    pattern, pattern_type = "bearish_engulfing", "reversal"
+
 
         # === BELT HOLD ===
         if body_ratio > 0.7 and (upper_wick < 0.05 * size or lower_wick < 0.05 * size):
@@ -118,6 +198,28 @@ def detect_single_candle(
                 enriched["volume_zscore"] = float(df["volume_zscore"].iloc[i])
             if "phase" in df.columns:
                 enriched["phase"] = str(df["phase"].iloc[i])
+                
+            # Quality scoring local (0..1) — indicatif, non bloquant
+            q = 0.5
+            if pattern in ("marubozu_bull", "marubozu_bear", "belt_hold_bull", "belt_hold_bear"):
+                q += 0.2
+            if pattern in ("bullish_engulfing", "bearish_engulfing"):
+                q += 0.15
+            if pattern in ("hammer", "inverted_hammer", "shooting_star", "hanging_man"):
+                q += 0.1
+            # volume / MTF / structure
+            if "volume_zscore" in df.columns:
+                vz = float(df["volume_zscore"].iloc[i])
+                if vz >= 1.0: q += 0.1
+                if vz >= 2.0: q += 0.05
+            if "pattern_m5" in df.columns and df["pattern_m5"].iloc[i] == pattern: q += 0.1
+            if "pattern_m15" in df.columns and df["pattern_m15"].iloc[i] == pattern: q += 0.1
+            if "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i]): q += 0.05
+            if "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i]): q += 0.05
+            if "bos" in df.columns and not pd.isna(df["bos"].iloc[i]): q += 0.05
+
+            enriched["quality"] = float(max(0.0, min(1.0, q)))
+     
 
             return enriched
 
@@ -211,28 +313,41 @@ def is_harami(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 1:
         return None
     c1, c2 = df.iloc[i - 1], df.iloc[i]
-    if c1["close"] > c1["open"] and c2["close"] < c2["open"]:  # bull -> bear
-        if c2["open"] < c1["close"] and c2["close"] > c1["open"]:
-            return {
-                "pattern": "bearish_harami",
-                "type": "reversal",
-                "is_bullish": False,
-            }
-    elif c1["close"] < c1["open"] and c2["close"] > c2["open"]:  # bear -> bull
-        if c2["open"] > c1["close"] and c2["close"] < c1["open"]:
-            return {"pattern": "bullish_harami", "type": "reversal", "is_bullish": True}
+
+    # Corps de c1
+    c1_hi, c1_lo = max(c1["open"], c1["close"]), min(c1["open"], c1["close"])
+    # Corps de c2
+    c2_hi, c2_lo = max(c2["open"], c2["close"]), min(c2["open"], c2["close"])
+
+    # c2 à l'intérieur du corps de c1
+    inside = (c2_hi <= c1_hi) and (c2_lo >= c1_lo)
+
+    if (c1["close"] > c1["open"]) and (c2["close"] < c2["open"]) and inside:
+        return {"pattern": "bearish_harami", "type": "reversal", "is_bullish": False}
+    if (c1["close"] < c1["open"]) and (c2["close"] > c2["open"]) and inside:
+        return {"pattern": "bullish_harami", "type": "reversal", "is_bullish": True}
     return None
+
 
 
 def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 1:
         return None
     c1, c2 = df.iloc[i - 1], df.iloc[i]
-    if abs(c1["high"] - c2["high"]) < 1e-5:  # sommets quasi identiques
+
+    # Tolérance dynamique
+    _ensure_context_cols(df)
+    tol = 1e-5
+    if "_atr" in df.columns:
+        tol = max(tol, float(df["_atr"].iloc[i]) * 0.10)  # 10% ATR
+    # Si df a un pas de prix 'price_step' ou peut être inféré, on peut raffiner ici.
+
+    if abs(c1["high"] - c2["high"]) <= tol:
         return {"pattern": "tweezer_top", "type": "reversal", "is_bullish": False}
-    if abs(c1["low"] - c2["low"]) < 1e-5:  # creux quasi identiques
+    if abs(c1["low"] - c2["low"]) <= tol:
         return {"pattern": "tweezer_bottom", "type": "reversal", "is_bullish": True}
     return None
+
 
 
 # ============================================================
@@ -333,6 +448,9 @@ def detect_combos(
         return [None] * (len(df) if df is not None else 0)
 
     signals: List[Optional[List[Dict[str, Any]]]] = []
+    import logging
+    LOG = logging.getLogger("ComboDetector")
+
 
     for i in range(len(df)):
         try:
@@ -352,15 +470,12 @@ def detect_combos(
                 signals.append(None)
                 continue
 
-            # 3) Confluences structurelles (OB/FVG/BOS si dispo)
+            # 3) Confluences structurelles + MTF + Quality
             for s in sigs:
-                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(
-                    df["ob_zone"].iloc[i]
-                )
+                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])
                 s["near_fvg"] = "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])
                 s["near_bos"] = "bos" in df.columns and not pd.isna(df["bos"].iloc[i])
 
-                # 4) Confirmations multi-timeframe
                 confirmed_tf = []
                 for tf in ["pattern_m5", "pattern_m15"]:
                     if tf in df.columns and df[tf].iloc[i] == s.get("pattern"):
@@ -368,11 +483,30 @@ def detect_combos(
                 if confirmed_tf:
                     s["confirmed_tf"] = confirmed_tf
 
-                # Ajout index + horodatage
+                # --- Quality (0..1) indicatif
+                q = float(s.get("quality", 0.5))  # hérite du single si présent
+                if s.get("source") == "multi":
+                    q += 0.1  # les patterns multi-bougies sont généralement plus fiables
+                if confirmed_tf:
+                    q += 0.1 * len(confirmed_tf)
+                if s.get("near_ob"):  q += 0.05
+                if s.get("near_fvg"): q += 0.05
+                if s.get("near_bos"): q += 0.05
+                if "volume_zscore" in df.columns:
+                    vz = float(df["volume_zscore"].iloc[i])
+                    if vz >= 1.0: q += 0.05
+                    if vz >= 2.0: q += 0.05
+                s["quality"] = float(max(0.0, min(1.0, q)))
+
+                # Index + horodatage (comme avant)
                 s["index"] = i
-                s["timestamp"] = (
-                    str(df.index[i]) if hasattr(df.index, "dtype") else None
-                )
+                s["timestamp"] = (str(df.index[i]) if hasattr(df.index, "dtype") else None)
+          
+            # Ajout index + horodatage
+            s["index"] = i
+            s["timestamp"] = (
+                str(df.index[i]) if hasattr(df.index, "dtype") else None
+            )
 
             signals.append(sigs)
 
@@ -381,10 +515,6 @@ def detect_combos(
             signals.append(None)
 
     return signals
-
-# === 5-candle: Rising / Falling Three Methods =====================
-
-# === 5-candle: Rising / Falling Three Methods =====================
 
 def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     # besoin des 5 dernières bougies: i-4..i
@@ -491,80 +621,99 @@ def _channel_slope(values: np.ndarray) -> float:
 
 def _is_flag_consolidation(highs: np.ndarray, lows: np.ndarray, max_bars: int = 8) -> Dict[str, Any]:
     """
-    Retourne { 'ok': bool, 'type': 'flag'|'pennant', 'slope_high':..., 'slope_low':..., 'contracting': bool }
-    Hypothèses:
-      - canal quasi // => slopes de highs et lows de même signe et proche
-      - pennant => amplitudes qui rétrécissent (contracting)
+    Renvoie: {'ok': bool, 'type': 'flag'|'pennant', 'slope_high':..., 'slope_low':..., 'contracting': bool, 'overlap': float}
+    Critères:
+      - canal ≈ parallèle (pentes proches, corrélation élevée)
+      - pennant: contraction de l'amplitude + overlap élevé
     """
-    if len(highs) < 3 or len(lows) < 3:
+    if len(highs) < 3 or len(lows) < 3 or len(highs) != len(lows) or len(highs) > max_bars:
         return {"ok": False}
 
-    slope_h = _channel_slope(highs)
-    slope_l = _channel_slope(lows)
-    contracting = (highs.max() - highs.min()) > 0 and (lows.max() - lows.min()) > 0 and (highs[-1] - lows[-1]) < (highs[0] - lows[0]) * 0.8
+    x = np.arange(len(highs))
+    # régressions simples
+    sh = _channel_slope(highs)
+    sl = _channel_slope(lows)
 
-    # flag: pentes proches (même signe), faible écart
-    parallelish = (np.sign(slope_h) == np.sign(slope_l)) and (abs(slope_h - slope_l) < 2 * (abs(slope_h) + abs(slope_l) + 1e-9))
+    # corrélation "parallélisme"
+    def _corr(a, b):
+        a = (a - a.mean())
+        b = (b - b.mean())
+        den = (np.sqrt((a*a).sum()) * np.sqrt((b*b).sum()))
+        return float((a*b).sum() / den) if den > 0 else 0.0
+
+    corr = _corr(highs, lows)
+    parallelish = (np.sign(sh) == np.sign(sl)) and (abs(sh - sl) <= 0.5 * (abs(sh) + abs(sl) + 1e-9)) and (corr >= 0.6)
+
+    # contraction
+    amp0 = highs[0] - lows[0]
+    ampN = highs[-1] - lows[-1]
+    contracting = (amp0 > 0) and (ampN < amp0 * 0.8)
+
+    # overlap (consolidation serrée)
+    hi_min, hi_max = highs.min(), highs.max()
+    lo_min, lo_max = lows.min(), lows.max()
+    overlap = max(0.0, (min(hi_max, highs[-1]) - max(lo_min, lows[-1]))) / max(1e-9, (hi_max - lo_min))
+
     shape = "pennant" if contracting and not parallelish else "flag"
-    ok = parallelish or contracting
+    ok = parallelish or (contracting and overlap >= 0.3)
 
-    return {"ok": bool(ok), "type": shape, "slope_high": slope_h, "slope_low": slope_l, "contracting": contracting}
+    return {"ok": bool(ok), "type": shape, "slope_high": sh, "slope_low": sl, "contracting": bool(contracting), "overlap": float(overlap)}
 
 
 def is_bull_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
-    """
-    Heuristique:
-      - impulsion haussière avant la consolidation (bar i-4..i-1)
-      - consolidation de 3–6 barres canalisées (flag) ou convergentes (pennant)
-      - retracement peu profond (≤50 % de l'impulsion)
-      - bar i = breakout haussier (close > max highs de la consolidation)
-    """
-    lookback = 7  # examine ~7 barres total
+    lookback = 7
     if i < lookback:
         return None
-    window = df.iloc[i-lookback:i+1].copy()
+    window = df.iloc[i - lookback:i + 1].copy()
 
-    # décomposer
-    # on prend les 1-2 premières barres pour l'impulsion, puis 3–6 pour consolidation, dernière = breakout
+    _ensure_context_cols(window)
+    atr = float(window["_atr"].iloc[-1]) if "_atr" in window.columns else 0.0
+
     impulse = window.iloc[0:2]
     cons = window.iloc[2:-1]
     brk = window.iloc[-1]
 
-    # impulsion haussière forte (close2 >> open0)
+    # Impulsion haussière "vraie"
+    impulse_range = impulse["close"].iloc[-1] - impulse["open"].iloc[0]
+    if impulse_range <= max(2.0 * atr, 0.0):
+        return None
     if impulse["close"].iloc[-1] <= impulse["open"].iloc[0]:
         return None
-    impulse_range = impulse["close"].iloc[-1] - impulse["open"].iloc[0]
 
     highs = cons["high"].to_numpy()
     lows = cons["low"].to_numpy()
-
     ch = _is_flag_consolidation(highs, lows)
     if not ch.get("ok"):
         return None
 
-    # retracement max: close cons min >= open0 + 0.5 * impulse_range
+    # retracement limité
     if (cons["low"].min() < impulse["open"].iloc[0] + 0.5 * impulse_range):
         return None
 
-    # breakout: close dernier > max(cons highs)
-    if brk["close"] > cons["high"].max():
+    # Breakout franc: close > max highs + buffer (0.05 ATR)
+    buffer = 0.05 * atr
+    if brk["close"] > cons["high"].max() + buffer and brk["close"] > brk["open"]:
         return {"pattern": f"bull_{ch['type']}", "type": "continuation", "is_bullish": True}
     return None
-
 
 def is_bear_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     lookback = 7
     if i < lookback:
         return None
-    window = df.iloc[i-lookback:i+1].copy()
+    window = df.iloc[i - lookback:i + 1].copy()
+
+    _ensure_context_cols(window)
+    atr = float(window["_atr"].iloc[-1]) if "_atr" in window.columns else 0.0
 
     impulse = window.iloc[0:2]
     cons = window.iloc[2:-1]
     brk = window.iloc[-1]
 
+    impulse_range = impulse["open"].iloc[0] - impulse["close"].iloc[-1]
+    if impulse_range <= max(2.0 * atr, 0.0):
+        return None
     if impulse["close"].iloc[-1] >= impulse["open"].iloc[0]:
         return None
-    impulse_range = impulse["open"].iloc[0] - impulse["close"].iloc[-1]
 
     highs = cons["high"].to_numpy()
     lows = cons["low"].to_numpy()
@@ -575,7 +724,8 @@ def is_bear_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
     if (cons["high"].max() > impulse["close"].iloc[-1] + 0.5 * impulse_range):
         return None
 
-    if brk["close"] < cons["low"].min():
+    buffer = 0.05 * atr
+    if brk["close"] < cons["low"].min() - buffer and brk["close"] < brk["open"]:
         return {"pattern": f"bear_{ch['type']}", "type": "continuation", "is_bullish": False}
     return None
 
