@@ -104,7 +104,7 @@
           "activate_after_rr": 1.0
         },
         "closure_rules": {
-          "close_on_full_profit": true,
+          "close_on_full_profit": false,
           "require_full_count_for_profit_close": true,
           "min_green_pnl_pips": 0.2,
           "rt_fast_window_ms": 2500,
