@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 import re, time
@@ -11,6 +10,7 @@ import json
 import pandas as pd
 import numpy as np
 import math
+import os
 import jsonschema
 from datetime import datetime, UTC  # AMÉLIORATION: Import explicite de UTC
 from pathlib import Path
@@ -3197,6 +3197,21 @@ class TradeExecutor:
         confidence = float(trade_decision.get("confidence", 1.0) or 1.0)
         confidence = max(0.0, min(1.0, confidence))
         max_dollar_risk = max_dollar_risk_base * confidence
+        # === RV-4: réduction douce par quality (si fournie par combos/OF) ===
+        try:
+            q = trade_decision.get("quality")
+            if isinstance(q, (int, float)):
+                q = max(0.0, min(1.0, float(q)))
+                # borne haute du budget en fonction de la qualité (0.5..1.0)
+                q_cap = 0.5 + 0.5 * q
+                if q_cap < 1.0:
+                    prev = max_dollar_risk
+                    max_dollar_risk = max_dollar_risk * q_cap
+                    self.logger.info(
+                        f"[QUALITY CAP] Risk$ {prev:.2f} -> {max_dollar_risk:.2f} (q={q:.2f}, cap={q_cap:.2f})"
+                    )
+        except Exception:
+            pass
 
         # 2) burst_size : partage du risque sur le panier (détection robuste)
         burst_size = None
@@ -3295,6 +3310,46 @@ class TradeExecutor:
         one_tick_pts = max(1, int(round((tick_size or point) / (point or 1.0))))
         _min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
 
+        # === RV-1: plancher de distance pour le SIZING (évite volumes énormes si SL ~ entry) ===
+        # Configs optionnelles
+        try:
+            min_sizing_stop_pts = int(
+                self.config_manager.get(
+                    "risk_management_settings.min_sizing_stop_pts", 0
+                )
+                or 0
+            )
+        except Exception:
+            min_sizing_stop_pts = 0
+        try:
+            min_sizing_stop_atr_mult = float(
+                self.config_manager.get(
+                    "risk_management_settings.min_sizing_stop_atr_mult", 0.25
+                )
+            )
+        except Exception:
+            min_sizing_stop_atr_mult = 0.25
+
+        # ATR en points si fourni par le pipeline/contexte (facultatif)
+        last_atr_pts = 0.0
+        try:
+            for k in ("last_atr_points", "atr_points", "last_atr_pts", "atr_pts"):
+                v = (context or {}).get(k)
+                if isinstance(v, (int, float)) and v > 0:
+                    last_atr_pts = float(v)
+                    break
+        except Exception:
+            pass
+
+        floor_pts_atr = (
+            int(round(last_atr_pts * min_sizing_stop_atr_mult))
+            if last_atr_pts > 0 and min_sizing_stop_atr_mult > 0
+            else 0
+        )
+        _sizing_floor_pts = max(_min_buf_pts, min_sizing_stop_pts, floor_pts_atr)
+
+        # === RV-2: SL effectif avec plancher sizing (pts) ===
+        # 1) SL respectant le buffer broker minimal (_min_buf_pts)
         if action == "BUY":
             sl_eff = min(
                 float(sl_price), float(entry_price) - _min_buf_pts * float(point)
@@ -3304,22 +3359,17 @@ class TradeExecutor:
                 float(sl_price), float(entry_price) + _min_buf_pts * float(point)
             )
 
-        price_diff = abs(float(entry_price) - float(sl_eff))
-        if price_diff <= 0 or not math.isfinite(price_diff):
-            raise TradeExecutionError(
-                "Distance Entry-SL effective nulle/invalide pour sizing."
-            )
+        # 2) Applique le plancher de sizing (_sizing_floor_pts)
+        _pt = float(point) if float(point or 0.0) > 0.0 else 1e-9  # garde anti-div/0
+        price_diff_pts = abs(float(entry_price) - float(sl_eff)) / _pt
+        if _sizing_floor_pts > 0 and price_diff_pts < _sizing_floor_pts:
+            adjust = _sizing_floor_pts * _pt
+            if action == "BUY":
+                sl_eff = float(entry_price) - adjust
+            else:
+                sl_eff = float(entry_price) + adjust
 
-        # SL effectif utilisé pour le sizing (l’executor peut décaler le SL réel si trop proche)
-        if action == "BUY":
-            sl_eff = min(
-                float(sl_price), float(entry_price) - _min_buf_pts * float(point)
-            )
-        else:  # SELL
-            sl_eff = max(
-                float(sl_price), float(entry_price) + _min_buf_pts * float(point)
-            )
-
+        # 3) Validation finale (distance > 0)
         price_diff = abs(float(entry_price) - float(sl_eff))
         if price_diff <= 0 or not math.isfinite(price_diff):
             raise TradeExecutionError(
@@ -3418,6 +3468,27 @@ class TradeExecutor:
                 f"Perte/lot trop faible ({per_lot_loss_usd:.6f}$) -> plancher {min_dlr_per_lot:.6f}$ appliqué."
             )
             per_lot_loss_usd = min_dlr_per_lot
+        # === RV-3: plancher par ACTIF (optionnel) ===
+        try:
+            per_asset_min = (
+                self.config_manager.get(
+                    "risk_management_settings.per_asset_min_dollar_risk_per_lot_fallback",
+                    {},
+                )
+                or {}
+            ).get(sym_name)
+            if (
+                isinstance(per_asset_min, (int, float))
+                and per_asset_min > min_dlr_per_lot
+            ):
+                min_dlr_per_lot = float(per_asset_min)
+                if per_lot_loss_usd < min_dlr_per_lot:
+                    self.logger.debug(
+                        f"[{sym_name}] Plancher perte/lot (asset): {per_lot_loss_usd:.6f} -> {min_dlr_per_lot:.6f}"
+                    )
+                    per_lot_loss_usd = min_dlr_per_lot
+        except Exception:
+            pass
 
         # --- Volume brut non arrondi ---
         raw_volume = max_dollar_risk / per_lot_loss_usd
@@ -3578,6 +3649,22 @@ class TradeExecutor:
                     volume = reduced
         except Exception as e:
             self.logger.warning(f"Contrôle marge non appliqué: {e}")
+
+        # === RV-5: plafond absolu failsafe (même si safety désactivée) ===
+        try:
+            failsafe_cap = float(
+                self.config_manager.get(
+                    "trade_executor_settings.absolute_volume_failsafe", 0.0
+                )
+                or 0.0
+            )
+            if failsafe_cap > 0 and volume > failsafe_cap:
+                self.logger.warning(
+                    f"[VOLUME FAILSAFE] {volume:.4f} -> {failsafe_cap:.4f}"
+                )
+                volume = failsafe_cap
+        except Exception:
+            pass
 
         # --- Vérification/ajustement final du risque (hard cap) ---
         tol = float(
@@ -3945,7 +4032,7 @@ class TradeExecutor:
             if tp_price is None or tp_price <= 0:
                 tp_price = 0.0  # MT5 = pas de TP
                 self.logger.debug("[BURST] TP neutralisé → trailing stop only")
-                      
+
         _raw_comment = str(trade_decision.get("comment") or "")
         _basket_id = str(trade_decision.get("basket_id") or "").strip() or None
 
@@ -3965,7 +4052,6 @@ class TradeExecutor:
         _comment = _comment.replace(" ", "").replace("|", "")
         _comment = re.sub(r"[^A-Za-z0-9._-]", "", _comment)[:31]
 
-       
         def _normalize_mt5_comment(text: str, fallback: str, max_len: int = 31) -> str:
             raw = (text or fallback or "").strip()
             raw = raw.replace("|", "").replace(" ", "")
@@ -3975,7 +4061,6 @@ class TradeExecutor:
         _sym_upper = str(getattr(symbol_info, "name", "") or "").upper()
         _basket_id = str(trade_decision.get("basket_id") or "").strip()
         _comment = _normalize_mt5_comment(_basket_id, fallback=f"burst_{_sym_upper}")
-    
 
         # --- Construction base requête (comment court + tags utiles) ---
         order_type_str = str(order_type_str or "MARKET").upper()
@@ -3990,7 +4075,6 @@ class TradeExecutor:
             "type_time": ORDER_TIME_GTC,
             "deviation": int(deviation_points),
             "comment": _comment,  # court, stable, contient le basket_id
-
             # --- champs métier / logs (ignorés par MT5) ---
             "strategy_type": str(config.get("strategy_name", "unknown")).lower(),
             "rule_name": str(trade_decision.get("rule_name", "")),
@@ -4005,8 +4089,10 @@ class TradeExecutor:
 
         # --- Timeout & mitigation (meta uniquement, pour l'orchestrateur) ---
         request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
-        request["_meta_use_mitigation"] = bool(trade_decision.get("use_mitigation", False))
-      
+        request["_meta_use_mitigation"] = bool(
+            trade_decision.get("use_mitigation", False)
+        )
+
         # --- Détermination du type d’ordre et prix de référence ---
         if order_type_str == "MARKET":
             request["action"] = mt5_action_deal
