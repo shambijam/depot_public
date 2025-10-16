@@ -1983,15 +1983,21 @@ class TradeExecutor:
                 )
             # >>> PATCH: sécuriser broker_symbol + symbol_info avant construction de la requête
             # 1) symbole brut depuis la décision
-            raw_symbol = str(trade_decision.get("asset") or trade_decision.get("symbol") or "").upper()
+            raw_symbol = str(
+                trade_decision.get("asset") or trade_decision.get("symbol") or ""
+            ).upper()
             if not raw_symbol:
-                raise TradeExecutionError("[BURST] Symbole manquant dans trade_decision.")
+                raise TradeExecutionError(
+                    "[BURST] Symbole manquant dans trade_decision."
+                )
 
             # 2) mapping éventuel vers symbole broker
             try:
                 mc = locals().get("market_context", {}) or {}
                 mapped = self._map_symbol_for_broker(raw_symbol, mc)
-                broker_symbol = (mapped or locals().get("broker_symbol") or raw_symbol).upper()
+                broker_symbol = (
+                    mapped or locals().get("broker_symbol") or raw_symbol
+                ).upper()
             except Exception:
                 broker_symbol = (locals().get("broker_symbol") or raw_symbol).upper()
 
@@ -2000,29 +2006,40 @@ class TradeExecutor:
                 sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
                 if callable(sel):
                     if not sel(broker_symbol):
-                        raise TradeExecutionError(f"[BURST] symbol non sélectionné: {broker_symbol}")
+                        raise TradeExecutionError(
+                            f"[BURST] symbol non sélectionné: {broker_symbol}"
+                        )
                 else:
                     info_tmp = self.mt5_connector.get_symbol_info(broker_symbol)
-                    if not info_tmp or (hasattr(info_tmp, "visible") and not info_tmp.visible):
+                    if not info_tmp or (
+                        hasattr(info_tmp, "visible") and not info_tmp.visible
+                    ):
                         subscribe = getattr(self.mt5_connector, "symbol_select", None)
                         if callable(subscribe) and not subscribe(broker_symbol, True):
-                            raise TradeExecutionError(f"[BURST] symbol_select a échoué: {broker_symbol}")
+                            raise TradeExecutionError(
+                                f"[BURST] symbol_select a échoué: {broker_symbol}"
+                            )
             except Exception as e:
                 raise TradeExecutionError(f"[BURST] Sélection symbole KO: {e}")
 
             # 4) recharger symbol_info depuis MT5 et le valider (digits/point)
             symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
             if not symbol_info:
-                raise TradeExecutionError(f"[BURST] symbol_info introuvable pour {broker_symbol}.")
+                raise TradeExecutionError(
+                    f"[BURST] symbol_info introuvable pour {broker_symbol}."
+                )
 
             try:
                 _digits = int(getattr(symbol_info, "digits", 0) or 0)
-                _point  = float(getattr(symbol_info, "point", 0.0) or 0.0)
+                _point = float(getattr(symbol_info, "point", 0.0) or 0.0)
             except Exception:
-                raise TradeExecutionError(f"[BURST] symbol_info illisible pour {broker_symbol} (digits/point).")
+                raise TradeExecutionError(
+                    f"[BURST] symbol_info illisible pour {broker_symbol} (digits/point)."
+                )
             if _digits <= 0 or _point <= 0:
-                raise TradeExecutionError(f"[BURST] symbol_info invalide pour {broker_symbol} (digits/point).")
-
+                raise TradeExecutionError(
+                    f"[BURST] symbol_info invalide pour {broker_symbol} (digits/point)."
+                )
 
             # ---------- 10) Construction requête ----------
             if rule_name_local == "burst_scalping":
@@ -2222,13 +2239,17 @@ class TradeExecutor:
             self.logger.warning(
                 f"[TRAILING] Erreur application trailing sur {(symbol or sym)}/{ticket}: {e}"
             )
-            
-    def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | None):
+
+    def _attach_sl_tp(
+        self, symbol: str, ticket: int, sl: float | None, tp: float | None
+    ):
         """Attache (ou ré-attache) SL/TP à une position existante."""
         mt5c = getattr(self, "mt5_connector", None)
         mt5 = getattr(mt5c, "mt5", None) if mt5c else None
         if not (mt5c and mt5):
-            self.logger.warning("[EXECUTOR] Impossible d’attacher SL/TP: mt5_connector absent.")
+            self.logger.warning(
+                "[EXECUTOR] Impossible d’attacher SL/TP: mt5_connector absent."
+            )
             return None
 
         req = {
@@ -2245,14 +2266,20 @@ class TradeExecutor:
             res = mt5c.order_send(req)
             rc = getattr(res, "retcode", None) if res else None
             if rc == getattr(mt5, "TRADE_RETCODE_DONE", None):
-                self.logger.info(f"[EXECUTOR] SL/TP attachés pour pos#{ticket} ({symbol}) → SL={req.get('sl')} TP={req.get('tp')}")
+                self.logger.info(
+                    f"[EXECUTOR] SL/TP attachés pour pos#{ticket} ({symbol}) → SL={req.get('sl')} TP={req.get('tp')}"
+                )
             else:
-                self.logger.warning(f"[EXECUTOR] Attache SL/TP échec pos#{ticket} ({symbol}) retcode={rc}")
+                self.logger.warning(
+                    f"[EXECUTOR] Attache SL/TP échec pos#{ticket} ({symbol}) retcode={rc}"
+                )
             return res
         except Exception as e:
-            self.logger.warning(f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}")
+            self.logger.warning(
+                f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}"
+            )
             return None
-    
+
     def _calculate_sl_tp_prices(
         self,
         trade_decision: dict,
@@ -3094,6 +3121,9 @@ class TradeExecutor:
             config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
         ) or {}
         closure = burst_cfg.get("closure_rules", {}) or {}
+        require_all_seen_once = bool(closure.get("require_all_seen_green_once", False))
+        all_seen_green_pips = float(closure.get("all_seen_green_pips", 3.0))
+        loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
 
         close_on_full_profit = bool(closure.get("close_on_full_profit", True))
         require_full_count = bool(
@@ -3135,6 +3165,12 @@ class TradeExecutor:
             self._burst_trailing_state = {}
         if not hasattr(self, "_last_trail_update_ms"):
             self._last_trail_update_ms = {}
+        if not hasattr(self, "_basket_seen_green"):
+            self._basket_seen_green = {}  # basket_id -> set(ticket)
+        if not hasattr(self, "_basket_all_seen"):
+            self._basket_all_seen = {}  # basket_id -> bool
+        if not hasattr(self, "_basket_first_seen_ts"):
+            self._basket_first_seen_ts = {}  # basket_id -> float(ts)
 
         # ---------- Helpers ----------
         def _v(pos, key, default=None):
@@ -3225,6 +3261,32 @@ class TradeExecutor:
                 return mt5c.get_positions() or []
             except Exception:
                 return []
+
+        def _update_seen_green(basket_id: str, positions, min_seen_pips: float):
+            """
+            Marque un ticket comme 'déjà vert' dès qu'il a atteint min_seen_pips au moins une fois.
+            Met self._basket_all_seen[basket_id] = True si tous les tickets ont été verts au moins une fois.
+            """
+            seen = self._basket_seen_green.setdefault(basket_id, set())
+            expected = _expected_count_from(positions)
+            if expected is None:
+                expected = len(positions)
+
+            for p in positions:
+                tk = _v(p, "ticket")
+                ep = _safe_float(_entry_price(p))
+                cp = _safe_float(_current_price(p))
+                if tk is None or ep is None or cp is None:
+                    continue
+                sym = str(_v(p, "symbol", "") or "").upper()
+                d = _direction(p)
+                pip = _pip_size_for_symbol(sym)
+                pp = ((cp - ep) / pip) if d == "BUY" else ((ep - cp) / pip)
+                if pp >= float(min_seen_pips):
+                    seen.add(int(tk))
+
+            # Tous déjà vus 'verts' ?
+            self._basket_all_seen[basket_id] = len(seen) >= expected
 
         def _group_baskets(positions):
             buckets = {}
@@ -3509,22 +3571,34 @@ class TradeExecutor:
 
                 any_action = False
                 for basket_id, pos in baskets.items():
-                    
-                    # --- PATCH: grâce de perte initiale pour éviter le kill au spread ---
-                    if not hasattr(self, "_basket_first_seen"):
-                        self._basket_first_seen = {}
-                    now_s = time.time()
-                    self._basket_first_seen.setdefault(basket_id, now_s)  # première observation
-                    loss_grace_seconds = float(closure.get("loss_grace_seconds", 2.0))  # défaut 2s
-                    
+
+                    # --- 3b: age panier + mémoire 'ever green' ---
+                    if basket_id not in self._basket_first_seen_ts:
+                        self._basket_first_seen_ts[basket_id] = time.time()
+                    age_ms = int(
+                        (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
+                    )
+
+                    # met à jour la mémoire: quels tickets ont déjà été verts au moins une fois
+                    _update_seen_green(basket_id, pos, all_seen_green_pips)
+                    all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
+
                     # 1) CLOSE INSTANTANÉ : Panier plein & TOUT VERT
                     if close_on_full_profit and _all_green_and_full(pos):
-                        self.logger.info(
-                            f"🎯 [FAST] {basket_id} PLEIN & TOUT VERT → CLOSE"
-                        )
-                        if _close_basket(basket_id, pos):
-                            any_action = True
-                            continue
+                        if (
+                            require_all_seen_once
+                            and not all_seen_ok
+                            and age_ms < loss_guard_arming_ms
+                        ):
+                            # On attend que chaque ticket ait été vert au moins une fois
+                            pass
+                        else:
+                            self.logger.info(
+                                f"🎯 [FAST] {basket_id} PLEIN & TOUT VERT → CLOSE"
+                            )
+                            if _close_basket(basket_id, pos):
+                                any_action = True
+                                continue
 
                     # 2) Trailing de panier (armement & retracement)
                     stats = _basket_stats(pos)
@@ -3575,12 +3649,21 @@ class TradeExecutor:
                             - pnl_pips
                         )
                         if dd >= trail_distance_pips and pnl_pips > 0.0:
-                            self.logger.warning(
-                                f"🔒 [FAST] {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
-                            )
-                            if _close_basket(basket_id, pos):
-                                any_action = True
-                                continue
+                            if (
+                                require_all_seen_once
+                                and not all_seen_ok
+                                and age_ms < loss_guard_arming_ms
+                            ):
+                                self.logger.info(
+                                    f"⏸️ [FAST] {basket_id} retrace {dd:.1f}p mais pas 'all_seen' (age={age_ms}ms)"
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"🔒 [FAST] {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
+                                )
+                                if _close_basket(basket_id, pos):
+                                    any_action = True
+                                    continue
 
                     # état debug
                     self._burst_trailing_state[basket_id] = {
@@ -3608,14 +3691,28 @@ class TradeExecutor:
             return
 
         for basket_id, pos in baskets.items():
+            # --- 3c: age panier + mémoire 'ever green' (Phase B) ---
+            if basket_id not in self._basket_first_seen_ts:
+                self._basket_first_seen_ts[basket_id] = time.time()
+            age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
+            _update_seen_green(basket_id, pos, all_seen_green_pips)
+            all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
+
             try:
                 # 1) all-green encore (au cas où)
                 if close_on_full_profit and _all_green_and_full(pos):
-                    self.logger.info(
-                        f"🎯 {basket_id} PLEIN & TOUT VERT (Phase B) → CLOSE"
-                    )
-                    _close_basket(basket_id, pos)
-                    continue
+                    if (
+                        require_all_seen_once
+                        and not all_seen_ok
+                        and age_ms < loss_guard_arming_ms
+                    ):
+                        pass
+                    else:
+                        self.logger.info(
+                            f"🎯 {basket_id} PLEIN & TOUT VERT (Phase B) → CLOSE"
+                        )
+                        _close_basket(basket_id, pos)
+                        continue
 
                 stats = _basket_stats(pos)
                 if not stats:
@@ -3623,12 +3720,19 @@ class TradeExecutor:
                 sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
                 # 2) filet de perte
-                if pnl_pips <= -abs(max_loss_pips) and (now_s - self._basket_first_seen[basket_id]) >= loss_grace_seconds:
-                    self.logger.warning(
-                        f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
-                    )
-                    _close_basket(basket_id, pos)
-                    continue
+                if pnl_pips <= -abs(max_loss_pips):
+                    if age_ms < loss_guard_arming_ms and (
+                        require_all_seen_once and not all_seen_ok
+                    ):
+                        self.logger.warning(
+                            f"⏸️ {basket_id} perte {pnl_pips:.1f}p mais guard non armé (age={age_ms}ms<{loss_guard_arming_ms}ms)"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
+                        )
+                        _close_basket(basket_id, pos)
+                        continue
 
                 # 3) trailing (armement / peak / retrace)
                 expected = _expected_count_from(pos)
@@ -3672,11 +3776,20 @@ class TradeExecutor:
                         - pnl_pips
                     )
                     if dd >= trail_distance_pips and pnl_pips > 0.0:
-                        self.logger.warning(
-                            f"🔒 {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
-                        )
-                        _close_basket(basket_id, pos)
-                        continue
+                        if (
+                            require_all_seen_once
+                            and not all_seen_ok
+                            and age_ms < loss_guard_arming_ms
+                        ):
+                            self.logger.info(
+                                f"⏸️ {basket_id} retrace {dd:.1f}p mais pas 'all_seen' (age={age_ms}ms)"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"🔒 {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
+                            )
+                            _close_basket(basket_id, pos)
+                            continue
 
                 # état debug
                 self._burst_trailing_state[basket_id] = {
@@ -5027,22 +5140,61 @@ class TradeExecutor:
         comment = comment.replace(" ", "").replace("|", "")
         comment = re.sub(r"[^A-Za-z0-9._-]", "", comment)[:31]
 
-        # --------- Trailing config (prend depuis decision > config) ---------
-        trailing_cfg = (
+        # --------- Trailing + Closure rules (fusion robuste, avec défauts sûrs) ---------
+        bs_cfg = ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
+            "burst_scalping", {}
+        ) or {}
+        tp_sl_cfg = bs_cfg.get("tp_sl", {}) or {}
+
+        # 1) TRAILING — merge avec défauts
+        trailing_cfg_raw = (
             trade_decision.get("trailing")
-            or (
-                ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
-                    "burst_scalping", {}
-                )
-                or {}
-            )
-            .get("tp_sl", {})
-            .get("trailing")
-            or ((config.get("burst_scalping", {}) or {}).get("tp_sl", {}) or {}).get(
-                "trailing"
-            )
+            or tp_sl_cfg.get("trailing")
             or {"enabled": True}
         )
+        trailing_defaults = {
+            "enabled": True,
+            "mode": "ATR",
+            "atr_period": 14,
+            "atr_mult": 0.6,
+            "min_trail_points": 30,
+            "arm_profit_points": 60,
+            "arm_atr_multiple": 0.8,
+            "max_pullback_points": 80,
+            "trail_update_throttle_ms": 250,
+            "backoff_step_points": 10,
+            "breakeven_lock_points": 10,
+            "max_spread_points_when_armed": 40,
+            "max_latency_ms_on_close": 500,
+        }
+        trailing_cfg = {**trailing_defaults, **(trailing_cfg_raw or {})}
+
+        # 2) CLOSURE RULES — merge avec défauts (support patch 3b/3c)
+        closure_defaults = {
+            "close_on_full_profit": True,
+            "require_full_count_for_profit_close": True,
+            "min_green_pnl_pips": 0.0,
+            "rt_fast_window_ms": 2500,
+            "rt_poll_interval_ms": 100,
+            # filet de perte + trailing panier
+            "max_loss_pips": 15.0,
+            "trail_trigger_pips": 10.0,
+            "trail_distance_pips": 5.0,
+            "trail_require_full_count": False,
+            "trail_update_min_interval_ms": 120,  # anti-spam broker
+            # ⛑️ laisse-vivre: tous les tickets doivent avoir été verts au moins une fois
+            "require_all_seen_green_once": True,
+            "all_seen_green_pips": 5.0,
+            # grâce initiale (ms) avant d’autoriser close si “all seen” pas encore atteint
+            "loss_guard_arming_ms": 5000,
+            # cooldown post-exit (fallback si pas défini plus haut)
+            "cooldown_after_exit_s": float(
+                config.get("cooldown_after_exit_s", 0.0)
+                or bs_cfg.get("cooldown_after_exit_s", 0.0)
+                or 0.0
+            ),
+        }
+        closure_cfg = {**closure_defaults, **(bs_cfg.get("closure_rules", {}) or {})}
 
         # --------- Requête finale ---------
         request = {
@@ -5063,6 +5215,8 @@ class TradeExecutor:
             # --- meta (ignorés par MT5) ---
             "_meta_no_tp": True,
             "_meta_trailing": trailing_cfg,
+            "_meta_trailing": trailing_cfg,
+            "_meta_closure_rules": closure_cfg,
             "_meta_entry_source": trade_decision.get("source", "core_decision"),
             "_meta_stops_level_points": stops_lvl_points,
             "_meta_point": point,
@@ -5565,7 +5719,9 @@ class TradeExecutor:
             "retcode_str": retcode_str,
         }
 
-    def _update_internal_position_state(self, mt5_result: Any, initial_risk: float) -> None:
+    def _update_internal_position_state(
+        self, mt5_result: Any, initial_risk: float
+    ) -> None:
         """
         Corrigé: ne lit PAS sl/tp depuis OrderSendResult (non exposés par l'API Python MT5).
         Récupère sl/tp depuis la request quand dispo, sinon via positions_get().
@@ -5599,9 +5755,9 @@ class TradeExecutor:
                 poss = list(mt5.positions_get(symbol=symbol) or [])
                 if poss:
                     # la plus récente
-                    pos = sorted(
-                        poss, key=lambda p: int(getattr(p, "time_update", 0))
-                    )[-1]
+                    pos = sorted(poss, key=lambda p: int(getattr(p, "time_update", 0)))[
+                        -1
+                    ]
         except Exception:
             pos = None
 
@@ -5615,7 +5771,8 @@ class TradeExecutor:
 
         # --- 3) Construction & stockage
         position_data = {
-            "ticket": getattr(mt5_result, "deal", None) or getattr(mt5_result, "order", None),
+            "ticket": getattr(mt5_result, "deal", None)
+            or getattr(mt5_result, "order", None),
             "symbol": symbol,
             "type": order_type,
             "volume": volume,
@@ -5631,7 +5788,9 @@ class TradeExecutor:
         ticket_key = position_data["ticket"]
         if ticket_key is not None:
             self._open_positions[ticket_key] = position_data
-            self.logger.debug(f"[STATE] position enregistrée pour ticket={ticket_key}: {position_data}")
+            self.logger.debug(
+                f"[STATE] position enregistrée pour ticket={ticket_key}: {position_data}"
+            )
         else:
             self.logger.debug(f"[STATE] position (sans ticket) : {position_data}")
 
@@ -5641,7 +5800,6 @@ class TradeExecutor:
                 self.reconcile_positions_with_broker()
         except Exception:
             pass
-
 
     def monitor_pending_orders(self) -> None:
         """

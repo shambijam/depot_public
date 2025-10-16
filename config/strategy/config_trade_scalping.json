@@ -42,7 +42,10 @@
           "min_hold_ms": 4000,
           "loss_guard_cooldown_ms": 6000,
           "loss_guard_require_full_count": false,
-          "min_positions_for_loss_guard": 1
+          "min_positions_for_loss_guard": 1,
+          "require_all_seen_green_once": true,
+          "all_seen_green_pips": 5,
+          "loss_guard_arming_ms": 5000
         }
       }
     }
