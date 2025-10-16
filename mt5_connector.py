@@ -833,6 +833,85 @@ class MT5Connector:
             self._login_info = None  # Effacer les infos de login précédentes
             return False
 
+    def reconnect_if_needed(self, max_tries: int = 2, delay: float = 0.5) -> bool:
+        """
+        Tente de (re)connecter MT5 en douceur si nécessaire.
+        Utilise self._login_info si disponible.
+        """
+        import time
+
+        def _is_connected() -> bool:
+            try:
+                return bool(
+                    self.is_connected()
+                    if callable(self.is_connected)
+                    else self.is_connected
+                )
+            except Exception:
+                return False
+
+        if _is_connected():
+            return True
+
+        creds = getattr(self, "_login_info", None) or {}
+        for i in range(max_tries):
+            try:
+                connect_fn = getattr(self, "connect", None)
+                if callable(connect_fn):
+                    ok = connect_fn(creds) if creds else connect_fn()
+                    if ok or _is_connected():
+                        return True
+            except Exception as e:
+                self.logger.warning(
+                    f"[MT5C] reconnect attempt {i+1}/{max_tries} failed: {e}"
+                )
+            time.sleep(delay * (i + 1))  # petit backoff progressif
+        return False
+
+    def safe_order_calc_margin(self, order_type, symbol: str, volume, price):
+        """
+        Wrapper tolérant autour mt5.order_calc_margin(...) → float ou None.
+        """
+        try:
+            m = self.mt5.order_calc_margin(
+                order_type, symbol, float(volume), float(price)
+            )
+            return float(m) if m is not None else None
+        except Exception as e:
+            self.logger.warning(f"order_calc_margin indisponible: {e}")
+            return None
+
+    def modify_position_sltp(
+        self, ticket: int, sl=None, tp=None, symbol: str | None = None
+    ):
+        """
+        Attache/ajuste SL/TP sur une position existante.
+        Retourne (ok: bool, result: Any).
+        """
+        mt5 = self.mt5
+        req = {
+            "action": getattr(mt5, "TRADE_ACTION_SLTP", None),
+            "position": int(ticket),
+        }
+        if symbol:
+            req["symbol"] = symbol
+        if sl is not None:
+            req["sl"] = float(sl)
+        if tp is not None:
+            req["tp"] = float(tp)
+
+        try:
+            res = mt5.order_send(req)
+            ok = getattr(res, "retcode", None) == getattr(
+                mt5, "TRADE_RETCODE_DONE", None
+            )
+            return bool(ok), res
+        except Exception as e:
+            self.logger.error(
+                f"modify_position_sltp exception (ticket={ticket}): {e}", exc_info=True
+            )
+            return False, None
+
     @property
     def is_connected(self) -> bool:
         """
@@ -1685,24 +1764,40 @@ class MT5Connector:
         """
         Envoi d'ordre MT5 robuste:
         - Normalise action/type/price/SL/TP
+        - Normalise volume (min/step/max) en FLOOR
+        - Pending guards (BUY/SELL LIMIT/STOP) vs Bid/Ask + stops_level/freeze_level (+buffer)
         - Fallback IOC/FOK/RETURN
-        - Préflight broker: volume min/max/step + stops_level/freeze_level
+        - Retry sur REQUOTE/PRICE_OFF/TIMEOUT/NO_CONNECTION avec refresh prix (market)
         - Enforce distance minimale SL/TP + tampon sécurité
-        - Post-attach SL/TP avec rattrapage si INVALID_STOPS
+        - Fallback INVALID_STOPS: re-send sans SL/TP puis post-attach via SLTP
         """
-        import math
+        import math, re, time
 
         # --- 0) Connexion ---
         try:
             connected = bool(
-                self.is_connected
-                if isinstance(self.is_connected, bool)
-                else self.is_connected()
+                self.is_connected()
+                if callable(self.is_connected)
+                else self.is_connected
             )
         except TypeError:
             connected = bool(getattr(self, "is_connected", False))
         if not connected:
             self.logger.error("MT5: Non connecté. Impossible d'envoyer l'ordre.")
+            try:
+                rec = getattr(self, "connect", None) or getattr(
+                    self, "reconnect_if_needed", None
+                )
+                if callable(rec):
+                    rec()
+                    connected = bool(
+                        self.is_connected()
+                        if callable(self.is_connected)
+                        else self.is_connected
+                    )
+            except Exception:
+                pass
+        if not connected:
             self.config_manager.send_alert(
                 "MT5 Non Connecté: Échec Envoi Ordre.", "telegram_critical"
             )
@@ -1770,6 +1865,14 @@ class MT5Connector:
             except Exception:
                 return None
 
+        def _norm_comment(
+            text: str, fallback: str = "SNIPER_X", max_len: int = 31
+        ) -> str:
+            raw = str(text if text is not None else fallback)
+            raw = raw.replace("|", "").replace(" ", "")
+            raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+            return raw[:max_len]
+
         def _sanitize_sltp(req: dict, digits: int):
             sl = _safe_num(req.get("sl") or req.get("stop_loss") or req.get("sl_price"))
             tp = _safe_num(
@@ -1787,7 +1890,8 @@ class MT5Connector:
                 req.pop(k, None)
             return req.get("sl"), req.get("tp")
 
-        # >>> NEW: infos & contraintes broker
+        # ================= FIX-1b: DE-DOUBLONNAGE HELPERS =================
+        # (on garde UNE SEULE version, complète, utilisée partout ci-dessous)
         def _symbol_ctx(symbol: str):
             si = None
             try:
@@ -1800,44 +1904,54 @@ class MT5Connector:
                 pass
             if not si:
                 return None
-            ctx = {
+            return {
                 "digits": int(getattr(si, "digits", 5) or 5),
                 "point": float(getattr(si, "point", 10**-5) or 10**-5),
-                "min_vol": float(getattr(si, "trade_min_volume", 0.01) or 0.01),
-                "max_vol": float(getattr(si, "trade_max_volume", 100.0) or 100.0),
-                "vol_step": float(getattr(si, "trade_volume_step", 0.01) or 0.01),
+                "min_vol": float(
+                    getattr(si, "trade_min_volume", getattr(si, "volume_min", 0.01))
+                    or 0.01
+                ),
+                "max_vol": float(
+                    getattr(si, "trade_max_volume", getattr(si, "volume_max", 100.0))
+                    or 100.0
+                ),
+                "vol_step": float(
+                    getattr(si, "trade_volume_step", getattr(si, "volume_step", 0.01))
+                    or 0.01
+                ),
                 "stops_level": int(
-                    getattr(si, "trade_stops_level", 0) or 0
-                ),  # en points
-                "freeze_level": int(getattr(si, "freeze_level", 0) or 0),  # en points
+                    getattr(si, "trade_stops_level", getattr(si, "stops_level", 0)) or 0
+                ),  # pts
+                "freeze_level": int(
+                    getattr(si, "trade_freeze_level", getattr(si, "freeze_level", 0))
+                    or 0
+                ),  # pts
+                "spread_pts": int(getattr(si, "spread", 0) or 0),
+                "name": getattr(si, "name", None) or symbol,
             }
-            return ctx
-      
 
-        # >>> NEW: enforce distance mini SL/TP + tampon selon Bid/Ask
         def _enforce_sltp_constraints(
             price: float, order_type: int, sl: float, tp: float, ctx: dict
         ):
             """
-            Retourne sl,tp ajustés pour respecter stops_level + buffer.
+            Enforce min distance = max(stops_level, freeze_level, spread) + buffer, côté Bid/Ask.
             """
             digits = ctx["digits"]
             pt = ctx["point"]
-            # buffer additionnel configurable pour éviter "SL collé"
             try:
                 buffer_pts = int(
                     self.config_manager.get("risk.sltp_extra_buffer_points", 2) or 2
                 )
             except Exception:
                 buffer_pts = 2
-            min_pts = max(int(ctx["stops_level"]), 0) + max(buffer_pts, 0)
+            min_pts = max(
+                ctx["stops_level"], ctx["freeze_level"], ctx["spread_pts"]
+            ) + max(buffer_pts, 0)
             min_dist = min_pts * pt
 
-            # sens
             BUY = _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY")
             SELL = _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL")
 
-            # tick pour Bid/Ask de sécurité
             try:
                 tk = mt5.symbol_info_tick(request["symbol"])
                 bid = float(getattr(tk, "bid", 0.0) or 0.0)
@@ -1846,31 +1960,57 @@ class MT5Connector:
                 bid = ask = 0.0
 
             adj_sl, adj_tp = sl, tp
-
             if order_type == BUY:
                 if isinstance(sl, (int, float)):
-                    # SL max = Bid - min_dist
                     limit = (bid or price) - min_dist
                     if sl >= limit:
                         adj_sl = round(limit, digits)
                 if isinstance(tp, (int, float)):
-                    # TP min = price + min_dist (facultatif mais on applique même logique)
                     limit = price + min_dist
                     if tp <= limit:
                         adj_tp = round(limit, digits)
             elif order_type == SELL:
                 if isinstance(sl, (int, float)):
-                    # SL min = Ask + min_dist
                     limit = (ask or price) + min_dist
                     if sl <= limit:
                         adj_sl = round(limit, digits)
                 if isinstance(tp, (int, float)):
-                    # TP max = price - min_dist
                     limit = price - min_dist
                     if tp >= limit:
                         adj_tp = round(limit, digits)
-
             return adj_sl, adj_tp, min_pts
+
+        # ---------- Pending trigger guards (même logique min_dist) ----------
+        def _pending_trigger_ok(
+            order_type: int, trig: float, ctx: dict
+        ) -> tuple[bool, str]:
+            try:
+                tk = mt5.symbol_info_tick(request["symbol"])
+                bid = float(getattr(tk, "bid", 0.0) or 0.0)
+                ask = float(getattr(tk, "ask", 0.0) or 0.0)
+            except Exception:
+                return False, "tick_unavailable"
+
+            pt = ctx["point"]
+            min_pts = max(ctx["stops_level"], ctx["freeze_level"], ctx["spread_pts"])
+            min_dist = min_pts * pt
+
+            BUY_LIMIT = _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT")
+            SELL_LIMIT = _mt5_const(
+                "order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
+            )
+            BUY_STOP = _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP")
+            SELL_STOP = _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
+
+            if order_type == BUY_LIMIT and not (trig < ask - min_dist):
+                return False, f"BUY_LIMIT trig >= ask-min({ask:.5f}-{min_dist:.5f})"
+            if order_type == SELL_LIMIT and not (trig > bid + min_dist):
+                return False, f"SELL_LIMIT trig <= bid+min({bid:.5f}+{min_dist:.5f})"
+            if order_type == BUY_STOP and not (trig > ask + min_dist):
+                return False, f"BUY_STOP trig <= ask+min({ask:.5f}+{min_dist:.5f})"
+            if order_type == SELL_STOP and not (trig < bid - min_dist):
+                return False, f"SELL_STOP trig >= bid-min({bid:.5f}-{min_dist:.5f})"
+            return True, "ok"
 
         # --- 2) Champs requis minimaux -------------------------------------------
         symbol = request.get("symbol")
@@ -1904,7 +2044,7 @@ class MT5Connector:
         if action is None:
             action = _mt5_const("trade_actions", "DEAL", "TRADE_ACTION_DEAL")
 
-        request.setdefault("comment", "SNIPER_X")
+        request["comment"] = _norm_comment(request.get("comment"), "SNIPER_X")
         if "magic" not in request:
             try:
                 request["magic"] = int(
@@ -1935,13 +2075,27 @@ class MT5Connector:
             pass
 
         # --- 3) Contexte symbole & normalisation volume --------------------------
-        ctx = _symbol_ctx(symbol)  # >>> NEW
+        ctx = _symbol_ctx(symbol)
         if not ctx:
             self.logger.error(
                 f"MT5: Impossible de récupérer symbol_info pour {symbol}."
             )
             return None
-       
+
+        vmin, vmax, vstep = ctx["min_vol"], ctx["max_vol"], ctx["vol_step"]
+        vol = max(vmin, min(vmax, float(volume)))
+        if vstep and vstep > 0:
+            steps = math.floor((vol - vmin) / vstep + 1e-12)
+            vol = max(vmin, vmin + steps * vstep)
+        if vol <= 0 or vol < vmin:
+            self.logger.error(f"MT5: Volume normalisé invalide ({vol}).")
+            return None
+        if vol != volume:
+            self.logger.info(
+                f"MT5: Volume normalisé {volume} -> {vol} (min={vmin}, step={vstep}, max={vmax})"
+            )
+        request["volume"] = round(vol, 8)
+
         # --- 4) Prix & digits ----------------------------------------------------
         digits = ctx["digits"]
         price_req = request.get("price")
@@ -1953,42 +2107,42 @@ class MT5Connector:
         is_market_action = action == _mt5_const(
             "trade_actions", "DEAL", "TRADE_ACTION_DEAL"
         )
-        is_market_type = order_type in (
-            _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY"),
-            _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL"),
-        )
-        is_pending_type = order_type in (
-            _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"),
-            _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"),
-            _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP"),
-            _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"),
-        )
+        BUY = _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY")
+        SELL = _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL")
+        is_market_type = order_type in (BUY, SELL)
+        BUY_LIMIT = _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT")
+        SELL_LIMIT = _mt5_const("order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT")
+        BUY_STOP = _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP")
+        SELL_STOP = _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP")
+        is_pending_type = order_type in (BUY_LIMIT, SELL_LIMIT, BUY_STOP, SELL_STOP)
+
+        def _market_price(side: str) -> float:
+            try:
+                t = mt5.symbol_info_tick(symbol)
+                if not t:
+                    return 0.0
+                if side == "BUY" and getattr(t, "ask", None):
+                    return float(t.ask)
+                if side == "SELL" and getattr(t, "bid", None):
+                    return float(t.bid)
+                return float(getattr(t, "ask", 0.0) or getattr(t, "bid", 0.0) or 0.0)
+            except Exception:
+                return 0.0
 
         if (
             is_market_action
             and is_market_type
             and (not price_val or not math.isfinite(price_val) or price_val <= 0)
         ):
-            side = (
-                "BUY"
-                if order_type == _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY")
-                else "SELL"
-            )
-            try:
-                px = self.get_current_price(symbol, side)
-                if isinstance(px, (int, float)) and px > 0:
-                    request["price"] = round(float(px), digits)
-                    price_val = request["price"]
-                else:
-                    self.logger.error(
-                        f"MT5: Prix market indisponible pour {symbol} ({side})."
-                    )
-                    return None
-            except Exception as ex:
-                self.logger.exception(
-                    f"MT5: Exception get_current_price({symbol},{side}): {ex}"
+            side = "BUY" if order_type == BUY else "SELL"
+            px = _market_price(side)
+            if px <= 0:
+                self.logger.error(
+                    f"MT5: Prix market indisponible pour {symbol} ({side})."
                 )
                 return None
+            request["price"] = round(float(px), digits)
+            price_val = request["price"]
         elif price_val > 0:
             request["price"] = round(float(price_val), digits)
             price_val = request["price"]
@@ -2003,7 +2157,12 @@ class MT5Connector:
 
         # --- 4bis) SL/TP (sanitize) + enforcement distance mini ------------------
         sl_val, tp_val = _sanitize_sltp(request, digits)
-        # >>> NEW: si SL présent, applique une distance mini (stops_level + buffer)
+        if is_pending_type and price_val:
+            ok_trg, why = _pending_trigger_ok(order_type, price_val, ctx)
+            if not ok_trg:
+                self.logger.error(f"MT5: Pending guard refusé ({why}). Req={request}")
+                return None
+
         if (
             is_market_type
             and is_market_action
@@ -2014,7 +2173,7 @@ class MT5Connector:
             )
             if sl_fix != sl_val or tp_fix != tp_val:
                 self.logger.warning(
-                    f"MT5: SL/TP ajustés pour respecter min distance ({min_pts} pts). SL: {sl_val}→{sl_fix}, TP: {tp_val}→{tp_fix}"
+                    f"MT5: SL/TP ajustés (≥ min {min_pts} pts). SL: {sl_val}→{sl_fix}, TP: {tp_val}→{tp_fix}"
                 )
                 if sl_fix is not None:
                     request["sl"] = sl_fix
@@ -2024,14 +2183,12 @@ class MT5Connector:
 
         # --- 5) Logs lisibles ----------------------------------------------------
         type_name_map = {
-            _mt5_const("order_types", "BUY", "ORDER_TYPE_BUY"): "BUY",
-            _mt5_const("order_types", "SELL", "ORDER_TYPE_SELL"): "SELL",
-            _mt5_const("order_types", "BUY_LIMIT", "ORDER_TYPE_BUY_LIMIT"): "BUY_LIMIT",
-            _mt5_const(
-                "order_types", "SELL_LIMIT", "ORDER_TYPE_SELL_LIMIT"
-            ): "SELL_LIMIT",
-            _mt5_const("order_types", "BUY_STOP", "ORDER_TYPE_BUY_STOP"): "BUY_STOP",
-            _mt5_const("order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"): "SELL_STOP",
+            BUY: "BUY",
+            SELL: "SELL",
+            BUY_LIMIT: "BUY_LIMIT",
+            SELL_LIMIT: "SELL_LIMIT",
+            BUY_STOP: "BUY_STOP",
+            SELL_STOP: "SELL_STOP",
         }
         action_str = type_name_map.get(order_type, f"TypeOrdre_{order_type}")
         self.logger.info(
@@ -2077,10 +2234,45 @@ class MT5Connector:
                 None,
             )
             or 10016
-        )  # >>> NEW
+        )
+        RET_REQUOTE = getattr(
+            mt5,
+            (maps.get("trade_retcodes", {}) or {}).get(
+                "REQUOTE", "TRADE_RETCODE_REQUOTE"
+            ),
+            None,
+        )
+        RET_PRICE_OFF = getattr(
+            mt5,
+            (maps.get("trade_retcodes", {}) or {}).get(
+                "PRICE_OFF", "TRADE_RETCODE_PRICE_OFF"
+            ),
+            None,
+        ) or getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", None)
+        RET_TIMEOUT = getattr(
+            mt5,
+            (maps.get("trade_retcodes", {}) or {}).get(
+                "TIMEOUT", "TRADE_RETCODE_TIMEOUT"
+            ),
+            None,
+        )
+        RET_NO_CONN = getattr(
+            mt5,
+            (maps.get("trade_retcodes", {}) or {}).get(
+                "NO_CONNECTION", "TRADE_RETCODE_NO_CONNECTION"
+            ),
+            None,
+        )
 
         success_set = (RET_DONE, RET_PLACED, RET_DONE_PARTIAL)
         executed_set = (RET_DONE, RET_DONE_PARTIAL)
+
+        # ================= FIX-1d: retryable sans None =================
+        retryable = {
+            x
+            for x in (RET_REQUOTE, RET_PRICE_OFF, RET_TIMEOUT, RET_NO_CONN)
+            if x is not None
+        }
 
         filling_candidates = []
         for tf in [
@@ -2092,111 +2284,212 @@ class MT5Connector:
             if tf and tf not in filling_candidates:
                 filling_candidates.append(tf)
 
+        try:
+            max_retries = int(
+                self.config_manager.get(
+                    "trade_executor_settings.order_send_max_retries", 2
+                )
+                or 2
+            )
+            sleep_between = float(
+                self.config_manager.get(
+                    "trade_executor_settings.order_send_retry_sleep_s", 0.05
+                )
+                or 0.05
+            )
+        except Exception:
+            max_retries, sleep_between = 2, 0.05
+
+        def _refresh_price_for_retry(req: dict):
+            if not (is_market_action and is_market_type):
+                return
+            side = "BUY" if order_type == BUY else "SELL"
+            new_px = _market_price(side)
+            if new_px > 0:
+                req["price"] = round(float(new_px), digits)
+
         last_res = None
         result = None
 
-        # --- 7) Envoi avec fallback ---------------------------------------------
+        # --- 7) Envoi avec fallback & retry -------------------------------------
         for tf in filling_candidates:
-            req = dict(request)
-            req["type_filling"] = tf
-            try:
-                res = mt5.order_send(req)
-            except Exception as ex:
-                self.logger.exception(
-                    f"MT5: Exception order_send() (filling={tf}): {ex}"
+            req_base = dict(request)
+            req_base["type_filling"] = tf
+            attempt = 0
+            while attempt <= max_retries:
+                req = dict(req_base)
+                try:
+                    res = mt5.order_send(req)
+                except Exception as ex:
+                    self.logger.exception(
+                        f"MT5: Exception order_send() (filling={tf}, try={attempt+1}/{max_retries+1}): {ex}"
+                    )
+                    self.config_manager.send_alert(
+                        f"MT5: Exception order_send() (filling={tf}): {ex}",
+                        "telegram_critical",
+                    )
+                    res = None
+
+                last_res = res
+                if res is None:
+                    attempt += 1
+                    if attempt <= max_retries:
+                        time.sleep(sleep_between)
+                        _refresh_price_for_retry(req_base)
+                        continue
+                    break
+
+                retcode_val = getattr(res, "retcode", None)
+                comment_val = getattr(res, "comment", "N/A")
+                deal_val = getattr(res, "deal", "N/A")
+                order_id_val = getattr(res, "order", "N/A")
+
+                self.logger.info(
+                    f"MT5: Réponse API. Retcode: {retcode_val}, Comment: {comment_val}, Deal: {deal_val}, Ordre: {order_id_val} (filling={tf}, try={attempt+1})"
                 )
-                self.config_manager.send_alert(
-                    f"MT5: Exception order_send() (filling={tf}): {ex}",
-                    "telegram_critical",
-                )
-                res = None
 
-            last_res = res
-            if res is None:
-                continue
+                if retcode_val in success_set:
+                    result = res
+                    # post-attach SL/TP si exécuté
+                    if (
+                        (retcode_val in executed_set)
+                        and is_market_action
+                        and (sl_val is not None or tp_val is not None)
+                    ):
 
-            retcode_val = getattr(res, "retcode", None)
-            comment_val = getattr(res, "comment", "N/A")
-            deal_val = getattr(res, "deal", "N/A")
-            order_id_val = getattr(res, "order", "N/A")
+                        def _attach_sltp(symbol: str, target_sl, target_tp):
+                            req_mod = {
+                                "action": _mt5_const(
+                                    "trade_actions", "SLTP", "TRADE_ACTION_SLTP"
+                                ),
+                                "symbol": symbol,
+                            }
+                            try:
+                                positions = list(mt5.positions_get(symbol=symbol) or [])
+                            except Exception:
+                                positions = []
+                            if not positions:
+                                return None
+                            latest = sorted(
+                                positions,
+                                key=lambda p: int(getattr(p, "ticket", 0)),
+                                reverse=True,
+                            )[0]
+                            req_mod["position"] = int(getattr(latest, "ticket"))
+                            if target_sl is not None:
+                                req_mod["sl"] = target_sl
+                            if target_tp is not None:
+                                req_mod["tp"] = target_tp
+                            return mt5.order_send(req_mod)
 
-            self.logger.info(
-                f"MT5: Réponse API. Retcode: {retcode_val}, Comment: {comment_val}, Deal: {deal_val}, Ordre: {order_id_val} (filling={tf})"
-            )
+                        res_mod = _attach_sltp(symbol, sl_val, tp_val)
+                        ret_mod = getattr(res_mod, "retcode", None) if res_mod else None
 
-            if retcode_val in success_set:
-                result = res
-                # --- 7bis) Post-attach SL/TP si exécuté --------------------------
+                        if ret_mod == RET_INVALID_STOPS:
+                            sl_w, tp_w, min_pts = _enforce_sltp_constraints(
+                                price_val, order_type, sl_val, tp_val, ctx
+                            )
+                            self.logger.warning(
+                                f"MT5: INVALID_STOPS lors de l'attache. On élargit SL/TP et on retente ({min_pts} pts)."
+                            )
+                            res_mod2 = _attach_sltp(symbol, sl_w, tp_w)
+                            ret_mod2 = (
+                                getattr(res_mod2, "retcode", None) if res_mod2 else None
+                            )
+                            if res_mod2 and ret_mod2 in success_set:
+                                self.logger.info(
+                                    f"MT5: SL/TP attachés après élargissement -> SL={sl_w} TP={tp_w}"
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"MT5: Attache SL/TP échouée après élargissement. Retcode={ret_mod2}."
+                                )
+                    break  # succès → on sort le retry pour ce filling
+
+                if (retcode_val in retryable) and attempt < max_retries:
+                    if retcode_val in {RET_TIMEOUT, RET_NO_CONN}:
+                        try:
+                            rec = getattr(self, "connect", None) or getattr(
+                                self, "reconnect_if_needed", None
+                            )
+                            if callable(rec):
+                                rec()
+                        except Exception:
+                            pass
+                    time.sleep(sleep_between)
+                    _refresh_price_for_retry(req_base)
+                    attempt += 1
+                    continue
+
                 if (
-                    (retcode_val in executed_set)
+                    (retcode_val == RET_INVALID_STOPS)
                     and is_market_action
                     and (sl_val is not None or tp_val is not None)
                 ):
-
-                    def _attach_sltp(symbol: str, target_sl, target_tp):
-                        # 1ère tentative brute
-                        req_mod = {
-                            "action": _mt5_const(
-                                "trade_actions", "SLTP", "TRADE_ACTION_SLTP"
-                            ),
-                            "symbol": symbol,
-                        }
-                        # récupérer la position récente
-                        try:
-                            positions = list(
-                                self.mt5.positions_get(symbol=symbol) or []
-                            )
-                        except Exception:
-                            positions = []
-                        if not positions:
-                            return None
-                        pos = sorted(
-                            positions,
-                            key=lambda p: int(getattr(p, "ticket", 0)),
-                            reverse=True,
-                        )[0]
-                        req_mod["position"] = int(getattr(pos, "ticket"))
-
-                        if target_sl is not None:
-                            req_mod["sl"] = target_sl
-                        if target_tp is not None:
-                            req_mod["tp"] = target_tp
-                        return self.mt5.order_send(req_mod)
-
-                    res_mod = _attach_sltp(symbol, sl_val, tp_val)
-                    ret_mod = getattr(res_mod, "retcode", None) if res_mod else None
-
-                    # >>> NEW: si INVALID_STOPS → on élargit automatiquement et on retente une fois
-                    if ret_mod == RET_INVALID_STOPS:
-                        sl_w, tp_w, min_pts = _enforce_sltp_constraints(
-                            price_val, order_type, sl_val, tp_val, ctx
+                    self.logger.warning(
+                        "MT5: INVALID_STOPS au send → re-send sans SL/TP puis post-attach."
+                    )
+                    req2 = dict(req_base)
+                    req2.pop("sl", None)
+                    req2.pop("tp", None)
+                    try:
+                        res2 = mt5.order_send(req2)
+                    except Exception as ex:
+                        self.logger.exception(
+                            f"MT5: Exception order_send() fallback sans SL/TP: {ex}"
                         )
-                        self.logger.warning(
-                            f"MT5: INVALID_STOPS lors de l'attache. On élargit SL/TP et on retente ({min_pts} pts)."
-                        )
-                        res_mod2 = _attach_sltp(symbol, sl_w, tp_w)
-                        ret_mod2 = (
-                            getattr(res_mod2, "retcode", None) if res_mod2 else None
-                        )
-                        if ret_mod2 not in success_set:
-                            self.logger.warning(
-                                f"MT5: Attache SL/TP échouée après élargissement. Retcode={ret_mod2}."
-                            )
-                        else:
-                            self.logger.info(
-                                f"MT5: SL/TP attachés après élargissement -> SL={sl_w} TP={tp_w}"
-                            )
+                        res2 = None
+                    if res2 and getattr(res2, "retcode", None) in success_set:
+                        result = res2
+                        if getattr(res2, "retcode", None) in executed_set:
 
-                break  # succès → sortir
+                            def _attach2(symbol: str, target_sl, target_tp):
+                                req_mod = {
+                                    "action": _mt5_const(
+                                        "trade_actions", "SLTP", "TRADE_ACTION_SLTP"
+                                    ),
+                                    "symbol": symbol,
+                                }
+                                try:
+                                    positions = list(
+                                        mt5.positions_get(symbol=symbol) or []
+                                    )
+                                except Exception:
+                                    positions = []
+                                if not positions:
+                                    return None
+                                # ================= FIX-1c: p (et pas pos) =================
+                                latest = sorted(
+                                    positions,
+                                    key=lambda p: int(getattr(p, "ticket", 0)),
+                                    reverse=True,
+                                )[0]
+                                req_mod["position"] = int(getattr(latest, "ticket"))
+                                if target_sl is not None:
+                                    req_mod["sl"] = target_sl
+                                if target_tp is not None:
+                                    req_mod["tp"] = target_tp
+                                return mt5.order_send(req_mod)
 
-            if retcode_val in (RET_INVALID_FILL, 10030) or (
-                "Unsupported filling mode" in str(comment_val)
-            ):
-                self.logger.warning(
-                    f"MT5: Filling {tf} non supporté → on essaie un autre."
-                )
-                continue
-            break
+                            sl_w, tp_w, _ = _enforce_sltp_constraints(
+                                price_val, order_type, sl_val, tp_val, ctx
+                            )
+                            _ = _attach2(symbol, sl_w, tp_w)
+                        break
+                    break
+
+                if retcode_val in (RET_INVALID_FILL, 10030) or (
+                    "Unsupported filling mode" in str(comment_val)
+                ):
+                    self.logger.warning(
+                        f"MT5: Filling {tf} non supporté → on essaie un autre."
+                    )
+                    break
+
+                break  # non-retryable
+
+            if result is not None:
+                break
 
         # --- 8) Sorties & logs finaux -------------------------------------------
         if result is not None:

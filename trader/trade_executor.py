@@ -12,7 +12,8 @@ import numpy as np
 import math
 import os
 import jsonschema
-from datetime import datetime, UTC  # AMÉLIORATION: Import explicite de UTC
+from typing import Any
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, UTC, timezone
@@ -223,6 +224,8 @@ class TradeExecutor:
             "baskets": {},  # basket_id -> meta
             "by_order": {},  # order_id  -> basket_id
         }
+        # Cooldown post-exit (par symbole broker)
+        self._cooldown_until: dict[str, float] = {}
 
         # Chargement dynamique des paramètres
         self._load_settings()
@@ -349,136 +352,272 @@ class TradeExecutor:
 
     def reconcile_state_with_broker(self) -> None:
         """
-        Réconcilie l'état interne des positions en fusionnant les données du broker
-        avec les données internes pour préserver les informations critiques (ex: risque initial).
+        Réconcilie l'état interne des positions avec le broker (MT5).
+        - Source de vérité: broker; on fusionne pour préserver les métadonnées internes (risque, trailing, tags).
+        - Reconstitue le risque initial si manquant (order_calc_profit), sinon 0.0.
+        - Purge les tickets clos; met à jour last_reconciliation_time (UTC).
+        - Applique un trailing si la position le demande et si apply_dynamic_trailing(...) est disponible.
         """
-        self.logger.info(
-            "Début de la réconciliation de l'état du TradeExecutor avec le broker..."
-        )
-        if not self.mt5_connector.is_connected:
-            self.logger.warning("MT5 n'est pas connecté pour la réconciliation.")
+        from datetime import datetime, timezone
+
+        self.logger.info("Réconciliation des positions avec le broker...")
+
+        # -------- Helpers sûrs --------
+        def _is_connected_safe() -> bool:
+            try:
+                attr = getattr(self.mt5_connector, "is_connected", None)
+                return bool(attr()) if callable(attr) else bool(attr)
+            except Exception:
+                return False
+
+        def _reconnect_if_needed():
+            try:
+                if not _is_connected_safe():
+                    rec = getattr(
+                        self.mt5_connector, "reconnect_if_needed", None
+                    ) or getattr(self.mt5_connector, "connect", None)
+                    if callable(rec):
+                        rec()
+            except Exception:
+                pass
+
+        def _pos_to_dict(p) -> dict:
+            if isinstance(p, dict):
+                return dict(p)
+            if hasattr(p, "_asdict"):
+                try:
+                    return dict(p._asdict())
+                except Exception:
+                    pass
+            # extraction tolérante par attributs fréquents
+            fields = (
+                "ticket",
+                "symbol",
+                "type",
+                "volume",
+                "price_open",
+                "price_current",
+                "profit",
+                "sl",
+                "tp",
+                "magic",
+                "comment",
+                "time",
+                "time_msc",
+            )
+            d = {}
+            for f in fields:
+                d[f] = getattr(p, f, None)
+            return d
+
+        def _get_positions() -> list[dict]:
+            # priorité au wrapper
+            try:
+                pos = self.mt5_connector.get_positions()
+                if pos:
+                    return [_pos_to_dict(x) for x in pos]
+            except Exception as e:
+                self.logger.warning(f"[RECONCILE] get_positions wrapper KO: {e}")
+            # fallback MT5 brut
+            try:
+                mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(
+                    self, "mt5", None
+                )
+                if mt5:
+                    pos = mt5.positions_get()
+                    return [_pos_to_dict(x) for x in (pos or [])]
+            except Exception as e:
+                self.logger.error(f"[RECONCILE] mt5.positions_get KO: {e}")
+            return []
+
+        def _estimate_initial_risk_usd(pos: dict) -> float:
+            """
+            Tente d'évaluer le risque initial en $ via order_calc_profit(volume, entry, SL).
+            Retourne 0.0 si non calculable.
+            """
+            try:
+                mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(
+                    self, "mt5", None
+                )
+                if not mt5:
+                    return 0.0
+                vol = float(pos.get("volume") or 0.0)
+                entry = float(pos.get("price_open") or pos.get("entry_price") or 0.0)
+                sl = float(pos.get("sl") or 0.0)
+                typ = int(pos.get("type") if pos.get("type") is not None else 0)
+                if vol <= 0 or entry <= 0 or sl <= 0:
+                    return 0.0
+                # type position = 0 BUY / 1 SELL en MT5
+                order_type = (
+                    getattr(mt5, "ORDER_TYPE_BUY", 0)
+                    if typ == 0
+                    else getattr(mt5, "ORDER_TYPE_SELL", 1)
+                )
+                profit = mt5.order_calc_profit(
+                    order_type, str(pos.get("symbol")), vol, entry, sl
+                )
+                # Certaines builds renvoient tuple (retcode, value). Tolérance:
+                if isinstance(profit, (tuple, list)) and len(profit) >= 2:
+                    profit = profit[1]
+                profit = float(profit)
+                if profit == profit:  # not NaN
+                    return abs(profit) if profit < 0 else float(profit)
+                return 0.0
+            except Exception:
+                return 0.0
+
+        def _safe_dt(ts: float | None) -> str | None:
+            try:
+                if ts is None:
+                    return None
+                # MT5 positions.time = epoch seconds
+                return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+            except Exception:
+                return None
+
+        def _merge_internal(broker_pos: dict, internal_pos: dict | None) -> dict:
+            """
+            Fusionne en privilégiant:
+            - Données volatiles du broker: price_current, profit, sl, tp, comment
+            - Métadonnées internes: initial_risk_usd, trailing flags/params, basket tags, etc.
+            """
+            base = dict(internal_pos or {})
+            base.update(
+                {  # valeurs fraîches broker
+                    "ticket": broker_pos.get("ticket"),
+                    "symbol": broker_pos.get("symbol"),
+                    "type": broker_pos.get("type"),
+                    "volume": broker_pos.get("volume"),
+                    "entry_price": broker_pos.get("price_open"),
+                    "current_price": broker_pos.get("price_current"),
+                    "profit": broker_pos.get("profit"),
+                    "sl": broker_pos.get("sl"),
+                    "tp": broker_pos.get("tp"),
+                    "magic": broker_pos.get("magic"),
+                    "comment": broker_pos.get("comment"),
+                    "open_time": _safe_dt(broker_pos.get("time")),
+                }
+            )
+            # initial_risk_usd: préserver s'il existe, sinon essayer de le (re)calculer
+            if (
+                not isinstance(base.get("initial_risk_usd"), (int, float))
+                or base["initial_risk_usd"] <= 0
+            ):
+                base["initial_risk_usd"] = _estimate_initial_risk_usd(base)
+
+            # placeholders/compat
+            base.setdefault("use_trailing", base.get("use_trailing", False))
+            base.setdefault("trailing_params", base.get("trailing_params", {}))
+            base.setdefault("sl_pips", base.get("sl_pips", None))
+            base.setdefault("atr_pips", base.get("atr_pips", None))
+            return base
+
+        # -------- Ensure connection then pull broker state --------
+        if not _is_connected_safe():
+            self.logger.warning(
+                "MT5 non connecté pour la réconciliation — tentative de reconnexion..."
+            )
+            _reconnect_if_needed()
+        if not _is_connected_safe():
+            self.logger.error(
+                "MT5 toujours non connecté — abandon de la réconciliation."
+            )
             return
 
         try:
-            broker_positions_list = self.mt5_connector.get_positions()
-            if broker_positions_list is None:
-                self.logger.error(
-                    "Échec de la récupération des positions du broker pour la réconciliation."
-                )
+            broker_positions = _get_positions()
+            if broker_positions is None:
+                self.logger.error("Impossible d'obtenir les positions broker (None).")
                 return
 
-            broker_positions_map = {
-                pos.ticket: pos._asdict() for pos in broker_positions_list
+            if not hasattr(self, "_open_positions") or not isinstance(
+                self._open_positions, dict
+            ):
+                self._open_positions = {}
+
+            broker_map = {
+                int(p.get("ticket")): p
+                for p in broker_positions
+                if p.get("ticket") is not None
             }
+            reconciled: dict[int, dict] = {}
 
-            reconciled_positions: Dict[int, Dict[str, Any]] = {}
-
-            # --- AMÉLIORATION MAJEURE : Logique de Fusion ---
-
-            # 1. Parcourir les positions du broker
-            for ticket, broker_pos in broker_positions_map.items():
-                if ticket in self._open_positions:
-                    # La position existe déjà en interne : on met à jour les données volatiles
-                    internal_pos = self._open_positions[ticket]
-                    internal_pos.update(
-                        {
-                            "current_price": broker_pos["price_current"],
-                            "profit": broker_pos["profit"],
-                            "sl": broker_pos[
-                                "sl"
-                            ],  # Mettre à jour SL/TP s'ils ont été modifiés manuellement
-                            "tp": broker_pos["tp"],
-                        }
-                    )
-                    reconciled_positions[ticket] = internal_pos
-                else:
-                    # La position est nouvelle pour nous (ouverte manuellement ou bot redémarré)
+            # 1) maj/fusion pour chaque position broker
+            for ticket, bpos in broker_map.items():
+                ipos = self._open_positions.get(ticket)
+                if ipos is None:
                     self.logger.warning(
-                        f"Position #{ticket} ({broker_pos['symbol']}) détectée chez le broker mais absente de l'état interne. Ajoutée (sans risque initial)."
+                        f"[RECONCILE] Position #{ticket} ({bpos.get('symbol')}) vue broker mais absente en interne → ajout."
                     )
-                    reconciled_positions[ticket] = {
-                        "ticket": broker_pos["ticket"],
-                        "symbol": broker_pos["symbol"],
-                        "type": broker_pos["type"],
-                        "volume": broker_pos["volume"],
-                        "entry_price": broker_pos["price_open"],
-                        "sl": broker_pos["sl"],
-                        "tp": broker_pos["tp"],
-                        "magic": broker_pos["magic"],
-                        "comment": broker_pos["comment"],
-                        "open_time": datetime.fromtimestamp(
-                            broker_pos["time"], tz=UTC
-                        ).isoformat(),
-                        "profit": broker_pos["profit"],
-                        "initial_risk_usd": 0.0,  # Risque inconnu
-                    }
+                merged = _merge_internal(bpos, ipos)
+                reconciled[ticket] = merged
 
-            # 2. Identifier les positions qui ont été clôturées
-            closed_tickets = set(self._open_positions.keys()) - set(
-                broker_positions_map.keys()
-            )
-            for ticket in closed_tickets:
+            # 2) suppression des tickets clos (présents en interne mais absents broker)
+            closed_tickets = set(self._open_positions.keys()) - set(broker_map.keys())
+            for tk in sorted(closed_tickets):
+                try:
+                    sym = self._open_positions[tk].get("symbol")
+                except Exception:
+                    sym = "?"
                 self.logger.info(
-                    f"Position #{ticket} ({self._open_positions[ticket]['symbol']}) absente chez le broker. Supprimée de l'état interne."
+                    f"[RECONCILE] Ticket #{tk} ({sym}) introuvable broker → purge interne."
                 )
 
-            # 3. Remplacer l'ancien état par le nouvel état réconcilié
-            self._open_positions = reconciled_positions
-            self._last_reconciliation_time = datetime.now(UTC)
+            # 3) swap atomique + horodatage
+            self._open_positions = reconciled
+            self._last_reconciliation_time = datetime.now(timezone.utc)
             self.logger.info(
-                f"Réconciliation terminée. {len(self._open_positions)} positions actives synchronisées."
+                f"Réconciliation OK — {len(self._open_positions)} position(s) actives synchronisées."
             )
 
-            # ✅ Application du trailing stop dynamique sur toutes les positions synchronisées
-            for ticket, pos in self._open_positions.items():
-                try:
-                    symbol = pos.get("symbol")
-
-                    # Vérifie si la position est marquée pour trailing
-                    if pos.get("use_trailing"):
-                        trailing_params = pos.get("trailing_params", {})
-                        trigger_pips = float(trailing_params.get("trigger_pips", 15))
-                        step_pips = float(trailing_params.get("step_pips", 5))
-
-                        # sl_pips = distance mini ; atr_pips = buffer volatilité
-                        self.apply_dynamic_trailing(
-                            ticket=ticket,
-                            sl_pips=trigger_pips,
-                            atr_pips=step_pips,
-                            symbol=symbol,
+            # 4) Trailing auto si demandé et si la méthode existe
+            if hasattr(self, "apply_dynamic_trailing") and callable(
+                getattr(self, "apply_dynamic_trailing")
+            ):
+                for tk, pos in self._open_positions.items():
+                    try:
+                        if pos.get("use_trailing"):
+                            params = pos.get("trailing_params", {}) or {}
+                            trigger_pips = float(params.get("trigger_pips", 15.0))
+                            step_pips = float(params.get("step_pips", 5.0))
+                            self.apply_dynamic_trailing(
+                                ticket=tk,
+                                sl_pips=trigger_pips,
+                                atr_pips=step_pips,
+                                symbol=pos.get("symbol"),
+                            )
+                        else:
+                            # fallback technique (optionnel mais sûr)
+                            sl_pips = float(pos.get("sl_pips", 6.0) or 6.0)
+                            atr_pips = float(pos.get("atr_pips", 3.0) or 3.0)
+                            self.logger.info(
+                                f"[SAFE TRAILING] #{tk} ({pos.get('symbol')}) sans params explicites → trigger={sl_pips}p, step={atr_pips}p"
+                            )
+                            self.apply_dynamic_trailing(
+                                ticket=tk,
+                                sl_pips=sl_pips,
+                                atr_pips=atr_pips,
+                                symbol=pos.get("symbol"),
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[RECONCILE] Trailing non appliqué sur #{tk}: {e}"
                         )
-                    else:
-                        # ✅ Fallback technique de sécurité :
-                        # Si la position n’a pas de trailing_params explicite,
-                        # on applique un trailing basique (valeurs par défaut).
-                        sl_pips = float(pos.get("sl_pips", 6.0))
-                        atr_pips = float(pos.get("atr_pips", 3.0))
-
-                        self.logger.info(
-                            f"[SAFE TRAILING] Position {ticket} ({symbol}) sans paramètres explicites → "
-                            f"application fallback technique: trigger={sl_pips}p, step={atr_pips}p"
-                        )
-
-                        self.apply_dynamic_trailing(
-                            ticket=ticket,
-                            sl_pips=sl_pips,
-                            atr_pips=atr_pips,
-                            symbol=symbol,
-                        )
-
-                except Exception as e:
-                    self.logger.warning(
-                        f"Trailing stop non appliqué sur {pos.get('symbol')} (ticket {ticket}): {e}"
-                    )
+            else:
+                self.logger.debug(
+                    "[RECONCILE] apply_dynamic_trailing indisponible — étape ignorée."
+                )
 
         except Exception as e:
-            self.logger.error(
-                f"Échec de la réconciliation de l'état avec le broker: {e}",
-                exc_info=True,
-            )
-            self.config_manager.send_alert(
-                f"Réconciliation Échec: {e}", "telegram_critical"
-            )
+            self.logger.error(f"Échec réconciliation: {e}", exc_info=True)
+            try:
+                # alerte tolérante si config_manager expose l’envoi d’alertes
+                if hasattr(self, "config_manager"):
+                    send = getattr(self.config_manager, "send_alert", None)
+                    if callable(send):
+                        send("Réconciliation Échec", f"{e}", "telegram_critical")
+            except Exception:
+                pass
 
     def _load_settings(self):
         """
@@ -978,6 +1117,31 @@ class TradeExecutor:
         if not _select_symbol_if_needed(broker_symbol):
             return _reject(f"symbol_not_selected:{broker_symbol}", sym=raw_symbol)
 
+        # ---------- 5bis) Cooldown after exit (hard skip) ----------
+
+        try:
+            import time as _t
+
+            cooldown_map = getattr(self, "_cooldown_until", {}) or {}
+            until = cooldown_map.get(broker_symbol.upper())
+            if until and _t.time() < until:
+                remain = int(until - _t.time())
+                reason = f"cooldown_after_exit_active:{remain}s"
+                # Logging interne seulement (pas de feedback_pipeline ici)
+                try:
+                    self.logger.info(
+                        f"[COOLDOWN] {broker_symbol} encore bloqué {remain}s → skip entrée."
+                    )
+                except Exception:
+                    pass
+                return _reject(reason, sym=raw_symbol)
+        except Exception as _e:
+            # Non-bloquant: on loggue si possible et on continue
+            try:
+                self.logger.warning(f"[COOLDOWN] check KO: {_e}")
+            except Exception:
+                pass
+
         # 6) Fenêtre/Calendrier de trading (hard block si configuré)
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
@@ -989,6 +1153,20 @@ class TradeExecutor:
         from datetime import datetime, timezone
 
         now_utc = datetime.now(timezone.utc)
+        # Bypass de la fenêtre si action CLOSE (on autorise la sortie de risque)
+        if action == "CLOSE":
+            pass  # on ne bloque jamais une sortie
+        else:
+            if now_utc.weekday() not in allowed_wd:
+                return _reject(
+                    f"trading_day_not_allowed:weekday={now_utc.weekday()}",
+                    sym=raw_symbol,
+                )
+            if not (start_h <= now_utc.hour < end_h):
+                return _reject(
+                    f"trading_time_blocked:{start_h:02d}-{end_h:02d}Z", sym=raw_symbol
+                )
+
         if now_utc.weekday() not in allowed_wd:
             return _reject(
                 f"trading_day_not_allowed:weekday={now_utc.weekday()}", sym=raw_symbol
@@ -1220,15 +1398,25 @@ class TradeExecutor:
         - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
         Tout volume présent dans la décision est ignoré.
         """
-        import math
+
+        # Fallback local si l'exception n'existe pas au module
+        try:
+            TradeExecutionError
+        except NameError:
+
+            class TradeExecutionError(Exception):
+                """Raised when order preparation fails."""
+
+                pass
 
         self.logger.info("Préparation de l'ordre MT5...")
+
         # --- Unpack sûrs pour éviter les UnboundLocalError ---
         trade_decision = (decision_package or {}).get("trade_decision", {}) or {}
         market_context = (decision_package or {}).get("market_context", {}) or {}
         active_config = (decision_package or {}).get("active_config", {}) or {}
 
-        # --- Raccourcis locaux ---
+        # --- Raccourcis locaux (laisse ta redondance, inoffensive) ---
         trade_decision = decision_package.get("trade_decision", {}) or {}
         active_config = (
             decision_package.get("active_config")
@@ -1376,12 +1564,9 @@ class TradeExecutor:
                     .get("burst_scalping", {})
                 ) or {}
                 guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
-                max_open_positions = int(
-                    guard_cfg.get("max_open_positions", 5)
-                )  # utile après démarrage
+                max_open_positions = int(guard_cfg.get("max_open_positions", 5))
                 cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
                 enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
-                # Nouveau: portée du blocage (global = toutes paires, sinon par symbole courant)
                 single_burst_global = bool(guard_cfg.get("single_burst_global", True))
 
                 import re, time
@@ -1391,7 +1576,7 @@ class TradeExecutor:
                         return obj.get(key, default)
                     return getattr(obj, key, default)
 
-                # 1) Récupération des positions selon le scope
+                # 1) Récup selon le scope
                 if single_burst_global:
                     all_open = self.mt5_connector.get_positions() or []
                     scope_lbl = "global"
@@ -1401,7 +1586,7 @@ class TradeExecutor:
                     )
                     scope_lbl = broker_symbol
 
-                # 2) Détection FIABLE des paniers burst en cours via le comment 'burst_scalping|basket='
+                # 2) Détection des paniers burst via 'burst_scalping|basket='
                 open_burst_ids = set()
                 for p in all_open:
                     c = str(_field(p, "comment", "") or "")
@@ -1411,13 +1596,13 @@ class TradeExecutor:
 
                 now_ts = time.time()
 
-                # 3) RÈGLE D'OR — si AU MOINS un panier burst est en cours → on bloque
+                # 3) Interdiction si un panier existe déjà
                 if enforce_closure and len(open_burst_ids) > 0:
                     raise TradeExecutionError(
                         f"⛔ Burst guard ({scope_lbl}): panier(s) en cours = {', '.join(sorted(open_burst_ids))} → interdit d’en démarrer un nouveau."
                     )
 
-                # 4) Cooldown (anti-burst rapproché)
+                # 4) Cooldown anti-burst rapproché
                 last_burst_time = getattr(self, "_last_burst_time", 0)
                 if (
                     cooldown_seconds > 0
@@ -1427,8 +1612,7 @@ class TradeExecutor:
                         f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
                     )
 
-                # 5) max_open_positions — on NE bloque PAS l’amorçage ici.
-                #    Ce param sert à limiter le nombre de lignes DANS le burst en cours (à gérer au moment où tu ajoutes des lignes).
+                # 5) max_open_positions (info only ici)
                 self.logger.info(
                     f"[BURST GUARD] OK pour démarrer (scope={scope_lbl}, aucun panier actif, cooldown OK)."
                 )
@@ -1479,9 +1663,6 @@ class TradeExecutor:
                 )
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
-
-            # Utiliser le symbole résolu pour TOUT le reste
-            broker_symbol = resolved_symbol
 
             # ⚠️ À partir d’ici on travaille UNIQUEMENT avec resolved_symbol
             broker_symbol = resolved_symbol
@@ -1545,12 +1726,12 @@ class TradeExecutor:
                     trigger_price = entry_price_market
 
             # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
-            rule_name = str(trade_decision.get("rule_name", "")).lower()
+            rule_name_local = str(trade_decision.get("rule_name", "")).lower()
 
-            if rule_name == "burst_scalping":
-                # Burst : SL uniquement si défini, jamais de TP
+            if rule_name_local == "burst_scalping":
+                # Burst : SL uniquement si défini, jamais de TP (trailing géré ailleurs)
                 sl_price = float(trade_decision.get("sl_price", 0.0) or 0.0)
-                tp_price = None  # 🚫 pas de TP fixe (Trailing géré ailleurs)
+                tp_price = None
             else:
                 # Autres stratégies → calcul normal
                 sl_price, tp_price = self._calculate_sl_tp_prices(
@@ -1563,7 +1744,7 @@ class TradeExecutor:
 
             # ---------- 8a) Sécurité broker & normalisation prix ----------
             try:
-                import math
+                import math  # ok si déjà importé
 
                 point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
                 tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
@@ -1604,7 +1785,6 @@ class TradeExecutor:
                     return round(math.floor(x / tick) * tick, digits)
 
                 # Ajustements selon le type d'ordre
-                rule_name_local = str(trade_decision.get("rule_name", "")).lower()
                 has_tp = (tp_price is not None) and (
                     rule_name_local != "burst_scalping"
                 )
@@ -1646,12 +1826,21 @@ class TradeExecutor:
                         tp_price = _floor_to_tick(entry_price_market - min_gap_price)
 
                 def _fmt(v):
-                    return f"{float(v):.{digits}f}" if isinstance(v, (int, float)) else "None"
+                    return (
+                        f"{float(v):.{digits}f}"
+                        if isinstance(v, (int, float))
+                        else "None"
+                    )
 
                 self.logger.info(
                     "[SAFETY] SL/TP normalisés | symbol=%s, entry=%s, SL=%s, TP=%s, min_gap=%s, stops_level=%s, freeze_level=%s",
-                    broker_symbol, _fmt(entry_price_market), _fmt(sl_price), _fmt(tp_price),
-                    _fmt(min_gap_price), str(stops_level_pts), str(freeze_level_pts)
+                    broker_symbol,
+                    _fmt(entry_price_market),
+                    _fmt(sl_price),
+                    _fmt(tp_price),
+                    _fmt(min_gap_price),
+                    str(stops_level_pts),
+                    str(freeze_level_pts),
                 )
 
             except Exception as e:
@@ -1668,7 +1857,7 @@ class TradeExecutor:
             rr_value = None
 
             # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
-            if trade_decision.get("rule_name", "").lower() != "burst_scalping":
+            if rule_name_local != "burst_scalping":
                 if min_rr > 0.0 and tp_price is not None:
                     if action == "BUY":
                         risk = max(entry_price_market - sl_price, 0.0)
@@ -1794,9 +1983,7 @@ class TradeExecutor:
                 )
 
             # ---------- 10) Construction requête ----------
-            rule_name = str(trade_decision.get("rule_name", "")).lower()
-
-            if rule_name == "burst_scalping":
+            if rule_name_local == "burst_scalping":
                 # 🚀 Redirection spécifique vers trailing stop
                 return self.build_burst_trailing_request(
                     trade_decision,
@@ -1839,55 +2026,159 @@ class TradeExecutor:
         self, ticket: int, sl_pips: float, atr_pips: float, symbol: Optional[str] = None
     ) -> None:
         """
-        Applique un trailing stop dynamique à une position.
-        - sl_pips = distance minimale en pips
-        - atr_pips = buffer additionnel lié à la volatilité (ex: ATR)
-        - symbol = symbole de la position (si None → récupéré depuis pos)
+        Applique un trailing stop dynamique (sans détendre le SL).
+        - Respecte stops_level/freeze_level/tick_size (+ buffer configurable)
+        - BUY: SL = Ask - (dist + buffer) ; SELL: SL = Bid + (dist + buffer)
+        - Rate-limit par ticket et pas de micro-update (< 1 tick)
         """
+        import time
+
         try:
-            pos = self._open_positions.get(ticket)
+            pos = (getattr(self, "_open_positions", {}) or {}).get(ticket)
             if not pos:
                 return
 
-            # ⚡ fallback si symbol n’est pas fourni
-            if not symbol:
-                symbol = pos.get("symbol")
-
-            action = "BUY" if pos.get("type") == self.POSITION_TYPE_BUY else "SELL"
-            current_price = self.mt5_connector.get_current_price(symbol, action)
-            if not current_price:
+            # symbole
+            sym = symbol or pos.get("symbol")
+            if not sym:
                 return
 
-            # Récup info symbole pour des pips corrects (FX vs XAU…)
-            info = self.mt5_connector.get_symbol_info(symbol)
-            digits = int(getattr(info, "digits", 5) or 5) if info else 5
+            mt5c = getattr(self, "mt5_connector", None)
+            if not mt5c:
+                return
+            mt5 = getattr(mt5c, "mt5", None)
 
-            # Pour FX 3/5 digits → 1 pip = 10 points ; sinon (ex: XAUUSD 2 digits) → 1 pip = 1 point
-            points_per_pip = 10.0 if digits in (3, 5) else 1.0
-            point = float(getattr(info, "point", point)) if info else point
-            pip_size = point * points_per_pip
+            # côté (0=BUY / 1=SELL) via constante interne
+            action = (
+                "BUY"
+                if pos.get("type") == getattr(self, "POSITION_TYPE_BUY", 0)
+                else "SELL"
+            )
 
-            # Distance trailing
-            trailing_dist = (sl_pips + atr_pips) * pip_size
+            # ----- Tick/prix courant côté broker (Ask pour BUY, Bid pour SELL) -----
+            bid = ask = None
+            if mt5:
+                try:
+                    tk = mt5.symbol_info_tick(sym)
+                    if tk:
+                        bid = float(getattr(tk, "bid", 0.0) or 0.0)
+                        ask = float(getattr(tk, "ask", 0.0) or 0.0)
+                except Exception:
+                    pass
 
             if action == "BUY":
+                cp = ask if (ask and ask > 0) else mt5c.get_current_price(sym, "BUY")
+            else:
+                cp = bid if (bid and bid > 0) else mt5c.get_current_price(sym, "SELL")
+            current_price = float(cp or 0.0)
+            if not (current_price > 0):
+                return
+
+            # ----- Infos symbole & tailles -----
+            si = None
+            try:
+                si = mt5c.get_symbol_info(sym)
+            except Exception:
+                si = None
+
+            digits = int(getattr(si, "digits", 5) or 5) if si else 5
+            point = float(getattr(si, "point", 1e-5) or 1e-5) if si else 1e-5
+            tick_size = (
+                float(getattr(si, "trade_tick_size", point) or point) if si else point
+            )
+            stops_level = int(getattr(si, "trade_stops_level", 0) or 0) if si else 0
+            freeze_level = int(getattr(si, "trade_freeze_level", 0) or 0) if si else 0
+
+            # FX 3/5 digits -> 1 pip = 10 points ; métaux (2 digits) -> 1 pip = 1 point
+            points_per_pip = 10.0 if digits in (3, 5) else 1.0
+            pip_size = point * points_per_pip
+
+            # ----- Buffer mini de sécurité (stops/freeze + extra configurable) -----
+            try:
+                extra_pts = int(
+                    self.config_manager.get("risk.sltp_extra_buffer_points", 2) or 2
+                )
+            except Exception:
+                extra_pts = 2
+            min_pts = max(stops_level, freeze_level) + max(extra_pts, 0)
+            min_dist_price = max(tick_size, min_pts * point)
+
+            # ----- Distance trailing -----
+            trailing_dist = max(0.0, float(sl_pips) + float(atr_pips)) * pip_size
+
+            # Candidat SL côté cours + application du buffer (Bid/Ask)
+            if action == "BUY":
                 new_sl = current_price - trailing_dist
-                if not pos.get("sl") or new_sl > pos.get("sl"):
-                    self._modify_sl(ticket, round(new_sl, digits))
-                    self.logger.info(
-                        f"[TRAILING] BUY {symbol} ticket={ticket}: SL relevé → {new_sl:.5f}"
-                    )
+                # SL ne doit pas dépasser Bid - min_dist
+                limit = (bid if (bid and bid > 0) else current_price) - min_dist_price
+                if new_sl >= limit:
+                    new_sl = limit
             else:  # SELL
                 new_sl = current_price + trailing_dist
-                if not pos.get("sl") or new_sl < pos.get("sl"):
-                    self._modify_sl(ticket, round(new_sl, digits))
+                # SL ne doit pas descendre sous Ask + min_dist
+                limit = (ask if (ask and ask > 0) else current_price) + min_dist_price
+                if new_sl <= limit:
+                    new_sl = limit
+
+            if not (new_sl == new_sl):  # NaN guard
+                return
+            new_sl = round(float(new_sl), digits)
+
+            # ----- Ne JAMAIS détendre + éviter les micro-updates (< 1 tick) -----
+            cur_sl = pos.get("sl")
+            cur_sl = float(cur_sl) if isinstance(cur_sl, (int, float)) else None
+            min_move = max(tick_size, point)
+
+            if cur_sl is not None:
+                if action == "BUY":
+                    # on ne monte le SL que si on dépasse d'au moins ~1/2 tick
+                    if not (new_sl > cur_sl + (min_move * 0.5)):
+                        return
+                else:
+                    if not (new_sl < cur_sl - (min_move * 0.5)):
+                        return
+
+            # ----- Rate-limit par ticket -----
+            try:
+                min_ms = int(
+                    self.config_manager.get(
+                        "dynamic_trailing.min_ms_between_updates", 150
+                    )
+                    or 150
+                )
+            except Exception:
+                min_ms = 150
+            if not hasattr(self, "_last_trail_update_ms"):
+                self._last_trail_update_ms = {}
+            now_ms = int(time.monotonic() * 1000)
+            last_ms = int(self._last_trail_update_ms.get(ticket, 0) or 0)
+            if now_ms - last_ms < min_ms:
+                return
+
+            # ----- Envoi modification SL (via helper existant) -----
+            ok = False
+            try:
+                ok = bool(self._modify_sl(ticket, new_sl))
+            except Exception as e:
+                self.logger.warning(
+                    f"[TRAILING] _modify_sl exception sur {sym}/{ticket}: {e}"
+                )
+
+            if ok:
+                self._last_trail_update_ms[ticket] = now_ms
+                try:
+                    # message homogène avec précision correcte
                     self.logger.info(
-                        f"[TRAILING] SELL {symbol} ticket={ticket}: SL abaissé → {new_sl:.5f}"
+                        f"[TRAILING] {action} {sym} ticket={ticket}: SL -> {format(new_sl, f'.{digits}f')}"
+                    )
+                except Exception:
+                    self.logger.info(
+                        f"[TRAILING] {action} {sym} ticket={ticket}: SL -> {new_sl}"
                     )
 
         except Exception as e:
             self.logger.warning(
-                f"[TRAILING] Erreur application trailing sur {symbol}/{ticket}: {e}"
+                f"[TRAILING] Erreur application trailing sur {(symbol or sym)}/{ticket}: {e}"
             )
 
     def _calculate_sl_tp_prices(
@@ -1898,11 +2189,24 @@ class TradeExecutor:
         entry_price: float,
         market_context: dict,
     ) -> tuple[float, Optional[float]]:
-        self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
+        """
+        Calcule SL/TP à partir des méthodes SWING / ATR / PIPS et TP via RR / ATR_MULTIPLE / PIPS.
+        - Respecte stops_level broker (+ soft buffer 2 ticks).
+        - Arrondit aux ticks (trade_tick_size) selon le sens (SL 'vers' l'extérieur, TP 'vers' l'extérieur).
+        - Garde-fous spread & cohérence BID/ASK.
+        - Désactive le TP si la stratégie/règle l'impose (burst_scalping).
+        """
+        # imports locaux pour éviter les dépendances module-globales
+        import math
 
-        # --- Init sûres ---
-        stop_loss_price: float = 0.0
-        take_profit_price: float = 0.0
+        try:
+            import pandas as pd
+            import numpy as np
+        except Exception:  # tolérance si l'appelant n’utilise pas ATR/SWING
+            pd = None  # type: ignore
+            np = None  # type: ignore
+
+        self.logger.info("Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS)...")
 
         # --- Action ---
         action_raw = str(trade_decision.get("action", "")).strip().upper()
@@ -1919,15 +2223,28 @@ class TradeExecutor:
         min_stop_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
         min_stop_price = min_stop_points * point
 
-        # --- Ticks min "défensif" si broker annonce 0 ---
-        min_ticks_soft = 2  # <<< clé pour éviter 10016 quand stops_level=0
+        # soft buffer si broker annonce 0 → ~2 ticks
+        min_ticks_soft = 2
         soft_min_price = max(min_stop_price, min_ticks_soft * tick_size)
 
-        # --- Pips heuristique ---
-        points_per_pip = 10.0
+        # pips (digits 3/5 => 10 points/pip, sinon 1)
+        points_per_pip = 10.0 if digits in (3, 5) else 1.0
         pip_size = point * points_per_pip
 
-        # --- Overrides PIPS ---
+        # --- Helpers arrondis ---
+        def _ceil_to_tick(x: float) -> float:
+            if tick_size <= 0:
+                return round(float(x), digits)
+            steps = math.ceil(float(x) / tick_size - 1e-12)
+            return round(steps * tick_size, digits)
+
+        def _floor_to_tick(x: float) -> float:
+            if tick_size <= 0:
+                return round(float(x), digits)
+            steps = math.floor(float(x) / tick_size + 1e-12)
+            return round(steps * tick_size, digits)
+
+        # --- Overrides PIPS / spread ---
         sl_pips_override = trade_decision.get("target_sl_pips")
         tp_pips_override = trade_decision.get("target_tp_pips")
         spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
@@ -1937,6 +2254,8 @@ class TradeExecutor:
         sl_method = str(prod_st.get("sl_placement_method", "PIPS")).upper()
         tp_method = str(prod_st.get("tp_placement_method", "RR")).upper()
         rr_ratio = float(prod_st.get("tp_rr_ratio", 1.5) or 1.5)
+        if not math.isfinite(rr_ratio) or rr_ratio <= 0:
+            rr_ratio = 1.5
 
         strat_st = config.get("smart_targets") or {}
         st_sl = strat_st.get("stop_loss") or {}
@@ -1950,23 +2269,50 @@ class TradeExecutor:
         )
 
         # --- Données marché (pour ATR/SWING) ---
-        symbol = str(trade_decision.get("asset", "")).upper()
-        rates_df = (market_context.get("market_data") or {}).get(symbol)
+        symbol = (
+            str(trade_decision.get("asset") or trade_decision.get("symbol") or "")
+        ).upper()
+        rates_df = None
+        try:
+            md = market_context.get("market_data") or {}
+            rates_df = md.get(symbol)
+        except Exception:
+            rates_df = None
 
-        def _compute_atr(df: pd.DataFrame, period: int) -> float:
-            if not isinstance(df, pd.DataFrame) or len(df) < period + 2:
+        def _compute_atr(df, period: int) -> float:
+            if (
+                pd is None
+                or np is None
+                or not isinstance(df, pd.DataFrame)
+                or len(df) < period + 2
+            ):
                 return float("nan")
-            high = df["high"].astype(float)
-            low = df["low"].astype(float)
-            close = df["close"].astype(float)
-            pc = close.shift(1)
-            tr = np.maximum.reduce(
-                [(high - low).abs(), (high - pc).abs(), (low - pc).abs()]
-            )
-            atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
-            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+            try:
+                high = df["high"].astype(float)
+                low = df["low"].astype(float)
+                close = df["close"].astype(float)
+                pc = close.shift(1)
+                tr = np.maximum.reduce(
+                    [
+                        (high - low).abs().values,
+                        (high - pc).abs().values,
+                        (low - pc).abs().values,
+                    ]
+                )
+                # moyenne simple (ou utilise EMA si tu préfères)
+                atr = (
+                    pd.Series(tr)
+                    .rolling(window=period, min_periods=period)
+                    .mean()
+                    .iloc[-1]
+                )
+                return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+            except Exception:
+                return float("nan")
 
         # ================= SL =================
+        stop_loss_price: float = 0.0
+
         if isinstance(sl_pips_override, (int, float)) and sl_pips_override > 0:
             sl_dist = float(sl_pips_override) * pip_size
             stop_loss_price = (
@@ -1976,7 +2322,9 @@ class TradeExecutor:
             if sl_method == "SWING":
                 lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
                 buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-                if not isinstance(rates_df, pd.DataFrame) or len(rates_df) < lookback:
+                if not (
+                    isinstance(rates_df, pd.DataFrame) and len(rates_df) >= lookback
+                ):
                     sl_method = "ATR"
                 else:
                     buf = buffer_pips * pip_size
@@ -2017,12 +2365,16 @@ class TradeExecutor:
                 )
 
         # ================= TP =================
-        # (Mode sans TP pour burst_scalping)
-        no_tp = str(config.get("strategy_name", "")).lower() in {
+        # Désactivation TP pour burst scalping (via strategy_name ou rule_name ou flag no_tp)
+        rule_name = str(trade_decision.get("rule_name", "")).lower()
+        no_tp_flag = bool(trade_decision.get("no_tp", False))
+        no_tp_strategy = str(config.get("strategy_name", "")).lower() in {
             "burst_scalping",
             "scalping_burst",
-        } or bool(trade_decision.get("no_tp", False))
+        }
+        no_tp = no_tp_flag or no_tp_strategy or (rule_name == "burst_scalping")
 
+        take_profit_price: Optional[float] = None
         if not no_tp:
             if isinstance(tp_pips_override, (int, float)) and tp_pips_override > 0:
                 tp_dist = float(tp_pips_override) * pip_size
@@ -2032,26 +2384,24 @@ class TradeExecutor:
             else:
                 if tp_method == "RR":
                     risk = abs(entry_price - stop_loss_price)
-                    if not (risk > 0):
-                        tp_method = "PIPS"
-                    else:
+                    if risk > 0:
                         tp_dist = risk * rr_ratio
                         take_profit_price = (
                             entry_price + tp_dist
                             if action == "BUY"
                             else entry_price - tp_dist
                         )
+                    else:
+                        tp_method = "PIPS"
 
-                if tp_method == "ATR_MULTIPLE" and take_profit_price == 0.0:
+                if tp_method == "ATR_MULTIPLE" and take_profit_price is None:
                     atr_p = int(
                         prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14))
                         or 14
                     )
                     atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
                     atr = _compute_atr(rates_df, atr_p)
-                    if not (atr == atr and atr > 0):
-                        tp_method = "PIPS"
-                    else:
+                    if atr == atr and atr > 0:
                         tp_dist = atr_mult * atr
                         take_profit_price = (
                             entry_price + tp_dist
@@ -2059,7 +2409,7 @@ class TradeExecutor:
                             else entry_price - tp_dist
                         )
 
-                if tp_method == "PIPS" and take_profit_price == 0.0:
+                if take_profit_price is None:  # fallback PIPS
                     tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
                     tp_dist = tp_pips * pip_size
                     take_profit_price = (
@@ -2069,69 +2419,77 @@ class TradeExecutor:
                     )
 
         # ================= Validations & ajustements =================
-        if entry_price <= 0:
+        if not (isinstance(entry_price, (int, float)) and entry_price > 0):
             raise TradeExecutionError("Prix d'entrée invalide.")
 
-        # Distances actuelles
+        # Distances brutes
         sl_dist_price = (
             (entry_price - stop_loss_price)
             if action == "BUY"
             else (stop_loss_price - entry_price)
         )
-        if sl_dist_price <= 0:
+        if not (sl_dist_price and sl_dist_price > 0):
             raise TradeExecutionError("Distance SL invalide (<=0).")
 
         tp_dist_price = None
-        if not no_tp:
+        if take_profit_price is not None:
             tp_dist_price = (
                 (take_profit_price - entry_price)
                 if action == "BUY"
                 else (entry_price - take_profit_price)
             )
-            if tp_dist_price is None or tp_dist_price <= 0:
+            if not (tp_dist_price and tp_dist_price > 0):
                 raise TradeExecutionError("Distance TP invalide (<=0).")
 
-        # A) min broker (stops_level) + soft 2 ticks
+        # A) min broker + soft 2 ticks
         sl_dist_price = max(sl_dist_price, soft_min_price)
         if tp_dist_price is not None:
             tp_dist_price = max(tp_dist_price, soft_min_price)
 
-        # B) Hard limits
+        # B) Hard limits (en points)
         sl_dist_points = sl_dist_price / point
         sl_dist_points = max(sl_dist_points, sl_hard_min_points)
         sl_dist_points = min(sl_dist_points, sl_hard_max_points)
         sl_dist_price = sl_dist_points * point
 
+        tp_dist_points = None
         if tp_dist_price is not None:
             tp_dist_points = tp_dist_price / point
             tp_dist_points = min(tp_dist_points, tp_hard_max_points)
             tp_dist_price = tp_dist_points * point
 
-        # C) Ajustement spread: éviter TP < SL + spread (en pips)
+        # C) Ajustement spread (si fourni) : impose TP >= SL + spread (en pips)
         if tp_dist_price is not None and spread_pips > 0:
             sl_pips_now = sl_dist_points / points_per_pip
-            tp_pips_now = tp_dist_points / points_per_pip
-            if tp_pips_now < (sl_pips_now + spread_pips):
+            tp_pips_now = (
+                tp_dist_points / points_per_pip if tp_dist_points is not None else None
+            )
+            if tp_pips_now is not None and tp_pips_now < (sl_pips_now + spread_pips):
                 tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
                 tp_dist_price = tp_dist_points * point
 
-        # D) Côté BID/ASK pour MARKET
-        tick = (market_context.get("last_tick") or {}).get(symbol) or {}
-        bid = float(tick.get("bid") or 0.0)
-        ask = float(tick.get("ask") or 0.0)
+        # D) Positionnement côté BID/ASK (si tick disponible)
+        try:
+            tick_map = market_context.get("last_tick") or {}
+            tick = tick_map.get(symbol) or {}
+            bid = float(tick.get("bid") or 0.0)
+            ask = float(tick.get("ask") or 0.0)
+        except Exception:
+            bid = ask = 0.0
+
         if bid > 0 and ask > 0 and ask > bid:
             if action == "BUY":
                 stop_loss_price = entry_price - sl_dist_price
-                if not no_tp:
+                if take_profit_price is not None:
                     take_profit_price = entry_price + tp_dist_price
-                    # imposer > ASK + min
+                    # assure TP > ASK + min
                     if take_profit_price < (ask + soft_min_price - 1e-12):
                         take_profit_price = ask + soft_min_price
-            else:
+            else:  # SELL
                 stop_loss_price = entry_price + sl_dist_price
-                if not no_tp:
+                if take_profit_price is not None:
                     take_profit_price = entry_price - tp_dist_price
-                    # imposer < BID - min
+                    # assure TP < BID - min
                     if take_profit_price > (bid - soft_min_price + 1e-12):
                         take_profit_price = bid - soft_min_price
         else:
@@ -2141,15 +2499,46 @@ class TradeExecutor:
                 if action == "BUY"
                 else entry_price + sl_dist_price
             )
-            if not no_tp:
+            if take_profit_price is not None:
                 take_profit_price = (
-                    entry_price + tp_dist_price
+                    entry_price + (tp_dist_price or 0.0)
                     if action == "BUY"
-                    else entry_price - tp_dist_price
+                    else entry_price - (tp_dist_price or 0.0)
                 )
 
+        # E) Arrondi à la grille des ticks + dernières cohérences directionnelles
+        if action == "BUY":
+            stop_loss_price = _floor_to_tick(
+                min(stop_loss_price, entry_price - soft_min_price)
+            )
+            if take_profit_price is not None:
+                take_profit_price = _ceil_to_tick(
+                    max(take_profit_price, entry_price + soft_min_price)
+                )
+                if not (take_profit_price > entry_price):
+                    take_profit_price = _ceil_to_tick(entry_price + soft_min_price)
+            if not (stop_loss_price < entry_price):
+                stop_loss_price = _floor_to_tick(entry_price - soft_min_price)
+        else:  # SELL
+            stop_loss_price = _ceil_to_tick(
+                max(stop_loss_price, entry_price + soft_min_price)
+            )
+            if take_profit_price is not None:
+                take_profit_price = _floor_to_tick(
+                    min(take_profit_price, entry_price - soft_min_price)
+                )
+                if not (take_profit_price < entry_price):
+                    take_profit_price = _floor_to_tick(entry_price - soft_min_price)
+            if not (stop_loss_price > entry_price):
+                stop_loss_price = _ceil_to_tick(entry_price + soft_min_price)
+
+        # Sortie finale
         stop_loss_price = round(float(stop_loss_price), digits)
-        take_profit_price = None if no_tp else round(float(take_profit_price), digits)
+        take_profit_price = (
+            None
+            if (no_tp or take_profit_price is None)
+            else round(float(take_profit_price), digits)
+        )
         return float(stop_loss_price), (
             None if take_profit_price is None else float(take_profit_price)
         )
@@ -2176,11 +2565,11 @@ class TradeExecutor:
         Ferme immédiatement toutes les positions appartenant au même burst `basket_id`.
 
         • Trouve les positions du panier (basket_id/burst_id/comment avec motif strict).
-        • Tente une fermeture 'bulk' → post-vérifie que tout est bien fermé.
-        • Fallback: ferme ticket par ticket, avec post-vérif.
+        • Tente une fermeture 'bulk' ; post-vérifie que tout est fermé.
+        • Fallback: ferme ticket par ticket via self.close_position(ticket=...), avec post-vérif.
         • Annule UNIQUEMENT les ordres en attente qui portent le `basket_id` dans le commentaire.
-        • Mode urgence: pousse un SL au marché (avec marge de sécurité: tick_size, stops_level, freeze_level) sans jamais détendre un SL existant.
-        • Purge des états internes (trailing/lock) et déverrouillage assuré (finally).
+        • Mode urgence: pousse un SL au marché (buffer = max(tick, stops_level*point, freeze*point)+1*tick) sans jamais détendre un SL existant.
+        • Purge des états internes (trailing/lock) + cooldown par symbole. Déverrouillage assuré (finally).
         """
         import re, time
 
@@ -2198,6 +2587,21 @@ class TradeExecutor:
             self.logger.error("[CLOSE] module MT5 indisponible sur le connecteur.")
             return {"closed": False, "reason": "no_mt5_module"}
 
+        # ---------- Budget de latence (option) ----------
+        try:
+            max_close_ms = int(
+                self.config_manager.get("dynamic_trailing.max_latency_ms_on_close", 0)
+                or 0
+            )
+        except Exception:
+            max_close_ms = 0
+        start_ms = int(time.time() * 1000)
+
+        def _time_left_ok() -> bool:
+            if max_close_ms <= 0:
+                return True
+            return (int(time.time() * 1000) - start_ms) < max_close_ms
+
         # ---------- State structs ----------
         if not hasattr(self, "_basket_peak_pips"):
             self._basket_peak_pips = {}
@@ -2209,6 +2613,8 @@ class TradeExecutor:
             self._active_burst_locks = {}
         if not hasattr(self, "_closing_baskets"):
             self._closing_baskets = set()
+        if not hasattr(self, "_cooldown_until"):
+            self._cooldown_until = {}
 
         # ---------- Lock concurrent ----------
         if basket_id in self._closing_baskets:
@@ -2237,7 +2643,7 @@ class TradeExecutor:
             if bid:
                 return str(bid)
             c = str(_v(pos, "comment", "") or "")
-            m = re.search(r"burst_scalping\|(?:[^|]*\|){0,3}?basket=([A-Za-z0-9_]+)", c)
+            m = re.search(r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)", c)
             if m:
                 return m.group(1)
             m = re.search(r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", c, re.IGNORECASE)
@@ -2267,15 +2673,17 @@ class TradeExecutor:
             return []
 
         def _cancel_pending_orders_for_basket(bid: str):
-            """
-            Annule SEULEMENT les ordres dont le commentaire contient explicitement le basket_id.
-            Pas de filtrage par symbole seul (trop large).
-            """
+            """Annule SEULEMENT les ordres dont le commentaire contient explicitement le basket_id (substring)."""
             pend = _list_pending_orders()
             if not pend:
                 return 0
             cancelled = 0
             for od in pend:
+                if not _time_left_ok():
+                    self.logger.warning(
+                        "[CLOSE] Budget de latence atteint pendant l'annulation des pendings."
+                    )
+                    break
                 try:
                     comment = str(_v(od, "comment", "") or "")
                     if bid and (bid in comment):
@@ -2321,7 +2729,6 @@ class TradeExecutor:
             stops = int(getattr(si, "trade_stops_level", 0) or 0)
             freeze = int(getattr(si, "trade_freeze_level", 0) or 0)
 
-            # prix courant
             try:
                 t = mt5.symbol_info_tick(symbol)
                 bid = _safe_float(getattr(t, "bid", None))
@@ -2329,29 +2736,32 @@ class TradeExecutor:
             except Exception:
                 bid = ask = None
 
-            one_tick = tick
-            buf = max(tick, stops * point, freeze * point) + one_tick
+            buf = max(tick, stops * point, freeze * point) + tick
 
             ok = ko = 0
             for p in positions:
+                if not _time_left_ok():
+                    self.logger.warning("[EMERGENCY-SL] Budget de latence atteint.")
+                    break
                 try:
                     tk = _v(p, "ticket")
                     typ = _v(p, "type")  # 0=BUY / 1=SELL
                     if tk is None or typ not in (0, 1):
                         continue
 
-                    if typ == 0:
+                    if typ == 0:  # BUY
                         ref = bid if bid is not None else _safe_float(_v(p, "bid"))
                         if ref is None:
                             continue
                         new_sl = ref - buf
-                    else:
+                    else:  # SELL
                         ref = ask if ask is not None else _safe_float(_v(p, "ask"))
                         if ref is None:
                             continue
                         new_sl = ref + buf
 
                     cur_sl = _safe_float(_v(p, "sl"))
+
                     # ne pas détendre
                     if typ == 0 and cur_sl is not None and new_sl <= cur_sl:
                         continue
@@ -2385,7 +2795,27 @@ class TradeExecutor:
             self._basket_trail_armed.pop(bid, None)
             self._burst_trailing_state.pop(bid, None)
 
-            # purge lock d’asset si mappé à ce basket
+            # COOLDOWN post-exit par symbole
+            try:
+                cd = float(self.config_manager.get("cooldown_after_exit_s", 0) or 0.0)
+                if cd <= 0:
+                    cd = float(
+                        self.config_manager.get(
+                            "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                            0,
+                        )
+                        or 0.0
+                    )
+                if cd > 0 and symbol_hint:
+                    import time as _t
+
+                    self._cooldown_until[str(symbol_hint).upper()] = _t.time() + cd
+                    self.logger.info(
+                        f"[COOLDOWN] {str(symbol_hint).upper()} bloqué {int(cd)}s après fermeture panier '{bid}'."
+                    )
+            except Exception as _e:
+                self.logger.warning(f"[COOLDOWN] set KO: {_e}")
+
             if symbol_hint:
                 self._active_burst_locks.pop(str(symbol_hint).upper(), None)
             else:
@@ -2420,28 +2850,37 @@ class TradeExecutor:
 
             symbol_hint = str(_v(basket_pos[0], "symbol", "") or "").upper()
 
-            # 2) Annule pendings attachés au basket (avant de fermer, évite réouvertures)
-            cancelled = _cancel_pending_orders_for_basket(basket_id)
+            # 2) annule pendings attachés au basket (avant de fermer)
+            if _time_left_ok():
+                cancelled = _cancel_pending_orders_for_basket(basket_id)
+            else:
+                self.logger.warning(
+                    "[CLOSE] Budget de latence atteint avant l'annulation des pendings."
+                )
 
-            # 3) Bulk close + post vérif
+            # 3) Bulk close si dispo + post-check rapide
             tickets = []
             for p in basket_pos:
                 tk = _v(p, "ticket")
                 if tk is not None:
                     try:
                         tickets.append(int(tk))
-                    except:
+                    except Exception:
                         self.logger.warning(f"[CLOSE] Ticket invalide: {tk}")
 
             tickets_closed = 0
             tickets_failed = 0
             forced_sl = False
 
-            if tickets and hasattr(mt5c, "close_positions"):
+            if (
+                tickets
+                and hasattr(mt5c, "close_positions")
+                and callable(getattr(mt5c, "close_positions"))
+                and _time_left_ok()
+            ):
                 try:
                     mt5c.close_positions(tickets=tickets)
-                    # post-check: poll court
-                    time.sleep(0.05)
+                    time.sleep(0.05)  # petit poll
                     left = [
                         p
                         for p in _list_open_positions()
@@ -2463,34 +2902,46 @@ class TradeExecutor:
                         self.logger.warning(
                             f"[CLOSE] Bulk partielle: {len(left)} restants → fallback tickets."
                         )
-                        # On recalcule la liste restante
                         tickets = []
                         for p in left:
                             tk = _v(p, "ticket")
                             if tk is not None:
                                 try:
                                     tickets.append(int(tk))
-                                except:
+                                except Exception:
                                     pass
                 except Exception as e:
                     self.logger.error(f"[CLOSE] bulk close_positions KO: {e}")
 
-            # 4) Fallback ticket par ticket + post-vérif par ticket
-            if tickets:
+            # 4) Fallback ticket par ticket via TA fonction robuste
+            if tickets and _time_left_ok():
                 for tk in tickets:
+                    if not _time_left_ok():
+                        self.logger.warning(
+                            "[CLOSE] Budget de latence atteint pendant le fallback ticket-by-ticket."
+                        )
+                        break
                     try:
-                        mt5c.close_position(int(tk))
-                        time.sleep(0.02)
-                        still = [
-                            p for p in _list_open_positions() if _v(p, "ticket") == tk
-                        ]
-                        if still:
-                            tickets_failed += 1
-                            self.logger.warning(
-                                f"[CLOSE] ticket {tk} non fermé (fallback)."
-                            )
+                        ret = self.close_position(
+                            ticket=int(tk)
+                        )  # ✅ utilise ta version avec retry/slippage
+                        if ret and ret.get("success"):
+                            # post-vérif ticket
+                            time.sleep(0.02)
+                            still = [
+                                p
+                                for p in _list_open_positions()
+                                if _v(p, "ticket") == tk
+                            ]
+                            if still:
+                                tickets_failed += 1
+                                self.logger.warning(
+                                    f"[CLOSE] ticket {tk} non fermé (fallback)."
+                                )
+                            else:
+                                tickets_closed += 1
                         else:
-                            tickets_closed += 1
+                            tickets_failed += 1
                     except Exception as e:
                         tickets_failed += 1
                         self.logger.error(f"[CLOSE] Échec clôture ticket {tk}: {e}")
@@ -2499,7 +2950,7 @@ class TradeExecutor:
             left_now = [
                 p for p in _list_open_positions() if _extract_basket_id(p) == basket_id
             ]
-            if left_now:
+            if left_now and _time_left_ok():
                 forced_sl = _force_sl_sweep(symbol_hint, left_now)
                 if forced_sl:
                     self.logger.warning(
@@ -2514,11 +2965,13 @@ class TradeExecutor:
 
             if all_closed:
                 self.logger.info(
-                    f"[CLOSE] Panier '{basket_id}' fermé. closed={tickets_closed} failed={tickets_failed} cancelled={cancelled} forced_sl={forced_sl}"
+                    f"[CLOSE] Panier '{basket_id}' fermé. closed={tickets_closed} failed={tickets_failed} "
+                    f"cancelled={cancelled} forced_sl={forced_sl}"
                 )
             else:
                 self.logger.warning(
-                    f"[CLOSE] Panier '{basket_id}' PARTIEL. restants={len(final_left)} | closed={tickets_closed} failed={tickets_failed} cancelled={cancelled} forced_sl={forced_sl}"
+                    f"[CLOSE] Panier '{basket_id}' PARTIEL. restants={len(final_left)} | closed={tickets_closed} "
+                    f"failed={tickets_failed} cancelled={cancelled} forced_sl={forced_sl}"
                 )
 
             _purge_states(basket_id, symbol_hint)
@@ -2560,6 +3013,7 @@ class TradeExecutor:
         trail_trigger_pips (float)
         trail_distance_pips (float)
         trail_require_full_count (bool)
+        trail_update_min_interval_ms (int)   # <- NOUVEAU (rate limit trailing), défaut 120
         """
         import re, time
 
@@ -2586,6 +3040,10 @@ class TradeExecutor:
             )
         )
         trail_require_full = bool(closure.get("trail_require_full_count", False))
+        # NOUVEAU: intervalle mini entre deux updates de trailing broker (anti-spam)
+        trail_update_min_interval_ms = int(
+            closure.get("trail_update_min_interval_ms", 120)
+        )
 
         # Garde-fous
         trail_trigger_pips = max(0.0, trail_trigger_pips)
@@ -2603,6 +3061,8 @@ class TradeExecutor:
             self._basket_trail_armed = {}
         if not hasattr(self, "_burst_trailing_state"):
             self._burst_trailing_state = {}
+        if not hasattr(self, "_last_trail_update_ms"):
+            self._last_trail_update_ms = {}
 
         # ---------- Helpers ----------
         def _v(pos, key, default=None):
@@ -2643,9 +3103,7 @@ class TradeExecutor:
 
         def _digits_for_symbol(sym: str) -> int:
             si = _symbol_info(sym)
-            return int(
-                _gv(si, "digits", 5) or 5
-            )  # <-- FIX anti 'SymbolInfoFallback.get'
+            return int(_gv(si, "digits", 5) or 5)  # FIX anti 'SymbolInfoFallback.get'
 
         def _current_price(pos):
             cp = _safe_float(_v(pos, "current_price"))
@@ -2794,9 +3252,46 @@ class TradeExecutor:
                             self._basket_peak_pips.pop(basket_id, None)
                             self._basket_trail_armed.pop(basket_id, None)
                             self._burst_trailing_state.pop(basket_id, None)
+                            self._last_trail_update_ms.pop(basket_id, None)  # NOUVEAU
                             self.logger.info(
                                 f"[CLOSE] Panier '{basket_id}' fermé (bulk)."
                             )
+                            # === COOLDOWN POST-EXIT (par symbole) ===
+                            try:
+                                if not hasattr(self, "_cooldown_until"):
+                                    self._cooldown_until = {}
+                                cd = float(
+                                    self.config_manager.get("cooldown_after_exit_s", 0)
+                                    or 0.0
+                                )
+                                if cd <= 0:
+                                    cd = float(
+                                        self.config_manager.get(
+                                            "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                            0,
+                                        )
+                                        or 0.0
+                                    )
+                                if cd > 0:
+                                    import time as _t
+
+                                    sym_from_positions = (
+                                        str(
+                                            _v(positions[0], "symbol", "") or ""
+                                        ).upper()
+                                        if positions
+                                        else ""
+                                    )
+                                    if sym_from_positions:
+                                        self._cooldown_until[sym_from_positions] = (
+                                            _t.time() + cd
+                                        )
+                                        self.logger.info(
+                                            f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
+                                        )
+                            except Exception as _e:
+                                self.logger.warning(f"[COOLDOWN] set KO: {_e}")
+
                             return True
             except Exception as e:
                 self.logger.error(f"[CLOSE] close_positions bulk KO: {e}")
@@ -2822,9 +3317,41 @@ class TradeExecutor:
                 self._basket_peak_pips.pop(basket_id, None)
                 self._basket_trail_armed.pop(basket_id, None)
                 self._burst_trailing_state.pop(basket_id, None)
+                self._last_trail_update_ms.pop(basket_id, None)  # NOUVEAU
                 self.logger.info(
                     f"[CLOSE] Panier '{basket_id}' fermé (fallback tickets)."
                 )
+                # === COOLDOWN POST-EXIT (par symbole) ===
+                try:
+                    if not hasattr(self, "_cooldown_until"):
+                        self._cooldown_until = {}
+                    cd = float(
+                        self.config_manager.get("cooldown_after_exit_s", 0) or 0.0
+                    )
+                    if cd <= 0:
+                        cd = float(
+                            self.config_manager.get(
+                                "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                0,
+                            )
+                            or 0.0
+                        )
+                    if cd > 0:
+                        import time as _t
+
+                        sym_from_positions = (
+                            str(_v(positions[0], "symbol", "") or "").upper()
+                            if positions
+                            else ""
+                        )
+                        if sym_from_positions:
+                            self._cooldown_until[sym_from_positions] = _t.time() + cd
+                            self.logger.info(
+                                f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
+                            )
+                except Exception as _e:
+                    self.logger.warning(f"[COOLDOWN] set KO: {_e}")
+
                 return True
 
             # 3) dernier recours : on laisse la phase B/emergency gérer
@@ -2899,7 +3426,7 @@ class TradeExecutor:
         # Phase A — FAST (boucle courte, décision immédiate)
         # ==============
         if rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
-            deadline = time.time() + (rt_fast_window_ms / 1000.0)
+            deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)  # M1 monotonic
             while True:
                 open_positions = _snapshot_positions()
                 if not open_positions:
@@ -2943,19 +3470,25 @@ class TradeExecutor:
                             self._basket_peak_pips.get(basket_id, pnl_pips)
                         ):
                             self._basket_peak_pips[basket_id] = pnl_pips
-                        # push SL broker en continu
-                        _push_broker_trailing_sl(
-                            basket_id,
-                            pos,
-                            direction,
-                            sym,
-                            avg_entry,
-                            pip_size,
-                            peak_pips=float(
-                                self._basket_peak_pips.get(basket_id, pnl_pips)
-                            ),
-                            distance_pips=trail_distance_pips,
+                        # --- M2: RATE LIMIT TRAILING (Phase A) ---
+                        _now_ms = int(time.monotonic() * 1000)
+                        _last_ms = int(
+                            self._last_trail_update_ms.get(basket_id, 0) or 0
                         )
+                        if _now_ms - _last_ms >= trail_update_min_interval_ms:
+                            _push_broker_trailing_sl(
+                                basket_id,
+                                pos,
+                                direction,
+                                sym,
+                                avg_entry,
+                                pip_size,
+                                peak_pips=float(
+                                    self._basket_peak_pips.get(basket_id, pnl_pips)
+                                ),
+                                distance_pips=trail_distance_pips,
+                            )
+                            self._last_trail_update_ms[basket_id] = _now_ms
                         # retracement ⇒ close
                         dd = (
                             float(self._basket_peak_pips.get(basket_id, pnl_pips))
@@ -2977,7 +3510,7 @@ class TradeExecutor:
                         "distance": trail_distance_pips,
                     }
 
-                if time.time() >= deadline:
+                if time.monotonic() >= deadline:
                     break
                 if not any_action:
                     time.sleep(rt_poll_interval_ms / 1000.0)
@@ -3036,18 +3569,23 @@ class TradeExecutor:
                     ):
                         self._basket_peak_pips[basket_id] = pnl_pips
 
-                    _push_broker_trailing_sl(
-                        basket_id,
-                        pos,
-                        direction,
-                        sym,
-                        avg_entry,
-                        pip_size,
-                        peak_pips=float(
-                            self._basket_peak_pips.get(basket_id, pnl_pips)
-                        ),
-                        distance_pips=trail_distance_pips,
-                    )
+                    # --- M2: RATE LIMIT TRAILING (Phase B) ---
+                    _now_ms = int(time.monotonic() * 1000)
+                    _last_ms = int(self._last_trail_update_ms.get(basket_id, 0) or 0)
+                    if _now_ms - _last_ms >= trail_update_min_interval_ms:
+                        _push_broker_trailing_sl(
+                            basket_id,
+                            pos,
+                            direction,
+                            sym,
+                            avg_entry,
+                            pip_size,
+                            peak_pips=float(
+                                self._basket_peak_pips.get(basket_id, pnl_pips)
+                            ),
+                            distance_pips=trail_distance_pips,
+                        )
+                        self._last_trail_update_ms[basket_id] = _now_ms
 
                     dd = (
                         float(self._basket_peak_pips.get(basket_id, pnl_pips))
@@ -3084,69 +3622,74 @@ class TradeExecutor:
         account_trade_settings: Dict[str, Any],
     ) -> float:
         """
-        Sizing par risque $ (source unique = broker_accounts.trade_settings.risk_per_trade_percent)
-        ------------------------------------------------------------------------------------------------
-        - AUCUN volume par défaut : si le calcul ne peut pas garantir le risque, on lève TradeExecutionError
-        - Priorité aux données broker: order_calc_profit -> tick_value/tick_size
-        - Heuristique pip-value optionnelle et contrôlée par configuration (désactivée par défaut)
-        - En mode BURST: le budget risque est REPARTI par ticket (budget / burst_size)
-        """
-        import math
+        Sizing par risque (compte) — source unique = broker_accounts.trade_settings.risk_per_trade_percent
 
-        # --- Action ---
+        Principes:
+        - AUCUN volume par défaut : si on ne peut pas garantir le risque -> TradeExecutionError
+        - Priorité aux données broker: order_calc_profit / tick_value & tick_size
+        - Heuristique pip-value optionnelle (off par défaut)
+        - BURST: partage du budget par ticket si non single-master
+        - Planchers "sizing floor" (stops_level/freeze_level/spread/ATR) pour éviter SL ~ prix
+        - Clamps & arrondis (symbole/compte), caps sécurité/fat-finger, contrôle marge
+        """
+        import math, os
+
+        # --- Action normalisée ---
         action = str(trade_decision.get("action", "")).upper()
         action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
         if action not in ("BUY", "SELL"):
             raise TradeExecutionError(f"Action invalide pour sizing: '{action}'")
 
-        # --- Contexte compte ---
+        # --- Équité compte ---
         acct_info = (context or {}).get("account_info", {}) or {}
         equity = acct_info.get("equity")
         if not isinstance(equity, (int, float)) or equity <= 0:
             raise TradeExecutionError("Équité du compte non positive ou manquante.")
 
-        # --- Risque % (unique, côté compte) ---
-
+        # --- Helpers ---
         def _try_float(x, default=None):
             try:
                 return float(x)
             except Exception:
                 return default
 
+        def _sget(obj, *names, default=None):
+            for n in names:
+                if hasattr(obj, n):
+                    v = getattr(obj, n)
+                    if v is not None:
+                        return v
+                if isinstance(obj, dict) and obj.get(n) is not None:
+                    return obj[n]
+            return default
+
+        # --- Risque % (source unique) ---
         risk_pct = None
         risk_source = None
 
-        # 0) Override explicite (si présent dans la décision)
         ovr = _try_float((trade_decision or {}).get("risk_pct_override"))
         if ovr and ovr > 0:
-            risk_pct = ovr
-            risk_source = "decision.override"
+            risk_pct, risk_source = ovr, "decision.override"
 
-        # 1) Paramètre passé par l'appelant (source privilégiée)
         if risk_pct is None:
             r = _try_float((account_trade_settings or {}).get("risk_per_trade_percent"))
             if r and r > 0:
-                risk_pct = r
-                risk_source = "account_trade_settings"
+                risk_pct, risk_source = r, "account_trade_settings"
 
-        # 2) Contexte (active_broker_account.trade_settings.risk_per_trade_percent)
         if risk_pct is None:
             aba = ((context or {}).get("active_broker_account") or {}).get(
                 "trade_settings", {}
             ) or {}
             r = _try_float(aba.get("risk_per_trade_percent"))
             if r and r > 0:
-                risk_pct = r
-                risk_source = "context.active_broker_account"
+                risk_pct, risk_source = r, "context.active_broker_account"
 
-        # 3) ENV rapide (permet un réglage express au runtime, ex: SNIPER_RISK_PCT=0.35)
         if risk_pct is None:
             r = _try_float(os.getenv("SNIPER_RISK_PCT"))
             if r and r > 0:
-                risk_pct = r
-                risk_source = "env.SNIPER_RISK_PCT"
+                risk_pct, risk_source = r, "env.SNIPER_RISK_PCT"
 
-        # 4) (Option) Legacy – seulement pour compat & avec warning unique, non utilisée pour le calcul
+        # Legacy (log unique)
         legacy_risk_local = config.get("risk_per_trade_percent") or (
             config.get("risk_management") or {}
         ).get("risk_per_trade_pct")
@@ -3154,19 +3697,18 @@ class TradeExecutor:
             self, "_warned_legacy_risk", False
         ):
             self.logger.warning(
-                "Legacy key détectée pour le risque (%s) dans la stratégie/actif — ignorée. "
+                "Legacy key détectée pour le risque (%s) — ignorée. "
                 "Utiliser broker_accounts.trade_settings.risk_per_trade_percent.",
                 legacy_risk_local,
             )
             setattr(self, "_warned_legacy_risk", True)
 
-        # 5) Erreur si rien trouvé
         if risk_pct is None or risk_pct <= 0:
             raise TradeExecutionError(
                 "Risque en % manquant/invalide (source unique requise)."
             )
 
-        # 6) Clip dans une plage safe (évite saisies délirantes)
+        # Clip range safe
         min_risk = _try_float(
             self.config_manager.get("risk_management_settings.min_risk_pct", 0.01), 0.01
         )
@@ -3180,7 +3722,6 @@ class TradeExecutor:
             )
         risk_pct = risk_pct_clipped
 
-        # Log explicite de la source
         try:
             self.logger.info(
                 f"[RISK%%] Utilisé: {risk_pct:.4f}%% (source={risk_source})"
@@ -3188,35 +3729,31 @@ class TradeExecutor:
         except Exception:
             pass
 
-        # --- Budget de risque en $ ---
+        # --- Budget de risque (compte) ---
         max_dollar_risk_base = float(equity) * (risk_pct / 100.0)
         if max_dollar_risk_base <= 0:
             raise TradeExecutionError("Risque en $ nul/invalide pour le sizing.")
 
-        # --- Ajustements dynamiques du risque ---
-        # 1) confidence ∈ [0,1] réduit le budget de risque (jamais l'augmente)
+        # Ajustements: confidence [0..1], quality cap (0.5..1.0)
         confidence = float(trade_decision.get("confidence", 1.0) or 1.0)
         confidence = max(0.0, min(1.0, confidence))
         max_dollar_risk = max_dollar_risk_base * confidence
-        # === RV-4: réduction douce par quality (si fournie par combos/OF) ===
+
         try:
             q = trade_decision.get("quality")
             if isinstance(q, (int, float)):
                 q = max(0.0, min(1.0, float(q)))
-                # borne haute du budget en fonction de la qualité (0.5..1.0)
                 q_cap = 0.5 + 0.5 * q
                 if q_cap < 1.0:
                     prev = max_dollar_risk
-                    max_dollar_risk = max_dollar_risk * q_cap
+                    max_dollar_risk *= q_cap
                     self.logger.info(
                         f"[QUALITY CAP] Risk$ {prev:.2f} -> {max_dollar_risk:.2f} (q={q:.2f}, cap={q_cap:.2f})"
                     )
         except Exception:
             pass
 
-        # 2) burst_size : partage du risque sur le panier (détection robuste)
-        burst_size = None
-
+        # Partage BURST (sauf single-master)
         def _to_int_pos(x):
             try:
                 xi = int(float(x))
@@ -3224,9 +3761,7 @@ class TradeExecutor:
             except Exception:
                 return None
 
-        # a) Décision
         burst_size = _to_int_pos(trade_decision.get("burst_size"))
-        # b) Contexte (plusieurs clés possibles selon tes couches)
         if burst_size is None and isinstance(context, dict):
             for k in (
                 "burst_size",
@@ -3241,56 +3776,60 @@ class TradeExecutor:
                 burst_size = _to_int_pos(v)
                 if burst_size:
                     break
-        # c) Config strat
         if burst_size is None:
             burst_size = (
                 _to_int_pos(
-                    ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
-                    .get("burst_scalping", {})
-                    .get("burst_size", 1)
+                    (
+                        (
+                            (config.get("entry_rules", {}) or {}).get("scalping", {})
+                            or {}
+                        ).get("burst_scalping", {})
+                        or {}
+                    ).get("burst_size", 1)
                 )
                 or 1
             )
 
-        if burst_size > 1:
+        single_master_mode = (
+            bool(trade_decision.get("burst_single_master"))
+            or bool((config.get("burst_single_master", {}) or {}).get("enabled", False))
+            or bool(
+                (
+                    (
+                        (config.get("entry_rules", {}) or {}).get("scalping", {}) or {}
+                    ).get("burst_scalping", {})
+                    or {}
+                )
+                .get("burst_single_master", {})
+                .get("enabled", False)
+            )
+        )
+        if (not single_master_mode) and burst_size and burst_size > 1:
             max_dollar_risk /= burst_size
 
-        # 3) volatility_factor (si fourni) : on n'autorise que la réduction du risque
-        if isinstance(trade_decision, dict) and "volatility_factor" in trade_decision:
+        # Volatility factor (réducteur uniquement)
+        if "volatility_factor" in (trade_decision or {}):
             try:
-                vfac_raw = trade_decision.get("volatility_factor", 1.0)
-                vfac = float(1.0 if vfac_raw in (None, "") else vfac_raw)
+                vfac = float(trade_decision.get("volatility_factor") or 1.0)
                 if math.isfinite(vfac) and vfac > 0:
                     if vfac < 1.0:
                         prev = max_dollar_risk
                         max_dollar_risk *= vfac
                         self.logger.info(
-                            f"[VOLATILITY FACTOR] Budget de risque ajusté: {prev:.2f}$ -> {max_dollar_risk:.2f}$ (facteur={vfac:.3f})"
+                            f"[VOLATILITY FACTOR] Risk$ {prev:.2f} -> {max_dollar_risk:.2f} (x{vfac:.3f})"
                         )
                     elif vfac > 1.0:
                         self.logger.info(
-                            f"[VOLATILITY FACTOR] Facteur>1 détecté ({vfac:.3f}) mais ignoré (pas d'augmentation de risque)."
+                            f"[VOLATILITY FACTOR] Facteur>1 ({vfac:.3f}) ignoré (pas d'augmentation du risque)."
                         )
             except Exception as e:
                 self.logger.warning(f"[VOLATILITY FACTOR] Ignoré: {e}")
 
-        # --- Distance prix (Entry -> SL) ---
+        # --- Distance prix (Entry -> SL) : préparation "sizing floor" ---
         try:
-            price_diff_raw = abs(float(entry_price) - float(sl_price))
+            _ = abs(float(entry_price) - float(sl_price))
         except Exception:
             raise TradeExecutionError("Entry/SL invalides pour sizing.")
-        # (la distance effective sera fixée après lecture des contraintes broker)
-
-        # --- Récup symbol_info robuste ---
-        def _sget(obj, *names, default=None):
-            for n in names:
-                if hasattr(obj, n):
-                    v = getattr(obj, n)
-                    if v is not None:
-                        return v
-                if isinstance(obj, dict) and obj.get(n) is not None:
-                    return obj[n]
-            return default
 
         sym_name = _sget(
             symbol_info, "name", default=str(trade_decision.get("asset", "")).upper()
@@ -3301,7 +3840,6 @@ class TradeExecutor:
             _sget(symbol_info, "trade_contract_size", "contract_size", default=100000.0)
             or 100000.0
         )
-        # --- Normalisation SL vs contraintes broker (buffer mini effectif) ---
         tick_size = float(
             _sget(symbol_info, "trade_tick_size", "tick_size", default=point) or point
         )
@@ -3311,8 +3849,7 @@ class TradeExecutor:
         one_tick_pts = max(1, int(round((tick_size or point) / (point or 1.0))))
         _min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
 
-        # === RV-1: plancher de distance pour le SIZING (évite volumes énormes si SL ~ entry) ===
-        # Configs optionnelles
+        # Planchers de sizing
         try:
             min_sizing_stop_pts = int(
                 self.config_manager.get(
@@ -3331,7 +3868,6 @@ class TradeExecutor:
         except Exception:
             min_sizing_stop_atr_mult = 0.25
 
-        # ATR en points si fourni par le pipeline/contexte (facultatif)
         last_atr_pts = 0.0
         try:
             for k in ("last_atr_points", "atr_points", "last_atr_pts", "atr_pts"):
@@ -3341,7 +3877,6 @@ class TradeExecutor:
                     break
         except Exception:
             pass
-
         floor_pts_atr = (
             int(round(last_atr_pts * min_sizing_stop_atr_mult))
             if last_atr_pts > 0 and min_sizing_stop_atr_mult > 0
@@ -3349,8 +3884,7 @@ class TradeExecutor:
         )
         _sizing_floor_pts = max(_min_buf_pts, min_sizing_stop_pts, floor_pts_atr)
 
-        # === RV-2: SL effectif avec plancher sizing (pts) ===
-        # 1) SL respectant le buffer broker minimal (_min_buf_pts)
+        # SL effectif utilisé pour le calcul de risque (ne modifie PAS le SL réel envoyé)
         if action == "BUY":
             sl_eff = min(
                 float(sl_price), float(entry_price) - _min_buf_pts * float(point)
@@ -3360,25 +3894,24 @@ class TradeExecutor:
                 float(sl_price), float(entry_price) + _min_buf_pts * float(point)
             )
 
-        # 2) Applique le plancher de sizing (_sizing_floor_pts)
-        _pt = float(point) if float(point or 0.0) > 0.0 else 1e-9  # garde anti-div/0
+        _pt = float(point) if float(point or 0.0) > 0.0 else 1e-9
         price_diff_pts = abs(float(entry_price) - float(sl_eff)) / _pt
         if _sizing_floor_pts > 0 and price_diff_pts < _sizing_floor_pts:
             adjust = _sizing_floor_pts * _pt
-            if action == "BUY":
-                sl_eff = float(entry_price) - adjust
-            else:
-                sl_eff = float(entry_price) + adjust
+            sl_eff = (
+                (float(entry_price) - adjust)
+                if action == "BUY"
+                else (float(entry_price) + adjust)
+            )
 
-        # 3) Validation finale (distance > 0)
         price_diff = abs(float(entry_price) - float(sl_eff))
         if price_diff <= 0 or not math.isfinite(price_diff):
             raise TradeExecutionError(
                 "Distance Entry-SL effective nulle/invalide pour sizing."
             )
 
-        # --- Estimation perte par 1 lot (priorité broker) ---
-        per_lot_loss_usd = None
+        # --- Perte par lot (devise compte) ---
+        per_lot_loss = None
         mt5_mod = getattr(self, "mt5", None) or getattr(
             getattr(self, "mt5_connector", None), "mt5", None
         )
@@ -3392,37 +3925,35 @@ class TradeExecutor:
                 profit = mt5_mod.order_calc_profit(
                     order_type, sym_name, 1.0, entry_price, sl_eff
                 )
-
-                per_lot_loss_usd = abs(float(profit))
-                if not math.isfinite(per_lot_loss_usd) or per_lot_loss_usd <= 0:
-                    per_lot_loss_usd = None
+                # Certaines implémentations exotiques renvoient un tuple — on protège
+                if isinstance(profit, (tuple, list)) and profit:
+                    profit = profit[-1]
+                per_lot_loss = abs(float(profit))
+                if not math.isfinite(per_lot_loss) or per_lot_loss <= 0:
+                    per_lot_loss = None
             except Exception as e:
                 self.logger.warning(f"mt5.order_calc_profit indisponible: {e}.")
-                per_lot_loss_usd = None
+                per_lot_loss = None
 
-        # 1) fallback tick_value / tick_size (broker)
-        if per_lot_loss_usd is None or per_lot_loss_usd <= 0:
-            tick_value = _sget(
-                symbol_info, "trade_tick_value", "tick_value", default=0.0
-            )
-            tick_size = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
+        # Fallback 1: tick_value / tick_size
+        if per_lot_loss is None or per_lot_loss <= 0:
+            tv = _sget(symbol_info, "trade_tick_value", "tick_value", default=0.0)
+            ts = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
             try:
-                tick_value = float(tick_value or 0.0)
-                tick_size = float(tick_size or 0.0)
+                tv = float(tv or 0.0)
+                ts = float(ts or 0.0)
             except Exception:
-                tick_value, tick_size = 0.0, 0.0
-            if tick_value > 0 and tick_size > 0:
-                nb_ticks = price_diff / tick_size
-                per_lot_loss_usd = nb_ticks * tick_value
+                tv, ts = 0.0, 0.0
+            if tv > 0 and ts > 0:
+                per_lot_loss = (price_diff / ts) * tv
 
-        # 2) fallback pip_value *contrôlé* (désactivé par défaut)
+        # Fallback 2: heuristique pip-value (optionnelle)
         allow_pip_heuristic = bool(
             self.config_manager.get(
                 "risk_management_settings.allow_heuristic_pip_fallback", False
             )
         )
-        if (per_lot_loss_usd is None or per_lot_loss_usd <= 0) and allow_pip_heuristic:
-            # digits 3/5 => 10 points par pip; digits 2 => 1 "pip" = point (ex: XAUUSD)
+        if (per_lot_loss is None or per_lot_loss <= 0) and allow_pip_heuristic:
             points_per_pip = 10.0 if digits in (3, 5) else 1.0
             pip_size = point * points_per_pip
             quote = (
@@ -3430,46 +3961,38 @@ class TradeExecutor:
                 if isinstance(sym_name, str) and len(sym_name) >= 6
                 else ""
             )
-
             if pip_size <= 0:
                 raise TradeExecutionError(f"[{sym_name}] pip_size invalide.")
-
             if quote == "USD":
-                pip_value_per_lot_usd = contract * pip_size
-                per_lot_loss_usd = (price_diff / pip_size) * pip_value_per_lot_usd
+                pip_value_per_lot = contract * pip_size
+                per_lot_loss = (price_diff / pip_size) * pip_value_per_lot
             elif quote == "JPY":
                 pip_value_jpy = contract * 0.01
                 if not entry_price or not math.isfinite(float(entry_price)):
                     raise TradeExecutionError(
                         f"[{sym_name}] Entry invalide pour conversion JPY."
                     )
-                pip_value_usd = pip_value_jpy / float(entry_price)
-                per_lot_loss_usd = (price_diff / pip_size) * pip_value_usd
+                pip_value_acct = pip_value_jpy / float(entry_price)
+                per_lot_loss = (price_diff / pip_size) * pip_value_acct
             else:
                 raise TradeExecutionError(
                     f"[{sym_name}] tick_value/tick_size indisponibles et heuristique pip-value interdite pour {quote}."
                 )
 
-        # ❌ pas d'autre fallback → sizing impossible
-        if (
-            per_lot_loss_usd is None
-            or per_lot_loss_usd <= 0
-            or not math.isfinite(per_lot_loss_usd)
-        ):
+        if per_lot_loss is None or per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
             raise TradeExecutionError("Impossible de calculer la perte par lot.")
 
-        # --- Plancher de perte par lot (anti-valeurs pathologiques) ---
+        # Planchers de sécurité pour per_lot_loss
         min_dlr_per_lot = float(
             self.config_manager.get(
                 "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
             )
         )
-        if per_lot_loss_usd < min_dlr_per_lot:
+        if per_lot_loss < min_dlr_per_lot:
             self.logger.debug(
-                f"Perte/lot trop faible ({per_lot_loss_usd:.6f}$) -> plancher {min_dlr_per_lot:.6f}$ appliqué."
+                f"Perte/lot trop faible ({per_lot_loss:.6f}) -> plancher {min_dlr_per_lot:.6f} appliqué."
             )
-            per_lot_loss_usd = min_dlr_per_lot
-        # === RV-3: plancher par ACTIF (optionnel) ===
+            per_lot_loss = min_dlr_per_lot
         try:
             per_asset_min = (
                 self.config_manager.get(
@@ -3481,19 +4004,17 @@ class TradeExecutor:
             if (
                 isinstance(per_asset_min, (int, float))
                 and per_asset_min > min_dlr_per_lot
+                and per_lot_loss < float(per_asset_min)
             ):
-                min_dlr_per_lot = float(per_asset_min)
-                if per_lot_loss_usd < min_dlr_per_lot:
-                    self.logger.debug(
-                        f"[{sym_name}] Plancher perte/lot (asset): {per_lot_loss_usd:.6f} -> {min_dlr_per_lot:.6f}"
-                    )
-                    per_lot_loss_usd = min_dlr_per_lot
+                self.logger.debug(
+                    f"[{sym_name}] Plancher perte/lot (asset): {per_lot_loss:.6f} -> {float(per_asset_min):.6f}"
+                )
+                per_lot_loss = float(per_asset_min)
         except Exception:
             pass
 
-        # --- Volume brut non arrondi ---
-        raw_volume = max_dollar_risk / per_lot_loss_usd
-        # --- Cap théorique par marge (avant clamps/arrondis) ---
+        # Volume brut (avant caps) + cap marge (théorique 1 lot)
+        raw_volume = max_dollar_risk / per_lot_loss
         try:
             if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
                 order_type = (
@@ -3513,7 +4034,7 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Cap par marge (pré-clamp) ignoré: {e}")
 
-        # --- Contraintes symbole/compte ---
+        # Contraintes symbole/compte
         vol_min_sym = float(_sget(symbol_info, "volume_min", default=0.01) or 0.01)
         vol_max_sym = float(_sget(symbol_info, "volume_max", default=100.0) or 100.0)
         vol_step_sym = float(_sget(symbol_info, "volume_step", default=0.01) or 0.01)
@@ -3528,14 +4049,13 @@ class TradeExecutor:
             (account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym
         )
 
-        # --- Cap stratégie ---
-        de = config.get("decision_engine") or {}
-        de_risk = de.get("risk") or {}
+        # Cap stratégie (optionnel)
+        de_risk = (config.get("decision_engine") or {}).get("risk") or {}
         strat_max_lot = de_risk.get("max_lot_size")
         if isinstance(strat_max_lot, (int, float)) and strat_max_lot > 0:
             max_lot_account = min(max_lot_account, float(strat_max_lot))
 
-        # --- Caps volume globaux & par actif (safety / fat-finger) ---
+        # Caps sécurité & fat-finger
         ff_cfg = {}
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
@@ -3544,7 +4064,6 @@ class TradeExecutor:
                 ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False)
             )
 
-            # Cap global absolu
             max_volume_safety = tes.get("max_absolute_volume_safety", None)
             if (
                 safety_enabled
@@ -3557,7 +4076,6 @@ class TradeExecutor:
                 )
                 raw_volume = float(max_volume_safety)
 
-            # Cap par actif (optionnel)
             per_asset_caps = ff_cfg.get("max_absolute_volume_for_asset", {}) or {}
             asset_cap = per_asset_caps.get(sym_name)
             if (
@@ -3570,11 +4088,10 @@ class TradeExecutor:
                     f"Cap volume actif {sym_name}: {raw_volume:.4f} -> {float(asset_cap):.4f}"
                 )
                 raw_volume = float(asset_cap)
-
         except Exception as e:
             self.logger.warning(f"Lecture caps volume sécurité échouée: {e}")
 
-        # --- Fat-finger dynamique (vs historique volumes) ---
+        # Fat-finger dynamique vs historique
         try:
             if bool(ff_cfg.get("enabled", False)) and bool(
                 ff_cfg.get("enable_dynamic_check", False)
@@ -3603,11 +4120,10 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Vérif fat-finger dynamique non appliquée: {e}")
 
-        # --- Arrondi & clamps initiaux ---
+        # Arrondi & clamps initiaux
         effective_step = max(lot_step_account, vol_step_sym) or 0.01
         if effective_step <= 0:
             effective_step = 0.01
-
         volume = max(min_lot_account, vol_min_sym, raw_volume)
         volume = min(max_lot_account, vol_max_sym, volume)
         steps = math.floor(volume / effective_step)
@@ -3617,7 +4133,7 @@ class TradeExecutor:
         if volume <= 0:
             raise TradeExecutionError(f"Volume calculé invalide ({volume}).")
 
-        # --- Contrôle de marge (réduction si nécessaire) ---
+        # Contrôle marge final (réduction si nécessaire)
         try:
             if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
                 order_type = (
@@ -3651,7 +4167,7 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"Contrôle marge non appliqué: {e}")
 
-        # === RV-5: plafond absolu failsafe (même si safety désactivée) ===
+        # Failsafe absolu (même si safety off)
         try:
             failsafe_cap = float(
                 self.config_manager.get(
@@ -3667,39 +4183,35 @@ class TradeExecutor:
         except Exception:
             pass
 
-        # --- Vérification/ajustement final du risque (hard cap) ---
+        # Vérification du risque réel vs budget (tolérance)
         tol = float(
             self.config_manager.get(
                 "trade_executor_settings.max_risk_deviation_multiplier", 1.05
             )
         )
-        actual_risk_dollars = volume * per_lot_loss_usd
+        actual_risk = volume * per_lot_loss
         max_allowed = max_dollar_risk * tol
-        if actual_risk_dollars > max_allowed and per_lot_loss_usd > 0:
-            # ramener le volume au plafond de risque autorisé puis réarrondir au pas
-            target_vol = max(
-                min_lot_account, vol_min_sym, max_allowed / per_lot_loss_usd
-            )
+        if actual_risk > max_allowed and per_lot_loss > 0:
+            target_vol = max(min_lot_account, vol_min_sym, max_allowed / per_lot_loss)
             target_vol = min(max_lot_account, vol_max_sym, target_vol)
             steps = math.floor(target_vol / effective_step)
             target_vol = round(steps * effective_step, 8)
-            # Recalc post-arrondi
-            actual_risk_dollars = target_vol * per_lot_loss_usd
-            if actual_risk_dollars > max_allowed:
-                target_vol = max(min_lot_account, target_vol - effective_step)
-                target_vol = round(target_vol, 8)
-                actual_risk_dollars = target_vol * per_lot_loss_usd
-
+            actual_risk = target_vol * per_lot_loss
+            if (
+                actual_risk > max_allowed
+            ):  # ultime petit cran si l'arrondi step nous dépasse encore
+                target_vol = max(min_lot_account, round(target_vol - effective_step, 8))
+                actual_risk = target_vol * per_lot_loss
             self.logger.warning(
-                f"Risque réel {volume * per_lot_loss_usd:.2f}$ > max {max_dollar_risk:.2f}$ (tol {tol:.2f}). "
+                f"Risque réel {volume * per_lot_loss:.2f} > max {max_dollar_risk:.2f} (tol {tol:.2f}). "
                 f"Volume ajusté {volume:.4f} -> {target_vol:.4f}"
             )
             volume = target_vol
 
-        # Log final (post-ajustements)
+        # Log final
         self.logger.info(
             f"Sizing {sym_name}: equity={equity:.2f}, risk%={risk_pct:.4f}, "
-            f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss_usd:.6f} -> vol={volume:.4f} "
+            f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss:.6f} -> vol={volume:.4f} "
             f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
             f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym}; burst_size={burst_size})."
         )
@@ -3871,14 +4383,24 @@ class TradeExecutor:
 
         Lève TradeExecutionError en cas d’invalidité bloquante.
         """
-        # ——— import des constantes MT5, robustifié ———
+        # ——— imports/fallback locaux (évite NameError) ———
+        import math, re
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            TradeExecutionError
+        except NameError:
+
+            class TradeExecutionError(Exception):
+                pass
+
+        # ——— accès MT5 robuste ———
         mt5 = None
         try:
             import MetaTrader5 as _mt5  # type: ignore
 
             mt5 = _mt5
         except Exception:
-            # tente via le connector (certains wrappers exposent mt5 dedans)
             mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
 
         self.logger.info("Construction de la requête MT5 finale...")
@@ -3947,7 +4469,6 @@ class TradeExecutor:
             sl_price = round(float(sl_price), digits)
             if tp_price is not None:
                 tp_price = round(float(tp_price), digits)
-
         except Exception as e:
             raise TradeExecutionError(f"SL/TP invalides: {e}")
 
@@ -3957,10 +4478,8 @@ class TradeExecutor:
             and float(trade_decision["entry_price"] or 0) > 0
         ):
             entry_price_market = round(float(trade_decision["entry_price"]), digits)
-
         if "sl_price" in trade_decision and float(trade_decision["sl_price"] or 0) > 0:
             sl_price = round(float(trade_decision["sl_price"]), digits)
-
         if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
             tp_price = round(float(trade_decision["tp_price"]), digits)
 
@@ -3974,7 +4493,7 @@ class TradeExecutor:
         if mt5_action_deal is None or mt5_action_pending is None:
             raise TradeExecutionError("Constantes MT5 TRADE_ACTION introuvables.")
 
-        # Types d’ordre
+        # Types marché
         ORDER_TYPE_BUY = getattr(mt5, "ORDER_TYPE_BUY", None)
         ORDER_TYPE_SELL = getattr(mt5, "ORDER_TYPE_SELL", None)
         if ORDER_TYPE_BUY is None or ORDER_TYPE_SELL is None:
@@ -3982,7 +4501,7 @@ class TradeExecutor:
                 "Constantes MT5 ORDER_TYPE BUY/SELL introuvables."
             )
 
-        # Mapping custom (facultatif)
+        # Mappings optionnels
         order_map = (getattr(self, "mt5_mappings", {}) or {}).get(
             "order_types", {}
         ) or {}
@@ -4027,56 +4546,51 @@ class TradeExecutor:
         if deviation_points < 0:
             deviation_points = 0
 
-        # --- Patch : neutraliser TP pour burst_scalping ---
+        # --- Patch: neutraliser TP pour burst_scalping & flag has_tp ---
         rule = str(trade_decision.get("rule_name", "")).lower()
-        if rule == "burst_scalping":
-            if tp_price is None or tp_price <= 0:
-                tp_price = 0.0  # MT5 = pas de TP
-                self.logger.debug("[BURST] TP neutralisé → trailing stop only")
+        if rule == "burst_scalping" and (tp_price is None or tp_price <= 0):
+            tp_price = 0.0  # MT5 = pas de TP
+            self.logger.debug("[BURST] TP neutralisé → trailing stop only")
+        has_tp = bool(tp_price and tp_price > 0)
 
-        _raw_comment = str(trade_decision.get("comment") or "")
-        _basket_id = str(trade_decision.get("basket_id") or "").strip() or None
-
-        # 1) si non fourni, essaie d’extraire "basket=XXX" du commentaire
-        if not _basket_id and _raw_comment:
-            m = re.search(r"basket=([A-Za-z0-9_]+)", _raw_comment)
+        # --- Basket/comment (une seule logique, sans double-écriture) ---
+        raw_comment = str(trade_decision.get("comment") or "")
+        basket_id = str(trade_decision.get("basket_id") or "").strip() or None
+        if not basket_id and raw_comment:
+            m = re.search(r"basket=([A-Za-z0-9_]+)", raw_comment)
             if m:
-                _basket_id = m.group(1)
-
-        # 2) sinon, fabrique un id court & stable (ex: "burst_XAUUSD")
-        if not _basket_id:
+                basket_id = m.group(1)
+        if not basket_id:
             sym_name = getattr(symbol_info, "name", "") or expected_symbol
-            _basket_id = f"burst_{str(sym_name).upper()}"
+            basket_id = f"burst_{str(sym_name).upper()}"
 
-        # 3) commentaire MT5 court (≤31), ASCII sûr
-        _comment = _raw_comment.strip() or _basket_id
-        _comment = _comment.replace(" ", "").replace("|", "")
-        _comment = re.sub(r"[^A-Za-z0-9._-]", "", _comment)[:31]
-
-        def _normalize_mt5_comment(text: str, fallback: str, max_len: int = 31) -> str:
-            raw = (text or fallback or "").strip()
+        def _normalize_mt5_comment(text: str, max_len: int = 31) -> str:
+            raw = (text or "").strip()
             raw = raw.replace("|", "").replace(" ", "")
             raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
             return raw[:max_len]
 
-        _sym_upper = str(getattr(symbol_info, "name", "") or "").upper()
-        _basket_id = str(trade_decision.get("basket_id") or "").strip()
-        _comment = _normalize_mt5_comment(_basket_id, fallback=f"burst_{_sym_upper}")
+        comment = _normalize_mt5_comment(raw_comment or basket_id)
 
-        # --- Construction base requête (comment court + tags utiles) ---
+        # --- Construction base requête ---
         order_type_str = str(order_type_str or "MARKET").upper()
-
         request = {
             "symbol": symbol_info.name,
             "volume": float(vol),
-            "magic": trade_decision.get("magic_number", config.get("magic_number")),
+            "magic": trade_decision.get(
+                "magic_number",
+                config.get(
+                    "magic_number",
+                    self.config_manager.get("trade_executor_settings", {}).get(
+                        "magic", 0
+                    ),
+                ),
+            ),
             "sl": float(sl_price),
-            # TP déjà neutralisé si rule == "burst_scalping" plus haut, sinon tp_price
-            "tp": float(tp_price),
             "type_time": ORDER_TIME_GTC,
             "deviation": int(deviation_points),
-            "comment": _comment,  # court, stable, contient le basket_id
-            # --- champs métier / logs (ignorés par MT5) ---
+            "comment": comment,  # court, stable, peut contenir basket_id
+            # — meta (ignorés par MT5) —
             "strategy_type": str(config.get("strategy_name", "unknown")).lower(),
             "rule_name": str(trade_decision.get("rule_name", "")),
             "meta_rr_projected": (
@@ -4084,11 +4598,13 @@ class TradeExecutor:
                 or trade_decision.get("rr")
                 or trade_decision.get("rr_effective")
             ),
-            "basket_id": (_basket_id or None),
+            "basket_id": basket_id,
             "is_burst_trade": (rule == "burst_scalping"),
         }
+        if has_tp:
+            request["tp"] = float(tp_price)  # seulement si TP actif
 
-        # --- Timeout & mitigation (meta uniquement, pour l'orchestrateur) ---
+        # --- Timeout & mitigation (meta only) ---
         request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
         request["_meta_use_mitigation"] = bool(
             trade_decision.get("use_mitigation", False)
@@ -4101,6 +4617,7 @@ class TradeExecutor:
             request["price"] = entry_price_market
             request["type_filling"] = mt5_filling_policy
             price_ref = float(request["price"])
+
         elif order_type_str in ("BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"):
             request["action"] = mt5_action_pending
             mapped = order_map.get(order_type_str, f"ORDER_TYPE_{order_type_str}")
@@ -4111,7 +4628,7 @@ class TradeExecutor:
                 )
             request["type"] = order_type_const
 
-            # Trigger proposé ou fallback sur marché (mais on vérifie les distances ensuite)
+            # Trigger proposé ou fallback marché
             trig = (
                 trigger_price
                 if isinstance(trigger_price, (int, float)) and trigger_price > 0
@@ -4119,8 +4636,13 @@ class TradeExecutor:
             )
             trig = round(float(trig), digits)
 
-            # Lecture du tick pour validations côté bid/ask
-            tick = self.mt5_connector.get_symbol_info_tick(symbol_info.name)
+            # Tick pour validations
+            tick = getattr(self.mt5_connector, "get_symbol_info_tick", None)
+            tick = (
+                tick(symbol_info.name)
+                if callable(tick)
+                else getattr(mt5, "symbol_info_tick", lambda s: None)(symbol_info.name)
+            )
             if not tick or not hasattr(tick, "ask") or not hasattr(tick, "bid"):
                 raise TradeExecutionError(f"Tick invalide pour {symbol_info.name}.")
             ask = float(getattr(tick, "ask") or 0.0)
@@ -4191,7 +4713,7 @@ class TradeExecutor:
                     raise TradeExecutionError(
                         f"SL trop proche: Δ={price_ref - sl_price:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
                     )
-                if (tp_price - price_ref) < min_stop_distance_price - 1e-12:
+                if has_tp and (tp_price - price_ref) < min_stop_distance_price - 1e-12:
                     raise TradeExecutionError(
                         f"TP trop proche: Δ={tp_price - price_ref:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
                     )
@@ -4200,39 +4722,37 @@ class TradeExecutor:
                     raise TradeExecutionError(
                         f"SL trop proche: Δ={sl_price - price_ref:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
                     )
-                if (price_ref - tp_price) < min_stop_distance_price - 1e-12:
+                if has_tp and (price_ref - tp_price) < min_stop_distance_price - 1e-12:
                     raise TradeExecutionError(
                         f"TP trop proche: Δ={price_ref - tp_price:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
                     )
 
-        # --- Commentaire & tags succincts ---
+        # --- Commentaire & tags succincts (template optionnel) ---
         comment_tpl = self.config_manager.get(
             "trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}"
         )
         max_len = int(self.config_manager.get("trading.comment_max_length", 31) or 31)
         strategy_tag = str(config.get("strategy_name", "N/A"))
         rule_name = str(trade_decision.get("rule_name", "") or "")
-        level_mode = str(trade_decision.get("level_mode", "") or "")
         rr_proj = (
             trade_decision.get("meta_rr_projected")
             or trade_decision.get("rr")
             or trade_decision.get("rr_effective")
         )
 
-        # --- Defaults ---
+        # Defaults (sécurité)
         request.setdefault(
             "action",
             mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending,
         )
         request.setdefault("type_time", ORDER_TIME_GTC)
 
-        # --- Compliance & audit (pour nos logs, ignoré par MT5) ---
+        # Meta compliance/audit
         request["_meta_rule_name"] = rule_name
         request["_meta_action"] = action_str
         request["_meta_rr"] = rr_proj
         request["_meta_stops_level_points"] = stops_lvl_points
         request["_meta_point"] = point
-
         request["_compliance_flags"] = {
             "direction_ok": True,
             "stops_ok": True,
@@ -4240,7 +4760,6 @@ class TradeExecutor:
             "order_type": order_type_str,
         }
 
-        # --- Champs explicites pour exécution & audit ---
         request["strategy_type"] = str(config.get("strategy_name", "unknown")).lower()
         request["rule_name"] = rule_name or config.get("rule_name", "")
         request["meta_rr_projected"] = rr_proj
@@ -4258,64 +4777,64 @@ class TradeExecutor:
         symbol_info: Any,
     ) -> dict:
         """
-        DEV-DESK (banque privée) — Construction robuste d'une requête MT5 spécifique
-        pour la stratégie "burst_scalping" :
-        - PAS de TP logique (on n'essaie PAS de construire/valider un TP)
-        - SL obligatoire et validée (arrondie aux digits broker)
-        - Volume normalisé & floored selon contraintes broker (vmin/vstep/vmax)
-        - Trailing configuration incluse dans le meta (pour le position/pm manager)
-        - Commentaire court & canonique (évite Invalid "comment")
-        - Tous les gardes métiers et logs pour audit/compliance
-
-        Retour : dict prêt à être transmis directement à l'étape d'exécution MT5.
-        Lève TradeExecutionError en cas d'anomalie bloquante.
+        Construction robuste d'une requête MT5 spécifique à la stratégie "burst_scalping".
+        - Aucun TP logique (TP=0.0 côté MT5, trailing géré par le moteur)
+        - SL obligatoire, arrondi aux digits et respect des distances stops_level
+        - Volume normalisé (FLOOR sur volume_step) et clampé [min, max]
+        - Commentaire court & canonique (<=31, ASCII), compatible avec l’extracteur de panier
+        - Trailing config stockée en meta (_meta_trailing)
+        - Remontées d’erreurs cohérentes via TradeExecutionError
         """
-        import math
+        import math, re, secrets
 
-        TradeExecutionErrorCls = globals().get("TradeExecutionError") or getattr(
-            self, "TradeExecutionError", Exception
-        )
+        # --- Fallback TradeExecutionError si pas importé ---
+        try:
+            TradeExecutionError
+        except NameError:
 
+            class TradeExecutionError(Exception):
+                pass
+
+        # --------- Validations d'entrée ---------
         if not isinstance(trade_decision, dict):
-            raise TradeExecutionErrorCls("trade_decision invalide (attendu dict).")
+            raise TradeExecutionError("trade_decision invalide (attendu dict).")
 
         action = str((trade_decision.get("action") or "").upper()).strip()
         if action not in {"BUY", "SELL"}:
-            raise TradeExecutionErrorCls(f"[BURST] Action invalide: '{action}'.")
+            raise TradeExecutionError(f"[BURST] Action invalide: '{action}'.")
 
-        if not symbol_info:
-            raise TradeExecutionErrorCls("[BURST] symbol_info manquant.")
-        if (
-            getattr(symbol_info, "point", None) in (None, 0, 0.0)
-            or getattr(symbol_info, "digits", None) is None
+        if not symbol_info or getattr(symbol_info, "name", None) in (
+            None,
+            "",
+            "UNKNOWN",
         ):
-            raise TradeExecutionErrorCls(
-                "[BURST] symbol_info invalide: digits/point manquants."
+            raise TradeExecutionError(
+                "[BURST] symbol_info invalide ou symbole introuvable."
             )
 
         try:
             digits = int(getattr(symbol_info, "digits", 0) or 0)
             point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         except Exception:
-            raise TradeExecutionErrorCls(
+            raise TradeExecutionError(
                 "[BURST] Impossible de lire digits/point du symbol_info."
             )
         if point <= 0:
-            raise TradeExecutionErrorCls("[BURST] symbol_info.point invalide (<=0).")
+            raise TradeExecutionError("[BURST] symbol_info.point invalide (<=0).")
 
-        symbol_name = getattr(symbol_info, "name", None) or getattr(
-            symbol_info, "symbol", None
-        )
+        symbol_name = str(
+            getattr(symbol_info, "name", "") or getattr(symbol_info, "symbol", "")
+        ).strip()
         if not symbol_name:
             symbol_name = str(
                 trade_decision.get("asset") or trade_decision.get("symbol") or ""
             ).strip()
             if not symbol_name:
-                raise TradeExecutionErrorCls(
-                    "[BURST] Impossible de déterminer le symbole (name/symbol manquants)."
+                raise TradeExecutionError(
+                    "[BURST] Impossible de déterminer le symbole."
                 )
 
-        # Normalisation volume (FLOOR)
+        # --------- Normalisation volume (FLOOR) ---------
         try:
             vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
             vmax = float(
@@ -4326,32 +4845,32 @@ class TradeExecutor:
             vmin, vmax, vstep = 0.0, float("inf"), 0.0
 
         if not isinstance(volume, (int, float)) or volume <= 0:
-            raise TradeExecutionErrorCls(f"[BURST] Volume invalide ({volume}).")
+            raise TradeExecutionError(f"[BURST] Volume invalide ({volume}).")
 
         vol = float(max(vmin, min(vmax, float(volume))))
         if vstep and vstep > 0:
             steps = math.floor((vol - vmin) / vstep + 1e-12)
             vol = max(vmin, vmin + steps * vstep)
-            if vol < vmin:
-                vol = vmin
-        if vol <= 0 or vol < vmin:
-            raise TradeExecutionErrorCls(f"[BURST] Volume normalisé invalide ({vol}).")
+            if vol > vmax:
+                vol = vmax
+        if vol < vmin or vol <= 0:
+            raise TradeExecutionError(f"[BURST] Volume normalisé invalide ({vol}).")
 
-        # Entry & SL validation
+        # --------- Entry & SL (arrondis + stops_level) ---------
         if not isinstance(entry_price, (int, float)) or entry_price <= 0:
-            raise TradeExecutionErrorCls("[BURST] entry_price invalide.")
+            raise TradeExecutionError("[BURST] entry_price invalide.")
         if not isinstance(sl_price, (int, float)) or sl_price <= 0:
-            raise TradeExecutionErrorCls("[BURST] sl_price invalide.")
+            raise TradeExecutionError("[BURST] sl_price invalide.")
         entry_price = round(float(entry_price), digits)
         sl_price = round(float(sl_price), digits)
 
-        # Distance mini broker (stops_level)
         stops_lvl_points = float(
             getattr(symbol_info, "trade_stops_level", 0)
             or getattr(symbol_info, "stops_level", 0)
             or 0
         )
         min_stop_distance_price = stops_lvl_points * point
+
         if min_stop_distance_price > 0:
             if action == "BUY" and (entry_price - sl_price) < min_stop_distance_price:
                 sl_price = round(entry_price - min_stop_distance_price, digits)
@@ -4362,15 +4881,16 @@ class TradeExecutor:
 
         if action == "BUY":
             if not (sl_price < entry_price):
-                raise TradeExecutionErrorCls(
+                raise TradeExecutionError(
                     f"[BURST] Cohérence BUY : SL({sl_price}) doit être < entry({entry_price})."
                 )
         else:
             if not (sl_price > entry_price):
-                raise TradeExecutionErrorCls(
+                raise TradeExecutionError(
                     f"[BURST] Cohérence SELL : SL({sl_price}) doit être > entry({entry_price})."
                 )
 
+        # --------- MT5: constantes & mapping ---------
         mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
         if mt5 is None:
             try:
@@ -4379,76 +4899,588 @@ class TradeExecutor:
                 mt5 = _mt5
             except Exception:
                 mt5 = None
+        if mt5 is None:
+            raise TradeExecutionError("[BURST] Module/constantes MT5 indisponibles.")
 
-        order_type_const = None
-        action_const = None
-        try:
-            if mt5 is not None:
-                action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
-                order_type_const = getattr(mt5, f"ORDER_TYPE_{action}", None)
-        except Exception:
-            action_const = None
-            order_type_const = None
+        action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
+        order_type_const = getattr(mt5, f"ORDER_TYPE_{action}", None)
+        if action_const is None or order_type_const is None:
+            raise TradeExecutionError(
+                "[BURST] Constantes MT5 (action/type) introuvables."
+            )
 
-        # ⛳️ COMMENTAIRE COURT & CANONIQUE (pas de suffixe '|BURST|i/N')
-        #   - priorité: decision.comment  (si déjà posé par la règle)
-        #   - sinon:    decision.basket_id (ex: 'burst_XAUUSD_c56e2a3f')
-        #   - sinon:    'burst_<SYMBOL>'
-        comment = str(
-            trade_decision.get("comment")
-            or trade_decision.get("basket_id")
-            or f"burst_{str(symbol_name).upper()}"
+        # --------- Deviation & magic ---------
+        # Cohérent avec _build_mt5_request : on lit d'abord execution_policy, sinon fallback.
+        deviation_points = int(
+            (config.get("execution_policy", {}) or {}).get(
+                "max_deviation_points", config.get("max_slippage_points", 20)
+            )
+            or 20
         )
-        # nettoyage minimal pour MT5 (éviter espaces, pipes superflus)
-        comment = comment.replace(" ", "")
-        # limitation soft (MT5 accepte ~31/64 selon build; on garde court)
-        if len(comment) > 48:
-            comment = comment[:48]
+        if deviation_points < 0:
+            deviation_points = 0
 
+        magic = int(
+            config.get(
+                "magic_number",
+                (self.config_manager.get("trade_executor_settings", {}) or {}).get(
+                    "magic", 0
+                ),
+            )
+            or 0
+        )
+
+        # --------- Basket/Comment (compatible extracteur) ---------
+        # Priorité: basket_id fourni → sinon génère "burst_<SYMBOL>_<hex6>".
+        basket_id = str(trade_decision.get("basket_id") or "").strip()
+        if not basket_id:
+            # forme courte compatible avec le regex: r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})"
+            hex6 = secrets.token_hex(3)
+            sym_up = re.sub(r"[^A-Z]", "", str(symbol_name).upper())[:6] or "ASSET"
+            basket_id = f"burst_{sym_up}_{hex6}"
+
+        # Commentaire MT5 (≤31, ASCII sûr), **met directement le basket_id** pour un parsing fiable.
+        comment = basket_id
+        comment = comment.replace(" ", "").replace("|", "")
+        comment = re.sub(r"[^A-Za-z0-9._-]", "", comment)[:31]
+
+        # --------- Trailing config (prend depuis decision > config) ---------
+        trailing_cfg = (
+            trade_decision.get("trailing")
+            or (
+                ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
+                    "burst_scalping", {}
+                )
+                or {}
+            )
+            .get("tp_sl", {})
+            .get("trailing")
+            or ((config.get("burst_scalping", {}) or {}).get("tp_sl", {}) or {}).get(
+                "trailing"
+            )
+            or {"enabled": True}
+        )
+
+        # --------- Requête finale ---------
         request = {
             "symbol": symbol_name,
             "volume": float(vol),
-            "sl": float(sl_price),
-            # NB: pas de TP logique → on force 0.0 pour compat MT5
-            "tp": 0.0,
             "price": float(entry_price),
+            "sl": float(sl_price),
+            "tp": 0.0,  # 🔒 pas de TP pour BURST (trailing only)
             "type": order_type_const,
             "action": action_const,
-            "deviation": int(config.get("max_slippage_points", 20) or 20),
-            "magic": int(config.get("magic_number", 123456) or 123456),
-            "comment": comment,  # ✅ court et stable
-            "strategy_type": "burst_scalping",
-            "rule_name": str(trade_decision.get("rule_name", "burst_scalping")),
-            # Meta
-            "_meta_no_tp": True,
-            "_meta_trailing": trade_decision.get(
-                "trailing",
-                (config.get("burst_scalping", {}) or {})
-                .get("tp_sl", {})
-                .get("trailing", {"enabled": True}),
+            "deviation": int(deviation_points),
+            "magic": magic,
+            "comment": comment,  # court, stable et parsable
+            "strategy_type": (
+                str(config.get("strategy_name", "burst_scalping")).lower()
             ),
+            "rule_name": str(trade_decision.get("rule_name", "burst_scalping")),
+            # --- meta (ignorés par MT5) ---
+            "_meta_no_tp": True,
+            "_meta_trailing": trailing_cfg,
             "_meta_entry_source": trade_decision.get("source", "core_decision"),
             "_meta_stops_level_points": stops_lvl_points,
             "_meta_point": point,
             "_meta_digits": digits,
-            # Tags burst (utiles au moteur d’exécution / audits)
-            "basket_id": trade_decision.get("basket_id"),
+            # tags burst utiles aux audits
+            "basket_id": basket_id,
             "burst_size": trade_decision.get("burst_size"),
             "burst_index": trade_decision.get("burst_index"),
             "is_burst_trade": True,
         }
 
-        self.logger.info(
-            f"[BURST][DEV-DESK] Requête construite: {action} {request['symbol']} | vol={request['volume']} | "
-            f"entry={entry_price} | sl={sl_price} | trailing={request['_meta_trailing']} | comment='{comment}'"
-        )
-
+        # Compliance flags pour nos logs
         request["_compliance_flags"] = {
             "direction_ok": True,
             "stops_ok": True,
             "order_type": "MARKET_DEAL_BURST",
         }
+
+        self.logger.info(
+            f"[BURST] Requête: {action} {request['symbol']} | vol={request['volume']:.4f} | "
+            f"entry={entry_price} | sl={sl_price} | basket={basket_id} | trailing={trailing_cfg}"
+        )
         return request
+
+    def execute_burst_single_master(self, payload: dict) -> dict:
+        """
+        Envoie UNE SEULE position 'master' (market deal) pour un burst scalping
+        et initialise tout l'état de trailing panier côté exécuteur.
+        Retourne un dict {status, basket_id, ticket, deal, request, retcode, retcode_str}.
+        """
+        import time, logging, hashlib, random, math, re
+        from datetime import datetime, timezone
+
+        logger = getattr(self, "logger", logging.getLogger(__name__))
+
+        # --------- Helpers sûrs ---------
+        def _is_connected() -> bool:
+            try:
+                attr = getattr(self.mt5_connector, "is_connected", None)
+                return bool(attr()) if callable(attr) else bool(attr)
+            except Exception:
+                return False
+
+        def _reconnect_if_needed():
+            try:
+                fn = getattr(
+                    self.mt5_connector, "reconnect_if_needed", None
+                ) or getattr(self.mt5_connector, "connect", None)
+                if callable(fn):
+                    fn()
+            except Exception:
+                pass
+
+        def _normalize_comment(text: str, fallback: str, max_len: int = 31) -> str:
+            raw = (text or fallback or "").strip()
+            raw = raw.replace("|", "").replace(" ", "")
+            raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+            return raw[:max_len]
+
+        def _get_cfg(path: str, default=None):
+            # config_manager.get d'abord, sinon lecture dans active_config (dotted)
+            try:
+                if hasattr(self, "config_manager"):
+                    v = self.config_manager.get(path, None)
+                    if v is not None:
+                        return v
+            except Exception:
+                pass
+            node = active_config or {}
+            try:
+                for part in path.split("."):
+                    node = node[part]
+                return node
+            except Exception:
+                return default
+
+        # --------- 0) Déballage & normalisation ---------
+        td = (payload or {}).get("trade_decision") or {}
+        market_context = (payload or {}).get("market_context") or {}
+        active_config = (payload or {}).get("active_config") or {}
+
+        action = str(td.get("action", "")).upper()
+        asset = str(td.get("asset", "")).upper()
+        rule_name = td.get("rule_name") or "burst_scalping"
+        strategy_type = td.get("strategy_type") or "unknown"
+        order_id = td.get("order_id", "N/A")
+
+        if action not in ("BUY", "SELL") or not asset or asset == "UNKNOWN":
+            reason = f"execute_burst_single_master input invalide: action={action}, asset={asset}"
+            logger.error(reason)
+            return {"status": "failed", "reason": reason}
+
+        # Connexion
+        if not _is_connected():
+            _reconnect_if_needed()
+        if not _is_connected():
+            reason = "mt5_not_connected"
+            logger.error(reason)
+            return {"status": "failed", "reason": reason}
+
+        mt5 = getattr(self.mt5_connector, "mt5", None)
+        if not mt5:
+            return {"status": "failed", "reason": "mt5_not_available"}
+
+        # --------- 1) Mapping & sélection symbole ---------
+        try:
+            broker_symbol = self._map_symbol_for_broker(asset, market_context) or asset
+        except Exception:
+            broker_symbol = asset
+        broker_symbol = str(broker_symbol).upper()
+
+        # resolve + infos symbole
+        try:
+            resolve = getattr(self.mt5_connector, "resolve_broker_symbol", None)
+            if callable(resolve):
+                broker_symbol = resolve(broker_symbol) or broker_symbol
+            si = self.mt5_connector.get_symbol_info(broker_symbol)
+            if not si or not getattr(si, "name", None):
+                return {"status": "failed", "reason": f"invalid_symbol:{broker_symbol}"}
+        except Exception as e:
+            logger.error(f"Symbol info KO: {e}")
+            return {"status": "failed", "reason": f"symbol_info_error:{e}"}
+
+        # MarketWatch selection
+        try:
+            sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
+            ok_sel = bool(sel(broker_symbol)) if callable(sel) else True
+            if not ok_sel:
+                info = self.mt5_connector.get_symbol_info(broker_symbol)
+                if not info or (hasattr(info, "visible") and not info.visible):
+                    sub = getattr(self.mt5_connector, "symbol_select", None)
+                    if callable(sub) and not sub(broker_symbol, True):
+                        return {
+                            "status": "failed",
+                            "reason": f"symbol_not_selected:{broker_symbol}",
+                        }
+        except Exception as e:
+            logger.warning(f"ensure_symbol_selected KO: {e}")
+
+        # --------- 2) Volume (normalisation min/step/max - floor) ---------
+        # volume direct (single-master) ou défaut config
+        try:
+            volume = float(td.get("volume"))
+            if not math.isfinite(volume) or volume <= 0:
+                raise ValueError("volume<=0")
+        except Exception:
+            try:
+                te_settings = (active_config or {}).get(
+                    "trade_executor_settings", {}
+                ) or {}
+                volume = float(te_settings.get("default_volume", 0.01))
+            except Exception:
+                volume = 0.01
+
+        try:
+            vmin = float(getattr(si, "volume_min", 0.01) or 0.01)
+            vmax = float(getattr(si, "volume_max", 100.0) or 100.0)
+            vstep = float(getattr(si, "volume_step", 0.01) or 0.01)
+        except Exception:
+            vmin, vmax, vstep = 0.01, 100.0, 0.01
+
+        vol = max(vmin, min(vmax, float(volume)))
+        if vstep > 0:
+            steps = math.floor((vol - vmin) / vstep + 1e-12)
+            vol = vmin + steps * vstep
+            if vol < vmin:
+                vol = vmin
+        if vol <= 0:
+            return {"status": "failed", "reason": f"invalid_volume_after_norm:{vol}"}
+
+        # --------- 3) Prix, slippage & policies ---------
+        # policy (FOK par défaut)
+        fill_str = str(_get_cfg("execution_policy.type_filling", "FOK")).upper()
+        type_filling = getattr(
+            mt5, f"ORDER_FILLING_{fill_str}", getattr(mt5, "ORDER_FILLING_FOK", None)
+        )
+        if type_filling is None:
+            type_filling = getattr(mt5, "ORDER_FILLING_FOK", 0)
+
+        deviation = int(_get_cfg("execution_policy.max_deviation_points", 20) or 20)
+        magic = int(_get_cfg("trade_executor_settings.magic", 0) or 0)
+
+        # ordre market → BUY sur ask, SELL sur bid
+        def _get_price(sym: str, side: str) -> float:
+            try:
+                t = mt5.symbol_info_tick(sym)
+                if not t:
+                    return 0.0
+                if side == "BUY" and hasattr(t, "ask") and t.ask:
+                    return float(t.ask)
+                if side == "SELL" and hasattr(t, "bid") and t.bid:
+                    return float(t.bid)
+                return float(getattr(t, "ask", 0.0) or getattr(t, "bid", 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        price = _get_price(broker_symbol, action)
+        if price <= 0:
+            return {"status": "failed", "reason": "price_unavailable"}
+
+        mt5_type = (
+            getattr(mt5, "ORDER_TYPE_BUY", 0)
+            if action == "BUY"
+            else getattr(mt5, "ORDER_TYPE_SELL", 1)
+        )
+
+        # --------- 4) Trailing params (défauts robustes) ---------
+        trailing = ((td.get("_meta") or {}).get("trailing")) or {}
+        trigger_pips = float(
+            trailing.get(
+                "trigger_pips",
+                _get_cfg(
+                    "burst_single_master.trail.trigger_pips",
+                    _get_cfg("dynamic_trailing.trigger_pips", 10.0),
+                ),
+            )
+            or 10.0
+        )
+        distance_pips = float(
+            trailing.get(
+                "distance_pips",
+                _get_cfg(
+                    "burst_single_master.trail.distance_pips",
+                    _get_cfg("dynamic_trailing.distance_pips", 5.0),
+                ),
+            )
+            or 5.0
+        )
+        min_hold_ms = int(
+            _get_cfg(
+                "burst_single_master.min_hold_ms",
+                _get_cfg("dynamic_trailing.min_hold_ms", 0),
+            )
+            or 0
+        )
+
+        # --------- 5) Basket ID + commentaire court ---------
+        basket_id = td.get("basket_id")
+        if not basket_id:
+            seed = f"{asset}|{int(time.time()*1000)}|{random.random()}"
+            hid = hashlib.sha1(seed.encode()).hexdigest()[:8]
+            basket_id = f"burst_{asset}_{hid}"
+
+        comment = _normalize_comment(basket_id, fallback=f"burst_{asset}")
+
+        # --------- 6) Construction requête DEAL ---------
+        req = {
+            "action": getattr(mt5, "TRADE_ACTION_DEAL", 1),
+            "symbol": getattr(si, "name", broker_symbol),
+            "type": mt5_type,
+            "volume": float(vol),
+            "price": float(price),
+            "type_filling": type_filling,
+            "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
+            "deviation": int(deviation),
+            "magic": int(magic),
+            "comment": comment,  # court, stable, = basket_id (détection & annulation faciles)
+            # pas de SL/TP ici → trailing only
+            "sl": 0.0,
+            "tp": 0.0,
+            # meta (ignorés par MT5)
+            "strategy_type": "burst_scalping",
+            "rule_name": rule_name,
+            "basket_id": basket_id,
+            "is_burst_trade": True,
+        }
+
+        # --------- 7) Envoi avec retry slippage ---------
+        # Retcodes
+        RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", None)
+        RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", None)
+        RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None)
+        OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
+
+        RET_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
+        RET_PRICE_OFF = getattr(
+            mt5,
+            "TRADE_RETCODE_PRICE_OFF",
+            getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", None),
+        )
+        RET_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
+        RET_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
+
+        max_retries = int(_get_cfg("trade_executor_settings.max_send_retries", 2) or 2)
+        sleep_between = float(
+            _get_cfg("trade_executor_settings.retry_sleep_seconds", 0.05) or 0.05
+        )
+        result = None
+        retcode = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = self.mt5_connector.order_send(req)
+            except Exception as e:
+                logger.error(
+                    f"[BURST] order_send exception (try {attempt+1}/{max_retries+1}): {e}",
+                    exc_info=True,
+                )
+                result = None
+
+            retcode = getattr(result, "retcode", None)
+            if retcode in OK_CODES:
+                break
+
+            # cas retryables → rafraîchir prix et re-tenter
+            if retcode in {RET_REQUOTE, RET_PRICE_OFF, RET_TIMEOUT, RET_CONNECTION}:
+                time.sleep(sleep_between)
+                # sur reconnexion perdue
+                if retcode in {RET_TIMEOUT, RET_CONNECTION} and not _is_connected():
+                    _reconnect_if_needed()
+                # met à jour le prix
+                new_px = _get_price(broker_symbol, action)
+                if new_px > 0:
+                    req["price"] = float(new_px)
+                continue
+
+            # non-retryable → stop
+            break
+
+        # mapping retcode str lisible
+        retcode_str = str(retcode)
+        try:
+            for k, v in (
+                (getattr(self, "mt5_mappings", {}) or {})
+                .get("trade_retcodes", {})
+                .items()
+            ):
+                if getattr(mt5, v, None) == retcode:
+                    retcode_str = k
+                    break
+        except Exception:
+            pass
+
+        if not result or retcode not in OK_CODES:
+            reason = f"retcode={retcode_str}"
+            logger.error(f"[BURST] ❌ Order send FAILED ({broker_symbol}) {reason}")
+
+            # feedback / audit soft
+            try:
+                fb = self.feedback_pipeline(
+                    order_id=order_id, status="failed", reason=reason
+                )
+                self._feedback_safe(td, fb)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "audit_logger"):
+                    self.audit_logger.log_trade_execution(
+                        {
+                            "status": "rejected",
+                            "symbol": broker_symbol,
+                            "action": action,
+                            "order_type": "MARKET",
+                            "volume": req["volume"],
+                            "entry_price": req["price"],
+                            "sl_price": req["sl"],
+                            "tp_price": req["tp"],
+                            "strategy_type": req.get("strategy_type"),
+                            "rule_name": req.get("rule_name"),
+                            "magic_number": req.get("magic"),
+                            "request": req,
+                            "response": {
+                                "retcode": retcode,
+                                "retcode_str": retcode_str,
+                            },
+                            "is_burst_trade": True,
+                        },
+                        getattr(self, "execution_context", {}) or {},
+                    )
+            except Exception:
+                pass
+
+            return {
+                "status": "failed",
+                "reason": reason,
+                "request": req,
+                "retcode": retcode,
+                "retcode_str": retcode_str,
+            }
+
+        # --------- 8) Post-envoi : trailing state & locks ---------
+        ticket = getattr(result, "order", None)
+        deal = getattr(result, "deal", None)
+
+        # registres
+        if not hasattr(self, "_open_positions"):
+            self._open_positions = {}
+        if not hasattr(self, "_burst_trailing_state"):
+            self._burst_trailing_state = {}
+        if not hasattr(self, "_basket_trail_armed"):
+            self._basket_trail_armed = {}
+        if not hasattr(self, "_basket_peak_pips"):
+            self._basket_peak_pips = {}
+        if not hasattr(self, "_active_burst_locks"):
+            self._active_burst_locks = {}
+
+        # trailing state par panier
+        self._burst_trailing_state[basket_id] = {
+            "trigger": float(trigger_pips),
+            "distance": float(distance_pips),
+            "trigger_pips": float(trigger_pips),
+            "distance_pips": float(distance_pips),
+            "min_hold_ms": int(min_hold_ms),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._basket_trail_armed[basket_id] = False
+        self._basket_peak_pips[basket_id] = 0.0
+        # lock d'asset pour empêcher un nouveau panier concurrent
+        try:
+            self._active_burst_locks[str(broker_symbol).upper()] = {
+                "basket_id": basket_id,
+                "since": time.time(),
+            }
+            # horodatage cooldown (utilisé par pre_trade_checks 5bis)
+            self._last_burst_time = time.time()
+        except Exception:
+            pass
+
+        # meta côté _open_positions (si ticket connu)
+        try:
+            if ticket is not None:
+                self._open_positions[int(ticket)] = {
+                    "ticket": int(ticket),
+                    "symbol": getattr(si, "name", broker_symbol),
+                    "type": 0 if action == "BUY" else 1,
+                    "volume": float(vol),
+                    "entry_price": float(req["price"]),
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "magic": int(magic),
+                    "comment": comment,
+                    "open_time": datetime.now(timezone.utc).isoformat(),
+                    "profit": 0.0,
+                    "_meta": {
+                        "basket_id": basket_id,
+                        "trailing": {
+                            "trigger_pips": float(trigger_pips),
+                            "distance_pips": float(distance_pips),
+                            "min_hold_ms": int(min_hold_ms),
+                        },
+                        "rule_name": rule_name,
+                        "strategy_type": strategy_type,
+                    },
+                }
+        except Exception:
+            pass
+
+        logger.info(
+            f"[BURST] ✅ MASTER {action} {broker_symbol} vol={vol} ticket={ticket or 'NA'} "
+            f"basket={basket_id} (trg={trigger_pips}p, dist={distance_pips}p, mh={min_hold_ms}ms)"
+        )
+
+        # Feedback & audit
+        try:
+            fb = self.feedback_pipeline(
+                order_id=order_id, status="sent", reason="burst_master_sent"
+            )
+            self._feedback_safe(td, fb)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "audit_logger"):
+                self.audit_logger.log_trade_execution(
+                    {
+                        "status": "placed" if retcode == RET_PLACED else "filled",
+                        "symbol": broker_symbol,
+                        "action": action,
+                        "order_type": "MARKET",
+                        "volume": req["volume"],
+                        "entry_price": req["price"],
+                        "sl_price": req["sl"],
+                        "tp_price": req["tp"],
+                        "strategy_type": req.get("strategy_type"),
+                        "rule_name": req.get("rule_name"),
+                        "magic_number": req.get("magic"),
+                        "ticket": ticket or deal,
+                        "request": req,
+                        "response": {
+                            "retcode": retcode,
+                            "retcode_str": retcode_str,
+                            "comment": getattr(result, "comment", ""),
+                            "order": ticket,
+                            "deal": deal,
+                            "is_burst_trade": True,
+                        },
+                    },
+                    getattr(self, "execution_context", {}) or {},
+                )
+        except Exception:
+            pass
+
+        return {
+            "status": "sent",
+            "mode": "burst",
+            "basket_id": basket_id,
+            "ticket": ticket,
+            "deal": deal,
+            "request": req,
+            "retcode": retcode,
+            "retcode_str": retcode_str,
+        }
 
     def _update_internal_position_state(
         self, mt5_result: Any, initial_risk: float
@@ -4541,16 +5573,32 @@ class TradeExecutor:
             if not positions:
                 return
 
-            # État partagé initialisé ailleurs (monitor_burst_baskets). On le crée si absent (tolérant).
+            # État partagé (création tolérante)
             if not hasattr(self, "_basket_trail_armed"):
                 self._basket_trail_armed = {}
             if not hasattr(self, "_basket_peak_pips"):
                 self._basket_peak_pips = {}
             if not hasattr(self, "_burst_trailing_state"):
                 self._burst_trailing_state = {}
+            # G2 — registre throttle
+            if not hasattr(self, "_last_trail_update_ms"):
+                self._last_trail_update_ms = {}
+            # H — reentrancy lock set
+            if not hasattr(self, "_closing_baskets"):
+                self._closing_baskets = set()
+            # J — cooldown map
+            if not hasattr(self, "_cooldown_until"):
+                self._cooldown_until = {}
+            # O1 — registres stop-floor anti-régression
+            if not hasattr(self, "_basket_sl_floor_buy"):
+                self._basket_sl_floor_buy = {}  # floor pour BUY
+            if not hasattr(self, "_basket_sl_ceiling_sell"):
+                self._basket_sl_ceiling_sell = {}  # ceiling pour SELL
 
-            import re
+            import re, time
+            from datetime import datetime
 
+            # ---------- Helpers ----------
             def _v(obj, key, default=None):
                 if isinstance(obj, dict):
                     return obj.get(key, default)
@@ -4608,13 +5656,157 @@ class TradeExecutor:
                         return None
                 return None
 
+            # single-master: expected=1 si activé
+            def _expected_count_single_master_default():
+                try:
+                    return bool(
+                        self.config_manager.get("burst_single_master.enabled", False)
+                    )
+                except Exception:
+                    return False
+
+            # F/H/J/K — fermer un panier au marché (avec lock, cooldown, budget latence)
+            def _close_basket(basket_id, pos_list) -> bool:
+                # H: reentrancy lock
+                if basket_id in self._closing_baskets:
+                    self.logger.debug(
+                        f"[KILL] déjà en fermeture basket={basket_id} — ignore."
+                    )
+                    return False
+                self._closing_baskets.add(basket_id)
+
+                # K1 — budget de latence (ms)
+                try:
+                    max_close_ms = int(
+                        self.config_manager.get(
+                            "dynamic_trailing.max_latency_ms_on_close", 0
+                        )
+                        or 0
+                    )
+                except Exception:
+                    max_close_ms = 0
+                start_ms = int(time.time() * 1000)
+
+                closed_any = False
+                sym_for_cooldown = None
+                try:
+                    tick_cache = {}
+                    for p in pos_list:
+                        sym = _v(p, "symbol")
+                        if not sym:
+                            continue
+                        sym_for_cooldown = sym
+                        if sym not in tick_cache:
+                            tick_cache[sym] = mt5.symbol_info_tick(sym)
+                        tick = tick_cache[sym]
+
+                        # K2 — respect du budget de latence
+                        if max_close_ms > 0:
+                            now_ms = int(time.time() * 1000)
+                            elapsed = now_ms - start_ms
+                            if elapsed >= max_close_ms:
+                                remaining = sum(
+                                    1
+                                    for x in pos_list
+                                    if (_safe_float(_v(x, "volume"), 0) or 0) > 0
+                                )
+                                self.logger.warning(
+                                    f"[KILL] {basket_id} budget {elapsed}ms ≥ {max_close_ms}ms → ABORT fermeture (reste ~{remaining} tickets)."
+                                )
+                                break
+
+                        pos_type = _v(p, "type")
+                        vol = _safe_float(_v(p, "volume"), None)
+                        ticket = int(_v(p, "ticket"))
+                        if vol is None or vol <= 0:
+                            continue
+
+                        # BUY -> SELL (close), SELL -> BUY (close)
+                        order_type = (
+                            getattr(mt5, "ORDER_TYPE_SELL", 1)
+                            if pos_type == getattr(mt5, "ORDER_TYPE_BUY", 0)
+                            else getattr(mt5, "ORDER_TYPE_BUY", 0)
+                        )
+                        price = _safe_float(
+                            getattr(
+                                tick,
+                                (
+                                    "ask"
+                                    if order_type == getattr(mt5, "ORDER_TYPE_BUY", 0)
+                                    else "bid"
+                                ),
+                                None,
+                            ),
+                            None,
+                        )
+
+                        req = {
+                            "action": getattr(mt5, "TRADE_ACTION_DEAL", 1),
+                            "symbol": sym,
+                            "position": ticket,
+                            "type": order_type,
+                            "volume": vol,
+                            "price": price,
+                            "deviation": 20,
+                            "magic": _v(p, "magic"),
+                            "comment": f"burst_close|basket={basket_id}",
+                        }
+                        result = self.mt5_connector.order_send(req)
+                        if result and getattr(result, "retcode", None) == getattr(
+                            mt5, "TRADE_RETCODE_DONE", 10009
+                        ):
+                            closed_any = True
+                            self.logger.warning(
+                                f"[KILL] Close ticket={ticket} basket={basket_id} OK"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"[KILL] ❌ Close ticket={ticket} basket={basket_id} retcode={getattr(result,'retcode','N/A')}"
+                            )
+
+                    # J — cooldown après fermeture du panier
+                    if closed_any and sym_for_cooldown:
+                        try:
+                            cd = float(
+                                self.config_manager.get("cooldown_after_exit_s", 0)
+                                or 0.0
+                            )
+                            if cd <= 0:
+                                cd = float(
+                                    self.config_manager.get(
+                                        "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                        0,
+                                    )
+                                    or 0.0
+                                )
+                            if cd > 0:
+                                until = time.time() + cd
+                                self._cooldown_until[str(sym_for_cooldown).upper()] = (
+                                    until
+                                )
+                                self.logger.info(
+                                    f"[COOLDOWN] {str(sym_for_cooldown).upper()} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
+                                )
+                        except Exception as _e:
+                            self.logger.warning(f"[COOLDOWN] set KO: {_e}")
+                except Exception as _e:
+                    self.logger.error(
+                        f"[KILL] Erreur close basket={basket_id}: {_e}", exc_info=True
+                    )
+                finally:
+                    # H2 — libération du lock + O4 purge des bornes
+                    self._closing_baskets.discard(basket_id)
+                    self._basket_sl_floor_buy.pop(basket_id, None)
+                    self._basket_sl_ceiling_sell.pop(basket_id, None)
+                return closed_any
+
             # 1) Regrouper par basket_id
             baskets = {}
             for p in positions:
                 bid = _extract_basket_id(p)
                 baskets.setdefault(bid, []).append(p)
 
-            # 2) Pour chaque panier, calculer le PnL panier et pousser les SL par ticket
+            # 2) Parcours des paniers
             for basket_id, pos_list in baskets.items():
                 if not pos_list:
                     continue
@@ -4631,7 +5823,7 @@ class TradeExecutor:
                 point = _safe_float(getattr(si, "point", None), 0.0001) or 0.0001
                 pip_size = _pip_size_from(si)
 
-                # current price de référence panier (tick unique)
+                # current price
                 try:
                     tick = mt5.symbol_info_tick(symbol)
                 except Exception:
@@ -4639,7 +5831,7 @@ class TradeExecutor:
                 if not tick:
                     continue
 
-                # direction (0=BUY, 1=SELL)
+                # direction
                 typ0 = _v(pos_list[0], "type", None)
                 direction = (
                     "BUY" if typ0 == getattr(mt5, "ORDER_TYPE_BUY", 0) else "SELL"
@@ -4651,12 +5843,11 @@ class TradeExecutor:
                     else getattr(tick, "ask", None)
                 )
                 if ref_price is None:
-                    # fallback par position si besoin
                     ref_price = _safe_float(_v(pos_list[0], "price_current"), None)
                 if ref_price is None:
                     continue
 
-                # PnL panier en pips (moyenne des prix d'entrée vs prix courant)
+                # PnL panier (pips)
                 entries = [_safe_float(_v(p, "price_open")) for p in pos_list]
                 entries = [x for x in entries if x is not None]
                 if not entries:
@@ -4668,10 +5859,7 @@ class TradeExecutor:
                     else ((avg_entry - ref_price) / pip_size)
                 )
 
-                # Lire config trailing (ordre de priorité):
-                #  a) état panier calculé (monitor_burst_baskets) : self._burst_trailing_state[basket_id]
-                #  b) meta du ticket dans self._open_positions[ticket]['_meta']['trailing']
-                #  c) défauts (trigger=10, distance=5)
+                # trailing config (priorité: état partagé -> meta ticket -> défauts)
                 trail = self._burst_trailing_state.get(basket_id) or {}
                 trigger_pips = _safe_float(trail.get("trigger"), None) or _safe_float(
                     trail.get("trigger_pips"), None
@@ -4679,9 +5867,7 @@ class TradeExecutor:
                 distance_pips = _safe_float(trail.get("distance"), None) or _safe_float(
                     trail.get("distance_pips"), None
                 )
-
                 if trigger_pips is None or distance_pips is None:
-                    # prendre depuis le premier ticket connu dans _open_positions
                     first_ticket = _v(pos_list[0], "ticket")
                     trailing_cfg = None
                     if hasattr(self, "_open_positions"):
@@ -4704,37 +5890,136 @@ class TradeExecutor:
                         trigger_pips = 10.0
                         distance_pips = 5.0
 
-                # Optionnel : n'armer que quand le panier est "plein"
+                # Gate d’armement (min_hold_ms) — support 2 emplacements
+                try:
+                    _mh_dyn = self.config_manager.get(
+                        "dynamic_trailing.min_hold_ms", None
+                    )
+                    if _mh_dyn is None:
+                        _mh_dyn = self.config_manager.get(
+                            "burst_single_master.min_hold_ms", 0
+                        )
+                    min_hold_ms = int(_mh_dyn or 0)
+                except Exception:
+                    min_hold_ms = 0
+
+                # Âge du panier (ms)
+                age_ms = 0.0
+                try:
+                    ts_list = []
+                    for p in pos_list:
+                        tmsc = _safe_float(_v(p, "time_msc"))
+                        if tmsc:
+                            ts_list.append(tmsc)
+                            continue
+                        tsec = _safe_float(_v(p, "time"))
+                        if tsec:
+                            ts_list.append(float(tsec) * 1000.0)
+                            continue
+                        iso = _v(p, "open_time")
+                        if iso:
+                            try:
+                                ts_list.append(
+                                    datetime.fromisoformat(str(iso)).timestamp()
+                                    * 1000.0
+                                )
+                            except Exception:
+                                pass
+                    if ts_list:
+                        age_ms = max(0.0, time.time() * 1000.0 - min(ts_list))
+                except Exception:
+                    pass
+
+                # Panier "plein" (info)
                 exp_n = _expected_from_comment(pos_list[0])
+                if exp_n is None and _expected_count_single_master_default():
+                    exp_n = 1
                 is_full = exp_n is not None and len(pos_list) >= exp_n
 
-                # Armer si seuil atteint
-                if pnl_pips >= float(trigger_pips):
+                # Kill-switch SPREAD (si armé)
+                try:
+                    max_spread_pts = float(
+                        self.config_manager.get(
+                            "dynamic_trailing.max_spread_points_when_armed", 0
+                        )
+                        or 0
+                    )
+                except Exception:
+                    max_spread_pts = 0.0
+                if max_spread_pts > 0 and self._basket_trail_armed.get(
+                    basket_id, False
+                ):
+                    try:
+                        bid = _safe_float(getattr(tick, "bid", None), None)
+                        ask = _safe_float(getattr(tick, "ask", None), None)
+                        if bid is not None and ask is not None and point > 0:
+                            spread_pts = (ask - bid) / point
+                            if spread_pts >= max_spread_pts:
+                                self.logger.warning(
+                                    f"[KILL] {basket_id} spread {spread_pts:.1f} ≥ {max_spread_pts:.1f} pts → CLOSE"
+                                )
+                                if _close_basket(basket_id, pos_list):
+                                    continue
+                    except Exception:
+                        pass
+
+                # Armement (seuil + délai)
+                if pnl_pips >= float(trigger_pips) and (age_ms >= float(min_hold_ms)):
                     if not self._basket_trail_armed.get(basket_id, False):
                         self._basket_trail_armed[basket_id] = True
                         self._basket_peak_pips[basket_id] = pnl_pips
                         self.logger.info(
-                            f"[TRAIL-PANIER] ARMÉ basket={basket_id} @ {pnl_pips:.1f}p (trigger={float(trigger_pips):.1f}p, full={is_full})"
+                            f"[TRAIL-PANIER] ARMÉ basket={basket_id} @ {pnl_pips:.1f}p (trigger={float(trigger_pips):.1f}p, full={is_full}, age={age_ms:.0f}ms)"
                         )
                     else:
-                        # Mettre à jour le pic si progression
                         if pnl_pips > float(
                             self._basket_peak_pips.get(basket_id, pnl_pips)
                         ):
                             self._basket_peak_pips[basket_id] = pnl_pips
 
                 if not self._basket_trail_armed.get(basket_id, False):
-                    # pas armé → rien à faire pour ce panier
-                    continue
+                    continue  # pas armé
 
+                # Stop cible relatif à l'ENTRY
                 peak = float(self._basket_peak_pips.get(basket_id, pnl_pips))
-                # Niveau stop en pips relatif à l'ENTRY: target_stop = max(peak - distance, 0)
                 target_stop_pips = peak - float(distance_pips)
                 if target_stop_pips < 0:
-                    # protection : ne pas remonter au-dessus de l'entry (BUY) / en dessous (SELL) tant que gain < distance
                     target_stop_pips = 0.0
 
-                # stops_level broker (distance min depuis le PRIX COURANT)
+                # N — quantification en marches
+                try:
+                    backoff_step = float(
+                        self.config_manager.get(
+                            "dynamic_trailing.backoff_step_points", 0
+                        )
+                        or 0.0
+                    )
+                except Exception:
+                    backoff_step = 0.0
+                if backoff_step > 0.0:
+                    target_stop_pips = (
+                        int(target_stop_pips / backoff_step) * backoff_step
+                    )
+
+                # Kill-switch PULLBACK max
+                try:
+                    max_pullback_pts = float(
+                        self.config_manager.get(
+                            "dynamic_trailing.max_pullback_points", 0
+                        )
+                        or 0
+                    )
+                except Exception:
+                    max_pullback_pts = 0.0
+                dd = peak - pnl_pips
+                if max_pullback_pts > 0 and dd >= max_pullback_pts and pnl_pips > 0.0:
+                    self.logger.warning(
+                        f"[KILL] {basket_id} pullback {dd:.1f}p ≥ {max_pullback_pts:.1f}p → CLOSE"
+                    )
+                    if _close_basket(basket_id, pos_list):
+                        continue
+
+                # stops_level broker
                 stops_level_points = _safe_float(
                     getattr(si, "trade_stops_level", None), None
                 )
@@ -4744,74 +6029,161 @@ class TradeExecutor:
                     )
                 min_dist_price = (stops_level_points or 0.0) * point
 
-                # Calcul et envoi des SL par ticket
-                updates = 0
-                for p in pos_list:
-                    entry = _safe_float(_v(p, "price_open"))
-                    if entry is None:
-                        continue
-
-                    # SL théorique par ticket (au niveau panier)
-                    if direction == "BUY":
-                        desired_sl = entry + target_stop_pips * pip_size
-                        # respect stops_level: SL <= Bid - min_dist
-                        lim = (getattr(tick, "bid", None) or ref_price) - min_dist_price
-                        if lim is not None:
-                            desired_sl = min(desired_sl, lim)
-                        # ne jamais dépasser le prix courant
-                        desired_sl = min(desired_sl, ref_price)
-                        # SL doit rester < entry pour rester "garanti" ? Ici on autorise >= entry si peak>distance
-                        # mais jamais > ref_price
-                    else:  # SELL
-                        desired_sl = entry - target_stop_pips * pip_size
-                        # respect stops_level: SL >= Ask + min_dist
-                        lim = (getattr(tick, "ask", None) or ref_price) + min_dist_price
-                        if lim is not None:
-                            desired_sl = max(desired_sl, lim)
-                        # ne jamais dépasser le prix courant
-                        desired_sl = max(desired_sl, ref_price)
-
-                    if desired_sl is None:
-                        continue
-
-                    desired_sl = round(float(desired_sl), digits)
-                    current_sl = _safe_float(_v(p, "sl"), None)
-
-                    # n'envoyer que si on améliore la protection
-                    improve = (
-                        direction == "BUY"
-                        and (current_sl is None or desired_sl > current_sl)
-                    ) or (
-                        direction == "SELL"
-                        and (current_sl is None or desired_sl < current_sl)
+                # Breakeven Lock
+                try:
+                    be_lock_pts = float(
+                        self.config_manager.get(
+                            "dynamic_trailing.breakeven_lock_points", 0.0
+                        )
+                        or 0.0
                     )
-                    if not improve:
-                        continue
+                except Exception:
+                    be_lock_pts = 0.0
+                be_lock_price = None
+                if be_lock_pts > 0.0:
+                    be_lock_price = (
+                        (avg_entry + be_lock_pts * pip_size)
+                        if direction == "BUY"
+                        else (avg_entry - be_lock_pts * pip_size)
+                    )
 
-                    sl_update = {
-                        "action": getattr(mt5, "TRADE_ACTION_SLTP", 3),
-                        "symbol": symbol,
-                        "position": int(_v(p, "ticket")),
-                        "sl": desired_sl,
-                        "tp": _safe_float(_v(p, "tp"), 0.0) or 0.0,
-                    }
-                    result = self.mt5_connector.order_send(sl_update)
-                    if result and getattr(result, "retcode", None) == getattr(
-                        mt5, "TRADE_RETCODE_DONE", 10009
-                    ):
-                        updates += 1
+                # G2 — throttle
+                try:
+                    throttle_ms = int(
+                        self.config_manager.get(
+                            "dynamic_trailing.trail_update_throttle_ms", 250
+                        )
+                        or 250
+                    )
+                except Exception:
+                    throttle_ms = 250
+                now_ms = int(time.time() * 1000)
+                last_ms = int(self._last_trail_update_ms.get(basket_id, 0) or 0)
+                allow_update = (throttle_ms <= 0) or ((now_ms - last_ms) >= throttle_ms)
+
+                updates = 0
+                updated_tickets = []
+                failed_tickets = []
+
+                if allow_update:
+                    # Calcul et envoi des SL par ticket
+                    for p in pos_list:
+                        entry = _safe_float(_v(p, "price_open"))
+                        if entry is None:
+                            continue
+
+                        if direction == "BUY":
+                            desired_sl = entry + target_stop_pips * pip_size
+                            # respect stops_level: SL <= Bid - min_dist
+                            lim = (
+                                getattr(tick, "bid", None) or ref_price
+                            ) - min_dist_price
+                            if lim is not None:
+                                desired_sl = min(desired_sl, lim)
+                            # ne jamais dépasser le prix courant
+                            desired_sl = min(desired_sl, ref_price)
+                            # clamp BE lock
+                            if be_lock_price is not None:
+                                desired_sl = max(desired_sl, be_lock_price)
+                                desired_sl = min(desired_sl, ref_price)
+                            # O2 — floor anti-régression (BUY)
+                            floor = self._basket_sl_floor_buy.get(basket_id)
+                            if floor is not None:
+                                desired_sl = max(desired_sl, float(floor))
+                        else:  # SELL
+                            desired_sl = entry - target_stop_pips * pip_size
+                            # respect stops_level: SL >= Ask + min_dist
+                            lim = (
+                                getattr(tick, "ask", None) or ref_price
+                            ) + min_dist_price
+                            if lim is not None:
+                                desired_sl = max(desired_sl, lim)
+                            # ne jamais dépasser le prix courant
+                            desired_sl = max(desired_sl, ref_price)
+                            # clamp BE lock
+                            if be_lock_price is not None:
+                                desired_sl = min(desired_sl, be_lock_price)
+                                desired_sl = max(desired_sl, ref_price)
+                            # O2 — ceiling anti-régression (SELL)
+                            ceiling = self._basket_sl_ceiling_sell.get(basket_id)
+                            if ceiling is not None:
+                                desired_sl = min(desired_sl, float(ceiling))
+
+                        desired_sl = round(float(desired_sl), digits)
+                        current_sl = _safe_float(_v(p, "sl"), None)
+
+                        improve = (
+                            direction == "BUY"
+                            and (current_sl is None or desired_sl > current_sl)
+                        ) or (
+                            direction == "SELL"
+                            and (current_sl is None or desired_sl < current_sl)
+                        )
+                        if not improve:
+                            continue
+
+                        sl_update = {
+                            "action": getattr(mt5, "TRADE_ACTION_SLTP", 3),
+                            "symbol": symbol,
+                            "position": int(_v(p, "ticket")),
+                            "sl": desired_sl,
+                            "tp": _safe_float(_v(p, "tp"), 0.0) or 0.0,
+                        }
+                        result = self.mt5_connector.order_send(sl_update)
+                        if result and getattr(result, "retcode", None) == getattr(
+                            mt5, "TRADE_RETCODE_DONE", 10009
+                        ):
+                            updates += 1
+                            ticket_id = int(_v(p, "ticket"))
+                            updated_tickets.append((ticket_id, desired_sl))
+                        else:
+                            ticket_id = int(_v(p, "ticket"))
+                            failed_tickets.append(ticket_id)
+
+                    # L3 — log agrégé + MAJ throttle
+                    if updates > 0:
+                        self._last_trail_update_ms[basket_id] = now_ms
+
+                    if updates > 0 and updated_tickets:
+                        tickets_str = ",".join(
+                            str(tk) for tk, _ in updated_tickets[:10]
+                        )
+                        sl_preview = updated_tickets[0][1]
                         self.logger.info(
-                            f"[TRAIL-PANIER] SL {symbol} ticket={_v(p,'ticket')} -> {desired_sl} "
-                            f"(peak={peak:.1f}p, target={target_stop_pips:.1f}p, pnl={pnl_pips:.1f}p)"
-                        )
-                    else:
-                        self.logger.warning(
-                            f"[TRAIL-PANIER] ❌ Update SL {symbol} ticket={_v(p,'ticket')} échec "
-                            f"retcode={getattr(result,'retcode','N/A')}"
+                            f"[TRAIL-PANIER] {symbol} basket={basket_id} UPDATE_SL x{updates} "
+                            f"tickets=[{tickets_str}{'...' if len(updated_tickets) > 10 else ''}] -> SL≈{sl_preview} "
+                            f"(peak={peak:.1f}p target={target_stop_pips:.1f}p pnl={pnl_pips:.1f}p)"
                         )
 
-                if updates == 0:
-                    # Rien n'a été modifié, log debug fin
+                        # O3 — mise à jour des bornes anti-régression par panier
+                        new_values = [float(slv) for _, slv in updated_tickets]
+                        if direction == "BUY":
+                            prev = self._basket_sl_floor_buy.get(basket_id)
+                            new_floor = (
+                                max(new_values)
+                                if prev is None
+                                else max(prev, max(new_values))
+                            )
+                            self._basket_sl_floor_buy[basket_id] = new_floor
+                        else:
+                            prev = self._basket_sl_ceiling_sell.get(basket_id)
+                            new_ceiling = (
+                                min(new_values)
+                                if prev is None
+                                else min(prev, min(new_values))
+                            )
+                            self._basket_sl_ceiling_sell[basket_id] = new_ceiling
+
+                    if failed_tickets:
+                        self.logger.warning(
+                            f"[TRAIL-PANIER] {symbol} basket={basket_id} ❌ SL FAIL tickets={failed_tickets}"
+                        )
+                else:
+                    self.logger.debug(
+                        f"[TRAIL-PANIER] throttle {basket_id} ({now_ms - last_ms}ms < {throttle_ms}ms) — skip update SL."
+                    )
+
+                if updates == 0 and allow_update:
                     self.logger.debug(
                         f"[TRAIL-PANIER] Aucune amélioration SL requise (basket={basket_id}, pnl={pnl_pips:.1f}p, peak={peak:.1f}p)."
                     )
@@ -4855,16 +6227,22 @@ class TradeExecutor:
         except Exception as e:
             self.logger.error(f"Erreur _modify_sl: {e}", exc_info=True)
 
-    def execute_order(self, request: dict) -> dict:
+    def execute_order(self, request: dict, is_dry_run: bool = False) -> dict:
         """
-        Envoie une requête d'ordre MT5 via MT5Connector et retourne
-        un résumé unifié de l'exécution.
-        - Ne lit PAS sl/tp depuis OrderSendResult (non exposés par MT5 Python)
-        -> on reprend sl/tp du 'request' ou on les réconcilie ensuite.
-        - Tolère les variations de champs dans OrderSendResult.
-        - Journalise l'exécution via AuditLogger si disponible.
+        Envoie une requête d'ordre MT5 via MT5Connector et retourne un résumé unifié.
+        Améliorations :
+        - Retries slippage/requote (PRICE_CHANGED, REQUOTE, OFF_QUOTES) :
+            * refresh du prix marché
+            * augmentation progressive de la déviation (capée)
+        - TP neutralisé pour burst_scalping (trailing-only)
+        - Normalisation 'comment' court & ASCII
+        - SL différé si stops/freeze ne permettent pas un SL immédiat (puis attach post-fill)
+        - Feedback propre (placed/filled/failed) via feedback_pipeline + _feedback_safe
         """
-        # --- Sécurité connexion (aucun fallback "simulation") ---
+        import time
+        from datetime import datetime, timezone as _tz
+
+        # ---------- Connexion ----------
         try:
             connected = getattr(self.mt5_connector, "is_connected", False)
             if callable(connected):
@@ -4878,11 +6256,13 @@ class TradeExecutor:
                 )
         except Exception:
             connected = False
-
         if not connected:
             raise TradeExecutionError("MT5 non connecté: envoi interdit.")
 
-        # --- Requêtes minimales ---
+        # ---------- Pré-validations ----------
+        if not isinstance(request, dict):
+            raise TradeExecutionError("Requête MT5 invalide (type non-dict).")
+
         symbol = request.get("symbol")
         if not symbol:
             raise TradeExecutionError("Requête MT5 invalide: 'symbol' manquant.")
@@ -4893,24 +6273,26 @@ class TradeExecutor:
         if vol <= 0:
             raise TradeExecutionError("Requête MT5 invalide: 'volume' doit être > 0.")
 
-        # --- Vérification du nombre de positions ouvertes (limite broker) ---
+        # Limite (défensive) nb positions sur ce symbole
         try:
-            open_positions = self.mt5_connector.get_positions(symbol=symbol)
-            if (
-                open_positions and len(open_positions) >= 200
-            ):  # adapte la limite si besoin
-                msg = f"[EXECUTOR] ❌ Limite de positions atteinte pour {symbol} ({len(open_positions)} ouvertes)."
+            open_positions = self.mt5_connector.get_positions(symbol=symbol) or []
+            if len(open_positions) >= 200:
+                msg = f"[EXECUTOR] ❌ Trop de positions ouvertes pour {symbol} ({len(open_positions)})."
                 self.logger.error(msg)
                 raise TradeExecutionError(msg)
         except Exception as e:
-            self.logger.warning(
-                f"[EXECUTOR] Impossible de vérifier le nombre de positions pour {symbol}: {e}"
-            )
+            self.logger.warning(f"[EXECUTOR] Check nb positions KO ({symbol}): {e}")
 
-        # --- Résolution des constantes MT5 depuis le connecteur (pas depuis self) ---
-        mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
+        # ---------- MT5 & constantes ----------
+        mt5c = self.mt5_connector
+        mt5 = getattr(mt5c, "mt5", None) or getattr(self, "mt5", None)
         if mt5 is None:
-            raise TradeExecutionError("MT5 API indisponible sur le connecteur.")
+            try:
+                import MetaTrader5 as _mt5  # type: ignore
+
+                mt5 = _mt5
+            except Exception:
+                raise TradeExecutionError("MT5 API indisponible sur le connecteur.")
 
         def _const(group: str, key: str, default_name: str):
             try:
@@ -4924,22 +6306,33 @@ class TradeExecutor:
             except Exception:
                 return getattr(mt5, default_name, None)
 
-        # --- Compatibilité retcodes (selon version MT5) ---
-        TRADE_RETCODE_NO_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
-        TRADE_RETCODE_CONNECTION = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
-        TRADE_RETCODE_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
+        # Codes succès
+        RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")
+        RET_PLACED = _const("trade_retcodes", "PLACED", "TRADE_RETCODE_PLACED")
+        RET_DONE_PARTIAL = _const(
+            "trade_retcodes", "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"
+        )
+        OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
+
+        # Codes connexion
+        RET_NO_CONN = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
+        RET_CONN = getattr(mt5, "TRADE_RETCODE_CONNECTION", None)
+        RET_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
         CONNECTION_ERROR_CODES = {
-            code
-            for code in (
-                TRADE_RETCODE_NO_CONNECTION,
-                TRADE_RETCODE_CONNECTION,
-                TRADE_RETCODE_TIMEOUT,
-            )
-            if code is not None
+            c for c in (RET_NO_CONN, RET_CONN, RET_TIMEOUT) if c is not None
         }
 
-        # --- Déterminer l'action (BUY/SELL) à partir du type ---
-        order_type = request.get("type")
+        # Codes "retryables" (slippage/requote/off quotes/price changed)
+        RET_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
+        RET_PRICE_CHANGED = getattr(mt5, "TRADE_RETCODE_PRICE_CHANGED", None)
+        RET_OFF_QUOTES = getattr(mt5, "TRADE_RETCODE_OFF_QUOTES", None)
+        RET_REJECT = getattr(mt5, "TRADE_RETCODE_REJECT", None)  # parfois réseau
+        RETRYABLE_CODES = {
+            c
+            for c in (RET_REQUOTE, RET_PRICE_CHANGED, RET_OFF_QUOTES, RET_REJECT)
+            if c is not None
+        }
+
         ORDER_TYPE_BUY = _const("order_types", "BUY", "ORDER_TYPE_BUY")
         ORDER_TYPE_SELL = _const("order_types", "SELL", "ORDER_TYPE_SELL")
         ORDER_TYPE_SELL_LIMIT = _const(
@@ -4949,50 +6342,50 @@ class TradeExecutor:
             "order_types", "SELL_STOP", "ORDER_TYPE_SELL_STOP"
         )
 
-        try:
-            ot_int = int(order_type)
-        except Exception:
-            ot_int = None
-        action = "BUY"
-        if ot_int in (ORDER_TYPE_SELL, ORDER_TYPE_SELL_LIMIT, ORDER_TYPE_SELL_STOP):
-            action = "SELL"
+        def _retcode_name(code: int | None) -> str | None:
+            if code is None:
+                return None
+            try:
+                for k in dir(mt5):
+                    if k.startswith("TRADE_RETCODE_") and getattr(mt5, k, None) == code:
+                        return k
+            except Exception:
+                pass
+            return None
 
-        # --- Contexte exécution (pour audit si dispo) ---
-        audit_ctx = getattr(self, "execution_context", {}) or {}
+        def _side_from_req(req: dict) -> str:
+            t = req.get("type")
+            try:
+                if t == ORDER_TYPE_BUY:
+                    return "BUY"
+                if t == ORDER_TYPE_SELL:
+                    return "SELL"
+            except Exception:
+                pass
+            # fallback conservateur (sera corrigé par le prix rafraîchi)
+            return "BUY"
 
-        # === Règles spéciales Burst Scalping ===
-        # -> On neutralise le TP (0.0 = pas de TP) car sorties exclusivement au trailing-stop
+        # ---------- Burst : neutraliser TP ----------
         if (
             request.get("is_burst_trade", False)
             or str(request.get("rule_name", "")).lower() == "burst_scalping"
         ):
             request["tp"] = 0.0
-            old_comment = request.get("comment", "")
-            request["comment"] = f"{old_comment} | BURST"
-            if request.get("early_entry_allowed", False):
-                request["comment"] = f"{request['comment']} | EARLY"
+            # on laisse le commentaire se faire normaliser juste après
             self.logger.info(
-                f"[EXECUTOR] 🎯 Burst trade → {symbol} (action={action}), TP supprimé (trailing attendu)."
+                f"[EXECUTOR] 🎯 Burst trade → {symbol} (TP neutralisé, trailing attendu)."
             )
 
-        # --- Normaliser/sécuriser le champ 'comment' (ASCII court, ≤31 chars) ---
+        # ---------- Commentaire MT5 sûr ----------
         def _normalize_mt5_comment(req: dict) -> str:
             import re
 
             raw = str(req.get("comment") or "")
             bid = str(req.get("basket_id") or "")
-
             if not bid and raw:
                 m = re.search(r"basket=([A-Za-z0-9_]+)", raw)
                 if m:
                     bid = m.group(1)
-                else:
-                    m2 = re.search(
-                        r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", raw, re.IGNORECASE
-                    )
-                    if m2:
-                        bid = m2.group(1)
-
             if bid:
                 raw = bid
             elif not raw:
@@ -5005,365 +6398,293 @@ class TradeExecutor:
                     )
                     else (sym or "order")
                 )
-
             raw = raw.replace("|", "").replace(" ", "")
             raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
-            return raw[:31] if len(raw) > 31 else raw
+            return raw[:31]
 
-        safe_comment_before = str(request.get("comment", ""))
         request["comment"] = _normalize_mt5_comment(request)
         if request.get("tp", None) is None:
             request["tp"] = 0.0  # MT5: 0.0 = pas de TP
 
-        self.logger.debug(
-            f"[EXECUTOR][COMMENT] '{safe_comment_before}' -> '{request.get('comment')}'"
-        )
-
-        # --- Normalisation SL/TP pour éviter "Invalid stops" (10016) ---
+        # ---------- Normalisation SL/TP & SL différé si trop proche ----------
+        side = _side_from_req(request)
+        info = None
         try:
-            info = None
-            if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
-                info = self.mt5_connector.mt5.symbol_info(symbol)
-            if not info and hasattr(self, "mt5") and self.mt5:
+            info = (
+                self.mt5_connector.mt5.symbol_info(symbol)
+                if getattr(self.mt5_connector, "mt5", None)
+                else None
+            )
+            if not info and getattr(self, "mt5", None):
                 info = self.mt5.symbol_info(symbol)
+        except Exception:
+            info = None
 
-            point = getattr(info, "point", None) or 0.0
-            digits = getattr(info, "digits", None) or 0
-            tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
-            stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)
-            freeze_level_pts = int(getattr(info, "trade_freeze_level", 0) or 0)
-            spread_pts = int(getattr(info, "spread", 0) or 0)
-            one_tick_pts = int(round((tick_size or point) / (point or 1.0))) or 1
-            _min_buf_pts = (
-                max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
-            )
+        point = getattr(info, "point", None) or 0.0
+        digits = int(getattr(info, "digits", None) or 0)
+        tick_size = getattr(info, "trade_tick_size", None) or point or 0.0
+        stops_level_pts = int(getattr(info, "trade_stops_level", 0) or 0)
+        freeze_level_pts = int(getattr(info, "trade_freeze_level", 0) or 0)
+        spread_pts = int(getattr(info, "spread", 0) or 0)
+        one_tick_pts = int(round((tick_size or point) / (point or 1.0))) or 1
+        min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
 
-            def _get_market_price(sym: str, side: str) -> float:
-                px = request.get("price")
-                if px:
-                    return float(px)
-                m = None
-                if hasattr(self.mt5_connector, "mt5") and self.mt5_connector.mt5:
+        def _get_market_price(sym: str, s: str) -> float:
+            px = request.get("price")
+            if px:
+                return float(px)
+            m = None
+            try:
+                if getattr(self.mt5_connector, "mt5", None):
                     m = self.mt5_connector.mt5.symbol_info_tick(sym)
-                if not m and hasattr(self, "mt5") and self.mt5:
+                if not m and getattr(self, "mt5", None):
                     m = self.mt5.symbol_info_tick(sym)
-                if not m:
-                    return 0.0
-                bid = getattr(m, "bid", None)
-                ask = getattr(m, "ask", None)
-                if side == "BUY" and ask is not None:
-                    return float(ask)
-                if side == "SELL" and bid is not None:
-                    return float(bid)
-                return float(ask or bid or 0.0)
-
-            def _round_to_tick(px: float) -> float:
-                if not tick_size or tick_size <= 0:
-                    return round(float(px), int(digits))
-                steps = round(float(px) / tick_size)
-                return round(steps * tick_size, int(digits))
-
-            def _ensure_min_buffer(sl_target: float, px_ref: float, side: str):
-                if px_ref is None or point <= 0:
-                    return True, sl_target
-                dist_pts = abs(px_ref - sl_target) / point
-                need_defer = dist_pts < float(_min_buf_pts)
-                if not need_defer:
-                    if side == "BUY" and sl_target >= px_ref:
-                        need_defer = True
-                    if side == "SELL" and sl_target <= px_ref:
-                        need_defer = True
-                return (not need_defer), _round_to_tick(sl_target)
-
-            sl = request.get("sl")
-            price = _get_market_price(symbol, action)
-
-            # ---------- SL avec gestion "defer" ----------
-            if sl is not None and price and point:
-                sl = float(sl)
-                if action == "BUY" and sl >= price:
-                    sl = price - (tick_size or point)
-                if action == "SELL" and sl <= price:
-                    sl = price + (tick_size or point)
-
-                ok_now, sl_ok = _ensure_min_buffer(sl, price, action)
-                if ok_now:
-                    request["sl"] = _round_to_tick(sl_ok)
-                else:
-                    request["_deferred_sl"] = _round_to_tick(sl_ok)
-                    request["sl"] = 0.0  # MT5: 0.0 = pas de SL à l'envoi
-
-            try:
-                _px_dbg = round(float(price), int(digits))
             except Exception:
-                _px_dbg = price
-            self.logger.info(
-                f"[EXECUTOR][STOPS] {symbol} action={action} price={_px_dbg} "
-                f"sl={request.get('sl')} tp={request.get('tp')} "
-                f"| stops={stops_level_pts} freeze={freeze_level_pts} spread={spread_pts} "
-                f"point={point} tick_size={tick_size}"
-            )
+                m = None
+            if not m:
+                return 0.0
+            bid = getattr(m, "bid", None)
+            ask = getattr(m, "ask", None)
+            if s == "BUY" and ask is not None:
+                return float(ask)
+            if s == "SELL" and bid is not None:
+                return float(bid)
+            return float(ask or bid or 0.0)
 
-        except Exception as _e:
-            self.logger.warning(f"[EXECUTOR][STOPS] Normalisation SL/TP ignorée: {_e}")
-            try:
-                c = str(request.get("comment", "") or "")[:31]
-                request["comment"] = c.encode("ascii", "ignore").decode("ascii")
-            except Exception:
-                request["comment"] = "burst"
+        def _round_to_tick(px: float) -> float:
+            if not tick_size or tick_size <= 0:
+                return round(float(px), digits)
+            steps = round(float(px) / tick_size)
+            return round(steps * tick_size, digits)
 
+        def _ensure_min_buffer(sl_target: float, px_ref: float, s: str):
+            if px_ref is None or point <= 0:
+                return True, sl_target
+            dist_pts = abs(px_ref - sl_target) / point
+            need_defer = dist_pts < float(min_buf_pts)
+            if not need_defer:
+                if s == "BUY" and sl_target >= px_ref:
+                    need_defer = True
+                if s == "SELL" and sl_target <= px_ref:
+                    need_defer = True
+            return (not need_defer), _round_to_tick(sl_target)
+
+        price = _get_market_price(symbol, side)
+        sl = request.get("sl")
+
+        if sl is not None and price and point:
+            sl = float(sl)
+            if side == "BUY" and sl >= price:
+                sl = price - (tick_size or point)
+            if side == "SELL" and sl <= price:
+                sl = price + (tick_size or point)
+            ok_now, sl_ok = _ensure_min_buffer(sl, price, side)
+            if ok_now:
+                request["sl"] = _round_to_tick(sl_ok)
+            else:
+                request["_deferred_sl"] = _round_to_tick(sl_ok)
+                request["sl"] = 0.0  # MT5: pas de SL à l'envoi
+
+        # ---------- Params retry depuis la conf ----------
+        te_settings = self.config_manager.get("trade_executor_settings", {}) or {}
+        max_attempts = int(
+            te_settings.get("retry_attempts", 2) or 2
+        )  # nb de retries (en plus de la 1re tentative)
+        sleep_ms = int(te_settings.get("retry_sleep_ms", 150) or 150)
+        slip_step = int(te_settings.get("retry_slippage_increment_points", 5) or 5)
+        dev_cap = int(te_settings.get("max_deviation_points_cap", 150) or 150)
+
+        # digits pour arrondi du prix au retry
         try:
-            # --- Envoi via le connecteur (retry limité) ---
-            max_retries = 2
-            last_error = None
-            result = None
+            si = self.mt5_connector.get_symbol_info(symbol)
+            price_digits = int(getattr(si, "digits", digits) or digits)
+        except Exception:
+            price_digits = digits or 5
 
-            for attempt in range(max_retries):
-                try:
-                    result = self.mt5_connector.order_send(request)
-                except Exception as e:
-                    last_error = e
-                    self.logger.error(
-                        f"[EXECUTOR] Exception order_send tentative {attempt+1}/{max_retries}: {e}",
-                        exc_info=True,
-                    )
-                    continue
-
-                if (
-                    result
-                    and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE
-                ):
-                    break
-                else:
-                    retcode = getattr(result, "retcode", None)
-                    self.logger.warning(
-                        f"[EXECUTOR] Tentative {attempt+1}/{max_retries} échouée "
-                        f"(retcode={retcode}, comment={getattr(result,'comment','')})"
-                    )
-                    last_error = result
-
-            if not result or getattr(result, "retcode", None) != mt5.TRADE_RETCODE_DONE:
-                retcode = getattr(result, "retcode", None)
-                comment = getattr(result, "comment", "")
-                reason = "UNKNOWN"
-
-                TRADE_RETCODE_INVALID_STOPS = getattr(
-                    mt5, "TRADE_RETCODE_INVALID_STOPS", None
-                )
-                TRADE_RETCODE_INVALID_PRICE = getattr(
-                    mt5, "TRADE_RETCODE_INVALID_PRICE", None
-                )
-                TRADE_RETCODE_INVALID_VOLUME = getattr(
-                    mt5, "TRADE_RETCODE_INVALID_VOLUME", None
-                )
-                TRADE_RETCODE_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
-                TRADE_RETCODE_REJECT = getattr(mt5, "TRADE_RETCODE_REJECT", None)
-
-                if retcode in CONNECTION_ERROR_CODES:
-                    reason = "BROKER/NETWORK"
-                elif retcode in {
-                    TRADE_RETCODE_INVALID_STOPS,
-                    TRADE_RETCODE_INVALID_PRICE,
-                    TRADE_RETCODE_INVALID_VOLUME,
-                }:
-                    reason = "PARAMS"
-                elif retcode in {TRADE_RETCODE_REQUOTE, TRADE_RETCODE_REJECT}:
-                    reason = "MARKET"
-
-                if (retcode == TRADE_RETCODE_INVALID_STOPS) or (
-                    str(comment).lower().find("invalid stops") >= 0
-                ):
-                    try:
-                        info = None
-                        if (
-                            hasattr(self.mt5_connector, "mt5")
-                            and self.mt5_connector.mt5
-                        ):
-                            info = self.mt5_connector.mt5.symbol_info(symbol)
-                        if not info and hasattr(self, "mt5") and self.mt5:
-                            info = self.mt5.symbol_info(symbol)
-
-                        point = getattr(info, "point", None) or 0.0
-                        digits = getattr(info, "digits", None) or 0
-                        tick_size = (
-                            getattr(info, "trade_tick_size", None) or point or 0.0
-                        )
-                        stops_level_pts = int(
-                            getattr(info, "trade_stops_level", 0) or 0
-                        )
-
-                        def _get_market_price(sym: str, side: str) -> float:
-                            px = request.get("price")
-                            if px:
-                                return float(px)
-                            m = None
-                            if (
-                                hasattr(self.mt5_connector, "mt5")
-                                and self.mt5_connector.mt5
-                            ):
-                                m = self.mt5_connector.mt5.symbol_info_tick(sym)
-                            if not m and hasattr(self, "mt5") and self.mt5:
-                                m = self.mt5.symbol_info_tick(sym)
-                            if not m:
-                                return 0.0
-                            bid = getattr(m, "bid", None)
-                            ask = getattr(m, "ask", None)
-                            if side == "BUY" and ask is not None:
-                                return float(ask)
-                            if side == "SELL" and bid is not None:
-                                return float(bid)
-                            return float(ask or bid or 0.0)
-
-                        px = _get_market_price(symbol, action)
-                        sl = request.get("sl")
-                        tp = request.get("tp")
-
-                        def _pts(a, b):
-                            return (
-                                (abs(float(a) - float(b)) / (point or 1.0))
-                                if (a is not None and b is not None)
-                                else None
-                            )
-
-                        sl_pts = _pts(sl, px)
-                        tp_pts = _pts(tp, px)
-
-                        self.logger.error(
-                            "[EXECUTOR][INVALID_STOPS] symbol=%s action=%s price=%s sl=%s tp=%s | "
-                            "sl_pts=%s tp_pts=%s | stops_level_pts=%s point=%s tick_size=%s comment=%s",
-                            symbol,
-                            action,
-                            round(px, digits) if px else px,
-                            sl,
-                            tp,
-                            sl_pts,
-                            tp_pts,
-                            stops_level_pts,
-                            point,
-                            tick_size,
-                            comment,
-                        )
-                    except Exception as _e:
-                        self.logger.error(f"[EXECUTOR][INVALID_STOPS] diag error: {_e}")
-
-                msg = f"[EXECUTOR] ❌ Trade échoué [{reason}] (retcode={retcode}, comment={comment}, request={request})"
-                self.logger.error(msg)
-                raise TradeExecutionError(msg)
-
-            # --- Récupération sûre des champs renvoyés ---
-            retcode = getattr(result, "retcode", None)
-            comment = getattr(result, "comment", "")
-            order_id = getattr(result, "order", None)
-            deal_id = getattr(result, "deal", None)
-            result_price = getattr(result, "price", None)
-            result_volume = getattr(result, "volume", None)
-            request_id = getattr(result, "request_id", None)
-
-            RET_DONE = _const("trade_retcodes", "DONE", "TRADE_RETCODE_DONE")
-            RET_PLACED = _const("trade_retcodes", "PLACED", "TRADE_RETCODE_PLACED")
-            RET_DONE_PARTIAL = _const(
-                "trade_retcodes", "DONE_PARTIAL", "TRADE_RETCODE_DONE_PARTIAL"
-            )
-            ok_codes = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
-
-            retcode_str = ""
+        # dry-run
+        if is_dry_run:
+            self.logger.info(f"[DRY-RUN] MT5 request (non envoyée): {request}")
             try:
-                for k, v in (self.mt5_mappings.get("trade_retcodes", {}) or {}).items():
-                    if getattr(mt5, v, None) == retcode:
-                        retcode_str = k
-                        break
-                if not retcode_str:
-                    retcode_str = str(retcode)
-            except Exception:
-                retcode_str = str(retcode)
-
-            if retcode not in ok_codes:
-                if hasattr(self, "audit_logger"):
-                    try:
-                        self.audit_logger.log_trade_execution(
-                            {
-                                "status": "rejected",
-                                "error_code": retcode,
-                                "retcode_str": retcode_str,
-                                "symbol": symbol,
-                                "action": action,
-                                "order_type": order_type,
-                                "volume": request.get("volume"),
-                                "entry_price": request.get("price"),
-                                "sl_price": request.get("sl"),
-                                "tp_price": request.get("tp"),
-                                "spread_pips": request.get("meta_spread_pips"),
-                                "rr_projected": request.get("meta_rr_projected"),
-                                "strategy_type": request.get("strategy_type"),
-                                "rule_name": request.get("rule_name"),
-                                "magic_number": request.get("magic"),
-                                "request": request,
-                                "is_burst_trade": request.get("is_burst_trade", False),
-                                "early_entry_allowed": request.get(
-                                    "early_entry_allowed", False
-                                ),
-                                "footprint_score": request.get("footprint_score"),
-                                "footprint_status": request.get("footprint_status"),
-                                "footprint_summary": request.get("footprint_summary"),
-                            },
-                            audit_ctx,
-                        )
-                    except Exception:
-                        pass
-
-                try:
-                    last_err = mt5.last_error()
-                    last_err_str = (
-                        f"{last_err}"
-                        if not isinstance(last_err, (tuple, list))
-                        else " | ".join(map(str, last_err))
-                    )
-                except Exception:
-                    last_err_str = "N/A"
-
-                raise TradeExecutionError(
-                    f"Envoi MT5 échoué (retcode={retcode} - {retcode_str}) | order={order_id} deal={deal_id} "
-                    f"| comment='{comment}' | last_error={last_err_str}"
+                fb = self.feedback_pipeline(
+                    order_id=str(request.get("client_order_id", "N/A")),
+                    status="placed",
+                    reason="dry_run",
                 )
-
-            status = (
-                "filled"
-                if retcode == RET_DONE
-                else ("partially_filled" if retcode == RET_DONE_PARTIAL else "placed")
-            )
-            execution_summary = {
-                "status": status,
-                "retcode": retcode,
-                "retcode_str": retcode_str,
-                "order": order_id,
-                "deal": deal_id,
+                self._feedback_safe(request, fb)
+            except Exception:
+                pass
+            return {
+                "status": "placed",
+                "reason": "dry_run",
+                "retcode": None,
+                "retcode_name": None,
+                "ticket": None,
                 "symbol": symbol,
-                "action": action,
-                "price": result_price if result_price else request.get("price"),
-                "volume": result_volume if result_volume else request.get("volume"),
-                "sl": request.get("sl"),
-                "tp": request.get("tp"),
-                "comment": comment,
-                "request_id": request_id,
-                "request_echo": {
-                    "type": order_type,
-                    "type_time": request.get("type_time"),
-                    "type_filling": request.get("type_filling"),
-                    "deviation": request.get("deviation"),
-                    "magic": request.get("magic"),
-                    "footprint_score": request.get("footprint_score"),
-                    "footprint_status": request.get("footprint_status"),
-                    "footprint_summary": request.get("footprint_summary"),
-                },
+                "price": request.get("price"),
+                "volume": request.get("volume"),
             }
 
-            # (Optionnel) réconciliation post-trade: relire la position pour confirmer SL/TP réellement enregistrés
+        # ---------- Envoi + retries ----------
+        attempt = 0
+        last_result = None
+        work = dict(request)
+        base_dev = int(work.get("deviation", 0) or 0)
+
+        while True:
+            attempt += 1
             try:
+                self.logger.info(f"[EXEC] Send MT5 (try {attempt}) → {work}")
+                result = mt5c.order_send(work)
+                last_result = result
+                rc = getattr(result, "retcode", None)
+                rc_name = _retcode_name(rc)
+                self.logger.info(f"[EXEC] retcode={rc} ({rc_name})")
+
+                # Succès immédiat : break
+                if rc in OK_CODES:
+                    break
+
+                # Retentable ?
+                if attempt <= (1 + max_attempts) and rc in RETRYABLE_CODES:
+                    # refresh prix + bump déviation
+                    new_px = _get_market_price(symbol, side)
+                    if new_px:
+                        work["price"] = round(float(new_px), price_digits)
+                    cur_dev = int(work.get("deviation", base_dev) or 0)
+                    cur_dev = min(dev_cap, cur_dev + slip_step)
+                    work["deviation"] = cur_dev
+                    self.logger.warning(
+                        f"[EXEC] Retry ({attempt-1}/{max_attempts}) rc={rc_name} → price={work.get('price')} dev={cur_dev}"
+                    )
+                    if sleep_ms > 0:
+                        time.sleep(sleep_ms / 1000.0)
+                    continue
+
+                # Non retentable ou fin des essais → échec
+                reason = f"retcode={rc} ({rc_name or 'UNKNOWN'})"
+                try:
+                    last_err = mt5.last_error()
+                    if last_err:
+                        if isinstance(last_err, (tuple, list)):
+                            reason += f" | last_error={' | '.join(map(str,last_err))}"
+                        else:
+                            reason += f" | last_error={last_err}"
+                except Exception:
+                    pass
+
+                self.logger.error(f"[EXEC] Échec définitif: {reason}")
+                try:
+                    fb = self.feedback_pipeline(
+                        order_id=str(work.get("client_order_id", "N/A")),
+                        status="failed",
+                        reason=reason,
+                    )
+                    self._feedback_safe(work, fb)
+                except Exception:
+                    pass
+                return {
+                    "status": "failed",
+                    "reason": reason,
+                    "retcode": rc,
+                    "retcode_name": rc_name,
+                    "ticket": None,
+                    "symbol": symbol,
+                    "price": float(work.get("price") or 0.0),
+                    "volume": float(work.get("volume") or 0.0),
+                }
+
+            except Exception as e:
+                self.logger.error(f"[EXEC] Exception order_send: {e}", exc_info=True)
+                if attempt <= (1 + max_attempts):
+                    if sleep_ms > 0:
+                        time.sleep(sleep_ms / 1000.0)
+                    continue
+                try:
+                    fb = self.feedback_pipeline(
+                        order_id=str(work.get("client_order_id", "N/A")),
+                        status="failed",
+                        reason=str(e),
+                    )
+                    self._feedback_safe(work, fb)
+                except Exception:
+                    pass
+                return {
+                    "status": "failed",
+                    "reason": str(e),
+                    "retcode": None,
+                    "retcode_name": None,
+                }
+
+        # ---------- Succès : normaliser le résultat ----------
+        rc = getattr(last_result, "retcode", None)
+        rc_name = _retcode_name(rc)
+        order_id = getattr(last_result, "order", None)
+        deal_id = getattr(last_result, "deal", None)
+        res_px = getattr(last_result, "price", None)
+        res_vol = getattr(last_result, "volume", None)
+        comment = getattr(last_result, "comment", "")
+        req_id = getattr(last_result, "request_id", None)
+
+        status = (
+            "placed"
+            if rc == RET_PLACED
+            else ("partially_filled" if rc == RET_DONE_PARTIAL else "filled")
+        )
+        execution_summary = {
+            "status": status,
+            "retcode": rc,
+            "retcode_name": rc_name,
+            "order": order_id,
+            "deal": deal_id,
+            "symbol": symbol,
+            "action": side,
+            "price": res_px if res_px else work.get("price"),
+            "volume": res_vol if res_vol else work.get("volume"),
+            "sl": work.get("sl"),
+            "tp": work.get("tp"),
+            "comment": comment,
+            "request_id": req_id,
+        }
+
+        # Stockage pending dans _open_positions (pour monitor/timeout)
+        if rc == RET_PLACED and hasattr(self, "_open_positions"):
+            try:
+                oid = int(order_id or 0)
+                if oid:
+                    self._open_positions[oid] = {
+                        "symbol": symbol,
+                        "type": work.get("type"),
+                        "volume": work.get("volume"),
+                        "price": work.get("price"),
+                        "sl": work.get("sl"),
+                        "tp": work.get("tp", 0.0),
+                        "open_time": datetime.now(_tz.utc).isoformat(),
+                        "_meta_timeout_bars": int(
+                            work.get("_meta_timeout_bars", 0) or 0
+                        ),
+                    }
+            except Exception as _e:
+                self.logger.warning(f"[EXEC] Stockage pending KO: {_e}")
+
+        # Update état interne pour les deals
+        if rc in {RET_DONE, RET_DONE_PARTIAL}:
+            try:
+                self._update_internal_position_state(last_result, initial_risk=0.0)
+            except Exception as _e:
+                self.logger.warning(f"[EXEC] Update état interne KO: {_e}")
+
+        # SL différé post-fill → attacher
+        try:
+            if work.get("_deferred_sl") is not None and status in (
+                "filled",
+                "partially_filled",
+            ):
                 positions = None
-                if hasattr(self, "mt5") and self.mt5:
+                if getattr(self, "mt5", None):
                     positions = self.mt5.positions_get(symbol=symbol)
-                if not positions and hasattr(self.mt5_connector, "mt5"):
+                if not positions and getattr(self.mt5_connector, "mt5", None):
                     positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
+                pos = None
                 if positions:
                     try:
                         pos = sorted(
@@ -5371,216 +6692,153 @@ class TradeExecutor:
                         )[-1]
                     except Exception:
                         pos = positions[-1]
-                    execution_summary["sl"] = getattr(
-                        pos, "sl", execution_summary["sl"]
+                if pos:
+                    # récupère à nouveau les contraintes stops/freeze
+                    info2 = info or (
+                        self.mt5_connector.mt5.symbol_info(symbol)
+                        if getattr(self.mt5_connector, "mt5", None)
+                        else None
                     )
-                    execution_summary["tp"] = getattr(
-                        pos, "tp", execution_summary["tp"]
-                    )
+                    point2 = getattr(info2, "point", None) or 0.0
+                    digits2 = int(getattr(info2, "digits", None) or digits or 0)
+                    tick2 = getattr(info2, "trade_tick_size", None) or point2 or 0.0
+                    spread2 = int(getattr(info2, "spread", 0) or 0)
+                    freeze2 = int(getattr(info2, "trade_freeze_level", 0) or 0)
+                    stops2 = int(getattr(info2, "trade_stops_level", 0) or 0)
+                    one_tick2 = int(round((tick2 or point2) / (point2 or 1.0))) or 1
+                    min_buf2 = max(spread2, freeze2, stops2) + one_tick2
+
+                    def _round2(px):
+                        if not tick2 or tick2 <= 0:
+                            return round(float(px), digits2)
+                        steps = round(float(px) / tick2)
+                        return round(steps * tick2, digits2)
+
+                    def _mkt(sym, s):
+                        m = None
+                        if getattr(self.mt5_connector, "mt5", None):
+                            m = self.mt5_connector.mt5.symbol_info_tick(sym)
+                        if not m and getattr(self, "mt5", None):
+                            m = self.mt5.symbol_info_tick(sym)
+                        if not m:
+                            return None
+                        bid = getattr(m, "bid", None)
+                        ask = getattr(m, "ask", None)
+                        if s == "BUY" and ask is not None:
+                            return float(ask)
+                        if s == "SELL" and bid is not None:
+                            return float(bid)
+                        return float(ask or bid or 0.0)
+
+                    px_now = _mkt(symbol, side)
+                    sl_target = float(work["_deferred_sl"])
+                    if px_now and point2:
+                        if side == "BUY":
+                            max_sl = px_now - (min_buf2 * point2)
+                            sl_target = min(sl_target, max_sl)
+                        else:
+                            min_sl = px_now + (min_buf2 * point2)
+                            sl_target = max(sl_target, min_sl)
+                    sl_target = _round2(sl_target)
+
+                    ticket = getattr(pos, "ticket", None)
+                    if ticket is None and isinstance(pos, dict):
+                        ticket = pos.get("ticket")
+                    if ticket is not None:
+                        modified = False
+                        for fn_name in (
+                            "position_modify",
+                            "modify_position",
+                            "set_sl_tp",
+                        ):
+                            fn = getattr(self.mt5_connector, fn_name, None)
+                            if callable(fn):
+                                try:
+                                    fn(
+                                        ticket=int(ticket),
+                                        sl=sl_target,
+                                        tp=execution_summary.get("tp", 0.0),
+                                    )
+                                    modified = True
+                                    self.logger.info(
+                                        f"[EXECUTOR] SL attaché post-fill (ticket={ticket}, sl={sl_target})."
+                                    )
+                                    break
+                                except Exception as e:
+                                    self.logger.warning(
+                                        f"[EXECUTOR] {fn_name} a échoué (ticket={ticket}): {e}"
+                                    )
+                        if not modified:
+                            self.logger.warning(
+                                "[EXECUTOR] Impossible d’attacher le SL post-fill (aucune méthode disponible)."
+                            )
+        except Exception as e:
+            self.logger.warning(f"[EXECUTOR] Post-fill SL attach ignoré: {e}")
+
+        # ---------- Feedback & audit ----------
+        try:
+            fb_status = "placed" if status == "placed" else "filled"
+            fb = self.feedback_pipeline(
+                order_id=str(order_id or deal_id or work.get("client_order_id", "N/A")),
+                status=fb_status,
+                reason=rc_name or fb_status.upper(),
+            )
+            self._feedback_safe(work, fb)
+        except Exception:
+            pass
+
+        if hasattr(self, "audit_logger"):
+            try:
+                self.audit_logger.log_trade_execution(
+                    {
+                        "status": execution_summary["status"],
+                        "symbol": symbol,
+                        "action": side,
+                        "order_type": work.get("type"),
+                        "volume": execution_summary["volume"],
+                        "entry_price": execution_summary["price"],
+                        "sl_price": execution_summary["sl"],
+                        "tp_price": execution_summary["tp"],
+                        "strategy_type": work.get("strategy_type"),
+                        "rule_name": work.get("rule_name"),
+                        "magic_number": work.get("magic"),
+                        "ticket": execution_summary.get("order")
+                        or execution_summary.get("deal"),
+                        "request": work,
+                        "response": {
+                            "retcode": rc,
+                            "retcode_str": rc_name,
+                            "comment": comment,
+                            "order": order_id,
+                            "deal": deal_id,
+                            "is_burst_trade": work.get("is_burst_trade", False),
+                        },
+                    },
+                    getattr(self, "execution_context", {}) or {},
+                )
             except Exception:
                 pass
 
-            # --- Attache du SL post-fill si on a dû l'omettre à l'envoi ---
-            try:
-                if request.get("_deferred_sl") is not None and execution_summary[
-                    "status"
-                ] in ("filled", "partially_filled"):
-                    positions = None
-                    if hasattr(self, "mt5") and self.mt5:
-                        positions = self.mt5.positions_get(symbol=symbol)
-                    if not positions and hasattr(self.mt5_connector, "mt5"):
-                        positions = self.mt5_connector.mt5.positions_get(symbol=symbol)
-                    pos = None
-                    if positions:
-                        try:
-                            pos = sorted(
-                                positions, key=lambda p: getattr(p, "time_update", 0)
-                            )[-1]
-                        except Exception:
-                            pos = positions[-1]
-
-                    if pos:
-                        info2 = info
-                        if (
-                            not info2
-                            and hasattr(self.mt5_connector, "mt5")
-                            and self.mt5_connector.mt5
-                        ):
-                            info2 = self.mt5_connector.mt5.symbol_info(symbol)
-
-                        point2 = getattr(info2, "point", None) or 0.0
-                        digits2 = getattr(info2, "digits", None) or 0
-                        tick2 = getattr(info2, "trade_tick_size", None) or point2 or 0.0
-                        spread2 = int(getattr(info2, "spread", 0) or 0)
-                        freeze2 = int(getattr(info2, "trade_freeze_level", 0) or 0)
-                        stops2 = int(getattr(info2, "trade_stops_level", 0) or 0)
-                        one_tick2 = int(round((tick2 or point2) / (point2 or 1.0))) or 1
-                        min_buf2 = max(spread2, freeze2, stops2) + one_tick2
-
-                        def _round2(px):
-                            if not tick2 or tick2 <= 0:
-                                return round(float(px), int(digits2))
-                            steps = round(float(px) / tick2)
-                            return round(steps * tick2, int(digits2))
-
-                        def _mkt(sym, side):
-                            m = None
-                            if (
-                                hasattr(self.mt5_connector, "mt5")
-                                and self.mt5_connector.mt5
-                            ):
-                                m = self.mt5_connector.mt5.symbol_info_tick(sym)
-                            if not m and hasattr(self, "mt5") and self.mt5:
-                                m = self.mt5.symbol_info_tick(sym)
-                            if not m:
-                                return None
-                            bid = getattr(m, "bid", None)
-                            ask = getattr(m, "ask", None)
-                            if side == "BUY" and ask is not None:
-                                return float(ask)
-                            if side == "SELL" and bid is not None:
-                                return float(bid)
-                            return float(ask or bid or 0.0)
-
-                        px_now = _mkt(symbol, action)
-                        sl_target = float(request["_deferred_sl"])
-                        if px_now and point2:
-                            if action == "BUY":
-                                max_sl = px_now - (min_buf2 * point2)
-                                sl_target = min(sl_target, max_sl)
-                            else:
-                                min_sl = px_now + (min_buf2 * point2)
-                                sl_target = max(sl_target, min_sl)
-                        sl_target = _round2(sl_target)
-
-                        ticket = getattr(pos, "ticket", None)
-                        if ticket is None and isinstance(pos, dict):
-                            ticket = pos.get("ticket")
-                        if ticket is not None:
-                            modified = False
-                            for fn_name in (
-                                "position_modify",
-                                "modify_position",
-                                "set_sl_tp",
-                            ):
-                                fn = getattr(self.mt5_connector, fn_name, None)
-                                if callable(fn):
-                                    try:
-                                        fn(
-                                            ticket=int(ticket),
-                                            sl=sl_target,
-                                            tp=execution_summary.get("tp", 0.0),
-                                        )
-                                        modified = True
-                                        self.logger.info(
-                                            f"[EXECUTOR] SL attaché post-fill (ticket={ticket}, sl={sl_target})."
-                                        )
-                                        break
-                                    except Exception as e:
-                                        self.logger.warning(
-                                            f"[EXECUTOR] {fn_name} a échoué (ticket={ticket}): {e}"
-                                        )
-                            if not modified:
-                                self.logger.warning(
-                                    "[EXECUTOR] Impossible d’attacher le SL post-fill (aucune méthode disponible)."
-                                )
-            except Exception as e:
-                self.logger.warning(f"[EXECUTOR] Post-fill SL attach ignoré: {e}")
-
-            # --- Audit succès ---
-            if hasattr(self, "audit_logger"):
-                try:
-                    self.audit_logger.log_trade_execution(
-                        {
-                            "status": execution_summary["status"],
-                            "symbol": symbol,
-                            "action": action,
-                            "order_type": order_type,
-                            "volume": execution_summary["volume"],
-                            "entry_price": execution_summary["price"],
-                            "sl_price": execution_summary["sl"],
-                            "tp_price": execution_summary["tp"],
-                            "spread_pips": request.get("meta_spread_pips"),
-                            "rr_projected": request.get("meta_rr_projected"),
-                            "strategy_type": request.get("strategy_type"),
-                            "rule_name": request.get("rule_name"),
-                            "magic_number": request.get("magic"),
-                            "ticket": execution_summary.get("order")
-                            or execution_summary.get("deal"),
-                            "request": request,
-                            "response": {
-                                "retcode": retcode,
-                                "retcode_str": retcode_str,
-                                "comment": comment,
-                                "order": order_id,
-                                "deal": deal_id,
-                                "is_burst_trade": request.get("is_burst_trade", False),
-                                "early_entry_allowed": request.get(
-                                    "early_entry_allowed", False
-                                ),
-                                "footprint_score": request.get("footprint_score"),
-                                "footprint_status": request.get("footprint_status"),
-                                "footprint_summary": request.get("footprint_summary"),
-                            },
-                        },
-                        audit_ctx,
-                    )
-                except Exception:
-                    pass
-
-            # === Log standard + stratégie ===
-            self.logger.info(f"Exécution OK: {execution_summary}")
-            strat_type = request.get("strategy_type", "unknown").lower()
-            if strat_type == "liquidity":
-                self.logger.info(
-                    f"[LIQUIDITY TRADE] ✅ {symbol} | action={action} | entry={execution_summary['price']} "
-                    f"| sl={execution_summary['sl']} | tp={execution_summary['tp']} | rr={request.get('meta_rr_projected', 'N/A')}"
-                )
-            elif strat_type == "scalping":
-                self.logger.info(
-                    f"[SCALPING TRADE] ⚡ {symbol} | action={action} | entry={execution_summary['price']} "
-                    f"| sl={execution_summary['sl']} | tp={execution_summary['tp']} | rr={request.get('meta_rr_projected', 'N/A')}"
-                )
-
-            return execution_summary
-
-        except TradeExecutionError:
-            raise
-        except Exception as e:
-            if hasattr(self, "audit_logger"):
-                try:
-                    self.audit_logger.log_trade_execution(
-                        {
-                            "status": "error",
-                            "symbol": symbol,
-                            "action": action,
-                            "order_type": order_type,
-                            "volume": request.get("volume"),
-                            "entry_price": request.get("price"),
-                            "sl_price": request.get("sl"),
-                            "tp_price": request.get("tp"),
-                            "spread_pips": request.get("meta_spread_pips"),
-                            "rr_projected": request.get("meta_rr_projected"),
-                            "strategy_type": request.get("strategy_type"),
-                            "rule_name": request.get("rule_name"),
-                            "magic_number": request.get("magic"),
-                            "request": request,
-                            "error_code": "UNEXPECTED_EXCEPTION",
-                            "error_message": str(e),
-                            "early_entry_allowed": request.get(
-                                "early_entry_allowed", False
-                            ),
-                        },
-                        audit_ctx,
-                    )
-                except Exception:
-                    pass
-            self.logger.error(
-                f"Erreur inattendue execute_order {symbol}: {e}", exc_info=True
+        # log stratégie
+        strat_type = (work.get("strategy_type") or "").lower()
+        if strat_type == "liquidity":
+            self.logger.info(
+                f"[LIQUIDITY TRADE] ✅ {symbol} | action={side} | entry={execution_summary['price']} "
+                f"| sl={execution_summary['sl']} | tp={execution_summary['tp']} | rr={work.get('meta_rr_projected','N/A')}"
             )
-            raise TradeExecutionError(
-                f"Échec inattendu execute_order {symbol}: {e}"
-            ) from e
+        elif strat_type in ("scalping", "burst_scalping"):
+            self.logger.info(
+                f"[SCALPING TRADE] ⚡ {symbol} | action={side} | entry={execution_summary['price']} "
+                f"| sl={execution_summary['sl']} | tp={execution_summary['tp']} | rr={work.get('meta_rr_projected','N/A')}"
+            )
+
+        # marquer le throttle "trade envoyé"
+        try:
+            self._mark_trade_sent(symbol, time.time())
+        except Exception:
+            pass
+
+        return execution_summary
 
     def _send_close_order_with_retries(self, request: dict) -> Optional[Any]:
         """
@@ -5614,255 +6872,408 @@ class TradeExecutor:
 
     def close_position(self, symbol: str = "ALL", ticket: Optional[int] = None) -> dict:
         """
-        Ferme une ou plusieurs positions en utilisant une logique de retry robuste.
-        Si 'ticket' est spécifié, ferme la position unique. Sinon, ferme toutes les positions
-        pour le 'symbol' donné, ou toutes les positions si 'symbol' est "ALL".
-        Cette fonction calcule également le P&L au moment de la clôture et envoie le feedback.
+        Ferme une ou plusieurs positions avec logique de retry (slippage/requote).
+        - Si 'ticket' est fourni → ferme uniquement ce ticket.
+        - Sinon, ferme toutes les positions du 'symbol', ou toutes si symbol == "ALL".
+        - Calcule le PnL exact au prix d'exécution (order_calc_profit), avec fallback.
+        - Envoie feedback/audit/alert sans jamais casser le flux si une API manque.
         """
-        self.logger.info(
-            f"Demande de clôture de position pour Symbole='{symbol}', Ticket='{ticket}'..."
-        )
-        # Toujours réconcilier avant de tenter de clôturer pour avoir l'état le plus frais.
-        self.reconcile_state_with_broker()
+        import time, re
+        from datetime import datetime, timezone as _tz
 
-        positions_to_close = []
-        if ticket:
-            if ticket in self._open_positions:
-                positions_to_close.append(self._open_positions[ticket])
+        UTC = _tz.utc
+        self.logger.info(f"[CLOSE] Demande: symbol='{symbol}', ticket='{ticket}'")
+
+        # --------- helpers MT5 / mapping sûrs ----------
+        mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None) or getattr(
+            self, "mt5", None
+        )
+        if mt5 is None:
+            try:
+                import MetaTrader5 as _mt5  # type: ignore
+
+                mt5 = _mt5
+            except Exception:
+                raise TradeExecutionError("MT5 API indisponible.")
+
+        def _map_const(path: str, fallback: str):
+            """
+            path: ex "order_types.SELL"
+            fallback: ex "ORDER_TYPE_SELL"
+            Retourne la constante MT5 (valeur int) si dispo, sinon None.
+            """
+            try:
+                name = self.config_manager.get(f"mt5_mappings.{path}", fallback)
+            except Exception:
+                name = fallback
+            return getattr(mt5, name, getattr(mt5, fallback, None))
+
+        # Position types (broker)
+        POS_BUY = _map_const("position_types.BUY", "POSITION_TYPE_BUY")
+        POS_SELL = _map_const("position_types.SELL", "POSITION_TYPE_SELL")
+
+        # Order types
+        OT_BUY = _map_const("order_types.BUY", "ORDER_TYPE_BUY")
+        OT_SELL = _map_const("order_types.SELL", "ORDER_TYPE_SELL")
+
+        # Actions
+        ACTION_DEAL = getattr(mt5, "TRADE_ACTION_DEAL", None)
+        if ACTION_DEAL is None:
+            raise TradeExecutionError("Constante TRADE_ACTION_DEAL introuvable.")
+
+        # Retcodes
+        RC_DONE = getattr(mt5, "TRADE_RETCODE_DONE", None)
+        RC_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None)
+        OK_CODES = {c for c in (RC_DONE, RC_DONE_PARTIAL) if c is not None}
+
+        RC_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
+        RC_PRICE_CHANGED = getattr(mt5, "TRADE_RETCODE_PRICE_CHANGED", None)
+        RC_OFF_QUOTES = getattr(mt5, "TRADE_RETCODE_OFF_QUOTES", None)
+        RC_REJECT = getattr(mt5, "TRADE_RETCODE_REJECT", None)
+        RETRYABLE_CODES = {
+            c
+            for c in (RC_REQUOTE, RC_PRICE_CHANGED, RC_OFF_QUOTES, RC_REJECT)
+            if c is not None
+        }
+
+        def _retcode_name(code):
+            try:
+                for k in dir(mt5):
+                    if k.startswith("TRADE_RETCODE_") and getattr(mt5, k, None) == code:
+                        return k
+            except Exception:
+                pass
+            return str(code)
+
+        # --------- (1) Reconcile état et collect positions broker ----------
+        try:
+            # Toujours tenter de rafraîchir l'état interne si dispo
+            if hasattr(self, "reconcile_state_with_broker") and callable(
+                self.reconcile_state_with_broker
+            ):
+                self.reconcile_state_with_broker()
+        except Exception as e:
+            self.logger.warning(f"[CLOSE] Reconcile KO: {e}")
+
+        broker_positions = []
+        try:
+            if ticket is not None:
+                broker_positions = [
+                    p
+                    for p in (mt5.positions_get() or [])
+                    if int(getattr(p, "ticket", -1)) == int(ticket)
+                ]
             else:
-                self.logger.warning(
-                    f"Position interne avec ticket {ticket} non trouvée. Impossible de clôturer."
-                )
-                return {
-                    "success": False,
-                    "message": f"Position {ticket} non trouvée.",
-                    "closed_count": 0,
-                    "failed_count": 1,
-                }
-        else:
-            positions_to_close = [
-                pos
-                for pos in self._open_positions.values()
-                if symbol == "ALL" or pos["symbol"] == symbol
-            ]
+                if symbol == "ALL":
+                    broker_positions = list(mt5.positions_get() or [])
+                else:
+                    broker_positions = list(mt5.positions_get(symbol=symbol) or [])
+        except Exception as e:
+            self.logger.warning(f"[CLOSE] positions_get KO: {e}")
+            broker_positions = []
+
+        def _pos_to_dict(p):
+            return {
+                "ticket": int(getattr(p, "ticket", 0) or 0),
+                "symbol": str(getattr(p, "symbol", "")),
+                "type": int(getattr(p, "type", -1)),
+                "volume": float(getattr(p, "volume", 0.0) or 0.0),
+                "entry_price": float(getattr(p, "price_open", 0.0) or 0.0),
+                "sl": float(getattr(p, "sl", 0.0) or 0.0),
+                "tp": float(getattr(p, "tp", 0.0) or 0.0),
+                "profit": float(getattr(p, "profit", 0.0) or 0.0),
+                "magic": getattr(p, "magic", None),
+                "comment": str(getattr(p, "comment", "") or ""),
+            }
+
+        positions_to_close = [_pos_to_dict(p) for p in broker_positions]
+
+        # Fallback interne si broker ne renvoie rien mais on a un ticket dans _open_positions
+        if (
+            not positions_to_close
+            and ticket is not None
+            and hasattr(self, "_open_positions")
+        ):
+            op = self._open_positions.get(ticket)
+            if isinstance(op, dict):
+                positions_to_close = [op]
 
         if not positions_to_close:
-            self.logger.info(
-                f"Aucune position à clôturer pour Symbole='{symbol}', Ticket='{ticket}'."
-            )
+            msg = f"Aucune position à clôturer (symbol='{symbol}', ticket='{ticket}')."
+            self.logger.info(f"[CLOSE] {msg}")
             return {
                 "success": True,
-                "message": "Aucune position à clôturer.",
+                "message": msg,
                 "closed_count": 0,
                 "failed_count": 0,
             }
 
+        # --------- (2) Paramètres retry depuis la conf ----------
+        tes = {}
+        try:
+            tes = self.config_manager.get("trade_executor_settings", {}) or {}
+        except Exception:
+            tes = {}
+
+        base_deviation = int(tes.get("default_slippage", 20) or 20)
+        max_attempts = int(
+            tes.get("retry_attempts", 2) or 2
+        )  # en plus de la 1re tentative
+        sleep_ms = int(tes.get("retry_sleep_ms", 150) or 150)
+        slip_step = int(tes.get("retry_slippage_increment_points", 5) or 5)
+        dev_cap = int(tes.get("max_deviation_points_cap", 150) or 150)
+
+        # --------- helpers prix / comment ----------
+        def _current_price_for_side(sym: str, side: str) -> float:
+            try:
+                return float(self.mt5_connector.get_current_price(sym, side) or 0.0)
+            except Exception:
+                return 0.0
+
+        def _normalize_comment_close(sym: str, raw_comment: str) -> str:
+            txt = f"close_{sym}" if not raw_comment else f"close_{raw_comment}"
+            txt = txt.replace(" ", "").replace("|", "")
+            txt = re.sub(r"[^A-Za-z0-9._-]", "", txt)
+            return txt[:31]
+
+        def _digits_for(sym: str) -> int:
+            try:
+                si = self.mt5_connector.get_symbol_info(sym)
+                return int(getattr(si, "digits", 5) or 5)
+            except Exception:
+                return 5
+
+        def _round_px(sym: str, px: float) -> float:
+            d = _digits_for(sym)
+            try:
+                return round(float(px), d)
+            except Exception:
+                return px
+
+        # --------- (3) Envoi avec retries ----------
         closed_count, failed_count = 0, 0
-        for pos_data in positions_to_close:
-            position_ticket = pos_data["ticket"]
 
-            # Déterminer l'action opposée pour la clôture
-            # Utilise les constantes MT5 via self.config_manager.get pour la robustesse
-            mt5_pos_buy = self.config_manager.get(
-                "mt5_mappings.position_types.BUY", 0
-            )  # 0 for BUY in MT5
-            mt5_pos_sell = self.config_manager.get(
-                "mt5_mappings.position_types.SELL", 1
-            )  # 1 for SELL in MT5
+        for pos in positions_to_close:
+            tkt = int(pos.get("ticket", 0) or 0)
+            sym = str(pos.get("symbol", "") or "")
+            ptype = int(pos.get("type", -1))
+            vol = float(pos.get("volume", 0.0) or 0.0)
+            entry = float(pos.get("entry_price", 0.0) or 0.0)
+            orig_comment = str(pos.get("comment", "") or "")
+            magic = pos.get("magic", None)
 
-            if pos_data["type"] == mt5_pos_buy:
-                # Assurez que mt5.ORDER_TYPE_SELL est accessible et que la config le mappe correctement
-                order_type_close = self.config_manager.get(
-                    "mt5_mappings.order_types.SELL", None
+            if not tkt or not sym or vol <= 0:
+                self.logger.error(
+                    f"[CLOSE] Position invalide (ticket={tkt}, sym='{sym}', vol={vol}) → skip."
                 )
-                if order_type_close is None:  # Fallback si mapping absent
-                    self.logger.error(
-                        "Mapping MT5 pour SELL manquant. Impossible de déterminer le type d'ordre de clôture."
-                    )
-                    failed_count += 1
-                    self._log_audit_trail(
-                        {
-                            "event_type": "TRADE_CLOSE_FAILED_MT5_MAPPING",
-                            "details": pos_data,
-                            "mapping_key": "order_types.SELL",
-                        }
-                    )
-                    continue
-                order_type_close_val = getattr(
-                    mt5, order_type_close
-                )  # Récupérer la valeur numérique
-            elif pos_data["type"] == mt5_pos_sell:
-                # Assurez que mt5.ORDER_TYPE_BUY est accessible et que la config le mappe correctement
-                order_type_close = self.config_manager.get(
-                    "mt5_mappings.order_types.BUY", None
-                )
-                if order_type_close is None:  # Fallback si mapping absent
-                    self.logger.error(
-                        "Mapping MT5 pour BUY manquant. Impossible de déterminer le type d'ordre de clôture."
-                    )
-                    failed_count += 1
-                    self._log_audit_trail(
-                        {
-                            "event_type": "TRADE_CLOSE_FAILED_MT5_MAPPING",
-                            "details": pos_data,
-                            "mapping_key": "order_types.BUY",
-                        }
-                    )
-                    continue
-                order_type_close_val = getattr(
-                    mt5, order_type_close
-                )  # Récupérer la valeur numérique
+                failed_count += 1
+                continue
+
+            # Type d'ordre opposé pour fermer
+            if ptype == POS_BUY:
+                order_type_close = OT_SELL
+                side = "SELL"  # on vend pour fermer un BUY → prix = Bid
+            elif ptype == POS_SELL:
+                order_type_close = OT_BUY
+                side = "BUY"  # on achète pour fermer un SELL → prix = Ask
             else:
                 self.logger.error(
-                    f"Type de position inconnu ({pos_data['type']}) pour le ticket {position_ticket}. Impossible de clôturer."
+                    f"[CLOSE] Type position inconnu ({ptype}) ticket={tkt} → skip."
                 )
                 failed_count += 1
-                self._log_audit_trail(
-                    {
-                        "event_type": "TRADE_CLOSE_FAILED_UNKNOWN_TYPE",
-                        "details": pos_data,
-                    }
-                )
                 continue
 
-            # Construire la requête de clôture
-            # Utilise l'action opposée pour récupérer le prix (Bid pour Sell, Ask pour Buy)
-            # Adapte 'SELL'/'BUY' string pour mt5_connector.get_current_price
-            price_action_for_get_current_price = (
-                "SELL"
-                if order_type_close_val
-                == getattr(
-                    mt5,
-                    self.config_manager.get(
-                        "mt5_mappings.order_types.SELL", "ORDER_TYPE_SELL"
-                    ),
-                )
-                else "BUY"
-            )
-            close_price = self.mt5_connector.get_current_price(
-                pos_data["symbol"], price_action_for_get_current_price
-            )
-            if not close_price:
+            # Premier prix
+            px = _current_price_for_side(sym, side)
+            if px <= 0:
                 self.logger.error(
-                    f"Impossible d'obtenir un prix de clôture pour la position #{position_ticket}."
-                )
-                self.config_manager.send_alert(
-                    "ERREUR",
-                    f"Impossible prix clôture #{position_ticket}",
-                    alert_type="telegram_error",
+                    f"[CLOSE] Prix indisponible pour {sym} (side={side}) → skip."
                 )
                 failed_count += 1
-                self._log_audit_trail(
-                    {"event_type": "TRADE_CLOSE_FAILED_NO_PRICE", "details": pos_data}
-                )
+                try:
+                    if hasattr(self.config_manager, "send_alert"):
+                        self.config_manager.send_alert(
+                            "ERREUR",
+                            f"Prix clôture indisponible: {sym} #{tkt}",
+                            alert_type="telegram_error",
+                        )
+                except Exception:
+                    pass
                 continue
 
-            request = {
-                "action": self.TRADE_ACTION_DEAL,  # Action pour un deal immédiat
-                "position": position_ticket,  # Le ticket de la position à clôturer
-                "symbol": pos_data["symbol"],
-                "volume": pos_data["volume"],
-                "type": order_type_close_val,  # Type d'ordre opposé (constante MT5 numérique)
-                "price": close_price,
-                "deviation": self.config_manager.get(
-                    "trade_executor_settings.default_slippage", 20
-                ),  # Slippage configurable
-                "magic": pos_data.get("magic"),
-                "comment": f"SNIPER_X Close | {pos_data.get('comment', 'N/A')}",  # Garder le commentaire original
+            # Requête basique
+            work = {
+                "action": ACTION_DEAL,
+                "position": int(tkt),
+                "symbol": sym,
+                "volume": float(vol),
+                "type": int(order_type_close),
+                "price": _round_px(sym, px),
+                "deviation": int(base_deviation),
+                "magic": magic,
+                "comment": _normalize_comment_close(sym, orig_comment),
             }
 
-            result = self._send_close_order_with_retries(request)
+            # --- boucle d'envoi + retry ---
+            attempt = 0
+            last_result = None
+            while True:
+                attempt += 1
+                try:
+                    self.logger.info(f"[CLOSE] Send (try {attempt}) → {work}")
+                    res = self.mt5_connector.order_send(work)
+                    last_result = res
+                    rc = getattr(res, "retcode", None)
+                    rc_name = _retcode_name(rc)
 
-            if result and result.retcode == self.config_manager.get(
-                "mt5_mappings.trade_retcodes.RETCODE_DONE", mt5.TRADE_RETCODE_DONE
-            ):
-                self.logger.info(
-                    f"Position #{position_ticket} ({pos_data['symbol']}) clôturée avec succès."
+                    if rc in OK_CODES:
+                        self.logger.info(f"[CLOSE] OK ticket={tkt} rc={rc} ({rc_name})")
+                        break
+
+                    # Retryable ?
+                    if attempt <= (1 + max_attempts) and rc in RETRYABLE_CODES:
+                        # rafraîchir prix + augmenter déviation
+                        new_px = _current_price_for_side(sym, side)
+                        if new_px > 0:
+                            work["price"] = _round_px(sym, new_px)
+                        cur_dev = int(
+                            work.get("deviation", base_deviation) or base_deviation
+                        )
+                        work["deviation"] = min(dev_cap, cur_dev + slip_step)
+                        self.logger.warning(
+                            f"[CLOSE] retry rc={rc_name} → price={work['price']} dev={work['deviation']}"
+                        )
+                        if sleep_ms > 0:
+                            time.sleep(sleep_ms / 1000.0)
+                        continue
+
+                    # Échec définitif
+                    self.logger.error(
+                        f"[CLOSE] Échec ticket={tkt} rc={rc} ({rc_name}) comment={getattr(res,'comment','')}"
+                    )
+                    failed_count += 1
+                    try:
+                        # audit trail si dispo
+                        if hasattr(self, "_log_audit_trail"):
+                            details = (
+                                res._asdict()
+                                if hasattr(res, "_asdict")
+                                else {
+                                    "retcode": rc,
+                                    "comment": getattr(res, "comment", ""),
+                                }
+                            )
+                            self._log_audit_trail(
+                                {
+                                    "event_type": "TRADE_CLOSE_FAILED",
+                                    "timestamp": datetime.now(UTC).isoformat(),
+                                    "order_id": tkt,
+                                    "symbol": sym,
+                                    "status": "FAILED",
+                                    "details": details,
+                                    "position_snapshot": dict(pos),
+                                }
+                            )
+                        if hasattr(self.config_manager, "send_alert"):
+                            self.config_manager.send_alert(
+                                "CRITIQUE",
+                                f"Clôture échec: {sym} #{tkt} | rc={rc_name}",
+                                alert_type="telegram_critical",
+                            )
+                    except Exception:
+                        pass
+                    break
+
+                except Exception as e:
+                    self.logger.error(
+                        f"[CLOSE] Exception order_send ticket={tkt}: {e}", exc_info=True
+                    )
+                    if attempt <= (1 + max_attempts):
+                        if sleep_ms > 0:
+                            time.sleep(sleep_ms / 1000.0)
+                        continue
+                    failed_count += 1
+                    break
+
+            # Si pas de succès → passe à la position suivante
+            if not last_result or getattr(last_result, "retcode", None) not in OK_CODES:
+                continue
+
+            # --- succès : calcul P&L exact au prix d'exécution ---
+            close_price = float(
+                getattr(last_result, "price", work["price"]) or work["price"]
+            )
+            try:
+                # action pour calcul = sens initial (BUY si position BUY, SELL si position SELL)
+                calc_action = OT_BUY if ptype == POS_BUY else OT_SELL
+                pnl_usd = float(
+                    mt5.order_calc_profit(
+                        calc_action, sym, float(vol), float(entry), float(close_price)
+                    )
+                )
+            except Exception:
+                pnl_usd = float(pos.get("profit", 0.0) or 0.0)  # fallback
+                self.logger.warning(
+                    f"[CLOSE] order_calc_profit KO ticket={tkt} → fallback profit courant {pnl_usd:.2f}"
                 )
 
-                # Calculer le P&L au moment de la clôture (plus précis)
-                # Utilise self.mt5_connector.mt5 pour appeler l'API MT5
-                _ret, pnl_usd = self.mt5_connector.mt5.order_calc_profit(
-                    pos_data["type"],
-                    pos_data["symbol"],
-                    pos_data["volume"],
-                    pos_data["entry_price"],
-                    result.price,  # P&L réel sur clôture
-                )
-                if (
-                    _ret
-                    != self.config_manager.get(
-                        "mt5_mappings.trade_retcodes.RETCODE_DONE",
-                        mt5.TRADE_RETCODE_DONE,
-                    )
-                    or pnl_usd is None
-                ):
-                    pnl_usd = pos_data.get(
-                        "profit", 0.0
-                    )  # Utiliser le profit en temps réel comme fallback si l'API échoue
-                    self.logger.warning(
-                        f"Impossible de calculer le P&L exact pour clôture #{position_ticket}. Utilisation du profit actuel ({pnl_usd:.2f} $)."
-                    )
+            # --- nettoyer l'état interne ---
+            try:
+                if hasattr(self, "_open_positions") and tkt in self._open_positions:
+                    del self._open_positions[tkt]
+            except Exception:
+                pass
 
-                # Mettre à jour l'état interne : supprimer la position clôturée
-                if position_ticket in self._open_positions:
-                    del self._open_positions[position_ticket]
-                closed_count += 1
+            closed_count += 1
 
-                # Enregistrer et notifier le résultat de la clôture
-                self._log_audit_trail(
-                    {
-                        "event_type": "TRADE_CLOSE_SUCCESS",
-                        "timestamp": datetime.now(UTC).isoformat(),
-                        "order_id": position_ticket,
-                        "symbol": pos_data["symbol"],
-                        "status": "SUCCESS",
-                        "details": result._asdict(),
-                        "pnl_usd": pnl_usd,
-                        "position_snapshot": pos_data,  # Snapshot de la position avant fermeture
+            # --- audit & feedback ---
+            try:
+                details = (
+                    last_result._asdict()
+                    if hasattr(last_result, "_asdict")
+                    else {
+                        "retcode": getattr(last_result, "retcode", None),
+                        "comment": getattr(last_result, "comment", ""),
+                        "order": getattr(last_result, "order", None),
+                        "deal": getattr(last_result, "deal", None),
+                        "price": getattr(last_result, "price", None),
                     }
                 )
-                # Envoyer un feedback au ConfigManager pour la mise à jour des métriques de performance
-                self.config_manager.feedback_on_trade_result(
-                    pos_data,
-                    {
-                        "execution_status": "executed",
-                        "pnl_usd": pnl_usd,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    },
-                )
-                self.config_manager.send_alert(
-                    message=f"📊 Position clôturée: {pos_data['symbol']} | P&L: ${pnl_usd:.2f}",
-                    alert_type="telegram_trade_closed",
-                )
+                if hasattr(self, "_log_audit_trail"):
+                    self._log_audit_trail(
+                        {
+                            "event_type": "TRADE_CLOSE_SUCCESS",
+                            "timestamp": datetime.now(UTC).isoformat(),
+                            "order_id": tkt,
+                            "symbol": sym,
+                            "status": "SUCCESS",
+                            "details": details,
+                            "pnl_usd": pnl_usd,
+                            "position_snapshot": dict(pos),
+                        }
+                    )
+                if hasattr(self.config_manager, "feedback_on_trade_result"):
+                    self.config_manager.feedback_on_trade_result(
+                        pos,
+                        {
+                            "execution_status": "executed",
+                            "pnl_usd": pnl_usd,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                if hasattr(self.config_manager, "send_alert"):
+                    self.config_manager.send_alert(
+                        message=f"📊 Position clôturée: {sym} | P&L: ${pnl_usd:.2f}",
+                        alert_type="telegram_trade_closed",
+                    )
+            except Exception:
+                pass
 
-            else:
-                self.logger.error(
-                    f"Échec de la clôture de la position #{position_ticket} après toutes les tentatives. Erreur MT5: {result.comment if result else 'Aucune réponse'}."
-                )
-                self.config_manager.send_alert(
-                    "CRITIQUE",
-                    f"Clôture Échec: {pos_data['symbol']} #{position_ticket} | {result.comment if result else 'Timeout'}",
-                    alert_type="telegram_critical",
-                )
-                failed_count += 1
-                self._log_audit_trail(
-                    {
-                        "event_type": "TRADE_CLOSE_FAILED",
-                        "timestamp": datetime.now(UTC).isoformat(),
-                        "order_id": position_ticket,
-                        "symbol": pos_data["symbol"],
-                        "status": "FAILED",
-                        "details": result._asdict() if result else {},
-                        "position_snapshot": pos_data,
-                    }
-                )
-
-        final_message = f"Clôture des positions terminée. Succès: {closed_count}, Échecs: {failed_count}."
-        self.logger.info(final_message)
+        final_msg = f"Clôture terminée. Succès: {closed_count}, Échecs: {failed_count}."
+        self.logger.info(f"[CLOSE] {final_msg}")
         return {
             "success": (failed_count == 0),
-            "message": final_message,
+            "message": final_msg,
             "closed_count": closed_count,
             "failed_count": failed_count,
         }
@@ -6339,16 +7750,21 @@ def run_trade_execution_pipeline(
 ) -> dict:
     """
     Pont unique entre la décision (DecisionPipeline) et l'exécution (TradeExecutor).
-    Corrigé: on lit dans decision_package['final_decision'] au lieu des clés racine.
-    Zéro tolérance aux champs manquants: on normalise et on valide avant d'appeler prepare_order.
+    Lit dans decision_package['final_decision'].
+    Normalise/valide avant prepare_order.
 
-    Ajout (petite touche):
-    - Garde-fou "fat-finger" sur le volume: si volume > cap (par actif ou global),
-      on stoppe en "pending_manual_approval" avec un volume suggéré = cap.
+    Ajouts/Corrections majeurs:
+    - Import robuste de TradeExecutionError (fallback local si absent)
+    - Garde-fou "fat-finger" volume (cap global / par actif)
+    - Correctif structurel: les étapes 5→7 ne sont pas conditionnées par 'volume is not None'
+    - Support is_dry_run: renvoie la requête/pre-payload sans exécuter d'ordre
     """
     import logging
 
     logger = logging.getLogger(__name__)
+
+    class TradeExecutionError(Exception):
+        pass
 
     # ----------- Helpers locaux -----------
     def _first_non_empty(*vals):
@@ -6430,7 +7846,6 @@ def run_trade_execution_pipeline(
             "CRITIQUE", reason, alert_type="telegram_critical"
         )
         raise TradeExecutionError(reason)
-
     asset = raw_asset.upper()
 
     # ----------- 3) order_type propre -----------
@@ -6450,9 +7865,10 @@ def run_trade_execution_pipeline(
         "target_sl_pips": final_decision.get("target_sl_pips"),
         "target_tp_pips": final_decision.get("target_tp_pips"),
         "rule_name": final_decision.get("rule_name"),
-        "strategy_type": final_decision.get("strategy_type", "unknown"),  # ✅ ajouté
+        "strategy_type": final_decision.get("strategy_type", "unknown"),
+        "burst_enabled": bool(final_decision.get("burst_enabled", False)),
+        "order_id": final_decision.get("order_id", "N/A"),
     }
-
     adapted_package = {
         "trade_decision": trade_decision,
         "market_context": market_context,
@@ -6468,8 +7884,7 @@ def run_trade_execution_pipeline(
         asset_cap = float(per_asset_caps.get(asset, global_cap))
         hard_cap = min(asset_cap, global_cap)
     except Exception:
-        # fallback ultra conservateur si config bancale
-        hard_cap = 10.0
+        hard_cap = 10.0  # fallback ultra conservateur
 
     vol = trade_decision.get("volume")
     if vol is not None:
@@ -6479,9 +7894,7 @@ def run_trade_execution_pipeline(
             reason = f"Volume invalide (non numérique): {vol!r}"
             logger.warning(reason)
             feedback = trade_executor.feedback_pipeline(
-                order_id=final_decision.get("order_id", "N/A"),
-                status="failed",
-                reason=reason,
+                order_id=trade_decision["order_id"], status="failed", reason=reason
             )
             trade_executor._feedback_safe(trade_decision, feedback)
             return {"status": "failed", "reason": reason}
@@ -6490,9 +7903,7 @@ def run_trade_execution_pipeline(
             reason = "Volume invalide (<= 0)."
             logger.warning(reason)
             feedback = trade_executor.feedback_pipeline(
-                order_id=final_decision.get("order_id", "N/A"),
-                status="failed",
-                reason=reason,
+                order_id=trade_decision["order_id"], status="failed", reason=reason
             )
             trade_executor._feedback_safe(trade_decision, feedback)
             return {"status": "failed", "reason": reason}
@@ -6504,7 +7915,7 @@ def run_trade_execution_pipeline(
             )
             logger.warning(reason)
             feedback = trade_executor.feedback_pipeline(
-                order_id=final_decision.get("order_id", "N/A"),
+                order_id=trade_decision["order_id"],
                 status="pending_manual_approval",
                 reason=reason,
             )
@@ -6514,64 +7925,72 @@ def run_trade_execution_pipeline(
                 "reason": reason,
                 "suggested_volume": hard_cap,
             }
-        # ----------- 5) Pre-trade checks -----------
-        ok, reason = trade_executor.pre_trade_checks(
-            trade_decision, active_config, market_context
+
+    # ----------- 5) Pre-trade checks (toujours exécutés) -----------
+    ok, reason = trade_executor.pre_trade_checks(
+        trade_decision, active_config, market_context
+    )
+    if not ok:
+        logger.warning(f"Pipeline de trade AVORTÉ (Erreur contrôlée): {reason}")
+        feedback = trade_executor.feedback_pipeline(
+            order_id=trade_decision["order_id"], status="failed", reason=reason
         )
-        if not ok:
-            logger.warning(f"Pipeline de trade AVORTÉ (Erreur contrôlée): {reason}")
-            feedback = trade_executor.feedback_pipeline(
-                order_id=final_decision.get("order_id", "N/A"),
-                status="failed",
-                reason=reason,
-            )
-            trade_executor._feedback_safe(trade_decision, feedback)
-            return {"status": "failed", "reason": reason}
+        trade_executor._feedback_safe(trade_decision, feedback)
+        return {"status": "failed", "reason": reason}
 
-        # ----------- 6) Préparer la requête MT5 (BURST ou STANDARD) -----------
-        try:
-            if final_decision.get(
-                "rule_name"
-            ) == "burst_scalping" or final_decision.get("burst_enabled", False):
-                burst_size = int(final_decision.get("burst_size", 3))
-                trade_decision = trade_executor._attach_burst_metadata(trade_decision)
+    # ----------- 6) Sélection du mode (BURST vs STANDARD) -----------
+    try:
+        is_burst = bool(
+            trade_decision.get("burst_enabled", False)
+            or trade_decision.get("rule_name") == "burst_scalping"
+        )
+        if is_burst:
+            # métadonnées burst (comment, basket_id, trailing meta…)
+            td_with_meta = trade_executor._attach_burst_metadata(dict(trade_decision))
 
-                requests = []
-                for i in range(burst_size):
-                    req = trade_executor.prepare_order(
-                        {
-                            "trade_decision": dict(trade_decision),
-                            "market_context": market_context,
-                            "active_config": active_config,
-                        }
-                    )
-                    # Taguer chaque ordre du panier
-                    requests.append(req)
-
-                results = [trade_executor.execute_order(r) for r in requests]
+            if is_dry_run:
                 return {
-                    "status": "burst_executed",
-                    "basket_id": trade_decision.get("basket_id"),
-                    "results": results,
+                    "status": "dry_run_ready",
+                    "mode": "burst",
+                    "payload": {
+                        "trade_decision": td_with_meta,
+                        "market_context": market_context,
+                        "active_config": active_config,
+                    },
                 }
 
-            # --- Mode standard ---
-            mt5_request = trade_executor.prepare_order(adapted_package)
-
-        except Exception as e:
-            reason = f"Préparation d'ordre échouée: {e}"
-            logger.error(reason, exc_info=True)
-            trade_executor._send_alert_safe(
-                "CRITIQUE", reason, alert_type="telegram_critical"
+            # Exécution BURST (single master)
+            return trade_executor.execute_burst_single_master(
+                {
+                    "trade_decision": td_with_meta,
+                    "market_context": market_context,
+                    "active_config": active_config,
+                }
             )
-            feedback = trade_executor.feedback_pipeline(
-                order_id=final_decision.get("order_id", "N/A"),
-                status="failed",
-                reason=str(e),
-            )
-            trade_executor._feedback_safe(trade_decision, feedback)
-            return {"status": "failed", "reason": str(e)}
 
-        # ----------- 7) Exécution standard -----------
-        execution_result = trade_executor.execute_order(mt5_request)
-        return execution_result
+        # --- Mode standard ---
+        mt5_request = trade_executor.prepare_order(adapted_package)
+
+    except Exception as e:
+        reason = f"Préparation d'ordre échouée: {e}"
+        logger.error(reason, exc_info=True)
+        trade_executor._send_alert_safe(
+            "CRITIQUE", reason, alert_type="telegram_critical"
+        )
+        feedback = trade_executor.feedback_pipeline(
+            order_id=trade_decision["order_id"], status="failed", reason=str(e)
+        )
+        trade_executor._feedback_safe(trade_decision, feedback)
+        return {"status": "failed", "reason": str(e)}
+
+    # ----------- 7) Exécution standard (ou dry-run) -----------
+    if is_dry_run:
+        return {
+            "status": "dry_run_ready",
+            "mode": "standard",
+            "request": mt5_request,
+            "trade_decision": trade_decision,
+        }
+
+    execution_result = trade_executor.execute_order(mt5_request)
+    return execution_result

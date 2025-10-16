@@ -1,14 +1,13 @@
 {
   "strategy_name": "scalping",
-  "version": "2.3",
-  "description": "Scalping Burst propre (XAUUSD only, trailing stop only, no TP)",
+  "version": "2.4",
+  "description": "Scalping Burst — Single-Master (1 broker position, trailing-only, no TP)",
   "tradeable_assets": [
     "XAUUSD"
   ],
   "magic_number": 52001,
   "risk_per_trade_percent": 3.0,
   "confidence_threshold": 0.2,
-  "stop_loss_pips": 60,
   "halt_on_major_news": false,
   "phase_detection": {
     "use_phase_observer": false,
@@ -25,108 +24,39 @@
   },
   "entry_rules": {
     "scalping": {
-      "marubozu_playbook": {
-        "enabled": true,
-        "mtf_bias": {
-          "use": true,
-          "prefer_h1": true,
-          "block_against_both": false
-        },
-        "detection": {
-          "atr_period": 14,
-          "lookback_bars": 3,
-          "min_atr_mult": 2.2,
-          "min_body_ratio": 0.85
-        },
-        "continuation": {
-          "enabled": true,
-          "pullback_frac_min": 0.2,
-          "pullback_frac_max": 0.4,
-          "use_trailing": true,
-          "trailing": {
-            "trigger_pips": 12,
-            "step_pips": 6
-          }
-        },
-        "reversal": {
-          "enabled": true,
-          "use_trailing": true,
-          "trailing": {
-            "trigger_pips": 10,
-            "step_pips": 5
-          }
-        },
-        "range_active": {
-          "enabled": true,
-          "lookback_bars": 20,
-          "max_range_over_atr": 3.0,
-          "min_avg_candle_atr": 0.9,
-          "tolerance_frac": 0.15,
-          "sl_pips": 30,
-          "use_trailing": true,
-          "trailing": {
-            "trigger_pips": 15,
-            "step_pips": 7
-          }
-        }
-      },
-      "range_accumulation": {
-        "enabled": true,
-        "lookback_bars": 20,
-        "tolerance_frac": 0.15,
-        "sl_pips": 30
-      },
-      "range_accumulation_mtf": {
-        "enabled": true,
-        "bias_timeframes": [
-          "M15",
-          "H1"
-        ],
-        "lookback_bars": 20,
-        "sl_pips": 25
-      },
       "burst_scalping": {
         "enabled": true,
-        "sl_pips": 5,
-        "burst_size": 8,
-        "max_bursts": 1,
-        "min_atr_m1_pips": 0.0,
-        "burst_guardrails": {
-          "max_open_positions": 5,
-          "cooldown_seconds": 90,
-          "enforce_burst_closure": true,
-          "single_burst_global": true
-        },
-        "trailing": {
-          "enabled": true,
-          "trigger_pips": 15,
-          "step_pips": 5,
-          "activate_after_rr": 1.0
-        },
-        "closure_rules": {
-          "close_on_full_profit": false,
-          "require_full_count_for_profit_close": true,
-          "min_green_pnl_pips": 0.2,
-          "rt_fast_window_ms": 2500,
-          "rt_poll_interval_ms": 150,
-          "max_loss_pips": 20.0,
-          "trail_trigger_pips": 1.0,
-          "trail_distance_pips": 6.0,
-          "trail_require_full_count": true
-        }
+        "burst_size": 5,
+        "max_bursts": 1
       }
     }
   },
+  "burst_single_master": {
+    "enabled": true,
+    "burst_size": 5,
+    "entry_mode": "MARKET",
+    "per_leg_virtual": true,
+    "min_hold_ms": 800,
+    "enforce_single_position": true
+  },
+  "dynamic_trailing": {
+    "enabled": true,
+    "mode": "ATR",
+    "atr_period": 14,
+    "atr_mult": 0.6,
+    "min_trail_points": 30,
+    "arm_profit_points": 60,
+    "arm_atr_multiple": 0.8,
+    "max_pullback_points": 80,
+    "trail_update_throttle_ms": 250,
+    "backoff_step_points": 10,
+    "breakeven_lock_points": 10,
+    "max_spread_points_when_armed": 40,
+    "max_latency_ms_on_close": 500
+  },
   "exit_rules": {
-    "use_trailing_stop": true,
-    "trailing_stop": {
-      "enabled": true,
-      "distance_pips": 5.0,
-      "mode": "atr",
-      "atr_period": 14,
-      "atr_multiplier": 2.0,
-      "step_lock": true
-    }
+    "managed_by": "single_master",
+    "use_trailing_stop": false
   },
   "decision_rules": [
     {
