@@ -20,6 +20,9 @@ SymbolInfoFallback = namedtuple(
     "SymbolInfoFallback",
     ["symbol", "spread", "point", "digits", "trade_contract_size", "trade_tick_size"],
 )
+# Alias .name pour compatibilité avec du code qui s'attend à 'name' (ex: build_burst_trailing_request)
+SymbolInfoFallback.name = property(lambda self: self.symbol)
+
 
 
 # Import pour la configuration

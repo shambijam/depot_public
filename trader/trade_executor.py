@@ -4803,36 +4803,39 @@ class TradeExecutor:
         if action not in {"BUY", "SELL"}:
             raise TradeExecutionError(f"[BURST] Action invalide: '{action}'.")
 
-        if not symbol_info or getattr(symbol_info, "name", None) in (
-            None,
-            "",
-            "UNKNOWN",
-        ):
-            raise TradeExecutionError(
-                "[BURST] symbol_info invalide ou symbole introuvable."
-            )
+        # ⚠️ symbol_info peut ne pas avoir .name => on ne bloque pas là-dessus
+        if not symbol_info:
+            raise TradeExecutionError("[BURST] symbol_info manquant.")
 
+        # Lecture robuste de digits/point (obligatoires pour les calculs)
         try:
             digits = int(getattr(symbol_info, "digits", 0) or 0)
             point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         except Exception:
-            raise TradeExecutionError(
-                "[BURST] Impossible de lire digits/point du symbol_info."
-            )
-        if point <= 0:
-            raise TradeExecutionError("[BURST] symbol_info.point invalide (<=0).")
+            raise TradeExecutionError("[BURST] symbol_info illisible (digits/point).")
 
+        if digits <= 0 or point <= 0.0:
+            raise TradeExecutionError(
+                "[BURST] symbol_info invalide: digits/point <= 0."
+            )
+
+        # Résolution robuste du nom symbole (fallbacks successifs)
         symbol_name = str(
             getattr(symbol_info, "name", "") or getattr(symbol_info, "symbol", "")
         ).strip()
         if not symbol_name:
+            # fallback depuis la décision si le broker ne fournit pas un name propre
             symbol_name = str(
                 trade_decision.get("asset") or trade_decision.get("symbol") or ""
             ).strip()
-            if not symbol_name:
-                raise TradeExecutionError(
-                    "[BURST] Impossible de déterminer le symbole."
-                )
+
+        if not symbol_name:
+            raise TradeExecutionError(
+                "[BURST] Impossible de déterminer le symbole (name/symbol/asset)."
+            )
+
+        # Normalisation
+        symbol_name = symbol_name.upper()
 
         # --------- Normalisation volume (FLOOR) ---------
         try:
