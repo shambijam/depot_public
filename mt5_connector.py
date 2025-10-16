@@ -883,38 +883,200 @@ class MT5Connector:
         except Exception as e:
             self.logger.warning(f"order_calc_margin indisponible: {e}")
             return None
-
+        
     def modify_position_sltp(
         self, ticket: int, sl=None, tp=None, symbol: str | None = None
     ):
         """
         Attache/ajuste SL/TP sur une position existante.
+        - Arrondit aux digits du symbole
+        - Ne "détend" jamais un SL existant (on n'éloigne pas le stop)
+        - Corrige INVALID_STOPS en élargissant au minimum requis (stops/freeze/spread + buffer)
         Retourne (ok: bool, result: Any).
         """
         mt5 = self.mt5
-        req = {
-            "action": getattr(mt5, "TRADE_ACTION_SLTP", None),
-            "position": int(ticket),
-        }
-        if symbol:
-            req["symbol"] = symbol
-        if sl is not None:
-            req["sl"] = float(sl)
-        if tp is not None:
-            req["tp"] = float(tp)
 
-        try:
-            res = mt5.order_send(req)
-            ok = getattr(res, "retcode", None) == getattr(
-                mt5, "TRADE_RETCODE_DONE", None
-            )
-            return bool(ok), res
-        except Exception as e:
-            self.logger.error(
-                f"modify_position_sltp exception (ticket={ticket}): {e}", exc_info=True
-            )
+        # --- helpers locaux ---------------------------------------------------------
+        def _f(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        def _symbol_ctx(sym: str):
+            si = None
+            try:
+                si = self.symbol_info(sym) if hasattr(self, "symbol_info") and callable(self.symbol_info) else mt5.symbol_info(sym)
+            except Exception:
+                si = None
+            if not si:
+                return None
+            return {
+                "digits": int(getattr(si, "digits", 5) or 5),
+                "point": float(getattr(si, "point", 10**-5) or 10**-5),
+                "stops_level": int(getattr(si, "trade_stops_level", getattr(si, "stops_level", 0)) or 0),
+                "freeze_level": int(getattr(si, "trade_freeze_level", getattr(si, "freeze_level", 0)) or 0),
+                "spread_pts": int(getattr(si, "spread", 0) or 0),
+            }
+
+        def _pos_by_ticket(tk: int):
+            try:
+                poss = list(mt5.positions_get() or [])
+                for p in poss:
+                    if int(getattr(p, "ticket", -1)) == int(tk):
+                        return p
+            except Exception:
+                pass
+            return None
+
+        def _tick(sym: str):
+            try:
+                t = mt5.symbol_info_tick(sym)
+                bid = float(getattr(t, "bid", 0.0) or 0.0)
+                ask = float(getattr(t, "ask", 0.0) or 0.0)
+                return bid, ask
+            except Exception:
+                return 0.0, 0.0
+
+        def _enforce_min_distance(sym: str, side: int, sl_in, tp_in, digits: int, ctx: dict):
+            """
+            Applique la distance mini: max(stops, freeze, spread) + buffer (en points).
+            Utilise le Bid/Ask courant pour vérifier SL/TP côté marché.
+            side: 0=BUY, 1=SELL (comme MT5)
+            """
+            # buffer configurable
+            try:
+                buffer_pts = int(self.config_manager.get("risk.sltp_extra_buffer_points", 2) or 2)
+            except Exception:
+                buffer_pts = 2
+
+            min_pts = max(ctx["stops_level"], ctx["freeze_level"], ctx["spread_pts"]) + max(buffer_pts, 0)
+            min_dist = float(min_pts) * float(ctx["point"])
+
+            bid, ask = _tick(sym)
+            sl_out, tp_out = sl_in, tp_in
+
+            if side == 0:  # BUY
+                if sl_out is not None:
+                    limit = (bid or 0.0) - min_dist
+                    if sl_out >= limit:
+                        sl_out = round(limit, digits)
+                if tp_out is not None:
+                    limit = (ask or 0.0) + min_dist
+                    if tp_out <= limit:
+                        tp_out = round(limit, digits)
+            else:  # SELL
+                if sl_out is not None:
+                    limit = (ask or 0.0) + min_dist
+                    if sl_out <= limit:
+                        sl_out = round(limit, digits)
+                if tp_out is not None:
+                    limit = (bid or 0.0) - min_dist
+                    if tp_out >= limit:
+                        tp_out = round(limit, digits)
+
+            return sl_out, tp_out, min_pts
+
+        # --- 1) récupérer la position / symbole / digits ----------------------------
+        pos = _pos_by_ticket(ticket)
+        if pos is None and symbol is None:
+            self.logger.error(f"modify_position_sltp: position introuvable pour ticket={ticket} et symbol=None")
             return False, None
 
+        if symbol is None:
+            symbol = str(getattr(pos, "symbol", "") or "")
+            if not symbol:
+                self.logger.error(f"modify_position_sltp: symbole introuvable pour ticket={ticket}")
+                return False, None
+
+        ctx = _symbol_ctx(symbol)
+        if not ctx:
+            self.logger.error(f"modify_position_sltp: symbol_info indisponible pour {symbol}")
+            return False, None
+
+        digits = ctx["digits"]
+        side = int(getattr(pos, "type", 0) if pos is not None else 0)  # 0=BUY, 1=SELL
+
+        # --- 2) SL/TP initial + arrondis -------------------------------------------
+        sl = _f(sl)
+        tp = _f(tp)
+        if sl is not None:
+            sl = round(sl, digits)
+        if tp is not None:
+            tp = round(tp, digits)
+
+        # Ne jamais "détendre" un SL existant
+        cur_sl = _f(getattr(pos, "sl", None)) if pos is not None else None
+        if cur_sl is not None and sl is not None:
+            if side == 0 and sl < cur_sl:     # BUY: SL plus bas = on éloigne → refuse
+                self.logger.info(f"[SLTP] Refus de détendre SL (BUY) {cur_sl} → {sl} (ticket={ticket})")
+                sl = None
+            if side == 1 and sl > cur_sl:     # SELL: SL plus haut = on éloigne → refuse
+                self.logger.info(f"[SLTP] Refus de détendre SL (SELL) {cur_sl} → {sl} (ticket={ticket})")
+                sl = None
+
+        # Rien à faire ?
+        if sl is None and tp is None:
+            self.logger.info(f"[SLTP] Rien à modifier (ticket={ticket}).")
+            return True, None
+
+        # --- 3) Pré-ajustement min distance ----------------------------------------
+        sl_adj, tp_adj, _ = _enforce_min_distance(symbol, side, sl, tp, digits, ctx)
+
+        # --- 4) Envoi + correction INVALID_STOPS si besoin --------------------------
+        def _send(sl_v, tp_v):
+            req = {
+                "action": getattr(mt5, "TRADE_ACTION_SLTP", None),
+                "position": int(ticket),
+                "symbol": symbol,
+            }
+            if sl_v is not None:
+                req["sl"] = float(sl_v)
+            if tp_v is not None:
+                req["tp"] = float(tp_v)
+            return mt5.order_send(req)
+
+        res = None
+        try:
+            res = _send(sl_adj, tp_adj)
+            ret = getattr(res, "retcode", None)
+        except Exception as e:
+            self.logger.error(f"modify_position_sltp exception (ticket={ticket}): {e}", exc_info=True)
+            return False, None
+
+        RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", None)
+        RET_INVALID_STOPS = getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", 10016)
+
+        if ret == RET_DONE:
+            return True, res
+
+        # Une seconde tentative en élargissant encore si INVALID_STOPS
+        if ret == RET_INVALID_STOPS:
+            # élargissement minimal (on reprend bid/ask actuels et on re-applique)
+            sl_w, tp_w, min_pts = _enforce_min_distance(symbol, side, sl_adj, tp_adj, digits, ctx)
+            self.logger.warning(f"[SLTP] INVALID_STOPS → élargissement à min {min_pts} pts puis nouvel essai (ticket={ticket}).")
+            try:
+                res2 = _send(sl_w, tp_w)
+                if getattr(res2, "retcode", None) == RET_DONE:
+                    return True, res2
+                return False, res2
+            except Exception as e:
+                self.logger.error(f"modify_position_sltp 2e essai exception (ticket={ticket}): {e}", exc_info=True)
+                return False, None
+
+        # autre retcode → KO
+        return False, res
+    
+    # --- Compatibilité avec d’anciens noms que le TradeExecutor peut appeler ---
+    def position_modify(self, ticket: int, sl=None, tp=None, symbol: str | None = None):
+        return self.modify_position_sltp(ticket=ticket, sl=sl, tp=tp, symbol=symbol)
+
+    def modify_position(self, ticket: int, sl=None, tp=None, symbol: str | None = None):
+        return self.modify_position_sltp(ticket=ticket, sl=sl, tp=tp, symbol=symbol)
+
+    def set_sl_tp(self, ticket: int, sl=None, tp=None, symbol: str | None = None):
+        return self.modify_position_sltp(ticket=ticket, sl=sl, tp=tp, symbol=symbol)
+      
     @property
     def is_connected(self) -> bool:
         """

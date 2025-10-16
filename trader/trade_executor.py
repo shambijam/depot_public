@@ -1981,6 +1981,48 @@ class TradeExecutor:
                 self.logger.warning(
                     f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
                 )
+            # >>> PATCH: sécuriser broker_symbol + symbol_info avant construction de la requête
+            # 1) symbole brut depuis la décision
+            raw_symbol = str(trade_decision.get("asset") or trade_decision.get("symbol") or "").upper()
+            if not raw_symbol:
+                raise TradeExecutionError("[BURST] Symbole manquant dans trade_decision.")
+
+            # 2) mapping éventuel vers symbole broker
+            try:
+                mc = locals().get("market_context", {}) or {}
+                mapped = self._map_symbol_for_broker(raw_symbol, mc)
+                broker_symbol = (mapped or locals().get("broker_symbol") or raw_symbol).upper()
+            except Exception:
+                broker_symbol = (locals().get("broker_symbol") or raw_symbol).upper()
+
+            # 3) s’assurer que le symbole est sélectionné (Market Watch)
+            try:
+                sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
+                if callable(sel):
+                    if not sel(broker_symbol):
+                        raise TradeExecutionError(f"[BURST] symbol non sélectionné: {broker_symbol}")
+                else:
+                    info_tmp = self.mt5_connector.get_symbol_info(broker_symbol)
+                    if not info_tmp or (hasattr(info_tmp, "visible") and not info_tmp.visible):
+                        subscribe = getattr(self.mt5_connector, "symbol_select", None)
+                        if callable(subscribe) and not subscribe(broker_symbol, True):
+                            raise TradeExecutionError(f"[BURST] symbol_select a échoué: {broker_symbol}")
+            except Exception as e:
+                raise TradeExecutionError(f"[BURST] Sélection symbole KO: {e}")
+
+            # 4) recharger symbol_info depuis MT5 et le valider (digits/point)
+            symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
+            if not symbol_info:
+                raise TradeExecutionError(f"[BURST] symbol_info introuvable pour {broker_symbol}.")
+
+            try:
+                _digits = int(getattr(symbol_info, "digits", 0) or 0)
+                _point  = float(getattr(symbol_info, "point", 0.0) or 0.0)
+            except Exception:
+                raise TradeExecutionError(f"[BURST] symbol_info illisible pour {broker_symbol} (digits/point).")
+            if _digits <= 0 or _point <= 0:
+                raise TradeExecutionError(f"[BURST] symbol_info invalide pour {broker_symbol} (digits/point).")
+
 
             # ---------- 10) Construction requête ----------
             if rule_name_local == "burst_scalping":
@@ -2180,7 +2222,37 @@ class TradeExecutor:
             self.logger.warning(
                 f"[TRAILING] Erreur application trailing sur {(symbol or sym)}/{ticket}: {e}"
             )
+            
+    def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | None):
+        """Attache (ou ré-attache) SL/TP à une position existante."""
+        mt5c = getattr(self, "mt5_connector", None)
+        mt5 = getattr(mt5c, "mt5", None) if mt5c else None
+        if not (mt5c and mt5):
+            self.logger.warning("[EXECUTOR] Impossible d’attacher SL/TP: mt5_connector absent.")
+            return None
 
+        req = {
+            "action": getattr(mt5, "TRADE_ACTION_SLTP", None),
+            "symbol": symbol,
+            "position": int(ticket),
+        }
+        if sl is not None:
+            req["sl"] = float(sl)
+        if tp is not None:
+            req["tp"] = float(tp)
+
+        try:
+            res = mt5c.order_send(req)
+            rc = getattr(res, "retcode", None) if res else None
+            if rc == getattr(mt5, "TRADE_RETCODE_DONE", None):
+                self.logger.info(f"[EXECUTOR] SL/TP attachés pour pos#{ticket} ({symbol}) → SL={req.get('sl')} TP={req.get('tp')}")
+            else:
+                self.logger.warning(f"[EXECUTOR] Attache SL/TP échec pos#{ticket} ({symbol}) retcode={rc}")
+            return res
+        except Exception as e:
+            self.logger.warning(f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}")
+            return None
+    
     def _calculate_sl_tp_prices(
         self,
         trade_decision: dict,
@@ -3437,6 +3509,14 @@ class TradeExecutor:
 
                 any_action = False
                 for basket_id, pos in baskets.items():
+                    
+                    # --- PATCH: grâce de perte initiale pour éviter le kill au spread ---
+                    if not hasattr(self, "_basket_first_seen"):
+                        self._basket_first_seen = {}
+                    now_s = time.time()
+                    self._basket_first_seen.setdefault(basket_id, now_s)  # première observation
+                    loss_grace_seconds = float(closure.get("loss_grace_seconds", 2.0))  # défaut 2s
+                    
                     # 1) CLOSE INSTANTANÉ : Panier plein & TOUT VERT
                     if close_on_full_profit and _all_green_and_full(pos):
                         self.logger.info(
@@ -3543,7 +3623,7 @@ class TradeExecutor:
                 sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
                 # 2) filet de perte
-                if pnl_pips <= -abs(max_loss_pips):
+                if pnl_pips <= -abs(max_loss_pips) and (now_s - self._basket_first_seen[basket_id]) >= loss_grace_seconds:
                     self.logger.warning(
                         f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
                     )
@@ -5485,30 +5565,83 @@ class TradeExecutor:
             "retcode_str": retcode_str,
         }
 
-    def _update_internal_position_state(
-        self, mt5_result: Any, initial_risk: float
-    ) -> None:
+    def _update_internal_position_state(self, mt5_result: Any, initial_risk: float) -> None:
         """
-        Met à jour le dictionnaire interne des positions ouvertes de manière centralisée.
+        Corrigé: ne lit PAS sl/tp depuis OrderSendResult (non exposés par l'API Python MT5).
+        Récupère sl/tp depuis la request quand dispo, sinon via positions_get().
         """
+        # --- 1) Récupération sûre depuis la requête d’origine
+        try:
+            req = getattr(mt5_result, "request", {}) or {}
+        except Exception:
+            req = {}
+
+        def _f(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        symbol = str(req.get("symbol") or "") or None
+        order_type = req.get("type")
+        volume = _f(req.get("volume"))
+        entry_price = _f(req.get("price") or getattr(mt5_result, "price", None))
+        sl_price = _f(req.get("sl") or req.get("stop_loss") or req.get("sl_price"))
+        tp_price = _f(req.get("tp") or req.get("take_profit") or req.get("tp_price"))
+        comment = req.get("comment")
+        magic = req.get("magic")
+
+        # --- 2) Compléments via positions_get() si nécessaire
+        pos = None
+        try:
+            mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
+            if mt5 and symbol:
+                poss = list(mt5.positions_get(symbol=symbol) or [])
+                if poss:
+                    # la plus récente
+                    pos = sorted(
+                        poss, key=lambda p: int(getattr(p, "time_update", 0))
+                    )[-1]
+        except Exception:
+            pos = None
+
+        if pos:
+            if entry_price is None:
+                entry_price = _f(getattr(pos, "price_open", None))
+            if sl_price is None:
+                sl_price = _f(getattr(pos, "sl", None))
+            if tp_price is None:
+                tp_price = _f(getattr(pos, "tp", None))
+
+        # --- 3) Construction & stockage
         position_data = {
-            "ticket": mt5_result.deal,
-            "symbol": mt5_result.request.symbol,
-            "type": mt5_result.request.type,
-            "volume": mt5_result.volume,
-            "entry_price": mt5_result.price,
-            "sl": mt5_result.sl,
-            "tp": mt5_result.tp,
-            "magic": mt5_result.request.magic,
-            "comment": mt5_result.request.comment,
+            "ticket": getattr(mt5_result, "deal", None) or getattr(mt5_result, "order", None),
+            "symbol": symbol,
+            "type": order_type,
+            "volume": volume,
+            "entry_price": entry_price,
+            "sl": sl_price,
+            "tp": tp_price,
+            "magic": magic,
+            "comment": comment,
             "open_time": datetime.now(UTC).isoformat(),
-            "initial_risk_usd": initial_risk,
+            "initial_risk_usd": float(initial_risk or 0.0),
         }
-        # La clé du dictionnaire est le 'deal' (ticket de la transaction)
-        self._open_positions[mt5_result.deal] = position_data
-        self.logger.debug(
-            f"État interne mis à jour pour la nouvelle position #{mt5_result.deal}."
-        )
+
+        ticket_key = position_data["ticket"]
+        if ticket_key is not None:
+            self._open_positions[ticket_key] = position_data
+            self.logger.debug(f"[STATE] position enregistrée pour ticket={ticket_key}: {position_data}")
+        else:
+            self.logger.debug(f"[STATE] position (sans ticket) : {position_data}")
+
+        # Optionnel: tenter une réconciliation silencieuse
+        try:
+            if hasattr(self, "reconcile_positions_with_broker"):
+                self.reconcile_positions_with_broker()
+        except Exception:
+            pass
+
 
     def monitor_pending_orders(self) -> None:
         """
@@ -6750,10 +6883,12 @@ class TradeExecutor:
                     if ticket is not None:
                         modified = False
                         for fn_name in (
+                            "modify_position_sltp",  # <— ajout essentiel
                             "position_modify",
                             "modify_position",
                             "set_sl_tp",
                         ):
+
                             fn = getattr(self.mt5_connector, fn_name, None)
                             if callable(fn):
                                 try:
