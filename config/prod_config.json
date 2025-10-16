@@ -243,8 +243,8 @@
       "slippage_points": 20
     },
     "volume_safety_enabled": true,
-    "max_absolute_volume_safety": 2.00,
-    "absolute_volume_failsafe": 2.00,
+    "max_absolute_volume_safety": 1.50,
+    "absolute_volume_failsafe": 1.50,
     "abort_on_excess_volume": true,
     "fat_finger_check": {
       "enabled": true,
@@ -252,7 +252,7 @@
       "avg_volume_lookback": 20,
       "max_volume_multiplier_from_avg": 5.0,
       "max_absolute_volume_for_asset": {
-        "XAUUSD": 2.0
+        "XAUUSD": 1.5
       },
       "execution": {
         "allow_demo_send": true

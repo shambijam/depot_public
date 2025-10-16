@@ -33,7 +33,7 @@
   },
   "burst_single_master": {
     "enabled": true,
-    "burst_size": 5,
+    "burst_size": 8,
     "entry_mode": "MARKET",
     "per_leg_virtual": true,
     "min_hold_ms": 800,
