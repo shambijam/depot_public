@@ -140,24 +140,11 @@ class MarketAnalyzer:
         strategy_config: "Dict[str, Any]",
     ):
         """
-        Retourne (ok: bool, decision: dict) pour scalping burst footprint.
-
-        Version robuste :
+        Retourne (ok: bool, decision: dict) pour scalping burst via triggers Footprint.
+        Version sans garde-fous (aucun filtre tickrate/couverture/phase, aucun 'enabled' gate).
         - Normalisation DATETIME unique (tz-aware -> naive UTC).
-        - Résolution de config tolérante (chemins multiples + fallback instance).
-        - Garde-fous flux paramétrables (tickrate/couverture/phase) désactivables par conf.
-        - Triggers en cascade (climax -> stacking -> absorption) sans fallback de trade.
-        - Entrée ONE_PRICE (burst synchrone) + sortie TRALING_ONLY panier (close_all_at_once).
-
-        Conf pour "zéro garde-fou" (exemple):
-            footprint_triggers:
-            enabled: true
-            tickrate_min: 0
-            coverage_s_min_burst: 0
-            phase_whitelist: []
-            allow_no_clear_phase_if_strong:
-                of_delta_abs_min: 0
-                tickrate_min: 0
+        - Triggers en cascade (climax -> stacking -> absorption), sans fallback de trade.
+        - Entrée ONE_PRICE (burst) + sortie TRAILING_ONLY panier (close_all_at_once).
         """
         import pandas as pd
 
@@ -188,38 +175,9 @@ class MarketAnalyzer:
         except Exception as e:
             return False, {"reason": f"triggers import error: {e}"}
 
-        # -------- helpers --------
-        def _deep_find_footprint_cfg(d):
-            """Retourne (cfg, path_str) en cherchant footprint_triggers partout."""
-            stack = [([], d)]
-            while stack:
-                path, node = stack.pop()
-                if isinstance(node, dict):
-                    if "footprint_triggers" in node and isinstance(
-                        node["footprint_triggers"], dict
-                    ):
-                        return node["footprint_triggers"], " → ".join(
-                            path + ["footprint_triggers"]
-                        )
-                    for k, v in node.items():
-                        stack.append((path + [str(k)], v))
-            return {}, ""
-
-        def _get_phase_from_bars(bdf: "pd.DataFrame") -> "str|None":
-            try:
-                if (
-                    bdf is not None
-                    and "phase" in bdf.columns
-                    and len(bdf["phase"].dropna()) > 0
-                ):
-                    return str(bdf["phase"].dropna().iloc[-1])
-            except Exception:
-                pass
-            return None
-
         # --- NORMALISATION DATETIME (tz-aware -> naive UTC) ---------------------------
         def _to_naive_utc_series(s: pd.Series) -> pd.Series:
-            s = pd.to_datetime(s, errors="coerce")  # conserve tz si présent
+            s = pd.to_datetime(s, errors="coerce")
             if pd.api.types.is_datetime64tz_dtype(s):
                 s = s.dt.tz_convert("UTC").dt.tz_localize(None)
             return s
@@ -240,13 +198,9 @@ class MarketAnalyzer:
                 df.index = _to_naive_utc_index(df.index)
 
             # 2) normaliser colonnes temporelles connues (tz-aware friendly)
-            dt_cols = [
-                c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns
-            ]
+            dt_cols = [c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns]
             for c in dt_cols:
-                if pd.api.types.is_datetime64_any_dtype(
-                    df[c]
-                ) or pd.api.types.is_object_dtype(df[c]):
+                if pd.api.types.is_datetime64_any_dtype(df[c]) or pd.api.types.is_object_dtype(df[c]):
                     df[c] = _to_naive_utc_series(df[c])
 
             # 3) s'assurer d'une colonne pivot 'dt'
@@ -268,147 +222,69 @@ class MarketAnalyzer:
                     pass
 
             return df
-
         # ------------------------------------------------------------------------------
-
-        # -------- config resolution --------
-        try:
-            cfg_fp = (
-                (strategy_config or {})
-                .get("entry_rules", {})
-                .get("scalping", {})
-                .get("burst_scalping", {})
-                .get("footprint_triggers", {})
-            )
-            cfg_path = "entry_rules → scalping → burst_scalping → footprint_triggers"
-
-            if not cfg_fp:
-                # fallback #1: attribut d'instance
-                cfg_fp = getattr(self, "footprint_triggers", {}) or {}
-                cfg_path = "self.footprint_triggers"
-
-            if not cfg_fp:
-                # fallback #2: recherche profonde
-                cfg_fp, cfg_path = _deep_find_footprint_cfg(strategy_config or {})
-
-            if not cfg_fp or not bool(cfg_fp.get("enabled", False)):
-                return False, {
-                    "reason": f"footprint_triggers disabled (cfg not found/enabled at '{cfg_path or 'N/A'}')"
-                }
-        except Exception as e:
-            return False, {"reason": f"config error: {e}"}
-
-        _log("info", f"[FP CFG] path='{cfg_path}' keys={list(cfg_fp.keys())}")
 
         # -------- normalisation unique --------
         try:
             ticks = _normalize_dt_df(ticks, prefer_col="dt")
-            bars = _normalize_dt_df(
-                bars, prefer_col="time"
-            )  # adapter à ton schéma si besoin
+            bars = _normalize_dt_df(bars, prefer_col="time")  # adapte si besoin à ton schéma
         except Exception as e:
             return False, {"reason": f"datetime normalization error: {e}"}
 
-        # -------- lecture des paramètres --------
+        # -------- lecture des paramètres (sans gate 'enabled') --------
         sc = strategy_config or {}
         price_step = float(sc.get("price_step", 0.1))
 
-        order_block = (
-            sc.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
-            or {}
-        )
-        burst_count = max(1, int(order_block.get("burst_size", 5)))
-        burst_count = min(burst_count, int(cfg_fp.get("max_burst_size", 10) or 10))
+        burst_block = sc.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {}
+        cfg_fp = burst_block.get("footprint_triggers", {}) or getattr(self, "footprint_triggers", {}) or {}
 
+        burst_count = max(1, int(burst_block.get("burst_size", 5)))  # pas de clamp max_burst_size
         order_entry_style = str(cfg_fp.get("entry_style", "LIMIT_FOK")).upper()
         order_validity_ms = int(cfg_fp.get("validity_ms", 800))
         price_offset_ticks = float(cfg_fp.get("price_offset_ticks", 0.0))
+        window_s = int(cfg_fp.get("window_s", 5))
 
-        # hygiène marché (paramétrables, 0 => désactivés)
-        tickrate_min = float(cfg_fp.get("tickrate_min", 0.0))
-        coverage_s_min = float(cfg_fp.get("coverage_s_min_burst", 0.0))
-        phase_whitelist = list(cfg_fp.get("phase_whitelist", []))
-        allow = cfg_fp.get("allow_no_clear_phase_if_strong", {}) or {}
-        allow_delta_abs_min = float(allow.get("of_delta_abs_min", 0.0))
-        allow_tickrate_min = float(allow.get("tickrate_min", tickrate_min))
-
-        # -------- snapshot footprint --------
+        # -------- snapshot footprint (dépendance dure, pas un "garde-fou") --------
         try:
-            df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=int(cfg_fp.get("window_s", 5))
-            )
+            df_levels, meta = _compute_footprint_snapshot(ticks, price_step=price_step, window_s=window_s)
             if df_levels is None or df_levels.empty:
                 return False, {"reason": "no footprint levels"}
         except Exception as e:
             return False, {"reason": f"footprint snapshot error: {e}"}
 
-        # -------- filtres de flux --------
-        tr = float(meta.get("tick_rate", 0.0))
-        cov = float(meta.get("coverage_s", 0.0))
-        if tickrate_min > 0 and tr < tickrate_min:
-            return False, {"reason": f"tickrate too low: {tr}/{tickrate_min}s"}
-        if coverage_s_min > 0 and cov < coverage_s_min:
-            return False, {"reason": f"coverage too short: {cov}s<{coverage_s_min}s"}
-
-        current_phase = _get_phase_from_bars(bars)
-        if phase_whitelist and current_phase not in phase_whitelist:
-            delta_abs = abs(float(meta.get("delta_total", 0.0)))
-            if not (delta_abs >= allow_delta_abs_min and tr >= allow_tickrate_min):
-                return False, {
-                    "reason": (
-                        f"phase '{current_phase}' not in whitelist and not strong-enough "
-                        f"(|Δ|={delta_abs}, tr={tr}/s)"
-                    )
-                }
-
-        # -------- triggers --------
+        # -------- triggers (analyse pure, aucun filtre autour) --------
         try:
+            # 1) Climax après consolidation
             d_climax = detect_volume_climax_after_consolidation(
                 bars,
                 df_levels,
                 lookback_bars=int(cfg_fp.get("climax", {}).get("lookback_bars", 8)),
                 vol_ratio_min=float(cfg_fp.get("climax", {}).get("vol_ratio_min", 2.0)),
-                delta_ratio_min=float(
-                    cfg_fp.get("climax", {}).get("delta_ratio_min", 1.5)
-                ),
-                need_consolidation=bool(
-                    cfg_fp.get("climax", {}).get("need_consolidation", True)
-                ),
-                consolidation_max_atr_mult=float(
-                    cfg_fp.get("climax", {}).get("consolidation_max_atr_mult", 1.0)
-                ),
+                delta_ratio_min=float(cfg_fp.get("climax", {}).get("delta_ratio_min", 1.5)),
+                need_consolidation=bool(cfg_fp.get("climax", {}).get("need_consolidation", True)),
+                consolidation_max_atr_mult=float(cfg_fp.get("climax", {}).get("consolidation_max_atr_mult", 1.0)),
             )
             decision = d_climax if d_climax.get("ok") else None
 
+            # 2) Stacking d'imbalance
             if decision is None:
                 d_stack = detect_imbalance_stacking(
                     df_levels,
-                    delta_ratio_min=float(
-                        cfg_fp.get("stacking", {}).get("delta_ratio_min", 1.3)
-                    ),
+                    delta_ratio_min=float(cfg_fp.get("stacking", {}).get("delta_ratio_min", 1.3)),
                     min_levels=int(cfg_fp.get("stacking", {}).get("min_levels", 3)),
-                    invalidate_opposite_ratio=float(
-                        cfg_fp.get("stacking", {}).get("invalidate_opposite_ratio", 0.6)
-                    ),
-                    vol_level_min_ratio_median_30s=float(
-                        cfg_fp.get("vol_level_min_ratio_median_30s", 0.0)
-                    ),
+                    invalidate_opposite_ratio=float(cfg_fp.get("stacking", {}).get("invalidate_opposite_ratio", 0.6)),
+                    vol_level_min_ratio_median_30s=float(cfg_fp.get("vol_level_min_ratio_median_30s", 0.0)),
                 )
                 if d_stack.get("ok"):
                     decision = d_stack
 
+            # 3) Absorption / rejet
             if decision is None:
                 d_abs = detect_absorption_reject(
                     df_levels,
-                    vol_zscore_min=float(
-                        cfg_fp.get("absorption", {}).get("vol_zscore_min", 2.0)
-                    ),
-                    delta_ratio_max=float(
-                        cfg_fp.get("absorption", {}).get("delta_ratio_max", 0.5)
-                    ),
-                    attempts_min=int(
-                        cfg_fp.get("absorption", {}).get("attempts_min", 2)
-                    ),
+                    vol_zscore_min=float(cfg_fp.get("absorption", {}).get("vol_zscore_min", 2.0)),
+                    delta_ratio_max=float(cfg_fp.get("absorption", {}).get("delta_ratio_max", 0.5)),
+                    attempts_min=int(cfg_fp.get("absorption", {}).get("attempts_min", 2)),
                 )
                 if d_abs.get("ok"):
                     decision = d_abs
@@ -418,59 +294,38 @@ class MarketAnalyzer:
         except Exception as e:
             return False, {"reason": f"trigger eval error: {e}"}
 
-        # -------- construction de l’ordre & trailing --------
+        # -------- construction de l’ordre & trailing (politique scalping burst) --------
         try:
-            micro_atr = float(
-                _micro_atr_from_ticks(
-                    ticks, window_s=int(cfg_fp.get("trail_atr_window_s", 10))
-                )
-            )
+            micro_atr = float(_micro_atr_from_ticks(ticks, window_s=int(cfg_fp.get("trail_atr_window_s", 10))))
             anchor_price = float(decision.get("anchor_price", meta.get("poc", 0.0)))
             direction = str(decision.get("direction", "BUY")).upper()
 
             # offset signé selon la direction
             signed_offset = float(price_offset_ticks) * float(price_step)
-            signed_offset = (
-                -abs(signed_offset) if direction == "SELL" else abs(signed_offset)
-            )
+            signed_offset = -abs(signed_offset) if direction == "SELL" else abs(signed_offset)
 
-            # Pour MARKET, le prix peut être ignoré en aval; on garde ancre+offset pour cohérence
             entry_price = float(anchor_price + signed_offset)
 
             entry = {
-                "style": order_entry_style,  # e.g. LIMIT_FOK | MARKET
+                "style": order_entry_style,   # e.g. LIMIT_FOK | MARKET
                 "price": entry_price,
                 "burst_count": int(burst_count),
                 "validity_ms": int(order_validity_ms),
+                # ONE_PRICE seulement (pas de ONE_SHOT qui peut impacter le sizing)
+                "price_mode": "ONE_PRICE",
             }
-            # --- sémantique burst ONE_PRICE + ouverture synchrone ---
-            entry.update(
-                {
-                    "price_mode": "ONE_PRICE",  # toutes les tailles au même prix
-                    "burst_open": "ONE_SHOT",  # envoi groupé
-                    "burst_sync_open": True,  # synchronisation ouverture
-                }
-            )
 
             trailing = {
                 "phase0": {
-                    "window_s": int(
-                        cfg_fp.get("trailing", {}).get("phase0_seconds", 5)
-                    ),
+                    "window_s": int(cfg_fp.get("trailing", {}).get("phase0_seconds", 5)),
                     "anchor": "footprint_block_or_micro_atr",
-                    "mult": float(
-                        cfg_fp.get("trailing", {}).get("phase0_mult_micro_atr_10s", 1.0)
-                    ),
+                    "mult": float(cfg_fp.get("trailing", {}).get("phase0_mult_micro_atr_10s", 1.0)),
                 },
                 "phase1": {
-                    "mult": float(
-                        cfg_fp.get("trailing", {}).get("phase1_mult_micro_atr_10s", 1.5)
-                    ),
+                    "mult": float(cfg_fp.get("trailing", {}).get("phase1_mult_micro_atr_10s", 1.5)),
                 },
                 "phase2": {
-                    "mult": float(
-                        cfg_fp.get("trailing", {}).get("phase2_mult_micro_atr_10s", 2.0)
-                    ),
+                    "mult": float(cfg_fp.get("trailing", {}).get("phase2_mult_micro_atr_10s", 2.0)),
                 },
                 "clamp": [
                     float(cfg_fp.get("trailing", {}).get("clamp_min", 0.0)),
@@ -489,10 +344,10 @@ class MarketAnalyzer:
                     "type": "TRAILING_ONLY",
                     "phases": trailing,
                     "basket": {
-                        "scope": "BASKET",  # logique au niveau panier
-                        "close_all_at_once": True,  # fermeture groupée
-                        "require_all_in_profit": True,  # ne ferme que si toutes les tailles sont en PV
-                        "sync_trailing": True,  # trailing partagé (panier)
+                        "scope": "BASKET",
+                        "close_all_at_once": True,
+                        "require_all_in_profit": True,
+                        "sync_trailing": True,
                     },
                 },
                 "meta": {**meta, **(decision.get("meta", {}) or {})},
