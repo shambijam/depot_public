@@ -464,6 +464,11 @@ def run_single_pipeline_cycle(
 
         base_config = config_manager.get_current_dynamic_config()
         execution_mode = str(base_config.get("mode_execution", "DEMO")).upper()
+        
+        # --- EXEC MODE OVERRIDE (force depuis config) ---
+        is_dry_run = bool(base_config.get("trade_execution", {}).get("dry_run", is_dry_run))
+        logger.info(f"[EXEC MODE] is_dry_run={is_dry_run} | execution_mode={execution_mode}")
+
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
@@ -1263,32 +1268,93 @@ def run_single_pipeline_cycle(
                         logger.warning(
                             f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}"
                         )
-                    # --- SPECIAL: Footprint burst LIMIT_FOK -> envoi panier dédié ---
+                    # --- SPECIAL: Burst scalping -> forcer le chemin LIMIT_FOK (avec normalisation & DRY RUN) ---
                     try:
+                        # 0) Normalisation du rule_name (certains moteurs mettent "burst" au lieu de "burst_scalping")
+                        rn_raw = str(td.get("rule_name", "")).lower()
+                        if rn_raw in ("burst", "burst_master", "scalping_burst", ""):
+                            td["rule_name"] = "burst_scalping"
                         rn = str(td.get("rule_name", "")).lower()
-                        est_fok = str(td.get("entry_style", "")).upper() == "LIMIT_FOK"
-                        if rn == "burst_scalping" and est_fok:
-                            ok = trade_executor.execute_burst_scalping_order(td, base_config)
-                            if ok:
-                                trade_executed_successfully = True
-                                # Armer/mettre à jour le watchdog trailing immédiatement
+
+                        if rn == "burst_scalping":
+                            # 1) Si entry_style absent, on force LIMIT_FOK
+                            style = str(td.get("entry_style", "")).upper().strip()
+                            if not style:
+                                td["entry_style"] = "LIMIT_FOK"
+                                style = "LIMIT_FOK"
+
+                            # 2) Completer burst_count / burst_volume_each si absents
+                            try:
                                 burst_cfg = (
                                     base_config.get("entry_rules", {})
                                     .get("scalping", {})
                                     .get("burst_scalping", {})
                                     or {}
                                 )
-                                trail_cfg = burst_cfg.get("trailing", {}) or {}
-                                trade_executor.monitor_burst_baskets(
-                                    config=base_config,
-                                    max_loss_pips=15.0,
-                                    trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
-                                    trail_step=float(trail_cfg.get("step_pips", 5.0)),
-                                )
-                            # on ne passe PAS par _execute_single_decision pour éviter un 2e envoi
-                            continue
+                                order_cfg = (burst_cfg.get("order", {}) or {})
+                                default_count = int(order_cfg.get("burst_count", 5))
+                                default_each  = float(order_cfg.get("burst_volume_each", 0.02))
+                            except Exception:
+                                default_count, default_each = 5, 0.02
+
+                            if "burst_count" not in td or not td.get("burst_count"):
+                                td["burst_count"] = default_count
+                            if "burst_volume_each" not in td or not td.get("burst_volume_each"):
+                                # si volume total fourni, on répartit
+                                tot = float(td.get("volume", 0.0) or 0.0)
+                                if tot > 0 and td["burst_count"] > 0:
+                                    td["burst_volume_each"] = round(tot / int(td["burst_count"]), 5)
+                                else:
+                                    td["burst_volume_each"] = default_each
+
+                            # 3) Prix d'entrée: si absent, on tente de le déduire du tick
+                            if "price" not in td or not float(td.get("price", 0.0) or 0.0):
+                                sym = str(td.get("asset") or td.get("symbol") or "").upper()
+                                action_up = str(td.get("action","")).upper()
+                                best = None
+                                try:
+                                    if hasattr(mt5_connector, "get_symbol_tick"):
+                                        tk = mt5_connector.get_symbol_tick(sym) or {}
+                                        # tolérant à différents formats (dict/obj)
+                                        ask = tk.get("ask", getattr(tk, "ask", None))
+                                        bid = tk.get("bid", getattr(tk, "bid", None))
+                                        best = (ask if action_up == "BUY" else bid)
+                                except Exception:
+                                    best = None
+                                if best:
+                                    td["price"] = float(best)
+
+                            # 4) Si c’est bien LIMIT_FOK -> on passe par l’exécuteur panier
+                            if style == "LIMIT_FOK":
+                                # Respect du DRY RUN: on simule au lieu d'envoyer MT5 si demandé
+                                if is_dry_run:
+                                    logger.info(
+                                        f"[BURST][DRY] {td.get('action','?')} x{td.get('burst_count')} "
+                                        f"{td.get('asset','?')} @ {float(td.get('price',0.0) or 0.0):.2f} "
+                                        f"(LIMIT+FOK simulé)"
+                                    )
+                                    trade_executed_successfully = True
+                                    # on saute le chemin legacy pour éviter l'erreur TradeRequest.get
+                                    continue
+                                else:
+                                    ok = trade_executor.execute_burst_scalping_order(td, base_config)
+                                    if ok:
+                                        trade_executed_successfully = True
+                                        # Armer/mettre à jour le watchdog trailing immédiatement
+                                        trail_cfg = (
+                                            burst_cfg.get("trailing", {}) if isinstance(burst_cfg, dict) else {}
+                                        ) or {}
+                                        trade_executor.monitor_burst_baskets(
+                                            config=base_config,
+                                            max_loss_pips=15.0,
+                                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
+                                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
+                                        )
+                                    # Quoi qu'il arrive, on ne passe PAS par _execute_single_decision pour ce rule
+                                    continue
+                            # Si pas LIMIT_FOK (ex. MARKET), on laisse filer vers le chemin legacy ci-dessous.
                     except Exception as e:
-                        logger.error(f"[PIPELINE] Burst LIMIT_FOK error: {e}", exc_info=True)
+                        logger.error(f"[PIPELINE] Burst LIMIT_FOK path error: {e}", exc_info=True)
   
                     if _execute_single_decision(
                         td,

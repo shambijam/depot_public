@@ -178,6 +178,9 @@
     ],
     "max_allowed_lot_size": 50.0
   },
+  "trade_execution": {
+    "dry_run": false
+  },
   "guardrails": {
     "enabled": true,
     "allow_fallbacks": false,
