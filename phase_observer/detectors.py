@@ -16,6 +16,39 @@ LOG = logging.getLogger(__name__)
 # ----------------------- FOOTPRINT TRIGGERS ----------------------------------
 from .features import _compute_footprint_snapshot, _micro_atr_from_ticks
 
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Tuple
+
+
+# --------- util prix (robuste sans price_step en conf) ---------
+def _infer_price_step_from_index(idx: pd.Index) -> float:
+    """Estime le pas de prix depuis l'index (exclut zéros / outliers)."""
+    try:
+        x = np.asarray(idx, dtype=float)
+        d = np.diff(np.unique(np.sort(x)))
+        d = d[d > 0]
+        if len(d) == 0:
+            return 0.0
+        # on prend un quantile bas pour éviter les pas irréguliers
+        step = float(np.quantile(d, 0.1))
+        # sécurise contre des pas ridiculement petits
+        return step if np.isfinite(step) and step > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _adjacent(a: float, b: float, step: float, tol_mult: float = 1.5) -> bool:
+    """Vrai si b est adjacent à a dans l'échelle de prix (~1 step, tolérance)."""
+    if step <= 0:
+        # fallback: stricte monotonie croissante
+        return b > a
+    return 0 < (b - a) <= tol_mult * step
+
+
+# ======================================================================
+# ENRICHED — STACKING
+# ======================================================================
 def detect_imbalance_stacking(
     df_levels: pd.DataFrame,
     *,
@@ -23,199 +56,416 @@ def detect_imbalance_stacking(
     min_levels: int = 3,
     invalidate_opposite_ratio: float = 0.60,
     vol_level_min_ratio_median_30s: float = 0.5,
+    allow_one_weak: bool = True,  # tolère 1 niveau un peu plus faible dans le run
+    allow_one_gap: bool = True,  # tolère 1 petit “trou” de pas
+    min_net_delta_mult_med: float = 1.0,  # delta cumulé doit dépasser k * médiane(|delta|)
 ) -> Dict[str, Any]:
     """
-    Cherche ≥ min_levels niveaux adjacents avec delta_ratio >= seuil.
-    Invalidation: niveau opposé 'fort' au milieu du stack.
+    Stacking enrichi:
+      - cherche un run de niveaux adjacents (tolérance 1 gap) de même signe,
+        delta_ratio >= delta_ratio_min (1 niveau faible toléré si allow_one_weak=True)
+      - invalide si un niveau opposé 'fort' apparaît à l'intérieur (invalidate_opposite_ratio)
+      - impose un minimum d'impact net: |Σ delta| >= k * median(|delta|)
+      - score = f(longueur, ratio moyen, net_delta, compacité en ticks)
+
+    Retour dict standard {ok, trigger, direction, confidence, anchor_price, meta}
     """
     out: Dict[str, Any] = {"ok": False}
     if df_levels is None or df_levels.empty:
         return out
+
     lv = df_levels.copy()
+    if (
+        "vol" not in lv.columns
+        or "delta" not in lv.columns
+        or "delta_ratio" not in lv.columns
+    ):
+        return out
     lv = lv[lv["vol"] > 0].copy()
     if lv.empty:
         return out
 
-    # filtrage volumes trop faibles (vs médiane snapshot)
-    med = float(lv["vol"].median() or 0.0)
-    if med <= 0:
-        med = 1.0
-    lv = lv[lv["vol"] >= vol_level_min_ratio_median_30s * med]
+    # filtre sur volumes vs médiane snapshot
+    med_vol = float(lv["vol"].median() or 0.0) or 1.0
+    lv = lv[lv["vol"] >= vol_level_min_ratio_median_30s * med_vol]
     if lv.empty:
         return out
 
-    # direction par signe du delta (majoritaire)
-    dir_arr = np.sign(lv["delta"].values)
+    # normalisation des colonnes utiles
+    prices = lv.index.values.astype(float)
+    sign_arr = np.sign(lv["delta"].values)  # -1 / 0 / +1
     ratio_arr = lv["delta_ratio"].values
-    prices = lv.index.values
+    abs_delta = np.abs(lv["delta"].values)
+    med_abs_delta = float(np.median(abs_delta) or 0.0) or 1.0
 
-    # balayage séquentiel pour trouver un stack
-    best = None
-    i = 0
-    while i < len(lv):
-        sign = dir_arr[i]
-        if sign == 0 or ratio_arr[i] < delta_ratio_min:
-            i += 1
-            continue
+    # ordre croissant des prix
+    order = np.argsort(prices)
+    prices = prices[order]
+    sign_arr = sign_arr[order]
+    ratio_arr = ratio_arr[order]
+    abs_delta = abs_delta[order]
+
+    step = _infer_price_step_from_index(prices)
+
+    def _scan_run(start: int) -> Tuple[int, int, bool, int, int]:
+        """Retourne (i0, j, invalid, weak_cnt, gap_cnt) du run depuis start."""
+        i = start
+        sgn = sign_arr[i]
+        if sgn == 0 or ratio_arr[i] < delta_ratio_min:
+            return i, i, False, 0, 0
         j = i + 1
-        ok_len = 1
+        weak_cnt = 0
+        gap_cnt = 0
         invalid = False
-        while j < len(lv):
-            # adjacent en prix
-            if (prices[j] - prices[j - 1]) == 0:
-                j += 1
-                continue
-            # on tolère un pas constant, sinon on stoppe la séquence
-            if (prices[j] - prices[j - 1]) <= 0:
+
+        while j < len(prices):
+            # stop si signe inverse ou ratio < seuil
+            if sign_arr[j] == 0:
                 break
-            if np.sign(lv["delta"].iloc[j]) != sign:
-                # niveau opposé: si 'fort', invalide
-                if lv["delta_ratio"].iloc[j] >= invalidate_opposite_ratio:
+            if sign_arr[j] != sgn:
+                # opposé: invalide si ratio opposé fort
+                if ratio_arr[j] >= invalidate_opposite_ratio:
                     invalid = True
                 break
-            if lv["delta_ratio"].iloc[j] < delta_ratio_min:
-                break
-            ok_len += 1
+            # adjacency
+            if not _adjacent(prices[j - 1], prices[j], step):
+                gap_cnt += 1
+                if not allow_one_gap or gap_cnt > 1:
+                    break
+            # ratio
+            if ratio_arr[j] < delta_ratio_min:
+                weak_cnt += 1
+                if not allow_one_weak or weak_cnt > 1:
+                    break
             j += 1
-        if not invalid and ok_len >= min_levels:
-            best = (i, j, int(sign))
-            break
-        i = j
+        return i, j, invalid, weak_cnt, gap_cnt
+
+    best = None
+    i = 0
+    while i < len(prices):
+        i0, j, invalid, weak_cnt, gap_cnt = _scan_run(i)
+        run_len = j - i0
+        if (not invalid) and run_len >= min_levels:
+            # score du run
+            seq_idx = slice(i0, j)
+            seq_ratio = float(ratio_arr[seq_idx].mean())
+            seq_net_delta = float(np.sum(sign_arr[seq_idx] * abs_delta[seq_idx]))
+            if abs(seq_net_delta) >= min_net_delta_mult_med * med_abs_delta:
+                # plus la compacité est forte (peu de gaps), mieux c'est
+                compact = max(0.0, 1.0 - 0.5 * gap_cnt)
+                # score 0..1
+                sc_len = min(1.0, run_len / max(min_levels, 5))
+                sc_ratio = min(1.0, seq_ratio / max(1.0, delta_ratio_min * 1.6))
+                sc_net = min(1.0, abs(seq_net_delta) / (5.0 * med_abs_delta))
+                score = 0.45 * sc_len + 0.35 * sc_ratio + 0.20 * sc_net
+                score *= compact
+                cand = dict(
+                    i0=i0,
+                    j=j,
+                    sign=int(np.sign(seq_net_delta) or sign_arr[i0]),
+                    run_len=int(run_len),
+                    seq_ratio=float(seq_ratio),
+                    seq_net_delta=float(seq_net_delta),
+                    compact=float(compact),
+                    score=float(score),
+                    weak_cnt=int(weak_cnt),
+                    gap_cnt=int(gap_cnt),
+                )
+                if best is None or cand["score"] > best["score"]:
+                    best = cand
+        i = max(i + 1, j)
 
     if best is None:
         return out
 
-    i, j, sgn = best
-    seq = lv.iloc[i:j]
+    i0, j, sgn = best["i0"], best["j"], best["sign"]
+    seq_prices = prices[i0:j]
     direction = "BUY" if sgn > 0 else "SELL"
-    anchor_price = float(seq.index[-1])  # dernier niveau du stack
-    out.update({
-        "ok": True,
-        "trigger": "stacking",
-        "direction": direction,
-        "confidence": float(seq["delta_ratio"].mean()),
-        "anchor_price": anchor_price,
-        "meta": {
-            "levels": int(len(seq)),
-            "delta_ratio_mean": float(seq["delta_ratio"].mean()),
-            "vol_mean": float(seq["vol"].mean()),
-        },
-    })
+    anchor_price = float(seq_prices[-1])  # dernier niveau du stack
+
+    out.update(
+        {
+            "ok": True,
+            "trigger": "stacking",
+            "direction": direction,
+            "confidence": float(min(0.99, max(0.55, best["score"]))),
+            "anchor_price": anchor_price,
+            "meta": {
+                "levels": int(best["run_len"]),
+                "delta_ratio_mean": float(best["seq_ratio"]),
+                "net_delta": float(best["seq_net_delta"]),
+                "compact": float(best["compact"]),
+                "weak_levels": int(best["weak_cnt"]),
+                "gaps": int(best["gap_cnt"]),
+                "price_step_inferred": float(step or 0.0),
+            },
+        }
+    )
     return out
 
 
+# ======================================================================
+# ENRICHED — ABSORPTION / REJECT
+# ======================================================================
 def detect_absorption_reject(
     df_levels: pd.DataFrame,
     *,
     vol_zscore_min: float = 2.0,
-    delta_ratio_max: float = 0.25,
+    delta_ratio_max: float = 0.35,  # un peu plus permissif que 0.25
     attempts_min: int = 2,
+    neighborhood_ticks: int = 2,  # nombre de levels autour pour compter des tentatives
 ) -> Dict[str, Any]:
     """
-    Absorption: niveau à z-score volumique élevé mais delta faible/opposé.
-    Rejet: premiers prints 'retour' (on approxime par delta de niveau adjacent).
+    Absorption enrichie:
+      - Détecte des 'murs' (zscore_vol élevé) dont le delta_ratio est faible (flux agressif absorbé)
+      - Compte des 'tentatives' dans le voisinage (± neighborhood_ticks)
+      - Infère la direction via les niveaux adjacents avec delta opposé clair (rejet)
+      - Score combinant zscore, nb de tentatives, clarté de l'opposition
+
+    Retour dict standard {ok, trigger, direction, confidence, anchor_price, meta}
     """
     out: Dict[str, Any] = {"ok": False}
     if df_levels is None or df_levels.empty:
         return out
     lv = df_levels.copy()
-    # candidates = niveaux 'mur'
-    cand = lv[(lv["zscore_vol"] >= vol_zscore_min) & (lv["delta_ratio"] <= delta_ratio_max)]
+    req_cols = {"zscore_vol", "delta_ratio", "delta", "vol"}
+    if any(c not in lv.columns for c in req_cols):
+        return out
+
+    # Candidats 'mur'
+    cand = lv[
+        (lv["zscore_vol"] >= vol_zscore_min) & (lv["delta_ratio"] <= delta_ratio_max)
+    ]
     if cand.empty:
         return out
 
-    # Heuristique de rejet: si le niveau juste au-dessus/dessous affiche delta opposé 'clair'
-    for price in cand.index:
-        idx = lv.index.get_loc(price)
-        # upper/lower voisins
-        neigh = []
-        if idx - 1 >= 0: neigh.append(lv.iloc[idx - 1])
-        if idx + 1 < len(lv): neigh.append(lv.iloc[idx + 1])
-        for nb in neigh:
-            if nb["delta_ratio"] >= 0.65 and np.sign(nb["delta"]) != np.sign(lv.loc[price, "delta"]):
-                direction = "BUY" if nb["delta"] > 0 else "SELL"
-                return {
-                    "ok": True,
-                    "trigger": "absorption_reject",
-                    "direction": direction,
-                    "confidence": float(max(0.55, min(0.9, nb["delta_ratio"]))),
-                    "anchor_price": float(nb.name),
-                    "meta": {
-                        "absorbed_level": float(price),
-                        "absorbed_zscore": float(lv.loc[price, "zscore_vol"]),
-                    },
-                }
+    prices = lv.index.values.astype(float)
+    step = _infer_price_step_from_index(prices)
+    price_to_idx = {float(p): i for i, p in enumerate(prices)}
+
+    best = None
+    for price, row in cand.iterrows():
+        p = float(price)
+        i = price_to_idx.get(p)
+        if i is None:
+            continue
+
+        # Tentatives (voisinage)
+        lo = max(0, i - neighborhood_ticks)
+        hi = min(len(lv) - 1, i + neighborhood_ticks)
+        nb_slice = lv.iloc[lo : hi + 1]
+        attempts = int((nb_slice["vol"] >= nb_slice["vol"].median()).sum())
+
+        # 'Opposition claire' dans le voisinage
+        opp = nb_slice[
+            (np.sign(nb_slice["delta"]) != np.sign(row["delta"]))
+            & (nb_slice["delta_ratio"] >= 0.65)
+        ]
+        opp_strength = float(opp["delta_ratio"].max() if not opp.empty else 0.0)
+
+        # Direction: si mur côté ASK absorbant vendeurs (delta < 0), rejet UP; inverse sinon
+        direction = "BUY" if row["delta"] < 0 else "SELL"
+        # Mais si l'opposition claire penche de l'autre côté, on s’aligne sur l’opposition
+        if not opp.empty:
+            majority = np.sign(opp["delta"].sum())
+            direction = "BUY" if majority > 0 else "SELL"
+
+        # Score simple
+        sc_z = min(1.0, float(row["zscore_vol"]) / (vol_zscore_min * 2.0))
+        sc_att = min(1.0, attempts / max(2.0, attempts_min * 2.0))
+        sc_opp = min(1.0, opp_strength / 1.2)
+        score = 0.5 * sc_z + 0.3 * sc_att + 0.2 * sc_opp
+
+        cand_out = dict(
+            price=p,
+            direction=direction,
+            score=score,
+            zscore=float(row["zscore_vol"]),
+            attempts=int(attempts),
+            opp=float(opp_strength),
+        )
+        if best is None or cand_out["score"] > best["score"]:
+            best = cand_out
+
+    if best is None:
+        return out
+
+    out.update(
+        {
+            "ok": True,
+            "trigger": "absorption_reject",
+            "direction": best["direction"],
+            "confidence": float(min(0.98, max(0.55, best["score"]))),
+            "anchor_price": float(best["price"]),
+            "meta": {
+                "absorbed_level": float(best["price"]),
+                "absorbed_zscore": float(best["zscore"]),
+                "attempts": int(best["attempts"]),
+                "opposition_strength": float(best["opp"]),
+                "price_step_inferred": float(step or 0.0),
+            },
+        }
+    )
     return out
 
 
-def _is_consolidation(bars: pd.DataFrame, lookback: int = 20, atr_mult: float = 0.8) -> bool:
+# ======================================================================
+# ENRICHED — CLIMAX AFTER CONSOLIDATION
+# ======================================================================
+def _is_consolidation(
+    bars: pd.DataFrame, lookback: int = 20, atr_mult: float = 0.8
+) -> bool:
     """
-    Détecte une consolidation simple: range/ATR moyen sous un seuil.
-    Attend colonnes: high, low, (optionnel) _atr. Fallback si ATR absent.
+    Consolidation simple: range/ATR moyen sous un seuil.
+    Si _atr absent, fallback ATR(14) pauvre.
     """
     if bars is None or len(bars) < max(5, lookback):
         return False
     df = bars.tail(lookback).copy()
     rng = float((df["high"].max() - df["low"].min()))
-    atr = float((df.get("_atr") or (df["high"] - df["low"]).rolling(14).mean()).tail(lookback).mean() or 1.0)
+    atr = float(
+        (df.get("_atr") or (df["high"] - df["low"]).rolling(14).mean())
+        .tail(lookback)
+        .mean()
+        or 1.0
+    )
     if atr <= 0:
         atr = 1.0
     return (rng / atr) <= atr_mult
+
 
 def detect_volume_climax_after_consolidation(
     bars: pd.DataFrame,
     df_levels: pd.DataFrame,
     *,
     lookback_bars: int = 20,
-    vol_ratio_min: float = 2.5,
-    delta_ratio_min: float = 0.70,
+    vol_ratio_min: float = 2.0,
+    delta_ratio_min: float = 0.60,
     need_consolidation: bool = True,
-    consolidation_max_atr_mult: float = 0.8,
+    consolidation_max_atr_mult: float = 1.0,
+    wick_bias: float = 0.65,  # préférer close proche de l’extrême (small wick)
+    footprint_near_ext_ticks: int = 2,  # top footprint proche du high/low de la barre
 ) -> Dict[str, Any]:
     """
-    Climax après consolidation: volume bar xN + snapshot footprint très déséquilibré.
-    bars: dataframe OHLCV (dernière ligne = bougie en formation ou close récente)
+    Climax enrichi:
+      - bar volume spike vs lookback
+      - (option) consolidation préalable
+      - analyse de la bougie (wicks) pour déterminer breakout vs exhaustion
+      - confluence footprint: top delta_ratio proche des extrêmes (<= N ticks)
+      - score final = f(vol spike, wick bias, footprint confluence)
+
+    Retour dict standard {ok, trigger, direction, confidence, anchor_price, meta}
     """
     out: Dict[str, Any] = {"ok": False}
-    if bars is None or len(bars) < max(5, lookback_bars) or df_levels is None or df_levels.empty:
+    if (
+        bars is None
+        or len(bars) < max(5, lookback_bars)
+        or df_levels is None
+        or df_levels.empty
+    ):
         return out
 
-    # Volume bar vs moyenne lookback
     b = bars.copy()
-    vol_col = "volume" if "volume" in b.columns else ("tick_volume" if "tick_volume" in b.columns else None)
+    vol_col = (
+        "volume"
+        if "volume" in b.columns
+        else ("tick_volume" if "tick_volume" in b.columns else None)
+    )
     if vol_col is None:
         return out
+
+    # Volume spike
     mean_vol = float(b[vol_col].tail(lookback_bars).mean() or 0.0)
     last_vol = float(b[vol_col].iloc[-1] or 0.0)
     if mean_vol <= 0:
         return out
-    if (last_vol / mean_vol) < vol_ratio_min:
+    vol_ratio = last_vol / mean_vol
+    if vol_ratio < vol_ratio_min:
         return out
 
-    # Option: on exige une période de consolidation au préalable
-    if need_consolidation and not _is_consolidation(b, lookback=lookback_bars, atr_mult=consolidation_max_atr_mult):
+    # Consolidation en amont
+    if need_consolidation and not _is_consolidation(
+        b, lookback=lookback_bars, atr_mult=consolidation_max_atr_mult
+    ):
         return out
 
-    # Footprint fortement unilatéral (snapshot)
-    # On prend le 'bloc' le plus déséquilibré dans le snapshot
-    lv = df_levels.sort_values("delta_ratio", ascending=False)
+    # Lecture bougie
+    o = float(b["open"].iloc[-1])
+    h = float(b["high"].iloc[-1])
+    l = float(b["low"].iloc[-1])
+    c = float(b["close"].iloc[-1])
+    body = abs(c - o)
+    rng = max(1e-12, h - l)
+    upper_wick = max(0.0, h - max(o, c))
+    lower_wick = max(0.0, min(o, c) - l)
+    # biais wick: 1.0 = close très proche de l’extrême, 0 = mèche opposée dominante
+    wick_score_up = max(
+        0.0, 1.0 - (upper_wick / rng)
+    )  # up move sain si petite mèche haute
+    wick_score_down = max(
+        0.0, 1.0 - (lower_wick / rng)
+    )  # down move sain si petite mèche basse
+
+    # Footprint: top delta_ratio + proximité de l’extrême
+    lv = df_levels.sort_values("delta_ratio", ascending=False).copy()
     top = lv.iloc[0]
-    if float(top["delta_ratio"]) < float(delta_ratio_min):
+    top_price = float(top.name)
+    top_ratio = float(top["delta_ratio"])
+    if top_ratio < delta_ratio_min:
         return out
 
-    direction = "BUY" if top["delta"] > 0 else "SELL"
+    # proximité extrême
+    step = _infer_price_step_from_index(df_levels.index)
+    ticks_to_high = int(round(abs(h - top_price) / (step or max(rng / 50.0, 1e-9))))
+    ticks_to_low = int(round(abs(top_price - l) / (step or max(rng / 50.0, 1e-9))))
+    near_high = ticks_to_high <= footprint_near_ext_ticks
+    near_low = ticks_to_low <= footprint_near_ext_ticks
+
+    # Direction + confluence
+    if top["delta"] > 0:
+        # Biais acheteur
+        wick_ok = wick_score_up >= wick_bias
+        fp_ok = near_high
+        direction = "BUY"
+        anchor = top_price if fp_ok else float(h)
+        wick_component = wick_score_up
+    else:
+        # Biais vendeur
+        wick_ok = wick_score_down >= wick_bias
+        fp_ok = near_low
+        direction = "SELL"
+        anchor = top_price if fp_ok else float(l)
+        wick_component = wick_score_down
+
+    # Score final
+    sc_vol = min(1.0, vol_ratio / (vol_ratio_min * 1.8))
+    sc_wick = float(max(0.0, min(1.0, wick_component)))
+    sc_fp = (
+        1.0
+        if (fp_ok and top_ratio >= (delta_ratio_min * 1.2))
+        else (0.5 if fp_ok else 0.0)
+    )
+    confidence = 0.5 * sc_vol + 0.3 * sc_wick + 0.2 * sc_fp
+    confidence = float(min(0.99, max(0.55, confidence)))
+
     return {
         "ok": True,
         "trigger": "climax_after_consolidation",
         "direction": direction,
-        "confidence": float(min(0.99, max(0.7, top["delta_ratio"]))),
-        "anchor_price": float(top.name),
+        "confidence": confidence,
+        "anchor_price": float(anchor),
         "meta": {
-            "bar_vol_ratio": float(last_vol / mean_vol),
+            "bar_vol_ratio": float(vol_ratio),
+            "wick_score_up": float(wick_score_up),
+            "wick_score_down": float(wick_score_down),
+            "footprint_top_ratio": float(top_ratio),
+            "footprint_top_price": float(top_price),
+            "fp_near_high": bool(near_high),
+            "fp_near_low": bool(near_low),
+            "price_step_inferred": float(step or 0.0),
             "consolidation": bool(need_consolidation),
         },
     }
-# -----------------------------------------------------------------------------
 
 
 # ============================================================
@@ -223,13 +473,17 @@ def detect_volume_climax_after_consolidation(
 # ============================================================
 # === Helpers Contexte & Paramètres (à placer au-dessus de detect_single_candle) ===
 
+
 def _p(patterns: Optional[Dict[str, Any]], key: str, default):
     try:
         return default if not patterns else patterns.get(key, default)
     except Exception:
         return default
 
-def _ensure_context_cols(df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20) -> None:
+
+def _ensure_context_cols(
+    df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20
+) -> None:
     """
     Enrichit df in-place avec:
       _tr, _atr, _ema, _trend_slope, _range, _body, _range_atr, _body_atr
@@ -243,8 +497,10 @@ def _ensure_context_cols(df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20)
         return
 
     if "_range" not in df.columns:
-        df["_range"] = (pd.to_numeric(df["high"], errors="coerce") -
-                        pd.to_numeric(df["low"], errors="coerce")).astype("float64")
+        df["_range"] = (
+            pd.to_numeric(df["high"], errors="coerce")
+            - pd.to_numeric(df["low"], errors="coerce")
+        ).astype("float64")
     if "_body" not in df.columns:
         o = pd.to_numeric(df["open"], errors="coerce")
         c = pd.to_numeric(df["close"], errors="coerce")
@@ -255,9 +511,16 @@ def _ensure_context_cols(df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20)
         l = pd.to_numeric(df["low"], errors="coerce")
         c = pd.to_numeric(df["close"], errors="coerce")
         prev_c = c.shift(1)
-        tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+        tr = pd.concat(
+            [(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1
+        ).max(axis=1)
         df["_tr"] = tr.fillna(h - l).astype("float64")
-        df["_atr"] = df["_tr"].rolling(window=max(int(atr_len), 1), min_periods=1).mean().astype("float64")
+        df["_atr"] = (
+            df["_tr"]
+            .rolling(window=max(int(atr_len), 1), min_periods=1)
+            .mean()
+            .astype("float64")
+        )
 
     if "_ema" not in df.columns:
         c = pd.to_numeric(df["close"], errors="coerce")
@@ -269,11 +532,20 @@ def _ensure_context_cols(df: pd.DataFrame, atr_len: int = 14, ema_len: int = 20)
         df["_trend_slope"] = ema.diff().fillna(0.0).astype("float64")
 
     if "_range_atr" not in df.columns:
-        atr = pd.to_numeric(df.get("_atr", pd.Series(0, index=df.index)), errors="coerce").replace(0, np.nan)
-        df["_range_atr"] = (df["_range"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        atr = pd.to_numeric(
+            df.get("_atr", pd.Series(0, index=df.index)), errors="coerce"
+        ).replace(0, np.nan)
+        df["_range_atr"] = (
+            (df["_range"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        )
     if "_body_atr" not in df.columns:
-        atr = pd.to_numeric(df.get("_atr", pd.Series(0, index=df.index)), errors="coerce").replace(0, np.nan)
-        df["_body_atr"] = (df["_body"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        atr = pd.to_numeric(
+            df.get("_atr", pd.Series(0, index=df.index)), errors="coerce"
+        ).replace(0, np.nan)
+        df["_body_atr"] = (
+            (df["_body"] / atr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        )
+
 
 """
 Détection factuelle de chandeliers individuels.
@@ -289,13 +561,23 @@ def detect_single_candle(
 
     try:
         # Prépare le contexte si absent
-        _ensure_context_cols(df, atr_len=_p(patterns, "atr_len", 14), ema_len=_p(patterns, "ema_len", 20))
+        _ensure_context_cols(
+            df, atr_len=_p(patterns, "atr_len", 14), ema_len=_p(patterns, "ema_len", 20)
+        )
 
         # Seuils paramétrables (par 'patterns' si fourni)
-        MIN_RANGE_ATR = float(_p(patterns, "min_range_atr", 0.15))   # filtre micro-bougies
-        MIN_BODY_ATR  = float(_p(patterns, "min_body_atr", 0.05))    # évite les corps ridicules
-        ENGULF_PAD    = float(_p(patterns, "engulf_pad", 0.05))      # % du range précédent pour valider l'avalement
-        VOL_Z_MIN     = float(_p(patterns, "volume_z_min", -9.0))    # si volume_zscore existe, seuil mini (par défaut inactif)
+        MIN_RANGE_ATR = float(
+            _p(patterns, "min_range_atr", 0.15)
+        )  # filtre micro-bougies
+        MIN_BODY_ATR = float(
+            _p(patterns, "min_body_atr", 0.05)
+        )  # évite les corps ridicules
+        ENGULF_PAD = float(
+            _p(patterns, "engulf_pad", 0.05)
+        )  # % du range précédent pour valider l'avalement
+        VOL_Z_MIN = float(
+            _p(patterns, "volume_z_min", -9.0)
+        )  # si volume_zscore existe, seuil mini (par défaut inactif)
 
         o, h, l, c = (
             df["open"].iloc[i],
@@ -311,15 +593,24 @@ def detect_single_candle(
         is_bull = c > o
 
         pattern, pattern_type = None, None
-        
+
         # Filtre micro-bougies (M1 bruyant) : si range/ATR trop faible -> ignore
-        range_atr = float(df["_range_atr"].iloc[i]) if "_range_atr" in df.columns else 1.0
-        body_atr  = float(df["_body_atr"].iloc[i])  if "_body_atr"  in df.columns else body / (size + 1e-12)
+        range_atr = (
+            float(df["_range_atr"].iloc[i]) if "_range_atr" in df.columns else 1.0
+        )
+        body_atr = (
+            float(df["_body_atr"].iloc[i])
+            if "_body_atr" in df.columns
+            else body / (size + 1e-12)
+        )
         if range_atr < MIN_RANGE_ATR or body_atr < MIN_BODY_ATR:
             return None
 
         # Si volume_zscore dispo : évite signaux sur volume anémique
-        if "volume_zscore" in df.columns and float(df["volume_zscore"].iloc[i]) < VOL_Z_MIN:
+        if (
+            "volume_zscore" in df.columns
+            and float(df["volume_zscore"].iloc[i]) < VOL_Z_MIN
+        ):
             return None
 
         # === DOJI & VARIANTS ===
@@ -360,16 +651,23 @@ def detect_single_candle(
             prev_o, prev_c = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
             prev_h, prev_l = df["high"].iloc[i - 1], df["low"].iloc[i - 1]
             prev_body_high = max(prev_o, prev_c)
-            prev_body_low  = min(prev_o, prev_c)
+            prev_body_low = min(prev_o, prev_c)
             prev_range = max(1e-12, prev_h - prev_l)
 
             # Corps actuel > corps précédent et "avale" le corps précédent + marge
             if body > abs(prev_c - prev_o):
-                if is_bull and (o <= prev_body_low) and (c >= prev_body_high + ENGULF_PAD * prev_range):
+                if (
+                    is_bull
+                    and (o <= prev_body_low)
+                    and (c >= prev_body_high + ENGULF_PAD * prev_range)
+                ):
                     pattern, pattern_type = "bullish_engulfing", "reversal"
-                elif (not is_bull) and (o >= prev_body_high) and (c <= prev_body_low - ENGULF_PAD * prev_range):
+                elif (
+                    (not is_bull)
+                    and (o >= prev_body_high)
+                    and (c <= prev_body_low - ENGULF_PAD * prev_range)
+                ):
                     pattern, pattern_type = "bearish_engulfing", "reversal"
-
 
         # === BELT HOLD ===
         if body_ratio > 0.7 and (upper_wick < 0.05 * size or lower_wick < 0.05 * size):
@@ -403,10 +701,15 @@ def detect_single_candle(
                 enriched["volume_zscore"] = float(df["volume_zscore"].iloc[i])
             if "phase" in df.columns:
                 enriched["phase"] = str(df["phase"].iloc[i])
-                
+
             # Quality scoring local (0..1) — indicatif, non bloquant
             q = 0.5
-            if pattern in ("marubozu_bull", "marubozu_bear", "belt_hold_bull", "belt_hold_bear"):
+            if pattern in (
+                "marubozu_bull",
+                "marubozu_bear",
+                "belt_hold_bull",
+                "belt_hold_bear",
+            ):
                 q += 0.2
             if pattern in ("bullish_engulfing", "bearish_engulfing"):
                 q += 0.15
@@ -415,16 +718,22 @@ def detect_single_candle(
             # volume / MTF / structure
             if "volume_zscore" in df.columns:
                 vz = float(df["volume_zscore"].iloc[i])
-                if vz >= 1.0: q += 0.1
-                if vz >= 2.0: q += 0.05
-            if "pattern_m5" in df.columns and df["pattern_m5"].iloc[i] == pattern: q += 0.1
-            if "pattern_m15" in df.columns and df["pattern_m15"].iloc[i] == pattern: q += 0.1
-            if "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i]): q += 0.05
-            if "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i]): q += 0.05
-            if "bos" in df.columns and not pd.isna(df["bos"].iloc[i]): q += 0.05
+                if vz >= 1.0:
+                    q += 0.1
+                if vz >= 2.0:
+                    q += 0.05
+            if "pattern_m5" in df.columns and df["pattern_m5"].iloc[i] == pattern:
+                q += 0.1
+            if "pattern_m15" in df.columns and df["pattern_m15"].iloc[i] == pattern:
+                q += 0.1
+            if "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i]):
+                q += 0.05
+            if "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i]):
+                q += 0.05
+            if "bos" in df.columns and not pd.isna(df["bos"].iloc[i]):
+                q += 0.05
 
             enriched["quality"] = float(max(0.0, min(1.0, q)))
-     
 
             return enriched
 
@@ -534,7 +843,6 @@ def is_harami(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-
 def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 1:
         return None
@@ -552,7 +860,6 @@ def is_tweezer(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if abs(c1["low"] - c2["low"]) <= tol:
         return {"pattern": "tweezer_bottom", "type": "reversal", "is_bullish": True}
     return None
-
 
 
 # ============================================================
@@ -581,7 +888,6 @@ def detect_multi_candle(
     if i < 1:
         return results
 
-
     detectors = [
         is_morning_star,
         is_evening_star,
@@ -598,7 +904,6 @@ def detect_multi_candle(
         is_bear_flag_or_pennant,
         is_one_two_three_reversal,
     ]
-
 
     for detector in detectors:
         try:
@@ -654,8 +959,8 @@ def detect_combos(
 
     signals: List[Optional[List[Dict[str, Any]]]] = []
     import logging
-    LOG = logging.getLogger("ComboDetector")
 
+    LOG = logging.getLogger("ComboDetector")
 
     for i in range(len(df)):
         try:
@@ -677,7 +982,9 @@ def detect_combos(
 
             # 3) Confluences structurelles + MTF + Quality
             for s in sigs:
-                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(df["ob_zone"].iloc[i])
+                s["near_ob"] = "ob_zone" in df.columns and not pd.isna(
+                    df["ob_zone"].iloc[i]
+                )
                 s["near_fvg"] = "fvg" in df.columns and not pd.isna(df["fvg"].iloc[i])
                 s["near_bos"] = "bos" in df.columns and not pd.isna(df["bos"].iloc[i])
 
@@ -691,27 +998,34 @@ def detect_combos(
                 # --- Quality (0..1) indicatif
                 q = float(s.get("quality", 0.5))  # hérite du single si présent
                 if s.get("source") == "multi":
-                    q += 0.1  # les patterns multi-bougies sont généralement plus fiables
+                    q += (
+                        0.1  # les patterns multi-bougies sont généralement plus fiables
+                    )
                 if confirmed_tf:
                     q += 0.1 * len(confirmed_tf)
-                if s.get("near_ob"):  q += 0.05
-                if s.get("near_fvg"): q += 0.05
-                if s.get("near_bos"): q += 0.05
+                if s.get("near_ob"):
+                    q += 0.05
+                if s.get("near_fvg"):
+                    q += 0.05
+                if s.get("near_bos"):
+                    q += 0.05
                 if "volume_zscore" in df.columns:
                     vz = float(df["volume_zscore"].iloc[i])
-                    if vz >= 1.0: q += 0.05
-                    if vz >= 2.0: q += 0.05
+                    if vz >= 1.0:
+                        q += 0.05
+                    if vz >= 2.0:
+                        q += 0.05
                 s["quality"] = float(max(0.0, min(1.0, q)))
 
                 # Index + horodatage (comme avant)
                 s["index"] = i
-                s["timestamp"] = (str(df.index[i]) if hasattr(df.index, "dtype") else None)
-          
+                s["timestamp"] = (
+                    str(df.index[i]) if hasattr(df.index, "dtype") else None
+                )
+
             # Ajout index + horodatage
             s["index"] = i
-            s["timestamp"] = (
-                str(df.index[i]) if hasattr(df.index, "dtype") else None
-            )
+            s["timestamp"] = str(df.index[i]) if hasattr(df.index, "dtype") else None
 
             signals.append(sigs)
 
@@ -721,11 +1035,12 @@ def detect_combos(
 
     return signals
 
+
 def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     # besoin des 5 dernières bougies: i-4..i
     if i < 4:
         return None
-    w = df.iloc[i-4:i+1]
+    w = df.iloc[i - 4 : i + 1]
     c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     # 1) grande bougie haussière initiale
@@ -737,21 +1052,29 @@ def is_rising_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
     # 2) trois petites bougies correctives dans le range de c1 (corps petits)
     def _is_small_inside(c):
         body = abs(c["close"] - c["open"])
-        return (body < 0.5 * body1) and (c["high"] <= c1["high"]) and (c["low"] >= c1["low"])
+        return (
+            (body < 0.5 * body1)
+            and (c["high"] <= c1["high"])
+            and (c["low"] >= c1["low"])
+        )
 
     if not (_is_small_inside(c2) and _is_small_inside(c3) and _is_small_inside(c4)):
         return None
 
     # 3) 5e bougie de relance haussière qui clôture au-delà du corps de c1
     if c5["close"] > max(c1["close"], c1["open"]) and c5["close"] > c5["open"]:
-        return {"pattern": "rising_three_methods", "type": "continuation", "is_bullish": True}
+        return {
+            "pattern": "rising_three_methods",
+            "type": "continuation",
+            "is_bullish": True,
+        }
     return None
 
 
 def is_falling_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    w = df.iloc[i-4:i+1]
+    w = df.iloc[i - 4 : i + 1]
     c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     body1 = abs(c1["close"] - c1["open"])
@@ -761,35 +1084,50 @@ def is_falling_three_methods(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any
 
     def _is_small_inside(c):
         body = abs(c["close"] - c["open"])
-        return (body < 0.5 * body1) and (c["high"] <= c1["high"]) and (c["low"] >= c1["low"])
+        return (
+            (body < 0.5 * body1)
+            and (c["high"] <= c1["high"])
+            and (c["low"] >= c1["low"])
+        )
 
     if not (_is_small_inside(c2) and _is_small_inside(c3) and _is_small_inside(c4)):
         return None
 
     if c5["close"] < min(c1["close"], c1["open"]) and c5["close"] < c5["open"]:
-        return {"pattern": "falling_three_methods", "type": "continuation", "is_bullish": False}
+        return {
+            "pattern": "falling_three_methods",
+            "type": "continuation",
+            "is_bullish": False,
+        }
     return None
 
 
 # === 5-candle: Mat Hold (version simplifiée) ======================
 
+
 def is_mat_hold_bull(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    w = df.iloc[i-4:i+1]
+    w = df.iloc[i - 4 : i + 1]
     c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     # c1 impulsion haussière
     if c1["close"] <= c1["open"]:
         return None
     # c2 gap up + petite bougie (ou doji)
-    if not (c2["open"] > c1["close"] and abs(c2["close"] - c2["open"]) <= (c1["close"] - c1["open"]) * 0.5):
+    if not (
+        c2["open"] > c1["close"]
+        and abs(c2["close"] - c2["open"]) <= (c1["close"] - c1["open"]) * 0.5
+    ):
         return None
     # c3,c4 petites bougies qui ne comblent pas réellement le gap initial
     if min(c3["low"], c4["low"]) <= c1["close"]:
         return None
     # c5 relance haussière qui close > max(c2..c4)
-    if c5["close"] > max(c2["high"], c3["high"], c4["high"]) and c5["close"] > c5["open"]:
+    if (
+        c5["close"] > max(c2["high"], c3["high"], c4["high"])
+        and c5["close"] > c5["open"]
+    ):
         return {"pattern": "mat_hold_bull", "type": "continuation", "is_bullish": True}
     return None
 
@@ -797,12 +1135,15 @@ def is_mat_hold_bull(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
 def is_mat_hold_bear(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     if i < 4:
         return None
-    w = df.iloc[i-4:i+1]
+    w = df.iloc[i - 4 : i + 1]
     c1, c2, c3, c4, c5 = (w.iloc[j] for j in range(5))
 
     if c1["close"] >= c1["open"]:
         return None
-    if not (c2["open"] < c1["close"] and abs(c2["close"] - c2["open"]) <= (c1["open"] - c1["close"]) * 0.5):
+    if not (
+        c2["open"] < c1["close"]
+        and abs(c2["close"] - c2["open"]) <= (c1["open"] - c1["close"]) * 0.5
+    ):
         return None
     if max(c3["high"], c4["high"]) >= c1["close"]:
         return None
@@ -811,8 +1152,8 @@ def is_mat_hold_bear(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-
 # === 5–8-candle: Flag / Pennant (heuristique OHLC) ================
+
 
 def _channel_slope(values: np.ndarray) -> float:
     # slope par régression linéaire simple
@@ -824,14 +1165,21 @@ def _channel_slope(values: np.ndarray) -> float:
     return float(num / den) if den != 0 else 0.0
 
 
-def _is_flag_consolidation(highs: np.ndarray, lows: np.ndarray, max_bars: int = 8) -> Dict[str, Any]:
+def _is_flag_consolidation(
+    highs: np.ndarray, lows: np.ndarray, max_bars: int = 8
+) -> Dict[str, Any]:
     """
     Renvoie: {'ok': bool, 'type': 'flag'|'pennant', 'slope_high':..., 'slope_low':..., 'contracting': bool, 'overlap': float}
     Critères:
       - canal ≈ parallèle (pentes proches, corrélation élevée)
       - pennant: contraction de l'amplitude + overlap élevé
     """
-    if len(highs) < 3 or len(lows) < 3 or len(highs) != len(lows) or len(highs) > max_bars:
+    if (
+        len(highs) < 3
+        or len(lows) < 3
+        or len(highs) != len(lows)
+        or len(highs) > max_bars
+    ):
         return {"ok": False}
 
     x = np.arange(len(highs))
@@ -841,13 +1189,17 @@ def _is_flag_consolidation(highs: np.ndarray, lows: np.ndarray, max_bars: int = 
 
     # corrélation "parallélisme"
     def _corr(a, b):
-        a = (a - a.mean())
-        b = (b - b.mean())
-        den = (np.sqrt((a*a).sum()) * np.sqrt((b*b).sum()))
-        return float((a*b).sum() / den) if den > 0 else 0.0
+        a = a - a.mean()
+        b = b - b.mean()
+        den = np.sqrt((a * a).sum()) * np.sqrt((b * b).sum())
+        return float((a * b).sum() / den) if den > 0 else 0.0
 
     corr = _corr(highs, lows)
-    parallelish = (np.sign(sh) == np.sign(sl)) and (abs(sh - sl) <= 0.5 * (abs(sh) + abs(sl) + 1e-9)) and (corr >= 0.6)
+    parallelish = (
+        (np.sign(sh) == np.sign(sl))
+        and (abs(sh - sl) <= 0.5 * (abs(sh) + abs(sl) + 1e-9))
+        and (corr >= 0.6)
+    )
 
     # contraction
     amp0 = highs[0] - lows[0]
@@ -857,19 +1209,28 @@ def _is_flag_consolidation(highs: np.ndarray, lows: np.ndarray, max_bars: int = 
     # overlap (consolidation serrée)
     hi_min, hi_max = highs.min(), highs.max()
     lo_min, lo_max = lows.min(), lows.max()
-    overlap = max(0.0, (min(hi_max, highs[-1]) - max(lo_min, lows[-1]))) / max(1e-9, (hi_max - lo_min))
+    overlap = max(0.0, (min(hi_max, highs[-1]) - max(lo_min, lows[-1]))) / max(
+        1e-9, (hi_max - lo_min)
+    )
 
     shape = "pennant" if contracting and not parallelish else "flag"
     ok = parallelish or (contracting and overlap >= 0.3)
 
-    return {"ok": bool(ok), "type": shape, "slope_high": sh, "slope_low": sl, "contracting": bool(contracting), "overlap": float(overlap)}
+    return {
+        "ok": bool(ok),
+        "type": shape,
+        "slope_high": sh,
+        "slope_low": sl,
+        "contracting": bool(contracting),
+        "overlap": float(overlap),
+    }
 
 
 def is_bull_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     lookback = 7
     if i < lookback:
         return None
-    window = df.iloc[i - lookback:i + 1].copy()
+    window = df.iloc[i - lookback : i + 1].copy()
 
     _ensure_context_cols(window)
     atr = float(window["_atr"].iloc[-1]) if "_atr" in window.columns else 0.0
@@ -892,20 +1253,25 @@ def is_bull_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
         return None
 
     # retracement limité
-    if (cons["low"].min() < impulse["open"].iloc[0] + 0.5 * impulse_range):
+    if cons["low"].min() < impulse["open"].iloc[0] + 0.5 * impulse_range:
         return None
 
     # Breakout franc: close > max highs + buffer (0.05 ATR)
     buffer = 0.05 * atr
     if brk["close"] > cons["high"].max() + buffer and brk["close"] > brk["open"]:
-        return {"pattern": f"bull_{ch['type']}", "type": "continuation", "is_bullish": True}
+        return {
+            "pattern": f"bull_{ch['type']}",
+            "type": "continuation",
+            "is_bullish": True,
+        }
     return None
+
 
 def is_bear_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     lookback = 7
     if i < lookback:
         return None
-    window = df.iloc[i - lookback:i + 1].copy()
+    window = df.iloc[i - lookback : i + 1].copy()
 
     _ensure_context_cols(window)
     atr = float(window["_atr"].iloc[-1]) if "_atr" in window.columns else 0.0
@@ -926,16 +1292,21 @@ def is_bear_flag_or_pennant(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]
     if not ch.get("ok"):
         return None
 
-    if (cons["high"].max() > impulse["close"].iloc[-1] + 0.5 * impulse_range):
+    if cons["high"].max() > impulse["close"].iloc[-1] + 0.5 * impulse_range:
         return None
 
     buffer = 0.05 * atr
     if brk["close"] < cons["low"].min() - buffer and brk["close"] < brk["open"]:
-        return {"pattern": f"bear_{ch['type']}", "type": "continuation", "is_bullish": False}
+        return {
+            "pattern": f"bear_{ch['type']}",
+            "type": "continuation",
+            "is_bullish": False,
+        }
     return None
 
 
 # === 1-2-3 Reversal (compact) =====================================
+
 
 def is_one_two_three_reversal(df: pd.DataFrame, i: int) -> Optional[Dict[str, Any]]:
     """
@@ -945,7 +1316,7 @@ def is_one_two_three_reversal(df: pd.DataFrame, i: int) -> Optional[Dict[str, An
     """
     if i < 4:
         return None
-    w = df.iloc[i-4:i+1]
+    w = df.iloc[i - 4 : i + 1]
     # bull
     hh = w["high"].iloc[1] > w["high"].iloc[0] and w["high"].iloc[1] > w["high"].iloc[2]
     pullback_ok = w["low"].iloc[3] > w["low"].iloc[2]
@@ -958,10 +1329,13 @@ def is_one_two_three_reversal(df: pd.DataFrame, i: int) -> Optional[Dict[str, An
     pullback_ok_b = w["high"].iloc[3] < w["high"].iloc[2]
     breakout_bear = w["close"].iloc[4] < w["low"].iloc[1]
     if ll and pullback_ok_b and breakout_bear:
-        return {"pattern": "one_two_three_bear", "type": "reversal", "is_bullish": False}
+        return {
+            "pattern": "one_two_three_bear",
+            "type": "reversal",
+            "is_bullish": False,
+        }
 
     return None
-
 
 
 # ============================================================
@@ -1105,7 +1479,7 @@ def detect_orderflow_v5(
 
     # ---------- 0) VALIDATION ----------
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        
+
         return {
             "score": 0,
             "status": "SUSPECT",
@@ -1117,11 +1491,22 @@ def detect_orderflow_v5(
     # On travaille sur une copie, index propre
     df = df.copy()
     df.reset_index(drop=True, inplace=True)
-   # --- [PATCH A] NORMALISATION TÔT DES COMPTEURS TICKS ---
-    for _col in ("BUY","SELL","buy_ticks","sell_ticks","ticks_buy","ticks_sell","t_buy","t_sell","buys","sells"):
+    # --- [PATCH A] NORMALISATION TÔT DES COMPTEURS TICKS ---
+    for _col in (
+        "BUY",
+        "SELL",
+        "buy_ticks",
+        "sell_ticks",
+        "ticks_buy",
+        "ticks_sell",
+        "t_buy",
+        "t_sell",
+        "buys",
+        "sells",
+    ):
         if _col in df.columns:
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
-   
+
     # Crée les alias standards si on a uniquement BUY/SELL
     if "BUY" in df.columns and "buy_ticks" not in df.columns:
         df["buy_ticks"] = df["BUY"]
@@ -1153,19 +1538,31 @@ def detect_orderflow_v5(
             if col in df.columns:
                 return pd.to_numeric(df[col], errors="coerce").fillna(default)
         return pd.Series(default, index=df.index, dtype="float64")
-    
+
     def _resolve_symbol(_df: pd.DataFrame) -> str:
-        for key in ("symbol","SYMBOL","asset","Asset","instrument","ticker","pair"):
+        for key in (
+            "symbol",
+            "SYMBOL",
+            "asset",
+            "Asset",
+            "instrument",
+            "ticker",
+            "pair",
+        ):
             if key in _df.columns and pd.notna(_df[key]).any():
                 return str(_df[key].iloc[-1])
         if hasattr(_df, "attrs") and _df.attrs.get("symbol"):
             return str(_df.attrs["symbol"])
         return ""
 
-
     # ---------- 1) CONSTRUCTION SÛRE DES COLONNES VOLUME ----------
-    ask = _safe_series("ask_volume", aliases=("buy","BUY","buys","buy_ticks","ticks_buy","t_buy"))
-    bid = _safe_series("bid_volume", aliases=("sell","SELL","sells","sell_ticks","ticks_sell","t_sell"))
+    ask = _safe_series(
+        "ask_volume", aliases=("buy", "BUY", "buys", "buy_ticks", "ticks_buy", "t_buy")
+    )
+    bid = _safe_series(
+        "bid_volume",
+        aliases=("sell", "SELL", "sells", "sell_ticks", "ticks_sell", "t_sell"),
+    )
 
     df["ask_volume"] = ask
     df["bid_volume"] = bid
@@ -1193,8 +1590,14 @@ def detect_orderflow_v5(
     if float((df["ask_volume"].sum() + df["bid_volume"].sum())) <= 1e-12:
 
         # 1) Si on a des compteurs de ticks buy/sell
-        buy_ticks  = _safe_series("buy_ticks",  aliases=("ticks_buy","t_buy","buys","BUY"),  default=np.nan)
-        sell_ticks = _safe_series("sell_ticks", aliases=("ticks_sell","t_sell","sells","SELL"), default=np.nan)
+        buy_ticks = _safe_series(
+            "buy_ticks", aliases=("ticks_buy", "t_buy", "buys", "BUY"), default=np.nan
+        )
+        sell_ticks = _safe_series(
+            "sell_ticks",
+            aliases=("ticks_sell", "t_sell", "sells", "SELL"),
+            default=np.nan,
+        )
 
         # Si encore NaN mais colonnes BUY/SELL présentes, on les force
         if buy_ticks.isna().all() and "BUY" in df.columns:
@@ -1205,23 +1608,30 @@ def detect_orderflow_v5(
         if not buy_ticks.isna().all() or not sell_ticks.isna().all():
             df["ask_volume"] = buy_ticks.fillna(0.0).astype("float64")
             df["bid_volume"] = sell_ticks.fillna(0.0).astype("float64")
-            df["aggressor_buy_vol"]  = df["ask_volume"].copy()
+            df["aggressor_buy_vol"] = df["ask_volume"].copy()
             df["aggressor_sell_vol"] = df["bid_volume"].copy()
             rescue_level, rescue_note = max(rescue_level, 1), "tick_counters"
-            LOG.debug(f"[OrderflowV5] zero-volume rescue: tick counters utilisés. sym={_resolve_symbol(df)}")
+            LOG.debug(
+                f"[OrderflowV5] zero-volume rescue: tick counters utilisés. sym={_resolve_symbol(df)}"
+            )
 
         else:
             # laisse inchangé le reste (vol_total_row -> split -> proxy)
 
             # 2) Sinon, si on a un volume total par ligne (ex: MT5 'tick_volume')
-            vol_total_row = _safe_series("tick_volume", aliases=("volume", "vol"), default=np.nan)
+            vol_total_row = _safe_series(
+                "tick_volume", aliases=("volume", "vol"), default=np.nan
+            )
 
             # Déterminer un prix de référence pour le sens (close ou mid bid/ask ou last)
             price = None
             if "close" in df.columns:
                 price = pd.to_numeric(df["close"], errors="coerce")
             elif {"bid", "ask"}.issubset(df.columns):
-                price = (pd.to_numeric(df["bid"], errors="coerce") + pd.to_numeric(df["ask"], errors="coerce")) / 2.0
+                price = (
+                    pd.to_numeric(df["bid"], errors="coerce")
+                    + pd.to_numeric(df["ask"], errors="coerce")
+                ) / 2.0
             elif "last" in df.columns:
                 price = pd.to_numeric(df["last"], errors="coerce")
 
@@ -1230,40 +1640,51 @@ def detect_orderflow_v5(
                 # sinon fallback directionnel (↑=0.80 / ↓=0.20 / =0.50)
                 dyn_w = None
                 if {"open", "high", "low", "close"}.issubset(df.columns):
-                    o = pd.to_numeric(df["open"],  errors="coerce")
-                    h = pd.to_numeric(df["high"],  errors="coerce")
-                    l = pd.to_numeric(df["low"],   errors="coerce")
+                    o = pd.to_numeric(df["open"], errors="coerce")
+                    h = pd.to_numeric(df["high"], errors="coerce")
+                    l = pd.to_numeric(df["low"], errors="coerce")
                     c = pd.to_numeric(df["close"], errors="coerce")
                     rng = (h - l).replace(0.0, np.nan)
-                    body_frac = ((c - o) / rng).clip(-1.0, 1.0).fillna(0.0)   # ∈ [-1..1]
-                    dyn_w = (0.5 + 0.4 * body_frac).clip(0.10, 0.90)          # ∈ [0.10..0.90]
+                    body_frac = ((c - o) / rng).clip(-1.0, 1.0).fillna(0.0)  # ∈ [-1..1]
+                    dyn_w = (0.5 + 0.4 * body_frac).clip(0.10, 0.90)  # ∈ [0.10..0.90]
 
                 if dyn_w is None:
                     up = price.diff().fillna(0.0)
                     dyn_w = pd.Series(
                         np.where(up > 0, 0.80, np.where(up < 0, 0.20, 0.50)),
-                        index=df.index
+                        index=df.index,
                     )
 
-                long_w  = dyn_w
-                short_w = (1.0 - dyn_w)
+                long_w = dyn_w
+                short_w = 1.0 - dyn_w
 
-                df["ask_volume"]  = (vol_total_row.fillna(0.0) * long_w).astype("float64")
-                df["bid_volume"]  = (vol_total_row.fillna(0.0) * short_w).astype("float64")
-                df["aggressor_buy_vol"]  = df["ask_volume"].copy()
+                df["ask_volume"] = (vol_total_row.fillna(0.0) * long_w).astype(
+                    "float64"
+                )
+                df["bid_volume"] = (vol_total_row.fillna(0.0) * short_w).astype(
+                    "float64"
+                )
+                df["aggressor_buy_vol"] = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
-                rescue_level, rescue_note = max(rescue_level, 1), "split_dynamic_price_ohlc"
-                LOG.debug(f"[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc. sym={_resolve_symbol(df)}")
+                rescue_level, rescue_note = (
+                    max(rescue_level, 1),
+                    "split_dynamic_price_ohlc",
+                )
+                LOG.debug(
+                    f"[OrderflowV5] zero-volume rescue: split dynamique via price/ohlc. sym={_resolve_symbol(df)}"
+                )
 
             else:
                 # 3) Fallback neutre si rien d'exploitable : 1 unité / ligne, 50/50
                 proxy = pd.Series(1.0, index=df.index, dtype="float64")
-                df["ask_volume"]  = (proxy * 0.5).astype("float64")
-                df["bid_volume"]  = (proxy * 0.5).astype("float64")
-                df["aggressor_buy_vol"]  = df["ask_volume"].copy()
+                df["ask_volume"] = (proxy * 0.5).astype("float64")
+                df["bid_volume"] = (proxy * 0.5).astype("float64")
+                df["aggressor_buy_vol"] = df["ask_volume"].copy()
                 df["aggressor_sell_vol"] = df["bid_volume"].copy()
                 rescue_level, rescue_note = 2, "proxy_50_50"
-                LOG.debug(f"[OrderflowV5] zero-volume rescue: proxy neutre 50/50. sym={_resolve_symbol(df)}")
+                LOG.debug(
+                    f"[OrderflowV5] zero-volume rescue: proxy neutre 50/50. sym={_resolve_symbol(df)}"
+                )
 
     # ---------- 2) MÉTRIQUES DE BASE ----------
     df["total_volume"] = (df["bid_volume"] + df["ask_volume"]).astype("float64")
@@ -1399,9 +1820,11 @@ def detect_orderflow_v5(
     # ---------- 7) SCORE GLOBAL ----------
     score = 50
     # fallback safe si le haut de la fonction n'a pas encore migré vers rescue_level
-    rescue_level = int(locals().get("rescue_level", 1 if locals().get("rescue_mode", False) else 0))
+    rescue_level = int(
+        locals().get("rescue_level", 1 if locals().get("rescue_mode", False) else 0)
+    )
     rescue_note = locals().get("rescue_note", "")
-    
+
     # Intensité directionnelle
     if vol_total > 0:
         score += min(30, abs(delta_total) / (vol_total + 1e-6) * 100.0)  # +0..30
@@ -1417,10 +1840,12 @@ def detect_orderflow_v5(
     # Pénalités/bonus échantillon selon rows + coverage/tick_rate si dispo
     rows = len(df)
     coverage_s = None
-    tick_rate  = None
+    tick_rate = None
     try:
         if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
-            coverage_s = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
+            coverage_s = float(
+                pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1]
+            )
         if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
             tick_rate = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
     except Exception:
@@ -1471,54 +1896,108 @@ def detect_orderflow_v5(
         "rescue": bool(rescue_level > 0),
         "rescue_note": rescue_note,
         "rescue_level": int(rescue_level),
-        "rescue_kind": ("none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard")),
+        "rescue_kind": (
+            "none" if rescue_level == 0 else ("soft" if rescue_level == 1 else "hard")
+        ),
     }
 
     # Biais de flux et conviction (0..1) pour le DecisionPipeline
-    bias = "SELL" if imbalance_mean <= 0.48 else ("BUY" if imbalance_mean >= 0.52 else "NEUTRAL")
-    conviction = float(min(1.0, abs(imbalance_mean - 0.5) / 0.25))  # 0.0 → 1.0 (0.25 = 25pts d’écart)
+    bias = (
+        "SELL"
+        if imbalance_mean <= 0.48
+        else ("BUY" if imbalance_mean >= 0.52 else "NEUTRAL")
+    )
+    conviction = float(
+        min(1.0, abs(imbalance_mean - 0.5) / 0.25)
+    )  # 0.0 → 1.0 (0.25 = 25pts d’écart)
     summary["bias"] = bias
     summary["conviction"] = round(conviction, 3)
 
     # Ajouts opportunistes si colonnes présentes (pour logger comme ton FOOTPRINT)
     if "coverage_s" in df.columns and pd.notna(df["coverage_s"]).any():
-        summary["coverage_s"] = float(pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1])
+        summary["coverage_s"] = float(
+            pd.to_numeric(df["coverage_s"], errors="coerce").iloc[-1]
+        )
     if "tick_rate" in df.columns and pd.notna(df["tick_rate"]).any():
-        summary["tick_rate"] = float(pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1])
+        summary["tick_rate"] = float(
+            pd.to_numeric(df["tick_rate"], errors="coerce").iloc[-1]
+        )
 
     # --- SELF-CHECK : alerte si rescue SOFT alors que des ticks existent et non-nuls ---
     try:
-        has_tick_cols = any(c in df.columns for c in (
-            "buy_ticks","ticks_buy","t_buy","buys","BUY",
-            "sell_ticks","ticks_sell","t_sell","sells","SELL"
-        ))
+        has_tick_cols = any(
+            c in df.columns
+            for c in (
+                "buy_ticks",
+                "ticks_buy",
+                "t_buy",
+                "buys",
+                "BUY",
+                "sell_ticks",
+                "ticks_sell",
+                "t_sell",
+                "sells",
+                "SELL",
+            )
+        )
         ticks_total = 0.0
-        for c in ("buy_ticks","ticks_buy","t_buy","buys","BUY","sell_ticks","ticks_sell","t_sell","sells","SELL"):
+        for c in (
+            "buy_ticks",
+            "ticks_buy",
+            "t_buy",
+            "buys",
+            "BUY",
+            "sell_ticks",
+            "ticks_sell",
+            "t_sell",
+            "sells",
+            "SELL",
+        ):
             if c in df.columns:
                 ticks_total += pd.to_numeric(df[c], errors="coerce").fillna(0.0).sum()
 
-        if (summary.get("rescue_level") == 1
-        and summary.get("rescue_note") != "tick_counters"
-        and has_tick_cols and ticks_total > 0):
+        if (
+            summary.get("rescue_level") == 1
+            and summary.get("rescue_note") != "tick_counters"
+            and has_tick_cols
+            and ticks_total > 0
+        ):
 
-            LOG.warning("[OrderflowV5] ALERT: rescue SOFT utilisé alors que des compteurs de ticks sont présents. "
-                        "Vérifie la construction d'ask/bid_volume en amont.")
+            LOG.warning(
+                "[OrderflowV5] ALERT: rescue SOFT utilisé alors que des compteurs de ticks sont présents. "
+                "Vérifie la construction d'ask/bid_volume en amont."
+            )
     except Exception:
         pass
 
-           
     # --- LOG [ORDERFLOW] (interne, anti-UNKNOWN & anti-doublon) ---
     try:
         # 1) Résolution robuste du symbole
         symbol = None
         # a) colonnes possibles
-        for key in ("symbol", "SYMBOL", "asset", "Asset", "instrument", "ticker", "pair"):
+        for key in (
+            "symbol",
+            "SYMBOL",
+            "asset",
+            "Asset",
+            "instrument",
+            "ticker",
+            "pair",
+        ):
             if key in df.columns and pd.notna(df[key]).any():
                 symbol = str(df[key].iloc[-1])
                 break
         # b) attributs possibles (df.attrs)
         if symbol is None and hasattr(df, "attrs"):
-            for key in ("symbol", "SYMBOL", "asset", "Asset", "instrument", "ticker", "pair"):
+            for key in (
+                "symbol",
+                "SYMBOL",
+                "asset",
+                "Asset",
+                "instrument",
+                "ticker",
+                "pair",
+            ):
                 if key in df.attrs and df.attrs[key]:
                     symbol = str(df.attrs[key])
                     break
@@ -1527,26 +2006,40 @@ def detect_orderflow_v5(
         if symbol:
             # 3) anti-doublon: on ne log que si la signature change
             sig = (
-            symbol,
-            int(score),
-            status,
-            round(summary["delta_total"], 2),
-            round(summary["volume_total"], 2),
-            bool(summary["rescue"]),
-            int(summary.get("rescue_level", 0)),
-            str(summary.get("rescue_kind", "none")),
-        )
+                symbol,
+                int(score),
+                status,
+                round(summary["delta_total"], 2),
+                round(summary["volume_total"], 2),
+                bool(summary["rescue"]),
+                int(summary.get("rescue_level", 0)),
+                str(summary.get("rescue_kind", "none")),
+            )
 
-            if not hasattr(detect_orderflow_v5, "_last_log_sig") or detect_orderflow_v5._last_log_sig != sig:
+            if (
+                not hasattr(detect_orderflow_v5, "_last_log_sig")
+                or detect_orderflow_v5._last_log_sig != sig
+            ):
                 detect_orderflow_v5._last_log_sig = sig
 
-                cov  = f" | coverage_s={float(summary['coverage_s']):.1f}" if 'coverage_s' in summary else ""
-                rate = f" | tick_rate={float(summary['tick_rate']):.2f}"    if 'tick_rate'  in summary else ""
+                cov = (
+                    f" | coverage_s={float(summary['coverage_s']):.1f}"
+                    if "coverage_s" in summary
+                    else ""
+                )
+                rate = (
+                    f" | tick_rate={float(summary['tick_rate']):.2f}"
+                    if "tick_rate" in summary
+                    else ""
+                )
                 rescue_txt = (
-                    f" | rescue=True level={summary.get('rescue_level')} kind={summary.get('rescue_kind')}"
-                    f" note={summary.get('rescue_note','')}"
-                ) if summary.get('rescue') else ""
-
+                    (
+                        f" | rescue=True level={summary.get('rescue_level')} kind={summary.get('rescue_kind')}"
+                        f" note={summary.get('rescue_note','')}"
+                    )
+                    if summary.get("rescue")
+                    else ""
+                )
 
                 LOG.info(
                     f"[ORDERFLOW][{symbol}] "
@@ -1562,7 +2055,6 @@ def detect_orderflow_v5(
         # ne jamais bloquer la détection si le log échoue
         pass
 
-
     return {
         "score": score,
         "status": status,
@@ -1570,6 +2062,7 @@ def detect_orderflow_v5(
         "patterns": patterns,
         "df": df,
     }
+
 
 def footprint_validator(
     candles: pd.DataFrame,
@@ -1914,8 +2407,10 @@ class Detectors:
     def __init__(self, logger=None, config_manager=None):
         self.logger = logger or logging.getLogger(__name__)
         self.config_manager = config_manager
-        
-    def detect_combos(self, df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+
+    def detect_combos(
+        self, df: pd.DataFrame, patterns: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Wrapper classe pour la fonction de module `detect_combos(df, patterns)`.
         Retourne un dict compatible avec le pipeline:
@@ -1930,8 +2425,16 @@ class Detectors:
         try:
             raw = detect_combos(df, patterns)  # fonction de module déjà définie
         except Exception as e:
-            self.logger.warning(f"[Detectors.detect_combos] erreur: {e}", exc_info=False)
-            return {"raw": [], "latest": None, "latest_index": None, "candles": [], "count": 0}
+            self.logger.warning(
+                f"[Detectors.detect_combos] erreur: {e}", exc_info=False
+            )
+            return {
+                "raw": [],
+                "latest": None,
+                "latest_index": None,
+                "candles": [],
+                "count": 0,
+            }
 
         latest_idx = None
         latest_sig = None
@@ -1943,7 +2446,9 @@ class Detectors:
                 if isinstance(row_sigs, list) and row_sigs:
                     latest_idx = i
                     # Heuristique: on prend le dernier élément de la liste (le plus "récent" pour cette bougie)
-                    latest_sig = row_sigs[-1] if isinstance(row_sigs[-1], dict) else None
+                    latest_sig = (
+                        row_sigs[-1] if isinstance(row_sigs[-1], dict) else None
+                    )
                     break
 
         total_count = sum(len(x) for x in raw if isinstance(x, list))
@@ -1952,24 +2457,52 @@ class Detectors:
             "raw": raw,
             "latest": latest_sig,
             "latest_index": latest_idx,
-            "candles": (raw[latest_idx] if (latest_idx is not None and isinstance(raw[latest_idx], list)) else []),
+            "candles": (
+                raw[latest_idx]
+                if (latest_idx is not None and isinstance(raw[latest_idx], list))
+                else []
+            ),
             "count": int(total_count),
         }
-        
-    def detect_orderflow_v5(self, ticks_df: pd.DataFrame, imbalance_threshold: float = 0.7, cvd_smoothing: int = 5) -> Dict[str, Any]:
-        try:
-            return detect_orderflow_v5(ticks_df, imbalance_threshold=imbalance_threshold, cvd_smoothing=cvd_smoothing)
-        except Exception as e:
-            self.logger.warning(f"[Detectors.detect_orderflow_v5] erreur: {e}", exc_info=False)
-            return {"score": 0, "status": "SUSPECT", "summary": {"error": str(e)}, "patterns": [], "df": pd.DataFrame()}
 
-    def validate_last_candle_footprint_safe(self, candles: pd.DataFrame, ticks: pd.DataFrame) -> Dict[str, Any]:
+    def detect_orderflow_v5(
+        self,
+        ticks_df: pd.DataFrame,
+        imbalance_threshold: float = 0.7,
+        cvd_smoothing: int = 5,
+    ) -> Dict[str, Any]:
+        try:
+            return detect_orderflow_v5(
+                ticks_df,
+                imbalance_threshold=imbalance_threshold,
+                cvd_smoothing=cvd_smoothing,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[Detectors.detect_orderflow_v5] erreur: {e}", exc_info=False
+            )
+            return {
+                "score": 0,
+                "status": "SUSPECT",
+                "summary": {"error": str(e)},
+                "patterns": [],
+                "df": pd.DataFrame(),
+            }
+
+    def validate_last_candle_footprint_safe(
+        self, candles: pd.DataFrame, ticks: pd.DataFrame
+    ) -> Dict[str, Any]:
         try:
             return footprint_validator(candles, ticks, candle_index=None)
         except Exception as e:
             self.logger.warning(f"[Detectors.footprint] erreur: {e}", exc_info=False)
-            return {"score": 0, "status": "SUSPECT", "summary": {"error": str(e)}, "footprint_df": pd.DataFrame(), "candle": {}}
-  
+            return {
+                "score": 0,
+                "status": "SUSPECT",
+                "summary": {"error": str(e)},
+                "footprint_df": pd.DataFrame(),
+                "candle": {},
+            }
 
     def validate_last_candle_footprint(
         self, candles: pd.DataFrame, ticks: pd.DataFrame
@@ -2880,10 +3413,18 @@ class Detectors:
         adx, di_plus, di_minus = calculate_adx(df, adx_period)
         # --- PATCH C1: ADX quantiles (auto-calibration) ---
         win = int(adx_config.get("quantile_window", 200))
-        trend_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.70)\
-                    .bfill().fillna(adx.median())
-        range_q = adx.rolling(window=win, min_periods=max(50, win//4)).quantile(0.30)\
-                    .bfill().fillna(adx.median())
+        trend_q = (
+            adx.rolling(window=win, min_periods=max(50, win // 4))
+            .quantile(0.70)
+            .bfill()
+            .fillna(adx.median())
+        )
+        range_q = (
+            adx.rolling(window=win, min_periods=max(50, win // 4))
+            .quantile(0.30)
+            .bfill()
+            .fillna(adx.median())
+        )
 
         # === 2. VOLATILITÉ GARMAN-KLASS ===
         vol_period = int(vol_config.get("calculation_period", 20))
@@ -2975,7 +3516,7 @@ class Detectors:
                     regimes.iloc[i] = "low_volatility_compression"
                 else:
                     regimes.iloc[i] = "transitional"
-           
+
             # Mettre à jour la mémoire
             self._last_regime = regimes.iloc[i]
 
@@ -3138,6 +3679,7 @@ class Detectors:
                 "tp_pips_suggestion": None,
                 "diagnostics": {"error": str(e)},
             }
+
     def determine_optimized_phase(self, row: pd.Series) -> str:
         """
         Toujours rendre un label déterministe, sans 'unknown/uncertain/no_clear_phase'.
@@ -3146,7 +3688,11 @@ class Detectors:
         regime = str(row.get("regime", "")).lower()
 
         # 0) Priorité signal liquidité explicite (si présent)
-        if bool(row.get("sweep_detected")) or bool(row.get("absorption_confirmed")) or bool(row.get("eqh_eql_detected")):
+        if (
+            bool(row.get("sweep_detected"))
+            or bool(row.get("absorption_confirmed"))
+            or bool(row.get("eqh_eql_detected"))
+        ):
             return "liquidity_eqh_eql"
 
         # 1) Volatilité (déterministe)
@@ -3163,17 +3709,29 @@ class Detectors:
                 return "trending_accumulation"
             # Si pas explicite, tenter BOS/MSS → direction
             bos = row.get("bos_mss_details") or {}
-            d = str(getattr(bos, "get", lambda *_: "")("direction", "")).lower() if isinstance(bos, dict) else ""
+            d = (
+                str(getattr(bos, "get", lambda *_: "")("direction", "")).lower()
+                if isinstance(bos, dict)
+                else ""
+            )
             if d in ("up", "bull", "bullish"):
                 return "trending_accumulation"
             if d in ("down", "bear", "bearish"):
                 return "trending_distribution"
             # Dernier recours trending : biais de clôture
-            return "trending_accumulation" if float(row.get("close", 0)) >= float(row.get("open", 0)) else "trending_distribution"
+            return (
+                "trending_accumulation"
+                if float(row.get("close", 0)) >= float(row.get("open", 0))
+                else "trending_distribution"
+            )
 
         # 3) Range → déterminisme accumulation vs distribution
-        if ("range" in regime) or ("sideways" in regime) or ("institutional" in regime and "range" in regime):
-            pos   = float(row.get("range_pos_pct", 0.5))
+        if (
+            ("range" in regime)
+            or ("sideways" in regime)
+            or ("institutional" in regime and "range" in regime)
+        ):
+            pos = float(row.get("range_pos_pct", 0.5))
             lower = bool(row.get("in_lower_tercile", pos <= 0.33))
             upper = bool(row.get("in_upper_tercile", pos >= 0.67))
             vol_m = float(row.get("volume_momentum", 0.0))
@@ -3194,7 +3752,11 @@ class Detectors:
 
             # C) Centre du range → direction BOS si dispo, sinon signe de momentum volume
             bos = row.get("bos_mss_details") or {}
-            d = str(getattr(bos, "get", lambda *_: "")("direction", "")).lower() if isinstance(bos, dict) else ""
+            d = (
+                str(getattr(bos, "get", lambda *_: "")("direction", "")).lower()
+                if isinstance(bos, dict)
+                else ""
+            )
             if d in ("up", "bull", "bullish"):
                 return "range_accumulation"
             if d in ("down", "bear", "bearish"):
@@ -3206,8 +3768,11 @@ class Detectors:
             return "institutional_drive"
 
         # 5) Défaut strictement déterministe (jamais 'unknown')
-        return "range_accumulation" if float(row.get("close", 0)) >= float(row.get("open", 0)) else "range_distribution"
-       
+        return (
+            "range_accumulation"
+            if float(row.get("close", 0)) >= float(row.get("open", 0))
+            else "range_distribution"
+        )
 
     def determine_phase(self, market_data: pd.DataFrame) -> str:
         """
