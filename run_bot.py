@@ -541,6 +541,15 @@ def run_single_pipeline_cycle(
                 ).copy()
 
                 market_results = market_analyzer.analyze(subset_df, asset)
+                # [PATCH-CANDLES] Purge patterns & traces chandeliers si OFF (anti-effet de bord)
+                if not CANDLES_ENABLED:
+                    try:
+                        market_results.pop("patterns", None)
+                        lat = market_results.get("latest")
+                        if isinstance(lat, dict):
+                            lat.pop("candles", None)
+                    except Exception:
+                        pass
 
                 # ⚠️ Ne réinitialise pas l’historique à chaque cycle → limite les doublons de logs
                 if cycle_count == 1 or do_full_refresh:
