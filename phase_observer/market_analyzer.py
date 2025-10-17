@@ -140,10 +140,12 @@ class MarketAnalyzer:
         strategy_config: "Dict[str, Any]",
     ):
         """
-        Analyse Footprint PURE (sans gardes-fous externes).
+        Analyse Footprint (sans gardes-fous externes).
         - Normalisation datetime unique.
-        - Triggers en cascade: climax -> stacking -> absorption.
-        - Si aucun trigger au 1er passage, un 2e passage "soft" abaisse légèrement les seuils (analyse only).
+        - Multi-fenêtres (ex: 3s/5s/8s), double passe (normal -> soft).
+        - Triggers: climax -> stacking -> absorption.
+        - Sélection 'meilleur signal' (score + confluences).
+        - Fallbacks inline (micro-stacking / micro-absorption) pour éviter un 'no trigger' abusif.
         Retour:
             (ok: bool, decision: dict | {"reason": ...})
             decision = {
@@ -156,6 +158,7 @@ class MarketAnalyzer:
             }
         """
         import pandas as pd
+        import numpy as np
 
         log = getattr(self, "logger", None)
 
@@ -232,147 +235,310 @@ class MarketAnalyzer:
 
         # --- paramètres (aucun gate externe) ---
         sc = strategy_config or {}
-        # Par défaut plus permissif: 0.01 convient bien à XAUUSD selon broker; tu peux override via conf.
         price_step = float(sc.get("price_step", 0.01))
-
         cfg = ((sc.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
             "burst_scalping", {}
         ).get("footprint_triggers", {}) or {}
 
-        # Pass 1 (valeurs raisonnables)
-        p1 = dict(
+        # candidates de fenêtres (tu peux overrider via conf: window_candidates_s: [3,5,8])
+        win_cands = list(cfg.get("window_candidates_s", []) or [])
+        if not win_cands:
+            # ordre court -> moyen pour capter des bursts rapides
+            win_cands = [3, 5, 8]
+
+        # seuils par défaut (passe 1)
+        base = dict(
             climax_lookback_bars=int(cfg.get("climax", {}).get("lookback_bars", 8)),
-            climax_vol_ratio_min=float(
-                cfg.get("climax", {}).get("vol_ratio_min", 1.6)
-            ),  # 2.0 -> 1.6
+            climax_vol_ratio_min=float(cfg.get("climax", {}).get("vol_ratio_min", 1.6)),
             climax_delta_ratio_min=float(
                 cfg.get("climax", {}).get("delta_ratio_min", 1.3)
-            ),  # 1.5 -> 1.3
+            ),
             climax_need_cons=bool(
                 cfg.get("climax", {}).get("need_consolidation", False)
-            ),  # True -> False
+            ),
             climax_cons_atr_max=float(
                 cfg.get("climax", {}).get("consolidation_max_atr_mult", 2.0)
-            ),  # 1.0 -> 2.0
+            ),
             stack_delta_ratio_min=float(
                 cfg.get("stacking", {}).get("delta_ratio_min", 1.2)
-            ),  # 1.3 -> 1.2
-            stack_min_levels=int(
-                cfg.get("stacking", {}).get("min_levels", 2)
-            ),  # 3 -> 2
+            ),
+            stack_min_levels=int(cfg.get("stacking", {}).get("min_levels", 2)),
             stack_inval_opp_ratio=float(
                 cfg.get("stacking", {}).get("invalidate_opposite_ratio", 0.65)
             ),
             stack_vol_lvl_min_med=float(cfg.get("vol_level_min_ratio_median_30s", 0.0)),
-            abs_vol_z_min=float(
-                cfg.get("absorption", {}).get("vol_zscore_min", 1.2)
-            ),  # 2.0 -> 1.2
+            abs_vol_z_min=float(cfg.get("absorption", {}).get("vol_zscore_min", 1.2)),
             abs_delta_ratio_max=float(
                 cfg.get("absorption", {}).get("delta_ratio_max", 0.6)
             ),
-            abs_attempts_min=int(
-                cfg.get("absorption", {}).get("attempts_min", 1)
-            ),  # 2 -> 1
-            window_s=int(cfg.get("window_s", 5)),
+            abs_attempts_min=int(cfg.get("absorption", {}).get("attempts_min", 1)),
         )
 
-        # --- snapshot footprint ---
-        try:
-            df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=p1["window_s"]
-            )
-            if df_levels is None or df_levels.empty:
-                return False, {"reason": "no footprint levels"}
-        except Exception as e:
-            return False, {"reason": f"footprint snapshot error: {e}"}
+        # soft (passe 2) – auto-relâchement léger
+        soft = dict(
+            climax_vol_ratio_min=max(1.15, base["climax_vol_ratio_min"] * 0.85),
+            climax_delta_ratio_min=max(1.10, base["climax_delta_ratio_min"] * 0.85),
+            stack_delta_ratio_min=max(1.05, base["stack_delta_ratio_min"] * 0.90),
+            abs_vol_z_min=max(0.80, base["abs_vol_z_min"] * 0.80),
+            abs_attempts_min=1,
+        )
 
-        # --- fonction d'essai des triggers (pour Pass 1 & Pass 2) ---
-        def _try_triggers(params) -> "dict|None":
-            # 1) Climax (si bars disponibles)
+        # --- helpers locaux -------------------------------------------------
+        def _score_boost_from_meta(dec, meta):
+            """Petit boost de confiance si la direction colle à l'empreinte globale."""
             try:
-                d_climax = {}
-                if bars is not None and not getattr(bars, "empty", True):
-                    d_climax = detect_volume_climax_after_consolidation(
-                        bars,
-                        df_levels,
-                        lookback_bars=params["climax_lookback_bars"],
-                        vol_ratio_min=params["climax_vol_ratio_min"],
-                        delta_ratio_min=params["climax_delta_ratio_min"],
-                        need_consolidation=params["climax_need_cons"],
-                        consolidation_max_atr_mult=params["climax_cons_atr_max"],
+                conf = float(dec.get("confidence", 0.7) or 0.7)
+                sdir = 1 if str(dec.get("direction", "BUY")).upper() == "BUY" else -1
+                dtot = float(meta.get("delta_total", 0.0) or 0.0)
+                if dtot != 0 and np.sign(dtot) == sdir:
+                    conf = min(0.99, conf + 0.05)  # boost léger
+                # Si anchor ~ proche POC, petit malus (on préfère un bloc net plutôt que le POC)
+                anc = float(dec.get("anchor_price", meta.get("poc", 0.0)) or 0.0)
+                poc = float(meta.get("poc", 0.0) or 0.0)
+                if anc and poc and abs(anc - poc) <= price_step:
+                    conf = max(0.55, conf - 0.03)
+                return conf
+            except Exception:
+                return float(dec.get("confidence", 0.7) or 0.7)
+
+        def _pick_best(*cands):
+            """Choisit la meilleure décision par confidence; tie-break: stacking>climax>absorption."""
+            cands = [c for c in cands if c and c.get("ok")]
+            if not cands:
+                return None
+            # boost meta déjà inclus dans les candidats passés ici
+            prio = {
+                "stacking": 3,
+                "climax_after_consolidation": 2,
+                "absorption_reject": 1,
+            }
+            cands.sort(
+                key=lambda d: (
+                    float(d.get("confidence", 0.0)),
+                    prio.get(str(d.get("trigger", "")), 0),
+                ),
+                reverse=True,
+            )
+            return cands[0]
+
+        def _micro_stack_inline(df_levels, delta_ratio_min=1.1, max_gap=1):
+            """Fallback minimaliste: repère un run 2-3 niveaux adjacents même signe & ratio > seuil."""
+            try:
+                lv = df_levels[df_levels["vol"] > 0].copy()
+                if lv.empty:
+                    return None
+                # ordonne
+                lv = lv.sort_index()
+                idx = lv.index.values.astype(float)
+                sign = np.sign(lv["delta"].values)
+                ratio = lv["delta_ratio"].values
+                # pas approximatif
+                diffs = np.diff(np.unique(idx))
+                step = np.quantile(diffs[diffs > 0], 0.1) if len(diffs) > 0 else 0.0
+                best = None
+                i = 0
+                while i < len(idx) - 1:
+                    if sign[i] == 0 or ratio[i] < delta_ratio_min:
+                        i += 1
+                        continue
+                    j = i + 1
+                    gaps = 0
+                    run = 1
+                    sgn = sign[i]
+                    while j < len(idx):
+                        if sign[j] != sgn or ratio[j] < delta_ratio_min:
+                            break
+                        if step > 0 and (idx[j] - idx[j - 1]) > 1.6 * step:
+                            gaps += 1
+                            if gaps > max_gap:
+                                break
+                        run += 1
+                        j += 1
+                    if run >= 2:
+                        direction = "BUY" if sgn > 0 else "SELL"
+                        anchor = float(idx[j - 1])
+                        conf = min(
+                            0.9,
+                            0.55
+                            + 0.1 * (run - 2)
+                            + 0.1
+                            * np.clip(ratio[i:j].mean() / delta_ratio_min, 0, 1.5),
+                        )
+                        best = {
+                            "ok": True,
+                            "trigger": "stacking_inline",
+                            "direction": direction,
+                            "confidence": conf,
+                            "anchor_price": anchor,
+                            "meta": {
+                                "levels": int(run),
+                                "delta_ratio_mean": float(ratio[i:j].mean()),
+                            },
+                        }
+                        break
+                    i = j
+                return best
+            except Exception:
+                return None
+
+        def _micro_absorption_inline(df_levels, z_min=1.1, opp_ratio=0.6):
+            """Fallback absorption simple: zscore_vol élevé + voisin opposé fort."""
+            try:
+                lv = df_levels.copy()
+                req = {"zscore_vol", "delta_ratio", "delta"}
+                if any(c not in lv.columns for c in req):
+                    return None
+                cands = lv[(lv["zscore_vol"] >= z_min) & (lv["delta_ratio"] <= 0.6)]
+                if cands.empty:
+                    return None
+                lv = lv.sort_index()
+                for price, row in cands.iterrows():
+                    i = lv.index.get_loc(price)
+                    neigh = []
+                    if i > 0:
+                        neigh.append(lv.iloc[i - 1])
+                    if i + 1 < len(lv):
+                        neigh.append(lv.iloc[i + 1])
+                    for nb in neigh:
+                        if (
+                            np.sign(nb["delta"]) != np.sign(row["delta"])
+                            and nb["delta_ratio"] >= opp_ratio
+                        ):
+                            direction = "BUY" if nb["delta"] > 0 else "SELL"
+                            conf = min(
+                                0.9, 0.6 + 0.2 * (row["zscore_vol"] / max(1.0, z_min))
+                            )
+                            return {
+                                "ok": True,
+                                "trigger": "absorption_inline",
+                                "direction": direction,
+                                "confidence": float(conf),
+                                "anchor_price": float(nb.name),
+                                "meta": {
+                                    "absorbed_level": float(price),
+                                    "absorbed_zscore": float(row["zscore_vol"]),
+                                },
+                            }
+                return None
+            except Exception:
+                return None
+
+        # --- exploration multi-fenêtres & double passe ---------------------
+        best_decision = None
+        best_meta = None
+
+        for pass_kind in ("normal", "soft"):
+            p = dict(base)
+            if pass_kind == "soft":
+                p.update(soft)
+
+            for win in win_cands:
+                # snapshot
+                try:
+                    df_levels, meta = _compute_footprint_snapshot(
+                        ticks, price_step=price_step, window_s=int(win)
                     )
-                    if d_climax.get("ok"):
-                        return d_climax
-            except Exception as e:
-                _log("debug", f"[TRIGGER] climax error: {e}")
+                    if df_levels is None or df_levels.empty:
+                        continue
+                except Exception as e:
+                    _log("debug", f"[SNAPSHOT] win={win}s error: {e}")
+                    continue
 
-            # 2) Stacking
-            try:
-                d_stack = detect_imbalance_stacking(
-                    df_levels,
-                    delta_ratio_min=params["stack_delta_ratio_min"],
-                    min_levels=params["stack_min_levels"],
-                    invalidate_opposite_ratio=params["stack_inval_opp_ratio"],
-                    vol_level_min_ratio_median_30s=params["stack_vol_lvl_min_med"],
-                )
-                if d_stack.get("ok"):
-                    return d_stack
-            except Exception as e:
-                _log("debug", f"[TRIGGER] stacking error: {e}")
+                # 1) climax
+                d1 = {}
+                try:
+                    if bars is not None and not getattr(bars, "empty", True):
+                        d1 = detect_volume_climax_after_consolidation(
+                            bars,
+                            df_levels,
+                            lookback_bars=p["climax_lookback_bars"],
+                            vol_ratio_min=p["climax_vol_ratio_min"],
+                            delta_ratio_min=p["climax_delta_ratio_min"],
+                            need_consolidation=p["climax_need_cons"],
+                            consolidation_max_atr_mult=p["climax_cons_atr_max"],
+                        )
+                except Exception as e:
+                    _log("debug", f"[TRIGGER] climax error: {e}")
+                    d1 = {}
 
-            # 3) Absorption
-            try:
-                d_abs = detect_absorption_reject(
-                    df_levels,
-                    vol_zscore_min=params["abs_vol_z_min"],
-                    delta_ratio_max=params["abs_delta_ratio_max"],
-                    attempts_min=params["abs_attempts_min"],
-                )
-                if d_abs.get("ok"):
-                    return d_abs
-            except Exception as e:
-                _log("debug", f"[TRIGGER] absorption error: {e}")
+                # 2) stacking
+                try:
+                    d2 = detect_imbalance_stacking(
+                        df_levels,
+                        delta_ratio_min=p["stack_delta_ratio_min"],
+                        min_levels=p["stack_min_levels"],
+                        invalidate_opposite_ratio=p["stack_inval_opp_ratio"],
+                        vol_level_min_ratio_median_30s=p["stack_vol_lvl_min_med"],
+                    )
+                except Exception as e:
+                    _log("debug", f"[TRIGGER] stacking error: {e}")
+                    d2 = {}
 
-            return None
+                # 3) absorption
+                try:
+                    d3 = detect_absorption_reject(
+                        df_levels,
+                        vol_zscore_min=p["abs_vol_z_min"],
+                        delta_ratio_max=p["abs_delta_ratio_max"],
+                        attempts_min=p["abs_attempts_min"],
+                    )
+                except Exception as e:
+                    _log("debug", f"[TRIGGER] absorption error: {e}")
+                    d3 = {}
 
-        # --- Pass 1 (normal-permissif) ---
-        decision = _try_triggers(p1)
+                # 4) fallbacks inline si rien
+                if not (d1.get("ok") or d2.get("ok") or d3.get("ok")):
+                    d4 = _micro_stack_inline(df_levels)
+                    d5 = _micro_absorption_inline(df_levels)
+                else:
+                    d4 = d5 = None
 
-        # --- Pass 2 "soft" (si toujours rien) : baisse légère & contrôlée des seuils ---
-        if decision is None:
-            p2 = p1.copy()
-            p2.update(
-                dict(
-                    climax_vol_ratio_min=max(1.2, p1["climax_vol_ratio_min"] * 0.85),
-                    climax_delta_ratio_min=max(
-                        1.1, p1["climax_delta_ratio_min"] * 0.85
-                    ),
-                    stack_delta_ratio_min=max(1.05, p1["stack_delta_ratio_min"] * 0.9),
-                    abs_vol_z_min=max(0.8, p1["abs_vol_z_min"] * 0.8),
-                    abs_attempts_min=1,
-                )
-            )
-            decision = _try_triggers(p2)
+                # boost de confiance meta & sélection
+                cand_list = []
+                for d in (d1, d2, d3, d4, d5):
+                    if d and d.get("ok"):
+                        d = dict(d)
+                        d["confidence"] = _score_boost_from_meta(d, meta)
+                        cand_list.append(d)
 
-        if decision is None:
+                pick = _pick_best(*cand_list) if cand_list else None
+                if pick:
+                    # garde le meilleur global
+                    if (best_decision is None) or (
+                        float(pick.get("confidence", 0))
+                        > float(best_decision.get("confidence", 0))
+                    ):
+                        best_decision = pick
+                        best_meta = meta
+
+            if best_decision is not None:
+                break  # on s'arrête à la première passe qui déclenche (normal ou soft)
+
+        if best_decision is None:
             return False, {"reason": "no trigger"}
 
-        # --- sortie décision ---
+        # --- sortie décision finale ---
         try:
-            direction = str(decision.get("direction", "BUY")).upper()
+            direction = str(best_decision.get("direction", "BUY")).upper()
             anchor_price = float(
-                decision.get("anchor_price", (meta or {}).get("poc", 0.0))
+                best_decision.get("anchor_price", (best_meta or {}).get("poc", 0.0))
             )
         except Exception:
-            direction, anchor_price = "BUY", float((meta or {}).get("poc", 0.0) or 0.0)
+            direction, anchor_price = "BUY", float(
+                (best_meta or {}).get("poc", 0.0) or 0.0
+            )
 
         out = {
             "action": "BUY" if direction == "BUY" else "SELL",
             "asset": asset,
-            "trigger": decision.get("trigger", "footprint"),
-            "confidence": float(decision.get("confidence", 0.7) or 0.7),
+            "trigger": best_decision.get("trigger", "footprint"),
+            "confidence": float(best_decision.get("confidence", 0.7) or 0.7),
             "anchor_price": anchor_price,
-            "meta": {**(meta or {}), **(decision.get("meta", {}) or {})},
+            "meta": {
+                **(best_meta or {}),
+                **(best_decision.get("meta", {}) or {}),
+                "window_used": int(win_cands[0] if isinstance(win_cands, list) else 0),
+            },
         }
         return True, out
 
