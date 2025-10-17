@@ -400,7 +400,7 @@ def main(args: argparse.Namespace) -> None:
             ai_interface_instance=ai_interface,
             strategy_manager_instance=strategy_manager,
         )
-       
+        decision_pipeline.extra_context = {}
         mecano = Mecano(config_manager_instance=config_manager)
         mecano.set_ai_analyzer(ai_decision)
 
@@ -544,10 +544,8 @@ def main(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
                        
-            decision_pipeline.extra_context = {
-                **(decision_pipeline.extra_context or {}),
-                "live_pre_signals": live_pre_signals,
-            }
+            _current_ctx = getattr(decision_pipeline, "extra_context", {})
+            decision_pipeline.extra_context = {**_current_ctx, "live_pre_signals": live_pre_signals}
 
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
