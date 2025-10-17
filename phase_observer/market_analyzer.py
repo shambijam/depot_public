@@ -135,23 +135,50 @@ class MarketAnalyzer:
     def analyze_footprint_triggers(
         self,
         asset: str,
-        ticks: pd.DataFrame,
-        bars: pd.DataFrame,
-        strategy_config: Dict[str, Any],
+        ticks: "pd.DataFrame",
+        bars: "pd.DataFrame",
+        strategy_config: "Dict[str, Any]",
     ):
         """
-        (ok, decision) pour scalping burst footprint
+        Retourne (ok: bool, decision: dict) pour scalping burst footprint.
+        Version robuste :
+        - Normalisation des timestamps (UTC -> tz-naive) pour éviter les erreurs NumPy.
+        - Résolution de config tolérante (chemins multiples).
+        - Garde-fous sur la qualité du flux (tickrate/couverture).
+        - Triggers (climax/stacking/absorption) avec fallback.
+        - Construction d’entrée avec offset signé (BUY/SELL) et trailing packagé.
         """
         import math
+        import pandas as pd
 
+        # -------- logging util --------
         log = getattr(self, "logger", None)
 
-        def _log(msg):
+        def _log(level: str, msg: str):
             try:
-                (log.info if log else print)(msg)
+                if log:
+                    getattr(log, level, log.info)(msg)
+                else:
+                    print(f"[{level.upper()}] {msg}")
             except Exception:
                 pass
 
+        # -------- safe imports --------
+        try:
+            from .features import _compute_footprint_snapshot, _micro_atr_from_ticks
+        except Exception as e:
+            return False, {"reason": f"features import error: {e}"}
+
+        try:
+            from .triggers import (
+                detect_volume_climax_after_consolidation,
+                detect_imbalance_stacking,
+                detect_absorption_reject,
+            )
+        except Exception as e:
+            return False, {"reason": f"triggers import error: {e}"}
+
+        # -------- helpers --------
         def _deep_find_footprint_cfg(d):
             """Retourne (cfg, path_str) en cherchant footprint_triggers partout."""
             stack = [([], d)]
@@ -168,8 +195,55 @@ class MarketAnalyzer:
                         stack.append((path + [str(k)], v))
             return {}, ""
 
+        def _normalize_dt(df: "pd.DataFrame") -> "pd.DataFrame":
+            """
+            Force un index datetime tz-naive (UTC sans tz) pour compat NumPy/rolling.
+            - Si 'timestamp' existe, on l'utilise; sinon l'index.
+            - Convertit en UTC, puis .tz_localize(None).
+            """
+            if df is None or len(df) == 0:
+                return df
+            df = df.copy()
+
+            # source temporelle
+            if "timestamp" in df.columns:
+                ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            else:
+                ts = pd.to_datetime(df.index, utc=True, errors="coerce")
+                df["timestamp"] = ts
+
+            # ts est tz-aware (UTC) -> rendre tz-naive
+            try:
+                # si tz-aware, ts.dt.tz est non None; si tz-naive, attribut existe mais vaut None
+                tz = getattr(ts.dt, "tz", None)
+                if tz is not None:
+                    ts = ts.dt.tz_convert("UTC")
+                # rendre tz-naive
+                ts = ts.dt.tz_localize(None)
+            except Exception:
+                # fallback le plus simple : to_datetime sans tz, considéré déjà en UTC
+                ts = pd.to_datetime(ts.astype("datetime64[ns]"), errors="coerce")
+
+            # appliquer proprement
+            df.index = ts
+            df["timestamp"] = ts
+            df.sort_index(inplace=True)
+            return df
+
+        def _get_phase_from_bars(bdf: "pd.DataFrame") -> "str|None":
+            try:
+                if (
+                    bdf is not None
+                    and "phase" in bdf.columns
+                    and len(bdf["phase"].dropna()) > 0
+                ):
+                    return str(bdf["phase"].dropna().iloc[-1])
+            except Exception:
+                pass
+            return None
+
+        # -------- config resolution --------
         try:
-            # 0) résolution config (canonique -> attr -> fallback deep)
             cfg_fp = (
                 (strategy_config or {})
                 .get("entry_rules", {})
@@ -180,73 +254,81 @@ class MarketAnalyzer:
             cfg_path = "entry_rules → scalping → burst_scalping → footprint_triggers"
 
             if not cfg_fp:
+                # fallback #1: attribut d'instance déjà posé via phase_observer_config merge
                 cfg_fp = getattr(self, "footprint_triggers", {}) or {}
                 cfg_path = "self.footprint_triggers"
 
             if not cfg_fp:
+                # fallback #2: recherche profonde n'importe où dans la conf stratégique
                 cfg_fp, cfg_path = _deep_find_footprint_cfg(strategy_config or {})
 
             if not cfg_fp or not bool(cfg_fp.get("enabled", False)):
                 return False, {
                     "reason": f"footprint_triggers disabled (cfg not found/enabled at '{cfg_path or 'N/A'}')"
                 }
+        except Exception as e:
+            return False, {"reason": f"config error: {e}"}
 
-            _log(f"[FP CFG] path='{cfg_path}' keys={list(cfg_fp.keys())}")
+        _log("info", f"[FP CFG] path='{cfg_path}' keys={list(cfg_fp.keys())}")
 
-            # 1) params & defaults
-            price_step = float((strategy_config or {}).get("price_step", 0.1))
-            order_block = (strategy_config or {}).get("entry_rules", {}).get(
-                "scalping", {}
-            ).get("burst_scalping", {}) or {}
-            burst_count = int(order_block.get("burst_size", 5))
-            order_entry_style = str(cfg_fp.get("entry_style", "LIMIT_FOK")).upper()
-            order_validity_ms = int(cfg_fp.get("validity_ms", 800))
-            price_offset_ticks = float(cfg_fp.get("price_offset_ticks", 0.0))
+        # -------- normalisation temporelle (⚠️ le fix) --------
+        try:
+            ticks = _normalize_dt(ticks) if ticks is not None else None
+            bars = _normalize_dt(bars) if bars is not None else None
+        except Exception as e:
+            return False, {"reason": f"datetime normalization error: {e}"}
 
-            # “hygiène”
-            tickrate_min = float(cfg_fp.get("tickrate_min", 0.0))
-            coverage_s_min = float(cfg_fp.get("coverage_s_min_burst", 0.0))
-            phase_whitelist = list(cfg_fp.get("phase_whitelist", []))
-            allow = cfg_fp.get("allow_no_clear_phase_if_strong", {}) or {}
-            allow_delta_abs_min = float(allow.get("of_delta_abs_min", 0.0))
-            allow_tickrate_min = float(allow.get("tickrate_min", tickrate_min))
+        # -------- lecture des paramètres --------
+        sc = strategy_config or {}
+        price_step = float(sc.get("price_step", 0.1))
 
-            # 2) snapshot footprint
-            from .features import _compute_footprint_snapshot, _micro_atr_from_ticks
+        order_block = (
+            sc.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
+            or {}
+        )
+        burst_count = max(1, int(order_block.get("burst_size", 5)))
+        burst_count = min(burst_count, int(cfg_fp.get("max_burst_size", 10) or 10))
 
+        order_entry_style = str(cfg_fp.get("entry_style", "LIMIT_FOK")).upper()
+        order_validity_ms = int(cfg_fp.get("validity_ms", 800))
+        price_offset_ticks = float(cfg_fp.get("price_offset_ticks", 0.0))
+
+        # hygiène marché
+        tickrate_min = float(cfg_fp.get("tickrate_min", 0.0))
+        coverage_s_min = float(cfg_fp.get("coverage_s_min_burst", 0.0))
+        phase_whitelist = list(cfg_fp.get("phase_whitelist", []))
+        allow = cfg_fp.get("allow_no_clear_phase_if_strong", {}) or {}
+        allow_delta_abs_min = float(allow.get("of_delta_abs_min", 0.0))
+        allow_tickrate_min = float(allow.get("tickrate_min", tickrate_min))
+
+        # -------- snapshot footprint --------
+        try:
             df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=5
+                ticks, price_step=price_step, window_s=int(cfg_fp.get("window_s", 5))
             )
             if df_levels is None or df_levels.empty:
                 return False, {"reason": "no footprint levels"}
+        except Exception as e:
+            return False, {"reason": f"footprint snapshot error: {e}"}
 
-            # 3) filtres
-            tr = float(meta.get("tick_rate", 0.0))
-            cov = float(meta.get("coverage_s", 0.0))
-            if tickrate_min > 0 and tr < tickrate_min:
-                return False, {"reason": f"tickrate too low: {tr}/{tickrate_min}s"}
-            if coverage_s_min > 0 and cov < coverage_s_min:
+        # -------- filtres de flux --------
+        tr = float(meta.get("tick_rate", 0.0))
+        cov = float(meta.get("coverage_s", 0.0))
+        if tickrate_min > 0 and tr < tickrate_min:
+            return False, {"reason": f"tickrate too low: {tr}/{tickrate_min}s"}
+        if coverage_s_min > 0 and cov < coverage_s_min:
+            return False, {"reason": f"coverage too short: {cov}s<{coverage_s_min}s"}
+
+        current_phase = _get_phase_from_bars(bars)
+        if phase_whitelist and current_phase not in phase_whitelist:
+            delta_abs = abs(float(meta.get("delta_total", 0.0)))
+            if not (delta_abs >= allow_delta_abs_min and tr >= allow_tickrate_min):
                 return False, {
-                    "reason": f"coverage too short: {cov}s<{coverage_s_min}s"
+                    "reason": f"phase '{current_phase}' not in whitelist and not strong-enough (|Δ|={delta_abs}, tr={tr}/s)"
                 }
 
-            current_phase = None
-            try:
-                if bars is not None and "phase" in bars.columns:
-                    s = bars["phase"].dropna()
-                    if len(s) > 0:
-                        current_phase = str(s.iloc[-1])
-            except Exception:
-                current_phase = None
-
-            if phase_whitelist and current_phase not in phase_whitelist:
-                delta_abs = abs(float(meta.get("delta_total", 0.0)))
-                if not (delta_abs >= allow_delta_abs_min and tr >= allow_tickrate_min):
-                    return False, {
-                        "reason": f"phase '{current_phase}' not in whitelist and not strong-enough (|Δ|={delta_abs}, tr={tr}/s)"
-                    }
-
-            # 4) triggers
+        # -------- triggers --------
+        try:
             d_climax = detect_volume_climax_after_consolidation(
                 bars,
                 df_levels,
@@ -299,18 +381,36 @@ class MarketAnalyzer:
 
             if decision is None:
                 return False, {"reason": "no trigger"}
+        except Exception as e:
+            return False, {"reason": f"trigger eval error: {e}"}
 
-            # 5) construction de la décision
-            micro_atr = float(_micro_atr_from_ticks(ticks, window_s=10))
+        # -------- construction de l’ordre & trailing --------
+        try:
+            micro_atr = float(
+                _micro_atr_from_ticks(
+                    ticks, window_s=int(cfg_fp.get("trail_atr_window_s", 10))
+                )
+            )
             anchor_price = float(decision.get("anchor_price", meta.get("poc", 0.0)))
-            entry_price = anchor_price + price_offset_ticks * price_step
+            direction = str(decision.get("direction", "BUY")).upper()
+
+            # offset signé selon la direction
+            signed_offset = price_offset_ticks * float(price_step)
+            if direction == "SELL":
+                signed_offset = -abs(signed_offset)
+            else:
+                signed_offset = abs(signed_offset)
+
+            # Pour MARKET, le prix peut être ignoré en aval; on met l’ancre + offset par cohérence
+            entry_price = float(anchor_price + signed_offset)
 
             entry = {
-                "style": order_entry_style,
-                "price": float(entry_price),
+                "style": order_entry_style,  # e.g. LIMIT_FOK | MARKET
+                "price": entry_price,
                 "burst_count": int(burst_count),
                 "validity_ms": int(order_validity_ms),
             }
+
             trailing = {
                 "phase0": {
                     "window_s": int(
@@ -324,12 +424,12 @@ class MarketAnalyzer:
                 "phase1": {
                     "mult": float(
                         cfg_fp.get("trailing", {}).get("phase1_mult_micro_atr_10s", 1.5)
-                    )
+                    ),
                 },
                 "phase2": {
                     "mult": float(
                         cfg_fp.get("trailing", {}).get("phase2_mult_micro_atr_10s", 2.0)
-                    )
+                    ),
                 },
                 "clamp": [
                     float(cfg_fp.get("trailing", {}).get("clamp_min", 0.0)),
@@ -339,22 +439,17 @@ class MarketAnalyzer:
             }
 
             out = {
-                "action": (
-                    "BUY"
-                    if str(decision.get("direction", "BUY")).upper() == "BUY"
-                    else "SELL"
-                ),
+                "action": "BUY" if direction == "BUY" else "SELL",
                 "asset": asset,
                 "trigger": decision.get("trigger", "footprint"),
                 "confidence": float(decision.get("confidence", 0.7)),
                 "entry": entry,
                 "exit": {"type": "TRAILING_ONLY", "phases": trailing},
-                "meta": {**decision.get("meta", {}), **meta},
+                "meta": {**meta, **(decision.get("meta", {}) or {})},
             }
             return True, out
-
         except Exception as e:
-            return False, {"reason": f"error: {e}"}
+            return False, {"reason": f"order build error: {e}"}
 
     def ready_and_confluence_ok(self, confluence_required: int = 2) -> Tuple[bool, str]:
         try:
