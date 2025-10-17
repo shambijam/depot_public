@@ -170,7 +170,7 @@ class MarketAnalyzer:
             return False, {"reason": f"features import error: {e}"}
 
         try:
-            from .triggers import (
+            from .detectors import (
                 detect_volume_climax_after_consolidation,
                 detect_imbalance_stacking,
                 detect_absorption_reject,
