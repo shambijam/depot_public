@@ -3650,6 +3650,170 @@ class TradeExecutor:
                         )
                 except Exception as e:
                     self.logger.error(f"[TRAIL→SL] err pos SL update: {e}")
+                    
+                         # ==============
+        # Phase 0 — ENTRY TRIGGERS (Footprint en temps réel)
+        # ==============
+        try:
+            fptr = (burst_cfg.get("footprint_triggers", {}) or {})
+            if bool(fptr.get("enabled", False)):
+                # Instancier (ou réutiliser) un MarketAnalyzer pour le moniteur
+                if not hasattr(self, "_monitor_market_analyzer"):
+                    from phase_observer.market_analyzer import MarketAnalyzer
+                    self._monitor_market_analyzer = MarketAnalyzer(
+                        config_manager=self.config_manager,
+                        logger=self.logger,
+                    )
+                ma = self._monitor_market_analyzer
+
+                # Liste de symboles autorisés
+                try:
+                    gs = (self.config_manager.get("global_safety", {}) or {})
+                    allowed_syms = list(gs.get("global_allowed_symbols", []))
+                except Exception:
+                    allowed_syms = []
+
+                # Fallback minimal si vide
+                if not allowed_syms:
+                    try:
+                        allowed_syms = sorted({
+                            str(getattr(p, "symbol", "") or p.get("symbol", "")).upper()
+                            for p in _snapshot_positions()
+                        })
+                    except Exception:
+                        allowed_syms = []
+
+                # Symboles qui ont déjà un panier burst ouvert (garde anti-doublon)
+                open_baskets = _group_baskets(_snapshot_positions())
+                syms_with_open_burst = {
+                    str(_v(ps[0], "symbol", "") or "").upper()
+                    for ps in open_baskets.values() if ps
+                }
+
+                # Cooldown après fermeture
+                now_ts = time.time()
+                cooldown_until = getattr(self, "_cooldown_until", {})
+
+                # Paramètres de collecte
+                lookback_s = int(fptr.get("lookback_s", 8))
+                tf = (config.get("data_collection", {}) or {}).get("default_timeframe", "M1")
+                bars_n = int((config.get("data_collection", {}) or {}).get("rolling_lookback_bars", 50))
+
+                for sym in allowed_syms:
+                    if not sym:
+                        continue
+                    if sym in syms_with_open_burst:
+                        continue
+                    if cooldown_until and cooldown_until.get(sym, 0) > now_ts:
+                        self.logger.info(f"[TRIGGER][MON] ⏳ cooldown actif {sym} → skip")
+                        continue
+
+                    # Ticks récents
+                    ticks_recent = None
+                    try:
+                        end = pd.Timestamp.utcnow()
+                        start = end - pd.Timedelta(seconds=lookback_s)
+                        if hasattr(mt5c, "get_ticks_range"):
+                            ticks_recent = mt5c.get_ticks_range(
+                                sym, start.to_pydatetime(), end.to_pydatetime()
+                            )
+                        elif hasattr(mt5c, "get_ticks_last_seconds"):
+                            ticks_recent = mt5c.get_ticks_last_seconds(sym, seconds=lookback_s)
+                    except Exception:
+                        ticks_recent = None
+
+                    # Contexte M1 annoté
+                    bars = None
+                    try:
+                        bars_raw = mt5c.get_rates(sym, tf, max(bars_n, 50))
+                        if bars_raw is not None and not bars_raw.empty:
+                            res = ma.analyze(bars_raw.tail(bars_n).copy(), sym)
+                            bars = res.get("annotated_df", bars_raw)
+                    except Exception as e:
+                        self.logger.warning(f"[TRIGGER][MON] bars fail {sym}: {e}")
+
+                    if ticks_recent is None or getattr(ticks_recent, "empty", True):
+                        self.logger.info(f"[TRIGGER][MON] {sym} → no recent ticks")
+                        continue
+                    if bars is None or getattr(bars, "empty", True):
+                        self.logger.info(f"[TRIGGER][MON] {sym} → no bars")
+                        continue
+
+                    # Détection footprint → trigger
+                    try:
+                        ok_fp, dec_fp = ma.analyze_footprint_triggers(
+                            asset=sym, ticks=ticks_recent, bars=bars, strategy_config=config
+                        )
+                    except Exception as e:
+                        self.logger.error(f"[TRIGGER][MON] trigger err {sym}: {e}", exc_info=True)
+                        continue
+
+                    if not ok_fp:
+                        # LOG EN INFO pour bien voir les raisons (pas en debug)
+                        self.logger.info(f"[TRIGGER][MON] {sym} no trigger: {dec_fp.get('reason')}")
+                        continue
+
+                    # Construction de la décision burst LIMIT_FOK
+                    entry = dec_fp.get("entry", {}) or {}
+                    action = str(dec_fp.get("action", "")).upper()
+                    if action not in {"BUY", "SELL"}:
+                        self.logger.info(f"[TRIGGER][MON] {sym} action invalide")
+                        continue
+
+                    order_cfg = (burst_cfg.get("order", {}) or {})
+                    burst_count = int(entry.get("burst_count", order_cfg.get("burst_count", 5)))
+                    burst_each  = float(entry.get("burst_volume_each", order_cfg.get("burst_volume_each", 0.02)))
+
+                    # Prix (Ask/Bid)
+                    price = None
+                    try:
+                        tk = getattr(mt5c, "get_symbol_tick", None)
+                        if tk:
+                            tkv = tk(sym)
+                            ask = tkv.get("ask", getattr(tkv, "ask", None)) if tkv is not None else None
+                            bid = tkv.get("bid", getattr(tkv, "bid", None)) if tkv is not None else None
+                            price = float(ask if action == "BUY" else bid)
+                    except Exception:
+                        price = None
+                    if not price:
+                        self.logger.info(f"[TRIGGER][MON] {sym} no tick price → skip")
+                        continue
+
+                    td = {
+                        "rule_name": "burst_scalping",
+                        "action": action,
+                        "asset": sym,
+                        "volume": round(burst_count * burst_each, 5),
+                        "entry_style": "LIMIT_FOK",
+                        "price": price,
+                        "burst_count": burst_count,
+                        "burst_volume_each": burst_each,
+                        "validity_ms": int(entry.get("validity_ms", 800)),
+                        "no_fallback": True,
+                        "no_tp": True,
+                        "trigger": dec_fp.get("trigger"),
+                        "confidence": float(dec_fp.get("confidence", 0.7)),
+                        "footprint_meta": dec_fp.get("meta", {}),
+                    }
+
+                    self.logger.info(
+                        f"[TRIGGER][MON] ✅ {action} {sym} burst x{burst_count}@{price:.2f} conf={td['confidence']:.2f}"
+                    )
+
+                    # Envoi (respecte dry_run éventuel dans la conf burst)
+                    try:
+                        if bool(burst_cfg.get("dry_run", False)):
+                            self.logger.info(f"[TRIGGER][MON] DRY RUN actif → pas d'envoi broker")
+                        else:
+                            ok = self.execute_burst_scalping_order(td, config)
+                            if ok:
+                                self.logger.info(f"[TRIGGER][MON] ordre envoyé pour {sym}")
+                    except Exception as e:
+                        self.logger.error(f"[TRIGGER][MON] exec err {sym}: {e}", exc_info=True)
+
+        except Exception as e:
+            self.logger.error(f"[TRIGGER][MON] phase0 error: {e}", exc_info=True)
+   
 
         # ==============
         # Phase A — FAST (boucle courte, décision immédiate)

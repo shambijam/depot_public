@@ -797,7 +797,8 @@ def run_single_pipeline_cycle(
                                 f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
                             )
                     else:
-                        logger.debug(f"[FOOTPRINT→DECISION][{asset}] skip: {dec_fp.get('reason')}")
+                       logger.info(f"[TRIGGER][{asset}] skip (no trigger): {dec_fp.get('reason')}")
+
                 except Exception as e:
                     logger.error(f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True)
 
