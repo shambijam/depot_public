@@ -109,6 +109,13 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
+            
+            # --- 0a) Config stratégie (pour meta & règles) ---
+            try:
+                strat_cfg = self.config_manager.get_strategy_config("scalping") or {}
+            except Exception:
+                strat_cfg = self.strategy_config or {}
+
             # --- 0c) Intégration footprint ---
             try:
                 fp_score = float(asset_signals.get("footprint_score", 0.0))
@@ -145,21 +152,24 @@ class ScalpingStrategy(BaseStrategy):
 
             # --- 0b) Analyse via MarketAnalyzer ---
             patterns, latest_pattern = [], None
-            if isinstance(df_work, pd.DataFrame):
+
+            # [PATCH-CANDLES] Master switch chandeliers/patterns/combos
+            candles_enabled = True
+            try:
+                cs = self.config_manager.get("phase_detection_defaults.candlestick_analysis", {}) or {}
+                candles_enabled = bool(cs.get("enabled", True))
+            except Exception:
+                candles_enabled = True
+
+            if candles_enabled and isinstance(df_work, pd.DataFrame):
                 try:
                     market_analyzer = MarketAnalyzer(
                         config_manager=self.config_manager,
                         logger=self.logger,
                     )
                     market_results = market_analyzer.analyze(df_work, asset)
-
-                    # On récupère les patterns détectés
                     patterns = market_results.get("patterns", {}).get("combos", [])
-                    # Dernier pattern exploitable
-                    latest_pattern = (
-                        market_results.get("patterns", {})
-                        .get("candles", [None])[-1]
-                    )
+                    latest_pattern = (market_results.get("patterns", {}).get("candles", [None])[-1])
                     if latest_pattern:
                         self.logger.info(
                             f"[{asset}] Dernier pattern détecté: "
@@ -169,8 +179,12 @@ class ScalpingStrategy(BaseStrategy):
                         asset_signals["latest_pattern"] = latest_pattern
                 except Exception as e:
                     self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
+            else:
+                if not candles_enabled:
+                    self.logger.info(f"[{asset}] ⛔ Analyse chandeliers/patterns/combos désactivée via config.")
+                else:
+                    self.logger.debug(f"[{asset}] MarketAnalyzer skip: df_work indisponible ou < 50 barres.")
 
-            strat_cfg = (self.strategy_config or {}).copy()
             # --- 1) Métadonnées --- (déplacé plus haut pour decide_from_patterns)
             meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
             pip_size = meta["pip_size"]

@@ -1,6 +1,6 @@
 {
     "core_parameters": {
-        "description": "Param\u00e8tres de base optimis\u00e9s pour d\u00e9tection de signaux",
+        "description": "Paramètres de base optimisés pour détection de signaux",
         "lookback_window": 12,
         "volatility_threshold": 0.0002,
         "volume_zscore": 1.2,
@@ -28,7 +28,7 @@
         "default_trade_contract_size": 100000.0
     },
     "detection_toggles": {
-        "description": "Indicateurs activ\u00e9s pour architecture SNIPER_X",
+        "description": "Indicateurs activés pour architecture SNIPER_X",
         "detect_fvg": true,
         "detect_order_block": true,
         "detect_bos_mss": true,
@@ -45,7 +45,7 @@
         "max_gap_age_bars": 50
     },
     "order_block_ml_settings": {
-        "description": "Order Blocks avec scoring ML et confluence (resserr\u00e9)",
+        "description": "Order Blocks avec scoring ML et confluence (resserré)",
         "enable_ml_scoring": true,
         "confluence_requirements": {
             "min_confluence_score": 0.73,
@@ -60,7 +60,7 @@
         }
     },
     "adaptive_swing_settings": {
-        "description": "Swing Points adaptatifs selon r\u00e9gime de volatilit\u00e9",
+        "description": "Swing Points adaptatifs selon régime de volatilité",
         "volatility_regimes": {
             "high_vol": {
                 "swing_order": 5,
@@ -83,7 +83,7 @@
         }
     },
     "bos_mss_enhanced_settings": {
-        "description": "BOS/MSS avec confirmations volume et momentum (resserr\u00e9)",
+        "description": "BOS/MSS avec confirmations volume et momentum (resserré)",
         "volume_confirmation": {
             "enable": true,
             "volume_multiplier_threshold": 1.2,
@@ -100,7 +100,7 @@
         }
     },
     "regime_detection_settings": {
-        "description": "D\u00e9tection sophistiqu\u00e9e du r\u00e9gime de march\u00e9",
+        "description": "Détection sophistiquée du régime de marché",
         "adx_settings": {
             "period": 14,
             "trending_threshold": 25,
@@ -119,7 +119,7 @@
         }
     },
     "confidence_score_calculation": {
-        "description": "Pond\u00e9ration des signaux et bonus de confluence (resserr\u00e9)",
+        "description": "Pondération des signaux et bonus de confluence (resserré)",
         "base_confidence": 0.25,
         "signal_weights": {
             "fvg_detected": 0.15,
@@ -168,7 +168,7 @@
         "enable_signal_quality_report": true
     },
     "multi_timeframe_settings": {
-        "description": "Configuration multi-timeframe pour confluence (resserr\u00e9e)",
+        "description": "Configuration multi-timeframe pour confluence (resserrée)",
         "enabled": true,
         "timeframes": [
             "M1",
@@ -191,7 +191,7 @@
         "strict_mode": true
     },
     "data_requirements": {
-        "description": "Exigences minimales d'historique/qualit\u00e9 pour produire des signaux",
+        "description": "Exigences minimales d'historique/qualité pour produire des signaux",
         "enabled": true,
         "min_bars_total": 500,
         "min_bars_by_timeframe": {
@@ -214,6 +214,11 @@
             "detect_eqh_eql": true,
             "detect_volume_anomaly": true,
             "detect_regime": true
+        },
+        "candlestick_analysis": {
+            "enabled": false,
+            "disable_patterns": false,
+            "disable_combos": false
         },
         "footprint_settings": {
             "description": "Paramètres de gestion et validation footprint",

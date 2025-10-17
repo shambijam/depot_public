@@ -202,21 +202,37 @@ class ScalpingPipeline:
             return {}
 
     def _detect_patterns(self, df_m1: Optional[pd.DataFrame], asset: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        combos = None
-        latest = None
+        combos: Optional[Dict[str, Any]] = None
+        latest: Optional[Dict[str, Any]] = None
+
+        # [PATCH-CANDLES] Master switch depuis phase_observer_config.json — doit être AVANT tout appel détecteur
+        try:
+            csw = self.config_manager.get("phase_detection_defaults.candlestick_analysis", {}) or {}
+        except Exception:
+            csw = {}
+
+        if csw.get("enabled") is False:
+            self.logger.info(f"[{asset}] ⛔ Candles/patterns/combos désactivés via config → skip detectors.")
+            return None, None
+
         try:
             if self.detectors and isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 30:
                 res = self.detectors.detect_combos(df_m1.copy())
+
                 if isinstance(res, dict) and res:
                     combos = res
-                if isinstance(res, dict):
+
+                    # Chercher le "dernier" pattern/candle si présent
                     cands = res.get("candles") or res.get("latest") or None
                     if isinstance(cands, list) and cands:
-                        latest = cands[-1] if isinstance(cands[-1], dict) else None
+                        last = cands[-1]
+                        latest = last if isinstance(last, dict) else None
                     elif isinstance(cands, dict):
                         latest = cands
+
         except Exception as e:
             self.logger.debug(f"[{asset}] detect_combos skipped: {e}")
+
         return combos, latest
 
     def _validate_footprint(self, context: Dict[str, Any], asset: str) -> Optional[Dict[str, Any]]:
