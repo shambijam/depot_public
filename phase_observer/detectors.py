@@ -13,6 +13,211 @@ from .features import (
 
 LOG = logging.getLogger(__name__)
 
+# ----------------------- FOOTPRINT TRIGGERS ----------------------------------
+from .features import _compute_footprint_snapshot, _micro_atr_from_ticks
+
+def detect_imbalance_stacking(
+    df_levels: pd.DataFrame,
+    *,
+    delta_ratio_min: float = 0.70,
+    min_levels: int = 3,
+    invalidate_opposite_ratio: float = 0.60,
+    vol_level_min_ratio_median_30s: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    Cherche ≥ min_levels niveaux adjacents avec delta_ratio >= seuil.
+    Invalidation: niveau opposé 'fort' au milieu du stack.
+    """
+    out: Dict[str, Any] = {"ok": False}
+    if df_levels is None or df_levels.empty:
+        return out
+    lv = df_levels.copy()
+    lv = lv[lv["vol"] > 0].copy()
+    if lv.empty:
+        return out
+
+    # filtrage volumes trop faibles (vs médiane snapshot)
+    med = float(lv["vol"].median() or 0.0)
+    if med <= 0:
+        med = 1.0
+    lv = lv[lv["vol"] >= vol_level_min_ratio_median_30s * med]
+    if lv.empty:
+        return out
+
+    # direction par signe du delta (majoritaire)
+    dir_arr = np.sign(lv["delta"].values)
+    ratio_arr = lv["delta_ratio"].values
+    prices = lv.index.values
+
+    # balayage séquentiel pour trouver un stack
+    best = None
+    i = 0
+    while i < len(lv):
+        sign = dir_arr[i]
+        if sign == 0 or ratio_arr[i] < delta_ratio_min:
+            i += 1
+            continue
+        j = i + 1
+        ok_len = 1
+        invalid = False
+        while j < len(lv):
+            # adjacent en prix
+            if (prices[j] - prices[j - 1]) == 0:
+                j += 1
+                continue
+            # on tolère un pas constant, sinon on stoppe la séquence
+            if (prices[j] - prices[j - 1]) <= 0:
+                break
+            if np.sign(lv["delta"].iloc[j]) != sign:
+                # niveau opposé: si 'fort', invalide
+                if lv["delta_ratio"].iloc[j] >= invalidate_opposite_ratio:
+                    invalid = True
+                break
+            if lv["delta_ratio"].iloc[j] < delta_ratio_min:
+                break
+            ok_len += 1
+            j += 1
+        if not invalid and ok_len >= min_levels:
+            best = (i, j, int(sign))
+            break
+        i = j
+
+    if best is None:
+        return out
+
+    i, j, sgn = best
+    seq = lv.iloc[i:j]
+    direction = "BUY" if sgn > 0 else "SELL"
+    anchor_price = float(seq.index[-1])  # dernier niveau du stack
+    out.update({
+        "ok": True,
+        "trigger": "stacking",
+        "direction": direction,
+        "confidence": float(seq["delta_ratio"].mean()),
+        "anchor_price": anchor_price,
+        "meta": {
+            "levels": int(len(seq)),
+            "delta_ratio_mean": float(seq["delta_ratio"].mean()),
+            "vol_mean": float(seq["vol"].mean()),
+        },
+    })
+    return out
+
+
+def detect_absorption_reject(
+    df_levels: pd.DataFrame,
+    *,
+    vol_zscore_min: float = 2.0,
+    delta_ratio_max: float = 0.25,
+    attempts_min: int = 2,
+) -> Dict[str, Any]:
+    """
+    Absorption: niveau à z-score volumique élevé mais delta faible/opposé.
+    Rejet: premiers prints 'retour' (on approxime par delta de niveau adjacent).
+    """
+    out: Dict[str, Any] = {"ok": False}
+    if df_levels is None or df_levels.empty:
+        return out
+    lv = df_levels.copy()
+    # candidates = niveaux 'mur'
+    cand = lv[(lv["zscore_vol"] >= vol_zscore_min) & (lv["delta_ratio"] <= delta_ratio_max)]
+    if cand.empty:
+        return out
+
+    # Heuristique de rejet: si le niveau juste au-dessus/dessous affiche delta opposé 'clair'
+    for price in cand.index:
+        idx = lv.index.get_loc(price)
+        # upper/lower voisins
+        neigh = []
+        if idx - 1 >= 0: neigh.append(lv.iloc[idx - 1])
+        if idx + 1 < len(lv): neigh.append(lv.iloc[idx + 1])
+        for nb in neigh:
+            if nb["delta_ratio"] >= 0.65 and np.sign(nb["delta"]) != np.sign(lv.loc[price, "delta"]):
+                direction = "BUY" if nb["delta"] > 0 else "SELL"
+                return {
+                    "ok": True,
+                    "trigger": "absorption_reject",
+                    "direction": direction,
+                    "confidence": float(max(0.55, min(0.9, nb["delta_ratio"]))),
+                    "anchor_price": float(nb.name),
+                    "meta": {
+                        "absorbed_level": float(price),
+                        "absorbed_zscore": float(lv.loc[price, "zscore_vol"]),
+                    },
+                }
+    return out
+
+
+def _is_consolidation(bars: pd.DataFrame, lookback: int = 20, atr_mult: float = 0.8) -> bool:
+    """
+    Détecte une consolidation simple: range/ATR moyen sous un seuil.
+    Attend colonnes: high, low, (optionnel) _atr. Fallback si ATR absent.
+    """
+    if bars is None or len(bars) < max(5, lookback):
+        return False
+    df = bars.tail(lookback).copy()
+    rng = float((df["high"].max() - df["low"].min()))
+    atr = float((df.get("_atr") or (df["high"] - df["low"]).rolling(14).mean()).tail(lookback).mean() or 1.0)
+    if atr <= 0:
+        atr = 1.0
+    return (rng / atr) <= atr_mult
+
+def detect_volume_climax_after_consolidation(
+    bars: pd.DataFrame,
+    df_levels: pd.DataFrame,
+    *,
+    lookback_bars: int = 20,
+    vol_ratio_min: float = 2.5,
+    delta_ratio_min: float = 0.70,
+    need_consolidation: bool = True,
+    consolidation_max_atr_mult: float = 0.8,
+) -> Dict[str, Any]:
+    """
+    Climax après consolidation: volume bar xN + snapshot footprint très déséquilibré.
+    bars: dataframe OHLCV (dernière ligne = bougie en formation ou close récente)
+    """
+    out: Dict[str, Any] = {"ok": False}
+    if bars is None or len(bars) < max(5, lookback_bars) or df_levels is None or df_levels.empty:
+        return out
+
+    # Volume bar vs moyenne lookback
+    b = bars.copy()
+    vol_col = "volume" if "volume" in b.columns else ("tick_volume" if "tick_volume" in b.columns else None)
+    if vol_col is None:
+        return out
+    mean_vol = float(b[vol_col].tail(lookback_bars).mean() or 0.0)
+    last_vol = float(b[vol_col].iloc[-1] or 0.0)
+    if mean_vol <= 0:
+        return out
+    if (last_vol / mean_vol) < vol_ratio_min:
+        return out
+
+    # Option: on exige une période de consolidation au préalable
+    if need_consolidation and not _is_consolidation(b, lookback=lookback_bars, atr_mult=consolidation_max_atr_mult):
+        return out
+
+    # Footprint fortement unilatéral (snapshot)
+    # On prend le 'bloc' le plus déséquilibré dans le snapshot
+    lv = df_levels.sort_values("delta_ratio", ascending=False)
+    top = lv.iloc[0]
+    if float(top["delta_ratio"]) < float(delta_ratio_min):
+        return out
+
+    direction = "BUY" if top["delta"] > 0 else "SELL"
+    return {
+        "ok": True,
+        "trigger": "climax_after_consolidation",
+        "direction": direction,
+        "confidence": float(min(0.99, max(0.7, top["delta_ratio"]))),
+        "anchor_price": float(top.name),
+        "meta": {
+            "bar_vol_ratio": float(last_vol / mean_vol),
+            "consolidation": bool(need_consolidation),
+        },
+    }
+# -----------------------------------------------------------------------------
+
+
 # ============================================================
 # 🔹 Candle Detectors (single candle, doji, hammer, marubozu…)
 # ============================================================

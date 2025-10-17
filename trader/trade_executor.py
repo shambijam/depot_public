@@ -3087,6 +3087,101 @@ class TradeExecutor:
             # déverrouillage inconditionnel
             self._closing_baskets.discard(basket_id)
 
+    def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
+        """
+        Exécute un BURST Scalping Footprint (LIMIT + FOK).
+        - Envoie N ordres simultanés au même prix (pas de fallback IOC/RETURN)
+        - Tous les ordres ont le même commentaire : 'burst_scalping|basket=<id>|entry=<price>'
+        - Si un seul ordre échoue ou partiel → annule tout.
+        - Ferme le panier complet via trailing (monitor_burst_baskets)
+        """
+        import time, uuid
+
+        mt5 = getattr(self.mt5_connector, "mt5", None)
+        if not mt5:
+            self.logger.error("[BURST] MT5 module indisponible.")
+            return False
+
+        symbol = str(decision.get("asset") or decision.get("symbol") or "").upper()
+        action = str(decision.get("action", "")).upper()
+        entry_style = decision.get("entry_style", "LIMIT_FOK").upper()
+        burst_count = int(decision.get("burst_count", 5))
+        burst_each = float(decision.get("burst_volume_each", 0.02))
+        entry_price = float(decision.get("price", 0.0))
+        validity_ms = int(decision.get("validity_ms", 800))
+        no_fallback = bool(decision.get("no_fallback", True))
+        basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
+        comment = f"burst_scalping|basket={basket_id}|entry={entry_price:.2f}"
+
+        if entry_price <= 0 or symbol == "":
+            self.logger.error("[BURST] Paramètres d'entrée invalides.")
+            return False
+
+        self.logger.info(
+            f"[BURST] 🔫 {action} x{burst_count} {symbol} @ {entry_price:.2f} "
+            f"(LIMIT+FOK, basket={basket_id})"
+        )
+
+        # --- Construction MT5 request prototype ---
+        order_type = (
+            mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+        )
+        request_template = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": burst_each,
+            "type": order_type,
+            "price": entry_price,
+            "deviation": 0,
+            "type_filling": mt5.ORDER_FILLING_FOK,  # ✅ FOK strict
+            "comment": comment,
+        }
+
+        sent_orders = []
+        start = time.time()
+
+        for i in range(burst_count):
+            result = None
+            try:
+                result = mt5.order_send(request_template)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    sent_orders.append(result)
+                else:
+                    self.logger.warning(
+                        f"[BURST] ❌ ordre {i+1}/{burst_count} échec retcode={getattr(result,'retcode','N/A')}"
+                    )
+                    break
+            except Exception as e:
+                self.logger.error(
+                    f"[BURST] Erreur envoi ordre {i+1}/{burst_count}: {e}"
+                )
+                break
+
+        elapsed_ms = (time.time() - start) * 1000
+        if len(sent_orders) != burst_count:
+            # Annulation de tout le panier si partiel
+            self.logger.warning(
+                f"[BURST] Annulation panier (partiel {len(sent_orders)}/{burst_count})."
+            )
+            try:
+                for o in sent_orders:
+                    mt5.order_send(
+                        {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": getattr(o, "order", None),
+                            "symbol": symbol,
+                        }
+                    )
+            except Exception:
+                pass
+            return False
+
+        self.logger.info(
+            f"[BURST] ✅ Panier complet envoyé ({burst_count} ordres) en {elapsed_ms:.1f}ms."
+        )
+        self._last_burst_time = time.time()
+        return True
+
     def monitor_burst_baskets(
         self,
         config: dict,

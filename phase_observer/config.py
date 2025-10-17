@@ -37,6 +37,53 @@ def update_parameters_from_config(self, strategy_config: dict) -> None:
     self.logger.info(
         f"PhaseObserver mis à jour avec les paramètres de la stratégie '{strategy_name}'."
     )
+    # --- [FOOTPRINT TRIGGERS: DEFAULTS + OVERRIDES] ----------------------
+    fp_user = dict(strategy_config.get("footprint_triggers", {}))
+    # Defaults robustes (XAUUSD à affiner)
+    fp_defaults = {
+        "enabled": True,
+        "filters": {
+            "spread_max_pts": 35,
+            "tickrate_min_per5s": 20,
+            "vol_level_min_ratio_median_30s": 0.5,
+        },
+        "stacking": {
+            "delta_ratio_min": 0.70,  # 70%
+            "min_levels": 3,
+            "invalidate_opposite_ratio": 0.60,
+            "validity_ms": 800,  # fenêtre d’envoi post-détection
+        },
+        "absorption": {
+            "vol_zscore_min": 2.0,
+            "delta_ratio_max": 0.25,
+            "attempts_min": 2,  # tentatives ratées avant rejet
+        },
+        "climax": {
+            "lookback_bars": 20,
+            "vol_ratio_min": 2.5,  # 2.5x la moyenne lookback
+            "delta_ratio_min": 0.70,
+            "need_consolidation": True,
+            "consolidation_max_atr_mult": 0.8,  # range/ATR < 0.8 sur N barres
+        },
+        "trailing": {
+            "phase0_seconds": [2, 4],
+            "phase0_mult_micro_atr_10s": 1.7,
+            "phase1_mult_micro_atr_10s": 1.3,
+            "phase2_mult_micro_atr_10s": 1.0,
+            "clamp_min": 1.0,
+            "clamp_max": 3.5,
+        },
+        "order": {
+            "entry_style": "LIMIT_FOK",
+            "burst_count": 5,  # à ajuster, compte démo
+            "burst_volume_each": 0.02,  # ex. 5x0.02 = 0.10
+            "price_offset_ticks": 0,  # 0 ou -1 tick favorable
+        },
+    }
+    fp_cfg = {**fp_defaults, **fp_user}
+    # Expose dans l'instance
+    setattr(self, "footprint_triggers", fp_cfg)
+    # ---------------------------------------------------------------------
 
     # TODO: invalider/rafraîchir les caches qui dépendent des anciens paramètres (si présents)
     # ex: setattr(self, "_tf_data_cache", {})  # si tu utilises un cache interne
@@ -51,14 +98,12 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
     self.logger.debug("Chargement des paramètres d'analyse pour PhaseObserver...")
 
     # Helper deep-merge si le ConfigManager n'en propose pas
-    def _deep_merge_dicts(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    def _deep_merge_dicts(
+        base: Dict[str, Any], extra: Dict[str, Any]
+    ) -> Dict[str, Any]:
         out = dict(base or {})
         for k, v in (extra or {}).items():
-            if (
-                k in out
-                and isinstance(out[k], dict)
-                and isinstance(v, dict)
-            ):
+            if k in out and isinstance(out[k], dict) and isinstance(v, dict):
                 out[k] = _deep_merge_dicts(out[k], v)
             else:
                 out[k] = v
@@ -79,7 +124,9 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
     # 2) Appliquer les surcharges
     if overrides:
         self.logger.debug(f"Application de surcharges de paramètres : {overrides}")
-        if getattr(self, "config_manager", None) is not None and hasattr(self.config_manager, "_merge_dicts"):
+        if getattr(self, "config_manager", None) is not None and hasattr(
+            self.config_manager, "_merge_dicts"
+        ):
             try:
                 all_settings = self.config_manager._merge_dicts(all_settings, overrides)
             except Exception as e:
@@ -132,4 +179,6 @@ def _load_settings(self, overrides: Optional[Dict[str, Any]] = None):
     except Exception as e:
         self.logger.warning(f"Création des répertoires sortie/logs impossible: {e}")
 
-    self.logger.debug("Paramètres de PhaseObserver chargés et appliqués (après nettoyage).")
+    self.logger.debug(
+        "Paramètres de PhaseObserver chargés et appliqués (après nettoyage)."
+    )

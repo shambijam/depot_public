@@ -496,6 +496,10 @@ def run_single_pipeline_cycle(
         # === Nouveau bloc collecte + analyse unifiée ===
         all_assets_market_data: Dict[str, pd.DataFrame] = {}
         all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
+        
+        # ⚡ Décisions Footprint (Scalping Burst) collectées pendant la boucle actifs
+        footprint_scalping_decisions: List[Dict[str, Any]] = []
+
 
         dcfg = base_config.get("data_collection", {}) or {}
         timeframe_str = dcfg.get("default_timeframe", "M1")
@@ -679,6 +683,81 @@ def run_single_pipeline_cycle(
                     logger.error(
                         f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
                     )
+                    
+                # === FOOTPRINT TRIGGERS → Décision Scalping Burst (LIMIT+FOK) ===
+                try:
+                    # 1) Ticks récents pour snapshot footprint (5–8s)
+                    ticks_recent_df = None
+                    try:
+                        # Si tu as une API range/now → privilégier 8s récents
+                        _now = pd.Timestamp.utcnow()
+                        start_recent = _now - pd.Timedelta(seconds=8)
+                        if hasattr(mt5_connector, "get_ticks_range"):
+                            ticks_recent_df = mt5_connector.get_ticks_range(
+                                asset, start_recent.to_pydatetime(), _now.to_pydatetime()
+                            )
+                        elif hasattr(mt5_connector, "get_ticks_last_seconds"):
+                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(
+                                asset, seconds=8
+                            )
+                    except Exception:
+                        ticks_recent_df = None
+
+                    # Fallback: réutiliser ticks_df de la bougie (si pas de better API)
+                    if (ticks_recent_df is None or ticks_recent_df.empty) and ("ticks_df" in locals()):
+                        ticks_recent_df = ticks_df
+
+                    if ticks_recent_df is not None and not ticks_recent_df.empty:
+                        ok_fp, dec_fp = market_analyzer.analyze_footprint_triggers(
+                            asset=asset,
+                            ticks=ticks_recent_df,
+                            bars=annotated_rates_df,         # historique M1 (>= 20 barres)
+                            strategy_config=base_config,     # fallback si self.footprint_triggers manquant
+                        )
+                    else:
+                        ok_fp, dec_fp = False, {"reason": "no recent ticks"}
+
+                    if ok_fp:
+                        # Construire la décision pour ton exécuteur actuel
+                        # - rule_name=burst_scalping → tes gardes/trailing existants se branchent
+                        # - volume total = burst_count * burst_volume_each (compat logs pipeline)
+                        entry = dec_fp.get("entry", {})
+                        burst_count = int(entry.get("burst_count", 5))
+                        burst_each = float(entry.get("burst_volume_each", 0.02))
+                        total_volume = round(burst_count * burst_each, 5)
+
+                        fp_decision = {
+                            "rule_name": "burst_scalping",
+                            "action": dec_fp.get("action"),
+                            "asset": dec_fp.get("asset", asset),
+                            "volume": total_volume,                # compat affichage pipeline
+                            "entry_style": entry.get("style", "LIMIT_FOK"),
+                            "price": float(entry.get("price")),
+                            "burst_count": burst_count,
+                            "burst_volume_each": burst_each,
+                            "validity_ms": int(entry.get("validity_ms", 800)),
+                            # Important pour exécuteur: pas de fallback, pas de TP
+                            "no_fallback": True,
+                            "no_tp": True,
+                            # On garde l’info exit phases pour l’intégration du trailing avancé plus tard
+                            "footprint_exit": dec_fp.get("exit", {}),
+                            # Télémétrie contextuelle
+                            "trigger": dec_fp.get("trigger"),
+                            "confidence": float(dec_fp.get("confidence", 0.7)),
+                            "footprint_meta": dec_fp.get("meta", {}),
+                        }
+                        footprint_scalping_decisions.append(fp_decision)
+
+                        logger.info(
+                            f"[FOOTPRINT→DECISION][{asset}] "
+                            f"{fp_decision['action']} burst x{burst_count}@{fp_decision['price']} "
+                            f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
+                        )
+                    else:
+                        logger.debug(f"[FOOTPRINT→DECISION][{asset}] skip: {dec_fp.get('reason')}")
+                except Exception as e:
+                    logger.error(f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True)
+
 
                 # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
                 try:
@@ -895,6 +974,20 @@ def run_single_pipeline_cycle(
         decision_package = (
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
+        
+        # === MERGE: décisions Footprint (Scalping Burst) dans le package ===
+        try:
+            if footprint_scalping_decisions:
+                decision_package.setdefault("scalping_decisions", [])
+                decision_package["scalping_decisions"].extend(footprint_scalping_decisions)
+                # Si aucune décision finale n'a été posée, on promeut la première footprint
+                decision_package.setdefault("final_decision", decision_package.get("final_decision") or {})
+                if not decision_package["final_decision"] and decision_package["scalping_decisions"]:
+                    decision_package["final_decision"] = decision_package["scalping_decisions"][0]
+                logger.info(f"[MERGE] {len(footprint_scalping_decisions)} décision(s) Footprint intégrée(s).")
+        except Exception as e:
+            logger.warning(f"[MERGE] Échec intégration décisions Footprint: {e}")
+
 
         # ====== LOG DÉCISION (anti-doublon) ======
         scalping_decisions = decision_package.get("scalping_decisions", []) or []
@@ -1170,7 +1263,33 @@ def run_single_pipeline_cycle(
                         logger.warning(
                             f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}"
                         )
-
+                    # --- SPECIAL: Footprint burst LIMIT_FOK -> envoi panier dédié ---
+                    try:
+                        rn = str(td.get("rule_name", "")).lower()
+                        est_fok = str(td.get("entry_style", "")).upper() == "LIMIT_FOK"
+                        if rn == "burst_scalping" and est_fok:
+                            ok = trade_executor.execute_burst_scalping_order(td, base_config)
+                            if ok:
+                                trade_executed_successfully = True
+                                # Armer/mettre à jour le watchdog trailing immédiatement
+                                burst_cfg = (
+                                    base_config.get("entry_rules", {})
+                                    .get("scalping", {})
+                                    .get("burst_scalping", {})
+                                    or {}
+                                )
+                                trail_cfg = burst_cfg.get("trailing", {}) or {}
+                                trade_executor.monitor_burst_baskets(
+                                    config=base_config,
+                                    max_loss_pips=15.0,
+                                    trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
+                                    trail_step=float(trail_cfg.get("step_pips", 5.0)),
+                                )
+                            # on ne passe PAS par _execute_single_decision pour éviter un 2e envoi
+                            continue
+                    except Exception as e:
+                        logger.error(f"[PIPELINE] Burst LIMIT_FOK error: {e}", exc_info=True)
+  
                     if _execute_single_decision(
                         td,
                         trade_executor,

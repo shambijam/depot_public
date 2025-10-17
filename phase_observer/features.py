@@ -13,6 +13,191 @@ try:
 except Exception:
     mt5 = None  # type: ignore
 
+# ---------- FOOTPRINT: helpers temps réel -----------------------------------
+
+
+from collections import defaultdict
+
+
+def _micro_atr_from_ticks(ticks: pd.DataFrame, window_s: int = 10) -> float:
+    """
+    Micro-ATR sur 'window_s' dernières secondes en points monétaires.
+    Attend colonnes: time (ns/epoch/ts), bid, ask. Robuste aux manques.
+    """
+    if ticks is None or len(ticks) < 3:
+        return 0.0
+    df = ticks.copy()
+    # coercition temps
+    if not np.issubdtype(df["time"].dtype, np.datetime64):
+        df["time"] = pd.to_datetime(
+            df["time"], errors="coerce", unit="s", utc=True
+        ).fillna(pd.Timestamp.utcnow())
+    cutoff = df["time"].max() - pd.Timedelta(seconds=window_s)
+    df = df[df["time"] >= cutoff].copy()
+    if df.empty:
+        return 0.0
+    # range micro
+    mid = (
+        pd.to_numeric(df.get("bid", df.get("last", df["price"])), errors="coerce")
+        + pd.to_numeric(df.get("ask", df.get("last", df["price"])), errors="coerce")
+    ) / 2.0
+    rng = mid.max() - mid.min()
+    return float(rng)
+
+
+def _tick_rate(ticks: pd.DataFrame, window_s: int = 5) -> float:
+    if ticks is None or ticks.empty:
+        return 0.0
+    if not np.issubdtype(ticks["time"].dtype, np.datetime64):
+        ts = pd.to_datetime(ticks["time"], errors="coerce", unit="s", utc=True)
+    else:
+        ts = ticks["time"]
+    cutoff = ts.max() - pd.Timedelta(seconds=window_s)
+    return float((ts >= cutoff).sum()) / float(window_s)
+
+
+def _last_spread(ticks: pd.DataFrame) -> float:
+    if ticks is None or ticks.empty:
+        return 0.0
+    bid = pd.to_numeric(ticks.get("bid"), errors="coerce")
+    ask = pd.to_numeric(ticks.get("ask"), errors="coerce")
+    if bid is not None and ask is not None and bid.notna().any() and ask.notna().any():
+        return float(ask.iloc[-1] - bid.iloc[-1])
+    # fallback: approx via last price jitter
+    last = pd.to_numeric(ticks.get("last", ticks.get("price")), errors="coerce")
+    if last is None or last.empty:
+        return 0.0
+    return float(last.diff().abs().median() or 0.0)
+
+
+def _compute_footprint_snapshot(
+    ticks: pd.DataFrame,
+    price_step: float,
+    window_s: int = 5,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Construit un snapshot footprint sur 'window_s' dernières secondes.
+    Retourne (df_levels, meta) où:
+      - df_levels indexé par 'price' (sorted), colonnes:
+        ['ask_vol','bid_vol','vol','delta','delta_ratio','zscore_vol','is_poc']
+      - meta: {'tick_rate','spread','window_s','poc_price'}
+    """
+    meta = {"tick_rate": 0.0, "spread": 0.0, "window_s": window_s, "poc_price": None}
+    if ticks is None or len(ticks) == 0:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "ask_vol",
+                    "bid_vol",
+                    "vol",
+                    "delta",
+                    "delta_ratio",
+                    "zscore_vol",
+                    "is_poc",
+                ]
+            ),
+            meta,
+        )
+
+    df = ticks.copy()
+    # time coercition
+    if not np.issubdtype(df["time"].dtype, np.datetime64):
+        df["time"] = pd.to_datetime(
+            df["time"], errors="coerce", unit="s", utc=True
+        ).fillna(pd.Timestamp.utcnow())
+    cutoff = df["time"].max() - pd.Timedelta(seconds=window_s)
+    df = df[df["time"] >= cutoff].copy()
+    if df.empty:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "ask_vol",
+                    "bid_vol",
+                    "vol",
+                    "delta",
+                    "delta_ratio",
+                    "zscore_vol",
+                    "is_poc",
+                ]
+            ),
+            meta,
+        )
+
+    # side / prix / volume robustes
+    price = pd.to_numeric(df.get("last", df.get("price")), errors="coerce")
+    bid = pd.to_numeric(df.get("bid", price), errors="coerce")
+    ask = pd.to_numeric(df.get("ask", price), errors="coerce")
+    vol = pd.to_numeric(df.get("volume", df.get("vol", 1.0)), errors="coerce").fillna(
+        1.0
+    )
+
+    # tentative de side: si 'side' absent, inférer vs mid
+    if "side" in df.columns:
+        side = df["side"].astype(str).str.lower()
+        is_buy = side.isin(["buy", "ask", "a", "b"])  # tolérance
+    else:
+        mid = (bid + ask) / 2.0
+        is_buy = price >= mid
+
+    # normalisation aux niveaux
+    if price_step <= 0:
+        # déduire un pas moyen (fallback)
+        price_step = (
+            float(np.nanmedian(np.abs(price.diff().dropna()).replace(0.0, np.nan)))
+            or 0.1
+        )
+
+    # re-binner les prix au pas
+    rounded = np.round(price / price_step) * price_step
+    agg = defaultdict(lambda: [0.0, 0.0])
+    for p, v, b in zip(rounded, vol, is_buy):
+        if np.isnan(p) or np.isnan(v):
+            continue
+        if b:
+            agg[p][0] += float(v)
+        else:
+            agg[p][1] += float(v)
+
+    rows = []
+    for p, (ask_vol, bid_vol) in agg.items():
+        total = ask_vol + bid_vol
+        delta = ask_vol - bid_vol
+        ratio = (abs(delta) / total) if total > 0 else 0.0
+        rows.append((p, ask_vol, bid_vol, total, delta, ratio))
+    if not rows:
+        return (
+            pd.DataFrame(
+                columns=["ask_vol", "bid_vol", "vol", "delta", "delta_ratio", "is_poc"]
+            ),
+            meta,
+        )
+
+    levels = (
+        pd.DataFrame(
+            rows, columns=["price", "ask_vol", "bid_vol", "vol", "delta", "delta_ratio"]
+        )
+        .sort_values("price")
+        .set_index("price")
+    )
+
+    # z-score du volume par niveau (dans la fenêtre)
+    m = float(levels["vol"].mean() or 0.0)
+    s = float(levels["vol"].std(ddof=0) or 1.0)
+    levels["zscore_vol"] = (levels["vol"] - m) / (s if s != 0 else 1.0)
+
+    # POC du snapshot
+    poc_price = float(levels["vol"].idxmax()) if not levels["vol"].empty else None
+    levels["is_poc"] = levels.index == poc_price
+
+    # meta
+    meta["tick_rate"] = _tick_rate(df, window_s=5)
+    meta["spread"] = _last_spread(df)
+    meta["poc_price"] = poc_price
+    return levels, meta
+
+
+# ---------------------------------------------------------------------------
+
 
 class FeaturesExtractor:
     def __init__(
