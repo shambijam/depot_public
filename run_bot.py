@@ -1253,8 +1253,10 @@ def run_single_pipeline_cycle(
                     pass
 
                 rn = str(td.get("rule_name", "burst_scalping")).lower()
-                entry_style = str(td.get("entry_style") or "LIMIT_FOK").upper().strip()
-                td["entry_style"] = entry_style
+                # On FORCE le style LIMIT_FOK pour tout burst, pour garantir le split multi-ordres
+                td["entry_style"] = "LIMIT_FOK"
+                entry_style = "LIMIT_FOK"
+
 
                 burst_cfg = (
                     base_config.get("entry_rules", {})
@@ -1283,9 +1285,21 @@ def run_single_pipeline_cycle(
                         price_val = float(ask if side == "BUY" else bid) if (ask or bid) else 0.0
                     except Exception:
                         price_val = 0.0
+                # Fallback natif MT5 si le wrapper ne renvoie rien
+                if price_val <= 0.0:
+                    try:
+                        mt5mod = getattr(mt5_connector, "mt5", None)
+                        if mt5mod:
+                            tk = mt5mod.symbol_info_tick(sym)
+                            if tk:
+                                price_val = float(tk.ask if side == "BUY" else tk.bid)
+                    except Exception:
+                        price_val = 0.0
+                
+                # 🚀 CAS 1 — burst : split dès qu'on a un prix
+                logger.info(f"[BURST][PLAN] {side} {sym} style={entry_style} count={burst_count} each={burst_each} price={price_val}")
+                if rn == "burst_scalping" and price_val > 0:
 
-                # 🚀 CAS 1 — burst LIMIT_FOK : split en N ordres enfants FOK (5x, etc.)
-                if rn == "burst_scalping" and entry_style == "LIMIT_FOK" and price_val > 0:
                     basket_id = td.get("basket_id") or td.get("comment") or f"burst_{sym}"
                     if is_dry_run:
                         logger.info(f"[BURST][DRY] {side} {sym} LIMIT+FOK x{burst_count} @ {price_val:.2f} (each={burst_each})")
