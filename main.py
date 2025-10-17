@@ -543,9 +543,11 @@ def main(args: argparse.Namespace) -> None:
                         live_pre_signals[asset] = live_signal
                 except Exception as e:
                     logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
-
-            # Injecter dans le contexte pipeline
-            decision_pipeline.extra_context = {"live_pre_signals": live_pre_signals}
+                       
+            decision_pipeline.extra_context = {
+                **(decision_pipeline.extra_context or {}),
+                "live_pre_signals": live_pre_signals,
+            }
 
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,

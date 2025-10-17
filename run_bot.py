@@ -1218,22 +1218,22 @@ def run_single_pipeline_cycle(
                 logger.warning(f"[BURST GUARD][pipeline] check global échoué: {e}")
 
             for td in scalping_decisions:
-                action = str(td.get("action", "")).upper()
+                # Normalisation mineure utile (sans forcer LIMIT_FOK ni appeler l’ancien chemin)
+                td["rule_name"] = str(td.get("rule_name", "") or "burst_scalping").lower()
+                if td["rule_name"] in ("burst", "burst_master", "scalping_burst"):
+                    td["rule_name"] = "burst_scalping"
 
-                # 🔧 (NO TP pour BURST) — à laisser avant l'exécution
+                # (Optionnel) No-TP pour burst + trailing par défaut depuis la config
                 try:
-                    rule_name = str(td.get("rule_name", "")).lower()
-                    if rule_name == "burst_scalping":
-                        # 1) empêcher toute réinjection de TP
+                    if td["rule_name"] == "burst_scalping":
                         for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
                             td.pop(k, None)
                         td["no_tp"] = True
-                        # 2) trailing CNF
                         trailing_cfg = (
                             (td.get("trailing") or {}) if td.get("trailing") else {}
                         ) or (
                             (global_context.get("asset_configs", {}) or {})
-                            .get(td.get("asset", ""), {})
+                            .get(td.get("asset",""), {})
                             .get("entry_rules", {})
                             .get("scalping", {})
                             .get("burst_scalping", {})
@@ -1243,13 +1243,42 @@ def run_single_pipeline_cycle(
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(
-                                    trailing_cfg.get("activate_after_rr", 1.0)
-                                ),
+                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
                     pass
+
+                # 👉 ROUTAGE UNIQUE via l’exécuteur unifié (plus d’appel direct à execute_burst_scalping_order)
+                decision_pkg = {
+                    "final_decision": td,
+                    "context": global_context,
+                    "active_config": base_config,
+                }
+                res = run_trade_execution_pipeline(
+                    trade_executor, decision_pkg, is_dry_run=is_dry_run
+                )
+
+                # Marquer succès + armer le trailing si besoin
+                status = (res or {}).get("status", "")
+                if status not in {"failed", ""}:
+                    trade_executed_successfully = True
+                    try:
+                        burst_cfg = (
+                            base_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            or {}
+                        )
+                        trail_cfg = burst_cfg.get("trailing", {}) or {}
+                        trade_executor.monitor_burst_baskets(
+                            config=base_config,
+                            max_loss_pips=15.0,
+                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
+                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BURST EXIT] Post-exec trailing setup: {e}")
 
                 if action in {"BUY", "SELL"}:
                     # [SYMBOL GUARD] si verrou par symbole (single_burst_global = False)
