@@ -8259,6 +8259,8 @@ def run_trade_execution_pipeline(
         "strategy_type": final_decision.get("strategy_type", "unknown"),
         "burst_enabled": bool(final_decision.get("burst_enabled", False)),
         "order_id": final_decision.get("order_id", "N/A"),
+        "entry_style": final_decision.get("entry_style"),
+        "price": final_decision.get("price"),
     }
     adapted_package = {
         "trade_decision": trade_decision,
@@ -8339,6 +8341,23 @@ def run_trade_execution_pipeline(
             # métadonnées burst (comment, basket_id, trailing meta…)
             td_with_meta = trade_executor._attach_burst_metadata(dict(trade_decision))
 
+            # 🔎 on lit style/prix depuis final_decision (fallback: trade_decision)
+            style = str(
+                (
+                    final_decision.get("entry_style")
+                    or trade_decision.get("entry_style")
+                    or ""
+                )
+            ).upper()
+            limit_price = float(
+                (
+                    final_decision.get("price")
+                    or trade_decision.get("price")
+                    or final_decision.get("trigger_price")
+                    or 0.0
+                )
+            )
+
             if is_dry_run:
                 return {
                     "status": "dry_run_ready",
@@ -8348,9 +8367,30 @@ def run_trade_execution_pipeline(
                         "market_context": market_context,
                         "active_config": active_config,
                     },
+                    "style": style,
+                    "price": limit_price,
                 }
 
-            # Exécution BURST (single master)
+            # ✅ LIMIT+FOK → usage de execute_burst_scalping_order
+            if style == "LIMIT_FOK" and limit_price > 0:
+                burst_decision = {
+                    "asset": asset,
+                    "action": action,
+                    "entry_style": "LIMIT_FOK",
+                    "price": limit_price,
+                    "burst_count": int(final_decision.get("burst_count", 5)),
+                    "burst_volume_each": float(
+                        final_decision.get("burst_volume_each", 0.02)
+                    ),
+                    "validity_ms": int(final_decision.get("validity_ms", 800)),
+                    "no_fallback": True,
+                    "comment": td_with_meta.get("comment"),
+                }
+                return trade_executor.execute_burst_scalping_order(
+                    burst_decision, active_config
+                )
+
+            # 🔁 Sinon: fallback sur ton burst “single master” (market)
             return trade_executor.execute_burst_single_master(
                 {
                     "trade_decision": td_with_meta,
