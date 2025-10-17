@@ -140,20 +140,23 @@ class MarketAnalyzer:
         strategy_config: "Dict[str, Any]",
     ):
         """
-        Analyse Footprint PURE (sans garde-fous, sans packaging d'ordre).
-        Retour: (ok: bool, decision: dict)
+        Analyse Footprint PURE (sans gardes-fous externes).
+        - Normalisation datetime unique.
+        - Triggers en cascade: climax -> stacking -> absorption.
+        - Si aucun trigger au 1er passage, un 2e passage "soft" abaisse légèrement les seuils (analyse only).
+        Retour:
+            (ok: bool, decision: dict | {"reason": ...})
             decision = {
                 action: "BUY"/"SELL",
                 asset: str,
                 trigger: str,
                 confidence: float,
                 anchor_price: float,
-                meta: dict   # footprint meta enrichi
+                meta: dict
             }
         """
         import pandas as pd
 
-        # ---------- logging util (ne change pas la logique) ----------
         log = getattr(self, "logger", None)
 
         def _log(level: str, msg: str):
@@ -163,7 +166,7 @@ class MarketAnalyzer:
             except Exception:
                 pass
 
-        # ---------- imports nécessaires ----------
+        # --- imports ---
         try:
             from .features import _compute_footprint_snapshot
         except Exception as e:
@@ -178,7 +181,7 @@ class MarketAnalyzer:
         except Exception as e:
             return False, {"reason": f"triggers import error: {e}"}
 
-        # ---------- normalisation DATETIME (strictement technique) ----------
+        # --- normalisation datetime ---
         def _to_naive_utc_series(s: pd.Series) -> pd.Series:
             s = pd.to_datetime(s, errors="coerce")
             if pd.api.types.is_datetime64tz_dtype(s):
@@ -227,107 +230,151 @@ class MarketAnalyzer:
         except Exception as e:
             return False, {"reason": f"datetime normalization error: {e}"}
 
-        # ---------- paramètres MINIMAUX (pas de gate/whitelist/tickrate/etc.) ----------
+        # --- paramètres (aucun gate externe) ---
         sc = strategy_config or {}
-        price_step = float(
-            sc.get("price_step", 0.1)
-        )  # besoin technique pour le snapshot
-        # Seuils triggers lisibles directement dans la conf, sinon valeurs par défaut
+        # Par défaut plus permissif: 0.01 convient bien à XAUUSD selon broker; tu peux override via conf.
+        price_step = float(sc.get("price_step", 0.01))
+
         cfg = ((sc.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
             "burst_scalping", {}
         ).get("footprint_triggers", {}) or {}
 
-        climax_lookback_bars = int(cfg.get("climax", {}).get("lookback_bars", 8))
-        climax_vol_ratio_min = float(cfg.get("climax", {}).get("vol_ratio_min", 2.0))
-        climax_delta_ratio_min = float(
-            cfg.get("climax", {}).get("delta_ratio_min", 1.5)
-        )
-        climax_need_cons = bool(cfg.get("climax", {}).get("need_consolidation", True))
-        climax_cons_atr_max = float(
-            cfg.get("climax", {}).get("consolidation_max_atr_mult", 1.0)
+        # Pass 1 (valeurs raisonnables)
+        p1 = dict(
+            climax_lookback_bars=int(cfg.get("climax", {}).get("lookback_bars", 8)),
+            climax_vol_ratio_min=float(
+                cfg.get("climax", {}).get("vol_ratio_min", 1.6)
+            ),  # 2.0 -> 1.6
+            climax_delta_ratio_min=float(
+                cfg.get("climax", {}).get("delta_ratio_min", 1.3)
+            ),  # 1.5 -> 1.3
+            climax_need_cons=bool(
+                cfg.get("climax", {}).get("need_consolidation", False)
+            ),  # True -> False
+            climax_cons_atr_max=float(
+                cfg.get("climax", {}).get("consolidation_max_atr_mult", 2.0)
+            ),  # 1.0 -> 2.0
+            stack_delta_ratio_min=float(
+                cfg.get("stacking", {}).get("delta_ratio_min", 1.2)
+            ),  # 1.3 -> 1.2
+            stack_min_levels=int(
+                cfg.get("stacking", {}).get("min_levels", 2)
+            ),  # 3 -> 2
+            stack_inval_opp_ratio=float(
+                cfg.get("stacking", {}).get("invalidate_opposite_ratio", 0.65)
+            ),
+            stack_vol_lvl_min_med=float(cfg.get("vol_level_min_ratio_median_30s", 0.0)),
+            abs_vol_z_min=float(
+                cfg.get("absorption", {}).get("vol_zscore_min", 1.2)
+            ),  # 2.0 -> 1.2
+            abs_delta_ratio_max=float(
+                cfg.get("absorption", {}).get("delta_ratio_max", 0.6)
+            ),
+            abs_attempts_min=int(
+                cfg.get("absorption", {}).get("attempts_min", 1)
+            ),  # 2 -> 1
+            window_s=int(cfg.get("window_s", 5)),
         )
 
-        stack_delta_ratio_min = float(
-            cfg.get("stacking", {}).get("delta_ratio_min", 1.3)
-        )
-        stack_min_levels = int(cfg.get("stacking", {}).get("min_levels", 3))
-        stack_inval_opp_ratio = float(
-            cfg.get("stacking", {}).get("invalidate_opposite_ratio", 0.6)
-        )
-        stack_vol_lvl_min_med = float(cfg.get("vol_level_min_ratio_median_30s", 0.0))
-
-        abs_vol_z_min = float(cfg.get("absorption", {}).get("vol_zscore_min", 2.0))
-        abs_delta_ratio_max = float(
-            cfg.get("absorption", {}).get("delta_ratio_max", 0.5)
-        )
-        abs_attempts_min = int(cfg.get("absorption", {}).get("attempts_min", 2))
-
-        window_s = int(cfg.get("window_s", 5))
-
-        # ---------- snapshot footprint (dépendance utile, pas un filtre) ----------
+        # --- snapshot footprint ---
         try:
             df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=window_s
+                ticks, price_step=price_step, window_s=p1["window_s"]
             )
             if df_levels is None or df_levels.empty:
                 return False, {"reason": "no footprint levels"}
         except Exception as e:
             return False, {"reason": f"footprint snapshot error: {e}"}
 
-        # ---------- TRIGGERS (analyse pure, sans autre condition) ----------
-        try:
-            decision = None
+        # --- fonction d'essai des triggers (pour Pass 1 & Pass 2) ---
+        def _try_triggers(params) -> "dict|None":
+            # 1) Climax (si bars disponibles)
+            try:
+                d_climax = {}
+                if bars is not None and not getattr(bars, "empty", True):
+                    d_climax = detect_volume_climax_after_consolidation(
+                        bars,
+                        df_levels,
+                        lookback_bars=params["climax_lookback_bars"],
+                        vol_ratio_min=params["climax_vol_ratio_min"],
+                        delta_ratio_min=params["climax_delta_ratio_min"],
+                        need_consolidation=params["climax_need_cons"],
+                        consolidation_max_atr_mult=params["climax_cons_atr_max"],
+                    )
+                    if d_climax.get("ok"):
+                        return d_climax
+            except Exception as e:
+                _log("debug", f"[TRIGGER] climax error: {e}")
 
-            d_climax = detect_volume_climax_after_consolidation(
-                bars,
-                df_levels,
-                lookback_bars=climax_lookback_bars,
-                vol_ratio_min=climax_vol_ratio_min,
-                delta_ratio_min=climax_delta_ratio_min,
-                need_consolidation=climax_need_cons,
-                consolidation_max_atr_mult=climax_cons_atr_max,
-            )
-            if d_climax.get("ok"):
-                decision = d_climax
-
-            if decision is None:
+            # 2) Stacking
+            try:
                 d_stack = detect_imbalance_stacking(
                     df_levels,
-                    delta_ratio_min=stack_delta_ratio_min,
-                    min_levels=stack_min_levels,
-                    invalidate_opposite_ratio=stack_inval_opp_ratio,
-                    vol_level_min_ratio_median_30s=stack_vol_lvl_min_med,
+                    delta_ratio_min=params["stack_delta_ratio_min"],
+                    min_levels=params["stack_min_levels"],
+                    invalidate_opposite_ratio=params["stack_inval_opp_ratio"],
+                    vol_level_min_ratio_median_30s=params["stack_vol_lvl_min_med"],
                 )
                 if d_stack.get("ok"):
-                    decision = d_stack
+                    return d_stack
+            except Exception as e:
+                _log("debug", f"[TRIGGER] stacking error: {e}")
 
-            if decision is None:
+            # 3) Absorption
+            try:
                 d_abs = detect_absorption_reject(
                     df_levels,
-                    vol_zscore_min=abs_vol_z_min,
-                    delta_ratio_max=abs_delta_ratio_max,
-                    attempts_min=abs_attempts_min,
+                    vol_zscore_min=params["abs_vol_z_min"],
+                    delta_ratio_max=params["abs_delta_ratio_max"],
+                    attempts_min=params["abs_attempts_min"],
                 )
                 if d_abs.get("ok"):
-                    decision = d_abs
+                    return d_abs
+            except Exception as e:
+                _log("debug", f"[TRIGGER] absorption error: {e}")
 
-            if decision is None:
-                return False, {"reason": "no trigger"}
+            return None
 
+        # --- Pass 1 (normal-permissif) ---
+        decision = _try_triggers(p1)
+
+        # --- Pass 2 "soft" (si toujours rien) : baisse légère & contrôlée des seuils ---
+        if decision is None:
+            p2 = p1.copy()
+            p2.update(
+                dict(
+                    climax_vol_ratio_min=max(1.2, p1["climax_vol_ratio_min"] * 0.85),
+                    climax_delta_ratio_min=max(
+                        1.1, p1["climax_delta_ratio_min"] * 0.85
+                    ),
+                    stack_delta_ratio_min=max(1.05, p1["stack_delta_ratio_min"] * 0.9),
+                    abs_vol_z_min=max(0.8, p1["abs_vol_z_min"] * 0.8),
+                    abs_attempts_min=1,
+                )
+            )
+            decision = _try_triggers(p2)
+
+        if decision is None:
+            return False, {"reason": "no trigger"}
+
+        # --- sortie décision ---
+        try:
             direction = str(decision.get("direction", "BUY")).upper()
-            anchor_price = float(decision.get("anchor_price", meta.get("poc", 0.0)))
-            out = {
-                "action": "BUY" if direction == "BUY" else "SELL",
-                "asset": asset,
-                "trigger": decision.get("trigger", "footprint"),
-                "confidence": float(decision.get("confidence", 0.7)),
-                "anchor_price": anchor_price,
-                "meta": {**meta, **(decision.get("meta", {}) or {})},
-            }
-            return True, out
+            anchor_price = float(
+                decision.get("anchor_price", (meta or {}).get("poc", 0.0))
+            )
+        except Exception:
+            direction, anchor_price = "BUY", float((meta or {}).get("poc", 0.0) or 0.0)
 
-        except Exception as e:
-            return False, {"reason": f"trigger eval error: {e}"}
+        out = {
+            "action": "BUY" if direction == "BUY" else "SELL",
+            "asset": asset,
+            "trigger": decision.get("trigger", "footprint"),
+            "confidence": float(decision.get("confidence", 0.7) or 0.7),
+            "anchor_price": anchor_price,
+            "meta": {**(meta or {}), **(decision.get("meta", {}) or {})},
+        }
+        return True, out
 
     def ready_and_confluence_ok(self, confluence_required: int = 2) -> Tuple[bool, str]:
         try:

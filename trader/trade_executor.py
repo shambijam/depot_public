@@ -4116,38 +4116,21 @@ class TradeExecutor:
         account_trade_settings: Dict[str, Any],
     ) -> float:
         """
-        Sizing par risque (compte) — source unique = broker_accounts.trade_settings.risk_per_trade_percent
+        STRICT RISK% — Fonction unique de sizing (sans garde-fous ni modulations).
+        - Source unique du risque%: account_trade_settings["risk_per_trade_percent"] (obligatoire).
+        - Aucun clip min/max, aucune modulation "confidence"/"quality"/"volatility_factor".
+        - Aucune majoration de distance (pas de stops_level/spread/ATR floor): on utilise le SL réel pour le calcul.
+        - Heuristique pip-value seulement si autorisée par conf (sinon erreur).
+        - Arrondi à la baisse (floor) au pas lot pour ne jamais dépasser le budget.
+        - Gestion Scalping vs Liquidity via 'sizing_scope':
+            * SINGLE  = le budget couvre 1 ticket (Liquidity par défaut)
+            * BASKET  = le budget couvre tout le panier; volume retourné = volume PAR TICKET (Scalping par défaut)
 
-        Principes:
-        - AUCUN volume par défaut : si on ne peut pas garantir le risque -> TradeExecutionError
-        - Priorité aux données broker: order_calc_profit / tick_value & tick_size
-        - Heuristique pip-value optionnelle (off par défaut)
-        - BURST: partage du budget par ticket si non single-master (le découpage par ticket se fait hors de cette fonction)
-        - Planchers "sizing floor" (stops_level/freeze_level/spread/ATR) pour éviter SL ~ prix
-        - Clamps & arrondis (symbole/compte), caps sécurité/fat-finger, contrôle marge
-        - CHANGEMENT: tous les arrondis volume se font à l'INCRÉMENT LE PLUS PROCHE (plus de floor) pour éviter le 0.01 forcé.
+        Retour: float volume (lot) arrondi (floor). Lève TradeExecutionError si non calculable.
         """
-        import math, os
+        import math
 
-        # --- Action normalisée ---
-        action = str(trade_decision.get("action", "")).upper()
-        action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
-        if action not in ("BUY", "SELL"):
-            raise TradeExecutionError(f"Action invalide pour sizing: '{action}'")
-
-        # --- Équité compte ---
-        acct_info = (context or {}).get("account_info", {}) or {}
-        equity = acct_info.get("equity")
-        if not isinstance(equity, (int, float)) or equity <= 0:
-            raise TradeExecutionError("Équité du compte non positive ou manquante.")
-
-        # --- Helpers ---
-        def _try_float(x, default=None):
-            try:
-                return float(x)
-            except Exception:
-                return default
-
+        # --- Helpers locals ---
         def _sget(obj, *names, default=None):
             for n in names:
                 if hasattr(obj, n):
@@ -4158,260 +4141,109 @@ class TradeExecutor:
                     return obj[n]
             return default
 
-        # --- Risque % (source unique) ---
-        risk_pct = None
-        risk_source = None
-
-        ovr = _try_float((trade_decision or {}).get("risk_pct_override"))
-        if ovr and ovr > 0:
-            risk_pct, risk_source = ovr, "decision.override"
-
-        if risk_pct is None:
-            r = _try_float((account_trade_settings or {}).get("risk_per_trade_percent"))
-            if r and r > 0:
-                risk_pct, risk_source = r, "account_trade_settings"
-
-        if risk_pct is None:
-            aba = ((context or {}).get("active_broker_account") or {}).get("trade_settings", {}) or {}
-            r = _try_float(aba.get("risk_per_trade_percent"))
-            if r and r > 0:
-                risk_pct, risk_source = r, "context.active_broker_account"
-
-        if risk_pct is None:
-            r = _try_float(os.getenv("SNIPER_RISK_PCT"))
-            if r and r > 0:
-                risk_pct, risk_source = r, "env.SNIPER_RISK_PCT"
-
-        # Legacy (log unique)
-        legacy_risk_local = config.get("risk_per_trade_percent") or (config.get("risk_management") or {}).get("risk_per_trade_pct")
-        if legacy_risk_local is not None and not getattr(self, "_warned_legacy_risk", False):
-            self.logger.warning(
-                "Legacy key détectée pour le risque (%s) — ignorée. "
-                "Utiliser broker_accounts.trade_settings.risk_per_trade_percent.",
-                legacy_risk_local,
-            )
-            setattr(self, "_warned_legacy_risk", True)
-
-        if risk_pct is None or risk_pct <= 0:
-            raise TradeExecutionError("Risque en % manquant/invalide (source unique requise).")
-
-        # Clip range safe (ne touche pas 0.41)
-        min_risk = _try_float(self.config_manager.get("risk_management_settings.min_risk_pct", 0.01), 0.01)
-        max_risk = _try_float(self.config_manager.get("risk_management_settings.max_risk_pct", 5.0), 5.0)
-        risk_pct_clipped = max(min_risk, min(max_risk, float(risk_pct)))
-        if risk_pct_clipped != risk_pct:
-            self.logger.warning(f"[RISK%%] Clip: {risk_pct:.4f}%% -> {risk_pct_clipped:.4f}%% (bounds {min_risk}-{max_risk})")
-        risk_pct = risk_pct_clipped
-
-        try:
-            self.logger.info(f"[RISK%%] Utilisé: {risk_pct:.4f}%% (source={risk_source})")
-        except Exception:
-            pass
-
-        # --- Budget de risque (compte) ---
-        max_dollar_risk_base = float(equity) * (risk_pct / 100.0)
-        if max_dollar_risk_base <= 0:
-            raise TradeExecutionError("Risque en $ nul/invalide pour le sizing.")
-
-        # Ajustements: confidence [0..1], quality cap (0.5..1.0)
-        confidence = float(trade_decision.get("confidence", 1.0) or 1.0)
-        confidence = max(0.0, min(1.0, confidence))
-        max_dollar_risk = max_dollar_risk_base * confidence
-
-        try:
-            q = trade_decision.get("quality")
-            if isinstance(q, (int, float)):
-                q = max(0.0, min(1.0, float(q)))
-                q_cap = 0.5 + 0.5 * q
-                if q_cap < 1.0:
-                    prev = max_dollar_risk
-                    max_dollar_risk *= q_cap
-                    self.logger.info(f"[QUALITY CAP] Risk$ {prev:.2f} -> {max_dollar_risk:.2f} (q={q:.2f}, cap={q_cap:.2f})")
-        except Exception:
-            pass
-
-        # Partage BURST (budget) — le split par ticket se fait ailleurs
-        def _to_int_pos(x):
+        def _as_float(x, name):
             try:
-                xi = int(float(x))
-                return xi if xi > 0 else None
+                v = float(x)
+                if not math.isfinite(v):
+                    raise ValueError
+                return v
             except Exception:
-                return None
+                raise TradeExecutionError(f"{name} invalide")
 
-        burst_size = _to_int_pos(trade_decision.get("burst_size"))
-        if burst_size is None and isinstance(context, dict):
-            for k in ("burst_size", "burst.count", "burst.size", "current_burst_size", "basket_size"):
-                v = context
-                for part in k.split("."):
-                    v = v.get(part) if isinstance(v, dict) else None
-                burst_size = _to_int_pos(v)
-                if burst_size:
-                    break
-        if burst_size is None:
-            burst_size = (
-                _to_int_pos((((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("burst_scalping", {}) or {}).get("burst_size", 1))
-                or 1
-            )
+        # --- Action ---
+        action = str(trade_decision.get("action", "")).upper()
+        action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
+        if action not in ("BUY", "SELL"):
+            raise TradeExecutionError(f"Action invalide pour sizing: '{action}'")
 
-        single_master_mode = (
-            bool(trade_decision.get("burst_single_master"))
-            or bool((config.get("burst_single_master", {}) or {}).get("enabled", False))
-            or bool((((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("burst_scalping", {}) or {}).get("burst_single_master", {}).get("enabled", False))
-        )
-        if (not single_master_mode) and burst_size and burst_size > 1:
-            max_dollar_risk /= burst_size
+        # --- Données compte ---
+        equity = _as_float(((context or {}).get("account_info") or {}).get("equity"), "Équité du compte")
+        risk_pct = _as_float((account_trade_settings or {}).get("risk_per_trade_percent"), "risk_per_trade_percent")
+        if risk_pct <= 0:
+            raise TradeExecutionError("risk_per_trade_percent doit être > 0")
 
-        # Volatility factor (réducteur uniquement)
-        if "volatility_factor" in (trade_decision or {}):
-            try:
-                vfac = float(trade_decision.get("volatility_factor") or 1.0)
-                if math.isfinite(vfac) and vfac > 0:
-                    if vfac < 1.0:
-                        prev = max_dollar_risk
-                        max_dollar_risk *= vfac
-                        self.logger.info(f"[VOLATILITY FACTOR] Risk$ {prev:.2f} -> {max_dollar_risk:.2f} (x{vfac:.3f})")
-                    elif vfac > 1.0:
-                        self.logger.info(f"[VOLATILITY FACTOR] Facteur>1 ({vfac:.3f}) ignoré (pas d'augmentation du risque).")
-            except Exception as e:
-                self.logger.warning(f"[VOLATILITY FACTOR] Ignoré: {e}")
+        # --- Budget STRICT (aucune modulation) ---
+        max_dollar_risk = equity * (risk_pct / 100.0)
+        if max_dollar_risk <= 0:
+            raise TradeExecutionError("Budget de risque nul")
 
-        # --- Distance prix (Entry -> SL) : préparation "sizing floor" ---
-        try:
-            _ = abs(float(entry_price) - float(sl_price))
-        except Exception:
-            raise TradeExecutionError("Entry/SL invalides pour sizing.")
+        # --- Scope (Scalping vs Liquidity) ---
+        strategy = str(trade_decision.get("strategy") or trade_decision.get("strategy_type") or "").lower()
+        sizing_scope = str(trade_decision.get("sizing_scope") or "").upper()
+        burst_size = int(float(trade_decision.get("burst_size") or 1))
+        if burst_size < 1:
+            burst_size = 1
 
+        if sizing_scope not in ("SINGLE", "BASKET"):
+            # défauts explicites
+            sizing_scope = "BASKET" if strategy == "scalping" else "SINGLE"
+
+        # budget par ticket
+        if sizing_scope == "BASKET" and burst_size > 1:
+            max_dollar_risk = max_dollar_risk / burst_size
+
+        # --- Distances/prix (SL réel, pas de floor ni buffer) ---
+        entry_price = _as_float(entry_price, "entry_price")
+        sl_price    = _as_float(sl_price, "sl_price")
+        distance = abs(entry_price - sl_price)
+        if distance <= 0:
+            raise TradeExecutionError("Distance Entry–SL nulle")
+
+        # --- Perte $ par lot (priorité MT5 -> tick_value/tick_size -> heuristique si autorisée) ---
         sym_name = _sget(symbol_info, "name", default=str(trade_decision.get("asset", "")).upper())
-        point = float(_sget(symbol_info, "point", default=0.00001) or 0.00001)
-        digits = int(_sget(symbol_info, "digits", default=5) or 5)
-        contract = float(_sget(symbol_info, "trade_contract_size", "contract_size", default=100000.0) or 100000.0)
-        tick_size = float(_sget(symbol_info, "trade_tick_size", "tick_size", default=point) or point)
-        stops_level_pts = int(_sget(symbol_info, "trade_stops_level", default=0) or 0)
-        freeze_level_pts = int(_sget(symbol_info, "trade_freeze_level", default=0) or 0)
-        spread_pts = int(_sget(symbol_info, "spread", default=0) or 0)
-        one_tick_pts = max(1, int(round((tick_size or point) / (point or 1.0))))
-        _min_buf_pts = max(stops_level_pts, freeze_level_pts, spread_pts) + one_tick_pts
-
-        # Planchers de sizing
-        try:
-            min_sizing_stop_pts = int(self.config_manager.get("risk_management_settings.min_sizing_stop_pts", 0) or 0)
-        except Exception:
-            min_sizing_stop_pts = 0
-        try:
-            min_sizing_stop_atr_mult = float(self.config_manager.get("risk_management_settings.min_sizing_stop_atr_mult", 0.25))
-        except Exception:
-            min_sizing_stop_atr_mult = 0.25
-
-        last_atr_pts = 0.0
-        try:
-            for k in ("last_atr_points", "atr_points", "last_atr_pts", "atr_pts"):
-                v = (context or {}).get(k)
-                if isinstance(v, (int, float)) and v > 0:
-                    last_atr_pts = float(v)
-                    break
-        except Exception:
-            pass
-        floor_pts_atr = int(round(last_atr_pts * min_sizing_stop_atr_mult)) if last_atr_pts > 0 and min_sizing_stop_atr_mult > 0 else 0
-        _sizing_floor_pts = max(_min_buf_pts, min_sizing_stop_pts, floor_pts_atr)
-
-        # SL effectif utilisé pour le calcul de risque (ne modifie PAS le SL réel envoyé)
-        if action == "BUY":
-            sl_eff = min(float(sl_price), float(entry_price) - _min_buf_pts * float(point))
-        else:
-            sl_eff = max(float(sl_price), float(entry_price) + _min_buf_pts * float(point))
-
-        _pt = float(point) if float(point or 0.0) > 0.0 else 1e-9
-        price_diff_pts = abs(float(entry_price) - float(sl_eff)) / _pt
-        if _sizing_floor_pts > 0 and price_diff_pts < _sizing_floor_pts:
-            adjust = _sizing_floor_pts * _pt
-            sl_eff = (float(entry_price) - adjust) if action == "BUY" else (float(entry_price) + adjust)
-
-        price_diff = abs(float(entry_price) - float(sl_eff))
-        if price_diff <= 0 or not math.isfinite(price_diff):
-            raise TradeExecutionError("Distance Entry-SL effective nulle/invalide pour sizing.")
-
-        # --- Perte par lot (devise compte) ---
         per_lot_loss = None
+
+        # 1) MT5 order_calc_profit
         mt5_mod = getattr(self, "mt5", None) or getattr(getattr(self, "mt5_connector", None), "mt5", None)
         if mt5_mod:
             try:
                 order_type = getattr(mt5_mod, "ORDER_TYPE_BUY", 0) if action == "BUY" else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
-                profit = mt5_mod.order_calc_profit(order_type, sym_name, 1.0, entry_price, sl_eff)
+                profit = mt5_mod.order_calc_profit(order_type, sym_name, 1.0, entry_price, sl_price)
                 if isinstance(profit, (tuple, list)) and profit:
                     profit = profit[-1]
-                per_lot_loss = abs(float(profit))
-                if not math.isfinite(per_lot_loss) or per_lot_loss <= 0:
-                    per_lot_loss = None
-            except Exception as e:
-                self.logger.warning(f"mt5.order_calc_profit indisponible: {e}.")
+                profit = float(profit)
+                if math.isfinite(profit) and profit != 0.0:
+                    per_lot_loss = abs(profit)
+            except Exception:
                 per_lot_loss = None
 
-        # Fallback 1: tick_value / tick_size
-        if per_lot_loss is None or per_lot_loss <= 0:
-            tv = _sget(symbol_info, "trade_tick_value", "tick_value", default=0.0)
-            ts = _sget(symbol_info, "trade_tick_size", "tick_size", default=0.0)
-            try:
-                tv = float(tv or 0.0)
-                ts = float(ts or 0.0)
-            except Exception:
-                tv, ts = 0.0, 0.0
-            if tv > 0 and ts > 0:
-                per_lot_loss = (price_diff / ts) * tv
+        # 2) tick_value / tick_size
+        if per_lot_loss is None:
+            tv = _sget(symbol_info, "trade_tick_value", "tick_value", default=None)
+            ts = _sget(symbol_info, "trade_tick_size", "tick_size", default=None)
+            if tv is not None and ts is not None:
+                tv = _as_float(tv, "tick_value")
+                ts = _as_float(ts, "tick_size")
+                if ts > 0:
+                    per_lot_loss = (distance / ts) * tv
 
-        # Fallback 2: heuristique pip-value (optionnelle)
-        allow_pip_heuristic = bool(self.config_manager.get("risk_management_settings.allow_heuristic_pip_fallback", False))
-        if (per_lot_loss is None or per_lot_loss <= 0) and allow_pip_heuristic:
-            points_per_pip = 10.0 if digits in (3, 5) else 1.0
-            pip_size = point * points_per_pip
-            quote = sym_name[-3:].upper() if isinstance(sym_name, str) and len(sym_name) >= 6 else ""
-            if pip_size <= 0:
-                raise TradeExecutionError(f"[{sym_name}] pip_size invalide.")
-            if quote == "USD":
-                pip_value_per_lot = contract * pip_size
-                per_lot_loss = (price_diff / pip_size) * pip_value_per_lot
-            elif quote == "JPY":
-                pip_value_jpy = contract * 0.01
-                if not entry_price or not math.isfinite(float(entry_price)):
-                    raise TradeExecutionError(f"[{sym_name}] Entry invalide pour conversion JPY.")
-                pip_value_acct = pip_value_jpy / float(entry_price)
-                per_lot_loss = (price_diff / pip_size) * pip_value_acct
+        # 3) heuristique pip-value (optionnelle)
+        if per_lot_loss is None:
+            allow_pip = bool((config.get("risk_management_settings") or {}).get("allow_heuristic_pip_fallback", False))
+            if not allow_pip:
+                raise TradeExecutionError("Impossible de calculer la perte/lot (pas d'heuristique autorisée)")
+            point  = _as_float(_sget(symbol_info, "point", default=0.00001), "point")
+            digits = int(float(_sget(symbol_info, "digits", default=5)))
+            if digits in (3, 5):
+                pip_size = point * 10.0
             else:
-                raise TradeExecutionError(
-                    f"[{sym_name}] tick_value/tick_size indisponibles et heuristique pip-value interdite pour {quote}."
-                )
+                pip_size = point
+            contract = _as_float(_sget(symbol_info, "trade_contract_size", "contract_size", default=100000.0), "contract_size")
+            if pip_size <= 0:
+                raise TradeExecutionError("pip_size invalide")
+            # Hypothèse simple: devise de cotation USD
+            per_pip_value_per_lot = contract * pip_size
+            per_lot_loss = (distance / pip_size) * per_pip_value_per_lot
 
-        if per_lot_loss is None or per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
-            raise TradeExecutionError("Impossible de calculer la perte par lot.")
+        if per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
+            raise TradeExecutionError("Perte/lot invalide")
 
-        # Planchers de sécurité pour per_lot_loss
-        min_dlr_per_lot = float(self.config_manager.get("risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0))
-        if per_lot_loss < min_dlr_per_lot:
-            self.logger.debug(f"Perte/lot trop faible ({per_lot_loss:.6f}) -> plancher {min_dlr_per_lot:.6f} appliqué.")
-            per_lot_loss = min_dlr_per_lot
-        try:
-            per_asset_min = (self.config_manager.get("risk_management_settings.per_asset_min_dollar_risk_per_lot_fallback", {}) or {}).get(sym_name)
-            if isinstance(per_asset_min, (int, float)) and per_asset_min > min_dlr_per_lot and per_lot_loss < float(per_asset_min):
-                self.logger.debug(f"[{sym_name}] Plancher perte/lot (asset): {per_lot_loss:.6f} -> {float(per_asset_min):.6f}")
-                per_lot_loss = float(per_asset_min)
-        except Exception:
-            pass
-
-        # Volume brut (avant caps) + cap marge (théorique 1 lot)
+        # --- Volume brut ---
         raw_volume = max_dollar_risk / per_lot_loss
-        try:
-            if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
-                order_type = getattr(mt5_mod, "ORDER_TYPE_BUY", 0) if action == "BUY" else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
-                m1 = mt5_mod.order_calc_margin(order_type, sym_name, 1.0, entry_price)
-                free_margin = acct_info.get("margin_free") or acct_info.get("balance")
-                if m1 and float(m1) > 0 and free_margin and float(free_margin) > 0:
-                    raw_max = float(free_margin) / float(m1)
-                    if raw_max > 0 and raw_volume > raw_max:
-                        self.logger.warning(f"[SIZING] Cap par marge: {raw_volume:.4f} -> {raw_max:.4f} (free={float(free_margin):.2f}, m1={float(m1):.2f})")
-                        raw_volume = raw_max
-        except Exception as e:
-            self.logger.warning(f"Cap par marge (pré-clamp) ignoré: {e}")
+        if raw_volume <= 0:
+            raise TradeExecutionError("Volume brut nul")
 
-        # Contraintes symbole/compte
+        # --- Contraintes symbole/compte + arrondi FLOOR (jamais au-dessus du budget) ---
         vol_min_sym = float(_sget(symbol_info, "volume_min", default=0.01) or 0.01)
         vol_max_sym = float(_sget(symbol_info, "volume_max", default=100.0) or 100.0)
         vol_step_sym = float(_sget(symbol_info, "volume_step", default=0.01) or 0.01)
@@ -4420,129 +4252,56 @@ class TradeExecutor:
         max_lot_account = float((account_trade_settings or {}).get("max_lot", vol_max_sym) or vol_max_sym)
         lot_step_account = float((account_trade_settings or {}).get("lot_step", vol_step_sym) or vol_step_sym)
 
-        # Cap stratégie (optionnel)
-        de_risk = (config.get("decision_engine") or {}).get("risk") or {}
-        strat_max_lot = de_risk.get("max_lot_size")
-        if isinstance(strat_max_lot, (int, float)) and strat_max_lot > 0:
-            max_lot_account = min(max_lot_account, float(strat_max_lot))
+        step = max(lot_step_account, vol_step_sym)
+        if step <= 0:
+            step = 0.01
 
-        # Caps sécurité & fat-finger
-        ff_cfg = {}
-        try:
-            tes = self.config_manager.get("trade_executor_settings", {}) or {}
-            ff_cfg = tes.get("fat_finger_check", {}) or {}
-            safety_enabled = bool(ff_cfg.get("enabled", False) or tes.get("volume_safety_enabled", False))
-
-            max_volume_safety = tes.get("max_absolute_volume_safety", None)
-            if safety_enabled and isinstance(max_volume_safety, (int, float)) and math.isfinite(float(max_volume_safety)) and raw_volume > float(max_volume_safety):
-                self.logger.warning(f"Cap volume sécurité: {raw_volume:.4f} -> {float(max_volume_safety):.4f}")
-                raw_volume = float(max_volume_safety)
-
-            per_asset_caps = ff_cfg.get("max_absolute_volume_for_asset", {}) or {}
-            asset_cap = per_asset_caps.get(sym_name)
-            if safety_enabled and isinstance(asset_cap, (int, float)) and math.isfinite(float(asset_cap)) and raw_volume > float(asset_cap):
-                self.logger.warning(f"Cap volume actif {sym_name}: {raw_volume:.4f} -> {float(asset_cap):.4f}")
-                raw_volume = float(asset_cap)
-        except Exception as e:
-            self.logger.warning(f"Lecture caps volume sécurité échouée: {e}")
-
-        # Fat-finger dynamique vs historique
-        try:
-            if bool(ff_cfg.get("enabled", False)) and bool(ff_cfg.get("enable_dynamic_check", False)):
-                lookback = int(ff_cfg.get("avg_volume_lookback", 20) or 20)
-                mult = float(ff_cfg.get("max_volume_multiplier_from_avg", 5.0) or 5.0)
-                recent = []
-                for k in ("recent_executed_trades", "recent_volumes", "volume_history"):
-                    seq = (context or {}).get(k)
-                    if isinstance(seq, list):
-                        recent = [float(x) for x in seq[-lookback:] if isinstance(x, (int, float))]
-                        if recent:
-                            break
-                if recent:
-                    avg_vol = sum(recent) / max(len(recent), 1)
-                    dyn_cap = max(avg_vol * mult, min_lot_account)
-                    if raw_volume > dyn_cap:
-                        self.logger.warning(f"Fat-finger dynamique: {raw_volume:.4f} -> cap {dyn_cap:.4f}")
-                        raw_volume = dyn_cap
-        except Exception as e:
-            self.logger.warning(f"Vérif fat-finger dynamique non appliquée: {e}")
-
-        # Arrondi & clamps initiaux — CHANGEMENT: arrondi AU PLUS PROCHE (pas de floor)
-        effective_step = max(lot_step_account, vol_step_sym) or 0.01
-        if effective_step <= 0:
-            effective_step = 0.01
-        volume = max(min_lot_account, vol_min_sym, raw_volume)
-        volume = min(max_lot_account, vol_max_sym, volume)
-        steps = int(round(volume / effective_step))                                 # <— CHANGEMENT
-        volume = round(steps * effective_step, 8)
+        # arrondi à la baisse
+        volume = math.floor(raw_volume / step) * step
         volume = max(min_lot_account, volume)
         volume = min(max_lot_account, volume)
-        if volume <= 0:
-            raise TradeExecutionError(f"Volume calculé invalide ({volume}).")
+        volume = min(vol_max_sym, max(vol_min_sym, volume))
 
-        # Contrôle marge final (réduction si nécessaire) — CHANGEMENT: arrondi AU PLUS PROCHE
+        if volume < min_lot_account:
+            # pas assez de budget pour le min lot
+            raise TradeExecutionError("Budget risque trop faible pour le lot minimum")
+
+        # --- Cap marge simple (si dispo) ---
         try:
             if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
                 order_type = getattr(mt5_mod, "ORDER_TYPE_BUY", 0) if action == "BUY" else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
                 margin_required = mt5_mod.order_calc_margin(order_type, sym_name, volume, entry_price)
-                free_margin = acct_info.get("margin_free")
-                if (
-                    margin_required is not None
-                    and free_margin is not None
-                    and math.isfinite(float(margin_required))
-                    and float(margin_required) > float(free_margin)
-                ):
+                free_margin = ((context or {}).get("account_info") or {}).get("margin_free")
+                if margin_required and free_margin and float(margin_required) > float(free_margin):
+                    # réduire à la capacité de marge (arrondi floor)
                     ratio = max(float(free_margin) / float(margin_required), 0.0)
-                    reduced = max(min_lot_account, vol_min_sym, ratio * volume)
-                    steps = int(round(reduced / effective_step))                    # <— CHANGEMENT
-                    reduced = round(steps * effective_step, 8)
-                    if reduced < min_lot_account:
-                        raise TradeExecutionError("Marge libre insuffisante pour le volume minimum.")
-                    self.logger.warning(
-                        f"Marge insuffisante: besoin ~{margin_required:.2f}, libre {free_margin:.2f}. "
-                        f"Volume réduit {volume:.4f} -> {reduced:.4f}"
-                    )
-                    volume = reduced
-        except Exception as e:
-            self.logger.warning(f"Contrôle marge non appliqué: {e}")
-
-        # Failsafe absolu (même si safety off)
-        try:
-            failsafe_cap = float(self.config_manager.get("trade_executor_settings.absolute_volume_failsafe", 0.0) or 0.0)
-            if failsafe_cap > 0 and volume > failsafe_cap:
-                self.logger.warning(f"[VOLUME FAILSAFE] {volume:.4f} -> {failsafe_cap:.4f}")
-                volume = failsafe_cap
+                    capped = math.floor((ratio * volume) / step) * step
+                    if capped < min_lot_account:
+                        raise TradeExecutionError("Marge insuffisante pour le lot minimum")
+                    volume = capped
         except Exception:
             pass
 
-        # Vérification du risque réel vs budget (tolérance) — CHANGEMENT: arrondi AU PLUS PROCHE
-        tol = float(self.config_manager.get("trade_executor_settings.max_risk_deviation_multiplier", 1.05))
+        # --- Vérif finale (ne jamais dépasser le budget) ---
         actual_risk = volume * per_lot_loss
-        max_allowed = max_dollar_risk * tol
-        if actual_risk > max_allowed and per_lot_loss > 0:
-            target_vol = max(min_lot_account, vol_min_sym, max_allowed / per_lot_loss)
-            target_vol = min(max_lot_account, vol_max_sym, target_vol)
-            steps = int(round(target_vol / effective_step))                         # <— CHANGEMENT
-            target_vol = round(steps * effective_step, 8)
-            actual_risk = target_vol * per_lot_loss
-            if actual_risk > max_allowed:  # ultime petit cran si l'arrondi step nous dépasse encore
-                target_vol = max(min_lot_account, round(target_vol - effective_step, 8))
-                actual_risk = target_vol * per_lot_loss
-            self.logger.warning(
-                f"Risque réel {volume * per_lot_loss:.2f} > max {max_dollar_risk:.2f} (tol {tol:.2f}). "
-                f"Volume ajusté {volume:.4f} -> {target_vol:.4f}"
+        if actual_risk > max_dollar_risk + 1e-6:
+            # un cran de moins si l'arrondi floor n'a pas suffi (rare)
+            vol2 = max(min_lot_account, round(volume - step, 8))
+            if vol2 < min_lot_account:
+                raise TradeExecutionError("Arrondi impossible sous budget avec min lot")
+            volume = vol2
+
+        # --- Log synthétique ---
+        try:
+            self.logger.info(
+                f"[SIZING] {sym_name} | strategy={strategy or '-'} scope={sizing_scope} burst={burst_size} "
+                f"| equity={equity:.2f} risk%={risk_pct:.4f} -> risk$={max_dollar_risk:.2f} "
+                f"| per_lot_loss={per_lot_loss:.6f} -> vol={volume:.4f}"
             )
-            volume = target_vol
+        except Exception:
+            pass
 
-        # Log final
-        self.logger.info(
-            f"Sizing {sym_name}: equity={equity:.2f}, risk%={risk_pct:.4f}, "
-            f"risk$={max_dollar_risk:.2f}, per_lot_loss={per_lot_loss:.6f} -> vol={volume:.4f} "
-            f"(acc_min={min_lot_account}, acc_step={lot_step_account}, acc_max={max_lot_account}; "
-            f"sym_min={vol_min_sym}, sym_step={vol_step_sym}, sym_max={vol_max_sym}; burst_size={burst_size})."
-        )
-
-        return float(volume)
+        return float(round(volume, 8))
 
 
     def _cooldown_guard(
