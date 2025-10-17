@@ -140,29 +140,32 @@ class MarketAnalyzer:
         strategy_config: "Dict[str, Any]",
     ):
         """
-        Retourne (ok: bool, decision: dict) pour scalping burst via triggers Footprint.
-        Version sans garde-fous (aucun filtre tickrate/couverture/phase, aucun 'enabled' gate).
-        - Normalisation DATETIME unique (tz-aware -> naive UTC).
-        - Triggers en cascade (climax -> stacking -> absorption), sans fallback de trade.
-        - Entrée ONE_PRICE (burst) + sortie TRAILING_ONLY panier (close_all_at_once).
+        Analyse Footprint PURE (sans garde-fous, sans packaging d'ordre).
+        Retour: (ok: bool, decision: dict)
+            decision = {
+                action: "BUY"/"SELL",
+                asset: str,
+                trigger: str,
+                confidence: float,
+                anchor_price: float,
+                meta: dict   # footprint meta enrichi
+            }
         """
         import pandas as pd
 
-        # -------- logging util --------
+        # ---------- logging util (ne change pas la logique) ----------
         log = getattr(self, "logger", None)
 
         def _log(level: str, msg: str):
             try:
                 if log:
                     getattr(log, level, log.info)(msg)
-                else:
-                    print(f"[{level.upper()}] {msg}")
             except Exception:
                 pass
 
-        # -------- safe imports --------
+        # ---------- imports nécessaires ----------
         try:
-            from .features import _compute_footprint_snapshot, _micro_atr_from_ticks
+            from .features import _compute_footprint_snapshot
         except Exception as e:
             return False, {"reason": f"features import error: {e}"}
 
@@ -175,7 +178,7 @@ class MarketAnalyzer:
         except Exception as e:
             return False, {"reason": f"triggers import error: {e}"}
 
-        # --- NORMALISATION DATETIME (tz-aware -> naive UTC) ---------------------------
+        # ---------- normalisation DATETIME (strictement technique) ----------
         def _to_naive_utc_series(s: pd.Series) -> pd.Series:
             s = pd.to_datetime(s, errors="coerce")
             if pd.api.types.is_datetime64tz_dtype(s):
@@ -192,18 +195,16 @@ class MarketAnalyzer:
             if df is None or df.empty:
                 return df
             df = df.copy()
-
-            # 1) index datetime -> naive UTC
             if pd.api.types.is_datetime64_any_dtype(df.index):
                 df.index = _to_naive_utc_index(df.index)
-
-            # 2) normaliser colonnes temporelles connues (tz-aware friendly)
-            dt_cols = [c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns]
+            dt_cols = [
+                c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns
+            ]
             for c in dt_cols:
-                if pd.api.types.is_datetime64_any_dtype(df[c]) or pd.api.types.is_object_dtype(df[c]):
+                if pd.api.types.is_datetime64_any_dtype(
+                    df[c]
+                ) or pd.api.types.is_object_dtype(df[c]):
                     df[c] = _to_naive_utc_series(df[c])
-
-            # 3) s'assurer d'une colonne pivot 'dt'
             picked = None
             for c in (prefer_col, "dt", "datetime", "timestamp", "time"):
                 if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c]):
@@ -212,149 +213,121 @@ class MarketAnalyzer:
             if picked is None and pd.api.types.is_datetime64_any_dtype(df.index):
                 df["dt"] = df.index
                 picked = "dt"
-
-            # 4) drop NaT + tri
             if picked:
                 df = df[~df[picked].isna()]
                 try:
                     df = df.sort_values(picked)
                 except Exception:
                     pass
-
             return df
-        # ------------------------------------------------------------------------------
 
-        # -------- normalisation unique --------
         try:
             ticks = _normalize_dt_df(ticks, prefer_col="dt")
-            bars = _normalize_dt_df(bars, prefer_col="time")  # adapte si besoin à ton schéma
+            bars = _normalize_dt_df(bars, prefer_col="time")
         except Exception as e:
             return False, {"reason": f"datetime normalization error: {e}"}
 
-        # -------- lecture des paramètres (sans gate 'enabled') --------
+        # ---------- paramètres MINIMAUX (pas de gate/whitelist/tickrate/etc.) ----------
         sc = strategy_config or {}
-        price_step = float(sc.get("price_step", 0.1))
+        price_step = float(
+            sc.get("price_step", 0.1)
+        )  # besoin technique pour le snapshot
+        # Seuils triggers lisibles directement dans la conf, sinon valeurs par défaut
+        cfg = ((sc.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
+            "burst_scalping", {}
+        ).get("footprint_triggers", {}) or {}
 
-        burst_block = sc.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {}
-        cfg_fp = burst_block.get("footprint_triggers", {}) or getattr(self, "footprint_triggers", {}) or {}
+        climax_lookback_bars = int(cfg.get("climax", {}).get("lookback_bars", 8))
+        climax_vol_ratio_min = float(cfg.get("climax", {}).get("vol_ratio_min", 2.0))
+        climax_delta_ratio_min = float(
+            cfg.get("climax", {}).get("delta_ratio_min", 1.5)
+        )
+        climax_need_cons = bool(cfg.get("climax", {}).get("need_consolidation", True))
+        climax_cons_atr_max = float(
+            cfg.get("climax", {}).get("consolidation_max_atr_mult", 1.0)
+        )
 
-        burst_count = max(1, int(burst_block.get("burst_size", 5)))  # pas de clamp max_burst_size
-        order_entry_style = str(cfg_fp.get("entry_style", "LIMIT_FOK")).upper()
-        order_validity_ms = int(cfg_fp.get("validity_ms", 800))
-        price_offset_ticks = float(cfg_fp.get("price_offset_ticks", 0.0))
-        window_s = int(cfg_fp.get("window_s", 5))
+        stack_delta_ratio_min = float(
+            cfg.get("stacking", {}).get("delta_ratio_min", 1.3)
+        )
+        stack_min_levels = int(cfg.get("stacking", {}).get("min_levels", 3))
+        stack_inval_opp_ratio = float(
+            cfg.get("stacking", {}).get("invalidate_opposite_ratio", 0.6)
+        )
+        stack_vol_lvl_min_med = float(cfg.get("vol_level_min_ratio_median_30s", 0.0))
 
-        # -------- snapshot footprint (dépendance dure, pas un "garde-fou") --------
+        abs_vol_z_min = float(cfg.get("absorption", {}).get("vol_zscore_min", 2.0))
+        abs_delta_ratio_max = float(
+            cfg.get("absorption", {}).get("delta_ratio_max", 0.5)
+        )
+        abs_attempts_min = int(cfg.get("absorption", {}).get("attempts_min", 2))
+
+        window_s = int(cfg.get("window_s", 5))
+
+        # ---------- snapshot footprint (dépendance utile, pas un filtre) ----------
         try:
-            df_levels, meta = _compute_footprint_snapshot(ticks, price_step=price_step, window_s=window_s)
+            df_levels, meta = _compute_footprint_snapshot(
+                ticks, price_step=price_step, window_s=window_s
+            )
             if df_levels is None or df_levels.empty:
                 return False, {"reason": "no footprint levels"}
         except Exception as e:
             return False, {"reason": f"footprint snapshot error: {e}"}
 
-        # -------- triggers (analyse pure, aucun filtre autour) --------
+        # ---------- TRIGGERS (analyse pure, sans autre condition) ----------
         try:
-            # 1) Climax après consolidation
+            decision = None
+
             d_climax = detect_volume_climax_after_consolidation(
                 bars,
                 df_levels,
-                lookback_bars=int(cfg_fp.get("climax", {}).get("lookback_bars", 8)),
-                vol_ratio_min=float(cfg_fp.get("climax", {}).get("vol_ratio_min", 2.0)),
-                delta_ratio_min=float(cfg_fp.get("climax", {}).get("delta_ratio_min", 1.5)),
-                need_consolidation=bool(cfg_fp.get("climax", {}).get("need_consolidation", True)),
-                consolidation_max_atr_mult=float(cfg_fp.get("climax", {}).get("consolidation_max_atr_mult", 1.0)),
+                lookback_bars=climax_lookback_bars,
+                vol_ratio_min=climax_vol_ratio_min,
+                delta_ratio_min=climax_delta_ratio_min,
+                need_consolidation=climax_need_cons,
+                consolidation_max_atr_mult=climax_cons_atr_max,
             )
-            decision = d_climax if d_climax.get("ok") else None
+            if d_climax.get("ok"):
+                decision = d_climax
 
-            # 2) Stacking d'imbalance
             if decision is None:
                 d_stack = detect_imbalance_stacking(
                     df_levels,
-                    delta_ratio_min=float(cfg_fp.get("stacking", {}).get("delta_ratio_min", 1.3)),
-                    min_levels=int(cfg_fp.get("stacking", {}).get("min_levels", 3)),
-                    invalidate_opposite_ratio=float(cfg_fp.get("stacking", {}).get("invalidate_opposite_ratio", 0.6)),
-                    vol_level_min_ratio_median_30s=float(cfg_fp.get("vol_level_min_ratio_median_30s", 0.0)),
+                    delta_ratio_min=stack_delta_ratio_min,
+                    min_levels=stack_min_levels,
+                    invalidate_opposite_ratio=stack_inval_opp_ratio,
+                    vol_level_min_ratio_median_30s=stack_vol_lvl_min_med,
                 )
                 if d_stack.get("ok"):
                     decision = d_stack
 
-            # 3) Absorption / rejet
             if decision is None:
                 d_abs = detect_absorption_reject(
                     df_levels,
-                    vol_zscore_min=float(cfg_fp.get("absorption", {}).get("vol_zscore_min", 2.0)),
-                    delta_ratio_max=float(cfg_fp.get("absorption", {}).get("delta_ratio_max", 0.5)),
-                    attempts_min=int(cfg_fp.get("absorption", {}).get("attempts_min", 2)),
+                    vol_zscore_min=abs_vol_z_min,
+                    delta_ratio_max=abs_delta_ratio_max,
+                    attempts_min=abs_attempts_min,
                 )
                 if d_abs.get("ok"):
                     decision = d_abs
 
             if decision is None:
                 return False, {"reason": "no trigger"}
-        except Exception as e:
-            return False, {"reason": f"trigger eval error: {e}"}
 
-        # -------- construction de l’ordre & trailing (politique scalping burst) --------
-        try:
-            micro_atr = float(_micro_atr_from_ticks(ticks, window_s=int(cfg_fp.get("trail_atr_window_s", 10))))
-            anchor_price = float(decision.get("anchor_price", meta.get("poc", 0.0)))
             direction = str(decision.get("direction", "BUY")).upper()
-
-            # offset signé selon la direction
-            signed_offset = float(price_offset_ticks) * float(price_step)
-            signed_offset = -abs(signed_offset) if direction == "SELL" else abs(signed_offset)
-
-            entry_price = float(anchor_price + signed_offset)
-
-            entry = {
-                "style": order_entry_style,   # e.g. LIMIT_FOK | MARKET
-                "price": entry_price,
-                "burst_count": int(burst_count),
-                "validity_ms": int(order_validity_ms),
-                # ONE_PRICE seulement (pas de ONE_SHOT qui peut impacter le sizing)
-                "price_mode": "ONE_PRICE",
-            }
-
-            trailing = {
-                "phase0": {
-                    "window_s": int(cfg_fp.get("trailing", {}).get("phase0_seconds", 5)),
-                    "anchor": "footprint_block_or_micro_atr",
-                    "mult": float(cfg_fp.get("trailing", {}).get("phase0_mult_micro_atr_10s", 1.0)),
-                },
-                "phase1": {
-                    "mult": float(cfg_fp.get("trailing", {}).get("phase1_mult_micro_atr_10s", 1.5)),
-                },
-                "phase2": {
-                    "mult": float(cfg_fp.get("trailing", {}).get("phase2_mult_micro_atr_10s", 2.0)),
-                },
-                "clamp": [
-                    float(cfg_fp.get("trailing", {}).get("clamp_min", 0.0)),
-                    float(cfg_fp.get("trailing", {}).get("clamp_max", 9_999.0)),
-                ],
-                "micro_atr_10s": micro_atr,
-            }
-
+            anchor_price = float(decision.get("anchor_price", meta.get("poc", 0.0)))
             out = {
                 "action": "BUY" if direction == "BUY" else "SELL",
                 "asset": asset,
                 "trigger": decision.get("trigger", "footprint"),
                 "confidence": float(decision.get("confidence", 0.7)),
-                "entry": entry,
-                "exit": {
-                    "type": "TRAILING_ONLY",
-                    "phases": trailing,
-                    "basket": {
-                        "scope": "BASKET",
-                        "close_all_at_once": True,
-                        "require_all_in_profit": True,
-                        "sync_trailing": True,
-                    },
-                },
+                "anchor_price": anchor_price,
                 "meta": {**meta, **(decision.get("meta", {}) or {})},
             }
             return True, out
+
         except Exception as e:
-            return False, {"reason": f"order build error: {e}"}
+            return False, {"reason": f"trigger eval error: {e}"}
 
     def ready_and_confluence_ok(self, confluence_required: int = 2) -> Tuple[bool, str]:
         try:

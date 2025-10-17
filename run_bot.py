@@ -464,10 +464,14 @@ def run_single_pipeline_cycle(
 
         base_config = config_manager.get_current_dynamic_config()
         execution_mode = str(base_config.get("mode_execution", "DEMO")).upper()
-        
+
         # --- EXEC MODE OVERRIDE (force depuis config) ---
-        is_dry_run = bool(base_config.get("trade_execution", {}).get("dry_run", is_dry_run))
-        logger.info(f"[EXEC MODE] is_dry_run={is_dry_run} | execution_mode={execution_mode}")
+        is_dry_run = bool(
+            base_config.get("trade_execution", {}).get("dry_run", is_dry_run)
+        )
+        logger.info(
+            f"[EXEC MODE] is_dry_run={is_dry_run} | execution_mode={execution_mode}"
+        )
 
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
@@ -501,10 +505,9 @@ def run_single_pipeline_cycle(
         # === Nouveau bloc collecte + analyse unifiée ===
         all_assets_market_data: Dict[str, pd.DataFrame] = {}
         all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
-        
+
         # ⚡ Décisions Footprint (Scalping Burst) collectées pendant la boucle actifs
         footprint_scalping_decisions: List[Dict[str, Any]] = []
-
 
         dcfg = base_config.get("data_collection", {}) or {}
         timeframe_str = dcfg.get("default_timeframe", "M1")
@@ -688,7 +691,7 @@ def run_single_pipeline_cycle(
                     logger.error(
                         f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
                     )
-                    
+
                 # === FOOTPRINT TRIGGERS → Décision Scalping Burst (LIMIT+FOK) ===
                 try:
                     # 1) Ticks récents pour snapshot footprint (5–8s)
@@ -699,23 +702,29 @@ def run_single_pipeline_cycle(
                         start_recent = _now - pd.Timedelta(seconds=8)
                         if hasattr(mt5_connector, "get_ticks_range"):
                             ticks_recent_df = mt5_connector.get_ticks_range(
-                                asset, start_recent.to_pydatetime(), _now.to_pydatetime()
+                                asset,
+                                start_recent.to_pydatetime(),
+                                _now.to_pydatetime(),
                             )
                         elif hasattr(mt5_connector, "get_ticks_last_seconds"):
-                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(asset, seconds=8)
+                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(
+                                asset, seconds=8
+                            )
                     except Exception:
                         ticks_recent_df = None
 
                     # Fallback: réutiliser ticks_df de la bougie (si pas de better API)
-                    if (ticks_recent_df is None or ticks_recent_df.empty) and ("ticks_df" in locals()):
+                    if (ticks_recent_df is None or ticks_recent_df.empty) and (
+                        "ticks_df" in locals()
+                    ):
                         ticks_recent_df = ticks_df
 
                     if ticks_recent_df is not None and not ticks_recent_df.empty:
                         ok_fp, dec_fp = market_analyzer.analyze_footprint_triggers(
                             asset=asset,
                             ticks=ticks_recent_df,
-                            bars=annotated_rates_df,         # historique M1 (>= 20 barres)
-                            strategy_config=base_config,     # fallback si self.footprint_triggers manquant
+                            bars=annotated_rates_df,  # historique M1 (>= 20 barres)
+                            strategy_config=base_config,  # fallback si self.footprint_triggers manquant
                         )
                     else:
                         ok_fp, dec_fp = False, {"reason": "no recent ticks"}
@@ -726,7 +735,9 @@ def run_single_pipeline_cycle(
                         entry = dec_fp.get("entry", {}) or {}
                         action = str(dec_fp.get("action", "")).upper()
                         if action not in {"BUY", "SELL"}:
-                            logger.debug(f"[FOOTPRINT→DECISION][{asset}] skip: action invalide ({action})")
+                            logger.debug(
+                                f"[FOOTPRINT→DECISION][{asset}] skip: action invalide ({action})"
+                            )
                             raise RuntimeError("action invalid")
 
                         burst_count = int(entry.get("burst_count", 5))
@@ -761,19 +772,23 @@ def run_single_pipeline_cycle(
                                     if mt5mod:
                                         tk = mt5mod.symbol_info_tick(asset)
                                         if tk:
-                                            price_val = float(tk.ask if action == "BUY" else tk.bid)
+                                            price_val = float(
+                                                tk.ask if action == "BUY" else tk.bid
+                                            )
                                 except Exception:
                                     price_val = None
 
                         if not price_val:
-                            logger.error(f"[FOOTPRINT→DECISION][{asset}] impossible d'obtenir le prix (Ask/Bid) → skip.")
+                            logger.error(
+                                f"[FOOTPRINT→DECISION][{asset}] impossible d'obtenir le prix (Ask/Bid) → skip."
+                            )
                             # On n’ajoute PAS de décision invalide (évite '[BURST] Paramètres d'entrée invalides.')
                         else:
                             fp_decision = {
                                 "rule_name": "burst_scalping",
                                 "action": action,
                                 "asset": dec_fp.get("asset", asset),
-                                "volume": total_volume,                      # compat affichage pipeline
+                                "volume": total_volume,  # compat affichage pipeline
                                 "entry_style": entry.get("style", "LIMIT_FOK"),
                                 "price": float(price_val),
                                 "burst_count": burst_count,
@@ -797,10 +812,14 @@ def run_single_pipeline_cycle(
                                 f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
                             )
                     else:
-                       logger.info(f"[TRIGGER][{asset}] skip (no trigger): {dec_fp.get('reason')}")
+                        logger.info(
+                            f"[TRIGGER][{asset}] skip (no trigger): {dec_fp.get('reason')}"
+                        )
 
                 except Exception as e:
-                    logger.error(f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True)
+                    logger.error(
+                        f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True
+                    )
 
                 # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
                 try:
@@ -1017,20 +1036,30 @@ def run_single_pipeline_cycle(
         decision_package = (
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
-        
+
         # === MERGE: décisions Footprint (Scalping Burst) dans le package ===
         try:
             if footprint_scalping_decisions:
                 decision_package.setdefault("scalping_decisions", [])
-                decision_package["scalping_decisions"].extend(footprint_scalping_decisions)
+                decision_package["scalping_decisions"].extend(
+                    footprint_scalping_decisions
+                )
                 # Si aucune décision finale n'a été posée, on promeut la première footprint
-                decision_package.setdefault("final_decision", decision_package.get("final_decision") or {})
-                if not decision_package["final_decision"] and decision_package["scalping_decisions"]:
-                    decision_package["final_decision"] = decision_package["scalping_decisions"][0]
-                logger.info(f"[MERGE] {len(footprint_scalping_decisions)} décision(s) Footprint intégrée(s).")
+                decision_package.setdefault(
+                    "final_decision", decision_package.get("final_decision") or {}
+                )
+                if (
+                    not decision_package["final_decision"]
+                    and decision_package["scalping_decisions"]
+                ):
+                    decision_package["final_decision"] = decision_package[
+                        "scalping_decisions"
+                    ][0]
+                logger.info(
+                    f"[MERGE] {len(footprint_scalping_decisions)} décision(s) Footprint intégrée(s)."
+                )
         except Exception as e:
             logger.warning(f"[MERGE] Échec intégration décisions Footprint: {e}")
-
 
         # ====== LOG DÉCISION (anti-doublon) ======
         scalping_decisions = decision_package.get("scalping_decisions", []) or []
@@ -1173,7 +1202,9 @@ def run_single_pipeline_cycle(
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
-                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+                print(
+                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
+                )
 
             # === [BURST GUARD PIPELINE] bloque tout nouveau burst si un panier est actif (scope global) ===
             try:
@@ -1225,7 +1256,12 @@ def run_single_pipeline_cycle(
 
                 # 🔧 Standardiser le rule_name + activer trailing/No-TP pour burst
                 try:
-                    if str(td.get("rule_name", "")).lower() in ("burst", "burst_master", "scalping_burst", ""):
+                    if str(td.get("rule_name", "")).lower() in (
+                        "burst",
+                        "burst_master",
+                        "scalping_burst",
+                        "",
+                    ):
                         td["rule_name"] = "burst_scalping"
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
@@ -1247,7 +1283,9 @@ def run_single_pipeline_cycle(
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
+                                "activate_after_rr": float(
+                                    trailing_cfg.get("activate_after_rr", 1.0)
+                                ),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
@@ -1258,21 +1296,22 @@ def run_single_pipeline_cycle(
                 td["entry_style"] = "LIMIT_FOK"
                 entry_style = "LIMIT_FOK"
 
-
                 burst_cfg = (
                     base_config.get("entry_rules", {})
                     .get("scalping", {})
                     .get("burst_scalping", {})
                     or {}
                 )
-                order_cfg = (burst_cfg.get("order", {}) or {})
+                order_cfg = burst_cfg.get("order", {}) or {}
                 default_count = int(order_cfg.get("burst_count", 5))
-                default_each  = float(order_cfg.get("burst_volume_each", 0.02))
+                default_each = float(order_cfg.get("burst_volume_each", 0.02))
 
                 burst_count = int(td.get("burst_count") or default_count)
-                burst_each  = float(td.get("burst_volume_each") or (
-                                    float(td.get("volume", 0) or 0) / max(1, burst_count)
-                                ) or default_each)
+                burst_each = float(
+                    td.get("burst_volume_each")
+                    or (float(td.get("volume", 0) or 0) / max(1, burst_count))
+                    or default_each
+                )
 
                 sym = str(td.get("asset") or td.get("symbol") or "").upper()
 
@@ -1283,7 +1322,11 @@ def run_single_pipeline_cycle(
                         tk = mt5_connector.get_symbol_tick(sym) or {}
                         ask = tk.get("ask", getattr(tk, "ask", None))
                         bid = tk.get("bid", getattr(tk, "bid", None))
-                        price_val = float(ask if side == "BUY" else bid) if (ask or bid) else 0.0
+                        price_val = (
+                            float(ask if side == "BUY" else bid)
+                            if (ask or bid)
+                            else 0.0
+                        )
                     except Exception:
                         price_val = 0.0
                 # Fallback natif MT5 si le wrapper ne renvoie rien
@@ -1296,14 +1339,20 @@ def run_single_pipeline_cycle(
                                 price_val = float(tk.ask if side == "BUY" else tk.bid)
                     except Exception:
                         price_val = 0.0
-                
+
                 # 🚀 CAS 1 — burst : split dès qu'on a un prix
-                logger.info(f"[BURST][PLAN] {side} {sym} style={entry_style} count={burst_count} each={burst_each} price={price_val}")
+                logger.info(
+                    f"[BURST][PLAN] {side} {sym} style={entry_style} count={burst_count} each={burst_each} price={price_val}"
+                )
                 if rn == "burst_scalping" and price_val > 0:
 
-                    basket_id = td.get("basket_id") or td.get("comment") or f"burst_{sym}"
+                    basket_id = (
+                        td.get("basket_id") or td.get("comment") or f"burst_{sym}"
+                    )
                     if is_dry_run:
-                        logger.info(f"[BURST][DRY] {side} {sym} LIMIT+FOK x{burst_count} @ {price_val:.2f} (each={burst_each})")
+                        logger.info(
+                            f"[BURST][DRY] {side} {sym} LIMIT+FOK x{burst_count} @ {price_val:.2f} (each={burst_each})"
+                        )
                         trade_executed_successfully = True
                         continue
 
@@ -1311,7 +1360,9 @@ def run_single_pipeline_cycle(
                         child = {
                             "action": side,
                             "asset": sym,
-                            "order_type": "BUY_LIMIT" if side == "BUY" else "SELL_LIMIT",
+                            "order_type": (
+                                "BUY_LIMIT" if side == "BUY" else "SELL_LIMIT"
+                            ),
                             "price": price_val,
                             "volume": burst_each,
                             "time_in_force": "FOK",
@@ -1325,17 +1376,21 @@ def run_single_pipeline_cycle(
                             "context": global_context,
                             "active_config": base_config,
                         }
-                        res = run_trade_execution_pipeline(trade_executor, exec_pkg, is_dry_run=False)
+                        res = run_trade_execution_pipeline(
+                            trade_executor, exec_pkg, is_dry_run=False
+                        )
                         status = str((res or {}).get("status", "")).lower()
                         if status in {"ok", "success", "filled"}:
                             trade_executed_successfully = True
                         else:
-                            logger.warning(f"[BURST][{sym}] enfant {i+1}/{burst_count} non rempli (ret={res}).")
+                            logger.warning(
+                                f"[BURST][{sym}] enfant {i+1}/{burst_count} non rempli (ret={res})."
+                            )
 
                     # Trailing/guard panier après envois
                     try:
-                        tr_cfg = (burst_cfg.get("trailing", {}) or {})
-                        cl_cfg = (burst_cfg.get("closure_rules", {}) or {})
+                        tr_cfg = burst_cfg.get("trailing", {}) or {}
+                        cl_cfg = burst_cfg.get("closure_rules", {}) or {}
                         trade_executor.monitor_burst_baskets(
                             config=base_config,
                             max_loss_pips=float(cl_cfg.get("max_loss_pips", 15.0)),
@@ -1359,7 +1414,7 @@ def run_single_pipeline_cycle(
                 if status not in {"failed", ""}:
                     trade_executed_successfully = True
                     try:
-                        tr_cfg = (burst_cfg.get("trailing", {}) or {})
+                        tr_cfg = burst_cfg.get("trailing", {}) or {}
                         trade_executor.monitor_burst_baskets(
                             config=base_config,
                             max_loss_pips=15.0,
@@ -1368,8 +1423,6 @@ def run_single_pipeline_cycle(
                         )
                     except Exception as e:
                         logger.warning(f"[BURST EXIT] Post-exec trailing setup: {e}")
-
-
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:
