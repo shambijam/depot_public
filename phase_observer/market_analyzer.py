@@ -141,14 +141,24 @@ class MarketAnalyzer:
     ):
         """
         Retourne (ok: bool, decision: dict) pour scalping burst footprint.
+
         Version robuste :
-        - Normalisation des timestamps (UTC -> tz-naive) pour éviter les erreurs NumPy.
-        - Résolution de config tolérante (chemins multiples).
-        - Garde-fous sur la qualité du flux (tickrate/couverture).
-        - Triggers (climax/stacking/absorption) avec fallback.
-        - Construction d’entrée avec offset signé (BUY/SELL) et trailing packagé.
+        - Normalisation DATETIME unique (tz-aware -> naive UTC).
+        - Résolution de config tolérante (chemins multiples + fallback instance).
+        - Garde-fous flux paramétrables (tickrate/couverture/phase) désactivables par conf.
+        - Triggers en cascade (climax -> stacking -> absorption) sans fallback de trade.
+        - Entrée ONE_PRICE (burst synchrone) + sortie TRALING_ONLY panier (close_all_at_once).
+
+        Conf pour "zéro garde-fou" (exemple):
+            footprint_triggers:
+            enabled: true
+            tickrate_min: 0
+            coverage_s_min_burst: 0
+            phase_whitelist: []
+            allow_no_clear_phase_if_strong:
+                of_delta_abs_min: 0
+                tickrate_min: 0
         """
-        import math
         import pandas as pd
 
         # -------- logging util --------
@@ -195,41 +205,6 @@ class MarketAnalyzer:
                         stack.append((path + [str(k)], v))
             return {}, ""
 
-        def _normalize_dt(df: "pd.DataFrame") -> "pd.DataFrame":
-            """
-            Force un index datetime tz-naive (UTC sans tz) pour compat NumPy/rolling.
-            - Si 'timestamp' existe, on l'utilise; sinon l'index.
-            - Convertit en UTC, puis .tz_localize(None).
-            """
-            if df is None or len(df) == 0:
-                return df
-            df = df.copy()
-
-            # source temporelle
-            if "timestamp" in df.columns:
-                ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-            else:
-                ts = pd.to_datetime(df.index, utc=True, errors="coerce")
-                df["timestamp"] = ts
-
-            # ts est tz-aware (UTC) -> rendre tz-naive
-            try:
-                # si tz-aware, ts.dt.tz est non None; si tz-naive, attribut existe mais vaut None
-                tz = getattr(ts.dt, "tz", None)
-                if tz is not None:
-                    ts = ts.dt.tz_convert("UTC")
-                # rendre tz-naive
-                ts = ts.dt.tz_localize(None)
-            except Exception:
-                # fallback le plus simple : to_datetime sans tz, considéré déjà en UTC
-                ts = pd.to_datetime(ts.astype("datetime64[ns]"), errors="coerce")
-
-            # appliquer proprement
-            df.index = ts
-            df["timestamp"] = ts
-            df.sort_index(inplace=True)
-            return df
-
         def _get_phase_from_bars(bdf: "pd.DataFrame") -> "str|None":
             try:
                 if (
@@ -241,6 +216,60 @@ class MarketAnalyzer:
             except Exception:
                 pass
             return None
+
+        # --- NORMALISATION DATETIME (tz-aware -> naive UTC) ---------------------------
+        def _to_naive_utc_series(s: pd.Series) -> pd.Series:
+            s = pd.to_datetime(s, errors="coerce")  # conserve tz si présent
+            if pd.api.types.is_datetime64tz_dtype(s):
+                s = s.dt.tz_convert("UTC").dt.tz_localize(None)
+            return s
+
+        def _to_naive_utc_index(idx: pd.Index) -> pd.Index:
+            idx = pd.to_datetime(idx, errors="coerce")
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_convert("UTC").tz_localize(None)
+            return idx
+
+        def _normalize_dt_df(df: pd.DataFrame, prefer_col: str = "dt") -> pd.DataFrame:
+            if df is None or df.empty:
+                return df
+            df = df.copy()
+
+            # 1) index datetime -> naive UTC
+            if pd.api.types.is_datetime64_any_dtype(df.index):
+                df.index = _to_naive_utc_index(df.index)
+
+            # 2) normaliser colonnes temporelles connues (tz-aware friendly)
+            dt_cols = [
+                c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns
+            ]
+            for c in dt_cols:
+                if pd.api.types.is_datetime64_any_dtype(
+                    df[c]
+                ) or pd.api.types.is_object_dtype(df[c]):
+                    df[c] = _to_naive_utc_series(df[c])
+
+            # 3) s'assurer d'une colonne pivot 'dt'
+            picked = None
+            for c in (prefer_col, "dt", "datetime", "timestamp", "time"):
+                if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c]):
+                    picked = c
+                    break
+            if picked is None and pd.api.types.is_datetime64_any_dtype(df.index):
+                df["dt"] = df.index
+                picked = "dt"
+
+            # 4) drop NaT + tri
+            if picked:
+                df = df[~df[picked].isna()]
+                try:
+                    df = df.sort_values(picked)
+                except Exception:
+                    pass
+
+            return df
+
+        # ------------------------------------------------------------------------------
 
         # -------- config resolution --------
         try:
@@ -254,12 +283,12 @@ class MarketAnalyzer:
             cfg_path = "entry_rules → scalping → burst_scalping → footprint_triggers"
 
             if not cfg_fp:
-                # fallback #1: attribut d'instance déjà posé via phase_observer_config merge
+                # fallback #1: attribut d'instance
                 cfg_fp = getattr(self, "footprint_triggers", {}) or {}
                 cfg_path = "self.footprint_triggers"
 
             if not cfg_fp:
-                # fallback #2: recherche profonde n'importe où dans la conf stratégique
+                # fallback #2: recherche profonde
                 cfg_fp, cfg_path = _deep_find_footprint_cfg(strategy_config or {})
 
             if not cfg_fp or not bool(cfg_fp.get("enabled", False)):
@@ -271,10 +300,12 @@ class MarketAnalyzer:
 
         _log("info", f"[FP CFG] path='{cfg_path}' keys={list(cfg_fp.keys())}")
 
-        # -------- normalisation temporelle (⚠️ le fix) --------
+        # -------- normalisation unique --------
         try:
-            ticks = _normalize_dt(ticks) if ticks is not None else None
-            bars = _normalize_dt(bars) if bars is not None else None
+            ticks = _normalize_dt_df(ticks, prefer_col="dt")
+            bars = _normalize_dt_df(
+                bars, prefer_col="time"
+            )  # adapter à ton schéma si besoin
         except Exception as e:
             return False, {"reason": f"datetime normalization error: {e}"}
 
@@ -293,7 +324,7 @@ class MarketAnalyzer:
         order_validity_ms = int(cfg_fp.get("validity_ms", 800))
         price_offset_ticks = float(cfg_fp.get("price_offset_ticks", 0.0))
 
-        # hygiène marché
+        # hygiène marché (paramétrables, 0 => désactivés)
         tickrate_min = float(cfg_fp.get("tickrate_min", 0.0))
         coverage_s_min = float(cfg_fp.get("coverage_s_min_burst", 0.0))
         phase_whitelist = list(cfg_fp.get("phase_whitelist", []))
@@ -324,7 +355,10 @@ class MarketAnalyzer:
             delta_abs = abs(float(meta.get("delta_total", 0.0)))
             if not (delta_abs >= allow_delta_abs_min and tr >= allow_tickrate_min):
                 return False, {
-                    "reason": f"phase '{current_phase}' not in whitelist and not strong-enough (|Δ|={delta_abs}, tr={tr}/s)"
+                    "reason": (
+                        f"phase '{current_phase}' not in whitelist and not strong-enough "
+                        f"(|Δ|={delta_abs}, tr={tr}/s)"
+                    )
                 }
 
         # -------- triggers --------
@@ -395,13 +429,12 @@ class MarketAnalyzer:
             direction = str(decision.get("direction", "BUY")).upper()
 
             # offset signé selon la direction
-            signed_offset = price_offset_ticks * float(price_step)
-            if direction == "SELL":
-                signed_offset = -abs(signed_offset)
-            else:
-                signed_offset = abs(signed_offset)
+            signed_offset = float(price_offset_ticks) * float(price_step)
+            signed_offset = (
+                -abs(signed_offset) if direction == "SELL" else abs(signed_offset)
+            )
 
-            # Pour MARKET, le prix peut être ignoré en aval; on met l’ancre + offset par cohérence
+            # Pour MARKET, le prix peut être ignoré en aval; on garde ancre+offset pour cohérence
             entry_price = float(anchor_price + signed_offset)
 
             entry = {
@@ -410,6 +443,14 @@ class MarketAnalyzer:
                 "burst_count": int(burst_count),
                 "validity_ms": int(order_validity_ms),
             }
+            # --- sémantique burst ONE_PRICE + ouverture synchrone ---
+            entry.update(
+                {
+                    "price_mode": "ONE_PRICE",  # toutes les tailles au même prix
+                    "burst_open": "ONE_SHOT",  # envoi groupé
+                    "burst_sync_open": True,  # synchronisation ouverture
+                }
+            )
 
             trailing = {
                 "phase0": {
@@ -433,7 +474,7 @@ class MarketAnalyzer:
                 },
                 "clamp": [
                     float(cfg_fp.get("trailing", {}).get("clamp_min", 0.0)),
-                    float(cfg_fp.get("trailing", {}).get("clamp_max", 9999.0)),
+                    float(cfg_fp.get("trailing", {}).get("clamp_max", 9_999.0)),
                 ],
                 "micro_atr_10s": micro_atr,
             }
@@ -444,7 +485,16 @@ class MarketAnalyzer:
                 "trigger": decision.get("trigger", "footprint"),
                 "confidence": float(decision.get("confidence", 0.7)),
                 "entry": entry,
-                "exit": {"type": "TRAILING_ONLY", "phases": trailing},
+                "exit": {
+                    "type": "TRAILING_ONLY",
+                    "phases": trailing,
+                    "basket": {
+                        "scope": "BASKET",  # logique au niveau panier
+                        "close_all_at_once": True,  # fermeture groupée
+                        "require_all_in_profit": True,  # ne ferme que si toutes les tailles sont en PV
+                        "sync_trailing": True,  # trailing partagé (panier)
+                    },
+                },
                 "meta": {**meta, **(decision.get("meta", {}) or {})},
             }
             return True, out
