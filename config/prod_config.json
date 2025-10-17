@@ -181,26 +181,6 @@
   "trade_execution": {
     "dry_run": false
   },
-  "entry_rules": {
-    "scalping": {
-      "burst_scalping": {
-        "footprint_triggers": {
-          "enabled": true,
-          "tickrate_min": 2.0,
-          "coverage_s_min_burst": 6,
-          "phase_whitelist": [
-            "range_distribution",
-            "range_accumulation",
-            "liquidity_eqh_eql"
-          ],
-          "allow_no_clear_phase_if_strong": {
-            "of_delta_abs_min": 150,
-            "tickrate_min": 2.0
-          }
-        }
-      }
-    }
-  },
   "guardrails": {
     "enabled": true,
     "allow_fallbacks": false,
