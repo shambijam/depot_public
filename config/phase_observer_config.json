@@ -315,6 +315,44 @@
                         "min_conf_for_entry": 0.50
                     }
                 }
+            },
+            "footprint_triggers": {
+                "enabled": true,
+                "filters": {
+                    "spread_max_pts": 20,
+                    "tickrate_min_per5s": 2.0,
+                    "vol_level_min_ratio_median_30s": 1.2
+                },
+                "climax": {
+                    "lookback_bars": 5,
+                    "vol_ratio_min": 2.5,
+                    "delta_ratio_min": 1.5,
+                    "need_consolidation": true,
+                    "consolidation_max_atr_mult": 0.8
+                },
+                "stacking": {
+                    "delta_ratio_min": 1.2,
+                    "min_levels": 3,
+                    "invalidate_opposite_ratio": 0.6,
+                    "validity_ms": 4000
+                },
+                "absorption": {
+                    "vol_zscore_min": 2.0,
+                    "delta_ratio_max": 0.4,
+                    "attempts_min": 2
+                },
+                "order": {
+                    "entry_style": "LIMIT_FOK",
+                    "price_offset_ticks": 2,
+                    "burst_count": 5,
+                    "burst_volume_each": 0.018
+                },
+                "trailing": {
+                    "phase0_seconds": 8,
+                    "phase0_mult_micro_atr_10s": 0.8,
+                    "phase1_drawdown_mult": 1.2,
+                    "phase2_drawdown_mult": 2.0
+                }
             }
         }
     }
