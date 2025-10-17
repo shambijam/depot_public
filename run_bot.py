@@ -1172,9 +1172,7 @@ def run_single_pipeline_cycle(
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
-                print(
-                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
-                )
+                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
 
             # === [BURST GUARD PIPELINE] bloque tout nouveau burst si un panier est actif (scope global) ===
             try:
@@ -1218,14 +1216,19 @@ def run_single_pipeline_cycle(
                 logger.warning(f"[BURST GUARD][pipeline] check global échoué: {e}")
 
             for td in scalping_decisions:
-                # Normalisation mineure utile (sans forcer LIMIT_FOK ni appeler l’ancien chemin)
-                td["rule_name"] = str(td.get("rule_name", "") or "burst_scalping").lower()
-                if td["rule_name"] in ("burst", "burst_master", "scalping_burst"):
-                    td["rule_name"] = "burst_scalping"
+                # ✅ Toujours valider/normaliser le side en 1er (évite UnboundLocalError)
+                side = str(td.get("action") or td.get("side") or "").upper().strip()
+                if side not in {"BUY", "SELL"}:
+                    logger.debug(f"[SCALPING] décision ignorée (side invalide): {td}")
+                    continue
 
-                # (Optionnel) No-TP pour burst + trailing par défaut depuis la config
+                # 🔧 Standardiser le rule_name + activer trailing/No-TP pour burst
                 try:
-                    if td["rule_name"] == "burst_scalping":
+                    if str(td.get("rule_name", "")).lower() in ("burst", "burst_master", "scalping_burst", ""):
+                        td["rule_name"] = "burst_scalping"
+                    rn = str(td.get("rule_name") or "burst_scalping").lower()
+
+                    if rn == "burst_scalping":
                         for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
                             td.pop(k, None)
                         td["no_tp"] = True
@@ -1233,7 +1236,7 @@ def run_single_pipeline_cycle(
                             (td.get("trailing") or {}) if td.get("trailing") else {}
                         ) or (
                             (global_context.get("asset_configs", {}) or {})
-                            .get(td.get("asset",""), {})
+                            .get(td.get("asset", ""), {})
                             .get("entry_rules", {})
                             .get("scalping", {})
                             .get("burst_scalping", {})
@@ -1249,7 +1252,86 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-                # 👉 ROUTAGE UNIQUE via l’exécuteur unifié (plus d’appel direct à execute_burst_scalping_order)
+                rn = str(td.get("rule_name", "burst_scalping")).lower()
+                entry_style = str(td.get("entry_style") or "LIMIT_FOK").upper().strip()
+                td["entry_style"] = entry_style
+
+                burst_cfg = (
+                    base_config.get("entry_rules", {})
+                    .get("scalping", {})
+                    .get("burst_scalping", {})
+                    or {}
+                )
+                order_cfg = (burst_cfg.get("order", {}) or {})
+                default_count = int(order_cfg.get("burst_count", 5))
+                default_each  = float(order_cfg.get("burst_volume_each", 0.02))
+
+                burst_count = int(td.get("burst_count") or default_count)
+                burst_each  = float(td.get("burst_volume_each") or (
+                                    float(td.get("volume", 0) or 0) / max(1, burst_count)
+                                ) or default_each)
+
+                sym = str(td.get("asset") or td.get("symbol") or "").upper()
+
+                # 🎯 Prix d'entrée (Ask pour BUY, Bid pour SELL)
+                price_val = float(td.get("price") or 0.0)
+                if price_val <= 0.0:
+                    try:
+                        tk = mt5_connector.get_symbol_tick(sym) or {}
+                        ask = tk.get("ask", getattr(tk, "ask", None))
+                        bid = tk.get("bid", getattr(tk, "bid", None))
+                        price_val = float(ask if side == "BUY" else bid) if (ask or bid) else 0.0
+                    except Exception:
+                        price_val = 0.0
+
+                # 🚀 CAS 1 — burst LIMIT_FOK : split en N ordres enfants FOK (5x, etc.)
+                if rn == "burst_scalping" and entry_style == "LIMIT_FOK" and price_val > 0:
+                    basket_id = td.get("basket_id") or td.get("comment") or f"burst_{sym}"
+                    if is_dry_run:
+                        logger.info(f"[BURST][DRY] {side} {sym} LIMIT+FOK x{burst_count} @ {price_val:.2f} (each={burst_each})")
+                        trade_executed_successfully = True
+                        continue
+
+                    for i in range(burst_count):
+                        child = {
+                            "action": side,
+                            "asset": sym,
+                            "order_type": "BUY_LIMIT" if side == "BUY" else "SELL_LIMIT",
+                            "price": price_val,
+                            "volume": burst_each,
+                            "time_in_force": "FOK",
+                            "validity_ms": int(td.get("validity_ms", 800)),
+                            "rule_name": "burst_scalping",
+                            "comment": f"burst_scalping|basket={basket_id}|child={i+1}/{burst_count}",
+                            "no_tp": True,
+                        }
+                        exec_pkg = {
+                            "final_decision": child,
+                            "context": global_context,
+                            "active_config": base_config,
+                        }
+                        res = run_trade_execution_pipeline(trade_executor, exec_pkg, is_dry_run=False)
+                        status = str((res or {}).get("status", "")).lower()
+                        if status in {"ok", "success", "filled"}:
+                            trade_executed_successfully = True
+                        else:
+                            logger.warning(f"[BURST][{sym}] enfant {i+1}/{burst_count} non rempli (ret={res}).")
+
+                    # Trailing/guard panier après envois
+                    try:
+                        tr_cfg = (burst_cfg.get("trailing", {}) or {})
+                        cl_cfg = (burst_cfg.get("closure_rules", {}) or {})
+                        trade_executor.monitor_burst_baskets(
+                            config=base_config,
+                            max_loss_pips=float(cl_cfg.get("max_loss_pips", 15.0)),
+                            trail_trigger=float(tr_cfg.get("trigger_pips", 10.0)),
+                            trail_step=float(tr_cfg.get("step_pips", 5.0)),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BURST EXIT] Post-exec trailing setup: {e}")
+                    continue
+
+                # 🪂 CAS 2 — fallback (MARKET / non-burst) via exécuteur unifié
                 decision_pkg = {
                     "final_decision": td,
                     "context": global_context,
@@ -1258,193 +1340,21 @@ def run_single_pipeline_cycle(
                 res = run_trade_execution_pipeline(
                     trade_executor, decision_pkg, is_dry_run=is_dry_run
                 )
-
-                # Marquer succès + armer le trailing si besoin
                 status = (res or {}).get("status", "")
                 if status not in {"failed", ""}:
                     trade_executed_successfully = True
                     try:
-                        burst_cfg = (
-                            base_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            or {}
-                        )
-                        trail_cfg = burst_cfg.get("trailing", {}) or {}
+                        tr_cfg = (burst_cfg.get("trailing", {}) or {})
                         trade_executor.monitor_burst_baskets(
                             config=base_config,
                             max_loss_pips=15.0,
-                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
-                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
+                            trail_trigger=float(tr_cfg.get("trigger_pips", 10.0)),
+                            trail_step=float(tr_cfg.get("step_pips", 5.0)),
                         )
                     except Exception as e:
                         logger.warning(f"[BURST EXIT] Post-exec trailing setup: {e}")
 
-                if action in {"BUY", "SELL"}:
-                    # [SYMBOL GUARD] si verrou par symbole (single_burst_global = False)
-                    try:
-                        rule_name_local = str(td.get("rule_name", "")).lower()
-                        if rule_name_local == "burst_scalping":
-                            burst_cfg = (
-                                base_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                or {}
-                            )
-                            guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
-                            enforce_closure = bool(
-                                guard_cfg.get("enforce_burst_closure", True)
-                            )
-                            single_burst_global = bool(
-                                guard_cfg.get("single_burst_global", True)
-                            )
 
-                            if enforce_closure and not single_burst_global:
-                                import re
-
-                                def _field(obj, key, default=None):
-                                    return (
-                                        obj.get(key, default)
-                                        if isinstance(obj, dict)
-                                        else getattr(obj, key, default)
-                                    )
-
-                                def _open_burst_ids(positions):
-                                    ids = set()
-                                    for _p in positions or []:
-                                        c = str(_field(_p, "comment", "") or "")
-                                        m = re.search(
-                                            r"burst_scalping\|basket=([A-Za-z0-9_]+)", c
-                                        )
-                                        if m:
-                                            ids.add(m.group(1))
-                                    return ids
-
-                                sym = str(
-                                    td.get("asset") or td.get("symbol") or ""
-                                ).upper()
-                                pos_sym = mt5_connector.get_positions(symbol=sym) or []
-                                burst_ids_sym = _open_burst_ids(pos_sym)
-                                if burst_ids_sym:
-                                    logger.info(
-                                        f"⛔ [BURST GUARD][{sym}] Panier(s) actif(s): {', '.join(sorted(burst_ids_sym))} → skip décision."
-                                    )
-                                    continue
-                    except Exception as e:
-                        logger.warning(
-                            f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}"
-                        )
-                    # --- SPECIAL: Burst scalping -> forcer le chemin LIMIT_FOK (avec normalisation & DRY RUN) ---
-                    try:
-                        # 0) Normalisation du rule_name (certains moteurs mettent "burst" au lieu de "burst_scalping")
-                        rn_raw = str(td.get("rule_name", "")).lower()
-                        if rn_raw in ("burst", "burst_master", "scalping_burst", ""):
-                            td["rule_name"] = "burst_scalping"
-                        rn = str(td.get("rule_name", "")).lower()
-
-                        if rn == "burst_scalping":
-                            # 1) Si entry_style absent, on force LIMIT_FOK
-                            style = str(td.get("entry_style", "")).upper().strip()
-                            if not style:
-                                td["entry_style"] = "LIMIT_FOK"
-                                style = "LIMIT_FOK"
-
-                            # 2) Completer burst_count / burst_volume_each si absents
-                            try:
-                                burst_cfg = (
-                                    base_config.get("entry_rules", {})
-                                    .get("scalping", {})
-                                    .get("burst_scalping", {})
-                                    or {}
-                                )
-                                order_cfg = (burst_cfg.get("order", {}) or {})
-                                default_count = int(order_cfg.get("burst_count", 5))
-                                default_each  = float(order_cfg.get("burst_volume_each", 0.02))
-                            except Exception:
-                                default_count, default_each = 5, 0.02
-
-                            if "burst_count" not in td or not td.get("burst_count"):
-                                td["burst_count"] = default_count
-                            if "burst_volume_each" not in td or not td.get("burst_volume_each"):
-                                # si volume total fourni, on répartit
-                                tot = float(td.get("volume", 0.0) or 0.0)
-                                if tot > 0 and td["burst_count"] > 0:
-                                    td["burst_volume_each"] = round(tot / int(td["burst_count"]), 5)
-                                else:
-                                    td["burst_volume_each"] = default_each
-
-                            # 3) Prix d'entrée: si absent, on tente de le déduire du tick
-                            if "price" not in td or not float(td.get("price", 0.0) or 0.0):
-                                sym = str(td.get("asset") or td.get("symbol") or "").upper()
-                                action_up = str(td.get("action","")).upper()
-                                best = None
-                                try:
-                                    if hasattr(mt5_connector, "get_symbol_tick"):
-                                        tk = mt5_connector.get_symbol_tick(sym) or {}
-                                        # tolérant à différents formats (dict/obj)
-                                        ask = tk.get("ask", getattr(tk, "ask", None))
-                                        bid = tk.get("bid", getattr(tk, "bid", None))
-                                        best = (ask if action_up == "BUY" else bid)
-                                except Exception:
-                                    best = None
-                                if best:
-                                    td["price"] = float(best)
-
-                            # 4) Si c’est bien LIMIT_FOK -> on passe par l’exécuteur panier
-                            if style == "LIMIT_FOK":
-                                # Respect du DRY RUN: on simule au lieu d'envoyer MT5 si demandé
-                                if is_dry_run:
-                                    logger.info(
-                                        f"[BURST][DRY] {td.get('action','?')} x{td.get('burst_count')} "
-                                        f"{td.get('asset','?')} @ {float(td.get('price',0.0) or 0.0):.2f} "
-                                        f"(LIMIT+FOK simulé)"
-                                    )
-                                    trade_executed_successfully = True
-                                    # on saute le chemin legacy pour éviter l'erreur TradeRequest.get
-                                    continue
-                                else:
-                                    ok = trade_executor.execute_burst_scalping_order(td, base_config)
-                                    if ok:
-                                        trade_executed_successfully = True
-                                        # Armer/mettre à jour le watchdog trailing immédiatement
-                                        trail_cfg = (
-                                            burst_cfg.get("trailing", {}) if isinstance(burst_cfg, dict) else {}
-                                        ) or {}
-                                        trade_executor.monitor_burst_baskets(
-                                            config=base_config,
-                                            max_loss_pips=15.0,
-                                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
-                                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
-                                        )
-                                    # Quoi qu'il arrive, on ne passe PAS par _execute_single_decision pour ce rule
-                                    continue
-                            # Si pas LIMIT_FOK (ex. MARKET), on laisse filer vers le chemin legacy ci-dessous.
-                    except Exception as e:
-                        logger.error(f"[PIPELINE] Burst LIMIT_FOK path error: {e}", exc_info=True)
-  
-                    if _execute_single_decision(
-                        td,
-                        trade_executor,
-                        mt5_connector,
-                        global_context,
-                        decision_package,
-                        execution_mode,
-                        logger,
-                    ):
-                        trade_executed_successfully = True
-                        burst_cfg = (
-                            base_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            or {}
-                        )
-                        trail_cfg = burst_cfg.get("trailing", {}) or {}
-                        trade_executor.monitor_burst_baskets(
-                            config=base_config,
-                            max_loss_pips=15.0,
-                            trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
-                            trail_step=float(trail_cfg.get("step_pips", 5.0)),
-                        )
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:
