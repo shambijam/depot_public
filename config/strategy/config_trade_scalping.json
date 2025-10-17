@@ -29,6 +29,20 @@
         "burst_size": 5,
         "max_bursts": 1,
         "cooldown_after_exit_s": 12,
+        "footprint_triggers": {
+          "enabled": true,
+          "tickrate_min": 2.0,
+          "coverage_s_min_burst": 6,
+          "phase_whitelist": [
+            "range_distribution",
+            "range_accumulation",
+            "liquidity_eqh_eql"
+          ],
+          "allow_no_clear_phase_if_strong": {
+            "of_delta_abs_min": 150,
+            "tickrate_min": 2.0
+          }
+        },
         "closure_rules": {
           "close_on_full_profit": false,
           "require_full_count_for_profit_close": false,
@@ -51,7 +65,7 @@
     }
   },
   "burst_single_master": {
-    "enabled": true,
+    "enabled": false,
     "burst_size": 5,
     "entry_mode": "MARKET",
     "per_leg_virtual": true,
@@ -62,18 +76,18 @@
     "enabled": true,
     "mode": "ATR",
     "atr_period": 14,
-    "atr_mult": 1.0,
-    "min_trail_points": 30,
-    "arm_profit_points": 120,
-    "arm_atr_multiple": 1.2,
-    "pre_arm_grace_ms": 1500,
+    "atr_mult": 2.0,
+    "min_trail_points": 100,
+    "arm_profit_points": 220,
+    "arm_atr_multiple": 2.0,
+    "pre_arm_grace_ms": 4500,
     "arm_require_full_count": false,
-    "max_pullback_points": 160,
-    "trail_update_throttle_ms": 350,
-    "backoff_step_points": 20,
-    "breakeven_lock_points": 40,
-    "max_spread_points_when_armed": 60,
-    "min_seconds_before_any_close": 4,
+    "max_pullback_points": 350,
+    "trail_update_throttle_ms": 1000,
+    "backoff_step_points": 60,
+    "breakeven_lock_points": 150,
+    "max_spread_points_when_armed": 110,
+    "min_seconds_before_any_close": 10,
     "max_latency_ms_on_close": 500
   },
   "exit_rules": {
