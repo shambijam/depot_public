@@ -10,7 +10,7 @@ import os
 import sys
 import json
 import time
-from datetime import datetime,timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from datetime import UTC
 from typing import Any
@@ -20,9 +20,6 @@ from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
-
-
-
 
 
 load_dotenv()
@@ -375,6 +372,7 @@ def _load_po_config_safe(config_manager):
     except Exception:
         return {}
 
+
 def _execute_single_decision(
     td,
     trade_executor,
@@ -469,6 +467,15 @@ def run_single_pipeline_cycle(
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
+        # [PATCH-CANDLES] Master switch lu une fois pour le cycle
+        try:
+            _cs = (
+                config_manager.get("phase_detection_defaults.candlestick_analysis", {})
+                or {}
+            )
+            CANDLES_ENABLED = bool(_cs.get("enabled", True))
+        except Exception:
+            CANDLES_ENABLED = True
 
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
@@ -520,21 +527,31 @@ def run_single_pipeline_cycle(
 
                 # ✅ Mode "horloge suisse" — 200 au 1er cycle, puis rolling 50, avec recalibration périodique
                 dcfg = base_config.get("data_collection", {}) or {}
-                rolling_lookback = int(dcfg.get("rolling_lookback_bars", 50))   # ex: 50
-                full_refresh_bars = int(dcfg.get("full_refresh_bars", 200))     # ex: 200
-                recalib_n = int(dcfg.get("recalibration_every_n_cycles", 10))   # ex: toutes les 10 itérations
+                rolling_lookback = int(dcfg.get("rolling_lookback_bars", 50))  # ex: 50
+                full_refresh_bars = int(dcfg.get("full_refresh_bars", 200))  # ex: 200
+                recalib_n = int(
+                    dcfg.get("recalibration_every_n_cycles", 10)
+                )  # ex: toutes les 10 itérations
 
-                do_full_refresh = (cycle_count == 1) or (recalib_n > 0 and cycle_count % recalib_n == 0)
-                subset_df = rates_df.tail(full_refresh_bars if do_full_refresh else rolling_lookback).copy()
+                do_full_refresh = (cycle_count == 1) or (
+                    recalib_n > 0 and cycle_count % recalib_n == 0
+                )
+                subset_df = rates_df.tail(
+                    full_refresh_bars if do_full_refresh else rolling_lookback
+                ).copy()
 
                 market_results = market_analyzer.analyze(subset_df, asset)
 
                 # ⚠️ Ne réinitialise pas l’historique à chaque cycle → limite les doublons de logs
                 if cycle_count == 1 or do_full_refresh:
-                    market_analyzer.phase_observer.load_initial_history(subset_df.copy())
+                    market_analyzer.phase_observer.load_initial_history(
+                        subset_df.copy()
+                    )
                 elif hasattr(market_analyzer.phase_observer, "update_with_new_data"):
-                    market_analyzer.phase_observer.update_with_new_data(subset_df.copy())
-              
+                    market_analyzer.phase_observer.update_with_new_data(
+                        subset_df.copy()
+                    )
+
                 # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(
                     f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}"
@@ -549,22 +566,45 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
-                # === LOG DIAGNOSTIQUE HISTORIQUE 200 BOUgies ===
-                try:
-                    last_200 = annotated_rates_df.tail(200)
-                    avg_vol = last_200["tick_volume"].mean() if "tick_volume" in last_200 else None
-                    avg_range = (last_200["high"] - last_200["low"]).mean() if {"high","low"} <= set(last_200.columns) else None
-                    bull_candles = int((last_200["close"] > last_200["open"]).sum()) if {"close","open"} <= set(last_200.columns) else 0
-                    bear_candles = int((last_200["close"] < last_200["open"]).sum()) if {"close","open"} <= set(last_200.columns) else 0
+                # === LOG DIAGNOSTIQUE HISTORIQUE 200 bougies ===
+                if CANDLES_ENABLED:
+                    try:
+                        last_200 = annotated_rates_df.tail(200)
+                        avg_vol = (
+                            last_200["tick_volume"].mean()
+                            if "tick_volume" in last_200
+                            else None
+                        )
+                        avg_range = (
+                            (last_200["high"] - last_200["low"]).mean()
+                            if {"high", "low"} <= set(last_200.columns)
+                            else None
+                        )
+                        bull_candles = (
+                            int((last_200["close"] > last_200["open"]).sum())
+                            if {"close", "open"} <= set(last_200.columns)
+                            else 0
+                        )
+                        bear_candles = (
+                            int((last_200["close"] < last_200["open"]).sum())
+                            if {"close", "open"} <= set(last_200.columns)
+                            else 0
+                        )
 
-                    logger.info(
-                        f"[{asset}] Historique(200 bougies) → "
-                        f"Bull={bull_candles}, Bear={bear_candles}, "
-                        f"VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
+                        logger.info(
+                            f"[{asset}] Historique(200 bougies) → "
+                            f"Bull={bull_candles}, Bear={bear_candles}, "
+                            f"VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}"
+                        )
+                else:
+                    logger.debug(
+                        f"[{asset}] Skip log 200 bougies (candlestick_analysis disabled)."
                     )
-                except Exception as e:
-                    logger.warning(f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}") 
-                    
+
                 # === PATCH FOOTPRINT ANALYSE (ciblage ticks dernière bougie) ===
                 try:
                     # ✅ Récupération de la dernière bougie fermée
@@ -572,9 +612,13 @@ def run_single_pipeline_cycle(
 
                     # ✅ Gestion robuste du timestamp
                     if "time" in annotated_rates_df.columns:
-                        start_ts = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                        start_ts = pd.to_datetime(
+                            last_candle["time"], utc=True, errors="coerce"
+                        )
                     else:
-                        start_ts = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+                        start_ts = pd.to_datetime(
+                            last_candle.name, utc=True, errors="coerce"
+                        )
 
                     if pd.isna(start_ts):
                         start_ts = pd.Timestamp.utcnow()
@@ -596,14 +640,16 @@ def run_single_pipeline_cycle(
                         )
 
                     if ticks_df is not None and not ticks_df.empty:
-                        ticks_df["time"] = pd.to_datetime(ticks_df["time"], utc=True, errors="coerce")
+                        ticks_df["time"] = pd.to_datetime(
+                            ticks_df["time"], utc=True, errors="coerce"
+                        )
 
                         fp_res = footprint_validator(
                             annotated_rates_df,
                             ticks_df,
                             candle_index=None,
                             price_step=None,
-                            imbalance_threshold=0.7
+                            imbalance_threshold=0.7,
                         )
 
                         logger.info(
@@ -621,8 +667,10 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
 
                 except Exception as e:
-                    logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
-                    
+                    logger.error(
+                        f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
+                    )
+
                 # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
                 try:
                     # ✅ On récupère les 5 dernières bougies pour l'analyse d'orderflow
@@ -670,8 +718,10 @@ def run_single_pipeline_cycle(
                     latest["orderflow_patterns"] = of_res.get("patterns", [])
 
                 except Exception as e:
-                    logger.error(f"[ORDERFLOW][{asset}] Erreur analyse Orderflow: {e}", exc_info=True)
-
+                    logger.error(
+                        f"[ORDERFLOW][{asset}] Erreur analyse Orderflow: {e}",
+                        exc_info=True,
+                    )
 
                 # Signaux unifiés
                 signals: Dict[str, Any] = (
@@ -684,9 +734,15 @@ def run_single_pipeline_cycle(
                     or {}
                 )
                 # --- WNT-1: attacher 'latest' pour diagnostic WHY_NO_TRADE (lecture seule)
-                signals["__latest"] = latest  # permet d'accéder à footprint/orderflow summaries si non recopiés par _build_asset_trading_signals
+                signals["__latest"] = (
+                    latest  # permet d'accéder à footprint/orderflow summaries si non recopiés par _build_asset_trading_signals
+                )
 
-                signals.update(market_results.get("patterns", {}))
+                if CANDLES_ENABLED:
+                    _pat = market_results.get("patterns", {})
+                    if _pat:
+                        signals.update(_pat)
+
                 signals["phase"] = market_results.get(
                     "phase", signals.get("phase", "neutral")
                 )
@@ -709,7 +765,6 @@ def run_single_pipeline_cycle(
                 # === PATCH A: expose FP/OF dans les signaux pour debug ultérieur ===
                 signals["footprint_summary"] = latest.get("footprint_summary")
                 signals["orderflow_summary"] = latest.get("orderflow_summary")
-
 
                 # Sauvegarde
                 all_assets_trading_signals[asset] = signals
@@ -740,23 +795,32 @@ def run_single_pipeline_cycle(
                 fp = sig.get("footprint_summary") or {}
                 of = sig.get("orderflow_summary") or {}
 
-                xcfg = (((asset_configs or {}).get("XAUUSD", {}) or {})
-                        .get("overrides", {}) or {}).get("scalping", {}) or {}
+                xcfg = (
+                    ((asset_configs or {}).get("XAUUSD", {}) or {}).get("overrides", {})
+                    or {}
+                ).get("scalping", {}) or {}
                 fpc = xcfg.get("footprint", {}) or {}
-                bt  = fpc.get("burst_tolerance", {}) or {}
-                ncp = ((xcfg.get("phase_detection", {}) or {})
-                    .get("allow_no_clear_phase_if_strong", {}) or {})
+                bt = fpc.get("burst_tolerance", {}) or {}
+                ncp = (xcfg.get("phase_detection", {}) or {}).get(
+                    "allow_no_clear_phase_if_strong", {}
+                ) or {}
 
-                phase   = sig.get("phase")
-                conf    = sig.get("confidence_score")
-                spread  = sig.get("current_spread_points")
-                ticks   = fp.get("tick_count")
-                cov     = fp.get("coverage_s")
-                trate   = fp.get("tick_rate")
-                dlt     = (of.get("delta_total")
-                        if isinstance(of.get("delta_total"), (int, float)) else None)
-                imb     = (of.get("mean_imbalance")
-                        if isinstance(of.get("mean_imbalance"), (int, float)) else None)
+                phase = sig.get("phase")
+                conf = sig.get("confidence_score")
+                spread = sig.get("current_spread_points")
+                ticks = fp.get("tick_count")
+                cov = fp.get("coverage_s")
+                trate = fp.get("tick_rate")
+                dlt = (
+                    of.get("delta_total")
+                    if isinstance(of.get("delta_total"), (int, float))
+                    else None
+                )
+                imb = (
+                    of.get("mean_imbalance")
+                    if isinstance(of.get("mean_imbalance"), (int, float))
+                    else None
+                )
 
                 print(
                     "[GATECHECK][XAUUSD] "
@@ -769,7 +833,6 @@ def run_single_pipeline_cycle(
                 )
         except Exception as _e:
             logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
-
 
         # Charger configs des assets (une seule fois via cache du ConfigManager)
         asset_configs = {}
@@ -796,13 +859,18 @@ def run_single_pipeline_cycle(
         global_context["diag_tracker"] = get_tracker_from_context(global_context)
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
-        
+
         # === [BURST EXIT MANAGEMENT] Fermer les paniers avant toute nouvelle décision ===
         try:
-            burst_cfg  = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
-            trail_cfg  = burst_cfg.get("trailing", {}) or {}
+            burst_cfg = (
+                base_config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                or {}
+            )
+            trail_cfg = burst_cfg.get("trailing", {}) or {}
             closure_cfg = burst_cfg.get("closure_rules", {}) or {}
-           
+
             # 2) Monitoring collectif (perte max + trailing collectif)
             trade_executor.monitor_burst_baskets(
                 config=base_config,
@@ -858,35 +926,49 @@ def run_single_pipeline_cycle(
         liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
 
         if not scalping_decisions and not liquidity_decisions:
-         # --- WNT-2: WHY_NO_TRADE (une ligne par actif) ---
+            # --- WNT-2: WHY_NO_TRADE (une ligne par actif) ---
             try:
                 SPREAD_MAX = {"EURUSD": 12, "GBPUSD": 18, "XAUUSD": 40}
                 # seuils minimums footprint M1 + tolérance burst (lecture seule, ne bloque rien)
-                FP_MIN = {"EURUSD": (15, 20), "GBPUSD": (15, 20), "XAUUSD": (20, 10)}  # (ticks_min, coverage_s_min)
+                FP_MIN = {
+                    "EURUSD": (15, 20),
+                    "GBPUSD": (15, 20),
+                    "XAUUSD": (20, 10),
+                }  # (ticks_min, coverage_s_min)
                 BURST_TR_MIN = 2.0
                 BURST_COV_MIN = 6.0  # 5–6s ok pour XAUUSD burst court
 
                 for asset, sig in all_assets_trading_signals.items():
                     try:
                         phase = sig.get("phase")
-                        conf  = float(sig.get("confidence_score", 0.0))
+                        conf = float(sig.get("confidence_score", 0.0))
                         spread = float(sig.get("current_spread_points", float("inf")))
 
                         # récupérer résumés footprint/orderflow (depuis signals ou fallback __latest)
                         latest = sig.get("__latest", {}) or {}
-                        fp_sum = sig.get("footprint_summary") or latest.get("footprint_summary") or {}
-                        of_sum = sig.get("orderflow_summary")  or latest.get("orderflow_summary")  or {}
+                        fp_sum = (
+                            sig.get("footprint_summary")
+                            or latest.get("footprint_summary")
+                            or {}
+                        )
+                        of_sum = (
+                            sig.get("orderflow_summary")
+                            or latest.get("orderflow_summary")
+                            or {}
+                        )
 
                         ticks = int(fp_sum.get("tick_count", 0) or 0)
-                        cov   = float(fp_sum.get("coverage_s", 0.0) or 0.0)
-                        tr    = float(fp_sum.get("tick_rate", 0.0) or 0.0)
+                        cov = float(fp_sum.get("coverage_s", 0.0) or 0.0)
+                        tr = float(fp_sum.get("tick_rate", 0.0) or 0.0)
 
                         # 1) qualité footprint M1
                         tmin, cmin = FP_MIN.get(asset, (15, 20))
                         reasons = []
                         if ticks < 3:
                             reasons.append("FP_HARD_FAIL")
-                        elif (ticks < tmin or cov < cmin) and not (tr >= BURST_TR_MIN and cov >= BURST_COV_MIN):
+                        elif (ticks < tmin or cov < cmin) and not (
+                            tr >= BURST_TR_MIN and cov >= BURST_COV_MIN
+                        ):
                             reasons.append("FP_LOW_SAMPLE")
 
                         # 2) spread
@@ -900,18 +982,25 @@ def run_single_pipeline_cycle(
                         # 4) direction (vote simple CVD/Δ OF + Δ FP)
                         votes = 0
                         try:
-                            cvd = float(of_sum.get("cvd_final", of_sum.get("CVD", 0.0)) or 0.0)
-                            if cvd != 0: votes += 1 if cvd > 0 else -1
+                            cvd = float(
+                                of_sum.get("cvd_final", of_sum.get("CVD", 0.0)) or 0.0
+                            )
+                            if cvd != 0:
+                                votes += 1 if cvd > 0 else -1
                         except Exception:
                             pass
                         try:
-                            delt_of = float(of_sum.get("delta_total", of_sum.get("Δ", 0.0)) or 0.0)
-                            if delt_of != 0: votes += 1 if delt_of > 0 else -1
+                            delt_of = float(
+                                of_sum.get("delta_total", of_sum.get("Δ", 0.0)) or 0.0
+                            )
+                            if delt_of != 0:
+                                votes += 1 if delt_of > 0 else -1
                         except Exception:
                             pass
                         try:
                             delt_fp = float(fp_sum.get("delta_total", 0.0) or 0.0)
-                            if delt_fp != 0: votes += 1 if delt_fp > 0 else -1
+                            if delt_fp != 0:
+                                votes += 1 if delt_fp > 0 else -1
                         except Exception:
                             pass
                         if abs(votes) < 2:
@@ -922,14 +1011,15 @@ def run_single_pipeline_cycle(
 
                         logger.info(
                             f"[WHY_NO_TRADE][{asset}] phase={phase} conf={conf:.3f} spread={spread} | "
-                            f"FP(ticks={ticks},win={cov:.0f}s,tr={tr:.2f}/s) | reasons=" + ",".join(reasons)
+                            f"FP(ticks={ticks},win={cov:.0f}s,tr={tr:.2f}/s) | reasons="
+                            + ",".join(reasons)
                         )
                     except Exception as _e:
                         logger.info(f"[WHY_NO_TRADE][{asset}] DIAG_ERROR: {_e}")
             except Exception:
                 pass
             # --- /WNT-2 ---
-   
+
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
@@ -938,22 +1028,35 @@ def run_single_pipeline_cycle(
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
-                print(f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}")
+                print(
+                    f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
+                )
 
             # === [BURST GUARD PIPELINE] bloque tout nouveau burst si un panier est actif (scope global) ===
             try:
-                burst_cfg = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                burst_cfg = (
+                    base_config.get("entry_rules", {})
+                    .get("scalping", {})
+                    .get("burst_scalping", {})
+                    or {}
+                )
                 guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
-                enforce_closure     = bool(guard_cfg.get("enforce_burst_closure", True))
+                enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
                 single_burst_global = bool(guard_cfg.get("single_burst_global", True))
 
                 if enforce_closure and single_burst_global:
                     import re
+
                     def _field(obj, key, default=None):
-                        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                        return (
+                            obj.get(key, default)
+                            if isinstance(obj, dict)
+                            else getattr(obj, key, default)
+                        )
+
                     def _open_burst_ids(positions):
                         ids = set()
-                        for p in (positions or []):
+                        for p in positions or []:
                             c = str(_field(p, "comment", "") or "")
                             m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
                             if m:
@@ -963,7 +1066,9 @@ def run_single_pipeline_cycle(
                     all_open = mt5_connector.get_positions() or []
                     open_bursts = _open_burst_ids(all_open)
                     if open_bursts:
-                        logger.info(f"⛔ [BURST GUARD] Panier(s) actif(s): {', '.join(sorted(open_bursts))} → aucune exécution scalping ce cycle.")
+                        logger.info(
+                            f"⛔ [BURST GUARD] Panier(s) actif(s): {', '.join(sorted(open_bursts))} → aucune exécution scalping ce cycle."
+                        )
                         return False
             except Exception as e:
                 logger.warning(f"[BURST GUARD][pipeline] check global échoué: {e}")
@@ -994,7 +1099,9 @@ def run_single_pipeline_cycle(
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
+                                "activate_after_rr": float(
+                                    trailing_cfg.get("activate_after_rr", 1.0)
+                                ),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
@@ -1005,32 +1112,55 @@ def run_single_pipeline_cycle(
                     try:
                         rule_name_local = str(td.get("rule_name", "")).lower()
                         if rule_name_local == "burst_scalping":
-                            burst_cfg = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                            burst_cfg = (
+                                base_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                or {}
+                            )
                             guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
-                            enforce_closure     = bool(guard_cfg.get("enforce_burst_closure", True))
-                            single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+                            enforce_closure = bool(
+                                guard_cfg.get("enforce_burst_closure", True)
+                            )
+                            single_burst_global = bool(
+                                guard_cfg.get("single_burst_global", True)
+                            )
 
                             if enforce_closure and not single_burst_global:
                                 import re
+
                                 def _field(obj, key, default=None):
-                                    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                                    return (
+                                        obj.get(key, default)
+                                        if isinstance(obj, dict)
+                                        else getattr(obj, key, default)
+                                    )
+
                                 def _open_burst_ids(positions):
                                     ids = set()
-                                    for _p in (positions or []):
+                                    for _p in positions or []:
                                         c = str(_field(_p, "comment", "") or "")
-                                        m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                                        m = re.search(
+                                            r"burst_scalping\|basket=([A-Za-z0-9_]+)", c
+                                        )
                                         if m:
                                             ids.add(m.group(1))
                                     return ids
 
-                                sym = str(td.get("asset") or td.get("symbol") or "").upper()
+                                sym = str(
+                                    td.get("asset") or td.get("symbol") or ""
+                                ).upper()
                                 pos_sym = mt5_connector.get_positions(symbol=sym) or []
                                 burst_ids_sym = _open_burst_ids(pos_sym)
                                 if burst_ids_sym:
-                                    logger.info(f"⛔ [BURST GUARD][{sym}] Panier(s) actif(s): {', '.join(sorted(burst_ids_sym))} → skip décision.")
+                                    logger.info(
+                                        f"⛔ [BURST GUARD][{sym}] Panier(s) actif(s): {', '.join(sorted(burst_ids_sym))} → skip décision."
+                                    )
                                     continue
                     except Exception as e:
-                        logger.warning(f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}")
+                        logger.warning(
+                            f"[BURST GUARD][{td.get('asset','?')}] check symbole échoué: {e}"
+                        )
 
                     if _execute_single_decision(
                         td,
@@ -1042,8 +1172,13 @@ def run_single_pipeline_cycle(
                         logger,
                     ):
                         trade_executed_successfully = True
-                        burst_cfg  = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
-                        trail_cfg  = burst_cfg.get("trailing", {}) or {}
+                        burst_cfg = (
+                            base_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            or {}
+                        )
+                        trail_cfg = burst_cfg.get("trailing", {}) or {}
                         trade_executor.monitor_burst_baskets(
                             config=base_config,
                             max_loss_pips=15.0,
@@ -1106,6 +1241,7 @@ def run_single_pipeline_cycle(
         except Exception:
             pass
         return trade_executed_successfully
+
 
 def main(args: argparse.Namespace) -> None:
     """
@@ -1211,7 +1347,7 @@ def main(args: argparse.Namespace) -> None:
         from run_bot import verify_environment_and_config, run_single_pipeline_cycle
 
         verify_environment_and_config(config_manager, mt5_connector, bot_mode)
-      
+
         default_cycle_interval_from_config = config_manager.get(
             "bot_behavior.cycle_interval_seconds", 23
         )
