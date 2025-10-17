@@ -702,9 +702,7 @@ def run_single_pipeline_cycle(
                                 asset, start_recent.to_pydatetime(), _now.to_pydatetime()
                             )
                         elif hasattr(mt5_connector, "get_ticks_last_seconds"):
-                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(
-                                asset, seconds=8
-                            )
+                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(asset, seconds=8)
                     except Exception:
                         ticks_recent_df = None
 
@@ -725,44 +723,83 @@ def run_single_pipeline_cycle(
                     if ok_fp:
                         # Construire la décision pour ton exécuteur actuel
                         # - rule_name=burst_scalping → tes gardes/trailing existants se branchent
-                        # - volume total = burst_count * burst_volume_each (compat logs pipeline)
-                        entry = dec_fp.get("entry", {})
+                        entry = dec_fp.get("entry", {}) or {}
+                        action = str(dec_fp.get("action", "")).upper()
+                        if action not in {"BUY", "SELL"}:
+                            logger.debug(f"[FOOTPRINT→DECISION][{asset}] skip: action invalide ({action})")
+                            raise RuntimeError("action invalid")
+
                         burst_count = int(entry.get("burst_count", 5))
                         burst_each = float(entry.get("burst_volume_each", 0.02))
                         total_volume = round(burst_count * burst_each, 5)
 
-                        fp_decision = {
-                            "rule_name": "burst_scalping",
-                            "action": dec_fp.get("action"),
-                            "asset": dec_fp.get("asset", asset),
-                            "volume": total_volume,                # compat affichage pipeline
-                            "entry_style": entry.get("style", "LIMIT_FOK"),
-                            "price": float(entry.get("price")),
-                            "burst_count": burst_count,
-                            "burst_volume_each": burst_each,
-                            "validity_ms": int(entry.get("validity_ms", 800)),
-                            # Important pour exécuteur: pas de fallback, pas de TP
-                            "no_fallback": True,
-                            "no_tp": True,
-                            # On garde l’info exit phases pour l’intégration du trailing avancé plus tard
-                            "footprint_exit": dec_fp.get("exit", {}),
-                            # Télémétrie contextuelle
-                            "trigger": dec_fp.get("trigger"),
-                            "confidence": float(dec_fp.get("confidence", 0.7)),
-                            "footprint_meta": dec_fp.get("meta", {}),
-                        }
-                        footprint_scalping_decisions.append(fp_decision)
+                        # 2) Prix d'entrée — fallback Ask/Bid si manquant (critique pour FOK)
+                        price_val = float(entry.get("price", 0.0) or 0.0)
+                        if price_val <= 0.0:
+                            price_val = None
+                            # a) via wrapper éventuel
+                            try:
+                                if hasattr(mt5_connector, "get_symbol_tick"):
+                                    tk = mt5_connector.get_symbol_tick(asset)
+                                    if tk is not None:
+                                        if isinstance(tk, dict):
+                                            ask = tk.get("ask")
+                                            bid = tk.get("bid")
+                                        else:
+                                            ask = getattr(tk, "ask", None)
+                                            bid = getattr(tk, "bid", None)
+                                        if action == "BUY" and ask:
+                                            price_val = float(ask)
+                                        elif action == "SELL" and bid:
+                                            price_val = float(bid)
+                            except Exception:
+                                price_val = None
+                            # b) fallback direct via module MT5 natif
+                            if price_val is None:
+                                try:
+                                    mt5mod = getattr(mt5_connector, "mt5", None)
+                                    if mt5mod:
+                                        tk = mt5mod.symbol_info_tick(asset)
+                                        if tk:
+                                            price_val = float(tk.ask if action == "BUY" else tk.bid)
+                                except Exception:
+                                    price_val = None
 
-                        logger.info(
-                            f"[FOOTPRINT→DECISION][{asset}] "
-                            f"{fp_decision['action']} burst x{burst_count}@{fp_decision['price']} "
-                            f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
-                        )
+                        if not price_val:
+                            logger.error(f"[FOOTPRINT→DECISION][{asset}] impossible d'obtenir le prix (Ask/Bid) → skip.")
+                            # On n’ajoute PAS de décision invalide (évite '[BURST] Paramètres d'entrée invalides.')
+                        else:
+                            fp_decision = {
+                                "rule_name": "burst_scalping",
+                                "action": action,
+                                "asset": dec_fp.get("asset", asset),
+                                "volume": total_volume,                      # compat affichage pipeline
+                                "entry_style": entry.get("style", "LIMIT_FOK"),
+                                "price": float(price_val),
+                                "burst_count": burst_count,
+                                "burst_volume_each": burst_each,
+                                "validity_ms": int(entry.get("validity_ms", 800)),
+                                # Important pour exécuteur: pas de fallback, pas de TP
+                                "no_fallback": True,
+                                "no_tp": True,
+                                # On garde l’info exit phases pour l’intégration du trailing avancé plus tard
+                                "footprint_exit": dec_fp.get("exit", {}),
+                                # Télémétrie contextuelle
+                                "trigger": dec_fp.get("trigger"),
+                                "confidence": float(dec_fp.get("confidence", 0.7)),
+                                "footprint_meta": dec_fp.get("meta", {}),
+                            }
+                            footprint_scalping_decisions.append(fp_decision)
+
+                            logger.info(
+                                f"[FOOTPRINT→DECISION][{asset}] "
+                                f"{fp_decision['action']} burst x{burst_count}@{fp_decision['price']} "
+                                f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
+                            )
                     else:
                         logger.debug(f"[FOOTPRINT→DECISION][{asset}] skip: {dec_fp.get('reason')}")
                 except Exception as e:
                     logger.error(f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True)
-
 
                 # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
                 try:
