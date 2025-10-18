@@ -28,7 +28,7 @@ from .types import (
     PhaseMemory,
 )
 
-from .features import FeaturesExtractor  # ✅ on importe la classe, plus les fonctions
+from .features import FeaturesExtractor  
 from .detectors import Detectors
 from reporter import PhaseObserverReporter
 from datetime import datetime, timezone

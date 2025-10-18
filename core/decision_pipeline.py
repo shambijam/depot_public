@@ -14,6 +14,7 @@ from core.utils import ConfigValidationError, TradeStatus, normalize_levels
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
+from phase_observer.footprint_analyzer import FootprintAnalyzer
 
 # PATCH PIPE-IMP-1 — import du pipeline (chemin: strategy/pipeline.py)
 try:
