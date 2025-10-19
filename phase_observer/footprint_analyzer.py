@@ -1,28 +1,28 @@
-#phase_observer/footprint_analyzer.py
-
+# phase_observer/footprint_analyzer.py
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Any, Tuple, Optional, List, Union
+from typing import Dict, Any, Tuple, Optional, List
 import pandas as pd
 import numpy as np
 from contextlib import contextmanager
 import time
 
+# Tes détecteurs “maison”
 from .detectors import (
     detect_imbalance_stacking,
     detect_absorption_reject,
     detect_volume_climax_after_consolidation,
 )
 
-
 """
 Footprint Trigger Analysis — Fixed & Enhanced
-- Param mapping correct vers chaque détecteur (plus d'kwargs inattendus)
+---------------------------------------------
+- Param mapping correct vers chaque détecteur (plus d'**kwargs inattendus)
 - Multi-fenêtres + double passe (normal/soft)
-- Sélection du meilleur trigger (alias + priorités cohérentes)
-- Fallbacks micro (stack/absorption) implémentés
-- Validation et normalisation tolérantes (feed-agnostic)
+- Sélection du meilleur trigger (priorités cohérentes + alias)
+- Fallbacks micro (stacking / absorption) si rien
+- Validation & normalisation tolérantes (feeds variés)
 - Observabilité (timings) sans garde-fous bloquants
 """
 
@@ -157,33 +157,50 @@ class DataValidator:
     def validate_ticks(ticks: pd.DataFrame) -> ValidationResult:
         if ticks is None or ticks.empty:
             return ValidationResult(False, ErrorCode.INSUFFICIENT_DATA, "Ticks dataframe is empty")
+
         cols = set(ticks.columns)
-        has_price = ("price" in cols) or ({"bid","ask"} <= cols) or ("last" in cols)
-        has_vol   = any(c in cols for c in ("volume","size","qty","amount","vol"))
+        has_price = ("price" in cols) or ({"bid", "ask"} <= cols) or ("last" in cols)
+        has_vol   = any(c in cols for c in ("volume", "size", "qty", "amount", "vol"))
         if not has_price or not has_vol:
             return ValidationResult(False, ErrorCode.DATA_VALIDATION, "Missing price/volume-like columns")
-        if "price" in cols and (ticks["price"] <= 0).any():
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, "Detected non-positive prices")
-        return ValidationResult(True, metrics={"row_count": len(ticks)})
+
+        if "price" in cols:
+            try:
+                if (ticks["price"] <= 0).any():
+                    return ValidationResult(False, ErrorCode.DATA_VALIDATION, "Detected non-positive prices")
+            except Exception:
+                pass  # feed exotique → on laisse passer
+
+        return ValidationResult(True, metrics={"row_count": int(len(ticks))})
 
     @staticmethod
     def validate_bars(bars: pd.DataFrame) -> ValidationResult:
         if bars is None or bars.empty:
             return ValidationResult(True, message="Bars optional, skipping")
+        cols = set(bars.columns)
         required = {"open","high","low","close"}
-        missing = required - set(bars.columns)
+        missing = required - cols
         if missing:
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Bars missing: {missing}")
-        invalid = (
-            (bars["high"] < bars["low"]) |
-            (bars["high"] < bars["open"]) |
-            (bars["high"] < bars["close"]) |
-            (bars["low"]  > bars["open"]) |
-            (bars["low"]  > bars["close"])
-        )
-        if invalid.any():
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Invalid OHLC in {invalid.sum()} bars")
-        return ValidationResult(True, metrics={"bar_count": len(bars)})
+            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Bars missing: {sorted(missing)}")
+        try:
+            invalid = (
+                (bars["high"] < bars["low"]) |
+                (bars["high"] < bars["open"]) |
+                (bars["high"] < bars["close"]) |
+                (bars["low"]  > bars["open"]) |
+                (bars["low"]  > bars["close"])
+            )
+            if invalid.any():
+                return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Invalid OHLC in {int(invalid.sum())} bars")
+        except Exception as e:
+            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"OHLC validation failed: {e}")
+
+        vol_col = None
+        for c in ("volume", "tick_volume", "tickVolume", "vol"):
+            if c in cols:
+                vol_col = c
+                break
+        return ValidationResult(True, metrics={"bar_count": int(len(bars)), "vol_col": vol_col})
 
 
 class DatetimeNormalizer:
@@ -203,15 +220,18 @@ class DatetimeNormalizer:
 
     @classmethod
     def normalize_dataframe(cls, df: pd.DataFrame, prefer_col: str = "dt") -> pd.DataFrame:
-        if df is None or df.empty: return df
+        if df is None or df.empty:
+            return df
         if pd.api.types.is_datetime64_any_dtype(df.index):
             df.index = cls.normalize_index(df.index)
         dt_cols = [c for c in ("dt","datetime","timestamp","time") if c in df.columns]
         for c in dt_cols:
             if pd.api.types.is_datetime64_any_dtype(df[c]) or pd.api.types.is_object_dtype(df[c]):
                 df[c] = cls.normalize_series(df[c])
-        picked = next((c for c in (prefer_col,"dt","datetime","timestamp","time")
-                      if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c])), None)
+        picked = next((
+            c for c in (prefer_col,"dt","datetime","timestamp","time")
+            if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c])
+        ), None)
         if picked is None and pd.api.types.is_datetime64_any_dtype(df.index):
             df["dt"] = df.index; picked = "dt"
         if picked:
@@ -234,6 +254,7 @@ class ConfidenceScorer:
 
     @staticmethod
     def boost_from_metadata(decision: Dict[str, Any], meta: Dict[str, Any], price_step: float) -> float:
+        meta = meta or {}
         conf = float(decision.get("confidence", 0.7) or 0.7)
         sdir = 1 if str(decision.get("direction","BUY")).upper() == "BUY" else -1
         dtot = float(meta.get("delta_total", 0.0) or 0.0)
@@ -248,7 +269,8 @@ class ConfidenceScorer:
     @staticmethod
     def select_best_decision(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         valid = [c for c in candidates if c and c.get("ok")]
-        if not valid: return None
+        if not valid:
+            return None
         prio = {
             TriggerType.STACKING.value: 3,
             TriggerType.CLIMAX.value: 2,
@@ -256,10 +278,10 @@ class ConfidenceScorer:
             TriggerType.MICRO_STACK.value: 1.2,
             TriggerType.MICRO_ABSORPTION.value: 1.0,
         }
-        valid.sort(key=lambda d: (float(d.get("confidence", 0.0)),
-                                  prio.get(ConfidenceScorer._alias(d.get("trigger")), 0)),
-                   reverse=True)
-        # ré-écrit l'étiquette normalisée pour la sortie
+        valid.sort(
+            key=lambda d: (float(d.get("confidence", 0.0)), prio.get(ConfidenceScorer._alias(d.get("trigger")), 0)),
+            reverse=True
+        )
         best = valid[0]
         best["trigger"] = ConfidenceScorer._alias(best.get("trigger"))
         return best
@@ -276,7 +298,7 @@ class PerformanceMonitor:
             self._record_metric(f"footprint.{phase_name}.duration_ms", elapsed_ms)
 
     def _record_metric(self, metric_name: str, value: float):
-        # branche ici vers Prometheus/StatsD si tu veux
+        # Plug vers Prometheus/StatsD si besoin
         pass
 
 
@@ -300,7 +322,7 @@ class FootprintAnalyzer:
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
         with self.monitor.measure_phase("total"):
-            # pré-traitement feed-agnostic (price/volume)
+            # 0) pré-traitement feed-agnostic (price/volume)
             ticks = self._ensure_price_volume_columns(ticks)
 
             # 1) validation
@@ -385,11 +407,6 @@ class FootprintAnalyzer:
         # --- imports dynamiques ---
         try:
             from .features import _compute_footprint_snapshot
-            from .detectors import (
-                detect_volume_climax_after_consolidation,
-                detect_imbalance_stacking,
-                detect_absorption_reject,
-            )
         except Exception as e:
             self._log_error("imports", e)
             return None, None, None
@@ -405,7 +422,6 @@ class FootprintAnalyzer:
             )
             if df_levels is None or df_levels.empty:
                 return None, None, None
-            # (optionnel) s'assurer d'un index trié croissant en prix
             try:
                 df_levels = df_levels.sort_index()
             except Exception:
@@ -418,10 +434,10 @@ class FootprintAnalyzer:
 
         # --- 1) Climax (bars optionnelles) ---
         if bars is not None and not getattr(bars, "empty", True):
+            climax_kwargs = {}
             try:
                 lookback = int(params.get("climax_lookback_bars", cfg.climax_lookback_bars))
-                # slice perf: ne garde que la zone utile (+ marge)
-                bar_slice = bars.tail(max(lookback + 5, 30))
+                bar_slice = bars.tail(max(lookback + 5, 30))  # slice perf
                 climax_kwargs = dict(
                     lookback_bars=lookback,
                     vol_ratio_min=float(params.get("climax_vol_ratio_min", cfg.climax_vol_ratio_min)),
@@ -436,6 +452,7 @@ class FootprintAnalyzer:
                 self._log_error("climax_detection", e, {"kwargs": climax_kwargs, "window_s": window_s})
 
         # --- 2) Stacking ---
+        stack_kwargs = {}
         try:
             stack_kwargs = dict(
                 delta_ratio_min=float(params.get("stack_delta_ratio_min", cfg.stack_delta_ratio_min)),
@@ -450,6 +467,7 @@ class FootprintAnalyzer:
             self._log_error("stacking_detection", e, {"kwargs": stack_kwargs, "window_s": window_s})
 
         # --- 3) Absorption ---
+        abs_kwargs = {}
         try:
             abs_kwargs = dict(
                 vol_zscore_min=float(params.get("abs_vol_z_min", cfg.abs_vol_z_min)),
@@ -464,7 +482,6 @@ class FootprintAnalyzer:
 
         # --- 4) Fallbacks micro si rien ---
         if not candidates:
-            # vérifie colonnes nécessaires avant d'appeler
             cols = set(df_levels.columns)
             if {"vol", "delta", "delta_ratio"}.issubset(cols):
                 fb1 = self._micro_stacking(df_levels)
@@ -484,9 +501,7 @@ class FootprintAnalyzer:
         if not best:
             return None, meta, window_s
 
-        # normalise l'étiquette et enrichit la meta avec la fenêtre utilisée
         try:
-            # si tu as exposé _alias publiquement, sinon laisse la normalisation au select_best_decision
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
         except Exception:
             pass
@@ -494,6 +509,7 @@ class FootprintAnalyzer:
         return best, meta, window_s
 
     def _build_trigger_response(self, asset: str, decision: Dict[str, Any], meta: Dict[str, Any], window_used: int) -> Dict[str, Any]:
+        meta = meta or {}
         direction = str(decision.get("direction","BUY")).upper()
         return TriggerDecision(
             action="BUY" if direction == "BUY" else "SELL",
@@ -501,47 +517,58 @@ class FootprintAnalyzer:
             trigger=decision.get("trigger","footprint"),
             confidence=float(decision.get("confidence",0.7) or 0.7),
             anchor_price=float(decision.get("anchor_price", meta.get("poc", 0.0))),
-            meta={**(meta or {}), **(decision.get("meta",{}) or {}), "window_used": int(window_used)},
+            meta={**meta, **(decision.get("meta",{}) or {}), "window_used": int(window_used)},
         ).to_dict()
 
     # ------------------- fallbacks micro -------------------
 
     def _micro_stacking(self, df_levels: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """2-3 niveaux adjacents, même signe, delta_ratio > 1.1 (tolère 1 petit gap)."""
+        """2-3 niveaux adjacents, même signe, delta_ratio > 1.1 (tolère 1 gap)."""
         try:
             lv = df_levels
             req = {"vol","delta","delta_ratio"}
-            if any(c not in lv.columns for c in req): return None
+            if any(c not in lv.columns for c in req):
+                return None
             lv = lv[lv["vol"] > 0].sort_index()
-            if lv.empty: return None
+            if lv.empty:
+                return None
 
             idx = lv.index.values.astype(float)
             sign = np.sign(lv["delta"].values)
             ratio = lv["delta_ratio"].values
 
             diffs = np.diff(np.unique(idx))
-            step = np.quantile(diffs[diffs>0], 0.1) if len(diffs)>0 else 0.0
+            step = np.quantile(diffs[diffs > 0], 0.1) if len(diffs) > 0 else 0.0
 
             i = 0
-            while i < len(idx)-1:
-                if sign[i]==0 or ratio[i] < 1.1:
-                    i += 1; continue
-                j = i+1; gaps=0; run=1; sgn=sign[i]
+            while i < len(idx) - 1:
+                if sign[i] == 0 or ratio[i] < 1.1:
+                    i += 1
+                    continue
+                j = i + 1
+                gaps = 0
+                run = 1
+                sgn = sign[i]
                 while j < len(idx):
-                    if sign[j] != sgn or ratio[j] < 1.1: break
-                    if step>0 and (idx[j]-idx[j-1]) > 1.6*step:
+                    if sign[j] != sgn or ratio[j] < 1.1:
+                        break
+                    if step > 0 and (idx[j] - idx[j - 1]) > 1.6 * step:
                         gaps += 1
-                        if gaps>1: break
-                    run += 1; j += 1
+                        if gaps > 1:
+                            break
+                    run += 1
+                    j += 1
                 if run >= 2:
-                    direction = "BUY" if sgn>0 else "SELL"
-                    anchor = float(idx[j-1])
-                    conf = min(0.9, 0.55 + 0.15*(run-2) + 0.1*np.clip(ratio[i:j].mean()/1.1, 0, 1.5))
+                    direction = "BUY" if sgn > 0 else "SELL"
+                    anchor = float(idx[j - 1])
+                    conf = min(0.9, 0.55 + 0.15 * (run - 2) + 0.1 * np.clip(ratio[i:j].mean() / 1.1, 0, 1.5))
                     return {
-                        "ok": True, "trigger": TriggerType.MICRO_STACK.value,
-                        "direction": direction, "confidence": float(conf),
+                        "ok": True,
+                        "trigger": TriggerType.MICRO_STACK.value,
+                        "direction": direction,
+                        "confidence": float(conf),
                         "anchor_price": anchor,
-                        "meta": {"levels": int(run), "delta_ratio_mean": float(ratio[i:j].mean())}
+                        "meta": {"levels": int(run), "delta_ratio_mean": float(ratio[i:j].mean())},
                     }
                 i = j
             return None
@@ -553,24 +580,28 @@ class FootprintAnalyzer:
         try:
             lv = df_levels
             req = {"zscore_vol","delta_ratio","delta"}
-            if any(c not in lv.columns for c in req): return None
+            if any(c not in lv.columns for c in req):
+                return None
             lv = lv.sort_index()
             cand = lv[(lv["zscore_vol"] >= 1.1) & (lv["delta_ratio"] <= 0.6)]
-            if cand.empty: return None
+            if cand.empty:
+                return None
             for price, row in cand.iterrows():
                 i = lv.index.get_loc(price)
                 neigh = []
-                if i>0: neigh.append(lv.iloc[i-1])
-                if i+1<len(lv): neigh.append(lv.iloc[i+1])
+                if i > 0: neigh.append(lv.iloc[i - 1])
+                if i + 1 < len(lv): neigh.append(lv.iloc[i + 1])
                 for nb in neigh:
                     if np.sign(nb["delta"]) != np.sign(row["delta"]) and nb["delta_ratio"] >= 0.6:
-                        direction = "BUY" if nb["delta"]>0 else "SELL"
-                        conf = min(0.9, 0.6 + 0.2*(row["zscore_vol"]/1.1))
+                        direction = "BUY" if nb["delta"] > 0 else "SELL"
+                        conf = min(0.9, 0.6 + 0.2 * (row["zscore_vol"] / 1.1))
                         return {
-                            "ok": True, "trigger": TriggerType.MICRO_ABSORPTION.value,
-                            "direction": direction, "confidence": float(conf),
+                            "ok": True,
+                            "trigger": TriggerType.MICRO_ABSORPTION.value,
+                            "direction": direction,
+                            "confidence": float(conf),
                             "anchor_price": float(nb.name),
-                            "meta": {"absorbed_level": float(price), "absorbed_zscore": float(row["zscore_vol"])}
+                            "meta": {"absorbed_level": float(price), "absorbed_zscore": float(row["zscore_vol"])},
                         }
             return None
         except Exception:
@@ -586,7 +617,7 @@ class FootprintAnalyzer:
             elif "bid" in df.columns and "ask" in df.columns:
                 df["price"] = (df["bid"] + df["ask"]) * 0.5
         if "volume" not in df.columns:
-            for alt in ("volume","size","qty","amount","vol"):
+            for alt in ("volume", "size", "qty", "amount", "vol"):
                 if alt in df.columns:
                     df["volume"] = df[alt]
                     break
@@ -595,17 +626,18 @@ class FootprintAnalyzer:
     def _log_error(self, context: str, error: Exception, extras: Dict[str, Any] = None):
         if self.logger:
             try:
-                self.logger.error(f"[FootprintAnalyzer] {context} failed",
-                                  extra={"error": str(error), "context": context, **(extras or {})})
+                self.logger.error(
+                    f"[FootprintAnalyzer] {context} failed",
+                    extra={"error": str(error), "context": context, **(extras or {})}
+                )
             except Exception:
-                # éviter crash si logger n'accepte pas extra
                 self.logger.error(f"[FootprintAnalyzer] {context} failed: {error}")
         else:
             print(f"[ERROR] {context}: {error} | {extras or {}}")
 
 
 # ========================= wrapper (même signature) =========================
-# -> drop-in replacement : garde ton API existante
+# -> drop-in : si un vieux appel importe directement cette fonction
 
 def analyze_footprint_triggers(
     self,

@@ -1,8 +1,10 @@
+# phase_observer/market_analyzer.py
+
 import logging
 import pandas as pd
 from typing import Dict, Any, Tuple
 from .orchestrator import PhaseObserver
-from .footprint_analyzer import FootprintAnalyzer 
+
 from .detectors import (
     detect_single_candle,
     detect_multi_candle_patterns,
@@ -12,7 +14,8 @@ from .detectors import (
     detect_absorption_reject,
     detect_volume_climax_after_consolidation,
 )
-
+from .footprint_analyzer import FootprintAnalyzer 
+self.footprint = FootprintAnalyzer(logger=self.logger)
 LOG = logging.getLogger(__name__)
 
 
@@ -23,7 +26,8 @@ class MarketAnalyzer:
         self.phase_observer = PhaseObserver(config_manager=config_manager)
         self._last_results: Dict[str, Any] = {}
         self._confluence_cache: Dict[str, pd.DataFrame] = {}
-
+        self.footprint = FootprintAnalyzer(logger=self.logger)
+        
     # ============================================================
     # 🔹 Analyse unifiée
     # ============================================================

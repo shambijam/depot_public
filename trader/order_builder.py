@@ -1,0 +1,1149 @@
+#trader/order_builder.py - Module de Construction d'Ordres pour le Bot SNIPER_X
+from __future__ import annotations
+
+import math
+import re
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, Optional
+from trader.errors import TradeExecutionError
+
+
+
+def prepare_order(self, decision_package: dict) -> dict:
+    """
+    Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
+    Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
+    avant toute requête MT5.
+
+    ✅ Décision unique du volume
+    - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
+    Tout volume présent dans la décision est ignoré.
+    """
+  
+    self.logger.info("Préparation de l'ordre MT5...")
+
+    # --- Unpack sûrs pour éviter les UnboundLocalError ---
+    trade_decision = (decision_package or {}).get("trade_decision", {}) or {}
+    market_context = (decision_package or {}).get("market_context", {}) or {}
+    active_config = (decision_package or {}).get("active_config", {}) or {}
+
+    # --- Raccourcis locaux (laisse ta redondance, inoffensive) ---
+    trade_decision = decision_package.get("trade_decision", {}) or {}
+    active_config = (
+        decision_package.get("active_config")
+        or decision_package.get("config_used")
+        or {}
+    )
+    market_context = decision_package.get("market_context", {}) or {}
+
+    # ---------- Helpers internes ----------
+    def _first_non_empty(*vals):
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    def _normalize_action(a: str) -> str:
+        a = (a or "").strip().upper()
+        mapping = {
+            "BUY": "BUY",
+            "SELL": "SELL",
+            "LONG": "BUY",
+            "SHORT": "SELL",
+            "CLOSE": "CLOSE",
+        }
+        return mapping.get(a, "")
+
+    def _normalize_volume(symbol_info, vol: float) -> float:
+        """
+        Clamp & round le volume selon les contraintes du symbole MT5.
+        Ne modifie pas la précision naturelle du broker (évite l'arrondi 2 décimales forcé).
+        """
+        try:
+            vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+            vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+            vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+        except Exception:
+            vmin, vmax, vstep = 0.01, 100.0, 0.01
+
+        if not isinstance(vol, (int, float)) or vol <= 0:
+            # 🔴 Aucun fallback arbitraire — on refuse un volume invalide
+            raise TradeExecutionError(
+                f"Volume invalide pour normalisation ({vol})."
+            )
+
+        # Clamp dans les bornes broker
+        vol = max(vmin, min(vmax, float(vol)))
+
+        # 🔧 Arrondi propre au pas broker
+        if vstep > 0:
+            steps = round((vol - vmin) / vstep)
+            vol = vmin + steps * vstep
+            if vol > vmax:
+                vol = vmax
+
+        # 🔒 Sécurité plancher
+        if vol < vmin:
+            vol = vmin
+
+        return round(
+            vol, 8
+        )  # précision suffisante sans écraser la granularité broker
+
+    # ---------- 1) Action ----------
+    action_raw = _first_non_empty(
+        trade_decision.get("final_action"),
+        trade_decision.get("selected_action"),
+        trade_decision.get("core_action"),
+        trade_decision.get("action"),
+        trade_decision.get("side"),
+        trade_decision.get("direction"),
+    )
+    action = _normalize_action(action_raw)
+
+    if not action:
+        msg = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)."
+        self.logger.error(msg)
+        raise TradeExecutionError(msg)
+
+    # ---------- 2) Asset ----------
+    raw_symbol = _first_non_empty(
+        trade_decision.get("asset"),
+        trade_decision.get("symbol"),
+        trade_decision.get("instrument"),
+    )
+    if not raw_symbol or raw_symbol.upper() == "UNKNOWN":
+        msg = "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
+        self.logger.error(msg)
+        raise TradeExecutionError(msg)
+
+    raw_symbol = raw_symbol.upper()
+
+    allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
+    if allowed and raw_symbol not in allowed:
+        msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
+        self.logger.error(msg)
+        raise TradeExecutionError(msg)
+
+    # ---------- 3) Mapping broker ----------
+    # 1) mapping de compte (prioritaire)  2) mapping global  3) défaut = raw
+    broker_map_acct = (
+        market_context.get("active_broker_account", {}).get("symbol_map") or {}
+    )
+    broker_map_global = self.config_manager.get("asset_symbol_mapping", {}) or {}
+    broker_symbol = (
+        str(
+            broker_map_acct.get(
+                raw_symbol, broker_map_global.get(raw_symbol, raw_symbol)
+            )
+        )
+        .strip()
+        .upper()
+    )
+
+    if not broker_symbol or broker_symbol == "UNKNOWN":
+        msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
+        self.logger.error(msg)
+        raise TradeExecutionError(msg)
+
+    # ---------- 3bis) Fenêtre/Calendrier de trading (hard block) ----------
+    try:
+        tes = self.config_manager.get("trade_executor_settings", {}) or {}
+        start_h = int(tes.get("trading_start_hour_utc", 0))
+        end_h = int(tes.get("trading_end_hour_utc", 24))
+        allowed_wd = set(tes.get("allowed_weekdays", list(range(7))))
+    except Exception:
+        start_h, end_h, allowed_wd = 0, 24, set(range(7))
+
+    now_utc = datetime.utcnow()
+    if now_utc.weekday() not in allowed_wd:
+        raise TradeExecutionError(
+            f"Jour non autorisé pour trader (weekday={now_utc.weekday()})."
+        )
+    if not (start_h <= now_utc.hour < end_h):
+        raise TradeExecutionError(
+            f"Hors fenêtre horaire UTC ({start_h:02d}-{end_h:02d})."
+        )
+
+    # ---------- [BURST GUARDRAILS] ----------
+    try:
+        rule_name = str(trade_decision.get("rule_name", "")).lower()
+        if rule_name == "burst_scalping":
+            burst_cfg = (
+                active_config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+            ) or {}
+            guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+            max_open_positions = int(guard_cfg.get("max_open_positions", 5))
+            cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
+            enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
+            single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+
+            import re, time
+
+            def _field(obj, key, default=None):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            # 1) Récup selon le scope
+            if single_burst_global:
+                all_open = self.mt5_connector.get_positions() or []
+                scope_lbl = "global"
+            else:
+                all_open = (
+                    self.mt5_connector.get_positions(symbol=broker_symbol) or []
+                )
+                scope_lbl = broker_symbol
+
+            # 2) Détection des paniers burst via 'burst_scalping|basket='
+            open_burst_ids = set()
+            for p in all_open:
+                c = str(_field(p, "comment", "") or "")
+                m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                if m:
+                    open_burst_ids.add(m.group(1))
+
+            now_ts = time.time()
+
+            # 3) Interdiction si un panier existe déjà
+            if enforce_closure and len(open_burst_ids) > 0:
+                raise TradeExecutionError(
+                    f"⛔ Burst guard ({scope_lbl}): panier(s) en cours = {', '.join(sorted(open_burst_ids))} → interdit d’en démarrer un nouveau."
+                )
+
+            # 4) Cooldown anti-burst rapproché
+            last_burst_time = getattr(self, "_last_burst_time", 0)
+            if (
+                cooldown_seconds > 0
+                and (now_ts - last_burst_time) < cooldown_seconds
+            ):
+                raise TradeExecutionError(
+                    f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
+                )
+
+            # 5) max_open_positions (info only ici)
+            self.logger.info(
+                f"[BURST GUARD] OK pour démarrer (scope={scope_lbl}, aucun panier actif, cooldown OK)."
+            )
+
+    except TradeExecutionError:
+        raise
+    except Exception as e:
+        self.logger.warning(f"[BURST GUARD] Vérification partielle échouée: {e}")
+
+    # ---------- 4) Cas CLOSE ----------
+    if action == "CLOSE":
+        return {
+            "action": "CLOSE",
+            "symbol": broker_symbol,
+            "order_id": trade_decision.get("order_id", str(uuid.uuid4())),
+            "ticket_to_close": trade_decision.get("ticket_to_close"),
+        }
+
+    # ---------- 5) order_type sécurisé ----------
+    order_type = str(trade_decision.get("order_type", "MARKET")).upper()
+    allowed_order_types = {
+        "MARKET",
+        "BUY_LIMIT",
+        "SELL_LIMIT",
+        "BUY_STOP",
+        "SELL_STOP",
+    }
+    if order_type not in allowed_order_types:
+        self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
+        order_type = "MARKET"
+
+    try:
+        # ---------- 6) Résolution + infos symbole ----------
+        resolved_symbol = self.mt5_connector.resolve_broker_symbol(broker_symbol)
+        if not resolved_symbol:
+            msg = (
+                f"Symbole MT5 introuvable pour '{broker_symbol}'. "
+                f"Vérifie la correspondance broker / Market Watch."
+            )
+            self.logger.error(msg)
+            raise TradeExecutionError(msg)
+
+        symbol_info = self.mt5_connector.get_symbol_info(resolved_symbol)
+        if not symbol_info:
+            msg = (
+                f"Symbole MT5 invalide ou introuvable ({resolved_symbol}). "
+                f"Vérifie la correspondance broker."
+            )
+            self.logger.error(msg)
+            raise TradeExecutionError(msg)
+
+        # ⚠️ À partir d’ici on travaille UNIQUEMENT avec resolved_symbol
+        broker_symbol = resolved_symbol
+
+        # log contraintes volume broker
+        try:
+            self.logger.info(
+                f"[VOLUME] constraints broker {broker_symbol}: "
+                f"min={getattr(symbol_info,'volume_min',None)}, "
+                f"step={getattr(symbol_info,'volume_step',None)}, "
+                f"max={getattr(symbol_info,'volume_max',None)}"
+            )
+        except Exception:
+            pass
+
+        # ---------- 6bis) Spread guard (en pips) ----------
+        try:
+            spread_pips = float(self.mt5_connector.get_spread_pips(broker_symbol))
+        except Exception:
+            spread_pips = float("inf")
+
+        entry_rules = (active_config.get("entry_rules") or {}).get("scalping") or {}
+        cap_soft = entry_rules.get("max_spread_pips")
+        cap_hard = entry_rules.get("hard_max_spread_pips")
+
+        max_spread_cap = None
+        if isinstance(cap_soft, (int, float)):
+            max_spread_cap = float(cap_soft)
+        if isinstance(cap_hard, (int, float)):
+            max_spread_cap = (
+                min(max_spread_cap, float(cap_hard))
+                if max_spread_cap is not None
+                else float(cap_hard)
+            )
+
+        if max_spread_cap is not None:
+            if not math.isfinite(spread_pips) or spread_pips > max_spread_cap:
+                raise TradeExecutionError(
+                    f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips."
+                )
+
+        # ---------- 7) Prix d'entrée ----------
+        entry_price_market = self.mt5_connector.get_current_price(
+            broker_symbol, action
+        )
+        if not entry_price_market or entry_price_market <= 0:
+            raise TradeExecutionError(
+                f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
+            )
+
+        entry_price_hint = trade_decision.get("entry_price")
+        trigger_price = trade_decision.get("trigger_price")
+        if trigger_price is None:
+            if (
+                order_type != "MARKET"
+                and isinstance(entry_price_hint, (int, float))
+                and entry_price_hint > 0
+            ):
+                trigger_price = entry_price_hint
+            else:
+                trigger_price = entry_price_market
+
+        # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
+        rule_name_local = str(trade_decision.get("rule_name", "")).lower()
+        is_burst = (rule_name_local == "burst_scalping")
+
+        if is_burst:
+            # Burst : SL OBLIGATOIRE, aucun TP (trailing-only)
+            sl_candidate = trade_decision.get("sl_price", None)
+            try:
+                sl_price = float(sl_candidate) if sl_candidate is not None else 0.0
+            except Exception:
+                sl_price = 0.0
+
+            if not (isinstance(sl_price, float) and math.isfinite(sl_price) and sl_price > 0.0):
+                # Fallback : calculer un SL via le moteur SL/TP
+                sl_calc, _tp_ignored = self._calculate_sl_tp_prices(
+                    trade_decision,
+                    active_config,
+                    symbol_info,
+                    entry_price_market,
+                    market_context,
+                )
+                sl_price = float(sl_calc or 0.0)
+
+            if not (math.isfinite(sl_price) and sl_price > 0.0):
+                raise TradeExecutionError("Burst scalping: SL requis mais introuvable")
+
+            tp_price = None  # jamais de TP en burst
+        else:
+            # Autres stratégies → calcul normal SL/TP
+            sl_price, tp_price = self._calculate_sl_tp_prices(
+                trade_decision,
+                active_config,
+                symbol_info,
+                entry_price_market,
+                market_context,
+            )
+
+
+        # ---------- 8a) Sécurité broker & normalisation prix ----------
+        try:
+            import math  # ok si déjà importé
+
+            point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
+            tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
+            digits = int(
+                getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
+            )
+
+            # MetaTrader: stops_level / freeze_level en "points"
+            stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
+            freeze_level_pts = int(getattr(symbol_info, "freeze_level", 0) or 0)
+            broker_min = max(stops_level_pts, freeze_level_pts) * point  # en prix
+
+            # Param config: distance min en pips
+            cfg_min_pips = None
+            try:
+                cfg_min_pips = (active_config.get("execution", {}) or {}).get(
+                    "min_sl_tp_distance_pips", None
+                ) or (active_config.get("scalping", {}) or {}).get(
+                    "min_sl_tp_distance_pips", None
+                )
+            except Exception:
+                cfg_min_pips = None
+
+            pip_size = 10.0 * point
+            cfg_min_price = (
+                float(cfg_min_pips) * pip_size
+                if isinstance(cfg_min_pips, (int, float))
+                else 0.0
+            )
+
+            # Gap minimal final en prix
+            min_gap_price = max(3.0 * point, broker_min, cfg_min_price)
+
+            def _ceil_to_tick(x: float) -> float:
+                return round(math.ceil(x / tick) * tick, digits)
+
+            def _floor_to_tick(x: float) -> float:
+                return round(math.floor(x / tick) * tick, digits)
+
+            # Ajustements selon le type d'ordre
+            has_tp = (tp_price is not None) and (
+                rule_name_local != "burst_scalping"
+            )
+
+            if action == "BUY":
+                # SL en-dessous, TP au-dessus (si TP existe)
+                if (entry_price_market - sl_price) < min_gap_price:
+                    sl_price = entry_price_market - min_gap_price
+                if has_tp and (tp_price - entry_price_market) < min_gap_price:
+                    tp_price = entry_price_market + min_gap_price
+
+                # Arrondi à la grille
+                sl_price = _floor_to_tick(sl_price)
+                if has_tp:
+                    tp_price = _ceil_to_tick(tp_price)
+
+                # Cohérence finale (sans TP en burst)
+                if not (sl_price < entry_price_market):
+                    sl_price = _floor_to_tick(entry_price_market - min_gap_price)
+                if has_tp and not (entry_price_market < tp_price):
+                    tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
+
+            elif action == "SELL":
+                # SL au-dessus, TP en-dessous (si TP existe)
+                if (sl_price - entry_price_market) < min_gap_price:
+                    sl_price = entry_price_market + min_gap_price
+                if has_tp and (entry_price_market - tp_price) < min_gap_price:
+                    tp_price = entry_price_market - min_gap_price
+
+                # Arrondi à la grille
+                sl_price = _ceil_to_tick(sl_price)
+                if has_tp:
+                    tp_price = _floor_to_tick(tp_price)
+
+                # Cohérence finale (sans TP en burst)
+                if not (entry_price_market < sl_price):
+                    sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
+                if has_tp and not (tp_price < entry_price_market):
+                    tp_price = _floor_to_tick(entry_price_market - min_gap_price)
+
+            def _fmt(v):
+                return (
+                    f"{float(v):.{digits}f}"
+                    if isinstance(v, (int, float))
+                    else "None"
+                )
+
+            self.logger.info(
+                "[SAFETY] SL/TP normalisés | symbol=%s, entry=%s, SL=%s, TP=%s, min_gap=%s, stops_level=%s, freeze_level=%s",
+                broker_symbol,
+                _fmt(entry_price_market),
+                _fmt(sl_price),
+                _fmt(tp_price),
+                _fmt(min_gap_price),
+                str(stops_level_pts),
+                str(freeze_level_pts),
+            )
+
+        except Exception as e:
+            self.logger.warning(f"[SAFETY] Normalisation SL/TP échouée: {e}")
+
+        # ---------- 8bis) RR minimum (SOFT permissif) ----------
+        try:
+            min_rr = float(
+                self.config_manager.get("risk_management.min_rr", 0) or 0.0
+            )
+        except Exception:
+            min_rr = 0.0
+
+        rr_value = None
+
+        # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
+        if rule_name_local != "burst_scalping":
+            if min_rr > 0.0 and tp_price is not None:
+                if action == "BUY":
+                    risk = max(entry_price_market - sl_price, 0.0)
+                    reward = max(tp_price - entry_price_market, 0.0)
+                else:  # SELL
+                    risk = max(sl_price - entry_price_market, 0.0)
+                    reward = max(entry_price_market - tp_price, 0.0)
+
+                rr_value = (reward / risk) if risk > 0 else 0.0
+
+                if risk <= 0.0 or reward <= 0.0:
+                    self.logger.warning(
+                        f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
+                    )
+                elif rr_value < min_rr:
+                    self.logger.info(
+                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
+                    )
+
+        # ---------- 9) Volume (calcul unique via risk-based sizing) ----------
+        account_trade_settings = (
+            market_context.get("active_broker_account", {}).get(
+                "trade_settings", {}
+            )
+            or {}
+        )
+
+        # ✅ Prérequis : risque défini et SL valide
+        risk_pct = float(
+            account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0
+        )
+        if risk_pct <= 0 or not sl_price or sl_price <= 0:
+            raise TradeExecutionError(
+                f"Risk sizing impossible: risk%={risk_pct}, sl_price={sl_price}"
+            )
+
+        # ✅ Calcul unique via _calculate_risk_based_volume
+        volume_final = float(
+            self._calculate_risk_based_volume(
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": order_type,
+                    "confidence": trade_decision.get("confidence", 1.0),
+                    "rule_name": trade_decision.get("rule_name"),
+                    "volatility_factor": trade_decision.get("volatility_factor"),
+                },
+                active_config,
+                market_context,
+                symbol_info,
+                entry_price_market,
+                sl_price,
+                account_trade_settings,
+            )
+        )
+        self.logger.info(
+            f"[VOLUME] Calcul risk-based réussi: risk%={risk_pct}, vol={volume_final:.4f}"
+        )
+
+        # ---------- 9a) Normalisation par contraintes symbole ----------
+        vol_before_norm = volume_final
+        volume_final = _normalize_volume(symbol_info, volume_final)
+        self.logger.info(
+            f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
+            f"(min={getattr(symbol_info,'volume_min',None)}, "
+            f"step={getattr(symbol_info,'volume_step',None)}, "
+            f"max={getattr(symbol_info,'volume_max',None)})"
+        )
+        if volume_final <= 0:
+            raise TradeExecutionError(
+                f"Volume final invalide après normalisation ({volume_final})."
+            )
+
+        # ---------- 9b) Fat-finger & caps globaux (optionnels) ----------
+        try:
+            tes = self.config_manager.get("trade_executor_settings", {}) or {}
+            ff = tes.get("fat_finger_check", {}) or {}
+            ff_enabled = bool(ff.get("enabled", False))
+            vol_safety_enabled = bool(tes.get("volume_safety_enabled", False))
+
+            if ff_enabled:
+                per_asset = ff.get("max_absolute_volume_for_asset") or {}
+                cap_sym = per_asset.get(raw_symbol)
+                if isinstance(cap_sym, (int, float)) and volume_final > float(
+                    cap_sym
+                ):
+                    raise TradeExecutionError(
+                        f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
+                    )
+
+            cap_global = tes.get("max_absolute_volume_safety", None)
+            if (
+                vol_safety_enabled
+                and isinstance(cap_global, (int, float))
+                and volume_final > float(cap_global)
+            ):
+                raise TradeExecutionError(
+                    f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}."
+                )
+
+            account_trade_settings = (
+                market_context.get("active_broker_account", {}).get(
+                    "trade_settings", {}
+                )
+                or {}
+            )
+            acc_min = account_trade_settings.get("min_lot")
+            acc_step = account_trade_settings.get("lot_step")
+            acc_max = account_trade_settings.get("max_lot")
+            self.logger.info(
+                f"[VOLUME] constraints compte: min={acc_min}, step={acc_step}, max={acc_max}"
+            )
+
+            if isinstance(acc_max, (int, float)) and volume_final > float(acc_max):
+                raise TradeExecutionError(
+                    f"Volume {volume_final} > max lot compte {float(acc_max)}."
+                )
+        except TradeExecutionError:
+            raise
+        except Exception as e:
+            self.logger.warning(
+                f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
+            )
+        # >>> PATCH: sécuriser broker_symbol + symbol_info avant construction de la requête
+        # 1) symbole brut depuis la décision
+        raw_symbol = str(
+            trade_decision.get("asset") or trade_decision.get("symbol") or ""
+        ).upper()
+        if not raw_symbol:
+            raise TradeExecutionError(
+                "[BURST] Symbole manquant dans trade_decision."
+            )
+
+        # 2) mapping éventuel vers symbole broker
+        try:
+            mc = locals().get("market_context", {}) or {}
+            mapped = self._map_symbol_for_broker(raw_symbol, mc)
+            broker_symbol = (
+                mapped or locals().get("broker_symbol") or raw_symbol
+            ).upper()
+        except Exception:
+            broker_symbol = (locals().get("broker_symbol") or raw_symbol).upper()
+
+        # 3) s’assurer que le symbole est sélectionné (Market Watch)
+        try:
+            sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
+            if callable(sel):
+                if not sel(broker_symbol):
+                    raise TradeExecutionError(
+                        f"[BURST] symbol non sélectionné: {broker_symbol}"
+                    )
+            else:
+                info_tmp = self.mt5_connector.get_symbol_info(broker_symbol)
+                if not info_tmp or (
+                    hasattr(info_tmp, "visible") and not info_tmp.visible
+                ):
+                    subscribe = getattr(self.mt5_connector, "symbol_select", None)
+                    if callable(subscribe) and not subscribe(broker_symbol, True):
+                        raise TradeExecutionError(
+                            f"[BURST] symbol_select a échoué: {broker_symbol}"
+                        )
+        except Exception as e:
+            raise TradeExecutionError(f"[BURST] Sélection symbole KO: {e}")
+
+        # 4) recharger symbol_info depuis MT5 et le valider (digits/point)
+        symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
+        if not symbol_info:
+            raise TradeExecutionError(
+                f"[BURST] symbol_info introuvable pour {broker_symbol}."
+            )
+
+        try:
+            _digits = int(getattr(symbol_info, "digits", 0) or 0)
+            _point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        except Exception:
+            raise TradeExecutionError(
+                f"[BURST] symbol_info illisible pour {broker_symbol} (digits/point)."
+            )
+        if _digits <= 0 or _point <= 0:
+            raise TradeExecutionError(
+                f"[BURST] symbol_info invalide pour {broker_symbol} (digits/point)."
+            )
+
+        # ---------- 10) Construction requête ----------
+        if rule_name_local == "burst_scalping":
+            # 🚀 Redirection spécifique vers trailing stop
+            return self.build_burst_trailing_request(
+                trade_decision,
+                active_config,
+                volume_final,
+                entry_price_market,
+                sl_price,
+                symbol_info,
+            )
+        else:
+            # 🏦 Mode classique avec TP/SL
+            return self._build_mt5_request(
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": order_type,
+                },
+                active_config,
+                volume_final,
+                entry_price_market,
+                sl_price,
+                tp_price,
+                symbol_info,
+                trigger_price,
+                order_type,
+            )
+
+    except TradeExecutionError:
+        raise
+    except Exception as e:
+        self.logger.error(
+            f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
+            exc_info=True,
+        )
+        raise TradeExecutionError(
+            f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
+        ) from e
+    
+def _build_mt5_request(
+    self,
+    trade_decision: dict,
+    config: dict,
+    volume: float,
+    entry_price_market: float,
+    sl_price: float,
+    tp_price: float,
+    symbol_info: Any,
+    trigger_price: Optional[float] = None,
+    order_type_str: str = "MARKET",
+) -> dict:
+    """
+    Construit et valide la requête finale pour l'API MetaTrader 5, en supportant
+    Market / Limit / Stop, avec contrôles durcis (style desk).
+    - Arrondis aux digits
+    - Distances mini broker (stops_level / trade_stops_level)
+    - Cohérence directionnelle prix/SL/TP (vs price_ref)
+    - Normalisation volume (min/step/max) par FLOOR (jamais de dépassement)
+    - Deviation/Filling policy robustes
+    - Expiration (GTC/DAY/SPECIFIED)
+    - Métadonnées d’audit & compliance_flags (ignorées par MT5)
+
+    Lève TradeExecutionError en cas d’invalidité bloquante.
+    """
+   
+    # ——— accès MT5 robuste ———
+    mt5 = None
+    try:
+        import MetaTrader5 as _mt5  # type: ignore
+
+        mt5 = _mt5
+    except Exception:
+        mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
+
+    self.logger.info("Construction de la requête MT5 finale...")
+
+    # --- Validations de base ---
+    action_str = str(trade_decision.get("action", "")).upper()  # BUY / SELL
+    expected_symbol = str(trade_decision.get("asset", "") or "N/A")
+
+    if action_str not in ("BUY", "SELL"):
+        raise TradeExecutionError(
+            f"Action invalide: '{action_str}' (attendu BUY/SELL)."
+        )
+
+    if (
+        (not symbol_info)
+        or (not getattr(symbol_info, "name", None))
+        or str(symbol_info.name).upper() == "UNKNOWN"
+    ):
+        raise TradeExecutionError(
+            f"Symbole MT5 invalide ou non résolu (asset={expected_symbol}, symbol_info={getattr(symbol_info, 'name', 'None')})."
+        )
+
+    # Broker units
+    digits = int(getattr(symbol_info, "digits", 0) or 0)
+    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+    if not (point > 0):
+        raise TradeExecutionError("symbol_info.point invalide (<= 0).")
+
+    # stops_level (clé broker tolérante)
+    stops_lvl_points = float(
+        getattr(symbol_info, "trade_stops_level", 0)
+        or getattr(symbol_info, "stops_level", 0)
+        or 0
+    )
+    min_stop_distance_price = stops_lvl_points * point
+
+    # --- Volume normalisé (FLOOR sur le step, clamp min/max) ---
+    vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
+    vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
+    vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
+
+    if not isinstance(volume, (int, float)) or volume <= 0:
+        raise TradeExecutionError(f"Volume invalide ({volume}).")
+
+    vol = float(volume)
+    vol = max(vmin, min(vmax, vol))
+    if vstep and vstep > 0:
+        # FLOOR: ne jamais surdimensionner par rapport au sizing
+        steps = math.floor((vol - vmin) / vstep + 1e-12)
+        vol = vmin + steps * vstep
+        if vol > vmax:
+            vol = vmax
+    if vol < vmin or vol <= 0:
+        raise TradeExecutionError(f"Volume après normalisation invalide ({vol}).")
+
+    self.logger.info(
+        f"[VOLUME] avant={volume} -> après={vol} (min={vmin}, step={vstep}, max={vmax})"
+    )
+
+    # --- Prix d’entrée & niveaux SL/TP arrondis ---
+    if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
+        raise TradeExecutionError("Prix d'entrée marché invalide.")
+    entry_price_market = round(float(entry_price_market), digits)
+
+    try:
+        sl_price = round(float(sl_price), digits)
+        if tp_price is not None:
+            tp_price = round(float(tp_price), digits)
+    except Exception as e:
+        raise TradeExecutionError(f"SL/TP invalides: {e}")
+
+    # --- Override LiquidityStrategy: utiliser prix absolus si fournis ---
+    if (
+        "entry_price" in trade_decision
+        and float(trade_decision["entry_price"] or 0) > 0
+    ):
+        entry_price_market = round(float(trade_decision["entry_price"]), digits)
+    if "sl_price" in trade_decision and float(trade_decision["sl_price"] or 0) > 0:
+        sl_price = round(float(trade_decision["sl_price"]), digits)
+    if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
+        tp_price = round(float(trade_decision["tp_price"]), digits)
+
+    # --- Mapping constantes MT5 (tolérant) ---
+    if mt5 is None:
+        raise TradeExecutionError("Module/constantes MT5 indisponibles.")
+
+    # Actions
+    mt5_action_deal = getattr(mt5, "TRADE_ACTION_DEAL", None)
+    mt5_action_pending = getattr(mt5, "TRADE_ACTION_PENDING", None)
+    if mt5_action_deal is None or mt5_action_pending is None:
+        raise TradeExecutionError("Constantes MT5 TRADE_ACTION introuvables.")
+
+    # Types marché
+    ORDER_TYPE_BUY = getattr(mt5, "ORDER_TYPE_BUY", None)
+    ORDER_TYPE_SELL = getattr(mt5, "ORDER_TYPE_SELL", None)
+    if ORDER_TYPE_BUY is None or ORDER_TYPE_SELL is None:
+        raise TradeExecutionError(
+            "Constantes MT5 ORDER_TYPE BUY/SELL introuvables."
+        )
+
+    # Mappings optionnels
+    order_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+        "order_types", {}
+    ) or {}
+    fill_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+        "order_filling_policies", {}
+    ) or {}
+    time_map = (getattr(self, "mt5_mappings", {}) or {}).get(
+        "order_time_flags", {}
+    ) or {}
+
+    # Time flags
+    ORDER_TIME_GTC = getattr(mt5, "ORDER_TIME_GTC", None)
+    ORDER_TIME_DAY = getattr(
+        mt5,
+        time_map.get("DAY", "ORDER_TIME_DAY"),
+        getattr(mt5, "ORDER_TIME_DAY", None),
+    )
+    ORDER_TIME_SPECIFIED = getattr(
+        mt5,
+        time_map.get("SPECIFIED", "ORDER_TIME_SPECIFIED"),
+        getattr(mt5, "ORDER_TIME_SPECIFIED", None),
+    )
+    if ORDER_TIME_GTC is None:
+        raise TradeExecutionError("Constante MT5 ORDER_TIME_GTC introuvable.")
+
+    # Filling policy
+    filling_policy_str = str(
+        config.get("execution_policy", {}).get("type_filling", "FOK")
+    ).upper()
+    mt5_filling_policy = getattr(
+        mt5,
+        fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
+        getattr(mt5, "ORDER_FILLING_FOK", None),
+    )
+    if mt5_filling_policy is None:
+        raise TradeExecutionError("Constante MT5 filling policy introuvable.")
+
+    # Déviation (points)
+    deviation_points = int(
+        config.get("execution_policy", {}).get("max_deviation_points", 20) or 20
+    )
+    if deviation_points < 0:
+        deviation_points = 0
+
+    # --- Burst: jamais de TP dans la requête ---
+    rule = str(trade_decision.get("rule_name", "")).lower()
+    is_burst = (rule == "burst_scalping")
+
+    # has_tp uniquement si NON-burst et tp>0
+    has_tp = (not is_burst) and (tp_price is not None and tp_price > 0)
+    if is_burst and (tp_price is not None and tp_price > 0):
+        self.logger.debug("[BURST] Ignoring provided TP → trailing stop only")
+
+    # --- Basket/comment (une seule logique, sans double-écriture) ---
+    raw_comment = str(trade_decision.get("comment") or "")
+    basket_id = str(trade_decision.get("basket_id") or "").strip() or None
+    if not basket_id and raw_comment:
+        m = re.search(r"basket=([A-Za-z0-9_]+)", raw_comment)
+        if m:
+            basket_id = m.group(1)
+    if not basket_id:
+        sym_name = getattr(symbol_info, "name", "") or expected_symbol
+        basket_id = f"burst_{str(sym_name).upper()}"
+
+    def _normalize_mt5_comment(text: str, max_len: int = 31) -> str:
+        raw = (text or "").strip()
+        raw = raw.replace("|", "").replace(" ", "")
+        raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+        return raw[:max_len]
+
+    comment = _normalize_mt5_comment(raw_comment or basket_id)
+
+    # --- Construction base requête ---
+    order_type_str = str(order_type_str or "MARKET").upper()
+    request = {
+        "symbol": symbol_info.name,
+        "volume": float(vol),
+        "magic": trade_decision.get(
+            "magic_number",
+            config.get(
+                "magic_number",
+                self.config_manager.get("trade_executor_settings", {}).get(
+                    "magic", 0
+                ),
+            ),
+        ),
+        "sl": float(sl_price),
+        "type_time": ORDER_TIME_GTC,
+        "deviation": int(deviation_points),
+        "comment": comment,  # court, stable, peut contenir basket_id
+        # — meta (ignorés par MT5) —
+        "strategy_type": str(config.get("strategy_name", "unknown")).lower(),
+        "rule_name": str(trade_decision.get("rule_name", "")),
+        "meta_rr_projected": (
+            trade_decision.get("meta_rr_projected")
+            or trade_decision.get("rr")
+            or trade_decision.get("rr_effective")
+        ),
+        "basket_id": basket_id,
+        "is_burst_trade": (rule == "burst_scalping"),
+    }
+    if has_tp:
+        request["tp"] = float(tp_price)  # seulement si TP actif
+
+    # --- Timeout & mitigation (meta only) ---
+    request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
+    request["_meta_use_mitigation"] = bool(
+        trade_decision.get("use_mitigation", False)
+    )
+
+    # --- Détermination du type d’ordre et prix de référence ---
+    if order_type_str == "MARKET":
+        request["action"] = mt5_action_deal
+        request["type"] = ORDER_TYPE_BUY if action_str == "BUY" else ORDER_TYPE_SELL
+        request["price"] = entry_price_market
+        request["type_filling"] = mt5_filling_policy
+        price_ref = float(request["price"])
+
+    elif order_type_str in ("BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"):
+        request["action"] = mt5_action_pending
+        mapped = order_map.get(order_type_str, f"ORDER_TYPE_{order_type_str}")
+        order_type_const = getattr(mt5, mapped, None)
+        if order_type_const is None:
+            raise TradeExecutionError(
+                f"Type d'ordre différé non supporté: '{order_type_str}'."
+            )
+        request["type"] = order_type_const
+
+        # Trigger proposé ou fallback marché
+        trig = (
+            trigger_price
+            if isinstance(trigger_price, (int, float)) and trigger_price > 0
+            else entry_price_market
+        )
+        trig = round(float(trig), digits)
+
+        # Tick pour validations
+        tick = getattr(self.mt5_connector, "get_symbol_info_tick", None)
+        tick = (
+            tick(symbol_info.name)
+            if callable(tick)
+            else getattr(mt5, "symbol_info_tick", lambda s: None)(symbol_info.name)
+        )
+        if not tick or not hasattr(tick, "ask") or not hasattr(tick, "bid"):
+            raise TradeExecutionError(f"Tick invalide pour {symbol_info.name}.")
+        ask = float(getattr(tick, "ask") or 0.0)
+        bid = float(getattr(tick, "bid") or 0.0)
+        if not (ask > 0 and bid > 0 and ask > bid):
+            raise TradeExecutionError(
+                f"Prix marché invalides (ask/bid) pour {symbol_info.name}."
+            )
+
+        # Règles MT5: distances min par type, côté BID/ASK
+        too_close = (
+            (
+                order_type_str == "BUY_LIMIT"
+                and not (trig < ask - min_stop_distance_price)
+            )
+            or (
+                order_type_str == "SELL_LIMIT"
+                and not (trig > bid + min_stop_distance_price)
+            )
+            or (
+                order_type_str == "BUY_STOP"
+                and not (trig > ask + min_stop_distance_price)
+            )
+            or (
+                order_type_str == "SELL_STOP"
+                and not (trig < bid - min_stop_distance_price)
+            )
+        )
+        if too_close:
+            raise TradeExecutionError(
+                f"{order_type_str}: trigger {trig:.{digits}f} trop proche du marché "
+                f"(ask={ask:.{digits}f}, bid={bid:.{digits}f}, min={min_stop_distance_price:.{digits}f})."
+            )
+
+        request["price"] = trig
+        price_ref = float(trig)
+
+        # Expiration
+        expiration_policy = str(
+            (config.get("order_expiration_policy") or {}).get("type", "GTC")
+        ).upper()
+        if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
+            request["type_time"] = ORDER_TIME_DAY
+        elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
+            request["type_time"] = ORDER_TIME_SPECIFIED
+            exp_str = (config.get("order_expiration_policy") or {}).get(
+                "datetime",
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            )
+            try:
+                if isinstance(exp_str, (int, float)):
+                    request["expiration"] = int(exp_str)
+                else:
+                    exp_dt = datetime.fromisoformat(str(exp_str))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    request["expiration"] = int(exp_dt.timestamp())
+            except Exception:
+                self.logger.error(f"Expiration invalide: {exp_str}. Fallback GTC.")
+                request["type_time"] = ORDER_TIME_GTC
+    else:
+        raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
+
+    # --- Distances min broker (SL/TP vs price_ref) ---
+    if min_stop_distance_price > 0:
+        if action_str == "BUY":
+            if (price_ref - sl_price) < min_stop_distance_price - 1e-12:
+                raise TradeExecutionError(
+                    f"SL trop proche: Δ={price_ref - sl_price:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
+                )
+            if has_tp and (tp_price - price_ref) < min_stop_distance_price - 1e-12:
+                raise TradeExecutionError(
+                    f"TP trop proche: Δ={tp_price - price_ref:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
+                )
+        else:  # SELL
+            if (sl_price - price_ref) < min_stop_distance_price - 1e-12:
+                raise TradeExecutionError(
+                    f"SL trop proche: Δ={sl_price - price_ref:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
+                )
+            if has_tp and (price_ref - tp_price) < min_stop_distance_price - 1e-12:
+                raise TradeExecutionError(
+                    f"TP trop proche: Δ={price_ref - tp_price:.{digits}f} < min {min_stop_distance_price:.{digits}f}."
+                )
+
+    # --- Commentaire & tags succincts (template optionnel) ---
+    comment_tpl = self.config_manager.get(
+        "trading.order_comment_template", "SNIPER_X|{strategy}|{order_type}"
+    )
+    max_len = int(self.config_manager.get("trading.comment_max_length", 31) or 31)
+    strategy_tag = str(config.get("strategy_name", "N/A"))
+    rule_name = str(trade_decision.get("rule_name", "") or "")
+    rr_proj = (
+        trade_decision.get("meta_rr_projected")
+        or trade_decision.get("rr")
+        or trade_decision.get("rr_effective")
+    )
+
+    # Defaults (sécurité)
+    request.setdefault(
+        "action",
+        mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending,
+    )
+    request.setdefault("type_time", ORDER_TIME_GTC)
+
+    # Meta compliance/audit
+    request["_meta_rule_name"] = rule_name
+    request["_meta_action"] = action_str
+    request["_meta_rr"] = rr_proj
+    request["_meta_stops_level_points"] = stops_lvl_points
+    request["_meta_point"] = point
+    request["_compliance_flags"] = {
+        "direction_ok": True,
+        "stops_ok": True,
+        "price_digits_ok": True,
+        "order_type": order_type_str,
+    }
+
+    request["strategy_type"] = str(config.get("strategy_name", "unknown")).lower()
+    request["rule_name"] = rule_name or config.get("rule_name", "")
+    request["meta_rr_projected"] = rr_proj
+
+    self.logger.debug(f"Requête MT5 construite et validée : {request}")
+    return request
+
+# --- Helpers robustes ---
+
+def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
+    """
+    Retourne le symbole broker à partir d'un mapping éventuel.
+    Ne renvoie JAMAIS 'UNKNOWN' : si pas de mapping, garde raw_symbol.
+    """
+    symbol_map = (
+        market_context.get("active_broker_account", {}).get("symbol_map", {}) or {}
+    )
+    broker_symbol = symbol_map.get(
+        raw_symbol, raw_symbol
+    )  # ✅ fallback = symbole d'origine
+    if broker_symbol != raw_symbol:
+        self.logger.info(f"[SYMBOL MAP] {raw_symbol} -> {broker_symbol}")
+    else:
+        self.logger.warning(
+            f"[SYMBOL MAP] Pas de mapping pour {raw_symbol}, utilisation telle quelle."
+        )
+    return broker_symbol
+
+def load_decision_package(self, decision_package: dict) -> dict:
+        """
+        Charge le package de décision sans validation.
+        """
+        self.logger.debug("Chargement du package de décision (aucune validation)...")
+
+        # Aucune validation, on retourne direct le package
+        return decision_package
+
+
+
