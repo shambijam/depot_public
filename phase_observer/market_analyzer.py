@@ -1,21 +1,21 @@
 # phase_observer/market_analyzer.py
-
 import logging
 import pandas as pd
-from typing import Dict, Any, Tuple
-from .orchestrator import PhaseObserver
+from typing import Dict, Any, Tuple, Optional
 
+from .orchestrator import PhaseObserver
 from .detectors import (
     detect_single_candle,
     detect_multi_candle_patterns,
     detect_combos,
     detect_orderflow_v5,
-    detect_imbalance_stacking,
-    detect_absorption_reject,
-    detect_volume_climax_after_consolidation,
+    # (les 3 suivants sont optionnels ici si non utilisés directement)
+    # detect_imbalance_stacking,
+    # detect_absorption_reject,
+    # detect_volume_climax_after_consolidation,
 )
-from .footprint_analyzer import FootprintAnalyzer 
-from phase_observer.footprint_analyzer import FootprintAnalyzer
+from .footprint_analyzer import FootprintAnalyzer   
+
 LOG = logging.getLogger(__name__)
 
 
@@ -27,10 +27,23 @@ class MarketAnalyzer:
         self._last_results: Dict[str, Any] = {}
         self._confluence_cache: Dict[str, pd.DataFrame] = {}
         self.footprint = FootprintAnalyzer(logger=self.logger)
+
+    # === Pass-through pour l'analyse des triggers footprint ===
+    def analyze_footprint_triggers(
+        self,
+        asset: str,
+        ticks: pd.DataFrame,
+        bars: Optional[pd.DataFrame],
+        strategy_config: Dict[str, Any],
+    ) -> Tuple[bool, Dict[str, Any]]:
+        return self.footprint.analyze_footprint_triggers(asset, ticks, bars, strategy_config)
+
         
     # ============================================================
     # 🔹 Analyse unifiée
     # ============================================================
+    
+    
     def analyze(self, df: pd.DataFrame, asset: str = "") -> Dict[str, Any]:
         if df is None or df.empty:
             return {"annotated_df": pd.DataFrame(), "latest": None, "patterns": {}}
