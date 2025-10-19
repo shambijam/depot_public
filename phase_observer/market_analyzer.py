@@ -15,7 +15,7 @@ from .detectors import (
     detect_volume_climax_after_consolidation,
 )
 from .footprint_analyzer import FootprintAnalyzer 
-self.footprint = FootprintAnalyzer(logger=self.logger)
+from phase_observer.footprint_analyzer import FootprintAnalyzer
 LOG = logging.getLogger(__name__)
 
 
