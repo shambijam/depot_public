@@ -1071,4 +1071,5 @@ TradeExecutor.approve_pending_order = approve_pending_order
 TradeExecutor.apply_dynamic_trailing = apply_dynamic_trailing
 TradeExecutor._modify_sl = _modify_sl
 TradeExecutor._bars_since = _bars_since
-
+TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
+TradeExecutor._update_internal_position_state = _update_internal_position_state
