@@ -30,7 +30,6 @@ def compute_lot_from_risk(
     - Floor au pas broker (jamais au-dessus du budget).
     - Cap par marge si infos dispo ; si le budget ne permet pas d'atteindre vmin → 0.0.
     """
-    import math
 
     # ----- 0) Entrées -----
     try:
@@ -304,6 +303,7 @@ def _calculate_risk_based_volume(
         step = 0.01
     try:
         decimals = max(0, int(round(-math.log10(step)))) if step > 0 else 2
+        decimals = min(decimals, 8)
     except Exception:
         decimals = 2
 

@@ -7,48 +7,16 @@ import re
 import time
 import pandas as pd
 import math
+import hashlib
+import random
 from typing import Any, Dict, Any, Optional
 from datetime import datetime, timedelta, UTC, timezone
-
 
 
 # ==============================
 # === Helpers Trading Utils ====
 # ==============================
 
-def _precheck_and_split_burst(
-    symbol_info, desired_vol_list, entry_price, sl_price, account_info
-):
-    # calc margin par 1 lot (ou par step), puis dimensionne
-    contract_size = float(getattr(symbol_info, "trade_contract_size", 0) or 100)
-    leverage = float(getattr(account_info, "leverage", 100) or 100)
-    # marge approx par lot = (prix * contract_size) / leverage
-    margin_per_lot = (entry_price * contract_size) / max(leverage, 1.0)
-
-    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
-
-    out = []
-    fm = free_margin
-    for vol in desired_vol_list:
-        need = vol * margin_per_lot
-        if need <= fm:
-            out.append(vol)
-            fm -= need
-        else:
-            # tente un downscale à la plus proche marche broker
-            vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-            vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
-            vmax_afford = max(vmin, (fm // margin_per_lot) * 1.0)  # lot entier
-            # quantifie sur marche
-            steps = int((vmax_afford - vmin) // vstep)
-            vol_adj = max(vmin, vmin + steps * vstep) if steps >= 0 else 0.0
-            if vol_adj >= vmin and (vol_adj * margin_per_lot) <= fm:
-                out.append(vol_adj)
-                fm -= vol_adj * margin_per_lot
-            else:
-                out.append(0.0)  # on skippera cet ordre
-
-    return [v for v in out if v > 0.0]
 
 def _attach_burst_metadata(self, trade_decision: dict) -> dict:
     """
@@ -513,10 +481,6 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     ).upper()
     burst_count = int(decision.get("burst_count", decision.get("burst_size", 5)))
     total_volume = float(decision.get("volume") or decision.get("total_volume") or 0.0)
-    if total_volume <= 0:
-        each_hint = float(decision.get("burst_volume_each", 0.0) or 0.0)
-        total_volume = round(max(0.0, each_hint) * burst_count, 8)
-
     entry_price = float(decision.get("price", 0.0) or 0.0)
     sl_price = float(decision.get("sl") or decision.get("sl_price") or 0.0) or None
     validity_ms = int(decision.get("validity_ms", 800))
@@ -527,43 +491,41 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         self.logger.error("[BURST] Paramètres invalides (symbole/prix/compte/volume).")
         return False
 
-    # --- Contraintes symbole pour aligner les volumes ---
-    try:
-        si = mt5.symbol_info(symbol)
-        vol_min = float(getattr(si, "volume_min", 0.01) or 0.01)
-        vol_max = float(getattr(si, "volume_max", 100.0) or 100.0)
-        vol_step = float(getattr(si, "volume_step", 0.01) or 0.01)
-    except Exception:
-        vol_min, vol_max, vol_step = 0.01, 100.0, 0.01
-
-    def _distribute(total, n, step, vmin, vmax):
-        base = math.floor((total / n) / step) * step
-        base = max(base, vmin)
-        vols = [base] * n
-        used = round(base * n, 8)
-        rem = round(total - used, 8)
-        i = 0
-        while rem >= step - 1e-12 and i < n:
-            add = min(step, vmax - vols[i])
-            if add >= step - 1e-12 and used + add <= total + 1e-12:
-                vols[i] = round(vols[i] + add, 8)
-                used = round(used + add, 8)
-                rem = round(total - used, 8)
-            i += 1
-        return [max(vmin, min(vmax, round(v, 8))) for v in vols]
-
-    child_vols = _distribute(total_volume, burst_count, vol_step, vol_min, vol_max)
-    sum_child = round(sum(child_vols), 8)
-    if sum_child <= 0 or sum_child > total_volume + 1e-9:
-        self.logger.error(
-            f"[BURST] Répartition volume invalide (sum={sum_child}, total={total_volume})."
-        )
+   # --- Child volumes (VALIDATION ONLY — pas de sizing ici) ---
+    child_vols = (decision.get("child_volumes") or [])
+    if not isinstance(child_vols, list) or not child_vols:
+        self.logger.error("[BURST] child_volumes manquant (doit être fourni et pré-quantifié en amont).")
         return False
+
+    # tous positifs, finis
+    try:
+        child_vols = [float(v) for v in child_vols]
+    except Exception:
+        self.logger.error("[BURST] child_volumes contient des valeurs non numériques.")
+        return False
+
+    if any((not math.isfinite(v) or v <= 0.0) for v in child_vols):
+        self.logger.error(f"[BURST] child_volumes invalide (valeurs <=0 ou non finies): {child_vols}")
+        return False
+
+    sum_child = round(sum(child_vols), 8)
+    if sum_child <= 0.0:
+        self.logger.error(f"[BURST] Somme des child_volumes <= 0: {sum_child}")
+        return False
+
+    # si total_volume est disponible, vérifier la cohérence (tolérance relative 1e-6)
+    if isinstance(total_volume, (int, float)) and total_volume > 0:
+        if abs(sum_child - float(total_volume)) > 1e-6 * max(1.0, float(total_volume)):
+            self.logger.error(
+                f"[BURST] Somme child_volumes ({sum_child}) != total_volume ({total_volume})"
+            )
+            return False
 
     self.logger.info(
         f"[BURST] 🔫 {action} x{burst_count} {symbol} @ {entry_price:.2f} "
         f"(style={entry_style}, basket={basket_id}, split={child_vols}, sum={sum_child:.3f})"
     )
+
 
     # --- Construction MT5 request prototype ---
     is_buy = action == "BUY"
@@ -639,7 +601,9 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     # [COOLDOWN] mise à jour des compteurs sur succès
     now_ts = time.time()
     asset_key = str(symbol).upper()
-    if not hasattr(self, "_last_trade_ts_by_asset") or not isinstance(self._last_trade_ts_by_asset, dict):
+    if not hasattr(self, "_last_trade_ts_by_asset") or not isinstance(
+        self._last_trade_ts_by_asset, dict
+    ):
         self._last_trade_ts_by_asset = {}
     self._last_any_trade_ts = now_ts
     self._last_trade_ts_by_asset[asset_key] = now_ts
@@ -1093,7 +1057,6 @@ def monitor_burst_baskets(
             except Exception as e:
                 self.logger.error(f"[TRAIL→SL] err pos SL update: {e}")
 
-                     
     # ==============
     # Phase A — FAST (boucle courte, décision immédiate)
     # ==============
@@ -1385,25 +1348,10 @@ def build_burst_trailing_request(
         )
     symbol_name = symbol_name.upper()
 
-    # --------- Normalisation volume (FLOOR) ---------
-    try:
-        vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
-        vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
-        vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
-    except Exception:
-        vmin, vmax, vstep = 0.0, float("inf"), 0.0
-
-    if not isinstance(volume, (int, float)) or volume <= 0:
+    # --------- Volume (VALIDATION ONLY — aucun sizing ici) ---------
+    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
         raise TradeExecutionError(f"[BURST] Volume invalide ({volume}).")
-
-    vol = float(max(vmin, min(vmax, float(volume))))
-    if vstep and vstep > 0:
-        steps = math.floor((vol - vmin) / vstep + 1e-12)
-        vol = max(vmin, vmin + steps * vstep)
-        if vol > vmax:
-            vol = vmax
-    if vol < vmin or vol <= 0:
-        raise TradeExecutionError(f"[BURST] Volume normalisé invalide ({vol}).")
+    vol = float(volume)  # le volume est déjà pré-quantifié par le sizing amont
 
     # --------- Entry & SL (arrondis + stops_level) ---------
     if not isinstance(entry_price, (int, float)) or entry_price <= 0:
@@ -1441,6 +1389,7 @@ def build_burst_trailing_request(
     if mt5 is None:
         try:
             import MetaTrader5 as _mt5  # type: ignore
+
             mt5 = _mt5
         except Exception:
             mt5 = None
@@ -1546,7 +1495,7 @@ def build_burst_trailing_request(
         "rule_name": str(trade_decision.get("rule_name", "burst_scalping")),
         # --- meta (ignorés par MT5) ---
         "_meta_no_tp": True,
-        "_meta_trailing": trailing_cfg,          # (fix: plus de doublon)
+        "_meta_trailing": trailing_cfg,  # (fix: plus de doublon)
         "_meta_closure_rules": closure_cfg,
         "_meta_entry_source": trade_decision.get("source", "core_decision"),
         "_meta_stops_level_points": stops_lvl_points,
@@ -1680,34 +1629,15 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     except Exception as e:
         logger.warning(f"ensure_symbol_selected KO: {e}")
 
-    # --------- 2) Volume (normalisation min/step/max - floor) ---------
-    # volume direct (single-master) ou défaut config
+    # --------- 2) Volume (validation simple — aucune normalisation/calcul ici) ---------
     try:
-        volume = float(td.get("volume"))
-        if not math.isfinite(volume) or volume <= 0:
-            raise ValueError("volume<=0")
+        vol = float(td["volume"])
+        if not math.isfinite(vol) or vol <= 0:
+            raise ValueError("invalid_volume")
     except Exception:
-        try:
-            te_settings = (active_config or {}).get("trade_executor_settings", {}) or {}
-            volume = float(te_settings.get("default_volume", 0.01))
-        except Exception:
-            volume = 0.01
-
-    try:
-        vmin = float(getattr(si, "volume_min", 0.01) or 0.01)
-        vmax = float(getattr(si, "volume_max", 100.0) or 100.0)
-        vstep = float(getattr(si, "volume_step", 0.01) or 0.01)
-    except Exception:
-        vmin, vmax, vstep = 0.01, 100.0, 0.01
-
-    vol = max(vmin, min(vmax, float(volume)))
-    if vstep > 0:
-        steps = math.floor((vol - vmin) / vstep + 1e-12)
-        vol = vmin + steps * vstep
-        if vol < vmin:
-            vol = vmin
-    if vol <= 0:
-        return {"status": "failed", "reason": f"invalid_volume_after_norm:{vol}"}
+        reason = "missing_or_invalid_volume"
+        logger.error(reason)
+        return {"status": "failed", "reason": reason}
 
     # --------- 3) Prix, slippage & policies ---------
     # policy (FOK par défaut)

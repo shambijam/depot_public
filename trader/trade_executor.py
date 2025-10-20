@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 import logging
-import sys 
+import sys
 from typing import Any, Optional, Dict, List, TYPE_CHECKING
 from datetime import datetime, timedelta, UTC, timezone
 from pathlib import Path
@@ -13,19 +13,26 @@ from core.utils import enforce_no_tp_for_burst, CustomJSONEncoder
 if TYPE_CHECKING:
     from core.config_manager import ConfigManager
     from mt5_connector import MT5Connector
-    
+
 # --- Mixins/colle de méthodes en provenance des briques ---
 from .settings import _load_settings
 from .order_builder import prepare_order
 from .sizing import _calculate_risk_based_volume
 from .sltp import _calculate_sl_tp_prices, _normalize_stops
-from .burst import monitor_burst_baskets  
+from .burst import monitor_burst_baskets
 from .reconcile import reconcile_state_with_broker, _update_internal_position_state
 from .audit import _log_audit_trail, _mark_trade_sent, generate_report
-from .validators import manual_override_if_needed, approve_pending_order,pre_trade_checks
+from .validators import (
+    manual_override_if_needed,
+    approve_pending_order,
+    pre_trade_checks,
+)
 from .trailing import apply_dynamic_trailing, _modify_sl, _bars_since
-from .burst import _attach_burst_metadata, execute_burst_scalping_order, execute_burst_single_master
-
+from .burst import (
+    _attach_burst_metadata,
+    execute_burst_scalping_order,
+    execute_burst_single_master,
+)
 
 
 # Import MT5 tolérant (utile pour constantes/retcodes si tu en appelles ici)
@@ -51,10 +58,8 @@ class InvalidDecisionPackageError(ValueError):
 
     pass
 
-class TradeExecutor:
 
-   
-    
+class TradeExecutor:
     """
     Exécute les décisions de trading de manière robuste et sécurisée.
 
@@ -106,19 +111,22 @@ class TradeExecutor:
         self._load_settings()
 
         self.logger.info(f"TradeExecutor initialisé en mode {self.mode.upper()}.")
-        
-       # --- Pass-throughs vers validators & order_builder (imports locaux pour éviter les cycles) ---
+
+    # --- Pass-throughs vers validators & order_builder (imports locaux pour éviter les cycles) ---
 
     def pre_trade_checks(self, trade_decision, active_config, market_context):
         from trader.validators import pre_trade_checks as _pre_checks
+
         return _pre_checks(self, trade_decision, active_config, market_context)
 
     def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
         from trader.order_builder import _map_symbol_for_broker as _map_fn
+
         return _map_fn(self, raw_symbol, market_context)
 
     def prepare_order(self, decision_package: dict) -> dict:
         from trader.order_builder import prepare_order as _prepare_order
+
         return _prepare_order(self, decision_package)
 
     def _build_mt5_request(
@@ -134,6 +142,7 @@ class TradeExecutor:
         order_type_str: str = "MARKET",
     ) -> dict:
         from trader.order_builder import _build_mt5_request as _build_req
+
         return _build_req(
             self,
             trade_decision,
@@ -146,9 +155,9 @@ class TradeExecutor:
             trigger_price,
             order_type_str,
         )
- 
 
         # La réconciliation initiale est gérée par main.py, ce qui est la bonne approche.
+
     def get_positions(self, symbol: str | None = None):
         """
         Retourne les positions ouvertes (liste de dicts). Filtre par symbole si fourni.
@@ -160,19 +169,27 @@ class TradeExecutor:
             return []
 
         try:
-            positions = mt5_mod.positions_get(symbol=symbol) if symbol else mt5_mod.positions_get()
+            positions = (
+                mt5_mod.positions_get(symbol=symbol)
+                if symbol
+                else mt5_mod.positions_get()
+            )
             out = []
             for p in positions or []:
                 sym = getattr(p, "symbol", "") or ""
                 info = mt5_mod.symbol_info(sym) if sym else None
-                point = float(getattr(info, "point", 0.0001) or 0.0001) if info else 0.0001
+                point = (
+                    float(getattr(info, "point", 0.0001) or 0.0001) if info else 0.0001
+                )
                 out.append(
                     {
                         "ticket": getattr(p, "ticket", None),
                         "symbol": sym or None,
                         "magic": getattr(p, "magic", None),
                         "comment": getattr(p, "comment", "") or "",
-                        "type": getattr(p, "type", None),  # POSITION_TYPE: 0=BUY, 1=SELL
+                        "type": getattr(
+                            p, "type", None
+                        ),  # POSITION_TYPE: 0=BUY, 1=SELL
                         "volume": float(getattr(p, "volume", 0) or 0),
                         "price_open": float(getattr(p, "price_open", 0) or 0),
                         "sl": float(getattr(p, "sl", 0) or 0),
@@ -184,7 +201,6 @@ class TradeExecutor:
         except Exception as e:
             self.logger.warning(f"[MT5C] get_positions() a échoué: {e}")
             return []
-
 
     # Compatibilité arrière (ancien appel)
     def get_open_positions(self, symbol: str | None = None):
@@ -205,7 +221,7 @@ class TradeExecutor:
         - SL différé si stops/freeze ne permettent pas un SL immédiat (puis attach post-fill)
         - Feedback propre (placed/filled/failed) via feedback_pipeline + _feedback_safe
         """
-        
+
         # ---------- Connexion ----------
         try:
             connected = getattr(self.mt5_connector, "is_connected", False)
@@ -815,11 +831,14 @@ def run_trade_execution_pipeline(
     Lit dans decision_package['final_decision'].
     Normalise/valide avant prepare_order.
 
-    Ajouts/Corrections majeurs:
-    - Import robuste de TradeExecutionError (fallback local si absent)
-    - Garde-fou "fat-finger" volume (cap global / par actif)
-    - Correctif structurel: les étapes 5→7 ne sont pas conditionnées par 'volume is not None'
-    - Support is_dry_run: renvoie la requête/pre-payload sans exécuter d'ordre
+    Corrections majeures (sizing clean):
+    - ❌ Ne propage plus le 'volume' provenant de la décision amont.
+    - ❌ Suppression du garde-fou 'fat-finger' sur un volume fourni par l'amont (inutile car ignoré).
+    - ✅ En mode BURST, calcul du lot via la fonction unique `_calculate_risk_based_volume`
+      (avec SL cohérent) avant d'appeler `execute_burst_single_master`.
+    - ✅ En mode BURST + LIMIT_FOK, on fournit `burst_volume_each` = lot par ticket
+      issu du risk% (scope BASKET traité par la fonction de sizing).
+    - ✅ En mode STANDARD, inchangé: sizing fait dans `prepare_order`.
     """
     import logging
 
@@ -917,11 +936,10 @@ def run_trade_execution_pipeline(
         logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
         order_type = "MARKET"
 
-    # ----------- 4) Construire le trade_decision standardisé -----------
+    # ----------- 4) Construire le trade_decision standardisé (sans 'volume') -----------
     trade_decision = {
         "action": action,
         "asset": asset,
-        "volume": final_decision.get("volume"),
         "order_type": order_type,
         "trigger_price": final_decision.get("trigger_price"),
         "target_sl_pips": final_decision.get("target_sl_pips"),
@@ -932,63 +950,25 @@ def run_trade_execution_pipeline(
         "order_id": final_decision.get("order_id", "N/A"),
         "entry_style": final_decision.get("entry_style"),
         "price": final_decision.get("price"),
+        # hints utiles au sizing
+        "confidence": final_decision.get("confidence"),
+        "volatility_factor": final_decision.get("volatility_factor"),
+        # pour BASKET sizing (si burst_count présent)
+        "burst_size": final_decision.get("burst_count", 1),
+        "sizing_scope": (
+            "BASKET"
+            if (
+                final_decision.get("burst_enabled")
+                or final_decision.get("rule_name") == "burst_scalping"
+            )
+            else "SINGLE"
+        ),
     }
     adapted_package = {
         "trade_decision": trade_decision,
         "market_context": market_context,
         "active_config": active_config,
     }
-
-    # ----------- 4bis) Garde-fou volume (fat-finger hard cap) -----------
-    try:
-        te_settings = (active_config or {}).get("trade_executor_settings", {}) or {}
-        ff = te_settings.get("fat_finger_check", {}) or {}
-        per_asset_caps = ff.get("max_absolute_volume_for_asset", {}) or {}
-        global_cap = float(te_settings.get("max_absolute_volume_safety", 10.0))
-        asset_cap = float(per_asset_caps.get(asset, global_cap))
-        hard_cap = min(asset_cap, global_cap)
-    except Exception:
-        hard_cap = 10.0  # fallback ultra conservateur
-
-    vol = trade_decision.get("volume")
-    if vol is not None:
-        try:
-            volf = float(vol)
-        except Exception:
-            reason = f"Volume invalide (non numérique): {vol!r}"
-            logger.warning(reason)
-            feedback = trade_executor.feedback_pipeline(
-                order_id=trade_decision["order_id"], status="failed", reason=reason
-            )
-            trade_executor._feedback_safe(trade_decision, feedback)
-            return {"status": "failed", "reason": reason}
-
-        if volf <= 0:
-            reason = "Volume invalide (<= 0)."
-            logger.warning(reason)
-            feedback = trade_executor.feedback_pipeline(
-                order_id=trade_decision["order_id"], status="failed", reason=reason
-            )
-            trade_executor._feedback_safe(trade_decision, feedback)
-            return {"status": "failed", "reason": reason}
-
-        if volf > hard_cap:
-            reason = (
-                f"Volume demandé {volf:.2f} > cap sécurité {hard_cap:.2f} pour {asset} (fat-finger). "
-                "Passage en validation manuelle."
-            )
-            logger.warning(reason)
-            feedback = trade_executor.feedback_pipeline(
-                order_id=trade_decision["order_id"],
-                status="pending_manual_approval",
-                reason=reason,
-            )
-            trade_executor._feedback_safe(trade_decision, feedback)
-            return {
-                "status": "pending_manual_approval",
-                "reason": reason,
-                "suggested_volume": hard_cap,
-            }
 
     # ----------- 5) Pre-trade checks (toujours exécutés) -----------
     ok, reason = trade_executor.pre_trade_checks(
@@ -1008,11 +988,95 @@ def run_trade_execution_pipeline(
             trade_decision.get("burst_enabled", False)
             or trade_decision.get("rule_name") == "burst_scalping"
         )
+
         if is_burst:
-            # métadonnées burst (comment, basket_id, trailing meta…)
+            # ——— BURST: sizing unique via fonction centrale (et SL cohérent) ———
             td_with_meta = trade_executor._attach_burst_metadata(dict(trade_decision))
 
-            # 🔎 on lit style/prix depuis final_decision (fallback: trade_decision)
+            # Résoudre symbole broker + infos + prix
+            try:
+                broker_symbol = (
+                    trade_executor.mt5_connector.resolve_broker_symbol(asset) or asset
+                )
+                symbol_info = trade_executor.mt5_connector.get_symbol_info(
+                    broker_symbol
+                )
+                if not symbol_info:
+                    raise TradeExecutionError(
+                        f"Symbole MT5 introuvable: {broker_symbol}"
+                    )
+                entry_price_market = trade_executor.mt5_connector.get_current_price(
+                    broker_symbol, action
+                )
+                if not entry_price_market or entry_price_market <= 0:
+                    raise TradeExecutionError(
+                        f"Prix de marché invalide pour {broker_symbol}."
+                    )
+            except Exception as e:
+                raise TradeExecutionError(f"Résolution symbole/prix KO: {e}")
+
+            # SL requis pour sizing risk% (pas de TP en burst)
+            sl_price = None
+            try:
+                # sl direct ?
+                if (
+                    isinstance(final_decision.get("sl_price"), (int, float))
+                    and final_decision["sl_price"] > 0
+                ):
+                    sl_price = float(final_decision["sl_price"])
+                else:
+                    sl_calc, _tp_ignored = trade_executor._calculate_sl_tp_prices(
+                        trade_decision,
+                        active_config,
+                        symbol_info,
+                        entry_price_market,
+                        market_context,
+                    )
+                    sl_price = float(sl_calc or 0.0)
+                if not (sl_price and sl_price > 0):
+                    raise TradeExecutionError(
+                        "Burst: SL requis introuvable pour sizing."
+                    )
+            except Exception as e:
+                raise TradeExecutionError(f"Calcul SL burst KO: {e}")
+
+            # Sizing unique (scope BASKET respecté via 'burst_size')
+            try:
+                account_trade_settings = (
+                    market_context.get("active_broker_account", {}) or {}
+                ).get("trade_settings", {}) or {}
+                per_ticket_volume = float(
+                    trade_executor._calculate_risk_based_volume(
+                        {
+                            "action": action,
+                            "asset": broker_symbol,
+                            "order_type": order_type,
+                            "rule_name": "burst_scalping",
+                            "strategy_type": trade_decision.get(
+                                "strategy_type", "unknown"
+                            ),
+                            "sizing_scope": "BASKET",
+                            "burst_size": int(
+                                final_decision.get("burst_count", 1) or 1
+                            ),
+                        },
+                        active_config,
+                        market_context,
+                        symbol_info,
+                        entry_price_market,
+                        sl_price,
+                        account_trade_settings,
+                    )
+                )
+            except Exception as e:
+                raise TradeExecutionError(f"Sizing burst KO: {e}")
+
+            # Appliquer sizing/SL au payload
+            td_with_meta["sl_price"] = sl_price
+            td_with_meta["volume"] = per_ticket_volume
+            td_with_meta["no_tp"] = True
+
+            # Style entrant & prix limite éventuel
             style = str(
                 (
                     final_decision.get("entry_style")
@@ -1027,6 +1091,7 @@ def run_trade_execution_pipeline(
                     or final_decision.get("trigger_price")
                     or 0.0
                 )
+                or 0.0
             )
 
             if is_dry_run:
@@ -1042,18 +1107,16 @@ def run_trade_execution_pipeline(
                     "price": limit_price,
                 }
 
-            # ✅ LIMIT+FOK → usage de execute_burst_scalping_order
+            # LIMIT_FOK → ordre burst limité (par ticket = per_ticket_volume)
             if style == "LIMIT_FOK" and limit_price > 0:
                 burst_decision = {
                     "asset": asset,
                     "action": action,
                     "entry_style": "LIMIT_FOK",
                     "price": limit_price,
-                    "burst_count": int(final_decision.get("burst_count", 5)),
-                    "burst_volume_each": float(
-                        final_decision.get("burst_volume_each", 0.02)
-                    ),
-                    "validity_ms": int(final_decision.get("validity_ms", 800)),
+                    "burst_count": int(final_decision.get("burst_count", 1) or 1),
+                    "burst_volume_each": per_ticket_volume,  # ✅ issu du risk%
+                    "validity_ms": int(final_decision.get("validity_ms", 800) or 800),
                     "no_fallback": True,
                     "comment": td_with_meta.get("comment"),
                 }
@@ -1061,7 +1124,7 @@ def run_trade_execution_pipeline(
                     burst_decision, active_config
                 )
 
-            # 🔁 Sinon: fallback sur ton burst “single master” (market)
+            # Sinon: MARKET “single master” (trailing-only)
             return trade_executor.execute_burst_single_master(
                 {
                     "trade_decision": td_with_meta,
@@ -1070,7 +1133,7 @@ def run_trade_execution_pipeline(
                 }
             )
 
-        # --- Mode standard ---
+        # --- Mode standard: sizing fait dans prepare_order ---
         mt5_request = trade_executor.prepare_order(adapted_package)
 
     except Exception as e:
@@ -1096,6 +1159,7 @@ def run_trade_execution_pipeline(
 
     execution_result = trade_executor.execute_order(mt5_request)
     return execution_result
+
 
 # --- Binding des fonctions des briques comme méthodes de TradeExecutor ---
 TradeExecutor._load_settings = _load_settings

@@ -34,12 +34,12 @@ from core.utils import (
     get_diff,
     ConfigValidationError,
     TradeStatus,
-)  
+)
 
 if TYPE_CHECKING:
     from core.config_manager import (
         ConfigManager,
-    )  
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,9 @@ class ConfigManager:
         # Chargement base_configs
         base_configs = self.config_loader.load_base_configs()
         self._config = base_configs
-        self._broker_accounts_config = base_configs.get("_broker_accounts_config", {"accounts": []})
+        self._broker_accounts_config = base_configs.get(
+            "_broker_accounts_config", {"accounts": []}
+        )
 
         # Logger level
         log_level_str = self.get("log_level", "INFO").upper()
@@ -104,7 +106,7 @@ class ConfigManager:
 
         self._initialized = True
         self.logger.info("ConfigManager initialisé avec succès (Singleton).")
-        
+
     def load_asset_config(self, asset: str) -> Dict[str, Any]:
         """
         Charge et met en cache la config d'un actif (EURUSD.json, GBPUSD.json, XAUUSD.json).
@@ -131,10 +133,14 @@ class ConfigManager:
 
             # On met en cache le contenu tel quel (comportement antérieur)
             self._asset_config_cache[asset] = cfg
-            self.logger.info(f"[CACHE] Config {asset} chargée et mise en cache (lecture JSON directe).")
+            self.logger.info(
+                f"[CACHE] Config {asset} chargée et mise en cache (lecture JSON directe)."
+            )
             return cfg
         except Exception as e:
-            self.logger.error(f"Impossible de charger la config {asset}: {e}", exc_info=True)
+            self.logger.error(
+                f"Impossible de charger la config {asset}: {e}", exc_info=True
+            )
             return {}
 
     def _reset_session_state(self) -> None:
@@ -706,113 +712,91 @@ class ConfigManager:
         trade_decision: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Calcule les paramètres de risque dynamiques (taille de lot, etc.) pour un trade.
-        Cette fonction est cruciale pour la gestion du risque institutionnelle, en s'assurant
-        que chaque trade respecte les limites définies et les spécifications du broker.
+        Calcule UNIQUEMENT des métriques de risque (pas de sizing ici).
+        - Fournit max_dollar_risk, estimation du risque par lot, et infos symbole utiles.
+        - Ne retourne PAS de 'volume' et ne fait AUCUN clamp/arrondi de lot.
         """
         self.logger.info(
-            f"Calcul des paramètres de risque pour {trade_decision.get('asset')}..."
+            f"Calcul des paramètres de risque (sans sizing) pour {trade_decision.get('asset')}..."
         )
 
         equity = context.get("account_info", {}).get(
             "equity",
             self.get("risk_management_settings.default_account_equity", 10000.0),
         )
-        if equity <= 0:
-            self.logger.error(
-                f"Équité du compte ({equity}) non positive. Impossible de calculer le risque."
-            )
-            return {}
+        if not isinstance(equity, (int, float)) or equity <= 0:
+            self.logger.error(f"Équité du compte invalide ({equity}).")
+            return {"ok": False, "reason": "invalid_equity"}
 
         risk_per_trade_percent = config.get("risk_per_trade_percent", 1.0)
-        if not (0 < risk_per_trade_percent <= 100):
+        if not (
+            isinstance(risk_per_trade_percent, (int, float))
+            and 0 < risk_per_trade_percent <= 100
+        ):
             self.logger.error(
                 f"Pourcentage de risque par trade invalide ({risk_per_trade_percent}%)."
             )
-            return {}
-        max_dollar_risk = equity * (risk_per_trade_percent / 100)
+            return {"ok": False, "reason": "invalid_risk_percent"}
 
-        asset = trade_decision.get("asset", "UNKNOWN_ASSET")
+        max_dollar_risk = float(equity) * (float(risk_per_trade_percent) / 100.0)
 
-        active_broker_account = context.get("active_broker_account", {})
-        account_trade_settings = active_broker_account.get("trade_settings", {})
+        asset = str(trade_decision.get("asset", "UNKNOWN_ASSET"))
+        asset_mt5_info = (context.get("market_data", {}).get(asset, {}) or {}).get(
+            "symbol_info", {}
+        ) or {}
 
-        asset_mt5_info = (
-            context.get("market_data", {}).get(asset, {}).get("symbol_info", {})
-        )
-
-        point = asset_mt5_info.get(
-            "point", self.get("risk_management_settings.default_points_in_pip", 0.00001)
-        )
-        contract_size = asset_mt5_info.get(
-            "trade_contract_size",
-            self.get("risk_management_settings.default_contract_size", 100000),
-        )
-
-        if point <= 0 or contract_size <= 0:
-            self.logger.error(
-                f"Informations cruciales du symbole manquantes ou invalides (point={point}, contract_size={contract_size}) pour {asset}. Impossible de calculer le risque."
+        point = float(
+            asset_mt5_info.get(
+                "point",
+                self.get("risk_management_settings.default_points_in_pip", 0.00001),
             )
-            return {}
+            or 0.0
+        )
+        contract_size = float(
+            asset_mt5_info.get(
+                "trade_contract_size",
+                self.get("risk_management_settings.default_contract_size", 100000),
+            )
+            or 0.0
+        )
+        if point <= 0.0 or contract_size <= 0.0:
+            self.logger.error(
+                f"Infos symbole manquantes/invalides (point={point}, contract_size={contract_size}) pour {asset}."
+            )
+            return {"ok": False, "reason": "invalid_symbol_info"}
 
         target_sl_pips = trade_decision.get("target_sl_pips")
-        if target_sl_pips is None or target_sl_pips <= 0:
-            self.logger.error(
-                f"Stop loss invalide ou nul ({target_sl_pips} pips) pour {asset}. Impossible de calculer le volume. Ordre bloqué pour sécurité."
-            )
-            return {
-                "volume": 0.0,
-                "max_dollar_risk": 0.0,
-            }
+        if not (isinstance(target_sl_pips, (int, float)) and target_sl_pips > 0):
+            self.logger.error(f"Stop loss invalide ou nul ({target_sl_pips}).")
+            return {"ok": False, "reason": "invalid_sl_pips"}
 
-        sl_distance_in_price = target_sl_pips * point
+        sl_distance_in_price = float(target_sl_pips) * point
         dollar_risk_per_lot_estimated = sl_distance_in_price * contract_size
-
         if dollar_risk_per_lot_estimated <= 0:
             self.logger.warning(
-                f"Le risque par lot estimé est nul ou négatif pour {asset}. Utilisation du volume minimum pour cette estimation."
+                "Risque par lot estimé <= 0. Utilisation d'un fallback pour information."
             )
-            dollar_risk_per_lot_estimated = self.get(
-                "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
+            dollar_risk_per_lot_estimated = float(
+                self.get(
+                    "risk_management_settings.min_dollar_risk_per_lot_fallback", 1.0
+                )
             )
 
-        calculated_lot_size = max_dollar_risk / dollar_risk_per_lot_estimated
-
-        min_lot_size = account_trade_settings.get(
-            "min_lot", self.get("risk_management_settings.min_lot_size_fallback", 0.01)
-        )
-        max_lot_size = account_trade_settings.get(
-            "max_lot", self.get("global_safety.max_allowed_lot_size", 50.0)
-        )
-        lot_step = account_trade_settings.get(
-            "lot_step",
-            self.get("risk_management_settings.default_lot_step_fallback", 0.01),
-        )
-
-        if lot_step <= 0:
-            self.logger.error(
-                f"Lot step invalide ou nul ({lot_step}) pour {asset}. Utilisation du fallback 0.01."
-            )
-            lot_step = 0.01
-
-        volume = max(min_lot_size, calculated_lot_size)
-        volume = min(max_lot_size, volume)
-
-        volume = round(volume / lot_step) * lot_step
-
-        lot_size_precision = (
-            len(str(lot_step).split(".")[-1]) if "." in str(lot_step) else 0
-        )
-        final_volume = round(volume, lot_size_precision)
-
+        # ⛔ Pas de sizing ici : on NE calcule NI ne retourne aucun volume.
         self.logger.info(
-            f"Calcul de risque pour {asset}: Equity=${equity:.2f}, Risque={risk_per_trade_percent}%, Max Dollar Risque=${max_dollar_risk:.2f}, Volume Final={final_volume:.{lot_size_precision}f} (Risque Estimé par Lot=${dollar_risk_per_lot_estimated:.2f})."
+            f"Risque (sans sizing) pour {asset}: Equity=${equity:.2f}, "
+            f"Risque%={risk_per_trade_percent}%, Max$Risk=${max_dollar_risk:.2f}, "
+            f"$Risk/Lot≈${dollar_risk_per_lot_estimated:.2f}."
         )
 
         return {
-            "volume": final_volume,
+            "ok": True,
             "max_dollar_risk": max_dollar_risk,
-            "risk_per_trade_percent": risk_per_trade_percent,
+            "risk_per_trade_percent": float(risk_per_trade_percent),
+            "dollar_risk_per_lot_estimated": dollar_risk_per_lot_estimated,
+            "sl_pips": float(target_sl_pips),
+            "point": point,
+            "contract_size": contract_size,
         }
 
     def check_news_schedule(
@@ -1009,7 +993,6 @@ class ConfigManager:
             reason=f"Feedback sur trade clôturé: {status.value}",
             ai_input=None,
         )
-
 
     def backtest_strategy(
         self, config: Dict[str, Any], historical_data: pd.DataFrame
@@ -1231,19 +1214,18 @@ class ConfigManager:
             ) from e
 
     _schema_cache: Dict[str, Dict[str, Any]] = {}
-    
+
     def parse_json_config(self, path: str) -> Dict[str, Any]:
         """
         Parse un fichier JSON et retourne son contenu sous forme de dict.
         """
-        
+
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             self.logger.error(f"Erreur lors du parsing JSON pour {path}: {e}")
             raise
-
 
     def validate_config(
         self, config: Dict[str, Any], soft_when_schema_missing: bool = True
@@ -1368,12 +1350,12 @@ class ConfigManager:
                 "ERREUR: StrategyManager n'est pas initialisé dans ConfigManager. Impossible de sélectionner une stratégie."
             )
             raise RuntimeError("StrategyManager non initialisé.")
-                      
+
         return {
             "final_decision": {},
             "config_used": self.get_current_dynamic_config(),
         }
-     
+
         # NOTE : La fonction issue_trade_order DOIT être une méthode de la classe ConfigManager,
         # et non imbriquée dans organize_pipeline_decision.
         # Je la place ici comme une méthode de la classe ConfigManager.

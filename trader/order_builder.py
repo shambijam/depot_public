@@ -1,4 +1,4 @@
-#trader/order_builder.py - Module de Construction d'Ordres pour le Bot SNIPER_X
+# trader/order_builder.py - Module de Construction d'Ordres pour le Bot SNIPER_X
 from __future__ import annotations
 
 import math
@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional
 from trader.errors import TradeExecutionError
 
 
-
 def prepare_order(self, decision_package: dict) -> dict:
     """
     Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
@@ -18,9 +17,10 @@ def prepare_order(self, decision_package: dict) -> dict:
 
     ✅ Décision unique du volume
     - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
-    Tout volume présent dans la décision est ignoré.
+    - Tout volume présent dans la décision est ignoré.
+    - La normalisation broker fait un FLOOR (jamais d'augmentation) pour ne pas dépasser le budget.
     """
-  
+
     self.logger.info("Préparation de l'ordre MT5...")
 
     # --- Unpack sûrs pour éviter les UnboundLocalError ---
@@ -57,8 +57,8 @@ def prepare_order(self, decision_package: dict) -> dict:
 
     def _normalize_volume(symbol_info, vol: float) -> float:
         """
-        Clamp & round le volume selon les contraintes du symbole MT5.
-        Ne modifie pas la précision naturelle du broker (évite l'arrondi 2 décimales forcé).
+        Clamp & FLOOR du volume selon les contraintes du symbole MT5.
+        ⚠️ FLOOR au pas broker (jamais d'augmentation) pour ne pas dépasser le budget.
         """
         try:
             vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
@@ -69,27 +69,23 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         if not isinstance(vol, (int, float)) or vol <= 0:
             # 🔴 Aucun fallback arbitraire — on refuse un volume invalide
-            raise TradeExecutionError(
-                f"Volume invalide pour normalisation ({vol})."
-            )
+            raise TradeExecutionError(f"Volume invalide pour normalisation ({vol}).")
 
         # Clamp dans les bornes broker
         vol = max(vmin, min(vmax, float(vol)))
 
-        # 🔧 Arrondi propre au pas broker
+        # 🔧 FLOOR au pas broker (jamais d'upsize)
         if vstep > 0:
-            steps = round((vol - vmin) / vstep)
+            steps = math.floor((vol - vmin) / vstep + 1e-12)
             vol = vmin + steps * vstep
             if vol > vmax:
                 vol = vmax
 
-        # 🔒 Sécurité plancher
+        # 🔒 Sécurité plancher (théoriquement garanti par le sizing strict)
         if vol < vmin:
             vol = vmin
 
-        return round(
-            vol, 8
-        )  # précision suffisante sans écraser la granularité broker
+        return round(vol, 8)  # précision suffisante sans écraser la granularité broker
 
     # ---------- 1) Action ----------
     action_raw = _first_non_empty(
@@ -121,7 +117,7 @@ def prepare_order(self, decision_package: dict) -> dict:
     raw_symbol = raw_symbol.upper()
 
     allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
-    if allowed and raw_symbol not in allowed:
+    if allowed & raw_symbol not in allowed:
         msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
@@ -193,9 +189,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 all_open = self.mt5_connector.get_positions() or []
                 scope_lbl = "global"
             else:
-                all_open = (
-                    self.mt5_connector.get_positions(symbol=broker_symbol) or []
-                )
+                all_open = self.mt5_connector.get_positions(symbol=broker_symbol) or []
                 scope_lbl = broker_symbol
 
             # 2) Détection des paniers burst via 'burst_scalping|basket='
@@ -216,10 +210,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
             # 4) Cooldown anti-burst rapproché
             last_burst_time = getattr(self, "_last_burst_time", 0)
-            if (
-                cooldown_seconds > 0
-                and (now_ts - last_burst_time) < cooldown_seconds
-            ):
+            if cooldown_seconds > 0 and (now_ts - last_burst_time) < cooldown_seconds:
                 raise TradeExecutionError(
                     f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
                 )
@@ -317,9 +308,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 )
 
         # ---------- 7) Prix d'entrée ----------
-        entry_price_market = self.mt5_connector.get_current_price(
-            broker_symbol, action
-        )
+        entry_price_market = self.mt5_connector.get_current_price(broker_symbol, action)
         if not entry_price_market or entry_price_market <= 0:
             raise TradeExecutionError(
                 f"Impossible de récupérer un prix de marché valide pour {broker_symbol}."
@@ -339,7 +328,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
-        is_burst = (rule_name_local == "burst_scalping")
+        is_burst = rule_name_local == "burst_scalping"
 
         if is_burst:
             # Burst : SL OBLIGATOIRE, aucun TP (trailing-only)
@@ -349,7 +338,11 @@ def prepare_order(self, decision_package: dict) -> dict:
             except Exception:
                 sl_price = 0.0
 
-            if not (isinstance(sl_price, float) and math.isfinite(sl_price) and sl_price > 0.0):
+            if not (
+                isinstance(sl_price, float)
+                and math.isfinite(sl_price)
+                and sl_price > 0.0
+            ):
                 # Fallback : calculer un SL via le moteur SL/TP
                 sl_calc, _tp_ignored = self._calculate_sl_tp_prices(
                     trade_decision,
@@ -373,7 +366,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                 entry_price_market,
                 market_context,
             )
-
 
         # ---------- 8a) Sécurité broker & normalisation prix ----------
         try:
@@ -418,9 +410,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 return round(math.floor(x / tick) * tick, digits)
 
             # Ajustements selon le type d'ordre
-            has_tp = (tp_price is not None) and (
-                rule_name_local != "burst_scalping"
-            )
+            has_tp = (tp_price is not None) and (rule_name_local != "burst_scalping")
 
             if action == "BUY":
                 # SL en-dessous, TP au-dessus (si TP existe)
@@ -460,9 +450,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
             def _fmt(v):
                 return (
-                    f"{float(v):.{digits}f}"
-                    if isinstance(v, (int, float))
-                    else "None"
+                    f"{float(v):.{digits}f}" if isinstance(v, (int, float)) else "None"
                 )
 
             self.logger.info(
@@ -481,9 +469,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # ---------- 8bis) RR minimum (SOFT permissif) ----------
         try:
-            min_rr = float(
-                self.config_manager.get("risk_management.min_rr", 0) or 0.0
-            )
+            min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
         except Exception:
             min_rr = 0.0
 
@@ -512,9 +498,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # ---------- 9) Volume (calcul unique via risk-based sizing) ----------
         account_trade_settings = (
-            market_context.get("active_broker_account", {}).get(
-                "trade_settings", {}
-            )
+            market_context.get("active_broker_account", {}).get("trade_settings", {})
             or {}
         )
 
@@ -550,7 +534,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             f"[VOLUME] Calcul risk-based réussi: risk%={risk_pct}, vol={volume_final:.4f}"
         )
 
-        # ---------- 9a) Normalisation par contraintes symbole ----------
+        # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
         vol_before_norm = volume_final
         volume_final = _normalize_volume(symbol_info, volume_final)
         self.logger.info(
@@ -574,9 +558,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             if ff_enabled:
                 per_asset = ff.get("max_absolute_volume_for_asset") or {}
                 cap_sym = per_asset.get(raw_symbol)
-                if isinstance(cap_sym, (int, float)) and volume_final > float(
-                    cap_sym
-                ):
+                if isinstance(cap_sym, (int, float)) and volume_final > float(cap_sym):
                     raise TradeExecutionError(
                         f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
                     )
@@ -614,15 +596,14 @@ def prepare_order(self, decision_package: dict) -> dict:
             self.logger.warning(
                 f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
             )
+
         # >>> PATCH: sécuriser broker_symbol + symbol_info avant construction de la requête
         # 1) symbole brut depuis la décision
         raw_symbol = str(
             trade_decision.get("asset") or trade_decision.get("symbol") or ""
         ).upper()
         if not raw_symbol:
-            raise TradeExecutionError(
-                "[BURST] Symbole manquant dans trade_decision."
-            )
+            raise TradeExecutionError("[BURST] Symbole manquant dans trade_decision.")
 
         # 2) mapping éventuel vers symbole broker
         try:
@@ -713,7 +694,8 @@ def prepare_order(self, decision_package: dict) -> dict:
         raise TradeExecutionError(
             f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
         ) from e
-    
+
+
 def _build_mt5_request(
     self,
     trade_decision: dict,
@@ -732,14 +714,13 @@ def _build_mt5_request(
     - Arrondis aux digits
     - Distances mini broker (stops_level / trade_stops_level)
     - Cohérence directionnelle prix/SL/TP (vs price_ref)
-    - Normalisation volume (min/step/max) par FLOOR (jamais de dépassement)
+    - **Volume déjà normalisé en amont (validation only ici)**
     - Deviation/Filling policy robustes
     - Expiration (GTC/DAY/SPECIFIED)
     - Métadonnées d’audit & compliance_flags (ignorées par MT5)
 
     Lève TradeExecutionError en cas d’invalidité bloquante.
     """
-   
     # ——— accès MT5 robuste ———
     mt5 = None
     try:
@@ -783,28 +764,10 @@ def _build_mt5_request(
     )
     min_stop_distance_price = stops_lvl_points * point
 
-    # --- Volume normalisé (FLOOR sur le step, clamp min/max) ---
-    vmin = float(getattr(symbol_info, "volume_min", 0.0) or 0.0)
-    vmax = float(getattr(symbol_info, "volume_max", float("inf")) or float("inf"))
-    vstep = float(getattr(symbol_info, "volume_step", 0.0) or 0.0)
-
-    if not isinstance(volume, (int, float)) or volume <= 0:
+    # --- Volume (VALIDATION ONLY — déjà normalisé en amont) ---
+    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
         raise TradeExecutionError(f"Volume invalide ({volume}).")
-
-    vol = float(volume)
-    vol = max(vmin, min(vmax, vol))
-    if vstep and vstep > 0:
-        # FLOOR: ne jamais surdimensionner par rapport au sizing
-        steps = math.floor((vol - vmin) / vstep + 1e-12)
-        vol = vmin + steps * vstep
-        if vol > vmax:
-            vol = vmax
-    if vol < vmin or vol <= 0:
-        raise TradeExecutionError(f"Volume après normalisation invalide ({vol}).")
-
-    self.logger.info(
-        f"[VOLUME] avant={volume} -> après={vol} (min={vmin}, step={vstep}, max={vmax})"
-    )
+    vol = float(volume)  # déjà normalisé par prepare_order/_normalize_volume
 
     # --- Prix d’entrée & niveaux SL/TP arrondis ---
     if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
@@ -843,14 +806,10 @@ def _build_mt5_request(
     ORDER_TYPE_BUY = getattr(mt5, "ORDER_TYPE_BUY", None)
     ORDER_TYPE_SELL = getattr(mt5, "ORDER_TYPE_SELL", None)
     if ORDER_TYPE_BUY is None or ORDER_TYPE_SELL is None:
-        raise TradeExecutionError(
-            "Constantes MT5 ORDER_TYPE BUY/SELL introuvables."
-        )
+        raise TradeExecutionError("Constantes MT5 ORDER_TYPE BUY/SELL introuvables.")
 
     # Mappings optionnels
-    order_map = (getattr(self, "mt5_mappings", {}) or {}).get(
-        "order_types", {}
-    ) or {}
+    order_map = (getattr(self, "mt5_mappings", {}) or {}).get("order_types", {}) or {}
     fill_map = (getattr(self, "mt5_mappings", {}) or {}).get(
         "order_filling_policies", {}
     ) or {}
@@ -894,7 +853,7 @@ def _build_mt5_request(
 
     # --- Burst: jamais de TP dans la requête ---
     rule = str(trade_decision.get("rule_name", "")).lower()
-    is_burst = (rule == "burst_scalping")
+    is_burst = rule == "burst_scalping"
 
     # has_tp uniquement si NON-burst et tp>0
     has_tp = (not is_burst) and (tp_price is not None and tp_price > 0)
@@ -929,9 +888,7 @@ def _build_mt5_request(
             "magic_number",
             config.get(
                 "magic_number",
-                self.config_manager.get("trade_executor_settings", {}).get(
-                    "magic", 0
-                ),
+                self.config_manager.get("trade_executor_settings", {}).get("magic", 0),
             ),
         ),
         "sl": float(sl_price),
@@ -954,9 +911,7 @@ def _build_mt5_request(
 
     # --- Timeout & mitigation (meta only) ---
     request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
-    request["_meta_use_mitigation"] = bool(
-        trade_decision.get("use_mitigation", False)
-    )
+    request["_meta_use_mitigation"] = bool(trade_decision.get("use_mitigation", False))
 
     # --- Détermination du type d’ordre et prix de référence ---
     if order_type_str == "MARKET":
@@ -1115,7 +1070,9 @@ def _build_mt5_request(
     self.logger.debug(f"Requête MT5 construite et validée : {request}")
     return request
 
+
 # --- Helpers robustes ---
+
 
 def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
     """
@@ -1136,14 +1093,12 @@ def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
         )
     return broker_symbol
 
+
 def load_decision_package(self, decision_package: dict) -> dict:
-        """
-        Charge le package de décision sans validation.
-        """
-        self.logger.debug("Chargement du package de décision (aucune validation)...")
+    """
+    Charge le package de décision sans validation.
+    """
+    self.logger.debug("Chargement du package de décision (aucune validation)...")
 
-        # Aucune validation, on retourne direct le package
-        return decision_package
-
-
-
+    # Aucune validation, on retourne direct le package
+    return decision_package

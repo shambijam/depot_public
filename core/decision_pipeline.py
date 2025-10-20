@@ -23,7 +23,6 @@ except Exception:
     ScalpingPipeline = None
 
 
-
 # Utilisation de TYPE_CHECKING pour éviter les importations circulaires à l'exécution
 if TYPE_CHECKING:
     from core.config_manager import (
@@ -105,7 +104,7 @@ class DecisionPipeline:
         )
         # --- PATCH A: Features + hook Arbiter (scalping sans PhaseObserver) ---
         try:
-            self.features = (self.config_manager.get("features") or {})
+            self.features = self.config_manager.get("features") or {}
         except Exception:
             self.features = {}
 
@@ -126,12 +125,11 @@ class DecisionPipeline:
             self.scalping_pipeline = ScalpingPipeline(
                 config_manager=self.config_manager,
                 arbiter=getattr(self, "arbiter", None),
-                logger=self.logger
+                logger=self.logger,
             )
         except Exception as _e:
             self.logger.warning(f"[INIT] ScalpingPipeline indisponible: {_e}")
             self.scalping_pipeline = None
-
 
     def get_asset_config(self, asset: str) -> Dict[str, Any]:
         """Charge une config asset une seule fois et la met en cache."""
@@ -158,9 +156,10 @@ class DecisionPipeline:
         """
         v = (cfg_scalping or {}).get("max_spread_pips", 3.0)
         return v.get(symbol, v.get("default", v)) if isinstance(v, dict) else v
-    
 
-    def institutional_decision_pipeline(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def institutional_decision_pipeline(
+        self, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Orchestration décisionnelle (Banque Privée)
         - ScalpingStrategy -> XAUUSD
@@ -217,7 +216,9 @@ class DecisionPipeline:
                 poc = pre_sig.get("footprint_poc")
 
                 # Boost léger de confiance si signal footprint fort
-                if isinstance(delta, (int, float)) and abs(delta) > 100:  # seuil ajustable
+                if (
+                    isinstance(delta, (int, float)) and abs(delta) > 100
+                ):  # seuil ajustable
                     sig = signals.get(asset, {})
                     old_conf = float(sig.get("confidence_score", 0.5))
                     sig["confidence_score"] = min(1.0, old_conf + 0.1)
@@ -231,10 +232,12 @@ class DecisionPipeline:
                 early_entry_threshold = 300  # ajustable (Δ en volume)
                 if abs(delta) >= early_entry_threshold:
                     sig["early_entry_allowed"] = True
-                    print(f"⚡ [LIVE] Early entry signal activé sur {asset} (Δ={delta})")
+                    print(
+                        f"⚡ [LIVE] Early entry signal activé sur {asset} (Δ={delta})"
+                    )
                 else:
                     sig["early_entry_allowed"] = False
-   
+
             # Conteneurs séparés (séparation stricte des domaines)
             scalping_decisions: list = []
             liquidity_decisions: list = []
@@ -253,7 +256,11 @@ class DecisionPipeline:
             # --- SCALPING (XAUUSD only) ---
             if "XAUUSD" in signals:
                 # --- PATCH B: PhaseObserver conditionnel pour scalping ---
-                inject_phase = self.phase_observer if self.scalping_phase_observer_enabled else None
+                inject_phase = (
+                    self.phase_observer
+                    if self.scalping_phase_observer_enabled
+                    else None
+                )
                 scalping = self.strategy_manager.get_strategy_instance(
                     "scalping",
                     per_asset="XAUUSD",
@@ -269,13 +276,17 @@ class DecisionPipeline:
 
                 if scalping:
                     try:
-                        dec = scalping.evaluate_entry("XAUUSD", analyzed_context, signals["XAUUSD"])
+                        dec = scalping.evaluate_entry(
+                            "XAUUSD", analyzed_context, signals["XAUUSD"]
+                        )
                         if isinstance(dec, dict):
 
                             # ====== CAS SPÉCIAL BURST ======
-                            if dec.get("rule_name") == "burst_scalping" \
-                            and isinstance(dec.get("burst_decisions"), list) \
-                            and dec["burst_decisions"]:
+                            if (
+                                dec.get("rule_name") == "burst_scalping"
+                                and isinstance(dec.get("burst_decisions"), list)
+                                and dec["burst_decisions"]
+                            ):
                                 sublist = dec["burst_decisions"]
 
                                 # Récupérer le basket_id s'il est présent dans les sous-ordres
@@ -288,23 +299,33 @@ class DecisionPipeline:
                                 # Antidoublon: si un panier avec ce basket_id est déjà ouvert (d’après le contexte), on ignore
                                 def _ctx_has_basket(ctx, asset, bid):
                                     try:
-                                        for pos in (ctx.get("open_positions") or []):
+                                        for pos in ctx.get("open_positions") or []:
                                             sym = pos.get("symbol") or pos.get("asset")
                                             if str(sym) != str(asset):
                                                 continue
                                             c = str(pos.get("comment") or "")
                                             m = pos.get("meta") or {}
-                                            if bid and (bid == pos.get("basket_id") or bid == m.get("basket_id") or bid in c):
+                                            if bid and (
+                                                bid == pos.get("basket_id")
+                                                or bid == m.get("basket_id")
+                                                or bid in c
+                                            ):
                                                 return True
                                             # Support du tag générique "burst:<id>" dans comment
-                                            if c.startswith("burst:") and (not bid or bid in c):
+                                            if c.startswith("burst:") and (
+                                                not bid or bid in c
+                                            ):
                                                 return True
                                     except Exception:
                                         pass
                                     return False
 
-                                if basket_id and _ctx_has_basket(analyzed_context, "XAUUSD", basket_id):
-                                    print(f"⛔ [SCALPING] burst ignoré: panier déjà ouvert ({basket_id})")
+                                if basket_id and _ctx_has_basket(
+                                    analyzed_context, "XAUUSD", basket_id
+                                ):
+                                    print(
+                                        f"⛔ [SCALPING] burst ignoré: panier déjà ouvert ({basket_id})"
+                                    )
                                 else:
                                     # On pousse UNE décision maître uniquement
                                     master = sublist[0].copy()
@@ -321,7 +342,9 @@ class DecisionPipeline:
 
                                     # Tag pour traçage/anti-duplication côté broker/positions
                                     if basket_id:
-                                        master.setdefault("comment", f"burst:{basket_id}")
+                                        master.setdefault(
+                                            "comment", f"burst:{basket_id}"
+                                        )
                                     else:
                                         master.setdefault("comment", "burst:auto")
 
@@ -339,11 +362,14 @@ class DecisionPipeline:
                                 dec.setdefault("execution_status", "ready")
                                 if _is_valid(dec):
                                     scalping_decisions.append(dec)
-                                    print(f"✅ [SCALPING] décision retenue: {dec.get('action')} {dec.get('asset')} rule={dec.get('rule_name')}")
+                                    print(
+                                        f"✅ [SCALPING] décision retenue: {dec.get('action')} {dec.get('asset')} rule={dec.get('rule_name')}"
+                                    )
 
                     except Exception as e:
-                        self.logger.error(f"[DECISION] Erreur scalping: {e}", exc_info=True)
-
+                        self.logger.error(
+                            f"[DECISION] Erreur scalping: {e}", exc_info=True
+                        )
 
             # --- LIQUIDITY (EURUSD/GBPUSD) ---
             liq_assets = [a for a in ("EURUSD", "GBPUSD") if a in signals]
@@ -364,7 +390,11 @@ class DecisionPipeline:
                         dec = liquidity.evaluate_entry(
                             analyzed_context, {a: signals[a] for a in liq_assets}
                         )
-                        decs = dec if isinstance(dec, list) else ([dec] if isinstance(dec, dict) else [])
+                        decs = (
+                            dec
+                            if isinstance(dec, list)
+                            else ([dec] if isinstance(dec, dict) else [])
+                        )
                         for d in decs:
                             d["strategy_type"] = "liquidity"
                             _ensure_asset(d, liq_assets[0])
@@ -372,14 +402,22 @@ class DecisionPipeline:
                             if _is_valid(d):
                                 liquidity_decisions.append(d)
                     except Exception as e:
-                        self.logger.error(f"[DECISION] Erreur liquidity: {e}", exc_info=True)
-                        
+                        self.logger.error(
+                            f"[DECISION] Erreur liquidity: {e}", exc_info=True
+                        )
+
                     # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
-                    print(f"📦 scalping_decisions={len(scalping_decisions)} | liquidity_decisions={len(liquidity_decisions)}")
+                    print(
+                        f"📦 scalping_decisions={len(scalping_decisions)} | liquidity_decisions={len(liquidity_decisions)}"
+                    )
                     if scalping_decisions:
-                        print(f"   ↳ top scalping: {scalping_decisions[0].get('action')} {scalping_decisions[0].get('asset')}")
+                        print(
+                            f"   ↳ top scalping: {scalping_decisions[0].get('action')} {scalping_decisions[0].get('asset')}"
+                        )
                     if liquidity_decisions:
-                        print(f"   ↳ top liquidity: {liquidity_decisions[0].get('action')} {liquidity_decisions[0].get('asset')}")
+                        print(
+                            f"   ↳ top liquidity: {liquidity_decisions[0].get('action')} {liquidity_decisions[0].get('asset')}"
+                        )
 
                     final_decisions = scalping_decisions + liquidity_decisions
 
@@ -387,16 +425,25 @@ class DecisionPipeline:
                     td = final_decisions[0] if final_decisions else {}
                     chosen_strategy = td.get("strategy_type") if td else None
                     chosen_asset = td.get("asset") if td else None
-                    
+
                     # 🔥 PATCH: Intégrer les footprints dans la décision finale
                     try:
                         if td and chosen_asset and chosen_asset in signals:
                             # 1) Récupère l'historique footprints poussé par analyze_last_bar / MTF
-                            fph = signals[chosen_asset].get("footprints_history", []) or []
-                            td["footprints_history"] = fph[-5:]  # garde une fenêtre courte pour décision
+                            fph = (
+                                signals[chosen_asset].get("footprints_history", [])
+                                or []
+                            )
+                            td["footprints_history"] = fph[
+                                -5:
+                            ]  # garde une fenêtre courte pour décision
 
                             # 2) Calcule un biais footprint simple sur les 3 derniers deltas
-                            last3 = [fp.get("delta", 0.0) for fp in fph[-3:] if isinstance(fp, dict)]
+                            last3 = [
+                                fp.get("delta", 0.0)
+                                for fp in fph[-3:]
+                                if isinstance(fp, dict)
+                            ]
                             bias = "neutral"
                             if len(last3) == 3:
                                 if all(d > 0 for d in last3):
@@ -408,9 +455,18 @@ class DecisionPipeline:
                             # 3) Micro-boost de confiance si cohérence action ↔ biais footprint
                             try:
                                 act = (td.get("action") or "").upper()
-                                old_conf = float(td.get("confidence_score", signals[chosen_asset].get("confidence_score", 0.5)))
+                                old_conf = float(
+                                    td.get(
+                                        "confidence_score",
+                                        signals[chosen_asset].get(
+                                            "confidence_score", 0.5
+                                        ),
+                                    )
+                                )
                                 new_conf = old_conf
-                                if (bias == "long" and act == "BUY") or (bias == "short" and act == "SELL"):
+                                if (bias == "long" and act == "BUY") or (
+                                    bias == "short" and act == "SELL"
+                                ):
                                     new_conf = min(1.0, old_conf + 0.05)  # +5 bps
                                 td["confidence_score"] = new_conf
                             except Exception:
@@ -426,8 +482,10 @@ class DecisionPipeline:
                                 f"last3={last3} conf→{td.get('confidence_score')}"
                             )
                     except Exception as e:
-                        self.logger.warning(f"[Decision] Intégration footprints impossible: {e}")
-  
+                        self.logger.warning(
+                            f"[Decision] Intégration footprints impossible: {e}"
+                        )
+
             # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
             final_decisions = scalping_decisions + liquidity_decisions
 
@@ -438,16 +496,26 @@ class DecisionPipeline:
 
             # === ÉTAPE 4: Adaptation config (base + config stratégie choisie) ===
             if chosen_strategy:
-                strat_cfg = self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+                strat_cfg = (
+                    self.strategy_manager.get_strategy_config(chosen_strategy) or {}
+                )
             else:
                 strat_cfg = {}  # ne JAMAIS appeler get_strategy_config(None)
 
-            config_for_this_cycle = self.config_manager._merge_dicts(base_cfg, strat_cfg)
-            adapted_config = self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            config_for_this_cycle = self.config_manager._merge_dicts(
+                base_cfg, strat_cfg
+            )
+            adapted_config = (
+                self.adapt_config(config_for_this_cycle, analyzed_context) or {}
+            )
             print("🤖 [DECISION] Configuration adaptée avec succès")
 
             # === ÉTAPE 4bis: Execution context (léger) ===
-            execution_context = {"spreads_pips": {}, "katana_snapshots": {}, "katana_ready_assets": []}
+            execution_context = {
+                "spreads_pips": {},
+                "katana_snapshots": {},
+                "katana_ready_assets": [],
+            }
             analyzed_context["execution_context"] = execution_context
 
             # === ÉTAPE 5: Affichage décision finale ===
@@ -485,7 +553,10 @@ class DecisionPipeline:
 
         except Exception as e:
             print(f"💥 [DECISION] ERREUR dans le pipeline: {e}")
-            self.logger.error(f"Erreur critique dans institutional_decision_pipeline: {e}", exc_info=True)
+            self.logger.error(
+                f"Erreur critique dans institutional_decision_pipeline: {e}",
+                exc_info=True,
+            )
             return {
                 "timestamp_utc": datetime.now(UTC).isoformat(),
                 "context": context,
@@ -494,7 +565,6 @@ class DecisionPipeline:
                 "execution_context": {},
                 "error": str(e),
             }
-
 
     def adapt_config(
         self, config: Dict[str, Any], context: Dict[str, Any]
@@ -854,32 +924,6 @@ class DecisionPipeline:
         except Exception:
             return None
 
-
-    def _quantize_volume(
-        self, vol: float, vmin: float, vmax: float, vstep: float
-    ) -> float:
-        """Ajuste le volume aux contraintes broker (min, max, step)."""
-        try:
-            vol = float(vol)
-        except (TypeError, ValueError):
-            vol = vmin
-
-        if vol <= 0 or not (vol == vol):  # NaN-safe
-            vol = vmin
-
-        # Snap au step
-        steps = max(1, round(vol / vstep)) if vstep > 0 else 1
-        vol_q = steps * vstep
-
-        # Clamp min/max
-        if vol_q < vmin:
-            vol_q = vmin
-        if vol_q > vmax:
-            vol_q = vmax
-
-        # Arrondi propre aux pas courants (2 décimales suffisent pour la plupart des brokers)
-        return round(vol_q, 2)
-
     def decide_trade_to_execute(
         self,
         context: Dict[str, Any],
@@ -941,7 +985,7 @@ class DecisionPipeline:
 
         # 3) CORE évalue directement les signaux (via stratégies dédiées)
         trade_decision = {}
-        
+
         # 🔧 Init sécurité pour pip_size (utilisé plus bas même hors burst)
         pip_size = 0.0001
 
@@ -959,16 +1003,21 @@ class DecisionPipeline:
                 if getattr(self, "scalping_pipeline", None) is None:
                     # Fallback ultra-sécurisé au cas où l'init a échoué
                     from strategy.pipeline import ScalpingPipeline as _SP
-                    self.scalping_pipeline = _SP(self.config_manager, arbiter=getattr(self, "arbiter", None), logger=self.logger)
+
+                    self.scalping_pipeline = _SP(
+                        self.config_manager,
+                        arbiter=getattr(self, "arbiter", None),
+                        logger=self.logger,
+                    )
 
                 decision = self.scalping_pipeline.run(
-                    asset="XAUUSD",
-                    context=context,
-                    current_config=current_config
+                    asset="XAUUSD", context=context, current_config=current_config
                 )
                 if isinstance(decision, dict) and decision:
                     trade_decision = decision
-                    self.logger.info("[CORE] Signal scalping (pipeline) retenu sur XAUUSD")
+                    self.logger.info(
+                        "[CORE] Signal scalping (pipeline) retenu sur XAUUSD"
+                    )
                     print("✅ [CORE] Décision scalping (pipeline) détectée sur XAUUSD")
             except Exception as e:
                 self.logger.error(f"[CORE] Erreur ScalpingPipeline.run: {e}")
@@ -1067,17 +1116,23 @@ class DecisionPipeline:
         )
         # --- PATCH C (ARB-01): Gate Arbiter avant exécution ---
         try:
-            chosen_strategy_name = str(current_config.get("strategy_name", "unknown")).lower()
+            chosen_strategy_name = str(
+                current_config.get("strategy_name", "unknown")
+            ).lower()
         except Exception:
             chosen_strategy_name = "unknown"
 
         if self.arbiter and normalized_action in {"BUY", "SELL"}:
             try:
-                ok, reason = self.arbiter.can_open(asset_raw, normalized_action, chosen_strategy_name)
+                ok, reason = self.arbiter.can_open(
+                    asset_raw, normalized_action, chosen_strategy_name
+                )
             except Exception as _e:
                 ok, reason = True, f"ARB_ERROR:{_e}"
             if not ok:
-                self.logger.info(f"[ARB.BLOCK] {asset_raw} {normalized_action} par '{chosen_strategy_name}' refusé: {reason}")
+                self.logger.info(
+                    f"[ARB.BLOCK] {asset_raw} {normalized_action} par '{chosen_strategy_name}' refusé: {reason}"
+                )
                 print(f"⛔ [ARB] Blocage: {asset_raw} {normalized_action} ({reason})")
                 return {}
 
@@ -1089,7 +1144,9 @@ class DecisionPipeline:
             df_patterns = md_asset.get("annotated_rates_df") or md_asset.get("rates_df")
 
             if isinstance(df_patterns, pd.DataFrame) and not df_patterns.empty:
-                ma = MarketAnalyzer(config_manager=self.config_manager, logger=self.logger)
+                ma = MarketAnalyzer(
+                    config_manager=self.config_manager, logger=self.logger
+                )
                 ma_results = ma.analyze(df_patterns.copy(), asset_raw)
 
                 last_sig = ma_results.get("latest", {})
@@ -1118,7 +1175,6 @@ class DecisionPipeline:
                     )
         except Exception as e:
             self.logger.warning(f"Erreur MarketAnalyzer: {e}")
-
 
         # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
@@ -1179,7 +1235,6 @@ class DecisionPipeline:
             )
             print("⚠️ [CORE] entry_price manquant — le risk engine risque d'échouer.")
 
-     
         # 4) Contrôles compte/risque simples
         active_broker_account = context.get("active_broker_account", {})
         max_positions_for_account = active_broker_account.get("trade_settings", {}).get(
@@ -1196,20 +1251,17 @@ class DecisionPipeline:
             print(f"⛔ [CORE] {msg}")
             return {}
 
-        # 5) Sizing au risque
+        # 5) Sizing au risque (⚠️ sans AUCUN ajustement de volume ici)
         risk_params = self.calculate_risk_parameters(
             context, current_config, trade_decision
         )
         self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
 
         if isinstance(risk_params, dict) and risk_params.get("ok"):
-            vol_ok = risk_params.get("volume")
-            if isinstance(vol_ok, (int, float)) and vol_ok > 0:
-                trade_decision["volume"] = float(vol_ok)
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
 
-           # ✅ Patch : pas de TP pour burst
+            # ✅ Patch : pas de TP pour burst
             if trade_decision.get("rule_name") == "burst_scalping":
                 levels = normalize_levels(
                     entry_price=trade_decision.get("entry_price"),
@@ -1233,89 +1285,6 @@ class DecisionPipeline:
                 )
                 trade_decision["sl_price"] = levels["sl"]
                 trade_decision["tp_price"] = levels["tp"]
-
-
-                # plancher volume soft
-                try:
-                    min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
-                    md_asset = (context.get("market_data", {}) or {}).get(
-                        trade_decision["asset"], {}
-                    ) or {}
-                    si = (
-                        md_asset.get("symbol_info")
-                        or current_config.get("symbol_info")
-                        or {}
-                    )
-
-                    def _g(d, k, default=0.0):
-                        try:
-                            v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
-                            v = float(v) if v is not None else default
-                            return v if math.isfinite(v) else default
-                        except Exception:
-                            return default
-
-                    vol_min_broker = _g(si, "volume_min", 0.0)
-                    vol_step_broker = _g(si, "volume_step", 0.0)
-                    min_lot_soft = max(
-                        min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0
-                    )
-                    vol = float(trade_decision.get("volume", 0.0))
-                    vol = max(vol, min_lot_soft) if vol > 0 else min_lot_soft
-                    if vol_step_broker and vol_step_broker > 0:
-                        steps = math.ceil(vol / vol_step_broker)
-                        vol = steps * vol_step_broker
-                    trade_decision["volume"] = float(vol)
-                    self.logger.info(
-                        f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})"
-                    )
-                except Exception as e:
-                    self.logger.debug(f"[SOFT-ATR] Ajustement volume ignoré: {e}")
-
-            # plancher de volume en cas de soft ATR
-            try:
-                flags = trade_decision.get("flags", {})
-                if flags.get("soft_atr_m1_low") and trade_decision.get("action") in {
-                    "BUY",
-                    "SELL",
-                }:
-                    min_lot_cfg = float(current_config.get("min_lot_size", 0.01))
-                    md_asset = (context.get("market_data", {}) or {}).get(
-                        asset_raw, {}
-                    ) or {}
-                    si = (
-                        md_asset.get("symbol_info")
-                        or current_config.get("symbol_info")
-                        or {}
-                    )
-
-                    def _get_num(d, k, default=0.0):
-                        try:
-                            v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
-                            v = float(v) if v is not None else default
-                            return v if math.isfinite(v) else default
-                        except Exception:
-                            return default
-
-                    vol_min_broker = _get_num(si, "volume_min", 0.0)
-                    vol_step_broker = _get_num(si, "volume_step", 0.0)
-                    min_lot_soft = max(
-                        min_lot_cfg, vol_min_broker if vol_min_broker > 0 else 0.0
-                    )
-                    vol = float(trade_decision.get("volume", 0.0))
-                    if vol <= 0.0:
-                        vol = min_lot_soft
-                    else:
-                        vol = max(vol, min_lot_soft)
-                    if vol_step_broker and vol_step_broker > 0:
-                        steps = math.ceil(vol / vol_step_broker)
-                        vol = steps * vol_step_broker
-                    trade_decision["volume"] = float(vol)
-                    self.logger.info(
-                        f"[SOFT-ATR] Volume relevé au plancher soft: {trade_decision['volume']} (min {min_lot_soft}, step {vol_step_broker or 'n/a'})"
-                    )
-            except Exception as e:
-                self.logger.debug(f"[SOFT-ATR] Patch plancher de volume ignoré: {e}")
 
         # === RÈGLE 2 : Trailing Stop
         try:
@@ -1381,7 +1350,7 @@ class DecisionPipeline:
                 trade_decision.pop("tp_price", None)
             else:
                 trade_decision["tp_price"] = levels["tp"]
-                       
+
         self.logger.debug(
             f"[CORE] Niveaux normalisés pour {trade_decision['asset']} → SL={levels['sl']} | TP={levels['tp']}"
         )
@@ -1404,7 +1373,6 @@ class DecisionPipeline:
             trade_decision["no_tp"] = True  # sécurité supplémentaire
         else:
             trade_decision["is_burst_trade"] = False
-
 
         # ==========================================================
         # 📋 Log final enrichi avec analyse patterns (si dispo)
@@ -1569,10 +1537,12 @@ class DecisionPipeline:
                     f"| vol={trade_decision.get('volume')} | SL={trade_decision.get('sl_price')} | TP={trade_decision.get('tp_price')}"
                 )
                 # --- PATCH A: Centralisation exécution ---
-                exec_res = run_trade_execution_pipeline(te, decision_package, is_dry_run=False)
+                exec_res = run_trade_execution_pipeline(
+                    te, decision_package, is_dry_run=False
+                )
                 self.logger.info(f"[EXECUTOR] Envoi MT5 terminé: {exec_res}")
 
-                # --- Enrichir la décision avec le résultat d'exécution ---
+                # --- Enrichir la décision avec le résultat d’exécution ---
                 try:
                     status = str(exec_res.get("status", "")).lower()
                     trade_decision["execution_status"] = status
@@ -1612,11 +1582,11 @@ class DecisionPipeline:
                     try:
                         if self.arbiter and trade_decision.get("executed"):
                             self.arbiter.register_trade(
-                                asset_raw,
-                                normalized_action,
-                                chosen_strategy_name
+                                asset_raw, normalized_action, chosen_strategy_name
                             )
-                            self.logger.info(f"[ARB.REG] {asset_raw} {normalized_action} enregistré (owner={chosen_strategy_name})")
+                            self.logger.info(
+                                f"[ARB.REG] {asset_raw} {normalized_action} enregistré (owner={chosen_strategy_name})"
+                            )
                     except Exception as _e:
                         self.logger.debug(f"[ARB.REG] Ignoré (err={_e})")
 
@@ -1664,7 +1634,7 @@ class DecisionPipeline:
 
         # Toujours retourner la décision (enrichie du statut d’exécution)
         return trade_decision
-   
+
     def _evaluate_rule(
         self, rule: Dict[str, Any], asset_signals: Dict[str, Any]
     ) -> bool:
