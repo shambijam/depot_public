@@ -462,10 +462,11 @@ def close_burst_basket(self, basket_id: str):
 def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     """
     BURST Scalping (LIMIT + FOK-like):
-    - Envoie N ordres simultanés
-    - Répartition du volume alignée au volume_step (pas de 0.01 imposé)
-    - Pose SL **UNIQUEMENT** (❌ jamais de TP, trailing géré ailleurs)
-    - Si un ordre échoue → on tente d'annuler tout
+    - Lit burst_size depuis la conf si non fourni dans decision
+    - Split du volume total en N enfants, alignés au volume_step, somme EXACTE
+    - SL OBLIGATOIRE : utilise decision['sl'|'sl_price'] sinon calcule via risk.stop_distance_pips
+    - Pas de TP (le trailing est géré ailleurs)
+    - Si un enfant échoue → on tente d’annuler tout le panier
     """
     import time, uuid, math
 
@@ -474,72 +475,162 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         self.logger.error("[BURST] MT5 module indisponible.")
         return False
 
+    # ---------- Lecture conf ----------
+    burst_cfg = (((config or {}).get("entry_rules") or {}).get("scalping") or {}).get(
+        "burst_scalping", {}
+    ) or {}
+    burst_size_conf = int(burst_cfg.get("burst_size", 5))
+    stop_pips_conf = int(
+        ((config or {}).get("risk") or {}).get("stop_distance_pips", 60)
+    )
+
+    # ---------- Decision / params ----------
     symbol = str(decision.get("asset") or decision.get("symbol") or "").upper()
     action = str(decision.get("action", "")).upper()
     entry_style = str(
         decision.get("entry_style") or decision.get("style") or "LIMIT_FOK"
     ).upper()
-    burst_count = int(decision.get("burst_count", decision.get("burst_size", 5)))
-    total_volume = float(decision.get("volume") or decision.get("total_volume") or 0.0)
+    total_volume = float(decision.get("total_volume") or decision.get("volume") or 0.0)
     entry_price = float(decision.get("price", 0.0) or 0.0)
-    sl_price = float(decision.get("sl") or decision.get("sl_price") or 0.0) or None
+    sl_price = decision.get("sl") or decision.get("sl_price")  # peut être None
+    burst_count = int(
+        decision.get("burst_count") or decision.get("burst_size") or burst_size_conf
+    )
     validity_ms = int(decision.get("validity_ms", 800))
-    basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
-    comment = f"burst_scalping|basket={basket_id}|entry={entry_price:.2f}"
 
-    if symbol == "" or entry_price <= 0 or burst_count <= 0 or total_volume <= 0:
-        self.logger.error("[BURST] Paramètres invalides (symbole/prix/compte/volume).")
+    if not symbol or entry_price <= 0 or total_volume <= 0 or burst_count <= 0:
+        self.logger.error("[BURST] Paramètres invalides (symbole/prix/volume/compte).")
         return False
 
-   # --- Child volumes (VALIDATION ONLY — pas de sizing ici) ---
-    child_vols = (decision.get("child_volumes") or [])
-    if not isinstance(child_vols, list) or not child_vols:
-        self.logger.error("[BURST] child_volumes manquant (doit être fourni et pré-quantifié en amont).")
-        return False
-
-    # tous positifs, finis
+    # ---------- Symbol info ----------
+    info = None
     try:
-        child_vols = [float(v) for v in child_vols]
+        if hasattr(self.mt5_connector, "safe_symbol_info"):
+            info = self.mt5_connector.safe_symbol_info(symbol)
+        if not info and hasattr(mt5, "symbol_info"):
+            info = mt5.symbol_info(symbol)
     except Exception:
-        self.logger.error("[BURST] child_volumes contient des valeurs non numériques.")
-        return False
+        info = None
 
-    if any((not math.isfinite(v) or v <= 0.0) for v in child_vols):
-        self.logger.error(f"[BURST] child_volumes invalide (valeurs <=0 ou non finies): {child_vols}")
-        return False
+    def sget(obj, name, default):
+        if not obj:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
 
-    sum_child = round(sum(child_vols), 8)
-    if sum_child <= 0.0:
-        self.logger.error(f"[BURST] Somme des child_volumes <= 0: {sum_child}")
-        return False
+    volume_step = float(sget(info, "volume_step", 0.01) or 0.01)
+    volume_min = float(sget(info, "volume_min", 0.01) or 0.01)
+    volume_max = float(sget(info, "volume_max", 100.0) or 100.0)
+    point = float(sget(info, "point", 0.01) or 0.01)
+    digits = int(float(sget(info, "digits", 2)))
+    pip_size = point * (10.0 if digits in (3, 5) else 1.0)
 
-    # si total_volume est disponible, vérifier la cohérence (tolérance relative 1e-6)
-    if isinstance(total_volume, (int, float)) and total_volume > 0:
-        if abs(sum_child - float(total_volume)) > 1e-6 * max(1.0, float(total_volume)):
+    # ---------- SL obligatoire ----------
+    if sl_price is None:
+        if stop_pips_conf <= 0 or pip_size <= 0:
             self.logger.error(
-                f"[BURST] Somme child_volumes ({sum_child}) != total_volume ({total_volume})"
+                "[BURST] Impossible de calculer un SL (stop_pips/pip_size invalides)."
+            )
+            return False
+        sl_offset = stop_pips_conf * pip_size
+        sl_price = (
+            entry_price - sl_offset if action == "BUY" else entry_price + sl_offset
+        )
+    try:
+        sl_price = float(sl_price)
+        if not math.isfinite(sl_price) or sl_price <= 0:
+            raise ValueError()
+    except Exception:
+        self.logger.error("[BURST] SL invalide.")
+        return False
+
+    # ---------- Split volumes ----------
+    def split_volume_exact(total, n, step, vmin, vmax):
+        if n <= 0:
+            return None
+        # volume par ticket "base" arrondi par défaut (FLOOR)
+        base = math.floor((total / n) / step) * step
+        if base < vmin - 1e-12:
+            # On ne “passe pas vers le haut” → total insuffisant pour n tickets
+            return None
+        vols = [base] * n
+        used = base * n
+        remain = total - used
+
+        # distribue le reste au pas lot sans dépasser vmax
+        k = 0
+        while remain >= step - 1e-12 and k < n * 2:  # garde-fou
+            i = k % n
+            if vols[i] + step <= vmax + 1e-12:
+                vols[i] += step
+                remain -= step
+            k += 1
+
+        # ajustement final: si reste tiny (< step/2), on l’ajoute au dernier
+        if abs(remain) > 1e-6:
+            # on tente un dernier ajustement si cela respecte les bornes
+            if vols[-1] + remain <= vmax + 1e-12 and vols[-1] + remain >= vmin - 1e-12:
+                vols[-1] += remain
+                remain = 0.0
+
+        # re-quantification stricte au pas lot
+        vols = [round(math.floor(v / step + 1e-9) * step, 8) for v in vols]
+        if any(v < vmin - 1e-12 or v > vmax + 1e-12 for v in vols):
+            return None
+        # somme exacte (tolérance)
+        if abs(sum(vols) - total) > max(1e-6, step / 2):
+            return None
+        return vols
+
+    child_vols = decision.get("child_volumes")
+    if child_vols:
+        try:
+            child_vols = [float(v) for v in child_vols]
+        except Exception:
+            self.logger.error("[BURST] child_volumes non numériques.")
+            return False
+        if len(child_vols) != burst_count:
+            self.logger.error(
+                f"[BURST] child_volumes != burst_count ({len(child_vols)} != {burst_count})."
+            )
+            return False
+        if abs(sum(child_vols) - total_volume) > max(1e-6, volume_step / 2):
+            self.logger.error("[BURST] Somme child_volumes != total_volume.")
+            return False
+        if any(v < volume_min - 1e-12 for v in child_vols):
+            self.logger.error("[BURST] Un enfant < volume_min.")
+            return False
+    else:
+        child_vols = split_volume_exact(
+            total_volume, burst_count, volume_step, volume_min, volume_max
+        )
+        if not child_vols:
+            self.logger.error(
+                f"[BURST] Volume total {total_volume} insuffisant pour {burst_count} enfants "
+                f"au pas {volume_step} (min lot={volume_min})."
             )
             return False
 
+    # ---------- Log plan ----------
+    basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
     self.logger.info(
-        f"[BURST] 🔫 {action} x{burst_count} {symbol} @ {entry_price:.2f} "
-        f"(style={entry_style}, basket={basket_id}, split={child_vols}, sum={sum_child:.3f})"
+        f"[BURST] Plan: {action} {symbol} x{burst_count} @ {entry_price:.2f} "
+        f"(style={entry_style}, split={child_vols}, total={sum(child_vols):.3f}, SL={sl_price:.2f})"
     )
 
-
-    # --- Construction MT5 request prototype ---
+    # ---------- Construction requêtes ----------
     is_buy = action == "BUY"
     if entry_style.endswith("FOK"):
-        # Deal + FOK (comportement “tout ou rien”)
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
         trade_action = mt5.TRADE_ACTION_DEAL
         type_filling = getattr(mt5, "ORDER_FILLING_FOK", 0)
     else:
-        # Pending LIMIT
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         trade_action = mt5.TRADE_ACTION_PENDING
         type_filling = getattr(mt5, "ORDER_FILLING_RETURN", 2)
 
+    comment = f"burst_scalping|basket={basket_id}|entry={entry_price:.2f}"
     request_template = {
         "action": trade_action,
         "symbol": symbol,
@@ -549,13 +640,11 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         "type_filling": type_filling,
         "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
         "comment": comment,
+        "sl": float(sl_price),  # SL TOUJOURS PRÉSENT
+        # ❌ pas de "tp"
     }
-    if sl_price:
-        request_template["sl"] = float(sl_price)
-    # ❌ Jamais de TP en burst → on n'ajoute PAS la clé "tp"
 
-    # --- Envoi BURST ---
-    # OK codes robustes (DONE / PLACED / DONE_PARTIAL)
+    # ---------- Envoi BURST ----------
     RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", None)
     RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", None)
     RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None)
@@ -574,7 +663,7 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         ok = bool(res and getattr(res, "retcode", None) in OK_CODES)
         self.logger.warning(
             f"[BURST] enfant {i}/{burst_count} retcode={getattr(res,'retcode',None)} "
-            f"vol={vol} req={{{'type':req.get('type'),'action':req.get('action'),'price':req.get('price'),'sl':req.get('sl',0.0)}}}"
+            f"vol={vol} req={{'type':req.get('type'),'action':req.get('action'),'price':req.get('price'),'sl':req.get('sl',0.0)}}"
         )
         if ok:
             sent.append(res)
@@ -597,10 +686,10 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
             return False
 
     self.logger.info(f"[BURST] ✅ Panier complet ({len(sent)}/{burst_count}).")
-    self._last_burst_time = time.time()
-    # [COOLDOWN] mise à jour des compteurs sur succès
+    # housekeeping
     now_ts = time.time()
-    asset_key = str(symbol).upper()
+    asset_key = symbol
+    self._last_burst_time = now_ts
     if not hasattr(self, "_last_trade_ts_by_asset") or not isinstance(
         self._last_trade_ts_by_asset, dict
     ):
@@ -608,7 +697,6 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     self._last_any_trade_ts = now_ts
     self._last_trade_ts_by_asset[asset_key] = now_ts
     self._cycle_new_trades = getattr(self, "_cycle_new_trades", 0) + 1
-
     return True
 
 
