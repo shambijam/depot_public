@@ -1720,12 +1720,7 @@ class MT5Connector:
                     trade_contract_size=contract_size,
                     trade_tick_size=tick_size,
                 )
-
-                # --- AJOUT: alias attendu par order_send() -------------------------------
-                def symbol_info(self, symbol: str):
-                    """Alias vers get_symbol_info pour compatibilité interne."""
-                    return self.get_symbol_info(symbol)
-
+               
                 self.logger.info(
                     f"[MT5C] Infos '{symbol_norm}' récupérées. Spread={wrapped.spread}, "
                     f"Point={wrapped.point}, Contract={wrapped.trade_contract_size}, TickSize={wrapped.trade_tick_size}"
@@ -1770,6 +1765,24 @@ class MT5Connector:
             f"Vérifie le mapping broker / suffixe exact dans le Market Watch."
         )
         return ""
+    
+    def ensure_symbol_selected(self, symbol: str) -> bool:
+        """
+        Rend le symbole visible dans le Market Watch et vérifie la visibilité.
+        Retourne True si le symbole est sélectionné/visible, False sinon.
+        """
+        try:
+            sym = str(symbol or "").strip().upper()
+            if not sym:
+                return False
+            ok = self.mt5.symbol_select(sym, True)
+            info = self.mt5.symbol_info(sym)
+            return bool(ok or (info and getattr(info, "visible", True)))
+        except Exception as e:
+            # On loggue en warning, on renvoie False (la préparation d'ordre décidera quoi faire)
+            self.logger.warning(f"ensure_symbol_selected({symbol}) failed: {e}")
+            return False
+
 
     def get_symbol_info_tick(self, symbol: str):
         """

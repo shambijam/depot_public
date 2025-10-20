@@ -217,27 +217,51 @@ def _calculate_risk_based_volume(
     )
     per_lot_loss = None
 
-    # 1) MT5 order_calc_profit
-    mt5_mod = getattr(self, "mt5", None) or getattr(
-        getattr(self, "mt5_connector", None), "mt5", None
-    )
-    if mt5_mod:
+    # avant le bloc 1) MT5 order_calc_profit
+    conn = getattr(self, "mt5_connector", None)
+    if conn and hasattr(conn, "safe_order_calc_profit"):
         try:
             order_type = (
-                getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
+                getattr(conn, "ORDER_TYPE_BUY", 0)
                 if action == "BUY"
-                else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
+                else getattr(conn, "ORDER_TYPE_SELL", 1)
             )
-            profit = mt5_mod.order_calc_profit(
+            profit = conn.safe_order_calc_profit(
                 order_type, sym_name, 1.0, entry_price, sl_price
             )
-            if isinstance(profit, (tuple, list)) and profit:
-                profit = profit[-1]
-            profit = float(profit)
-            if math.isfinite(profit) and profit != 0.0:
-                per_lot_loss = abs(profit)
+            if profit is not None and float(profit) != 0.0:
+                per_lot_loss = abs(float(profit))
         except Exception:
             per_lot_loss = None
+
+    # ... et plus bas dans le cap marge :
+    if conn and hasattr(conn, "safe_order_calc_margin"):
+        margin_required = float(
+            conn.safe_order_calc_margin(order_type, sym_name, volume, entry_price)
+            or 0.0
+        )
+    else:
+        # 1) MT5 order_calc_profit
+        mt5_mod = getattr(self, "mt5", None) or getattr(
+            getattr(self, "mt5_connector", None), "mt5", None
+        )
+        if mt5_mod:
+            try:
+                order_type = (
+                    getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
+                    if action == "BUY"
+                    else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
+                )
+                profit = mt5_mod.order_calc_profit(
+                    order_type, sym_name, 1.0, entry_price, sl_price
+                )
+                if isinstance(profit, (tuple, list)) and profit:
+                    profit = profit[-1]
+                profit = float(profit)
+                if math.isfinite(profit) and profit != 0.0:
+                    per_lot_loss = abs(profit)
+            except Exception:
+                per_lot_loss = None
 
     # 2) tick_value / tick_size
     if per_lot_loss is None:
