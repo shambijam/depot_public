@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from phase_observer.detectors import Detectors
 from phase_observer.market_analyzer import MarketAnalyzer
+from trader.sizing import _calculate_risk_based_volume
+from phase_observer.footprint_analyzer import FootprintAnalyzer  
 
 
 

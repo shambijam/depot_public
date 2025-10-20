@@ -10,6 +10,7 @@ import csv
 import sys
 import math
 import re
+import time
 import MetaTrader5 as mt5
 from collections import namedtuple
 from datetime import datetime, timedelta, UTC
