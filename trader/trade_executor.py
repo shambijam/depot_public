@@ -22,8 +22,9 @@ from .sltp import _calculate_sl_tp_prices, _normalize_stops
 from .burst import monitor_burst_baskets  
 from .reconcile import reconcile_state_with_broker, _update_internal_position_state
 from .audit import _log_audit_trail, _mark_trade_sent, generate_report
-from .validators import manual_override_if_needed, approve_pending_order
+from .validators import manual_override_if_needed, approve_pending_order,pre_trade_checks
 from .trailing import apply_dynamic_trailing, _modify_sl, _bars_since
+from .burst import _attach_burst_metadata, execute_burst_scalping_order, execute_burst_single_master
 
 
 
@@ -1073,3 +1074,7 @@ TradeExecutor._modify_sl = _modify_sl
 TradeExecutor._bars_since = _bars_since
 TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
 TradeExecutor._update_internal_position_state = _update_internal_position_state
+TradeExecutor.pre_trade_checks = pre_trade_checks
+TradeExecutor._attach_burst_metadata = _attach_burst_metadata
+TradeExecutor.execute_burst_scalping_order = execute_burst_scalping_order
+TradeExecutor.execute_burst_single_master = execute_burst_single_master
