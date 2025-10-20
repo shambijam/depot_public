@@ -106,6 +106,47 @@ class TradeExecutor:
         self._load_settings()
 
         self.logger.info(f"TradeExecutor initialisé en mode {self.mode.upper()}.")
+        
+       # --- Pass-throughs vers validators & order_builder (imports locaux pour éviter les cycles) ---
+
+    def pre_trade_checks(self, trade_decision, active_config, market_context):
+        from trader.validators import pre_trade_checks as _pre_checks
+        return _pre_checks(self, trade_decision, active_config, market_context)
+
+    def _map_symbol_for_broker(self, raw_symbol: str, market_context: dict) -> str:
+        from trader.order_builder import _map_symbol_for_broker as _map_fn
+        return _map_fn(self, raw_symbol, market_context)
+
+    def prepare_order(self, decision_package: dict) -> dict:
+        from trader.order_builder import prepare_order as _prepare_order
+        return _prepare_order(self, decision_package)
+
+    def _build_mt5_request(
+        self,
+        trade_decision: dict,
+        config: dict,
+        volume: float,
+        entry_price_market: float,
+        sl_price: float,
+        tp_price: float,
+        symbol_info,
+        trigger_price: float | None = None,
+        order_type_str: str = "MARKET",
+    ) -> dict:
+        from trader.order_builder import _build_mt5_request as _build_req
+        return _build_req(
+            self,
+            trade_decision,
+            config,
+            volume,
+            entry_price_market,
+            sl_price,
+            tp_price,
+            symbol_info,
+            trigger_price,
+            order_type_str,
+        )
+ 
 
         # La réconciliation initiale est gérée par main.py, ce qui est la bonne approche.
     def get_positions(self, symbol: str | None = None):
