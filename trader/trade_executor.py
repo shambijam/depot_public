@@ -9,6 +9,8 @@ from typing import Any, Optional, Dict, List, TYPE_CHECKING
 from datetime import datetime, timedelta, UTC, timezone
 from pathlib import Path
 from core.utils import enforce_no_tp_for_burst, CustomJSONEncoder
+from trader.sizing import _calculate_risk_based_volume  
+
 
 if TYPE_CHECKING:
     from core.config_manager import ConfigManager
@@ -937,6 +939,28 @@ def run_trade_execution_pipeline(
         order_type = "MARKET"
 
     # ----------- 4) Construire le trade_decision standardisé (sans 'volume') -----------
+    
+    # --- Résolution robuste du burst_size (decision -> config -> défaut) ---
+    def _resolve_burst_size(fd: dict, cfg: dict) -> int:
+        try:
+            v = fd.get("burst_count") or fd.get("burst_size")
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+        try:
+            return int(
+                (((cfg or {}).get("entry_rules") or {}).get("scalping") or {})
+                .get("burst_scalping", {})
+                .get("burst_size", 1)
+                or 1
+            )
+        except Exception:
+            return 1
+
+    resolved_burst = _resolve_burst_size(final_decision, active_config)
+    logger.info(f"[BURST] resolved_burst_size={resolved_burst}")
+
     trade_decision = {
         "action": action,
         "asset": asset,
@@ -950,11 +974,10 @@ def run_trade_execution_pipeline(
         "order_id": final_decision.get("order_id", "N/A"),
         "entry_style": final_decision.get("entry_style"),
         "price": final_decision.get("price"),
-        # hints utiles au sizing
         "confidence": final_decision.get("confidence"),
         "volatility_factor": final_decision.get("volatility_factor"),
-        # pour BASKET sizing (si burst_count présent)
-        "burst_size": final_decision.get("burst_count", 1),
+        "burst_size": int(resolved_burst),
+
         "sizing_scope": (
             "BASKET"
             if (
@@ -1056,9 +1079,8 @@ def run_trade_execution_pipeline(
                                 "strategy_type", "unknown"
                             ),
                             "sizing_scope": "BASKET",
-                            "burst_size": int(
-                                final_decision.get("burst_count", 1) or 1
-                            ),
+                            "burst_size": int(resolved_burst),
+
                         },
                         active_config,
                         market_context,
@@ -1114,8 +1136,8 @@ def run_trade_execution_pipeline(
                     "action": action,
                     "entry_style": "LIMIT_FOK",
                     "price": limit_price,
-                    "burst_count": int(final_decision.get("burst_count", 1) or 1),
-                    "burst_volume_each": per_ticket_volume,  # ✅ issu du risk%
+                    "burst_count": int(resolved_burst),
+                    "burst_volume_each": per_ticket_volume, 
                     "validity_ms": int(final_decision.get("validity_ms", 800) or 800),
                     "no_fallback": True,
                     "comment": td_with_meta.get("comment"),

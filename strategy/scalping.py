@@ -626,45 +626,19 @@ class ScalpingStrategy(BaseStrategy):
         tick_size = float(symbol_info.get("trade_tick_size", 0.0001) or 0.0001)
         value_per_point = tick_value / tick_size if tick_size > 0 else 1.0
 
-        # --- Config risk management ---
-        account_info = context.get("account_info", {}) or {}
-        equity = float(account_info.get("equity", 0.0) or 0.0)
-        # NB: sizing final sera recalculé côté executor via risk_per_trade_percent (source broker_accounts)
-        risk_pct = float(burst_cfg.get("risk_per_trade_percent", 3.0))
-
-        # Répartir le risque sur l’ensemble du panier
-        max_risk = (equity * (risk_pct / 100.0)) / max(1, size)
-
-        # --- SL en pips depuis config ---
+               # --- SL en pips (paramètre) — pas de sizing ici ---
         sl_pips = burst_cfg.get("sl_pips", 5.0)
-        if not isinstance(sl_pips, (int, float)) or sl_pips <= 0:
+        try:
+            sl_pips = float(sl_pips)
+        except Exception:
+            sl_pips = 5.0
+        if sl_pips <= 0:
             sl_pips = 5.0
 
-        # --- Distance SL en prix ---
-        if action.upper() == "BUY":
-            sl_price = entry_price - sl_pips * pip_size_value
-            sl_distance_price = entry_price - sl_price
-        else:
-            sl_price = entry_price + sl_pips * pip_size_value
-            sl_distance_price = sl_price - entry_price
-        sl_distance_price = abs(sl_distance_price)
-
-        # --- Risque par lot ---
-        risk_per_lot = sl_distance_price * value_per_point
-        volume = (max_risk / risk_per_lot) if risk_per_lot > 0 else 0.0
-
-        # --- Normalisation broker ---
-        min_lot = float(symbol_info.get("volume_min", 0.01) or 0.01)
-        lot_step = float(symbol_info.get("volume_step", 0.01) or 0.01)
-        max_lot = float(symbol_info.get("volume_max", 100.0) or 100.0)
-
-        if lot_step > 0:
-            volume = math.floor(volume / lot_step) * lot_step
-        volume = max(min_lot, min(max_lot, volume))
-
-        if volume <= 0:
-            self.logger.error(f"[{asset}] ❌ Volume calculé invalide ({volume}).")
-            return None
+        # ⚠️ On NE CALCULE PLUS DE VOLUME ICI.
+        # Le sizing est centralisé dans trader.sizing._calculate_risk_based_volume (scope=BASKET).
+        # On prépare uniquement les infos de contexte (entry_price, sl_pips).
+        volume = None
 
         # ================================
         # 🔒 GATING "ONE BURST AT A TIME"

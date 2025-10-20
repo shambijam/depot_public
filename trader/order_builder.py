@@ -113,11 +113,10 @@ def prepare_order(self, decision_package: dict) -> dict:
         msg = "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
-
     raw_symbol = raw_symbol.upper()
-
     allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
-    if allowed & raw_symbol not in allowed:
+    if raw_symbol not in allowed:
+
         msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
@@ -325,7 +324,41 @@ def prepare_order(self, decision_package: dict) -> dict:
                 trigger_price = entry_price_hint
             else:
                 trigger_price = entry_price_market
+                
+        # --- Résolution robuste du burst_size (decision -> config -> défaut) ---
+        def _resolve_burst_size(fd: dict, cfg: dict) -> int:
+            try:
+                v = fd.get("burst_count") or fd.get("burst_size")
+                if v is not None:
+                    return int(v)
+            except Exception:
+                pass
+            try:
+                return int(
+                    (((cfg or {}).get("entry_rules") or {}).get("scalping") or {})
+                    .get("burst_scalping", {})
+                    .get("burst_size", 1)
+                    or 1
+                )
+            except Exception:
+                return 1
 
+        resolved_burst = _resolve_burst_size(trade_decision, active_config)
+        self.logger.info(f"[BURST] prepare_order: resolved_burst_size={resolved_burst}")
+        
+                # Micro-guards
+        try:
+            resolved_burst = int(resolved_burst)
+        except Exception:
+            resolved_burst = 1
+        if resolved_burst < 1:
+            self.logger.warning("[BURST] burst_size<1 → forcé à 1")
+            resolved_burst = 1
+
+        # (Optionnel mais pratique) Propager la valeur dans la décision
+        trade_decision["burst_size"] = resolved_burst
+
+               
         # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"

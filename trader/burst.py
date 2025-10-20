@@ -11,6 +11,7 @@ import hashlib
 import random
 from typing import Any, Dict, Any, Optional
 from datetime import datetime, timedelta, UTC, timezone
+from trader.sizing import _calculate_risk_based_volume
 
 
 # ==============================
@@ -487,46 +488,50 @@ def _get_ref_price(self, symbol: str, is_buy: bool, entry_style: str):
 
 def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     """
-    BURST scalping avec sizing par risque:
-    - risk_per_trade_percent / burst_size = risque par enfant
-    - Volume enfant = risque_enfant / (distance_SL_en_ticks * tick_value_par_tick)
-    - Normalisation au pas de lot (min/step/max)
-    - SL obligatoire (calc si absent via stop_distance_pips)
-    - Envoi N enfants; si échec d’un enfant → tentative d’annulation des pendings envoyés
+    BURST scalping — ORCHESTRATION PURE (sans sizing)
+    - Consomme un volume par ticket déjà calculé: decision["burst_volume_each"]
+    - Envoie N enfants (burst_count/burst_size)
+    - SL obligatoire (pris de la décision ; sinon tentative via stop_distance_pips si dispo)
+    - Aucun TP (trailing ailleurs)
+    - Si un enfant échoue → annulation des pendings déjà placés
     """
-    import math, time, uuid
+    import time, uuid
 
     mt5 = getattr(self.mt5_connector, "mt5", None)
     if not mt5:
         self.logger.error("[BURST] MT5 module indisponible.")
         return False
 
-    # --------- Conf & params ----------
-    burst_cfg = (((config or {}).get("entry_rules") or {}).get("scalping") or {}).get(
-        "burst_scalping", {}
-    ) or {}
-    burst_count = int(
-        decision.get("burst_count")
-        or decision.get("burst_size")
-        or burst_cfg.get("burst_size", 5)
-    )
-
-    risk_pct = float(
-        ((config or {}).get("risk") or {}).get("risk_per_trade_percent", 0.1)
-    )
-    stop_pips_conf = float(
-        ((config or {}).get("risk") or {}).get("stop_distance_pips", 60)
-    )
-
+    # --------- Paramètres décision ---------
     symbol = str(decision.get("asset") or decision.get("symbol") or "").upper()
     action = str(decision.get("action", "")).upper()  # BUY/SELL
     entry_style = str(
         decision.get("entry_style") or decision.get("style") or "LIMIT_FOK"
     ).upper()
 
-    if not symbol or action not in ("BUY", "SELL") or burst_count <= 0:
+    # volume par ticket : OBLIGATOIRE ici (déjà calculé en amont par trader.sizing)
+    try:
+        burst_vol_each = float(decision.get("burst_volume_each", 0.0) or 0.0)
+    except Exception:
+        burst_vol_each = 0.0
+
+    # taille du panier
+    burst_count = int(
+        decision.get("burst_count")
+        or decision.get("burst_size")
+        or (((config or {}).get("entry_rules") or {}).get("scalping") or {})
+        .get("burst_scalping", {})
+        .get("burst_size", 5)
+    )
+
+    if (
+        not symbol
+        or action not in ("BUY", "SELL")
+        or burst_count <= 0
+        or not (burst_vol_each > 0)
+    ):
         self.logger.error(
-            "[BURST] Paramètres insuffisants (symbol/action/burst_count)."
+            "[BURST] Paramètres insuffisants (symbol/action/burst_count/volume_each)."
         )
         return False
 
@@ -545,30 +550,8 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
 
     digits = int(getattr(si, "digits", 5) or 5)
     point = float(getattr(si, "point", 10**-5) or 10**-5)
-    vol_min = float(
-        getattr(si, "trade_min_volume", getattr(si, "volume_min", 0.01)) or 0.01
-    )
-    vol_max = float(
-        getattr(si, "trade_max_volume", getattr(si, "volume_max", 100.0)) or 100.0
-    )
-    vol_step = float(
-        getattr(si, "trade_volume_step", getattr(si, "volume_step", 0.01)) or 0.01
-    )
-
-    tick_sz = float(
-        getattr(si, "trade_tick_size", point) or point
-    )  # taille d’un tick de prix
-    tick_val = float(
-        getattr(si, "trade_tick_value", 0.0)
-        or getattr(si, "trade_tick_value_profit", 0.0)
-        or getattr(si, "tick_value", 0.0)  # selon brokers
-        or (
-            float(getattr(si, "trade_contract_size", 0.0) or 0.0) * tick_sz
-        )  # fallback approx
-    )
 
     # --------- Prix d'entrée & SL ----------
-    # prix d’entrée (si 0 → tick market)
     def _ref_price(side_buy: bool) -> float:
         try:
             tk = mt5.symbol_info_tick(symbol)
@@ -585,137 +568,84 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         self.logger.error(f"[BURST] Prix d’entrée indisponible pour {symbol}.")
         return False
 
+    # SL prioritaire depuis la décision
     sl_price = decision.get("sl") or decision.get("sl_price")
     if sl_price is None:
-        # calcule SL via stop_distance_pips si non fourni
-        # NB: pip pour 3/5 digits = 10*point, sinon point
-        pip_size = point * (10.0 if digits in (3, 5) else 1.0)
-        if stop_pips_conf <= 0 or pip_size <= 0:
-            self.logger.error("[BURST] stop_distance_pips invalide → SL introuvable.")
-            return False
-        offset = stop_pips_conf * pip_size
-        sl_price = entry_price - offset if action == "BUY" else entry_price + offset
+        # Option "kill-switch" si conf disponible (pas un sizing, juste une distance de secours)
+        try:
+            stop_pips_conf = float(
+                (((config or {}).get("risk") or {}).get("stop_distance_pips", 0.0))
+                or 0.0
+            )
+        except Exception:
+            stop_pips_conf = 0.0
+        if stop_pips_conf > 0:
+            pip_size = point * (10.0 if digits in (3, 5) else 1.0)
+            offset = stop_pips_conf * pip_size
+            sl_price = entry_price - offset if action == "BUY" else entry_price + offset
 
-    try:
-        sl_price = float(sl_price)
-        if not math.isfinite(sl_price) or sl_price <= 0:
-            raise ValueError()
-    except Exception:
-        self.logger.error("[BURST] SL invalide.")
-        return False
+    if sl_price is not None:
+        try:
+            sl_price = float(sl_price)
+            if not (sl_price > 0):
+                sl_price = None
+        except Exception:
+            sl_price = None
 
-    sl_dist = abs(entry_price - sl_price)
-    if sl_dist <= 0 or tick_sz <= 0 or tick_val <= 0:
-        self.logger.error(
-            "[BURST] Paramètres de risque invalides (sl_dist/tick_sz/tick_val)."
-        )
-        return False
-
-    # --------- Risque par enfant → volume enfant ----------
-    # balance/équité
-    try:
-        ai = mt5.account_info()
-        balance = float(
-            getattr(ai, "equity", 0.0) or getattr(ai, "balance", 0.0) or 0.0
-        )
-    except Exception:
-        balance = 0.0
-    if balance <= 0:
-        # fallback éventuel dans ta config si nécessaire
-        balance = float(
-            ((config or {}).get("account") or {}).get("assumed_balance", 0.0) or 0.0
-        )
-    if balance <= 0:
-        self.logger.error("[BURST] Balance/équité indisponible pour le sizing.")
-        return False
-
-    # risque par enfant en devise du compte
-    risk_child_money = balance * (float(risk_pct) / 100.0) / float(burst_count)
-
-    # risque par lot pour cette distance de SL
-    ticks_on_sl = sl_dist / tick_sz
-    if ticks_on_sl <= 0:
-        self.logger.error("[BURST] SL trop serré (ticks_on_sl<=0).")
-        return False
-
-    risk_per_lot = ticks_on_sl * tick_val  # devise du compte
-    if risk_per_lot <= 0:
-        self.logger.error("[BURST] tick_value nul → sizing impossible.")
-        return False
-
-    raw_child_vol = risk_child_money / risk_per_lot
-
-    # normalisation au pas de lot (FLOOR, pas de surprise côté broker)
-    def quantize_vol(v: float) -> float:
-        v = max(vol_min, min(vol_max, float(v)))
-        steps = math.floor((v - vol_min) / vol_step + 1e-12)
-        return round(max(vol_min, vol_min + steps * vol_step), 8)
-
-    child_vol = quantize_vol(raw_child_vol)
-    if child_vol < vol_min - 1e-12:
-        self.logger.error(f"[BURST] Volume enfant < min ({child_vol} < {vol_min}).")
-        return False
-
-    child_vols = [child_vol] * burst_count
-    total_vol = round(sum(child_vols), 8)
-
-    basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
-    self.logger.info(
-        f"[BURST] PLAN {action} {symbol} x{burst_count} @ {entry_price:.{digits}f} | "
-        f"risk%={risk_pct}% split={burst_count} → risk_enfant≈{risk_child_money:.2f} "
-        f"| vol_enfant={child_vol} (raw={raw_child_vol:.6f}) | Σvol={total_vol} | SL={sl_price:.{digits}f}"
-    )
-
-    # --------- Types d’ordre (laisser le wrapper choisir le filling + fallback) ----------
+    # --------- Mapping type d'ordre ----------
     is_buy = action == "BUY"
-    if (
-        "LIMIT" in entry_style
-        or "FOK" in entry_style
-        or "IOC" in entry_style
-        or "MARKET" in entry_style
-    ):
-        # Interprétation simple :
-        # - '...FOK/IOC/MARKET' → MARKET (DEAL) BUY/SELL (le wrapper gère filling + retry)
-        # - '...LIMIT' explicite → PENDING BUY_LIMIT/SELL_LIMIT
-        is_market = any(k in entry_style for k in ("FOK", "IOC", "MARKET"))
-    else:
-        # par défaut: MARKET
-        is_market = True
-
-    if is_market:
+    # Lecture simple de style: MARKET-like si FOK/IOC/MARKET, sinon LIMIT
+    if any(k in entry_style for k in ("FOK", "IOC", "MARKET")):
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
         trade_action = mt5.TRADE_ACTION_DEAL
     else:
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         trade_action = mt5.TRADE_ACTION_PENDING
 
+    basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
+
     request_template = {
         "action": trade_action,
-        "symbol": symbol,
+        "symbol": getattr(si, "name", symbol),
         "type": order_type,
         "price": round(entry_price, digits),
-        # ne PAS forcer type_filling ici → le wrapper s’en charge avec fallback
         "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
         "deviation": int(decision.get("deviation", 20)),
         "comment": f"burst_scalping|basket={basket_id}",
-        "sl": float(sl_price),  # SL TOUJOURS PRÉSENT
-        # pas de TP (géré ailleurs)
+        # Pas de TP en burst (trailing ailleurs)
+        "sl": (
+            float(sl_price)
+            if isinstance(sl_price, (int, float)) and sl_price > 0
+            else 0.0
+        ),
+        "tp": 0.0,
+        # meta (ignorés par MT5)
+        "strategy_type": "burst_scalping",
+        "rule_name": str(decision.get("rule_name") or "burst_scalping"),
+        "basket_id": basket_id,
+        "is_burst_trade": True,
     }
 
-    # --------- Envoi ----------
+    self.logger.info(
+        f"[BURST] PLAN {action} {symbol} x{burst_count} @ {request_template['price']:.{digits}f} "
+        f"| vol_each={burst_vol_each}"
+    )
+
+    # --------- Envoi N enfants ----------
     RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
     RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", 10008)
     RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10031)
     OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
 
     sent = []
-    for i, vol in enumerate(child_vols, 1):
+    for i in range(1, burst_count + 1):
         req = dict(request_template)
-        req["volume"] = float(vol)
+        req["volume"] = float(
+            burst_vol_each
+        )  # ✅ volume déjà calculé/quantifié en amont
         res = None
         try:
-            # utilisation du WRAPPER (obligatoire)
-            res = self.mt5_connector.order_send(req)
+            res = self.mt5_connector.order_send(req)  # wrapper (retries/guards)
         except Exception as e:
             self.logger.exception(
                 f"[BURST] Exception order_send enfant {i}/{burst_count}: {e}"
@@ -724,7 +654,8 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
         ret = getattr(res, "retcode", None) if res is not None else None
         ok = bool(ret in OK_CODES)
         self.logger.info(
-            f"[BURST] enfant {i}/{burst_count} → retcode={ret} volume={vol} price={req['price']} sl={req.get('sl')}"
+            f"[BURST] enfant {i}/{burst_count} → retcode={ret} volume={req['volume']} "
+            f"price={req['price']} sl={req.get('sl')}"
         )
 
         if ok:
@@ -750,7 +681,7 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
             return False
 
     self.logger.info(f"[BURST] ✅ Panier complété ({len(sent)}/{burst_count}).")
-    # housekeeping
+    # housekeeping léger
     now_ts = time.time()
     self._last_burst_time = now_ts
     self._last_any_trade_ts = now_ts

@@ -1981,6 +1981,7 @@ class MT5Connector:
         - Retry: REQUOTE/PRICE_OFF/TIMEOUT/NO_CONNECTION (refresh prix si MARKET)
         - Enforce distance mini SL/TP; INVALID_STOPS → re-send sans SL/TP (+ attach après exec MARKET)
         """
+        import math, re, time
 
         # --- Connexion ---
         try:
@@ -2267,25 +2268,40 @@ class MT5Connector:
         except Exception:
             pass
 
-        # --- Contexte symbole & volume ---
+        # --- Contexte symbole & volume (VALIDATION SEULE, pas d'ajustement) ---
         ctx = _symbol_ctx(symbol)
         if not ctx:
             self.logger.error(f"MT5: symbol_info indisponible pour {symbol}.")
             return None
 
         vmin, vmax, vstep = ctx["min_vol"], ctx["max_vol"], ctx["vol_step"]
-        vol = max(vmin, min(vmax, float(volume)))
-        if vstep and vstep > 0:
-            steps = math.floor((vol - vmin) / vstep + 1e-12)
-            vol = max(vmin, vmin + steps * vstep)
-        if vol <= 0 or vol < vmin:
-            self.logger.error(f"MT5: Volume normalisé invalide ({vol}).")
-            return None
-        if vol != volume:
-            self.logger.info(
-                f"MT5: Volume normalisé {volume} -> {vol} (min={vmin}, step={vstep}, max={vmax})"
+        vol_in = float(volume)
+
+        # 1) Bornes broker
+        if not (vol_in >= vmin and vol_in <= vmax):
+            self.logger.error(
+                f"MT5: Volume hors bornes broker (vol={vol_in}, min={vmin}, max={vmax}). "
+                f"Aucun auto-ajustement — échec dur (exécution pure)."
             )
-        request["volume"] = round(vol, 8)
+            return None
+
+        # 2) Alignement au pas broker (FLOOR interdit ici → pure exécution)
+        def _is_step_aligned(vol: float, base: float, step: float) -> bool:
+            if step <= 0:
+                return True
+            steps = round((vol - base) / step)
+            aligned = base + steps * step
+            return abs(aligned - vol) < 1e-12
+
+        if not _is_step_aligned(vol_in, vmin, vstep):
+            self.logger.error(
+                f"MT5: Volume non aligné au step broker (vol={vol_in}, base={vmin}, step={vstep}). "
+                f"Aucun auto-ajustement — échec dur (exécution pure)."
+            )
+            return None
+
+        # ✅ Exécution pure : on NE MODIFIE PAS le volume transmis
+        request["volume"] = round(vol_in, 8)
 
         # --- Prix / type / filling défaut ---
         digits = ctx["digits"]
