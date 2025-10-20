@@ -169,6 +169,10 @@ def _calculate_risk_based_volume(
 
     EPS = 1e-9
 
+    # Connecteurs (définis tôt pour éviter NameError)
+    conn = getattr(self, "mt5_connector", None)
+    mt5_mod = getattr(self, "mt5", None) or getattr(conn, "mt5", None)
+
     # --- Action ---
     action = str(trade_decision.get("action", "")).upper()
     action = {"LONG": "BUY", "SHORT": "SELL"}.get(action, action)
@@ -212,56 +216,44 @@ def _calculate_risk_based_volume(
         raise TradeExecutionError("Distance Entry–SL nulle")
 
     # --- Perte $ par lot ---
-    sym_name = _sget(
-        symbol_info, "name", default=str(trade_decision.get("asset", "")).upper()
+    sym_name = (
+        _sget(symbol_info, "name", default=str(trade_decision.get("asset", "")).upper())
+        or str(trade_decision.get("asset", "")).upper()
     )
     per_lot_loss = None
 
-    # avant le bloc 1) MT5 order_calc_profit
-    conn = getattr(self, "mt5_connector", None)
-    if conn and hasattr(conn, "safe_order_calc_profit"):
+    # 1) safe_order_calc_profit (connecteur) si dispo
+    if per_lot_loss is None and conn and hasattr(conn, "safe_order_calc_profit"):
         try:
-            order_type = (
-                getattr(conn, "ORDER_TYPE_BUY", 0)
-                if action == "BUY"
-                else getattr(conn, "ORDER_TYPE_SELL", 1)
+            order_type_i = 0 if action == "BUY" else 1
+            p = conn.safe_order_calc_profit(
+                order_type_i, sym_name, 1.0, entry_price, sl_price
             )
-            profit = conn.safe_order_calc_profit(
-                order_type, sym_name, 1.0, entry_price, sl_price
-            )
-            if profit is not None and float(profit) != 0.0:
-                per_lot_loss = abs(float(profit))
+            if p is not None:
+                p = float(p)
+                if math.isfinite(p) and p != 0.0:
+                    per_lot_loss = abs(p)
         except Exception:
             per_lot_loss = None
 
-    # ... et plus bas dans le cap marge :
-    if conn and hasattr(conn, "safe_order_calc_margin"):
-        margin_required = float(
-            conn.safe_order_calc_margin(order_type, sym_name, volume, entry_price)
-            or 0.0
-        )
-    else:
-        # 1) MT5 order_calc_profit
-        mt5_mod = getattr(self, "mt5", None) or getattr(
-            getattr(self, "mt5_connector", None), "mt5", None
-        )
-        if mt5_mod:
-            try:
-                order_type = (
-                    getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
-                    if action == "BUY"
-                    else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
-                )
-                profit = mt5_mod.order_calc_profit(
-                    order_type, sym_name, 1.0, entry_price, sl_price
-                )
-                if isinstance(profit, (tuple, list)) and profit:
-                    profit = profit[-1]
-                profit = float(profit)
-                if math.isfinite(profit) and profit != 0.0:
-                    per_lot_loss = abs(profit)
-            except Exception:
-                per_lot_loss = None
+    # 1bis) MT5 natif order_calc_profit
+    if per_lot_loss is None and mt5_mod and hasattr(mt5_mod, "order_calc_profit"):
+        try:
+            order_type_mt5 = (
+                getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
+                if action == "BUY"
+                else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
+            )
+            p = mt5_mod.order_calc_profit(
+                order_type_mt5, sym_name, 1.0, entry_price, sl_price
+            )
+            if isinstance(p, (tuple, list)) and p:
+                p = p[-1]
+            p = float(p)
+            if math.isfinite(p) and p != 0.0:
+                per_lot_loss = abs(p)
+        except Exception:
+            per_lot_loss = None
 
     # 2) tick_value / tick_size
     if per_lot_loss is None:
@@ -348,33 +340,39 @@ def _calculate_risk_based_volume(
     # Clamp DOWN vers les maxima autorisés
     volume = min(volume_floor, vol_max_sym, max_lot_account)
 
-    # --- Cap marge (si dispo) ---
+    # --- Cap marge (si dispo) — APRES le calcul du volume ---
     try:
-        if mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
-            order_type = (
+        margin_required = 0.0
+        order_type_i = 0 if action == "BUY" else 1
+
+        if conn and hasattr(conn, "safe_order_calc_margin"):
+            margin_required = float(
+                conn.safe_order_calc_margin(order_type_i, sym_name, volume, entry_price)
+                or 0.0
+            )
+        elif mt5_mod and hasattr(mt5_mod, "order_calc_margin"):
+            order_type_mt5 = (
                 getattr(mt5_mod, "ORDER_TYPE_BUY", 0)
                 if action == "BUY"
                 else getattr(mt5_mod, "ORDER_TYPE_SELL", 1)
             )
             margin_required = float(
-                mt5_mod.order_calc_margin(order_type, sym_name, volume, entry_price)
+                mt5_mod.order_calc_margin(order_type_mt5, sym_name, volume, entry_price)
                 or 0.0
             )
-            free_margin = float(
-                ((context or {}).get("account_info") or {}).get("margin_free") or 0.0
-            )
-            if (
-                margin_required > 0
-                and free_margin > 0
-                and margin_required > free_margin
-            ):
-                ratio = max(free_margin / margin_required, 0.0)
-                capped = math.floor(((ratio * volume) + EPS) / step) * step
-                if capped + EPS < min_required:
-                    raise TradeExecutionError("Marge insuffisante pour le lot minimum")
-                volume = min(capped, vol_max_sym, max_lot_account)
+
+        free_margin = float(
+            ((context or {}).get("account_info") or {}).get("margin_free") or 0.0
+        )
+
+        if margin_required > 0 and free_margin > 0 and margin_required > free_margin:
+            ratio = max(free_margin / margin_required, 0.0)
+            capped = math.floor(((ratio * volume) + EPS) / step) * step
+            if capped + EPS < min_required:
+                raise TradeExecutionError("Marge insuffisante pour le lot minimum")
+            volume = min(capped, vol_max_sym, max_lot_account)
     except Exception:
-        # En cas d'erreur MT5, on retombe sur le volume déjà flooré (conservateur)
+        # En cas d'erreur, on retombe sur le volume déjà flooré (conservateur)
         pass
 
     # --- Vérif finale : ne pas dépasser le budget ---
