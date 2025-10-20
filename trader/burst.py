@@ -457,6 +457,31 @@ def close_burst_basket(self, basket_id: str):
     finally:
         # déverrouillage inconditionnel
         self._closing_baskets.discard(basket_id)
+        
+def _get_ref_price(self, symbol: str, is_buy: bool, entry_style: str):
+    """
+    Donne un prix de référence POSITIF et cohérent avec le côté.
+    - Pour FOK (market-like) : BUY → ask, SELL → bid
+    - Pour LIMIT (pending) : on place au meilleur côté (BUY → bid, SELL → ask)
+    Fallback: dernière close valide si tick absent.
+    """
+    mt5 = getattr(self.mt5_connector, "mt5", None)
+    tick = mt5.symbol_info_tick(symbol) if mt5 else None
+    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+
+    if entry_style.endswith("FOK"):
+        ref = ask if is_buy else bid
+    else:
+        ref = bid if is_buy else ask
+
+    if ref <= 0.0:
+        # petit filet de sécurité : on tente la dernière close M1
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1) if mt5 else None
+        if rates and len(rates) and float(rates[0]["close"]) > 0:
+            ref = float(rates[0]["close"])
+
+    return ref if ref > 0.0 else None
 
 
 def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
@@ -492,6 +517,14 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     ).upper()
     total_volume = float(decision.get("total_volume") or decision.get("volume") or 0.0)
     entry_price = float(decision.get("price", 0.0) or 0.0)
+    is_buy = action == "BUY"
+    if entry_price <= 0:
+        ref = self._get_ref_price(symbol, is_buy, entry_style)
+        if not ref:
+            self.logger.error(f"[BURST] Pas de prix de référence valide pour {symbol}.")
+            return False
+        entry_price = ref
+
     sl_price = decision.get("sl") or decision.get("sl_price")  # peut être None
     burst_count = int(
         decision.get("burst_count") or decision.get("burst_size") or burst_size_conf
