@@ -601,8 +601,7 @@ def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
     else:
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         trade_action = mt5.TRADE_ACTION_PENDING
-
-    basket_id = f"burst_{symbol}_{uuid.uuid4().hex[:8]}"
+    basket_id = str(decision.get("basket_id") or f"burst_{symbol}_{uuid.uuid4().hex[:8]}")
 
     request_template = {
         "action": trade_action,

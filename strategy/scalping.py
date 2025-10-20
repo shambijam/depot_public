@@ -699,40 +699,38 @@ class ScalpingStrategy(BaseStrategy):
             )
             return None
 
-        # --- Construire le panier ---
+        # --- Construire la décision de PANIER (une seule décision) ---
+        entry_style = str(burst_cfg.get("entry_style", "MARKET")).upper()
         basket_id = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
-        decisions: List[Dict[str, Any]] = []
 
-        for i in range(size):
-            # Format comment aligné avec close/monitor: "burst_scalping|BURST|i/N|basket=<id>"
-            comment = basket_id  # ex: 'burst_XAUUSD_c56e2a3f'
-            d: Dict[str, Any] = {
-                "action": action,
-                "asset": asset,
-                "order_type": "MARKET",
-                "entry_price": entry_price,
-                "sl_price": sl_price,
-                "tp_price": None,  # pas de TP (trailing)
-                "volume": volume,
-                "rule_name": "burst_scalping",
-                "strategy_type": "scalping",
-                "basket_id": basket_id,
-                "burst_index": i + 1,
-                "burst_size": size,
-                "meta": {"burst": True, "entry_source": "core_decision"},
-                "comment": comment,  # clé : sérialise le basket dans le comment (watchdog-friendly)
-            }
-            decisions.append(d)
+        burst_decision: Dict[str, Any] = {
+            "rule_name": "burst_scalping",
+            "strategy_type": "scalping",
+            "action": action,
+            "asset": asset,
+            # on laisse 'order_type' simple ; prepare_order fera les garde-fous
+            "order_type": "MARKET",
+            "entry_style": entry_style,
+            "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
+            # 🧩 PAS de 'sl_price' ni de 'tp_price' ici → calculés/normalisés dans prepare_order
+            # 🧩 PAS de 'volume' ici → sizing dans trader.sizing._calculate_risk_based_volume (scope=BASKET)
+            "burst_size": int(size),
+            "basket_id": basket_id,  # transmis à l’orchestrateur pour tagger les commentaires
+            "meta": {"burst": True, "entry_source": "core_decision"},
+            # 'comment' sera construit proprement plus tard (wrapper/orchestrateur)
+        }
 
-        # Enregistrer le VERROU mémoire immédiatement (évite double-burst si positions_get() lag)
-        self._active_burst_locks[asset] = {"basket_id": basket_id, "expected": size, "ts": time.time()}
+        # Verrou mémoire immédiat (évite double-burst avant que positions_get() reflète l'état)
+        self._active_burst_locks[asset] = {
+            "basket_id": basket_id,
+            "expected": size,
+            "ts": time.time()
+        }
 
         self.logger.info(
-            f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | "
-            f"SL={sl_price} | volume={volume:.2f} | risk={risk_pct}% | basket_id={basket_id}"
+            f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
         )
-        return {"burst_decisions": decisions, "basket_id": basket_id}
-
+        return burst_decision
 
 
     def _get_bars(self, asset: str, timeframe: str, count: int):
