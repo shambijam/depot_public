@@ -29,6 +29,7 @@ Footprint Trigger Analysis — Fixed & Enhanced
 
 # ========================= enums / dataclasses =========================
 
+
 class ErrorCode(Enum):
     IMPORT_FAILURE = "E001"
     DATA_VALIDATION = "E002"
@@ -97,11 +98,9 @@ class TriggerConfig:
 
     @classmethod
     def from_strategy_config(cls, strategy_config: Dict[str, Any]) -> "TriggerConfig":
-        node = (
-            (strategy_config or {})
-            .get("entry_rules", {}).get("scalping", {})
-            .get("burst_scalping", {}).get("footprint_triggers", {}) or {}
-        )
+        node = (strategy_config or {}).get("entry_rules", {}).get("scalping", {}).get(
+            "burst_scalping", {}
+        ).get("footprint_triggers", {}) or {}
         c = node.get("climax", {}) or {}
         s = node.get("stacking", {}) or {}
         a = node.get("absorption", {}) or {}
@@ -115,7 +114,9 @@ class TriggerConfig:
             stack_delta_ratio_min=float(s.get("delta_ratio_min", 1.2)),
             stack_min_levels=int(s.get("min_levels", 2)),
             stack_invalidate_opp_ratio=float(s.get("invalidate_opposite_ratio", 0.65)),
-            stack_vol_lvl_min_med=float(node.get("vol_level_min_ratio_median_30s", 0.0)),
+            stack_vol_lvl_min_med=float(
+                node.get("vol_level_min_ratio_median_30s", 0.0)
+            ),
             abs_vol_z_min=float(a.get("vol_zscore_min", 1.2)),
             abs_delta_ratio_max=float(a.get("delta_ratio_max", 0.6)),
             abs_attempts_min=int(a.get("attempts_min", 1)),
@@ -152,55 +153,123 @@ class TriggerDecision:
 
 # ========================= utilities =========================
 
+
 class DataValidator:
     @staticmethod
     def validate_ticks(ticks: pd.DataFrame) -> ValidationResult:
+        """
+        Validation tolérante des ticks :
+        - Vérifie la présence de colonnes prix/volume *ou équivalents*.
+        - N'échoue plus si quelques lignes ont un prix non-positif : on valide
+        si au moins un sous-ensemble exploitable (prix > 0) existe.
+        - Expose des métriques utiles (lignes totales, lignes valides).
+        """
         if ticks is None or ticks.empty:
-            return ValidationResult(False, ErrorCode.INSUFFICIENT_DATA, "Ticks dataframe is empty")
+            return ValidationResult(
+                False, ErrorCode.INSUFFICIENT_DATA, "Ticks dataframe is empty"
+            )
 
         cols = set(ticks.columns)
-        has_price = ("price" in cols) or ({"bid", "ask"} <= cols) or ("last" in cols)
-        has_vol   = any(c in cols for c in ("volume", "size", "qty", "amount", "vol"))
-        if not has_price or not has_vol:
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, "Missing price/volume-like columns")
 
-        if "price" in cols:
-            try:
-                if (ticks["price"] <= 0).any():
-                    return ValidationResult(False, ErrorCode.DATA_VALIDATION, "Detected non-positive prices")
-            except Exception:
-                pass  # feed exotique → on laisse passer
+        has_price_like = (
+            ("price" in cols) or ({"bid", "ask"} <= cols) or ("last" in cols)
+        )
+        has_vol_like = any(
+            c in cols for c in ("volume", "size", "qty", "amount", "vol")
+        )
+        if not has_price_like or not has_vol_like:
+            return ValidationResult(
+                False, ErrorCode.DATA_VALIDATION, "Missing price/volume-like columns"
+            )
 
-        return ValidationResult(True, metrics={"row_count": int(len(ticks))})
+        # Série de prix "effective" (sans muter le DF d'entrée)
+        eff_price = None
+        try:
+            if "price" in cols:
+                eff_price = pd.to_numeric(ticks["price"], errors="coerce")
+            elif {"bid", "ask"} <= cols:
+                bid = pd.to_numeric(ticks["bid"], errors="coerce")
+                ask = pd.to_numeric(ticks["ask"], errors="coerce")
+                eff_price = (bid + ask) * 0.5
+            elif "last" in cols:
+                eff_price = pd.to_numeric(ticks["last"], errors="coerce")
+        except Exception:
+            eff_price = None
+
+        if eff_price is None:
+            return ValidationResult(
+                False, ErrorCode.DATA_VALIDATION, "No usable price series"
+            )
+
+        good_price_mask = eff_price.notna() & (eff_price > 0)
+        valid_rows = int(good_price_mask.sum())
+        total_rows = int(len(ticks))
+
+        if valid_rows == 0:
+            return ValidationResult(
+                False, ErrorCode.DATA_VALIDATION, "Detected non-positive prices"
+            )
+
+        # (Optionnel) check volume > 0 sur une colonne connue, sans bloquer si mixte
+        pos_vol_rows = None
+        try:
+            vol_col = next(
+                (c for c in ("volume", "size", "qty", "amount", "vol") if c in cols),
+                None,
+            )
+            if vol_col is not None:
+                vol_series = pd.to_numeric(ticks[vol_col], errors="coerce")
+                pos_vol_rows = int((vol_series.fillna(0) > 0).sum())
+        except Exception:
+            pos_vol_rows = None
+
+        return ValidationResult(
+            True,
+            metrics={
+                "row_count": total_rows,
+                "valid_price_rows": valid_rows,
+                "positive_volume_rows": pos_vol_rows,
+            },
+        )
 
     @staticmethod
     def validate_bars(bars: pd.DataFrame) -> ValidationResult:
         if bars is None or bars.empty:
             return ValidationResult(True, message="Bars optional, skipping")
         cols = set(bars.columns)
-        required = {"open","high","low","close"}
+        required = {"open", "high", "low", "close"}
         missing = required - cols
         if missing:
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Bars missing: {sorted(missing)}")
+            return ValidationResult(
+                False, ErrorCode.DATA_VALIDATION, f"Bars missing: {sorted(missing)}"
+            )
         try:
             invalid = (
-                (bars["high"] < bars["low"]) |
-                (bars["high"] < bars["open"]) |
-                (bars["high"] < bars["close"]) |
-                (bars["low"]  > bars["open"]) |
-                (bars["low"]  > bars["close"])
+                (bars["high"] < bars["low"])
+                | (bars["high"] < bars["open"])
+                | (bars["high"] < bars["close"])
+                | (bars["low"] > bars["open"])
+                | (bars["low"] > bars["close"])
             )
             if invalid.any():
-                return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"Invalid OHLC in {int(invalid.sum())} bars")
+                return ValidationResult(
+                    False,
+                    ErrorCode.DATA_VALIDATION,
+                    f"Invalid OHLC in {int(invalid.sum())} bars",
+                )
         except Exception as e:
-            return ValidationResult(False, ErrorCode.DATA_VALIDATION, f"OHLC validation failed: {e}")
+            return ValidationResult(
+                False, ErrorCode.DATA_VALIDATION, f"OHLC validation failed: {e}"
+            )
 
         vol_col = None
         for c in ("volume", "tick_volume", "tickVolume", "vol"):
             if c in cols:
                 vol_col = c
                 break
-        return ValidationResult(True, metrics={"bar_count": int(len(bars)), "vol_col": vol_col})
+        return ValidationResult(
+            True, metrics={"bar_count": int(len(bars)), "vol_col": vol_col}
+        )
 
 
 class DatetimeNormalizer:
@@ -219,21 +288,32 @@ class DatetimeNormalizer:
         return idx
 
     @classmethod
-    def normalize_dataframe(cls, df: pd.DataFrame, prefer_col: str = "dt") -> pd.DataFrame:
+    def normalize_dataframe(
+        cls, df: pd.DataFrame, prefer_col: str = "dt"
+    ) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         if pd.api.types.is_datetime64_any_dtype(df.index):
             df.index = cls.normalize_index(df.index)
-        dt_cols = [c for c in ("dt","datetime","timestamp","time") if c in df.columns]
+        dt_cols = [
+            c for c in ("dt", "datetime", "timestamp", "time") if c in df.columns
+        ]
         for c in dt_cols:
-            if pd.api.types.is_datetime64_any_dtype(df[c]) or pd.api.types.is_object_dtype(df[c]):
+            if pd.api.types.is_datetime64_any_dtype(
+                df[c]
+            ) or pd.api.types.is_object_dtype(df[c]):
                 df[c] = cls.normalize_series(df[c])
-        picked = next((
-            c for c in (prefer_col,"dt","datetime","timestamp","time")
-            if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c])
-        ), None)
+        picked = next(
+            (
+                c
+                for c in (prefer_col, "dt", "datetime", "timestamp", "time")
+                if c in df.columns and pd.api.types.is_datetime64_any_dtype(df[c])
+            ),
+            None,
+        )
         if picked is None and pd.api.types.is_datetime64_any_dtype(df.index):
-            df["dt"] = df.index; picked = "dt"
+            df["dt"] = df.index
+            picked = "dt"
         if picked:
             df = df[~df[picked].isna()].sort_values(picked)
         return df
@@ -253,10 +333,12 @@ class ConfidenceScorer:
         return mapping.get(str(trigger), str(trigger))
 
     @staticmethod
-    def boost_from_metadata(decision: Dict[str, Any], meta: Dict[str, Any], price_step: float) -> float:
+    def boost_from_metadata(
+        decision: Dict[str, Any], meta: Dict[str, Any], price_step: float
+    ) -> float:
         meta = meta or {}
         conf = float(decision.get("confidence", 0.7) or 0.7)
-        sdir = 1 if str(decision.get("direction","BUY")).upper() == "BUY" else -1
+        sdir = 1 if str(decision.get("direction", "BUY")).upper() == "BUY" else -1
         dtot = float(meta.get("delta_total", 0.0) or 0.0)
         if dtot and np.sign(dtot) == sdir:
             conf = min(0.99, conf + 0.05)
@@ -267,7 +349,9 @@ class ConfidenceScorer:
         return conf
 
     @staticmethod
-    def select_best_decision(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def select_best_decision(
+        candidates: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
         valid = [c for c in candidates if c and c.get("ok")]
         if not valid:
             return None
@@ -279,8 +363,11 @@ class ConfidenceScorer:
             TriggerType.MICRO_ABSORPTION.value: 1.0,
         }
         valid.sort(
-            key=lambda d: (float(d.get("confidence", 0.0)), prio.get(ConfidenceScorer._alias(d.get("trigger")), 0)),
-            reverse=True
+            key=lambda d: (
+                float(d.get("confidence", 0.0)),
+                prio.get(ConfidenceScorer._alias(d.get("trigger")), 0),
+            ),
+            reverse=True,
         )
         best = valid[0]
         best["trigger"] = ConfidenceScorer._alias(best.get("trigger"))
@@ -304,8 +391,11 @@ class PerformanceMonitor:
 
 # ========================= main analyzer =========================
 
+
 class FootprintAnalyzer:
-    def __init__(self, logger=None, metrics_monitor: Optional[PerformanceMonitor] = None):
+    def __init__(
+        self, logger=None, metrics_monitor: Optional[PerformanceMonitor] = None
+    ):
         self.logger = logger
         self.monitor = metrics_monitor or PerformanceMonitor()
         self.validator = DataValidator()
@@ -329,10 +419,16 @@ class FootprintAnalyzer:
             with self.monitor.measure_phase("validation"):
                 vt = self.validator.validate_ticks(ticks)
                 if not vt.is_valid:
-                    return False, {"reason": vt.message, "error_code": vt.error_code.value}
+                    return False, {
+                        "reason": vt.message,
+                        "error_code": vt.error_code.value,
+                    }
                 vb = self.validator.validate_bars(bars)
                 if not vb.is_valid:
-                    return False, {"reason": vb.message, "error_code": vb.error_code.value}
+                    return False, {
+                        "reason": vb.message,
+                        "error_code": vb.error_code.value,
+                    }
 
             # 2) config
             cfg = TriggerConfig.from_strategy_config(strategy_config or {})
@@ -342,10 +438,16 @@ class FootprintAnalyzer:
             with self.monitor.measure_phase("datetime_norm"):
                 try:
                     ticks = self.normalizer.normalize_dataframe(ticks.copy(), "dt")
-                    bars  = self.normalizer.normalize_dataframe(bars.copy(), "time") if bars is not None else None
+                    bars = (
+                        self.normalizer.normalize_dataframe(bars.copy(), "time")
+                        if bars is not None
+                        else None
+                    )
                 except Exception as e:
-                    return False, {"reason": f"Datetime normalization failed: {e}",
-                                   "error_code": ErrorCode.DATETIME_NORMALIZATION.value}
+                    return False, {
+                        "reason": f"Datetime normalization failed: {e}",
+                        "error_code": ErrorCode.DATETIME_NORMALIZATION.value,
+                    }
 
             # 4) exploration multi-fenêtres / double passe
             best_decision = None
@@ -354,11 +456,14 @@ class FootprintAnalyzer:
 
             for pass_type in ("normal", "soft"):
                 params_map: Dict[str, Any] = (
-                    cfg.to_dict() if pass_type == "normal"
+                    cfg.to_dict()
+                    if pass_type == "normal"
                     else {**cfg.to_dict(), **cfg.soft_params}
                 )
 
-                for win in params_map.get("window_candidates_s", cfg.window_candidates_s):
+                for win in params_map.get(
+                    "window_candidates_s", cfg.window_candidates_s
+                ):
                     with self.monitor.measure_phase(f"window_{int(win)}s"):
                         decision, meta, used_win = self._analyze_single_window(
                             ticks=ticks,
@@ -371,10 +476,14 @@ class FootprintAnalyzer:
 
                         if decision and decision.get("ok"):
                             if (best_decision is None) or (
-                                float(decision.get("confidence", 0)) >
-                                float(best_decision.get("confidence", 0))
+                                float(decision.get("confidence", 0))
+                                > float(best_decision.get("confidence", 0))
                             ):
-                                best_decision, best_meta, best_win = decision, meta, used_win
+                                best_decision, best_meta, best_win = (
+                                    decision,
+                                    meta,
+                                    used_win,
+                                )
 
                 if best_decision:
                     break  # on s'arrête dès qu'on a un signal dans la passe courante
@@ -399,7 +508,7 @@ class FootprintAnalyzer:
         window_s: int,
         params: Dict[str, Any],
         price_step: float,
-        cfg: TriggerConfig
+        cfg: TriggerConfig,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]]:
         """
         Retourne (best_decision, meta_snapshot, window_used)
@@ -436,59 +545,93 @@ class FootprintAnalyzer:
         if bars is not None and not getattr(bars, "empty", True):
             climax_kwargs = {}
             try:
-                lookback = int(params.get("climax_lookback_bars", cfg.climax_lookback_bars))
+                lookback = int(
+                    params.get("climax_lookback_bars", cfg.climax_lookback_bars)
+                )
                 bar_slice = bars.tail(max(lookback + 5, 30))  # slice perf
                 climax_kwargs = dict(
                     lookback_bars=lookback,
-                    vol_ratio_min=float(params.get("climax_vol_ratio_min", cfg.climax_vol_ratio_min)),
-                    delta_ratio_min=float(params.get("climax_delta_ratio_min", cfg.climax_delta_ratio_min)),
-                    need_consolidation=bool(params.get("climax_need_consolidation", cfg.climax_need_consolidation)),
-                    consolidation_max_atr_mult=float(params.get("climax_cons_atr_max", cfg.climax_cons_atr_max)),
+                    vol_ratio_min=float(
+                        params.get("climax_vol_ratio_min", cfg.climax_vol_ratio_min)
+                    ),
+                    delta_ratio_min=float(
+                        params.get("climax_delta_ratio_min", cfg.climax_delta_ratio_min)
+                    ),
+                    need_consolidation=bool(
+                        params.get(
+                            "climax_need_consolidation", cfg.climax_need_consolidation
+                        )
+                    ),
+                    consolidation_max_atr_mult=float(
+                        params.get("climax_cons_atr_max", cfg.climax_cons_atr_max)
+                    ),
                 )
-                d1 = detect_volume_climax_after_consolidation(bar_slice, df_levels, **climax_kwargs)
+                d1 = detect_volume_climax_after_consolidation(
+                    bar_slice, df_levels, **climax_kwargs
+                )
                 if d1.get("ok"):
                     candidates.append(d1)
             except Exception as e:
-                self._log_error("climax_detection", e, {"kwargs": climax_kwargs, "window_s": window_s})
+                self._log_error(
+                    "climax_detection",
+                    e,
+                    {"kwargs": climax_kwargs, "window_s": window_s},
+                )
 
         # --- 2) Stacking ---
         stack_kwargs = {}
         try:
             stack_kwargs = dict(
-                delta_ratio_min=float(params.get("stack_delta_ratio_min", cfg.stack_delta_ratio_min)),
+                delta_ratio_min=float(
+                    params.get("stack_delta_ratio_min", cfg.stack_delta_ratio_min)
+                ),
                 min_levels=int(params.get("stack_min_levels", cfg.stack_min_levels)),
-                invalidate_opposite_ratio=float(params.get("stack_invalidate_opp_ratio", cfg.stack_invalidate_opp_ratio)),
-                vol_level_min_ratio_median_30s=float(params.get("stack_vol_lvl_min_med", cfg.stack_vol_lvl_min_med)),
+                invalidate_opposite_ratio=float(
+                    params.get(
+                        "stack_invalidate_opp_ratio", cfg.stack_invalidate_opp_ratio
+                    )
+                ),
+                vol_level_min_ratio_median_30s=float(
+                    params.get("stack_vol_lvl_min_med", cfg.stack_vol_lvl_min_med)
+                ),
             )
             d2 = detect_imbalance_stacking(df_levels, **stack_kwargs)
             if d2.get("ok"):
                 candidates.append(d2)
         except Exception as e:
-            self._log_error("stacking_detection", e, {"kwargs": stack_kwargs, "window_s": window_s})
+            self._log_error(
+                "stacking_detection", e, {"kwargs": stack_kwargs, "window_s": window_s}
+            )
 
         # --- 3) Absorption ---
         abs_kwargs = {}
         try:
             abs_kwargs = dict(
                 vol_zscore_min=float(params.get("abs_vol_z_min", cfg.abs_vol_z_min)),
-                delta_ratio_max=float(params.get("abs_delta_ratio_max", cfg.abs_delta_ratio_max)),
+                delta_ratio_max=float(
+                    params.get("abs_delta_ratio_max", cfg.abs_delta_ratio_max)
+                ),
                 attempts_min=int(params.get("abs_attempts_min", cfg.abs_attempts_min)),
             )
             d3 = detect_absorption_reject(df_levels, **abs_kwargs)
             if d3.get("ok"):
                 candidates.append(d3)
         except Exception as e:
-            self._log_error("absorption_detection", e, {"kwargs": abs_kwargs, "window_s": window_s})
+            self._log_error(
+                "absorption_detection", e, {"kwargs": abs_kwargs, "window_s": window_s}
+            )
 
         # --- 4) Fallbacks micro si rien ---
         if not candidates:
             cols = set(df_levels.columns)
             if {"vol", "delta", "delta_ratio"}.issubset(cols):
                 fb1 = self._micro_stacking(df_levels)
-                if fb1: candidates.append(fb1)
+                if fb1:
+                    candidates.append(fb1)
             if {"zscore_vol", "delta_ratio", "delta"}.issubset(cols):
                 fb2 = self._micro_absorption(df_levels)
-                if fb2: candidates.append(fb2)
+                if fb2:
+                    candidates.append(fb2)
 
         if not candidates:
             return None, meta, window_s
@@ -508,16 +651,26 @@ class FootprintAnalyzer:
 
         return best, meta, window_s
 
-    def _build_trigger_response(self, asset: str, decision: Dict[str, Any], meta: Dict[str, Any], window_used: int) -> Dict[str, Any]:
+    def _build_trigger_response(
+        self,
+        asset: str,
+        decision: Dict[str, Any],
+        meta: Dict[str, Any],
+        window_used: int,
+    ) -> Dict[str, Any]:
         meta = meta or {}
-        direction = str(decision.get("direction","BUY")).upper()
+        direction = str(decision.get("direction", "BUY")).upper()
         return TriggerDecision(
             action="BUY" if direction == "BUY" else "SELL",
             asset=asset,
-            trigger=decision.get("trigger","footprint"),
-            confidence=float(decision.get("confidence",0.7) or 0.7),
+            trigger=decision.get("trigger", "footprint"),
+            confidence=float(decision.get("confidence", 0.7) or 0.7),
             anchor_price=float(decision.get("anchor_price", meta.get("poc", 0.0))),
-            meta={**meta, **(decision.get("meta",{}) or {}), "window_used": int(window_used)},
+            meta={
+                **meta,
+                **(decision.get("meta", {}) or {}),
+                "window_used": int(window_used),
+            },
         ).to_dict()
 
     # ------------------- fallbacks micro -------------------
@@ -526,7 +679,7 @@ class FootprintAnalyzer:
         """2-3 niveaux adjacents, même signe, delta_ratio > 1.1 (tolère 1 gap)."""
         try:
             lv = df_levels
-            req = {"vol","delta","delta_ratio"}
+            req = {"vol", "delta", "delta_ratio"}
             if any(c not in lv.columns for c in req):
                 return None
             lv = lv[lv["vol"] > 0].sort_index()
@@ -561,14 +714,22 @@ class FootprintAnalyzer:
                 if run >= 2:
                     direction = "BUY" if sgn > 0 else "SELL"
                     anchor = float(idx[j - 1])
-                    conf = min(0.9, 0.55 + 0.15 * (run - 2) + 0.1 * np.clip(ratio[i:j].mean() / 1.1, 0, 1.5))
+                    conf = min(
+                        0.9,
+                        0.55
+                        + 0.15 * (run - 2)
+                        + 0.1 * np.clip(ratio[i:j].mean() / 1.1, 0, 1.5),
+                    )
                     return {
                         "ok": True,
                         "trigger": TriggerType.MICRO_STACK.value,
                         "direction": direction,
                         "confidence": float(conf),
                         "anchor_price": anchor,
-                        "meta": {"levels": int(run), "delta_ratio_mean": float(ratio[i:j].mean())},
+                        "meta": {
+                            "levels": int(run),
+                            "delta_ratio_mean": float(ratio[i:j].mean()),
+                        },
                     }
                 i = j
             return None
@@ -579,7 +740,7 @@ class FootprintAnalyzer:
         """zscore_vol >= 1.1 + voisin opposé clair (delta_ratio>=0.6)."""
         try:
             lv = df_levels
-            req = {"zscore_vol","delta_ratio","delta"}
+            req = {"zscore_vol", "delta_ratio", "delta"}
             if any(c not in lv.columns for c in req):
                 return None
             lv = lv.sort_index()
@@ -589,10 +750,15 @@ class FootprintAnalyzer:
             for price, row in cand.iterrows():
                 i = lv.index.get_loc(price)
                 neigh = []
-                if i > 0: neigh.append(lv.iloc[i - 1])
-                if i + 1 < len(lv): neigh.append(lv.iloc[i + 1])
+                if i > 0:
+                    neigh.append(lv.iloc[i - 1])
+                if i + 1 < len(lv):
+                    neigh.append(lv.iloc[i + 1])
                 for nb in neigh:
-                    if np.sign(nb["delta"]) != np.sign(row["delta"]) and nb["delta_ratio"] >= 0.6:
+                    if (
+                        np.sign(nb["delta"]) != np.sign(row["delta"])
+                        and nb["delta_ratio"] >= 0.6
+                    ):
                         direction = "BUY" if nb["delta"] > 0 else "SELL"
                         conf = min(0.9, 0.6 + 0.2 * (row["zscore_vol"] / 1.1))
                         return {
@@ -601,7 +767,10 @@ class FootprintAnalyzer:
                             "direction": direction,
                             "confidence": float(conf),
                             "anchor_price": float(nb.name),
-                            "meta": {"absorbed_level": float(price), "absorbed_zscore": float(row["zscore_vol"])},
+                            "meta": {
+                                "absorbed_level": float(price),
+                                "absorbed_zscore": float(row["zscore_vol"]),
+                            },
                         }
             return None
         except Exception:
@@ -610,34 +779,103 @@ class FootprintAnalyzer:
     # ------------------- helpers -------------------
 
     def _ensure_price_volume_columns(self, ticks: pd.DataFrame) -> pd.DataFrame:
+        """
+        Normalisation robuste du flux ticks :
+        - Crée/corrige la colonne 'price' même si une 'price' exotique existe mais contient des valeurs <= 0.
+        - Sources de vérité, par ordre de priorité : mid(bid,ask) → last → price existante → bid → ask.
+        - Remplissages ciblés (ffill/bfill) puis purge des lignes non-positives.
+        - Aligne 'volume' depuis une colonne volume-like si besoin.
+        """
+        if ticks is None or ticks.empty:
+            return ticks
+
         df = ticks.copy()
+
+        # --- Prépare les champs disponibles ---
+        cols = set(df.columns)
+        has_bid = "bid" in cols
+        has_ask = "ask" in cols
+        has_bid_ask = has_bid and has_ask
+        has_last = "last" in cols
+        has_price = "price" in cols
+
+        # Cast numériques sans lever d'exception
+        def _to_num(s):
+            try:
+                return pd.to_numeric(s, errors="coerce")
+            except Exception:
+                return s
+
+        mid = None
+        if has_bid:
+            df["bid"] = _to_num(df["bid"])
+        if has_ask:
+            df["ask"] = _to_num(df["ask"])
+        if has_bid_ask:
+            mid = (df["bid"] + df["ask"]) * 0.5
+
+        if has_last:
+            df["last"] = _to_num(df["last"])
+
+        if has_price:
+            df["price"] = _to_num(df["price"])
+
+        # --- Construction / réparation de 'price' ---
         if "price" not in df.columns:
-            if "last" in df.columns:
+            # Crée 'price' à partir des meilleures sources
+            if has_bid_ask:
+                df["price"] = mid
+            elif has_last:
                 df["price"] = df["last"]
-            elif "bid" in df.columns and "ask" in df.columns:
-                df["price"] = (df["bid"] + df["ask"]) * 0.5
+            elif has_bid:
+                df["price"] = df["bid"]
+            elif has_ask:
+                df["price"] = df["ask"]
+            else:
+                # Pas de source fiable → on crée vide (le validateur gèrera)
+                df["price"] = np.nan
+        else:
+            # Répare la 'price' existante si <= 0 ou NaN
+            bad_mask = ~np.isfinite(df["price"]) | (df["price"] <= 0)
+            if bad_mask.any():
+                # 1) remplace d'abord par mid si dispo
+                if has_bid_ask:
+                    df.loc[bad_mask, "price"] = mid[bad_mask]
+                    bad_mask = ~np.isfinite(df["price"]) | (df["price"] <= 0)
+                # 2) sinon par 'last' si dispo
+                if bad_mask.any() and has_last:
+                    df.loc[bad_mask, "price"] = df["last"][bad_mask]
+                    bad_mask = ~np.isfinite(df["price"]) | (df["price"] <= 0)
+                # 3) sinon par bid/ask si dispo
+                if bad_mask.any() and has_bid:
+                    df.loc[bad_mask, "price"] = df["bid"][bad_mask]
+                    bad_mask = ~np.isfinite(df["price"]) | (df["price"] <= 0)
+                if bad_mask.any() and has_ask:
+                    df.loc[bad_mask, "price"] = df["ask"][bad_mask]
+                    bad_mask = ~np.isfinite(df["price"]) | (df["price"] <= 0)
+                # 4) ffill/bfill comme dernier recours (utile si flux sporadique)
+                if bad_mask.any():
+                    df["price"] = df["price"].ffill().bfill()
+
+        # --- Filtre final: supprimer les lignes au prix non-positif ---
+        df = df[pd.to_numeric(df["price"], errors="coerce") > 0].copy()
+
+        # --- Volume: crée 'volume' si absent depuis les colonnes connues ---
         if "volume" not in df.columns:
             for alt in ("volume", "size", "qty", "amount", "vol"):
                 if alt in df.columns:
-                    df["volume"] = df[alt]
+                    df["volume"] = _to_num(df[alt])
                     break
-        return df
+            if "volume" not in df.columns:
+                # On laisse sans volume (le validateur pourra refuser si vraiment nécessaire)
+                df["volume"] = np.nan
 
-    def _log_error(self, context: str, error: Exception, extras: Dict[str, Any] = None):
-        if self.logger:
-            try:
-                self.logger.error(
-                    f"[FootprintAnalyzer] {context} failed",
-                    extra={"error": str(error), "context": context, **(extras or {})}
-                )
-            except Exception:
-                self.logger.error(f"[FootprintAnalyzer] {context} failed: {error}")
-        else:
-            print(f"[ERROR] {context}: {error} | {extras or {}}")
+        return df
 
 
 # ========================= wrapper (même signature) =========================
 # -> drop-in : si un vieux appel importe directement cette fonction
+
 
 def analyze_footprint_triggers(
     self,
@@ -647,5 +885,7 @@ def analyze_footprint_triggers(
     strategy_config: "Dict[str, Any]",
 ):
     analyzer = FootprintAnalyzer(logger=getattr(self, "logger", None))
-    ok, result = analyzer.analyze_footprint_triggers(asset, ticks, bars, strategy_config)
+    ok, result = analyzer.analyze_footprint_triggers(
+        asset, ticks, bars, strategy_config
+    )
     return ok, result

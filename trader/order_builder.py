@@ -19,6 +19,12 @@ def prepare_order(self, decision_package: dict) -> dict:
     - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
     - Tout volume présent dans la décision est ignoré.
     - La normalisation broker fait un FLOOR (jamais d'augmentation) pour ne pas dépasser le budget.
+
+    ✅ Burst scalping (conforme au cahier des charges)
+    - PAS de LIMIT_FOK ici : exécution **MARKET**, split géré par l'exécuteur.
+    - `burst_size` résolu (decision → conf) et propagé.
+    - `sizing_scope="BASKET"` pour que le sizing fasse `risk_per_trade_percent / burst_size`.
+    - SL OBLIGATOIRE, TP désactivé (trailing only).
     """
 
     self.logger.info("Préparation de l'ordre MT5...")
@@ -28,7 +34,7 @@ def prepare_order(self, decision_package: dict) -> dict:
     market_context = (decision_package or {}).get("market_context", {}) or {}
     active_config = (decision_package or {}).get("active_config", {}) or {}
 
-    # --- Raccourcis locaux (laisse ta redondance, inoffensive) ---
+    # --- Raccourcis locaux (garde-fous) ---
     trade_decision = decision_package.get("trade_decision", {}) or {}
     active_config = (
         decision_package.get("active_config")
@@ -68,24 +74,19 @@ def prepare_order(self, decision_package: dict) -> dict:
             vmin, vmax, vstep = 0.01, 100.0, 0.01
 
         if not isinstance(vol, (int, float)) or vol <= 0:
-            # 🔴 Aucun fallback arbitraire — on refuse un volume invalide
             raise TradeExecutionError(f"Volume invalide pour normalisation ({vol}).")
 
-        # Clamp dans les bornes broker
         vol = max(vmin, min(vmax, float(vol)))
-
-        # 🔧 FLOOR au pas broker (jamais d'upsize)
         if vstep > 0:
             steps = math.floor((vol - vmin) / vstep + 1e-12)
             vol = vmin + steps * vstep
             if vol > vmax:
                 vol = vmax
 
-        # 🔒 Sécurité plancher (théoriquement garanti par le sizing strict)
         if vol < vmin:
             vol = vmin
 
-        return round(vol, 8)  # précision suffisante sans écraser la granularité broker
+        return round(vol, 8)
 
     # ---------- 1) Action ----------
     action_raw = _first_non_empty(
@@ -97,9 +98,8 @@ def prepare_order(self, decision_package: dict) -> dict:
         trade_decision.get("direction"),
     )
     action = _normalize_action(action_raw)
-
     if not action:
-        msg = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE/LONG/SHORT)."
+        msg = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE)."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
@@ -114,15 +114,14 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.error(msg)
         raise TradeExecutionError(msg)
     raw_symbol = raw_symbol.upper()
+
     allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
     if raw_symbol not in allowed:
-
         msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
     # ---------- 3) Mapping broker ----------
-    # 1) mapping de compte (prioritaire)  2) mapping global  3) défaut = raw
     broker_map_acct = (
         market_context.get("active_broker_account", {}).get("symbol_map") or {}
     )
@@ -136,13 +135,12 @@ def prepare_order(self, decision_package: dict) -> dict:
         .strip()
         .upper()
     )
-
     if not broker_symbol or broker_symbol == "UNKNOWN":
         msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
-    # ---------- 3bis) Fenêtre/Calendrier de trading (hard block) ----------
+    # ---------- 3bis) Fenêtre/Calendrier de trading ----------
     try:
         tes = self.config_manager.get("trade_executor_settings", {}) or {}
         start_h = int(tes.get("trading_start_hour_utc", 0))
@@ -166,10 +164,8 @@ def prepare_order(self, decision_package: dict) -> dict:
         rule_name = str(trade_decision.get("rule_name", "")).lower()
         if rule_name == "burst_scalping":
             burst_cfg = (
-                active_config.get("entry_rules", {})
-                .get("scalping", {})
-                .get("burst_scalping", {})
-            ) or {}
+                (active_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}
+            ).get("burst_scalping", {}) or {}
             guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
             max_open_positions = int(guard_cfg.get("max_open_positions", 5))
             cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
@@ -183,7 +179,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                     return obj.get(key, default)
                 return getattr(obj, key, default)
 
-            # 1) Récup selon le scope
             if single_burst_global:
                 all_open = self.mt5_connector.get_positions() or []
                 scope_lbl = "global"
@@ -191,7 +186,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                 all_open = self.mt5_connector.get_positions(symbol=broker_symbol) or []
                 scope_lbl = broker_symbol
 
-            # 2) Détection des paniers burst via 'burst_scalping|basket='
             open_burst_ids = set()
             for p in all_open:
                 c = str(_field(p, "comment", "") or "")
@@ -200,25 +194,20 @@ def prepare_order(self, decision_package: dict) -> dict:
                     open_burst_ids.add(m.group(1))
 
             now_ts = time.time()
-
-            # 3) Interdiction si un panier existe déjà
             if enforce_closure and len(open_burst_ids) > 0:
                 raise TradeExecutionError(
                     f"⛔ Burst guard ({scope_lbl}): panier(s) en cours = {', '.join(sorted(open_burst_ids))} → interdit d’en démarrer un nouveau."
                 )
 
-            # 4) Cooldown anti-burst rapproché
             last_burst_time = getattr(self, "_last_burst_time", 0)
             if cooldown_seconds > 0 and (now_ts - last_burst_time) < cooldown_seconds:
                 raise TradeExecutionError(
                     f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
                 )
 
-            # 5) max_open_positions (info only ici)
             self.logger.info(
                 f"[BURST GUARD] OK pour démarrer (scope={scope_lbl}, aucun panier actif, cooldown OK)."
             )
-
     except TradeExecutionError:
         raise
     except Exception as e:
@@ -235,14 +224,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
     # ---------- 5) order_type sécurisé ----------
     order_type = str(trade_decision.get("order_type", "MARKET")).upper()
-    allowed_order_types = {
-        "MARKET",
-        "BUY_LIMIT",
-        "SELL_LIMIT",
-        "BUY_STOP",
-        "SELL_STOP",
-    }
-    if order_type not in allowed_order_types:
+    if order_type not in {"MARKET", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}:
         self.logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
         order_type = "MARKET"
 
@@ -251,25 +233,19 @@ def prepare_order(self, decision_package: dict) -> dict:
         resolved_symbol = self.mt5_connector.resolve_broker_symbol(broker_symbol)
         if not resolved_symbol:
             msg = (
-                f"Symbole MT5 introuvable pour '{broker_symbol}'. "
-                f"Vérifie la correspondance broker / Market Watch."
+                f"Symbole MT5 introuvable pour '{broker_symbol}'. Vérifie Market Watch."
             )
             self.logger.error(msg)
             raise TradeExecutionError(msg)
 
         symbol_info = self.mt5_connector.get_symbol_info(resolved_symbol)
         if not symbol_info:
-            msg = (
-                f"Symbole MT5 invalide ou introuvable ({resolved_symbol}). "
-                f"Vérifie la correspondance broker."
-            )
+            msg = f"Symbole MT5 invalide ou introuvable ({resolved_symbol})."
             self.logger.error(msg)
             raise TradeExecutionError(msg)
 
-        # ⚠️ À partir d’ici on travaille UNIQUEMENT avec resolved_symbol
         broker_symbol = resolved_symbol
 
-        # log contraintes volume broker
         try:
             self.logger.info(
                 f"[VOLUME] constraints broker {broker_symbol}: "
@@ -280,7 +256,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         except Exception:
             pass
 
-        # ---------- 6bis) Spread guard (en pips) ----------
+        # ---------- 6bis) Spread guard ----------
         try:
             spread_pips = float(self.mt5_connector.get_spread_pips(broker_symbol))
         except Exception:
@@ -325,7 +301,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             else:
                 trigger_price = entry_price_market
 
-        # --- Résolution robuste du burst_size (decision -> config -> défaut) ---
+        # --- Résolution `burst_size` (decision -> conf -> défaut) ---
         def _resolve_burst_size(fd: dict, cfg: dict) -> int:
             try:
                 v = fd.get("burst_count") or fd.get("burst_size")
@@ -344,9 +320,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                 return 1
 
         resolved_burst = _resolve_burst_size(trade_decision, active_config)
-        self.logger.info(f"[BURST] prepare_order: resolved_burst_size={resolved_burst}")
-
-        # Micro-guards
         try:
             resolved_burst = int(resolved_burst)
         except Exception:
@@ -355,15 +328,13 @@ def prepare_order(self, decision_package: dict) -> dict:
             self.logger.warning("[BURST] burst_size<1 → forcé à 1")
             resolved_burst = 1
 
-        # (Optionnel mais pratique) Propager la valeur dans la décision
-        trade_decision["burst_size"] = resolved_burst
-
-        # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
+        trade_decision["burst_size"] = resolved_burst  # propagation utile au sizing
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"
 
+        # ---------- 7bis) SL/TP ----------
         if is_burst:
-            # Burst : SL OBLIGATOIRE, aucun TP (trailing-only)
+            # SL OBLIGATOIRE, pas de TP
             sl_candidate = trade_decision.get("sl_price", None)
             try:
                 sl_price = float(sl_candidate) if sl_candidate is not None else 0.0
@@ -375,7 +346,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                 and math.isfinite(sl_price)
                 and sl_price > 0.0
             ):
-                # Fallback : calculer un SL via le moteur SL/TP
                 sl_calc, _tp_ignored = self._calculate_sl_tp_prices(
                     trade_decision,
                     active_config,
@@ -384,13 +354,11 @@ def prepare_order(self, decision_package: dict) -> dict:
                     market_context,
                 )
                 sl_price = float(sl_calc or 0.0)
-
             if not (math.isfinite(sl_price) and sl_price > 0.0):
                 raise TradeExecutionError("Burst scalping: SL requis mais introuvable")
 
-            tp_price = None  # jamais de TP en burst
+            tp_price = None
         else:
-            # Autres stratégies → calcul normal SL/TP
             sl_price, tp_price = self._calculate_sl_tp_prices(
                 trade_decision,
                 active_config,
@@ -401,20 +369,16 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # ---------- 8a) Sécurité broker & normalisation prix ----------
         try:
-            import math  # ok si déjà importé
-
             point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
             tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
             digits = int(
                 getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
             )
 
-            # MetaTrader: stops_level / freeze_level en "points"
             stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
             freeze_level_pts = int(getattr(symbol_info, "freeze_level", 0) or 0)
             broker_min = max(stops_level_pts, freeze_level_pts) * point  # en prix
 
-            # Param config: distance min en pips
             cfg_min_pips = None
             try:
                 cfg_min_pips = (active_config.get("execution", {}) or {}).get(
@@ -431,8 +395,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                 if isinstance(cfg_min_pips, (int, float))
                 else 0.0
             )
-
-            # Gap minimal final en prix
             min_gap_price = max(3.0 * point, broker_min, cfg_min_price)
 
             def _ceil_to_tick(x: float) -> float:
@@ -441,40 +403,29 @@ def prepare_order(self, decision_package: dict) -> dict:
             def _floor_to_tick(x: float) -> float:
                 return round(math.floor(x / tick) * tick, digits)
 
-            # Ajustements selon le type d'ordre
             has_tp = (tp_price is not None) and (rule_name_local != "burst_scalping")
 
             if action == "BUY":
-                # SL en-dessous, TP au-dessus (si TP existe)
                 if (entry_price_market - sl_price) < min_gap_price:
                     sl_price = entry_price_market - min_gap_price
                 if has_tp and (tp_price - entry_price_market) < min_gap_price:
                     tp_price = entry_price_market + min_gap_price
-
-                # Arrondi à la grille
                 sl_price = _floor_to_tick(sl_price)
                 if has_tp:
                     tp_price = _ceil_to_tick(tp_price)
-
-                # Cohérence finale (sans TP en burst)
                 if not (sl_price < entry_price_market):
                     sl_price = _floor_to_tick(entry_price_market - min_gap_price)
                 if has_tp and not (entry_price_market < tp_price):
                     tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
 
             elif action == "SELL":
-                # SL au-dessus, TP en-dessous (si TP existe)
                 if (sl_price - entry_price_market) < min_gap_price:
                     sl_price = entry_price_market + min_gap_price
                 if has_tp and (entry_price_market - tp_price) < min_gap_price:
                     tp_price = entry_price_market - min_gap_price
-
-                # Arrondi à la grille
                 sl_price = _ceil_to_tick(sl_price)
                 if has_tp:
                     tp_price = _floor_to_tick(tp_price)
-
-                # Cohérence finale (sans TP en burst)
                 if not (entry_price_market < sl_price):
                     sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
                 if has_tp and not (tp_price < entry_price_market):
@@ -495,46 +446,41 @@ def prepare_order(self, decision_package: dict) -> dict:
                 str(stops_level_pts),
                 str(freeze_level_pts),
             )
-
         except Exception as e:
             self.logger.warning(f"[SAFETY] Normalisation SL/TP échouée: {e}")
 
-        # ---------- 8bis) RR minimum (SOFT permissif) ----------
+        # ---------- 8bis) RR minimum (soft) ----------
         try:
             min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
         except Exception:
             min_rr = 0.0
-
         rr_value = None
+        if (
+            rule_name_local != "burst_scalping"
+            and min_rr > 0.0
+            and tp_price is not None
+        ):
+            if action == "BUY":
+                risk = max(entry_price_market - sl_price, 0.0)
+                reward = max(tp_price - entry_price_market, 0.0)
+            else:
+                risk = max(sl_price - entry_price_market, 0.0)
+                reward = max(entry_price_market - tp_price, 0.0)
+            rr_value = (reward / risk) if risk > 0 else 0.0
+            if risk <= 0.0 or reward <= 0.0:
+                self.logger.warning(
+                    f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté (permissif)."
+                )
+            elif rr_value < min_rr:
+                self.logger.info(
+                    f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté (permissif)."
+                )
 
-        # ✅ Appliquer le check RR seulement si la stratégie a un TP (ex: Liquidity)
-        if rule_name_local != "burst_scalping":
-            if min_rr > 0.0 and tp_price is not None:
-                if action == "BUY":
-                    risk = max(entry_price_market - sl_price, 0.0)
-                    reward = max(tp_price - entry_price_market, 0.0)
-                else:  # SELL
-                    risk = max(sl_price - entry_price_market, 0.0)
-                    reward = max(entry_price_market - tp_price, 0.0)
-
-                rr_value = (reward / risk) if risk > 0 else 0.0
-
-                if risk <= 0.0 or reward <= 0.0:
-                    self.logger.warning(
-                        f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté en mode permissif."
-                    )
-                elif rr_value < min_rr:
-                    self.logger.info(
-                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté en mode permissif."
-                    )
-
-        # ---------- 9) Volume (calcul unique via risk-based sizing) ----------
+        # ---------- 9) Volume via sizing risk-based ----------
         account_trade_settings = (
             market_context.get("active_broker_account", {}).get("trade_settings", {})
             or {}
         )
-
-        # ✅ Prérequis : risque défini et SL valide
         risk_pct = float(
             account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0
         )
@@ -543,16 +489,22 @@ def prepare_order(self, decision_package: dict) -> dict:
                 f"Risk sizing impossible: risk%={risk_pct}, sl_price={sl_price}"
             )
 
-        # ✅ Calcul unique via _calculate_risk_based_volume
+        # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
+        sizing_scope = trade_decision.get("sizing_scope")
+        if is_burst:
+            sizing_scope = "BASKET"
+
         volume_final = float(
             self._calculate_risk_based_volume(
                 {
                     "action": action,
                     "asset": broker_symbol,
-                    "order_type": order_type,
+                    "order_type": "MARKET" if is_burst else order_type,
                     "confidence": trade_decision.get("confidence", 1.0),
                     "rule_name": trade_decision.get("rule_name"),
                     "volatility_factor": trade_decision.get("volatility_factor"),
+                    "sizing_scope": sizing_scope,
+                    "burst_size": resolved_burst,
                 },
                 active_config,
                 market_context,
@@ -571,16 +523,14 @@ def prepare_order(self, decision_package: dict) -> dict:
         volume_final = _normalize_volume(symbol_info, volume_final)
         self.logger.info(
             f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
-            f"(min={getattr(symbol_info,'volume_min',None)}, "
-            f"step={getattr(symbol_info,'volume_step',None)}, "
-            f"max={getattr(symbol_info,'volume_max',None)})"
+            f"(min={getattr(symbol_info,'volume_min',None)}, step={getattr(symbol_info,'volume_step',None)}, max={getattr(symbol_info,'volume_max',None)})"
         )
         if volume_final <= 0:
             raise TradeExecutionError(
                 f"Volume final invalide après normalisation ({volume_final})."
             )
 
-        # ---------- 9b) Fat-finger & caps globaux (optionnels) ----------
+        # ---------- 9b) Sécurités volume (fat-finger / caps) ----------
         try:
             tes = self.config_manager.get("trade_executor_settings", {}) or {}
             ff = tes.get("fat_finger_check", {}) or {}
@@ -629,94 +579,10 @@ def prepare_order(self, decision_package: dict) -> dict:
                 f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
             )
 
-        # >>> PATCH: sécuriser broker_symbol + symbol_info avant construction de la requête
-        # 1) symbole brut depuis la décision
-        raw_symbol = str(
-            trade_decision.get("asset") or trade_decision.get("symbol") or ""
-        ).upper()
-        if not raw_symbol:
-            raise TradeExecutionError("[BURST] Symbole manquant dans trade_decision.")
-
-        # 2) mapping éventuel vers symbole broker
-        try:
-            mc = locals().get("market_context", {}) or {}
-            mapped = self._map_symbol_for_broker(raw_symbol, mc)
-            broker_symbol = (
-                mapped or locals().get("broker_symbol") or raw_symbol
-            ).upper()
-        except Exception:
-            broker_symbol = (locals().get("broker_symbol") or raw_symbol).upper()
-
-        # 3) s’assurer que le symbole est sélectionné (Market Watch)
-        try:
-            sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
-            if callable(sel):
-                if not sel(broker_symbol):
-                    raise TradeExecutionError(
-                        f"[BURST] symbol non sélectionné: {broker_symbol}"
-                    )
-            else:
-                info_tmp = self.mt5_connector.get_symbol_info(broker_symbol)
-                if not info_tmp or (
-                    hasattr(info_tmp, "visible") and not info_tmp.visible
-                ):
-                    subscribe = getattr(self.mt5_connector, "symbol_select", None)
-                    if callable(subscribe) and not subscribe(broker_symbol, True):
-                        raise TradeExecutionError(
-                            f"[BURST] symbol_select a échoué: {broker_symbol}"
-                        )
-        except Exception as e:
-            raise TradeExecutionError(f"[BURST] Sélection symbole KO: {e}")
-
-        # 4) recharger symbol_info depuis MT5 et le valider (digits/point)
-        symbol_info = self.mt5_connector.get_symbol_info(broker_symbol)
-        if not symbol_info:
-            raise TradeExecutionError(
-                f"[BURST] symbol_info introuvable pour {broker_symbol}."
-            )
-
-        try:
-            _digits = int(getattr(symbol_info, "digits", 0) or 0)
-            _point = float(getattr(symbol_info, "point", 0.0) or 0.0)
-        except Exception:
-            raise TradeExecutionError(
-                f"[BURST] symbol_info illisible pour {broker_symbol} (digits/point)."
-            )
-        if _digits <= 0 or _point <= 0:
-            raise TradeExecutionError(
-                f"[BURST] symbol_info invalide pour {broker_symbol} (digits/point)."
-            )
-
         # ---------- 10) Construction requête ----------
-        PENDING_TYPES = {"BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
-        tif = str(trade_decision.get("time_in_force", "")).upper()
-        is_pending = order_type in PENDING_TYPES
-        is_fok = tif == "FOK"
-
-        if rule_name_local == "burst_scalping" and is_pending and is_fok:
-            # ✅ Cas burst LIMIT_FOK multi-enfants : on construit un PENDING avec SL, sans TP
-            #    (expiration ultra-courte gérée dans _build_mt5_request)
-            tp_none = None
-            return self._build_mt5_request(
-                {
-                    "action": action,
-                    "asset": broker_symbol,
-                    "order_type": order_type,
-                    "time_in_force": "FOK",  # passe l’intention au builder
-                    "validity_ms": int(trade_decision.get("validity_ms", 800)),
-                },
-                active_config,
-                volume_final,
-                entry_price_market,  # prix de marché pour normalisation
-                sl_price,
-                tp_none,  # pas de TP en burst
-                symbol_info,
-                trigger_price,  # prix LIMIT/STOP cible
-                order_type,
-            )
-
-        elif rule_name_local == "burst_scalping":
-            # 🚀 Single-master (MARKET) avec trailing (pas de TP)
+        # ❌ SUPPRIMÉ: branche LIMIT_FOK burst pending
+        # 🚀 Burst scalping = MARKET single-master + trailing (pas de TP)
+        if is_burst:
             return self.build_burst_trailing_request(
                 trade_decision,
                 active_config,
@@ -725,30 +591,29 @@ def prepare_order(self, decision_package: dict) -> dict:
                 sl_price,
                 symbol_info,
             )
-        else:
-            # 🏦 Mode classique
-            return self._build_mt5_request(
-                {
-                    "action": action,
-                    "asset": broker_symbol,
-                    "order_type": order_type,
-                },
-                active_config,
-                volume_final,
-                entry_price_market,
-                sl_price,
-                tp_price,
-                symbol_info,
-                trigger_price,
-                order_type,
-            )
+
+        # 🏦 Autres stratégies → chemin standard
+        return self._build_mt5_request(
+            {
+                "action": action,
+                "asset": broker_symbol,
+                "order_type": order_type,
+            },
+            active_config,
+            volume_final,
+            entry_price_market,
+            sl_price,
+            tp_price,
+            symbol_info,
+            trigger_price,
+            order_type,
+        )
 
     except TradeExecutionError:
         raise
     except Exception as e:
         self.logger.error(
-            f"Erreur inattendue préparation ordre {broker_symbol}: {e}",
-            exc_info=True,
+            f"Erreur inattendue préparation ordre {broker_symbol}: {e}", exc_info=True
         )
         raise TradeExecutionError(
             f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
