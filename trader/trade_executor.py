@@ -1101,10 +1101,30 @@ def run_trade_execution_pipeline(
             except Exception as e:
                 raise TradeExecutionError(f"Sizing burst KO: {e}")
 
-            # Appliquer sizing/SL au payload
+            # Appliquer sizing/SL au payload —> on envoie le VOLUME TOTAL (each × burst_size)
+            burst_size = int(resolved_burst)
+            total_volume = per_ticket_volume * burst_size
+
+            # Normaliser au pas de lot broker si dispo
+            try:
+                total_volume = trade_executor.mt5_connector.normalize_lot(
+                    broker_symbol, total_volume
+                )
+            except Exception:
+                total_volume = round(total_volume, 2)
+
             td_with_meta["sl_price"] = sl_price
-            td_with_meta["volume"] = per_ticket_volume
+            td_with_meta["volume"] = total_volume  # ✅ ex: 0.02 * 5 = 0.10
             td_with_meta["no_tp"] = True
+
+            # Méta (traces, et pour éviter tout re-split en aval)
+            td_with_meta["burst_size"] = burst_size
+            td_with_meta["burst_virtual_each"] = per_ticket_volume
+            td_with_meta["no_split"] = True
+
+            trade_executor.logger.info(
+                f"[BURST][SINGLE-MASTER] burst={burst_size} each={per_ticket_volume:.2f} -> total={total_volume:.2f}"
+            )
 
             # Style amont (on ignore toute demande LIMIT_FOK/STOP et on force MARKET)
             style = str(
