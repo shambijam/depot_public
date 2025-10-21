@@ -324,7 +324,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 trigger_price = entry_price_hint
             else:
                 trigger_price = entry_price_market
-                
+
         # --- Résolution robuste du burst_size (decision -> config -> défaut) ---
         def _resolve_burst_size(fd: dict, cfg: dict) -> int:
             try:
@@ -345,8 +345,8 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         resolved_burst = _resolve_burst_size(trade_decision, active_config)
         self.logger.info(f"[BURST] prepare_order: resolved_burst_size={resolved_burst}")
-        
-                # Micro-guards
+
+        # Micro-guards
         try:
             resolved_burst = int(resolved_burst)
         except Exception:
@@ -358,7 +358,6 @@ def prepare_order(self, decision_package: dict) -> dict:
         # (Optionnel mais pratique) Propager la valeur dans la décision
         trade_decision["burst_size"] = resolved_burst
 
-               
         # ---------- 7bis) Sécurisation SL/TP pour Burst ----------
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"
@@ -689,8 +688,35 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
 
         # ---------- 10) Construction requête ----------
-        if rule_name_local == "burst_scalping":
-            # 🚀 Redirection spécifique vers trailing stop
+        PENDING_TYPES = {"BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
+        tif = str(trade_decision.get("time_in_force", "")).upper()
+        is_pending = order_type in PENDING_TYPES
+        is_fok = tif == "FOK"
+
+        if rule_name_local == "burst_scalping" and is_pending and is_fok:
+            # ✅ Cas burst LIMIT_FOK multi-enfants : on construit un PENDING avec SL, sans TP
+            #    (expiration ultra-courte gérée dans _build_mt5_request)
+            tp_none = None
+            return self._build_mt5_request(
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": order_type,
+                    "time_in_force": "FOK",  # passe l’intention au builder
+                    "validity_ms": int(trade_decision.get("validity_ms", 800)),
+                },
+                active_config,
+                volume_final,
+                entry_price_market,  # prix de marché pour normalisation
+                sl_price,
+                tp_none,  # pas de TP en burst
+                symbol_info,
+                trigger_price,  # prix LIMIT/STOP cible
+                order_type,
+            )
+
+        elif rule_name_local == "burst_scalping":
+            # 🚀 Single-master (MARKET) avec trailing (pas de TP)
             return self.build_burst_trailing_request(
                 trade_decision,
                 active_config,
@@ -700,7 +726,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 symbol_info,
             )
         else:
-            # 🏦 Mode classique avec TP/SL
+            # 🏦 Mode classique
             return self._build_mt5_request(
                 {
                     "action": action,
@@ -744,16 +770,19 @@ def _build_mt5_request(
     """
     Construit et valide la requête finale pour l'API MetaTrader 5, en supportant
     Market / Limit / Stop, avec contrôles durcis (style desk).
+
     - Arrondis aux digits
     - Distances mini broker (stops_level / trade_stops_level)
     - Cohérence directionnelle prix/SL/TP (vs price_ref)
     - **Volume déjà normalisé en amont (validation only ici)**
     - Deviation/Filling policy robustes
-    - Expiration (GTC/DAY/SPECIFIED)
+    - Expiration (GTC/DAY/SPECIFIED + FOK-like pending)
     - Métadonnées d’audit & compliance_flags (ignorées par MT5)
-
-    Lève TradeExecutionError en cas d’invalidité bloquante.
     """
+    # --- imports locaux sûrs ---
+    import math, re, time
+    from datetime import datetime, timezone, timedelta
+
     # ——— accès MT5 robuste ———
     mt5 = None
     try:
@@ -800,7 +829,7 @@ def _build_mt5_request(
     # --- Volume (VALIDATION ONLY — déjà normalisé en amont) ---
     if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
         raise TradeExecutionError(f"Volume invalide ({volume}).")
-    vol = float(volume)  # déjà normalisé par prepare_order/_normalize_volume
+    vol = float(volume)  # déjà normalisé en amont
 
     # --- Prix d’entrée & niveaux SL/TP arrondis ---
     if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
@@ -814,15 +843,12 @@ def _build_mt5_request(
     except Exception as e:
         raise TradeExecutionError(f"SL/TP invalides: {e}")
 
-    # --- Override LiquidityStrategy: utiliser prix absolus si fournis ---
-    if (
-        "entry_price" in trade_decision
-        and float(trade_decision["entry_price"] or 0) > 0
-    ):
+    # --- Overrides absolus (si fournis dans la décision) ---
+    if float(trade_decision.get("entry_price", 0) or 0) > 0:
         entry_price_market = round(float(trade_decision["entry_price"]), digits)
-    if "sl_price" in trade_decision and float(trade_decision["sl_price"] or 0) > 0:
+    if float(trade_decision.get("sl_price", 0) or 0) > 0:
         sl_price = round(float(trade_decision["sl_price"]), digits)
-    if "tp_price" in trade_decision and float(trade_decision["tp_price"] or 0) > 0:
+    if float(trade_decision.get("tp_price", 0) or 0) > 0:
         tp_price = round(float(trade_decision["tp_price"]), digits)
 
     # --- Mapping constantes MT5 (tolérant) ---
@@ -853,9 +879,7 @@ def _build_mt5_request(
     # Time flags
     ORDER_TIME_GTC = getattr(mt5, "ORDER_TIME_GTC", None)
     ORDER_TIME_DAY = getattr(
-        mt5,
-        time_map.get("DAY", "ORDER_TIME_DAY"),
-        getattr(mt5, "ORDER_TIME_DAY", None),
+        mt5, time_map.get("DAY", "ORDER_TIME_DAY"), getattr(mt5, "ORDER_TIME_DAY", None)
     )
     ORDER_TIME_SPECIFIED = getattr(
         mt5,
@@ -865,35 +889,43 @@ def _build_mt5_request(
     if ORDER_TIME_GTC is None:
         raise TradeExecutionError("Constante MT5 ORDER_TIME_GTC introuvable.")
 
-    # Filling policy
+    # Filling policies
+    ORDER_FILLING_FOK = getattr(
+        mt5,
+        fill_map.get("FOK", "ORDER_FILLING_FOK"),
+        getattr(mt5, "ORDER_FILLING_FOK", None),
+    )
+    ORDER_FILLING_IOC = getattr(
+        mt5,
+        fill_map.get("IOC", "ORDER_FILLING_IOC"),
+        getattr(mt5, "ORDER_FILLING_IOC", None),
+    )
+    if ORDER_FILLING_FOK is None or ORDER_FILLING_IOC is None:
+        raise TradeExecutionError("Constantes MT5 ORDER_FILLING FOK/IOC introuvables.")
+
+    # Policy par défaut (config)
     filling_policy_str = str(
         config.get("execution_policy", {}).get("type_filling", "FOK")
     ).upper()
-    mt5_filling_policy = getattr(
-        mt5,
-        fill_map.get(filling_policy_str, "ORDER_FILLING_FOK"),
-        getattr(mt5, "ORDER_FILLING_FOK", None),
-    )
-    if mt5_filling_policy is None:
-        raise TradeExecutionError("Constante MT5 filling policy introuvable.")
+    mt5_filling_policy = {
+        "FOK": ORDER_FILLING_FOK,
+        "IOC": ORDER_FILLING_IOC,
+    }.get(filling_policy_str, ORDER_FILLING_FOK)
 
     # Déviation (points)
     deviation_points = int(
         config.get("execution_policy", {}).get("max_deviation_points", 20) or 20
     )
-    if deviation_points < 0:
-        deviation_points = 0
+    deviation_points = max(0, deviation_points)
 
     # --- Burst: jamais de TP dans la requête ---
     rule = str(trade_decision.get("rule_name", "")).lower()
     is_burst = rule == "burst_scalping"
-
-    # has_tp uniquement si NON-burst et tp>0
     has_tp = (not is_burst) and (tp_price is not None and tp_price > 0)
     if is_burst and (tp_price is not None and tp_price > 0):
         self.logger.debug("[BURST] Ignoring provided TP → trailing stop only")
 
-    # --- Basket/comment (une seule logique, sans double-écriture) ---
+    # --- Basket/comment ---
     raw_comment = str(trade_decision.get("comment") or "")
     basket_id = str(trade_decision.get("basket_id") or "").strip() or None
     if not basket_id and raw_comment:
@@ -927,7 +959,7 @@ def _build_mt5_request(
         "sl": float(sl_price),
         "type_time": ORDER_TIME_GTC,
         "deviation": int(deviation_points),
-        "comment": comment,  # court, stable, peut contenir basket_id
+        "comment": comment,  # ≤31 chars, stable
         # — meta (ignorés par MT5) —
         "strategy_type": str(config.get("strategy_name", "unknown")).lower(),
         "rule_name": str(trade_decision.get("rule_name", "")),
@@ -937,21 +969,53 @@ def _build_mt5_request(
             or trade_decision.get("rr_effective")
         ),
         "basket_id": basket_id,
-        "is_burst_trade": (rule == "burst_scalping"),
+        "is_burst_trade": is_burst,
     }
     if has_tp:
         request["tp"] = float(tp_price)  # seulement si TP actif
+
+    # --- TIF pour MARKET (FOK/IOC si demandé dans la décision) ---
+    if order_type_str == "MARKET":
+        tif = str(trade_decision.get("time_in_force", "")).upper()
+        if tif == "FOK":
+            request["type_filling"] = ORDER_FILLING_FOK
+        elif tif == "IOC":
+            request["type_filling"] = ORDER_FILLING_IOC
+
+    # --- FOK-like pour PENDING (LIMIT/STOP) ---
+    try:
+        tif = str(trade_decision.get("time_in_force", "")).upper()
+        validity_ms = int(trade_decision.get("validity_ms", 800))
+        if (
+            order_type_str in {"BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
+            and tif == "FOK"
+        ):
+            # FOK-like via expiration ultra-courte (en timestamp UTC)
+            request["type_time"] = ORDER_TIME_SPECIFIED
+            expiry_ts = int(
+                (
+                    datetime.now(timezone.utc) + timedelta(milliseconds=validity_ms)
+                ).timestamp()
+            )
+            request["expiration"] = expiry_ts
+            request["comment"] = _normalize_mt5_comment(
+                (request.get("comment") or "") + "_FOKexp"
+            )
+    except Exception as _e:
+        self.logger.warning(f"[ORDER_BUILDER] setup FOK-like expir failed: {_e}")
 
     # --- Timeout & mitigation (meta only) ---
     request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
     request["_meta_use_mitigation"] = bool(trade_decision.get("use_mitigation", False))
 
-    # --- Détermination du type d’ordre et prix de référence ---
+    # --- Détermination du type d’ordre & prix de référence ---
     if order_type_str == "MARKET":
         request["action"] = mt5_action_deal
         request["type"] = ORDER_TYPE_BUY if action_str == "BUY" else ORDER_TYPE_SELL
         request["price"] = entry_price_market
-        request["type_filling"] = mt5_filling_policy
+        request.setdefault(
+            "type_filling", mt5_filling_policy
+        )  # ne pas écraser un FOK/IOC explicite
         price_ref = float(request["price"])
 
     elif order_type_str in ("BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"):
@@ -1016,29 +1080,31 @@ def _build_mt5_request(
         request["price"] = trig
         price_ref = float(trig)
 
-        # Expiration
+        # Expiration policy (n’écrase pas un FOK-like déjà en SPECIFIED)
         expiration_policy = str(
             (config.get("order_expiration_policy") or {}).get("type", "GTC")
         ).upper()
-        if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
-            request["type_time"] = ORDER_TIME_DAY
-        elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
-            request["type_time"] = ORDER_TIME_SPECIFIED
-            exp_str = (config.get("order_expiration_policy") or {}).get(
-                "datetime",
-                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-            )
-            try:
-                if isinstance(exp_str, (int, float)):
-                    request["expiration"] = int(exp_str)
-                else:
-                    exp_dt = datetime.fromisoformat(str(exp_str))
-                    if exp_dt.tzinfo is None:
-                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-                    request["expiration"] = int(exp_dt.timestamp())
-            except Exception:
-                self.logger.error(f"Expiration invalide: {exp_str}. Fallback GTC.")
-                request["type_time"] = ORDER_TIME_GTC
+        if request.get("type_time") == ORDER_TIME_GTC:
+            if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
+                request["type_time"] = ORDER_TIME_DAY
+            elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
+                request["type_time"] = ORDER_TIME_SPECIFIED
+                exp_str = (config.get("order_expiration_policy") or {}).get(
+                    "datetime",
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                )
+                try:
+                    if isinstance(exp_str, (int, float)):
+                        exp_ts = int(float(exp_str))
+                    else:
+                        exp_dt = datetime.fromisoformat(str(exp_str))
+                        if exp_dt.tzinfo is None:
+                            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                        exp_ts = int(exp_dt.timestamp())
+                    request["expiration"] = exp_ts
+                except Exception:
+                    self.logger.error(f"Expiration invalide: {exp_str}. Fallback GTC.")
+                    request["type_time"] = ORDER_TIME_GTC
     else:
         raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
 
@@ -1078,8 +1144,7 @@ def _build_mt5_request(
 
     # Defaults (sécurité)
     request.setdefault(
-        "action",
-        mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending,
+        "action", mt5_action_deal if order_type_str == "MARKET" else mt5_action_pending
     )
     request.setdefault("type_time", ORDER_TIME_GTC)
 

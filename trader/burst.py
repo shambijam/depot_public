@@ -1301,7 +1301,7 @@ def build_single_master_request(
         "deviation": int(deviation_points),
         "magic": int(magic),
         "comment": comment,
-        "sl": 0.0,
+        "sl": float(trade_decision.get("sl_price", 0.0)) or 0.0,
         "tp": 0.0,
         # meta (ignoré par MT5)
         "strategy_type": "scalping",

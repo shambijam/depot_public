@@ -840,7 +840,7 @@ def run_trade_execution_pipeline(
     - ✅ On force MARKET côté burst (entry_style=MARKET), TP désactivé par défaut (no_tp=True).
     - ✅ Journalisation explicite.
     """
-    import logging
+    import time
 
     logger = logging.getLogger(__name__)
 
@@ -1056,6 +1056,110 @@ def run_trade_execution_pipeline(
     # ------------------------ 6) Sélection du mode ------------------------
     try:
         if burst_flag:
+            
+            # --- [NEW] Branche multi-ordres LIMIT_FOK pour 'burst_scalping' ---
+            rule_lower = (trade_decision.get("rule_name") or "").lower()
+            if rule_lower == "burst_scalping" and str(trade_decision.get("entry_style","")).upper() == "LIMIT_FOK":
+                # 6.1 Résoudre symbole & prix de référence
+                try:
+                    broker_symbol = trade_executor.mt5_connector.resolve_broker_symbol(asset) or asset
+                    symbol_info = trade_executor.mt5_connector.get_symbol_info(broker_symbol)
+                    if not symbol_info:
+                        return _abort(f"Symbole MT5 introuvable: {broker_symbol}", extra="burst_scalping_limit_fok")
+                    # Prix LIMIT attendu dans la décision (sinon on prend ask/bid courant)
+                    limit_price = float(final_decision.get("price") or 0.0)
+                    if limit_price <= 0:
+                        tk = trade_executor.mt5_connector.get_symbol_tick(broker_symbol) or {}
+                        ask = tk.get("ask", getattr(tk, "ask", None))
+                        bid = tk.get("bid", getattr(tk, "bid", None))
+                        limit_price = float(ask if action == "BUY" else bid) if (ask or bid) else 0.0
+                    if limit_price <= 0:
+                        return _abort("Prix LIMIT introuvable pour LIMIT_FOK", extra="burst_scalping_limit_fok")
+                except Exception as e:
+                    return _abort(f"Résolution symbole/prix KO: {e}", extra="burst_scalping_limit_fok")
+
+                # 6.2 SL à partir de la conf / préférence existante
+                try:
+                    if isinstance(final_decision.get("sl_price"), (int,float)) and final_decision["sl_price"] > 0:
+                        sl_price = float(final_decision["sl_price"])
+                    else:
+                        sl_calc, _ = trade_executor._calculate_sl_tp_prices(
+                            {**trade_decision, "price": limit_price},  # on référence le LIMIT
+                            active_config,
+                            symbol_info,
+                            limit_price,  # prix d'entrée visé
+                            market_context,
+                        )
+                        sl_price = float(sl_calc or 0.0)
+                    if not (sl_price and sl_price > 0):
+                        return _abort("SL requis introuvable pour burst_scalping LIMIT_FOK", extra="burst_scalping_limit_fok")
+                except Exception as e:
+                    return _abort(f"Calcul SL burst LIMIT_FOK KO: {e}", extra="burst_scalping_limit_fok")
+
+                # 6.3 Taille: priorise burst_volume_each sinon sizing risk% par ticket (scope=BASKET)
+                count = int(final_decision.get("burst_count") or trade_decision.get("burst_size") or 5)
+                each = final_decision.get("burst_volume_each")
+                if not isinstance(each, (int,float)) or each <= 0:
+                    # calcule lot par ticket en tenant compte du burst (division du risk% sur le panier)
+                    try:
+                        account_trade_settings = (market_context.get("active_broker_account", {}) or {}).get("trade_settings", {}) or {}
+                        each = float(
+                            trade_executor._calculate_risk_based_volume(
+                                {
+                                    "action": action,
+                                    "asset": broker_symbol,
+                                    "order_type": "MARKET",  # sizing de référence
+                                    "rule_name": "burst_scalping",
+                                    "strategy_type": trade_decision.get("strategy_type","scalping"),
+                                    "sizing_scope": "BASKET",
+                                    "burst_size": int(count),
+                                },
+                                active_config,
+                                market_context,
+                                symbol_info,
+                                limit_price,
+                                sl_price,
+                                account_trade_settings,
+                            )
+                        )
+                    except Exception as e:
+                        return _abort(f"Sizing burst LIMIT_FOK KO: {e}", extra="burst_scalping_limit_fok")
+
+                # 6.4 Boucle d’envoi des enfants LIMIT+FOK avec SL présent
+                ok_any = False
+                basket_id = f"burst_{asset}_{int(time.time())}"
+                for i in range(1, count+1):
+                    child_decision = {
+                        "action": action,
+                        "asset": asset,
+                        "order_type": "BUY_LIMIT" if action=="BUY" else "SELL_LIMIT",
+                        "price": float(limit_price),
+                        "volume": float(each),
+                        "time_in_force": "FOK",
+                        "validity_ms": int(final_decision.get("validity_ms", 800)),
+                        "strategy_type": "scalping",
+                        "rule_name": "burst_scalping",
+                        "comment": f"burst_scalping|basket={basket_id}|child={i}/{count}",
+                        "sl_price": float(sl_price),
+                        "no_tp": True,
+                    }
+                    pkg = {"trade_decision": child_decision, "market_context": market_context, "active_config": active_config}
+                    try:
+                        req = trade_executor.prepare_order(pkg)
+                        res = trade_executor.execute_order(req)
+                        st = (res or {}).get("status","")
+                        if st in {"sent","placed","filled"}:
+                            ok_any = True
+                        else:
+                            _log("warning", f"[BURST][{asset}] enfant {i}/{count} rejeté: {res}")
+                    except Exception as e:
+                        _log("error", f"[BURST][{asset}] enfant {i}/{count} erreur: {e}")
+                if ok_any:
+                    _audit("filled", {"asset": asset, "mode": "burst_scalping_limit_fok", "children": count})
+                    return {"status":"filled","mode":"burst_scalping_limit_fok","children":count}
+                else:
+                    return _abort("Aucun enfant LIMIT_FOK rempli", extra="burst_scalping_limit_fok")
+
             # ------ BURST SINGLE-MASTER ------
             td = trade_executor._attach_burst_metadata(dict(trade_decision))
 
