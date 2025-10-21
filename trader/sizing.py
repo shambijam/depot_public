@@ -207,19 +207,23 @@ def _calculate_risk_based_volume(
         raise TradeExecutionError("Budget de risque nul")
 
     # ----- Scope / burst -----
-    strategy = str(
-        trade_decision.get("strategy") or trade_decision.get("strategy_type") or ""
-    ).lower()
+    rule_name = str(trade_decision.get("rule_name", "")).lower()
+    strategy = str(trade_decision.get("strategy") or trade_decision.get("strategy_type") or "").lower()
+
     sizing_scope = str(trade_decision.get("sizing_scope") or "").upper()
     burst_size = int(float(trade_decision.get("burst_size") or 1))
     if burst_size < 1:
         burst_size = 1
-    if sizing_scope not in ("SINGLE", "BASKET"):
-        sizing_scope = "BASKET" if strategy == "scalping" else "SINGLE"
-    # si BASKET → on dimensionne PAR TICKET
-    per_ticket_risk = (
-        max_risk_amount / burst_size if sizing_scope == "BASKET" else max_risk_amount
-    )
+
+    # 🔒 Force BASKET en mode single_master/burst_scalping
+    if not sizing_scope:
+        sizing_scope = "BASKET" if rule_name in {"burst_scalping", "burst_single_master"} else ("BASKET" if strategy == "scalping" else "SINGLE")
+    elif sizing_scope not in {"SINGLE", "BASKET"}:
+        sizing_scope = "BASKET" if rule_name in {"burst_scalping", "burst_single_master"} else "SINGLE"
+
+    # si BASKET → dimensionnement PAR TICKET (risk_total / burst_size)
+    per_ticket_risk = max_risk_amount / burst_size if sizing_scope == "BASKET" else max_risk_amount
+
 
     # ----- Prix / distance -----
     entry_price = _as_float(entry_price, "entry_price")
@@ -319,9 +323,26 @@ def _calculate_risk_based_volume(
             raise TradeExecutionError(
                 "Heuristique pip-value indisponible (pas de calc profit fiable pour convertir en devise compte)"
             )
+    # ... après tous les essais pour calculer per_lot_loss ...
 
     if per_lot_loss is None or per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
         raise TradeExecutionError("Perte/lot invalide")
+
+    # 🔎 LOG À INSÉRER ICI — AVANT le calcul de raw_volume
+    try:
+        self.logger.info(
+            "[SIZING] scope=%s burst=%d equity=%.2f risk%%=%.4f → risk_total=%.2f "
+            "risk_ticket=%.2f dist=%.5f per_lot_loss=%.6f",
+            sizing_scope, burst_size, equity, risk_pct,
+            max_risk_amount, per_ticket_risk, distance, per_lot_loss
+        )
+    except Exception:
+        pass
+
+    # ===================== Volume brut (par ticket si basket) =====================
+    raw_volume = per_ticket_risk / per_lot_loss
+
+
 
     # ===================== Volume brut (par ticket si basket) =====================
     raw_volume = per_ticket_risk / per_lot_loss
