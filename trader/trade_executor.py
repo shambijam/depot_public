@@ -1202,5 +1202,4 @@ TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
 TradeExecutor._update_internal_position_state = _update_internal_position_state
 TradeExecutor.pre_trade_checks = pre_trade_checks
 TradeExecutor._attach_burst_metadata = _attach_burst_metadata
-TradeExecutor.execute_burst_scalping_order = execute_burst_scalping_order
 TradeExecutor.execute_burst_single_master = execute_burst_single_master
