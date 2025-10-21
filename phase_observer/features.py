@@ -74,6 +74,7 @@ def _compute_footprint_snapshot(
     ticks: pd.DataFrame,
     price_step: float,
     window_s: int = 5,
+    dynamic_price_step: bool = False,  # Nouveau paramètre pour activer un price_step dynamique
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Construit un snapshot footprint sur 'window_s' dernières secondes.
@@ -139,9 +140,9 @@ def _compute_footprint_snapshot(
         mid = (bid + ask) / 2.0
         is_buy = price >= mid
 
-    # normalisation aux niveaux
-    if price_step <= 0:
-        # déduire un pas moyen (fallback)
+    # gestion du price_step dynamique ou statique
+    if price_step <= 0 or dynamic_price_step:
+        # Déduire un pas moyen (fallback dynamique)
         price_step = (
             float(np.nanmedian(np.abs(price.diff().dropna()).replace(0.0, np.nan)))
             or 0.1

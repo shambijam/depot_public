@@ -342,10 +342,10 @@
                     "attempts_min": 2
                 },
                 "order": {
-                    "entry_style": "LIMIT_FOK",
+                    "entry_style": "MARKET",
                     "price_offset_ticks": 2,
                     "burst_count": 5,
-                    "burst_volume_each": 0.018
+                    "burst_volume_each": 0.02
                 },
                 "trailing": {
                     "phase0_seconds": 8,
