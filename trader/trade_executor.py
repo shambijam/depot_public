@@ -829,14 +829,14 @@ def run_trade_execution_pipeline(
 ) -> dict:
     """
     Pont unique entre la décision (DecisionPipeline) et l'exécution (TradeExecutor).
+    Lit dans decision_package['final_decision'].
+    Normalise/valide avant prepare_order.
 
-    Mises à jour :
-    - Tous les trades 'burst' (rule_name in {burst_single_master, burst_scalping} ou burst_enabled=True)
-      sont routés vers execute_burst_single_master.
-    - Le volume est calculé UNE SEULE FOIS via _calculate_risk_based_volume avec sizing_scope='BASKET'
-      et burst_size résolu (decision -> config -> défaut).
-    - Plus aucun appel à execute_burst_scalping_order (supprimé).
-    - Le flux STANDARD reste inchangé (prepare_order -> execute_order).
+    Corrections majeures (single-master only):
+    - ❌ Suppression totale de la branche LIMIT_FOK (plus d'appel à execute_burst_scalping_order).
+    - ✅ Tous les trades "burst" passent par execute_burst_single_master.
+    - ✅ 'is_burst' couvre désormais 'burst_single_master' (et l’historique 'burst_scalping').
+    - ❌ On n’utilise plus aucun 'volume' venant de l’amont (le sizing est recalculé).
     """
     import logging
 
@@ -845,7 +845,7 @@ def run_trade_execution_pipeline(
     class TradeExecutionError(Exception):
         pass
 
-    # ---------------- Helpers ----------------
+    # ----------- Helpers locaux -----------
     def _first_non_empty(*vals):
         for v in vals:
             if isinstance(v, str) and v.strip():
@@ -863,40 +863,7 @@ def run_trade_execution_pipeline(
         }
         return mapping.get(a, "")
 
-    def _resolve_burst_size(fd: dict, cfg: dict) -> int:
-        # 1) priorité décision
-        v = fd.get("burst_count") or fd.get("burst_size")
-        if v is not None:
-            try:
-                return max(1, int(v))
-            except Exception:
-                pass
-        # 2) nouvelle conf burst_single_master
-        sm = (
-            cfg.get("burst_single_master")
-            or ((cfg.get("entry_rules") or {}).get("scalping") or {}).get(
-                "burst_single_master"
-            )
-            or {}
-        )
-        if sm.get("burst_size") is not None:
-            try:
-                return max(1, int(sm.get("burst_size") or 1))
-            except Exception:
-                return 1
-        # 3) rétro-compat burst_scalping
-        legacy = ((cfg.get("entry_rules") or {}).get("scalping") or {}).get(
-            "burst_scalping"
-        ) or {}
-        if legacy.get("burst_size") is not None:
-            try:
-                return max(1, int(legacy.get("burst_size") or 1))
-            except Exception:
-                return 1
-        # 4) défaut
-        return 1
-
-    # ---------------- 0) Lecture paquet ----------------
+    # ----------- 0) Validation structure paquet -----------
     if not isinstance(decision_package, dict):
         reason = "Paquet de décision invalide (type non-dict)."
         logger.error(reason)
@@ -927,7 +894,7 @@ def run_trade_execution_pipeline(
         )
         raise TradeExecutionError(reason)
 
-    # ---------------- 1) Action ----------------
+    # ----------- 1) Action -----------
     action_raw = _first_non_empty(
         final_decision.get("final_action"),
         final_decision.get("selected_action"),
@@ -945,7 +912,7 @@ def run_trade_execution_pipeline(
         )
         raise TradeExecutionError(reason)
 
-    # ---------------- 2) Asset ----------------
+    # ----------- 2) Asset -----------
     raw_asset = _first_non_empty(
         final_decision.get("asset"),
         final_decision.get("symbol"),
@@ -960,22 +927,48 @@ def run_trade_execution_pipeline(
         raise TradeExecutionError(reason)
     asset = raw_asset.upper()
 
-    # ---------------- 3) order_type ----------------
+    # ----------- 3) order_type propre -----------
     order_type = str(final_decision.get("order_type", "MARKET")).upper()
     allowed_order_types = {"MARKET", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
     if order_type not in allowed_order_types:
         logger.debug(f"order_type inconnu '{order_type}', fallback 'MARKET'.")
         order_type = "MARKET"
 
-    # ---------------- 4) Décision standardisée (sans volume) ----------------
+    # ----------- 4) Résolution burst_size & trade_decision standardisée (sans volume) -----------
+    def _resolve_burst_size(fd: dict, cfg: dict) -> int:
+        # priorité à ce qui est dans la décision
+        v = fd.get("burst_count") or fd.get("burst_size")
+        if v is not None:
+            try:
+                return max(1, int(v))
+            except Exception:
+                pass
+        # nouveau chemin: burst_single_master
+        sm = (
+            cfg.get("burst_single_master")
+            or ((cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                "burst_single_master"
+            )
+            or {}
+        )
+        if sm.get("burst_size") is not None:
+            try:
+                return max(1, int(sm.get("burst_size") or 1))
+            except Exception:
+                return 1
+        # rétro-compat: ancienne clé burst_scalping
+        legacy = ((cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+            "burst_scalping"
+        ) or {}
+        if legacy.get("burst_size") is not None:
+            try:
+                return max(1, int(legacy.get("burst_size") or 1))
+            except Exception:
+                return 1
+        return 1
+
     resolved_burst = _resolve_burst_size(final_decision, active_config)
     logger.info(f"[BURST] resolved_burst_size={resolved_burst}")
-
-    rule_name = str(final_decision.get("rule_name", "")).lower()
-    is_burst_rule = bool(
-        final_decision.get("burst_enabled", False)
-        or rule_name in ("burst_single_master", "burst_scalping")
-    )
 
     trade_decision = {
         "action": action,
@@ -993,7 +986,15 @@ def run_trade_execution_pipeline(
         "confidence": final_decision.get("confidence"),
         "volatility_factor": final_decision.get("volatility_factor"),
         "burst_size": int(resolved_burst),
-        "sizing_scope": "BASKET" if is_burst_rule else "SINGLE",
+        "sizing_scope": (
+            "BASKET"
+            if (
+                final_decision.get("burst_enabled")
+                or str(final_decision.get("rule_name") or "").lower()
+                in {"burst_scalping", "burst_single_master"}
+            )
+            else "SINGLE"
+        ),
     }
     adapted_package = {
         "trade_decision": trade_decision,
@@ -1001,7 +1002,7 @@ def run_trade_execution_pipeline(
         "active_config": active_config,
     }
 
-    # ---------------- 5) Pre-trade checks ----------------
+    # ----------- 5) Pre-trade checks -----------
     ok, reason = trade_executor.pre_trade_checks(
         trade_decision, active_config, market_context
     )
@@ -1013,26 +1014,23 @@ def run_trade_execution_pipeline(
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": reason}
 
-    # ---------------- 6) Routing : BURST (Single-Master) vs STANDARD ----------------
+    # ----------- 6) Sélection du mode (BURST single-master vs STANDARD) -----------
     try:
-        if is_burst_rule:
-            # -------- BURST: Single-Master uniquement --------
+        rule_lower = str(trade_decision.get("rule_name") or "").lower()
+        is_burst = bool(
+            trade_decision.get("burst_enabled", False)
+            or rule_lower in {"burst_single_master", "burst_scalping"}
+        )
+
+        if is_burst:
+            # ——— BURST SINGLE-MASTER ———
             td_with_meta = trade_executor._attach_burst_metadata(dict(trade_decision))
 
-            # a) Résoudre symbole / infos / prix
+            # Résoudre symbole broker + infos + prix
             try:
-                # map/resolve broker symbol
-                try:
-                    mapped = trade_executor._map_symbol_for_broker(
-                        asset, market_context
-                    )
-                except Exception:
-                    mapped = asset
                 broker_symbol = (
-                    trade_executor.mt5_connector.resolve_broker_symbol(mapped or asset)
-                    or asset
+                    trade_executor.mt5_connector.resolve_broker_symbol(asset) or asset
                 )
-
                 symbol_info = trade_executor.mt5_connector.get_symbol_info(
                     broker_symbol
                 )
@@ -1040,7 +1038,6 @@ def run_trade_execution_pipeline(
                     raise TradeExecutionError(
                         f"Symbole MT5 introuvable: {broker_symbol}"
                     )
-
                 entry_price_market = trade_executor.mt5_connector.get_current_price(
                     broker_symbol, action
                 )
@@ -1051,18 +1048,16 @@ def run_trade_execution_pipeline(
             except Exception as e:
                 raise TradeExecutionError(f"Résolution symbole/prix KO: {e}")
 
-            # b) SL requis pour calcul de risque
+            # SL requis pour sizing risk%
+            sl_price = None
             try:
-                sl_price = None
-                # 1) fourni ?
                 if (
                     isinstance(final_decision.get("sl_price"), (int, float))
-                    and float(final_decision["sl_price"]) > 0
+                    and final_decision["sl_price"] > 0
                 ):
                     sl_price = float(final_decision["sl_price"])
                 else:
-                    # 2) calcul moteur SL/TP
-                    sl_calc, _tp_ignored = trade_executor._calculate_sl_tp_prices(
+                    sl_calc, _ = trade_executor._calculate_sl_tp_prices(
                         trade_decision,
                         active_config,
                         symbol_info,
@@ -1070,53 +1065,30 @@ def run_trade_execution_pipeline(
                         market_context,
                     )
                     sl_price = float(sl_calc or 0.0)
-
-                # 3) fallback via stop_distance_pips si besoin
                 if not (sl_price and sl_price > 0):
-                    stop_pips = float(
-                        ((active_config.get("risk") or {}).get("stop_distance_pips", 0))
-                        or 0
-                    )
-                    if stop_pips <= 0:
-                        raise TradeExecutionError(
-                            "Burst: SL requis introuvable pour sizing."
-                        )
-                    point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
-                    digits = int(getattr(symbol_info, "digits", 5) or 5)
-                    pip_sz = (10.0 * point) if digits in (3, 5) else point
-                    off = stop_pips * pip_sz
-                    sl_price = (
-                        entry_price_market - off
-                        if action == "BUY"
-                        else entry_price_market + off
+                    raise TradeExecutionError(
+                        "Burst: SL requis introuvable pour sizing."
                     )
             except Exception as e:
                 raise TradeExecutionError(f"Calcul SL burst KO: {e}")
 
-            # c) Sizing unique (volume maître) — scope BASKET + burst_size
+            # Sizing unique (scope BASKET via burst_size)
             try:
                 account_trade_settings = (
                     market_context.get("active_broker_account", {}) or {}
                 ).get("trade_settings", {}) or {}
-
-                master_volume = float(
+                per_ticket_volume = float(
                     trade_executor._calculate_risk_based_volume(
                         {
                             "action": action,
                             "asset": broker_symbol,
-                            "order_type": order_type,
-                            "rule_name": (
-                                trade_decision.get("rule_name") or "burst_single_master"
-                            ),
+                            "order_type": "MARKET",  # single-master = market
+                            "rule_name": "burst_single_master",
                             "strategy_type": trade_decision.get(
                                 "strategy_type", "unknown"
                             ),
                             "sizing_scope": "BASKET",
                             "burst_size": int(resolved_burst),
-                            "confidence": trade_decision.get("confidence", 1.0),
-                            "volatility_factor": trade_decision.get(
-                                "volatility_factor"
-                            ),
                         },
                         active_config,
                         market_context,
@@ -1126,32 +1098,49 @@ def run_trade_execution_pipeline(
                         account_trade_settings,
                     )
                 )
-                if not (master_volume > 0):
-                    raise TradeExecutionError(
-                        f"Sizing burst a retourné un volume invalide: {master_volume}"
-                    )
             except Exception as e:
                 raise TradeExecutionError(f"Sizing burst KO: {e}")
 
-            # d) Préparer payload Single-Master
-            td_with_meta["volume"] = master_volume  # <- volume maître (un seul ordre)
-            td_with_meta["sl_price"] = (
-                sl_price  # utilisé uniquement pour sizing; l'ordre master est sans SL
+            # Appliquer sizing/SL au payload
+            td_with_meta["sl_price"] = sl_price
+            td_with_meta["volume"] = per_ticket_volume
+            td_with_meta["no_tp"] = True
+
+            # Style amont (on ignore toute demande LIMIT_FOK/STOP et on force MARKET)
+            style = str(
+                (
+                    final_decision.get("entry_style")
+                    or trade_decision.get("entry_style")
+                    or ""
+                )
+            ).upper()
+            if style and style != "MARKET":
+                logger.info(
+                    f"[BURST][SINGLE-MASTER] style '{style}' ignoré → forçage MARKET."
+                )
+            limit_price = float(
+                (
+                    final_decision.get("price")
+                    or final_decision.get("trigger_price")
+                    or 0.0
+                )
+                or 0.0
             )
-            td_with_meta["no_tp"] = True  # trailing-only
 
             if is_dry_run:
                 return {
                     "status": "dry_run_ready",
-                    "mode": "burst",
+                    "mode": "burst_single_master",
                     "payload": {
                         "trade_decision": td_with_meta,
                         "market_context": market_context,
                         "active_config": active_config,
                     },
+                    "style_forced": "MARKET",
+                    "limit_price_ignored": limit_price,
                 }
 
-            # e) Exécution Single-Master (toujours MARKET)
+            # Exécution single-master (toujours)
             return trade_executor.execute_burst_single_master(
                 {
                     "trade_decision": td_with_meta,
@@ -1160,7 +1149,7 @@ def run_trade_execution_pipeline(
                 }
             )
 
-        # -------- STANDARD: flux normal --------
+        # --- Mode standard ---
         mt5_request = trade_executor.prepare_order(adapted_package)
 
     except Exception as e:
@@ -1170,14 +1159,12 @@ def run_trade_execution_pipeline(
             "CRITIQUE", reason, alert_type="telegram_critical"
         )
         feedback = trade_executor.feedback_pipeline(
-            order_id=trade_decision.get("order_id", "N/A"),
-            status="failed",
-            reason=str(e),
+            order_id=trade_decision["order_id"], status="failed", reason=str(e)
         )
         trade_executor._feedback_safe(trade_decision, feedback)
         return {"status": "failed", "reason": str(e)}
 
-    # ---------------- 7) Exécution STANDARD (ou dry-run) ----------------
+    # ----------- 7) Exécution standard (ou dry-run) -----------
     if is_dry_run:
         return {
             "status": "dry_run_ready",
@@ -1186,7 +1173,8 @@ def run_trade_execution_pipeline(
             "trade_decision": trade_decision,
         }
 
-    return trade_executor.execute_order(mt5_request)
+    execution_result = trade_executor.execute_order(mt5_request)
+    return execution_result
 
 
 # --- Binding des fonctions des briques comme méthodes de TradeExecutor ---
