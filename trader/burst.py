@@ -486,213 +486,6 @@ def _get_ref_price(self, symbol: str, is_buy: bool, entry_style: str):
     return ref if ref > 0.0 else None
 
 
-def execute_burst_scalping_order(self, decision: dict, config: dict) -> bool:
-    """
-    BURST scalping — ORCHESTRATION PURE (sans sizing)
-    - Consomme un volume par ticket déjà calculé: decision["burst_volume_each"]
-    - Envoie N enfants (burst_count/burst_size)
-    - SL obligatoire (pris de la décision ; sinon tentative via stop_distance_pips si dispo)
-    - Aucun TP (trailing ailleurs)
-    - Si un enfant échoue → annulation des pendings déjà placés
-    """
-    import time, uuid
-
-    mt5 = getattr(self.mt5_connector, "mt5", None)
-    if not mt5:
-        self.logger.error("[BURST] MT5 module indisponible.")
-        return False
-
-    # --------- Paramètres décision ---------
-    symbol = str(decision.get("asset") or decision.get("symbol") or "").upper()
-    action = str(decision.get("action", "")).upper()  # BUY/SELL
-    entry_style = str(
-        decision.get("entry_style") or decision.get("style") or "LIMIT_FOK"
-    ).upper()
-
-    # volume par ticket : OBLIGATOIRE ici (déjà calculé en amont par trader.sizing)
-    try:
-        burst_vol_each = float(decision.get("burst_volume_each", 0.0) or 0.0)
-    except Exception:
-        burst_vol_each = 0.0
-
-    # taille du panier
-    burst_count = int(
-        decision.get("burst_count")
-        or decision.get("burst_size")
-        or (((config or {}).get("entry_rules") or {}).get("scalping") or {})
-        .get("burst_scalping", {})
-        .get("burst_size", 5)
-    )
-
-    if (
-        not symbol
-        or action not in ("BUY", "SELL")
-        or burst_count <= 0
-        or not (burst_vol_each > 0)
-    ):
-        self.logger.error(
-            "[BURST] Paramètres insuffisants (symbol/action/burst_count/volume_each)."
-        )
-        return False
-
-    # --------- Infos symbole ----------
-    try:
-        si = (
-            self.mt5_connector.symbol_info(symbol)
-            if callable(getattr(self.mt5_connector, "symbol_info", None))
-            else mt5.symbol_info(symbol)
-        )
-    except Exception:
-        si = None
-    if not si:
-        self.logger.error(f"[BURST] symbol_info indisponible pour {symbol}.")
-        return False
-
-    digits = int(getattr(si, "digits", 5) or 5)
-    point = float(getattr(si, "point", 10**-5) or 10**-5)
-
-    # --------- Prix d'entrée & SL ----------
-    def _ref_price(side_buy: bool) -> float:
-        try:
-            tk = mt5.symbol_info_tick(symbol)
-            if not tk:
-                return 0.0
-            return float(getattr(tk, "ask" if side_buy else "bid", 0.0) or 0.0)
-        except Exception:
-            return 0.0
-
-    entry_price = float(decision.get("price") or 0.0) or _ref_price(
-        side_buy=(action == "BUY")
-    )
-    if entry_price <= 0:
-        self.logger.error(f"[BURST] Prix d’entrée indisponible pour {symbol}.")
-        return False
-
-    # SL prioritaire depuis la décision
-    sl_price = decision.get("sl") or decision.get("sl_price")
-    if sl_price is None:
-        # Option "kill-switch" si conf disponible (pas un sizing, juste une distance de secours)
-        try:
-            stop_pips_conf = float(
-                (((config or {}).get("risk") or {}).get("stop_distance_pips", 0.0))
-                or 0.0
-            )
-        except Exception:
-            stop_pips_conf = 0.0
-        if stop_pips_conf > 0:
-            pip_size = point * (10.0 if digits in (3, 5) else 1.0)
-            offset = stop_pips_conf * pip_size
-            sl_price = entry_price - offset if action == "BUY" else entry_price + offset
-
-    if sl_price is not None:
-        try:
-            sl_price = float(sl_price)
-            if not (sl_price > 0):
-                sl_price = None
-        except Exception:
-            sl_price = None
-
-    # --------- Mapping type d'ordre ----------
-    is_buy = action == "BUY"
-    # Lecture simple de style: MARKET-like si FOK/IOC/MARKET, sinon LIMIT
-    if any(k in entry_style for k in ("FOK", "IOC", "MARKET")):
-        order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-        trade_action = mt5.TRADE_ACTION_DEAL
-    else:
-        order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
-        trade_action = mt5.TRADE_ACTION_PENDING
-    basket_id = str(decision.get("basket_id") or f"burst_{symbol}_{uuid.uuid4().hex[:8]}")
-
-    request_template = {
-        "action": trade_action,
-        "symbol": getattr(si, "name", symbol),
-        "type": order_type,
-        "price": round(entry_price, digits),
-        "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
-        "deviation": int(decision.get("deviation", 20)),
-        "comment": f"burst_scalping|basket={basket_id}",
-        # Pas de TP en burst (trailing ailleurs)
-        "sl": (
-            float(sl_price)
-            if isinstance(sl_price, (int, float)) and sl_price > 0
-            else 0.0
-        ),
-        "tp": 0.0,
-        # meta (ignorés par MT5)
-        "strategy_type": "burst_scalping",
-        "rule_name": str(decision.get("rule_name") or "burst_scalping"),
-        "basket_id": basket_id,
-        "is_burst_trade": True,
-    }
-
-    self.logger.info(
-        f"[BURST] PLAN {action} {symbol} x{burst_count} @ {request_template['price']:.{digits}f} "
-        f"| vol_each={burst_vol_each}"
-    )
-
-    # --------- Envoi N enfants ----------
-    RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
-    RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", 10008)
-    RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10031)
-    OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
-
-    sent = []
-    for i in range(1, burst_count + 1):
-        req = dict(request_template)
-        req["volume"] = float(
-            burst_vol_each
-        )  # ✅ volume déjà calculé/quantifié en amont
-        res = None
-        try:
-            res = self.mt5_connector.order_send(req)  # wrapper (retries/guards)
-        except Exception as e:
-            self.logger.exception(
-                f"[BURST] Exception order_send enfant {i}/{burst_count}: {e}"
-            )
-
-        ret = getattr(res, "retcode", None) if res is not None else None
-        ok = bool(ret in OK_CODES)
-        self.logger.info(
-            f"[BURST] enfant {i}/{burst_count} → retcode={ret} volume={req['volume']} "
-            f"price={req['price']} sl={req.get('sl')}"
-        )
-
-        if ok:
-            sent.append(res)
-        else:
-            # échec : tenter de retirer ce qui a été PLACÉ (PENDING)
-            self.logger.warning(
-                f"[BURST] Échec enfant {i}. Annulation du panier en cours…"
-            )
-            try:
-                for r in sent:
-                    oid = int(getattr(r, "order", 0) or 0)
-                    if oid:
-                        mt5.order_send(
-                            {
-                                "action": mt5.TRADE_ACTION_REMOVE,
-                                "order": oid,
-                                "symbol": symbol,
-                            }
-                        )
-            except Exception:
-                pass
-            return False
-
-    self.logger.info(f"[BURST] ✅ Panier complété ({len(sent)}/{burst_count}).")
-    # housekeeping léger
-    now_ts = time.time()
-    self._last_burst_time = now_ts
-    self._last_any_trade_ts = now_ts
-    if not hasattr(self, "_last_trade_ts_by_asset") or not isinstance(
-        self._last_trade_ts_by_asset, dict
-    ):
-        self._last_trade_ts_by_asset = {}
-    self._last_trade_ts_by_asset[symbol] = now_ts
-    self._cycle_new_trades = getattr(self, "_cycle_new_trades", 0) + 1
-    return True
-
-
 def monitor_burst_baskets(
     self,
     config: dict,
@@ -1376,237 +1169,166 @@ def monitor_burst_baskets(
             )
 
 
-def build_burst_trailing_request(
+def build_single_master_request(
     self,
     trade_decision: dict,
     config: dict,
     volume: float,
-    entry_price: float,
-    sl_price: float,
-    symbol_info: Any,
+    symbol_info: object,
+    entry_price: float = 0.0,  # optionnel, le prix sera rafraîchi à l'envoi
 ) -> dict:
     """
-    Construction robuste d'une requête MT5 spécifique à la stratégie "burst_scalping".
-    - ❌ Aucun TP logique (TP=0.0 côté MT5, trailing géré par le moteur)
-    - ✅ SL obligatoire, arrondi aux digits et respect des distances stops_level
-    - Volume normalisé (FLOOR sur volume_step) et clampé [min, max]
-    - Commentaire court & canonique (<=31, ASCII), compatible extracteur de panier
-    - Trailing config stockée en meta (_meta_trailing)
-    - Remontées d’erreurs via TradeExecutionError
+    Builder pour le mode Burst Single-Master (1 seule position, trailing-only).
+    - ❌ Aucun TP/SL côté MT5 (SL/TP = 0.0) ; le trailing est géré par l’exécuteur.
+    - ✅ Reprend les mêmes chemins de config que execute_burst_single_master.
+    - ✅ Commentaire court = basket_id (<=31, ASCII).
+    - ⚠️ Le volume est déjà calculé/normalisé en amont (prepare_order) → pas de re-floor.
     """
-    import math, re, secrets
-    from trader.errors import TradeExecutionError  # <- plus de fallback local
+    import re, secrets, math
+    from trader.errors import TradeExecutionError
 
-    # --------- Validations d'entrée ---------
     if not isinstance(trade_decision, dict):
-        raise TradeExecutionError("trade_decision invalide (attendu dict).")
+        raise TradeExecutionError("trade_decision invalide (dict attendu).")
 
-    action = str((trade_decision.get("action") or "").upper()).strip()
+    action = str(trade_decision.get("action", "")).upper()
     if action not in {"BUY", "SELL"}:
-        raise TradeExecutionError(f"[BURST] Action invalide: '{action}'.")
+        raise TradeExecutionError(f"[SINGLE_MASTER] Action invalide: '{action}'.")
 
     if not symbol_info:
-        raise TradeExecutionError("[BURST] symbol_info manquant.")
-
+        raise TradeExecutionError("[SINGLE_MASTER] symbol_info manquant.")
     try:
         digits = int(getattr(symbol_info, "digits", 0) or 0)
-        point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        symbol_name = (
+            getattr(symbol_info, "name", "")
+            or getattr(symbol_info, "symbol", "")
+            or str(trade_decision.get("asset") or "")
+        ).upper()
     except Exception:
-        raise TradeExecutionError("[BURST] symbol_info illisible (digits/point).")
-    if digits <= 0 or point <= 0.0:
-        raise TradeExecutionError("[BURST] symbol_info invalide: digits/point <= 0.")
+        raise TradeExecutionError("[SINGLE_MASTER] symbol_info illisible.")
 
-    symbol_name = str(
-        getattr(symbol_info, "name", "") or getattr(symbol_info, "symbol", "")
-    ).strip()
     if not symbol_name:
-        symbol_name = str(
-            trade_decision.get("asset") or trade_decision.get("symbol") or ""
-        ).strip()
-    if not symbol_name:
-        raise TradeExecutionError(
-            "[BURST] Impossible de déterminer le symbole (name/symbol/asset)."
-        )
-    symbol_name = symbol_name.upper()
+        raise TradeExecutionError("[SINGLE_MASTER] symbole introuvable.")
 
-    # --------- Volume (VALIDATION ONLY — aucun sizing ici) ---------
+    # Volume : validation simple (déjà calculé/quantifié en amont)
     if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
-        raise TradeExecutionError(f"[BURST] Volume invalide ({volume}).")
-    vol = float(volume)  # le volume est déjà pré-quantifié par le sizing amont
+        raise TradeExecutionError(f"[SINGLE_MASTER] Volume invalide ({volume}).")
 
-    # --------- Entry & SL (arrondis + stops_level) ---------
-    if not isinstance(entry_price, (int, float)) or entry_price <= 0:
-        raise TradeExecutionError("[BURST] entry_price invalide.")
-    if not isinstance(sl_price, (int, float)) or sl_price <= 0:
-        raise TradeExecutionError("[BURST] sl_price invalide.")
-    entry_price = round(float(entry_price), digits)
-    sl_price = round(float(sl_price), digits)
+    # Basket / Comment
+    basket_id = str(trade_decision.get("basket_id") or "").strip()
+    if not basket_id:
+        hex6 = secrets.token_hex(3)
+        sym6 = re.sub(r"[^A-Z]", "", symbol_name)[:6] or "ASSET"
+        basket_id = f"burst_{sym6}_{hex6}"
+    comment = re.sub(
+        r"[^A-Za-z0-9._-]", "", basket_id.replace("|", "").replace(" ", "")
+    )[:31]
 
-    stops_lvl_points = float(
-        getattr(symbol_info, "trade_stops_level", 0)
-        or getattr(symbol_info, "stops_level", 0)
-        or 0
+    # Deviation & magic
+    def _cfg(path, default=None):
+        try:
+            if hasattr(self, "config_manager"):
+                v = self.config_manager.get(path, None)
+                if v is not None:
+                    return v
+        except Exception:
+            pass
+        # fallback dans le dict config (dotted)
+        node = config or {}
+        try:
+            for part in path.split("."):
+                node = node[part]
+            return node
+        except Exception:
+            return default
+
+    deviation_points = int(
+        _cfg(
+            "execution_policy.max_deviation_points",
+            _cfg("trade_executor_settings.slippage_points", 20),
+        )
+        or 20
     )
-    min_stop_distance_price = stops_lvl_points * point
-    if min_stop_distance_price > 0:
-        if action == "BUY" and (entry_price - sl_price) < min_stop_distance_price:
-            sl_price = round(entry_price - min_stop_distance_price, digits)
-        elif action == "SELL" and (sl_price - entry_price) < min_stop_distance_price:
-            sl_price = round(entry_price + min_stop_distance_price, digits)
+    magic = int(
+        _cfg("trade_executor_settings.magic", _cfg("defaults.magic_number", 0)) or 0
+    )
 
-    if action == "BUY":
-        if not (sl_price < entry_price):
-            raise TradeExecutionError(
-                f"[BURST] Cohérence BUY : SL({sl_price}) doit être < entry({entry_price})."
+    # Trailing (mêmes chemins que execute_burst_single_master)
+    trailing_cfg = {
+        "trigger_pips": float(
+            _cfg(
+                "entry_rules.scalping.burst_single_master.trail.trigger_pips",
+                _cfg("dynamic_trailing.trigger_pips", 10.0),
             )
-    else:
-        if not (sl_price > entry_price):
-            raise TradeExecutionError(
-                f"[BURST] Cohérence SELL : SL({sl_price}) doit être > entry({entry_price})."
+            or 10.0
+        ),
+        "distance_pips": float(
+            _cfg(
+                "entry_rules.scalping.burst_single_master.trail.distance_pips",
+                _cfg("dynamic_trailing.distance_pips", 5.0),
             )
+            or 5.0
+        ),
+        "min_hold_ms": int(
+            _cfg(
+                "entry_rules.scalping.burst_single_master.min_hold_ms",
+                _cfg("dynamic_trailing.min_hold_ms", 0),
+            )
+            or 0
+        ),
+    }
 
-    # --------- MT5: constantes & mapping ---------
+    # MT5 consts (type et action MARKET)
     mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
-    if mt5 is None:
+    if not mt5:
         try:
             import MetaTrader5 as _mt5  # type: ignore
 
             mt5 = _mt5
         except Exception:
-            mt5 = None
-    if mt5 is None:
-        raise TradeExecutionError("[BURST] Module/constantes MT5 indisponibles.")
-
-    action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
+            raise TradeExecutionError("[SINGLE_MASTER] MT5 indisponible.")
     order_type_const = getattr(mt5, f"ORDER_TYPE_{action}", None)
-    if action_const is None or order_type_const is None:
-        raise TradeExecutionError("[BURST] Constantes MT5 (action/type) introuvables.")
+    action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
+    if order_type_const is None or action_const is None:
+        raise TradeExecutionError("[SINGLE_MASTER] Constantes MT5 manquantes.")
 
-    # --------- Deviation & magic ---------
-    deviation_points = int(
-        (config.get("execution_policy", {}) or {}).get(
-            "max_deviation_points", config.get("max_slippage_points", 20)
-        )
-        or 20
-    )
-    if deviation_points < 0:
-        deviation_points = 0
-
-    magic = int(
-        config.get(
-            "magic_number",
-            (self.config_manager.get("trade_executor_settings", {}) or {}).get(
-                "magic", 0
-            ),
-        )
-        or 0
-    )
-
-    # --------- Basket/Comment ---------
-    basket_id = str(trade_decision.get("basket_id") or "").strip()
-    if not basket_id:
-        hex6 = secrets.token_hex(3)
-        sym_up = re.sub(r"[^A-Z]", "", str(symbol_name).upper())[:6] or "ASSET"
-        basket_id = f"burst_{sym_up}_{hex6}"
-
-    comment = basket_id.replace(" ", "").replace("|", "")
-    comment = re.sub(r"[^A-Za-z0-9._-]", "", comment)[:31]
-
-    # --------- Trailing & Closure ---------
-    bs_cfg = ((config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get(
-        "burst_scalping", {}
-    ) or {}
-    tp_sl_cfg = bs_cfg.get("tp_sl", {}) or {}
-
-    trailing_cfg_raw = (
-        trade_decision.get("trailing") or tp_sl_cfg.get("trailing") or {"enabled": True}
-    )
-    trailing_defaults = {
-        "enabled": True,
-        "mode": "ATR",
-        "atr_period": 14,
-        "atr_mult": 0.6,
-        "min_trail_points": 30,
-        "arm_profit_points": 60,
-        "arm_atr_multiple": 0.8,
-        "max_pullback_points": 80,
-        "trail_update_throttle_ms": 250,
-        "backoff_step_points": 10,
-        "breakeven_lock_points": 10,
-        "max_spread_points_when_armed": 40,
-        "max_latency_ms_on_close": 500,
-    }
-    trailing_cfg = {**trailing_defaults, **(trailing_cfg_raw or {})}
-
-    closure_defaults = {
-        "close_on_full_profit": True,
-        "require_full_count_for_profit_close": True,
-        "min_green_pnl_pips": 0.0,
-        "rt_fast_window_ms": 2500,
-        "rt_poll_interval_ms": 100,
-        "max_loss_pips": 15.0,
-        "trail_trigger_pips": 10.0,
-        "trail_distance_pips": 5.0,
-        "trail_require_full_count": False,
-        "trail_update_min_interval_ms": 120,
-        "require_all_seen_green_once": True,
-        "all_seen_green_pips": 5.0,
-        "loss_guard_arming_ms": 5000,
-        "cooldown_after_exit_s": float(
-            config.get("cooldown_after_exit_s", 0.0)
-            or bs_cfg.get("cooldown_after_exit_s", 0.0)
-            or 0.0
-        ),
-    }
-    closure_cfg = {**closure_defaults, **(bs_cfg.get("closure_rules", {}) or {})}
-
-    # --------- Requête finale ---------
-    request = {
+    # Requête (SL/TP à 0.0 — trailing-only)
+    req = {
         "symbol": symbol_name,
-        "volume": float(vol),
-        "price": float(entry_price),
-        "sl": float(sl_price),
-        "tp": 0.0,  # 🔒 pas de TP pour BURST (trailing only)
         "type": order_type_const,
         "action": action_const,
+        "volume": float(volume),
+        "price": round(float(entry_price or 0.0), digits) if entry_price else 0.0,
         "deviation": int(deviation_points),
-        "magic": magic,
+        "magic": int(magic),
         "comment": comment,
-        "strategy_type": (str(config.get("strategy_name", "burst_scalping")).lower()),
-        "rule_name": str(trade_decision.get("rule_name", "burst_scalping")),
-        # --- meta (ignorés par MT5) ---
-        "_meta_no_tp": True,
-        "_meta_trailing": trailing_cfg,  # (fix: plus de doublon)
-        "_meta_closure_rules": closure_cfg,
-        "_meta_entry_source": trade_decision.get("source", "core_decision"),
-        "_meta_stops_level_points": stops_lvl_points,
-        "_meta_point": point,
-        "_meta_digits": digits,
+        "sl": 0.0,
+        "tp": 0.0,
+        # meta (ignoré par MT5)
+        "strategy_type": "scalping",
+        "rule_name": str(trade_decision.get("rule_name") or "burst_single_master"),
         "basket_id": basket_id,
-        "burst_size": trade_decision.get("burst_size"),
-        "burst_index": trade_decision.get("burst_index"),
         "is_burst_trade": True,
+        "_meta_trailing": trailing_cfg,
     }
 
     self.logger.info(
-        f"[BURST] Requête: {action} {request['symbol']} | vol={request['volume']:.4f} | "
-        f"entry={entry_price} | sl={sl_price} | basket={basket_id} | trailing={trailing_cfg}"
+        f"[SINGLE_MASTER] Build req: {action} {symbol_name} | vol={req['volume']:.4f} | "
+        f"price_hint={req['price']} | basket={basket_id} | trailing={trailing_cfg}"
     )
-    return request
+    return req
 
 
 def execute_burst_single_master(self, payload: dict) -> dict:
     """
-    Envoie UNE SEULE position 'master' (market deal) pour un burst scalping
-    et initialise tout l'état de trailing panier côté exécuteur.
-    Retourne un dict {status, basket_id, ticket, deal, request, retcode, retcode_str}.
+    Envoie UNE SEULE position 'master' (market deal) pour un burst single-master
+    et initialise l'état de trailing. Retourne {status, basket_id, ticket, deal, request, retcode, retcode_str}.
     """
     import time, logging, hashlib, random, math, re
     from datetime import datetime, timezone
 
     logger = getattr(self, "logger", logging.getLogger(__name__))
 
-    # --------- Helpers sûrs ---------
+    # --------- Helpers ---------
     def _is_connected() -> bool:
         try:
             attr = getattr(self.mt5_connector, "is_connected", None)
@@ -1631,7 +1353,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         return raw[:max_len]
 
     def _get_cfg(path: str, default=None):
-        # config_manager.get d'abord, sinon lecture dans active_config (dotted)
         try:
             if hasattr(self, "config_manager"):
                 v = self.config_manager.get(path, None)
@@ -1647,15 +1368,15 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         except Exception:
             return default
 
-    # --------- 0) Déballage & normalisation ---------
+    # --------- 0) Déballage ---------
     td = (payload or {}).get("trade_decision") or {}
     market_context = (payload or {}).get("market_context") or {}
     active_config = (payload or {}).get("active_config") or {}
 
     action = str(td.get("action", "")).upper()
     asset = str(td.get("asset", "")).upper()
-    rule_name = td.get("rule_name") or "burst_scalping"
-    strategy_type = td.get("strategy_type") or "unknown"
+    rule_name = td.get("rule_name") or "burst_single_master"
+    strategy_type = td.get("strategy_type") or "scalping"
     order_id = td.get("order_id", "N/A")
 
     if action not in ("BUY", "SELL") or not asset or asset == "UNKNOWN":
@@ -1682,7 +1403,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         broker_symbol = asset
     broker_symbol = str(broker_symbol).upper()
 
-    # resolve + infos symbole
     try:
         resolve = getattr(self.mt5_connector, "resolve_broker_symbol", None)
         if callable(resolve):
@@ -1694,7 +1414,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         logger.error(f"Symbol info KO: {e}")
         return {"status": "failed", "reason": f"symbol_info_error:{e}"}
 
-    # MarketWatch selection
     try:
         sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
         ok_sel = bool(sel(broker_symbol)) if callable(sel) else True
@@ -1710,7 +1429,7 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     except Exception as e:
         logger.warning(f"ensure_symbol_selected KO: {e}")
 
-    # --------- 2) Volume (validation simple — aucune normalisation/calcul ici) ---------
+    # --------- 2) Volume (décidé en amont par prepare_order) ---------
     try:
         vol = float(td["volume"])
         if not math.isfinite(vol) or vol <= 0:
@@ -1720,27 +1439,26 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         logger.error(reason)
         return {"status": "failed", "reason": reason}
 
-    # --------- 3) Prix, slippage & policies ---------
-    # policy (FOK par défaut)
-    fill_str = str(_get_cfg("execution_policy.type_filling", "FOK")).upper()
-    type_filling = getattr(
-        mt5, f"ORDER_FILLING_{fill_str}", getattr(mt5, "ORDER_FILLING_FOK", None)
+    # --------- 3) Prix & policies ---------
+    deviation = int(
+        _get_cfg("execution_policy.max_deviation_points", None)
+        or _get_cfg("trade_executor_settings.slippage_points", 20)
+        or 20
     )
-    if type_filling is None:
-        type_filling = getattr(mt5, "ORDER_FILLING_FOK", 0)
+    magic = int(
+        _get_cfg("trade_executor_settings.magic", None)
+        or _get_cfg("defaults.magic_number", 0)
+        or 0
+    )
 
-    deviation = int(_get_cfg("execution_policy.max_deviation_points", 20) or 20)
-    magic = int(_get_cfg("trade_executor_settings.magic", 0) or 0)
-
-    # ordre market → BUY sur ask, SELL sur bid
     def _get_price(sym: str, side: str) -> float:
         try:
             t = mt5.symbol_info_tick(sym)
             if not t:
                 return 0.0
-            if side == "BUY" and hasattr(t, "ask") and t.ask:
+            if side == "BUY" and getattr(t, "ask", None):
                 return float(t.ask)
-            if side == "SELL" and hasattr(t, "bid") and t.bid:
+            if side == "SELL" and getattr(t, "bid", None):
                 return float(t.bid)
             return float(getattr(t, "ask", 0.0) or getattr(t, "bid", 0.0) or 0.0)
         except Exception:
@@ -1756,13 +1474,13 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         else getattr(mt5, "ORDER_TYPE_SELL", 1)
     )
 
-    # --------- 4) Trailing params (défauts robustes) ---------
+    # --------- 4) Trailing params ---------
     trailing = ((td.get("_meta") or {}).get("trailing")) or {}
     trigger_pips = float(
         trailing.get(
             "trigger_pips",
             _get_cfg(
-                "burst_single_master.trail.trigger_pips",
+                "entry_rules.scalping.burst_single_master.trail.trigger_pips",
                 _get_cfg("dynamic_trailing.trigger_pips", 10.0),
             ),
         )
@@ -1772,7 +1490,7 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         trailing.get(
             "distance_pips",
             _get_cfg(
-                "burst_single_master.trail.distance_pips",
+                "entry_rules.scalping.burst_single_master.trail.distance_pips",
                 _get_cfg("dynamic_trailing.distance_pips", 5.0),
             ),
         )
@@ -1780,13 +1498,13 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     )
     min_hold_ms = int(
         _get_cfg(
-            "burst_single_master.min_hold_ms",
+            "entry_rules.scalping.burst_single_master.min_hold_ms",
             _get_cfg("dynamic_trailing.min_hold_ms", 0),
         )
         or 0
     )
 
-    # --------- 5) Basket ID + commentaire court ---------
+    # --------- 5) Basket & commentaire ---------
     basket_id = td.get("basket_id")
     if not basket_id:
         seed = f"{asset}|{int(time.time()*1000)}|{random.random()}"
@@ -1795,48 +1513,37 @@ def execute_burst_single_master(self, payload: dict) -> dict:
 
     comment = _normalize_comment(basket_id, fallback=f"burst_{asset}")
 
-    # --------- 6) Construction requête DEAL ---------
+    # --------- 6) Construction requête DEAL (laisser order_send gérer le filling) ---------
     req = {
         "action": getattr(mt5, "TRADE_ACTION_DEAL", 1),
         "symbol": getattr(si, "name", broker_symbol),
         "type": mt5_type,
         "volume": float(vol),
         "price": float(price),
-        "type_filling": type_filling,
         "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
         "deviation": int(deviation),
         "magic": int(magic),
-        "comment": comment,  # court, stable, = basket_id (détection & annulation faciles)
-        # pas de SL/TP ici → trailing only
+        "comment": comment,
         "sl": 0.0,
         "tp": 0.0,
-        # meta (ignorés par MT5)
-        "strategy_type": "burst_scalping",
+        # meta hors MT5
+        "strategy_type": strategy_type,
         "rule_name": rule_name,
         "basket_id": basket_id,
         "is_burst_trade": True,
     }
 
-    # --------- 7) Envoi avec retry slippage ---------
-    # Retcodes
-    RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", None)
-    RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", None)
-    RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", None)
+    # --------- 7) Envoi (wrapper order_send avec retry interne) ---------
+    RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
+    RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", 10008)
+    RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10031)
     OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
-
-    RET_REQUOTE = getattr(mt5, "TRADE_RETCODE_REQUOTE", None)
-    RET_PRICE_OFF = getattr(
-        mt5,
-        "TRADE_RETCODE_PRICE_OFF",
-        getattr(mt5, "TRADE_RETCODE_INVALID_PRICE", None),
-    )
-    RET_TIMEOUT = getattr(mt5, "TRADE_RETCODE_TIMEOUT", None)
-    RET_CONNECTION = getattr(mt5, "TRADE_RETCODE_NO_CONNECTION", None)
 
     max_retries = int(_get_cfg("trade_executor_settings.max_send_retries", 2) or 2)
     sleep_between = float(
         _get_cfg("trade_executor_settings.retry_sleep_seconds", 0.05) or 0.05
     )
+
     result = None
     retcode = None
 
@@ -1854,22 +1561,10 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         if retcode in OK_CODES:
             break
 
-        # cas retryables → rafraîchir prix et re-tenter
-        if retcode in {RET_REQUOTE, RET_PRICE_OFF, RET_TIMEOUT, RET_CONNECTION}:
-            time.sleep(sleep_between)
-            # sur reconnexion perdue
-            if retcode in {RET_TIMEOUT, RET_CONNECTION} and not _is_connected():
-                _reconnect_if_needed()
-            # met à jour le prix
-            new_px = _get_price(broker_symbol, action)
-            if new_px > 0:
-                req["price"] = float(new_px)
-            continue
+        # Retry simples : le wrapper gère déjà la plupart des cas, on temporise
+        time.sleep(sleep_between)
 
-        # non-retryable → stop
-        break
-
-    # mapping retcode str lisible
+    # mapping retcode lisible
     retcode_str = str(retcode)
     try:
         for k, v in (
@@ -1885,7 +1580,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         reason = f"retcode={retcode_str}"
         logger.error(f"[BURST] ❌ Order send FAILED ({broker_symbol}) {reason}")
 
-        # feedback / audit soft
         try:
             fb = self.feedback_pipeline(
                 order_id=order_id, status="failed", reason=reason
@@ -1909,10 +1603,7 @@ def execute_burst_single_master(self, payload: dict) -> dict:
                         "rule_name": req.get("rule_name"),
                         "magic_number": req.get("magic"),
                         "request": req,
-                        "response": {
-                            "retcode": retcode,
-                            "retcode_str": retcode_str,
-                        },
+                        "response": {"retcode": retcode, "retcode_str": retcode_str},
                         "is_burst_trade": True,
                     },
                     getattr(self, "execution_context", {}) or {},
@@ -1932,7 +1623,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     ticket = getattr(result, "order", None)
     deal = getattr(result, "deal", None)
 
-    # registres
     if not hasattr(self, "_open_positions"):
         self._open_positions = {}
     if not hasattr(self, "_burst_trailing_state"):
@@ -1944,7 +1634,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     if not hasattr(self, "_active_burst_locks"):
         self._active_burst_locks = {}
 
-    # trailing state par panier
     self._burst_trailing_state[basket_id] = {
         "trigger": float(trigger_pips),
         "distance": float(distance_pips),
@@ -1955,18 +1644,15 @@ def execute_burst_single_master(self, payload: dict) -> dict:
     }
     self._basket_trail_armed[basket_id] = False
     self._basket_peak_pips[basket_id] = 0.0
-    # lock d'asset pour empêcher un nouveau panier concurrent
     try:
         self._active_burst_locks[str(broker_symbol).upper()] = {
             "basket_id": basket_id,
             "since": time.time(),
         }
-        # horodatage cooldown (utilisé par pre_trade_checks 5bis)
         self._last_burst_time = time.time()
     except Exception:
         pass
 
-    # meta côté _open_positions (si ticket connu)
     try:
         if ticket is not None:
             self._open_positions[int(ticket)] = {
@@ -2000,7 +1686,6 @@ def execute_burst_single_master(self, payload: dict) -> dict:
         f"basket={basket_id} (trg={trigger_pips}p, dist={distance_pips}p, mh={min_hold_ms}ms)"
     )
 
-    # Feedback & audit
     try:
         fb = self.feedback_pipeline(
             order_id=order_id, status="sent", reason="burst_master_sent"

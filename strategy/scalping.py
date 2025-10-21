@@ -11,8 +11,7 @@ import pandas as pd
 from phase_observer.detectors import Detectors
 from phase_observer.market_analyzer import MarketAnalyzer
 from trader.sizing import _calculate_risk_based_volume
-from phase_observer.footprint_analyzer import FootprintAnalyzer  
-
+from phase_observer.footprint_analyzer import FootprintAnalyzer
 
 
 class ScalpingStrategy(BaseStrategy):
@@ -31,7 +30,7 @@ class ScalpingStrategy(BaseStrategy):
         self,
         config_manager,
         strategy_config: Optional[Dict[str, Any]] = None,
-        mt5_connector=None,   # 👈 ajouté ici
+        mt5_connector=None,  # 👈 ajouté ici
         logger=None,
     ):
         """
@@ -41,19 +40,14 @@ class ScalpingStrategy(BaseStrategy):
 
         self.config_manager = config_manager
         self.strategy_config = strategy_config or {}
-        self.mt5_connector = mt5_connector   # ✅ plus d'erreur
+        self.mt5_connector = mt5_connector  # ✅ plus d'erreur
         self.logger = logger or getattr(config_manager, "logger", None)
         self.market_analyzer = MarketAnalyzer(
-            config_manager=self.config_manager,
-            logger=self.logger
+            config_manager=self.config_manager, logger=self.logger
         )
 
         # Initialisation des détecteurs
-        self.detectors = Detectors(
-            logger=self.logger,
-            config_manager=config_manager
-        )
-
+        self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
@@ -61,7 +55,9 @@ class ScalpingStrategy(BaseStrategy):
     # =============   API PRINCIPALE (ENTRÉE)   ================
     # ==========================================================
     # --- Dans class ScalpingStrategy(BaseStrategy): ---
-    def _finalize_decision(self, decision: Dict[str, Any], analyzed_context: Dict[str, Any]) -> Dict[str, Any]:
+    def _finalize_decision(
+        self, decision: Dict[str, Any], analyzed_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Normalise la décision avant retour au pipeline.
         Évite que le pipeline écrase une décision valide faute de champs attendus.
@@ -72,16 +68,19 @@ class ScalpingStrategy(BaseStrategy):
         # Champs standard attendus par l'executor / pipeline
         decision.setdefault("strategy_type", "scalping")
         decision.setdefault("rule_name", decision.get("rule_name", "burst_scalping"))
-        decision.setdefault("execution_status", "ready")   # prêt à exécuter
+        decision.setdefault("execution_status", "ready")  # prêt à exécuter
         decision.setdefault("confidence", float(decision.get("confidence", 0.0) or 0.0))
 
         # Optionnel: petit snapshot de contexte utile au debug
         ctx = analyzed_context or {}
-        decision.setdefault("context_snapshot", {
-            "cycle": ctx.get("cycle_count"),
-            "daily_trade_count": ctx.get("daily_trade_count"),
-            "market_regime": ctx.get("market_regime"),
-        })
+        decision.setdefault(
+            "context_snapshot",
+            {
+                "cycle": ctx.get("cycle_count"),
+                "daily_trade_count": ctx.get("daily_trade_count"),
+                "market_regime": ctx.get("market_regime"),
+            },
+        )
 
         return decision
 
@@ -94,13 +93,13 @@ class ScalpingStrategy(BaseStrategy):
     ) -> Dict[str, Any]:
         """
         Version 'desk pro' compatible pipeline:
-        - Pas de fallback → uniquement des règles explicites
+        - Pas de fallback implicite → uniquement des règles explicites
         - Priorité:
             1. Marubozu (MarketAnalyzer + Playbook)
             2. Range Accumulation MTF
             3. Range Accumulation simple
-            4. Burst scalping
-        - ATR/Spread n'affecte que le burst
+            4. Burst single_master
+        - ATR/Spread n'affecte que le burst single_master si des seuils sont configurés
         """
         try:
             # --- 0) Données & config ---
@@ -111,7 +110,7 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
-            
+
             # --- 0a) Config stratégie (pour meta & règles) ---
             try:
                 strat_cfg = self.config_manager.get_strategy_config("scalping") or {}
@@ -124,28 +123,41 @@ class ScalpingStrategy(BaseStrategy):
                 fp_status = str(asset_signals.get("footprint_status", "N/A")).upper()
                 fp_summary = asset_signals.get("footprint_summary", {})
 
-                # Boost confiance si footprint cohérent
-                if fp_status == "BULLISH" and fp_score > 0 and asset_signals.get("phase", "").lower().startswith("bull"):
+                # Boost de confiance si footprint cohérent avec le biais
+                if (
+                    fp_status == "BULLISH"
+                    and fp_score > 0
+                    and asset_signals.get("phase", "").lower().startswith("bull")
+                ):
                     asset_signals["confidence_score"] = min(
                         1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.15
                     )
-                    self.logger.info(f"[{asset}] 📊 Footprint bullish → confiance renforcée")
+                    self.logger.info(
+                        f"[{asset}] 📊 Footprint bullish → confiance renforcée"
+                    )
 
-                if fp_status == "BEARISH" and fp_score > 0 and asset_signals.get("phase", "").lower().startswith("bear"):
+                if (
+                    fp_status == "BEARISH"
+                    and fp_score > 0
+                    and asset_signals.get("phase", "").lower().startsWith("bear")
+                ):
                     asset_signals["confidence_score"] = min(
                         1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.15
                     )
-                    self.logger.info(f"[{asset}] 📊 Footprint bearish → confiance renforcée")
+                    self.logger.info(
+                        f"[{asset}] 📊 Footprint bearish → confiance renforcée"
+                    )
 
-                # Early entry si déséquilibre extrême
-                delta = None
+                # Early entry si déséquilibre extrême (optionnel)
                 try:
                     delta = fp_summary.get("delta_total")
                 except Exception:
                     delta = None
-                if isinstance(delta, (int, float)) and abs(delta) >= 300:  # seuil ajustable
+                if isinstance(delta, (int, float)) and abs(delta) >= 300:
                     asset_signals["early_entry_allowed"] = True
-                    self.logger.info(f"[{asset}] ⚡ Early entry activé (Δ={delta}) via footprint")
+                    self.logger.info(
+                        f"[{asset}] ⚡ Early entry activé (Δ={delta}) via footprint"
+                    )
                 else:
                     asset_signals["early_entry_allowed"] = False
 
@@ -154,11 +166,14 @@ class ScalpingStrategy(BaseStrategy):
 
             # --- 0b) Analyse via MarketAnalyzer ---
             patterns, latest_pattern = [], None
-
-            # [PATCH-CANDLES] Master switch chandeliers/patterns/combos
             candles_enabled = True
             try:
-                cs = self.config_manager.get("phase_detection_defaults.candlestick_analysis", {}) or {}
+                cs = (
+                    self.config_manager.get(
+                        "phase_detection_defaults.candlestick_analysis", {}
+                    )
+                    or {}
+                )
                 candles_enabled = bool(cs.get("enabled", True))
             except Exception:
                 candles_enabled = True
@@ -171,7 +186,9 @@ class ScalpingStrategy(BaseStrategy):
                     )
                     market_results = market_analyzer.analyze(df_work, asset)
                     patterns = market_results.get("patterns", {}).get("combos", [])
-                    latest_pattern = (market_results.get("patterns", {}).get("candles", [None])[-1])
+                    latest_pattern = market_results.get("patterns", {}).get(
+                        "candles", [None]
+                    )[-1]
                     if latest_pattern:
                         self.logger.info(
                             f"[{asset}] Dernier pattern détecté: "
@@ -183,18 +200,21 @@ class ScalpingStrategy(BaseStrategy):
                     self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
             else:
                 if not candles_enabled:
-                    self.logger.info(f"[{asset}] ⛔ Analyse chandeliers/patterns/combos désactivée via config.")
+                    self.logger.info(
+                        f"[{asset}] ⛔ Analyse chandeliers/patterns/combos désactivée via config."
+                    )
                 else:
-                    self.logger.debug(f"[{asset}] MarketAnalyzer skip: df_work indisponible ou < 50 barres.")
+                    self.logger.debug(
+                        f"[{asset}] MarketAnalyzer skip: df_work indisponible ou < 50 barres."
+                    )
 
-            # --- 1) Métadonnées --- (déplacé plus haut pour decide_from_patterns)
+            # --- 1) Métadonnées (pip_size, spread, etc.) ---
             meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
             pip_size = meta["pip_size"]
             if pip_size <= 0:
                 self.logger.warning(f"[{asset}] pip_size invalide.")
                 return {}
 
-                    
             # --- Banque privée: décision patterns chandeliers ---
             if latest_pattern and isinstance(df_work, pd.DataFrame) and len(df_work) > 0:
                 last_candle = df_work.iloc[-1]
@@ -205,7 +225,7 @@ class ScalpingStrategy(BaseStrategy):
                     ctx={
                         "atr_m1_pips": None,
                         "spread_pips": meta.get("spread_pips", 999.0),
-                        "trend_hint": None,  # ou ton biais SMA si dispo
+                        "trend_hint": None,
                         "near_resistance": meta.get("near_resistance"),
                         "near_support": meta.get("near_support"),
                         "sma_fast_up": meta.get("sma_fast_up"),
@@ -219,14 +239,6 @@ class ScalpingStrategy(BaseStrategy):
                         f"(pattern={latest_pattern.get('pattern')})"
                     )
 
-
-            # Config burst_scalping
-            burst_cfg = (
-                strat_cfg.get("burst_scalping")
-                or ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
-                or {}
-            )
-           
             # --- 2) Prix courant ---
             price = self._safe_price_from_signals(asset_signals)
             if not price:
@@ -234,7 +246,11 @@ class ScalpingStrategy(BaseStrategy):
                 return {}
 
             # --- 3) Marubozu Playbook ---
-            mp_cfg = (strat_cfg.get("entry_rules") or {}).get("scalping", {}).get("marubozu_playbook", {})
+            mp_cfg = (
+                (strat_cfg.get("entry_rules") or {})
+                .get("scalping", {})
+                .get("marubozu_playbook", {})
+            )
             if (
                 mp_cfg.get("enabled", True)
                 and isinstance(df_work, pd.DataFrame)
@@ -253,7 +269,11 @@ class ScalpingStrategy(BaseStrategy):
                     return self._finalize_decision(mp_decision, analyzed_context)
 
             # --- 3b) Marubozu Impulse ---
-            imp_cfg = (strat_cfg.get("entry_rules") or {}).get("scalping", {}).get("marubozu_impulse", {})
+            imp_cfg = (
+                (strat_cfg.get("entry_rules") or {})
+                .get("scalping", {})
+                .get("marubozu_impulse", {})
+            )
             if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
                 impulse_decision = self._rule_marubozu_impulse(
                     df=df_work, asset=asset, price=price, meta=meta, cfg=imp_cfg
@@ -261,7 +281,7 @@ class ScalpingStrategy(BaseStrategy):
                 if impulse_decision:
                     return self._finalize_decision(impulse_decision, analyzed_context)
 
-            # --- 4) Biais directionnel MTF ---
+            # --- 4) Biais directionnel MTF / fallback SMA20 ---
             action = self._infer_action_from_signals(asset_signals)
             if action is None:
                 if isinstance(df_work, pd.DataFrame) and len(df_work) >= 20:
@@ -305,7 +325,8 @@ class ScalpingStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
-            # --- 7) Burst scalping ---
+            # --- 7) Burst single_master ---
+            # ATR M1 (optionnel, pour guardrails si tu configures un seuil)
             atr_m1_pips = None
             if isinstance(df_work, pd.DataFrame):
                 atr_m1 = self._atr(df_work, period=14)
@@ -315,81 +336,103 @@ class ScalpingStrategy(BaseStrategy):
                     else None
                 )
 
-            # Config guardrails dynamique
+            # Config guardrails (seuils globaux si présents)
             guardrails_cfg = {}
             try:
                 guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
             except Exception:
                 guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-            # Seuils dynamiques
+            # Config single_master
+            sm_cfg = ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                "burst_single_master", {}
+            ) or {}
+            if not bool(sm_cfg.get("enabled", True)):
+                self.logger.info(f"[{asset}] single_master désactivé en config.")
+                self.logger.info(
+                    f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu."
+                )
+                return {}
+
+            # Seuils dynamiques (optionnels)
+            try:
+                max_spread_sm = float(
+                    sm_cfg.get(
+                        "max_spread_pips",
+                        (guardrails_cfg.get("volatility", {}) or {}).get(
+                            "max_spread_pips", 0.0
+                        ),
+                    )
+                    or 0.0
+                )
+            except Exception:
+                max_spread_sm = 0.0
+
             try:
                 min_atr_req = float(
-                    burst_cfg.get(
+                    sm_cfg.get(
                         "min_atr_m1_pips",
-                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0),
+                        (guardrails_cfg.get("volatility", {}) or {}).get(
+                            "min_atr_m1_pips", 0.0
+                        ),
                     )
+                    or 0.0
                 )
             except Exception:
                 min_atr_req = 0.0
 
-            try:
-                max_spread_burst = float(
-                    burst_cfg.get(
-                        "max_spread_pips",
-                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0),
-                    )
+            # Gating simple selon les seuils si fournis
+            if max_spread_sm > 0 and meta.get("spread_pips", 0.0) > max_spread_sm:
+                self.logger.info(
+                    f"[{asset}] REFUS single_master → spread {meta['spread_pips']:.2f}p > seuil {max_spread_sm:.2f}p"
                 )
-            except Exception:
-                max_spread_burst = 999.0
-
-            ignore_all = bool(guardrails_cfg.get("ignore_all", False))
-            burst_ignore_checks = bool(burst_cfg.get("ignore_checks", False))
-            effective_ignore_checks = ignore_all or burst_ignore_checks
-
-            self.logger.debug(
-                f"[{asset}][SCALPING] thresholds → min_atr_m1={min_atr_req}, "
-                f"max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
-            )
-
-            burst_allowed = True
-            if not effective_ignore_checks:
-                if max_spread_burst and meta.get("spread_pips", 0.0) > max_spread_burst:
-                    self.logger.info(
-                        f"[{asset}] REFUS BURST → spread {meta['spread_pips']:.2f}p > seuil {max_spread_burst:.2f}p"
-                    )
-                    burst_allowed = False
-
-                if min_atr_req > 0.0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
-                    self.logger.info(
-                        f"[{asset}] REFUS BURST → ATR M1 {atr_m1_pips or 0:.2f}p < seuil {min_atr_req:.2f}p"
-                    )
-                    burst_allowed = False
-
-            if bool(burst_cfg.get("enabled", True)) and burst_allowed:
-                burst_decision = self._rule_burst_scalping(
-                    asset=asset,
-                    action=action,
-                    entry_price=price,
-                    meta=meta,
-                    signals={**asset_signals, "atr_m1_pips": atr_m1_pips},
-                    burst_cfg=burst_cfg,
-                    context=analyzed_context,
+                self.logger.info(
+                    f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu."
                 )
-                if burst_decision:
-                    burst_decision.setdefault("strategy_type", "scalping")
-                    burst_decision.setdefault("rule_name", "burst_scalping")
-                    burst_decision.setdefault("execution_status", "ready")
-                    return self._finalize_decision(burst_decision, analyzed_context)
+                return {}
+
+            if min_atr_req > 0.0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
+                self.logger.info(
+                    f"[{asset}] REFUS single_master → ATR M1 {atr_m1_pips or 0:.2f}p < seuil {min_atr_req:.2f}p"
+                )
+                self.logger.info(
+                    f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu."
+                )
+                return {}
+
+            # Décision single_master (aucun volume/SL ici → calculés en aval dans prepare_order)
+            entry_mode = str(sm_cfg.get("entry_mode", "MARKET")).upper()
+            burst_sz = int(sm_cfg.get("burst_size", 5) or 5)
+
+            sm_decision = {
+                "strategy_type": "scalping",
+                "rule_name": "burst_single_master",
+                "execution_status": "ready",
+                "action": action,
+                "asset": asset,
+                "order_type": entry_mode,  # MARKET / BUY_LIMIT / SELL_LIMIT
+                "entry_price": (float(price) if entry_mode != "MARKET" else None),
+                "burst_size": burst_sz,  # virtuel (logique interne)
+                "meta": {
+                    "burst": True,
+                    "entry_source": "core_decision",
+                    "per_leg_virtual": bool(sm_cfg.get("per_leg_virtual", True)),
+                    "atr_m1_pips": atr_m1_pips,
+                },
+            }
+            return self._finalize_decision(sm_decision, analyzed_context)
 
             # --- Aucun setup valide ---
-            self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
+            # (Jamais atteint car on retourne au-dessus pour SM ; gardé par sécurité)
+            self.logger.info(
+                f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu."
+            )
             return {}
 
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
-         
+
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================
     # ==========================================================
@@ -448,16 +491,13 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
-    
+
     # =====================================================
     # BANQUE PRIVÉE — Décision via Patterns Chandeliers
     # =====================================================
-    @staticmethod    
+    @staticmethod
     def decide_from_patterns(
-        asset: str,
-        latest_pattern: dict,
-        last_candle,
-        ctx: dict = None
+        asset: str, latest_pattern: dict, last_candle, ctx: dict = None
     ):
         """
         Renvoie 'BUY' | 'SELL' | None selon pattern + contexte.
@@ -500,14 +540,14 @@ class ScalpingStrategy(BaseStrategy):
 
         # --- contexte/guardrails ---
         ctx = ctx or {}
-        atr_pips      = ctx.get("atr_m1_pips")
-        min_atr_pips  = ctx.get("min_atr_pips", 0.1)
-        spread_pips   = ctx.get("spread_pips", 999.0)
-        max_spread    = ctx.get("max_spread_pips", 999.0)
-        trend_hint    = ctx.get("trend_hint")                # 'up' | 'down' | None
-        near_res      = bool(ctx.get("near_resistance", False))
-        near_sup      = bool(ctx.get("near_support", False))
-        sma_fast_up   = bool(ctx.get("sma_fast_up", False))
+        atr_pips = ctx.get("atr_m1_pips")
+        min_atr_pips = ctx.get("min_atr_pips", 0.1)
+        spread_pips = ctx.get("spread_pips", 999.0)
+        max_spread = ctx.get("max_spread_pips", 999.0)
+        trend_hint = ctx.get("trend_hint")  # 'up' | 'down' | None
+        near_res = bool(ctx.get("near_resistance", False))
+        near_sup = bool(ctx.get("near_support", False))
+        sma_fast_up = bool(ctx.get("sma_fast_up", False))
         sma_fast_down = bool(ctx.get("sma_fast_down", False))
 
         # Liquidity / ATR / spread
@@ -534,7 +574,7 @@ class ScalpingStrategy(BaseStrategy):
             return None
 
         # Hammer / Hanging man
-        hammer_like = (wd > 2 * body and wu < body)
+        hammer_like = wd > 2 * body and wu < body
         if _has(pname, "hammer") or hammer_like:
             if is_green and not near_res:
                 action = "BUY"
@@ -546,43 +586,68 @@ class ScalpingStrategy(BaseStrategy):
                 action = "SELL"
 
         # Shooting star
-        shoot_like = (wu > 2 * body and wd < body)
+        shoot_like = wu > 2 * body and wd < body
         if _has(pname, "shooting_star") or shoot_like:
             if not is_green and not near_sup:
                 action = "SELL"
 
         # --- combos ---
-        if _has(pname, "morning_star"): action = "BUY"
-        if _has(pname, "evening_star"): action = "SELL"
-        if _has(pname, "harami_bull") and is_green: action = "BUY"
-        if _has(pname, "harami_bear") and not is_green: action = "SELL"
-        if _has(pname, "tweezer_bottom"): action = "BUY"
-        if _has(pname, "tweezer_top"):    action = "SELL"
-        if _has(pname, "three_white_soldiers"): action = "BUY"
-        if _has(pname, "three_black_crows"):    action = "SELL"
+        if _has(pname, "morning_star"):
+            action = "BUY"
+        if _has(pname, "evening_star"):
+            action = "SELL"
+        if _has(pname, "harami_bull") and is_green:
+            action = "BUY"
+        if _has(pname, "harami_bear") and not is_green:
+            action = "SELL"
+        if _has(pname, "tweezer_bottom"):
+            action = "BUY"
+        if _has(pname, "tweezer_top"):
+            action = "SELL"
+        if _has(pname, "three_white_soldiers"):
+            action = "BUY"
+        if _has(pname, "three_black_crows"):
+            action = "SELL"
 
         # --- figures chartistes ---
-        if _has(pname, "double_bottom"): action = "BUY"
-        if _has(pname, "double_top"):    action = "SELL"
-        if _has(pname, "inverse_head_shoulders", "inv_head_shoulders"): action = "BUY"
-        if _has(pname, "head_shoulders", "head-and-shoulders"):          action = "SELL"
-        if _has(pname, "bull_flag", "bull_pennant"):  action = "BUY"
-        if _has(pname, "bear_flag", "bear_pennant"):  action = "SELL"
-        if _has(pname, "ascending_triangle"):  action = "BUY"
-        if _has(pname, "descending_triangle"): action = "SELL"
-        if _has(pname, "symmetrical_triangle"): action = None  # neutre
+        if _has(pname, "double_bottom"):
+            action = "BUY"
+        if _has(pname, "double_top"):
+            action = "SELL"
+        if _has(pname, "inverse_head_shoulders", "inv_head_shoulders"):
+            action = "BUY"
+        if _has(pname, "head_shoulders", "head-and-shoulders"):
+            action = "SELL"
+        if _has(pname, "bull_flag", "bull_pennant"):
+            action = "BUY"
+        if _has(pname, "bear_flag", "bear_pennant"):
+            action = "SELL"
+        if _has(pname, "ascending_triangle"):
+            action = "BUY"
+        if _has(pname, "descending_triangle"):
+            action = "SELL"
+        if _has(pname, "symmetrical_triangle"):
+            action = None  # neutre
 
         # --- confluences directionnelles ---
-        if action == "BUY"  and trend_hint == "down": action = None
-        if action == "SELL" and trend_hint == "up":   action = None
-        if action == "BUY"  and sma_fast_down:        action = None
-        if action == "SELL" and sma_fast_up:          action = None
-        if action == "BUY"  and near_res:             action = None
-        if action == "SELL" and near_sup:             action = None
+        if action == "BUY" and trend_hint == "down":
+            action = None
+        if action == "SELL" and trend_hint == "up":
+            action = None
+        if action == "BUY" and sma_fast_down:
+            action = None
+        if action == "SELL" and sma_fast_up:
+            action = None
+        if action == "BUY" and near_res:
+            action = None
+        if action == "SELL" and near_sup:
+            action = None
 
         # --- filtres finaux de cohérence (no BUY sur bougie rouge, etc.) ---
-        if action == "BUY"  and not is_green: return None
-        if action == "SELL" and is_green:      return None
+        if action == "BUY" and not is_green:
+            return None
+        if action == "SELL" and is_green:
+            return None
 
         return action
 
@@ -590,147 +655,45 @@ class ScalpingStrategy(BaseStrategy):
     # Tes règles scalping/liquidity existantes commencent ici
     # =====================================================
 
-    def _rule_burst_scalping(
+    def _rule_burst_single_master(
         self,
         asset: str,
         action: str,
         entry_price: float,
         meta: Dict[str, Any],
-        signals: Dict[str, Any],
-        burst_cfg: Dict[str, Any],
+        sm_cfg: Dict[str, Any],
         context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Burst Scalping (risk-based):
-        - Ouvre un panier de N ordres d’un coup
-        - Volume calculé dynamiquement selon risk_per_trade_percent
-        - SL obligatoire, pas de TP (gestion via trailing stop)
-        - Respecte strictement burst_size et max_bursts de la config
-        - Refuse tout nouveau burst tant qu’un panier burst pour l’actif est encore ouvert (verrou mémoire + scan MT5)
+        Single-Master:
+        - 1 seule position broker (volume unique calculé plus tard)
+        - Pas de TP (trailing global)
+        - burst_size est virtuel (logique interne)
         """
-        import math, uuid, re, time
+        import uuid
 
-        # === Lecture config ===
-        size = int(burst_cfg.get("burst_size", 3))          # nombre d’ordres par burst
-        max_bursts = int(burst_cfg.get("max_bursts", 1))    # nombre de bursts autorisés en parallèle
-        if size <= 0:
+        if action not in ("BUY", "SELL"):
             return None
 
-        # --- Infos broker ---
-        symbol_info = context.get("symbol_info", {}) or {}
-        point = float(symbol_info.get("point", 0.01))
-        pip_size_value = point * (10.0 if int(symbol_info.get("digits", 5)) in (3, 5) else 1.0)
+        entry_mode = str(sm_cfg.get("entry_mode", "MARKET")).upper()   # MARKET / BUY_LIMIT / SELL_LIMIT
+        burst_size = int(sm_cfg.get("burst_size", 5) or 5)
+        basket_id  = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
 
-        contract_size = float(symbol_info.get("trade_contract_size", 100000) or 100000)
-        tick_value = float(symbol_info.get("trade_tick_value", 1.0) or 1.0)
-        tick_size = float(symbol_info.get("trade_tick_size", 0.0001) or 0.0001)
-        value_per_point = tick_value / tick_size if tick_size > 0 else 1.0
-
-               # --- SL en pips (paramètre) — pas de sizing ici ---
-        sl_pips = burst_cfg.get("sl_pips", 5.0)
-        try:
-            sl_pips = float(sl_pips)
-        except Exception:
-            sl_pips = 5.0
-        if sl_pips <= 0:
-            sl_pips = 5.0
-
-        # ⚠️ On NE CALCULE PLUS DE VOLUME ICI.
-        # Le sizing est centralisé dans trader.sizing._calculate_risk_based_volume (scope=BASKET).
-        # On prépare uniquement les infos de contexte (entry_price, sl_pips).
-        volume = None
-
-        # ================================
-        # 🔒 GATING "ONE BURST AT A TIME"
-        # ================================
-        # 1) Registre mémoire (indépendant de MT5) pour survivre aux trous de positions_get()
-        if not hasattr(self, "_active_burst_locks"):
-            self._active_burst_locks = {}  # {asset: {"basket_id": str, "expected": int, "ts": float}}
-
-        # 2) Nettoyage/verrou: si plus aucune position pour ce basket → purge le lock
-        def _extract_basket_id_from_comment(c: str) -> Optional[str]:
-            # tolérant: 'burst_scalping|BURST|i/N|basket=ID' OU 'burst_scalping|basket=ID|i/N'
-            m = re.search(r"burst_scalping\|(?:[^|]*\|){0,3}basket=([A-Za-z0-9_]+)", c)
-            return m.group(1) if m else None
-
-        def _scan_active_baskets_for_asset() -> set:
-            active = set()
-            mt5c = getattr(self, "mt5_connector", None)
-            positions = []
-            # priorité au connecteur normalisé
-            if mt5c and hasattr(mt5c, "get_positions"):
-                try:
-                    positions = mt5c.get_positions() or []
-                except Exception:
-                    positions = []
-            elif hasattr(self, "mt5_connector") and hasattr(self.mt5_connector, "get_open_positions"):
-                try:
-                    positions = self.mt5_connector.get_open_positions() or []
-                except Exception:
-                    positions = []
-
-            for pos in positions:
-                try:
-                    sym = (pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", None)) or ""
-                    if str(sym).upper() != asset.upper():
-                        continue
-                    comment = (pos.get("comment") if isinstance(pos, dict) else getattr(pos, "comment", "")) or ""
-                    bid = _extract_basket_id_from_comment(str(comment))
-                    if bid:
-                        active.add(bid)
-                except Exception:
-                    continue
-            return active
-
-        # Purge éventuelle d'un lock orphelin
-        if asset in self._active_burst_locks:
-            locked_id = self._active_burst_locks[asset].get("basket_id")
-            active_now = _scan_active_baskets_for_asset()
-            if locked_id and locked_id not in active_now:
-                # panier fermé côté broker → on libère le lock
-                self._active_burst_locks.pop(asset, None)
-
-        # 3) Garde stricte: refuser si lock mémoire OU si on détecte déjà des paniers actifs côté broker
-        active_baskets_for_asset = _scan_active_baskets_for_asset()
-        if (asset in self._active_burst_locks) or (len(active_baskets_for_asset) >= max_bursts):
-            self.logger.warning(
-                f"[{asset}] Refus nouveau burst: lock={asset in self._active_burst_locks}, "
-                f"brokers_baskets={len(active_baskets_for_asset)}/{max_bursts} actif(s)."
-            )
-            return None
-
-        # --- Construire la décision de PANIER (une seule décision) ---
-        entry_style = str(burst_cfg.get("entry_style", "MARKET")).upper()
-        basket_id = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
-
-        burst_decision: Dict[str, Any] = {
-            "rule_name": "burst_scalping",
+        return {
             "strategy_type": "scalping",
+            "rule_name": "burst_single_master",
+            "execution_status": "ready",
             "action": action,
             "asset": asset,
-            # on laisse 'order_type' simple ; prepare_order fera les garde-fous
-            "order_type": "MARKET",
-            "entry_style": entry_style,
-            "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
-            # 🧩 PAS de 'sl_price' ni de 'tp_price' ici → calculés/normalisés dans prepare_order
-            # 🧩 PAS de 'volume' ici → sizing dans trader.sizing._calculate_risk_based_volume (scope=BASKET)
-            "burst_size": int(size),
-            "basket_id": basket_id,  # transmis à l’orchestrateur pour tagger les commentaires
-            "meta": {"burst": True, "entry_source": "core_decision"},
-            # 'comment' sera construit proprement plus tard (wrapper/orchestrateur)
-        }
-
-        # Verrou mémoire immédiat (évite double-burst avant que positions_get() reflète l'état)
-        self._active_burst_locks[asset] = {
+            "order_type": entry_mode,
+            "entry_price": float(entry_price) if entry_mode != "MARKET" else None,
+            "burst_size": burst_size,                 # virtuel (utile pour ta logique interne)
             "basket_id": basket_id,
-            "expected": size,
-            "ts": time.time()
+            "meta": {
+                "burst": True,
+                "entry_source": "core_decision"
+            }
         }
-
-        self.logger.info(
-            f"[{asset}] 🔥 Burst Scalping: {size}x {action} @ {entry_price} | basket_id={basket_id}"
-        )
-        return burst_decision
 
 
     def _get_bars(self, asset: str, timeframe: str, count: int):
@@ -1162,19 +1125,33 @@ class ScalpingStrategy(BaseStrategy):
 
         body_ratio = body / size
         min_body_ratio = float(cfg.get("min_body_ratio", 0.9))  # ex: 90% du range
-        max_wick_ratio = float(cfg.get("max_wick_ratio", 0.1))  # ex: mèches < 10% du corps
+        max_wick_ratio = float(
+            cfg.get("max_wick_ratio", 0.1)
+        )  # ex: mèches < 10% du corps
 
-        if body_ratio >= min_body_ratio and upper_wick <= max_wick_ratio * body and lower_wick <= max_wick_ratio * body:
+        if (
+            body_ratio >= min_body_ratio
+            and upper_wick <= max_wick_ratio * body
+            and lower_wick <= max_wick_ratio * body
+        ):
             action = "BUY" if last["close"] > last["open"] else "SELL"
 
             # SL : derrière l'extrême
-            sl_price = (last["low"] - 2 * pip_size) if action == "BUY" else (last["high"] + 2 * pip_size)
+            sl_price = (
+                (last["low"] - 2 * pip_size)
+                if action == "BUY"
+                else (last["high"] + 2 * pip_size)
+            )
             sl_pips = abs(price - sl_price) / pip_size
 
             # TP : R:R basé sur config
             rr_target = float(cfg.get("rr_target", 2.0))
             tp_pips = sl_pips * rr_target
-            tp_price = price + tp_pips * pip_size if action == "BUY" else price - tp_pips * pip_size
+            tp_price = (
+                price + tp_pips * pip_size
+                if action == "BUY"
+                else price - tp_pips * pip_size
+            )
 
             decision = {
                 "action": action,
@@ -1202,8 +1179,9 @@ class ScalpingStrategy(BaseStrategy):
             return decision
 
         return None
-    
-         # --- API attendue par BaseStrategy (stubs fonctionnels) ---
+
+        # --- API attendue par BaseStrategy (stubs fonctionnels) ---
+
     def get_parameters(self) -> Dict[str, any]:
         """
         Retourne un snapshot des paramètres runtime de la stratégie (pour logs/diagnostic).
@@ -1236,7 +1214,9 @@ class ScalpingStrategy(BaseStrategy):
         except Exception as e:
             self.logger.warning(f"[SCALPING] update_strategy_parameters skipped: {e}")
 
-    def evaluate_exit(self, context: Dict[str, Any], open_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def evaluate_exit(
+        self, context: Dict[str, Any], open_positions: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """
         Politique de sortie par défaut (no-op) — renvoie une liste vide si pas de conditions spécifiques.
         L’executor ou d’autres modules peuvent fermer les positions via trailing/SL/TP.
@@ -1248,9 +1228,6 @@ class ScalpingStrategy(BaseStrategy):
         except Exception as e:
             self.logger.warning(f"[SCALPING] evaluate_exit skipped: {e}")
             return []
-
-
-
 
     # ==========================================================
     # =============      ADAPTATION TP/SL BASE     =============
