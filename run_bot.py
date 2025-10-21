@@ -382,43 +382,104 @@ def _execute_single_decision(
     execution_mode,
     logger,
 ):
-    """Exécute une décision unique (scalping ou liquidity)."""
-    decision_package_for_executor = {
-        "trade_decision": td,
-        "active_config": decision_package.get("config_used", {}) or {},
-        "market_context": global_context,
-    }
+    """
+    Exécute UNE décision (scalping ou liquidity).
 
+    Mode burst_scalping => single_master :
+      - AUCUN split par burst_size (pas de boucle)
+      - sizing_scope="BASKET" (lot = risk% / burst_size côté prepare_order)
+      - TP désactivé (trailing only)
+      - Une seule préparation + exécution
+    """
     try:
-        if td.get("rule_name") == "burst_scalping" or td.get("burst_enabled", False):
-            burst_size = int(td.get("burst_size", 3))
-            trade_decision = trade_executor._attach_burst_metadata(td)
-            requests = []
-            for i in range(burst_size):
-                req = trade_executor.prepare_order(
-                    {
-                        "trade_decision": dict(trade_decision),
-                        "market_context": global_context,
-                        "active_config": decision_package.get("config_used", {}) or {},
-                    }
-                )
-                req["comment"] = f"{req.get('comment','')}|BURST|{i+1}/{burst_size}"
-                requests.append(req)
-            results = [trade_executor.execute_order(r) for r in requests]
-            return all(
-                str(res.get("status", "")).lower() in {"filled", "placed"}
-                for res in results
-            )
-        else:
-            order_request = trade_executor.prepare_order(decision_package_for_executor)
+        # --- Sanity side/action ---
+        side = str(td.get("action") or td.get("side") or "").upper().strip()
+        if side not in {"BUY", "SELL"}:
+            logger.debug(f"[EXECUTOR] décision ignorée (side invalide): {td}")
+            return False
+
+        # --- Paquet standard pour l'exécuteur (sera ajusté plus bas si burst) ---
+        base_pkg = {
+            "active_config": decision_package.get("config_used", {}) or {},
+            "market_context": global_context,
+        }
+
+        # --- Détection (et normalisation d'alias) du mode burst ---
+        rn = str(td.get("rule_name", "")).lower().strip()
+        if rn in {"burst", "burst_master", "scalping_burst", "burst_single", "burst_single_master", ""}:
+            rn = "burst_scalping"
+        is_burst = rn == "burst_scalping" or bool(td.get("burst_enabled", False))
+
+        if is_burst:
+            # ===== SINGLE MASTER =====
+            # 1) Résolution burst_size (decision -> config -> défaut)
+            def _resolve_burst(d, conf):
+                try:
+                    if d.get("burst_size") is not None:
+                        return int(d.get("burst_size"))
+                    if d.get("burst_count") is not None:
+                        return int(d.get("burst_count"))
+                except Exception:
+                    pass
+                try:
+                    return int(
+                        (((conf or {}).get("entry_rules", {}) or {}).get("scalping", {}) or {})
+                        .get("burst_scalping", {})
+                        .get("burst_size", 1)
+                    )
+                except Exception:
+                    return 1
+
+            resolved_burst = _resolve_burst(td, base_pkg["active_config"])
+            if resolved_burst < 1:
+                resolved_burst = 1
+
+            # 2) Nettoyage des champs hérités LIMIT_FOK / lot par enfant
+            td = dict(td)  # on travaille sur une copie
+            td["rule_name"] = "burst_scalping"
+            td.pop("entry_style", None)       # pas de LIMIT_FOK
+            td.pop("burst_volume_each", None) # pas de lot figé par enfant
+
+            # 3) Paramètres single_master compréhensibles par prepare_order
+            td["burst_size"] = int(resolved_burst)
+            td["sizing_scope"] = "BASKET"     # lot = risk% / burst_size côté sizing
+            td["no_tp"] = True                # trailing only (TP supprimé)
+
+            # 4) Optionnel : attacher un basket_id / métadonnées (si dispo)
+            try:
+                if hasattr(trade_executor, "_attach_burst_metadata"):
+                    td = trade_executor._attach_burst_metadata(td) or td
+            except Exception as e:
+                logger.debug(f"[EXECUTOR] _attach_burst_metadata: {e}")
+
+            # 5) Préparation & exécution (UNE seule requête)
+            order_request = trade_executor.prepare_order({
+                "trade_decision": td,
+                **base_pkg,
+            })
             exec_res = trade_executor.execute_order(order_request)
-            return str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+            ok = str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+            logger.info(
+                f"[BURST single_master] {side} {td.get('asset')} "
+                f"| burst_size={resolved_burst} | status={exec_res.get('status')}"
+            )
+            return ok
+
+        # ===== Non-burst : chemin standard =====
+        order_request = trade_executor.prepare_order({
+            "trade_decision": td,
+            **base_pkg,
+        })
+        exec_res = trade_executor.execute_order(order_request)
+        return str(exec_res.get("status", "")).lower() in {"filled", "placed"}
+
     except Exception as e:
         logger.error(
             f"[EXECUTOR] Erreur prepare/execute pour {td.get('asset')}: {e}",
             exc_info=True,
         )
         return False
+
 
 
 def run_single_pipeline_cycle(
@@ -1256,19 +1317,26 @@ def run_single_pipeline_cycle(
 
                 # 🔧 Standardiser le rule_name + activer trailing/No-TP pour burst
                 try:
-                    if str(td.get("rule_name", "")).lower() in (
+                    _alias = str(td.get("rule_name", "")).lower().strip()
+                    if _alias in {
                         "burst",
                         "burst_master",
                         "scalping_burst",
+                        "burst_single_master",
+                        "burst_single",
                         "",
-                    ):
+                    }:
                         td["rule_name"] = "burst_scalping"
+
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
                     if rn == "burst_scalping":
+                        # on supprime tout TP (burst = trailing only)
                         for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
                             td.pop(k, None)
                         td["no_tp"] = True
+
+                        # trailing par défaut si activé en config
                         trailing_cfg = (
                             (td.get("trailing") or {}) if td.get("trailing") else {}
                         ) or (
@@ -1283,18 +1351,13 @@ def run_single_pipeline_cycle(
                         if trailing_cfg.get("enabled", True):
                             td["trailing"] = {
                                 "enabled": True,
-                                "activate_after_rr": float(
-                                    trailing_cfg.get("activate_after_rr", 1.0)
-                                ),
+                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
                                 "step_pips": float(trailing_cfg.get("step_pips", 5)),
                             }
                 except Exception:
                     pass
 
-                rn = str(td.get("rule_name", "burst_scalping")).lower()
-
-                # 🚫 SUPPRESSION de LIMIT_FOK : on force un envoi MARKET géré par l'exécuteur
-                # ✅ Résolution unique du burst_size (décision > conf burst_single_master > conf burst_scalping > fallback)
+              
                 try:
                     conf_burst = (
                         base_config.get("entry_rules", {})

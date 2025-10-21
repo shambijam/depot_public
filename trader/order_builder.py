@@ -329,6 +329,25 @@ def prepare_order(self, decision_package: dict) -> dict:
             resolved_burst = 1
 
         trade_decision["burst_size"] = resolved_burst  # propagation utile au sizing
+        # --- Normalisation des alias burst → 'burst_scalping'
+        _alias = str(trade_decision.get("rule_name", "")).lower().strip()
+        if _alias in {
+            "burst",
+            "burst_master",
+            "scalping_burst",
+            "burst_single_master",
+            "burst_single",
+            "",
+        }:
+            trade_decision["rule_name"] = "burst_scalping"
+
+        # Hints explicites pour le sizing/exécution burst (idempotents)
+        if trade_decision.get("rule_name") == "burst_scalping":
+            # sizing panier (risk% / burst_size) même si l'appelant ne l’a pas mis
+            trade_decision.setdefault("sizing_scope", "BASKET")
+            # ici on force une intention MARKET pour le master (le split est géré ailleurs)
+            trade_decision.setdefault("order_type", "MARKET")
+
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"
 
