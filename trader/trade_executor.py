@@ -32,7 +32,6 @@ from .validators import (
 from .trailing import apply_dynamic_trailing, _modify_sl, _bars_since
 from .burst import (
     _attach_burst_metadata,
-    execute_burst_scalping_order,
     execute_burst_single_master,
 )
 
