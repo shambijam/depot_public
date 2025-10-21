@@ -36,6 +36,8 @@ from .burst import (
 )
 
 
+
+
 # Import MT5 tolérant (utile pour constantes/retcodes si tu en appelles ici)
 try:
     import MetaTrader5 as mt5
