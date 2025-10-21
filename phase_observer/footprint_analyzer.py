@@ -535,6 +535,67 @@ class FootprintAnalyzer:
                 df_levels = df_levels.sort_index()
             except Exception:
                 pass
+            # === PATCH: Harmonisation colonnes + métriques manquantes ===
+            # On veut: vol, delta, delta_ratio, zscore_vol
+
+            cols = {c.lower(): c for c in df_levels.columns}
+
+            def _pick(*names):
+                for n in names:
+                    if n in cols:
+                        return cols[n]
+                return None
+
+            # 1) volume
+            vol_col = _pick("vol", "volume", "qty", "size", "amount")
+            if vol_col is None:
+                df_levels["vol"] = 0.0
+            else:
+                if vol_col != "vol":
+                    df_levels.rename(columns={vol_col: "vol"}, inplace=True)
+
+            # 2) delta
+            delt_col = _pick("delta", "Δ", "delta_value", "delt")
+            if delt_col is None:
+                df_levels["delta"] = 0.0
+            else:
+                if delt_col != "delta":
+                    df_levels.rename(columns={delt_col: "delta"}, inplace=True)
+
+            # 3) delta_ratio = |delta| / max(vol, eps)
+            if "delta_ratio" not in df_levels.columns:
+                eps = 1e-9
+                df_levels["delta_ratio"] = (df_levels["delta"].abs()) / (df_levels["vol"].abs() + eps)
+
+            # 4) zscore_vol (robuste) — indispensable pour l’absorption
+            if "zscore_vol" not in df_levels.columns:
+                v = df_levels["vol"].astype(float)
+                if v.count() >= 8:
+                    med = float(v.median())
+                    mad = float((v - med).abs().median())
+                    if mad > 1e-9:
+                        df_levels["zscore_vol"] = (v - med) / (1.4826 * mad + 1e-9)
+                    else:
+                        std = float(v.std(ddof=0))
+                        df_levels["zscore_vol"] = (v - float(v.mean())) / (std + 1e-9)
+                else:
+                    df_levels["zscore_vol"] = 0.0
+
+            # 5) LOG instantané pour comprendre pourquoi ça ne déclenche pas
+            try:
+                self.logger.info(
+                    "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
+                    int(window_s),
+                    int(len(df_levels)),
+                    float(df_levels['vol'].median() if 'vol' in df_levels else 0.0),
+                    float(df_levels['zscore_vol'].max() if 'zscore_vol' in df_levels else 0.0),
+                    float(df_levels['delta_ratio'].quantile(0.95) if 'delta_ratio' in df_levels else 0.0),
+                    float(df_levels['delta'].sum() if 'delta' in df_levels else 0.0),
+                )
+            except Exception:
+                pass
+
+                        
         except Exception as e:
             self._log_error("snapshot", e, {"window_s": window_s})
             return None, None, None
@@ -598,6 +659,19 @@ class FootprintAnalyzer:
             d2 = detect_imbalance_stacking(df_levels, **stack_kwargs)
             if d2.get("ok"):
                 candidates.append(d2)
+                
+            else:
+                try:
+                    self.logger.debug(
+                        "[FP-STACK] no trigger | win=%ss | reason=%s | stats={levels:%s, dr_mean:%.3f}",
+                        int(window_s),
+                        d2.get("reason", "thresholds_not_met"),
+                        d2.get("meta", {}).get("levels"),
+                        float(d2.get("meta", {}).get("delta_ratio_mean", 0.0)),
+                    )
+                except Exception:
+                    pass
+  
         except Exception as e:
             self._log_error(
                 "stacking_detection", e, {"kwargs": stack_kwargs, "window_s": window_s}
@@ -634,6 +708,19 @@ class FootprintAnalyzer:
                     candidates.append(fb2)
 
         if not candidates:
+            try:
+                self.logger.info(
+                    "[FP-NO-CAND] win=%ss | zmax=%.2f dr_p95=%.2f dr_p90=%.2f dr_mean=%.2f vol_med=%.2f dsum=%.2f",
+                    int(window_s),
+                    float(df_levels['zscore_vol'].max()),
+                    float(df_levels['delta_ratio'].quantile(0.95)),
+                    float(df_levels['delta_ratio'].quantile(0.90)),
+                    float(df_levels['delta_ratio'].mean()),
+                    float(df_levels['vol'].median()),
+                    float(df_levels['delta'].sum()),
+                )
+            except Exception:
+                pass
             return None, meta, window_s
 
         # --- boost confiance & sélection ---
@@ -648,6 +735,30 @@ class FootprintAnalyzer:
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
         except Exception:
             pass
+        
+        # Dernier recours: momentum gate (optionnel)
+        if not best:
+            try:
+                dsum = float(df_levels["delta"].sum())
+                dr_p95 = float(df_levels["delta_ratio"].quantile(0.95))
+                zmax = float(df_levels["zscore_vol"].max())
+                if abs(dsum) > 0 and dr_p95 >= 1.15 and zmax >= 1.0:
+                    direction = "BUY" if dsum > 0 else "SELL"
+                    best = {
+                        "ok": True,
+                        "trigger": "stacking_inline",
+                        "direction": direction,
+                        "confidence": 0.62 if zmax < 1.5 else 0.68,
+                        "anchor_price": float(df_levels.index.values[-1]),
+                        "meta": {
+                            "dsum": dsum,
+                            "dr_p95": dr_p95,
+                            "zmax": zmax,
+                            "fallback": "momentum_gate",
+                        },
+                    }
+            except Exception:
+                pass
 
         return best, meta, window_s
 
