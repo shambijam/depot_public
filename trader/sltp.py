@@ -89,47 +89,45 @@ def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | 
             f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}"
         )
         return None
-def resolve_side(action_raw, order_type, position_type, mt5):
-    s = (action_raw or "").strip().upper()
-    if s in ("BUY", "SELL"):
-        return s
 
-    # order_type sous forme string
-    if isinstance(order_type, str):
-        t = order_type.strip().upper()
-        if t in ("BUY", "BUY_LIMIT", "BUY_STOP", "BUY_STOP_LIMIT"):
-            return "BUY"
-        if t in ("SELL", "SELL_LIMIT", "SELL_STOP", "SELL_STOP_LIMIT"):
-            return "SELL"
 
-    # order_type sous forme int (constantes MT5)
-    if mt5 is not None and isinstance(order_type, int):
-        if order_type in (
-            getattr(mt5, "ORDER_TYPE_BUY", -1),
-            getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -1),
-            getattr(mt5, "ORDER_TYPE_BUY_STOP", -1),
-            getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -1),
-        ):
-            return "BUY"
-        if order_type in (
-            getattr(mt5, "ORDER_TYPE_SELL", -1),
-            getattr(mt5, "ORDER_TYPE_SELL_LIMIT", -1),
-            getattr(mt5, "ORDER_TYPE_SELL_STOP", -1),
-            getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -1),
-        ):
-            return "SELL"
+# --- Helpers de normalisation ---
+from trader.errors import TradeExecutionError
 
-    # position_type (si on modifie une position existante)
-    if mt5 is not None:
-        if position_type == getattr(mt5, "POSITION_TYPE_BUY", -1):
+
+def resolve_side(obj: dict) -> str:
+    """
+    Normalise la direction en 'BUY' ou 'SELL' en regardant plusieurs alias.
+    Accepte: action/side/order_action/direction/final_action/trade_action, LONG/SHORT, B/S, +1/-1/1/-1.
+    """
+    candidates = [
+        obj.get("action"),
+        obj.get("side"),
+        obj.get("order_action"),
+        obj.get("direction"),
+        obj.get("final_action"),
+        obj.get("trade_action"),
+    ]
+
+    # numérique ?
+    for c in candidates:
+        if isinstance(c, (int, float)):
+            return "BUY" if float(c) > 0 else "SELL"
+
+    # textuel
+    for c in candidates:
+        if c is None:
+            continue
+        s = str(c).strip().upper()
+        if s in ("BUY", "LONG", "B", "+1", "1"):
             return "BUY"
-        if position_type == getattr(mt5, "POSITION_TYPE_SELL", -1):
+        if s in ("SELL", "SHORT", "S", "-1"):
             return "SELL"
 
     raise TradeExecutionError(
-        f"Impossible de déduire le sens (action='{action_raw}', "
-        f"order_type={order_type}, position_type={position_type})"
+        "Action invalide pour SL/TP: vide ou non reconnue (aucun alias trouvé)."
     )
+
 
 # ==============================
 # === Calcul SL / TP (RR dyn) ===
@@ -145,43 +143,41 @@ def _calculate_sl_tp_prices(
     market_context: dict,
 ) -> tuple[float, Optional[float]]:
     """
-    Calcule SL/TP à partir des méthodes SWING / ATR / PIPS pour le SL,
-    et RR / ATR_MULTIPLE / PIPS pour le TP, avec **RR dynamique** si fourni.
-
-    ✅ Changement majeur:
-      - **Burst_scalping utilise désormais SL & TP** (plus de désactivation TP).
-      - Le **RR** peut être poussé par le pipeline via `tp_rr_ratio_hint`
-        (sinon fallback RR de la conf + modulation simple par vol/trigger si dispo).
-      - Les distances respectent stops_level broker + buffer soft (2 ticks).
-
-    Retourne: (sl_price: float, tp_price: Optional[float])
+    Calcule SL/TP à partir de SWING/ATR/PIPS pour le SL, et RR/ATR_MULTIPLE/PIPS pour le TP.
+    - Normalise la direction via resolve_side() (BUY/SELL), et la réécrit dans trade_decision["action"]
+    - Respecte stops_level broker (+ soft buffer 2 ticks)
+    - Supporte RR dynamique (tp_rr_ratio_hint) + modulation optionnelle par facteurs de contexte
+    - Aucun trailing ici (burst_scalping = SL/TP only)
+    Retour: (sl_price, tp_price|None)
     """
     import math
 
+    # --- 0) Direction robuste (corrige l'erreur "Action invalide pour SL/TP: ''") ---
     try:
-        import pandas as pd  # type: ignore
-        import numpy as np  # type: ignore
-    except Exception:
-        pd = None  # type: ignore
-        np = None  # type: ignore
+        action = resolve_side(
+            trade_decision
+        )  # BUY / SELL (accepte final_action/side/etc.)
+        trade_decision["action"] = action  # standardise pour tous les appels suivants
+    except Exception as e:
+        raise TradeExecutionError(
+            f"Action invalide pour SL/TP: vide ou non reconnue ({e})"
+        )
 
-    self.logger.info(
-        "Calcul du SL/TP (SWING/ATR/PIPS + RR/ATR_MULTIPLE/PIPS, RR dynamique supporté)..."
-    )
+    # --- 1) Sanity checks entrée ---
+    if not (isinstance(entry_price, (int, float)) and entry_price > 0):
+        raise TradeExecutionError("Prix d'entrée invalide.")
 
-    # --- Action ---
-    action_raw = str(trade_decision.get("action", "")).strip().upper()
-    action = {"LONG": "BUY", "SHORT": "SELL"}.get(action_raw, action_raw)
-    if action not in ("BUY", "SELL"):
-        raise TradeExecutionError(f"Action invalide pour SL/TP: '{action_raw}'")
-
-    # --- Symbole/broker ---
+    # --- 2) Broker params ---
     point = float(getattr(symbol_info, "point", 0.0) or 0.0)
     if point <= 0:
         raise TradeExecutionError("symbol_info.point invalide (<=0).")
     digits = int(getattr(symbol_info, "digits", 0) or 0)
     tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or point)
-    min_stop_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
+    min_stop_points = int(
+        getattr(symbol_info, "trade_stops_level", 0)
+        or getattr(symbol_info, "stops_level", 0)
+        or 0
+    )
     min_stop_price = min_stop_points * point
 
     # soft buffer si broker annonce 0 → ~2 ticks
@@ -192,97 +188,13 @@ def _calculate_sl_tp_prices(
     points_per_pip = 10.0 if digits in (3, 5) else 1.0
     pip_size = point * points_per_pip
 
-    # --- Helpers arrondis ---
-    def _ceil_to_tick(x: float) -> float:
-        if tick_size <= 0:
-            return round(float(x), digits)
-        steps = math.ceil(float(x) / tick_size - 1e-12)
-        return round(steps * tick_size, digits)
-
-    def _floor_to_tick(x: float) -> float:
-        if tick_size <= 0:
-            return round(float(x), digits)
-        steps = math.floor(float(x) / tick_size + 1e-12)
-        return round(steps * tick_size, digits)
-
-    # --- Overrides PIPS / spread ---
-    sl_pips_override = trade_decision.get("target_sl_pips")
-    tp_pips_override = trade_decision.get("target_tp_pips")
-    spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
-
-    # --- Paramètres produit / stratégie ---
-    # Chemin 1 (privilégié): entry_rules.scalping.burst_scalping.sltp
-    sltp_cfg = (
-        ((config.get("entry_rules") or {}).get("scalping") or {})
-        .get("burst_scalping", {})
-        .get("sltp", {})
-    ) or {}
-    rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
-    rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
-    rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
-    sl_method = str(sltp_cfg.get("sl_method", "") or "").upper()
-
-    # Fallback (historique): smart_sl_tp_settings
-    prod_st = config.get("smart_sl_tp_settings", {}) or {}
-    if not sl_method:
-        sl_method = str(prod_st.get("sl_placement_method", "PIPS") or "PIPS").upper()
-    tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
-    rr_default = float(prod_st.get("tp_rr_ratio", rr_base) or rr_base)
-
-    # === RR dynamique depuis le pipeline (hint) ===
-    rr_hint = trade_decision.get("tp_rr_ratio_hint")
-    if isinstance(rr_hint, (int, float)) and math.isfinite(rr_hint) and rr_hint > 0:
-        rr_ratio = float(rr_hint)
-    else:
-        # Modulation simple si le pipeline a fourni des facteurs (facultatif)
-        rr_ratio = float(rr_default)
-        vol_factor = trade_decision.get("volatility_factor")
-        trig_factor = trade_decision.get("trigger_factor")
-        if (
-            isinstance(vol_factor, (int, float))
-            and math.isfinite(vol_factor)
-            and vol_factor > 0
-        ):
-            rr_ratio *= float(vol_factor)
-        # Si pas de trigger_factor explicite, on permet un léger boost via confidence [0..1] → [0.9..1.1]
-        if (
-            isinstance(trig_factor, (int, float))
-            and math.isfinite(trig_factor)
-            and trig_factor > 0
-        ):
-            rr_ratio *= float(trig_factor)
-        else:
-            conf = trade_decision.get("confidence")
-            if isinstance(conf, (int, float)) and 0 <= float(conf) <= 1:
-                rr_ratio *= 0.9 + 0.2 * float(conf)  # 0→0.9 ; 0.5→1.0 ; 1.0→1.1
-
-    # Clamp final
-    rr_ratio = max(
-        rr_floor, min(rr_cap, float(rr_ratio if rr_ratio > 0 else rr_default))
-    )
-
-    # --- Hard limits historiques (points) ---
-    strat_st = config.get("smart_targets") or {}
-    st_sl = strat_st.get("stop_loss") or {}
-    st_tp = strat_st.get("take_profit") or {}
-    sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
-    sl_hard_max_points = float(
-        st_sl.get("hard_max_points", float("inf")) or float("inf")
-    )
-    tp_hard_max_points = float(
-        st_tp.get("hard_max_points", float("inf")) or float("inf")
-    )
-
-    # --- Données marché (pour ATR/SWING) ---
-    symbol = str(
-        trade_decision.get("asset") or trade_decision.get("symbol") or ""
-    ).upper()
-    rates_df = None
+    # --- 3) Libs optionnelles pour ATR ---
     try:
-        md = (market_context or {}).get("market_data") or {}
-        rates_df = md.get(symbol)
+        import pandas as pd  # type: ignore
+        import numpy as np  # type: ignore
     except Exception:
-        rates_df = None
+        pd = None  # type: ignore
+        np = None  # type: ignore
 
     def _compute_atr(df, period: int) -> float:
         if (
@@ -312,9 +224,92 @@ def _calculate_sl_tp_prices(
         except Exception:
             return float("nan")
 
-    # ================= SL =================
-    stop_loss_price: float = 0.0
+    # --- 4) Overrides éventuels & inputs marché ---
+    sl_pips_override = trade_decision.get("target_sl_pips")
+    tp_pips_override = trade_decision.get("target_tp_pips")
+    spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
 
+    symbol = str(
+        trade_decision.get("asset") or trade_decision.get("symbol") or ""
+    ).upper()
+    try:
+        rates_df = ((market_context or {}).get("market_data") or {}).get(symbol)
+    except Exception:
+        rates_df = None
+
+    # --- 5) Lecture de la configuration SLTP ---
+    # Chemin privilégié (asset/strat): entry_rules.scalping.burst_scalping.sltp
+    sltp_cfg = (
+        ((config.get("entry_rules") or {}).get("scalping") or {})
+        .get("burst_scalping", {})
+        .get("sltp", {})
+    ) or {}
+
+    rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
+    rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
+    rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
+    sl_method = str(sltp_cfg.get("sl_method", "") or "").upper()
+
+    # Fallback historique
+    prod_st = config.get("smart_sl_tp_settings", {}) or {}
+    if not sl_method:
+        sl_method = str(prod_st.get("sl_placement_method", "PIPS") or "PIPS").upper()
+    tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
+    rr_default = float(prod_st.get("tp_rr_ratio", rr_base) or rr_base)
+
+    # RR dynamique (hint + modulation)
+    rr_hint = trade_decision.get("tp_rr_ratio_hint")
+    if isinstance(rr_hint, (int, float)) and math.isfinite(rr_hint) and rr_hint > 0:
+        rr_ratio = float(rr_hint)
+    else:
+        rr_ratio = float(rr_default)
+        vol_factor = trade_decision.get("volatility_factor")
+        trig_factor = trade_decision.get("trigger_factor")
+        if (
+            isinstance(vol_factor, (int, float))
+            and math.isfinite(vol_factor)
+            and vol_factor > 0
+        ):
+            rr_ratio *= float(vol_factor)
+        if (
+            isinstance(trig_factor, (int, float))
+            and math.isfinite(trig_factor)
+            and trig_factor > 0
+        ):
+            rr_ratio *= float(trig_factor)
+        else:
+            conf = trade_decision.get("confidence")
+            if isinstance(conf, (int, float)) and 0 <= float(conf) <= 1:
+                rr_ratio *= 0.9 + 0.2 * float(conf)  # 0→0.9 ; 0.5→1.0 ; 1.0→1.1
+    rr_ratio = max(rr_floor, min(rr_cap, rr_ratio if rr_ratio > 0 else rr_default))
+
+    # Hard limits historiques (points)
+    strat_st = config.get("smart_targets") or {}
+    st_sl = strat_st.get("stop_loss") or {}
+    st_tp = strat_st.get("take_profit") or {}
+    sl_hard_min_points = float(st_sl.get("hard_min_points", 0) or 0.0)
+    sl_hard_max_points = float(
+        st_sl.get("hard_max_points", float("inf")) or float("inf")
+    )
+    tp_hard_max_points = float(
+        st_tp.get("hard_max_points", float("inf")) or float("inf")
+    )
+
+    # --- 6) Helpers arrondis ---
+    def _ceil_to_tick(x: float) -> float:
+        if tick_size <= 0:
+            return round(float(x), digits)
+        steps = math.ceil(float(x) / tick_size - 1e-12)
+        return round(steps * tick_size, digits)
+
+    def _floor_to_tick(x: float) -> float:
+        if tick_size <= 0:
+            return round(float(x), digits)
+        steps = math.floor(float(x) / tick_size + 1e-12)
+        return round(steps * tick_size, digits)
+
+    # --- 7) Calcul SL ---
+    stop_loss_price: float = 0.0
     if isinstance(sl_pips_override, (int, float)) and sl_pips_override > 0:
         sl_dist = float(sl_pips_override) * pip_size
         stop_loss_price = (
@@ -325,11 +320,7 @@ def _calculate_sl_tp_prices(
         if method == "SWING":
             lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
             buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
-            if not (
-                rates_df is not None
-                and hasattr(rates_df, "tail")
-                and len(rates_df) >= lookback
-            ):
+            if not (hasattr(rates_df, "tail") and len(rates_df or []) >= lookback):
                 method = "ATR"
             else:
                 buf = buffer_pips * pip_size
@@ -362,10 +353,8 @@ def _calculate_sl_tp_prices(
                 entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
             )
 
-    # ================= TP =================
-    # ❗️Plus de neutralisation du TP pour burst: on calcule le TP normalement (RR par défaut)
+    # --- 8) Calcul TP (jamais neutralisé ici pour burst) ---
     take_profit_price: Optional[float] = None
-
     if isinstance(tp_pips_override, (int, float)) and tp_pips_override > 0:
         tp_dist = float(tp_pips_override) * pip_size
         take_profit_price = (
@@ -382,7 +371,6 @@ def _calculate_sl_tp_prices(
                 )
             else:
                 method = "PIPS"
-
         if method == "ATR_MULTIPLE" and take_profit_price is None:
             atr_p = int(
                 prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14
@@ -394,7 +382,6 @@ def _calculate_sl_tp_prices(
                 take_profit_price = (
                     entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
                 )
-
         if take_profit_price is None:  # fallback PIPS
             tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
             tp_dist = tp_pips * pip_size
@@ -402,11 +389,7 @@ def _calculate_sl_tp_prices(
                 entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
             )
 
-    # ================= Validations & ajustements =================
-    if not (isinstance(entry_price, (int, float)) and entry_price > 0):
-        raise TradeExecutionError("Prix d'entrée invalide.")
-
-    # Distances brutes
+    # --- 9) Validations distances ---
     sl_dist_price = (
         (entry_price - stop_loss_price)
         if action == "BUY"
@@ -430,7 +413,7 @@ def _calculate_sl_tp_prices(
     if tp_dist_price is not None:
         tp_dist_price = max(tp_dist_price, soft_min_price)
 
-    # B) Hard limits (en points)
+    # B) Hard limits (points)
     sl_dist_points = sl_dist_price / point
     sl_dist_points = max(sl_dist_points, sl_hard_min_points)
     sl_dist_points = min(sl_dist_points, sl_hard_max_points)
@@ -442,7 +425,7 @@ def _calculate_sl_tp_prices(
         tp_dist_points = min(tp_dist_points, tp_hard_max_points)
         tp_dist_price = tp_dist_points * point
 
-    # C) Ajustement spread (si fourni) : impose TP >= SL + spread (en pips)
+    # C) Ajustement spread: impose TP >= SL + spread (en pips) si on a TP
     if tp_dist_price is not None and spread_pips > 0:
         sl_pips_now = sl_dist_points / points_per_pip
         tp_pips_now = (
@@ -452,7 +435,7 @@ def _calculate_sl_tp_prices(
             tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
             tp_dist_price = tp_dist_points * point
 
-    # D) Positionnement côté BID/ASK (si tick disponible)
+    # D) Positionnement côté BID/ASK (si tick dispo)
     try:
         tick_map = (market_context or {}).get("last_tick") or {}
         tick = tick_map.get(symbol) or {}
@@ -464,16 +447,14 @@ def _calculate_sl_tp_prices(
     if bid > 0 and ask > 0 and ask > bid:
         if action == "BUY":
             stop_loss_price = entry_price - sl_dist_price
-            if take_profit_price is not None:
+            if tp_dist_price is not None:
                 take_profit_price = entry_price + tp_dist_price
-                # assure TP > ASK + min
                 if take_profit_price < (ask + soft_min_price - 1e-12):
                     take_profit_price = ask + soft_min_price
         else:  # SELL
             stop_loss_price = entry_price + sl_dist_price
-            if take_profit_price is not None:
+            if tp_dist_price is not None:
                 take_profit_price = entry_price - tp_dist_price
-                # assure TP < BID - min
                 if take_profit_price > (bid - soft_min_price + 1e-12):
                     take_profit_price = bid - soft_min_price
     else:
@@ -483,14 +464,14 @@ def _calculate_sl_tp_prices(
             if action == "BUY"
             else entry_price + sl_dist_price
         )
-        if take_profit_price is not None:
+        if tp_dist_price is not None:
             take_profit_price = (
-                entry_price + (tp_dist_price or 0.0)
+                entry_price + tp_dist_price
                 if action == "BUY"
-                else entry_price - (tp_dist_price or 0.0)
+                else entry_price - tp_dist_price
             )
 
-    # E) Arrondi à la grille des ticks + dernières cohérences directionnelles
+    # E) Arrondi grille de ticks + cohérences directionnelles finales
     if action == "BUY":
         stop_loss_price = _floor_to_tick(
             min(stop_loss_price, entry_price - soft_min_price)
@@ -516,7 +497,7 @@ def _calculate_sl_tp_prices(
         if not (stop_loss_price > entry_price):
             stop_loss_price = _ceil_to_tick(entry_price + soft_min_price)
 
-    # Sortie finale
+    # --- 10) Sortie ---
     stop_loss_price = round(float(stop_loss_price), digits)
     take_profit_price = (
         None if take_profit_price is None else round(float(take_profit_price), digits)
