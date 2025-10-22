@@ -552,168 +552,168 @@ def prepare_order(self, decision_package: dict) -> dict:
             trade_decision["rr_effective"] = rr_value
         else:
             self.logger.debug("[RR] TP absent → RR non évalué (soft).")
-
-        # ---------- 9) Volume via sizing risk-based ----------
-        account_trade_settings = (
-            market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
-        )
-
-        # On accepte "0.25", "0,25", "0.25%", etc. -> float(0.25)
-        def _to_float(x):
-            try:
-                if isinstance(x, str):
-                    xs = x.strip().replace("%", "").replace(",", ".")
-                    return float(xs)
-                return float(x)
-            except Exception:
-                return None
-
-        def _cascade(*vals) -> float:
-            """Renvoie le premier float > 0 trouvé parmi vals, sinon 0.0"""
-            for v in vals:
-                f = _to_float(v)
-                if f is not None and f > 0:
-                    return f
-            return 0.0
-
-        # 🎯 Sources élargies (décision → config active → conf globale → env → fallback sûr)
-        import os
-        resolved_risk_pct = _cascade(
-            # 1) compte/broker
-            account_trade_settings.get("risk_per_trade_percent"),
-            # 2) décision (plusieurs alias tolérés)
-            trade_decision.get("risk_per_trade_percent"),
-            trade_decision.get("risk_pct"),
-            trade_decision.get("risk_percent"),
-            # 3) config active
-            (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
-            (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
-            # 4) conf globale (plusieurs chemins)
-            self.config_manager.get("risk_management.risk_per_trade_percent"),
-            self.config_manager.get("risk_management.default_risk_per_trade_percent"),
-            self.config_manager.get("defaults.risk_per_trade_percent"),
-            # 5) env (au cas où tu le pilotes par variable)
-            os.getenv("SNIPERX_RISK_PCT"),
-            # 6) fallback explicitement fourni par décision/config
-            trade_decision.get("fallback_risk_per_trade_percent"),
-            (active_config.get("risk_management", {}) or {}).get("fallback_risk_per_trade_percent"),
-        )
-
-        # Clamp via conf (sécurité)
-        min_risk = _to_float(self.config_manager.get("risk_management.min_risk_per_trade_percent", 0.01)) or 0.01
-        max_risk = _to_float(self.config_manager.get("risk_management.max_risk_per_trade_percent", 2.0)) or 2.0
-
-        used_fallback = False
-        if resolved_risk_pct <= 0:
-            # dernier filet si TOUT est vide → 0.25% par défaut "safe"
-            resolved_risk_pct = 0.25
-            used_fallback = True
-
-        # clamp
-        if resolved_risk_pct < min_risk:
-            self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} < min {min_risk} → forcé à {min_risk}")
-            resolved_risk_pct = min_risk
-        elif resolved_risk_pct > max_risk:
-            self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} > max {max_risk} → forcé à {max_risk}")
-            resolved_risk_pct = max_risk
-
-        if used_fallback:
-            self.logger.warning(f"[SIZING] Aucune source valide → fallback risk%={resolved_risk_pct} (configure `risk_per_trade_percent`)")
-
-        # SL requis pour le sizing
-        if not sl_price or sl_price <= 0:
-            raise TradeExecutionError(f"Risk sizing impossible: sl_price invalide ({sl_price})")
-
-        # ✅ IMPORTANT: en burst on force le scope panier (risk% / burst_size)
-        sizing_scope = trade_decision.get("sizing_scope")
-        if is_burst:
-            sizing_scope = "BASKET"
-
-        # --- [SIZING] Résolution robuste de l'équité du compte (évite 'Équité du compte invalide') ---
-        account_ctx = market_context.get("active_broker_account") or {}
-        equity_val = account_ctx.get("equity")
-
-        # 1) chemins alternatifs connus
-        if equity_val is None or equity_val == "":
-            equity_val = ((account_ctx.get("account_info") or {}).get("equity")
-                        or (account_ctx.get("info") or {}).get("equity"))
-
-        # 2) lecture MT5 si dispo
-        if equity_val is None or equity_val == "":
-            try:
-                ai = self.mt5_connector.get_account_info()
-                equity_val = getattr(ai, "equity", None)
-                if equity_val not in (None, ""):
-                    self.logger.info(f"[SIZING] Équité résolue via MT5: {equity_val}")
-            except Exception as e:
-                self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
-
-        # 3) fallback conf (utile en dry-run/backtest)
-        if equity_val is None or equity_val == "":
-            try:
-                equity_val = self.config_manager.get("risk_management.default_equity")
-                if equity_val not in (None, ""):
-                    self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
-            except Exception:
-                equity_val = None
-
-        # 4) validation finale et injection dans le contexte
-        def _as_pos_float(x):
-            try:
-                if isinstance(x, str):
-                    x = x.strip().replace(",", ".")
-                v = float(x)
-                return v if v > 0 else None
-            except Exception:
-                return None
-
-        equity_val = _as_pos_float(equity_val)
-        if equity_val is None:
-            raise TradeExecutionError(
-                "Équité du compte invalide ou introuvable pour le sizing. "
-                "Renseigne market_context.active_broker_account.equity, ou configure risk_management.default_equity."
+            
+            # ---------- 9) Volume via sizing risk-based ----------
+            account_trade_settings = (
+                market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
             )
 
-        # MàJ du contexte pour que sizing.py récupère une valeur valide
-        account_ctx["equity"] = equity_val
-        ai = account_ctx.get("account_info") or {}
-        ai["equity"] = equity_val
-        account_ctx["account_info"] = ai
-        market_context["active_broker_account"] = account_ctx
-        # --- fin résolution équité ---
+            # On accepte "0.25", "0,25", "0.25%", etc. -> float(0.25)
+            def _to_float(x):
+                try:
+                    if isinstance(x, str):
+                        xs = x.strip().replace("%", "").replace(",", ".")
+                        return float(xs)
+                    return float(x)
+                except Exception:
+                    return None
 
-        # passe une copie de trade_settings avec le risk% résolu
-        account_trade_settings_over = {
-            **account_trade_settings,
-            "risk_per_trade_percent": resolved_risk_pct,
-            "equity": equity_val,
-        }
+            def _cascade(*vals) -> float:
+                """Renvoie le premier float > 0 trouvé parmi vals, sinon 0.0"""
+                for v in vals:
+                    f = _to_float(v)
+                    if f is not None and f > 0:
+                        return f
+                return 0.0
 
-        volume_final = float(
-            _sizing_risk_volume(
-                self,
-                {
-                    "action": action,
-                    "asset": broker_symbol,
-                    "order_type": "MARKET" if is_burst else order_type,
-                    "confidence": trade_decision.get("confidence", 1.0),
-                    "rule_name": trade_decision.get("rule_name"),
-                    "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,      # BASKET si burst
-                    "burst_size": resolved_burst,      # ex: 5 → risk%/5 par ticket
-                },
-                active_config,
-                market_context,
-                symbol_info,
-                entry_price_market,
-                sl_price,
-                account_trade_settings_over,
+            # 🎯 Sources élargies (décision → config active → conf globale → env → fallback sûr)
+            import os
+            resolved_risk_pct = _cascade(
+                # 1) compte/broker
+                account_trade_settings.get("risk_per_trade_percent"),
+                # 2) décision (plusieurs alias tolérés)
+                trade_decision.get("risk_per_trade_percent"),
+                trade_decision.get("risk_pct"),
+                trade_decision.get("risk_percent"),
+                # 3) config active
+                (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
+                (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
+                # 4) conf globale (plusieurs chemins)
+                self.config_manager.get("risk_management.risk_per_trade_percent"),
+                self.config_manager.get("risk_management.default_risk_per_trade_percent"),
+                self.config_manager.get("defaults.risk_per_trade_percent"),
+                # 5) env (au cas où tu le pilotes par variable)
+                os.getenv("SNIPERX_RISK_PCT"),
+                # 6) fallback explicitement fourni par décision/config
+                trade_decision.get("fallback_risk_per_trade_percent"),
+                (active_config.get("risk_management", {}) or {}).get("fallback_risk_per_trade_percent"),
             )
-        )
 
-        self.logger.info(
-            f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → lot/ticket={volume_final}"
-        )
+            # Clamp via conf (sécurité)
+            min_risk = _to_float(self.config_manager.get("risk_management.min_risk_per_trade_percent", 0.01)) or 0.01
+            max_risk = _to_float(self.config_manager.get("risk_management.max_risk_per_trade_percent", 2.0)) or 2.0
+
+            used_fallback = False
+            if resolved_risk_pct <= 0:
+                # dernier filet si TOUT est vide → 0.25% par défaut "safe"
+                resolved_risk_pct = 0.25
+                used_fallback = True
+
+            # clamp
+            if resolved_risk_pct < min_risk:
+                self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} < min {min_risk} → forcé à {min_risk}")
+                resolved_risk_pct = min_risk
+            elif resolved_risk_pct > max_risk:
+                self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} > max {max_risk} → forcé à {max_risk}")
+                resolved_risk_pct = max_risk
+
+            if used_fallback:
+                self.logger.warning(f"[SIZING] Aucune source valide → fallback risk%={resolved_risk_pct} (configure `risk_per_trade_percent`)")
+
+            # SL requis pour le sizing
+            if not sl_price or sl_price <= 0:
+                raise TradeExecutionError(f"Risk sizing impossible: sl_price invalide ({sl_price})")
+
+            # ✅ IMPORTANT: en burst on force le scope panier (risk% / burst_size)
+            sizing_scope = trade_decision.get("sizing_scope")
+            if is_burst:
+                sizing_scope = "BASKET"
+
+            # --- [SIZING] Résolution robuste de l'équité du compte (évite 'Équité du compte invalide') ---
+            account_ctx = market_context.get("active_broker_account") or {}
+            equity_val = account_ctx.get("equity")
+
+            # 1) Chemins alternatifs connus
+            if equity_val is None or equity_val == "":
+                equity_val = ((account_ctx.get("account_info") or {}).get("equity")
+                            or (account_ctx.get("info") or {}).get("equity"))
+
+            # 2) lecture MT5 si dispo
+            if equity_val is None or equity_val == "":
+                try:
+                    ai = self.mt5_connector.get_account_info()
+                    equity_val = getattr(ai, "equity", None)
+                    if equity_val not in (None, ""):
+                        self.logger.info(f"[SIZING] Équité résolue via MT5: {equity_val}")
+                except Exception as e:
+                    self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
+
+            # 3) fallback conf (utile en dry-run/backtest)
+            if equity_val is None or equity_val == "":
+                try:
+                    equity_val = self.config_manager.get("risk_management.default_equity")
+                    if equity_val not in (None, ""):
+                        self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
+                except Exception:
+                    equity_val = None
+
+            # 4) validation finale et injection dans le contexte
+            def _as_pos_float(x):
+                try:
+                    if isinstance(x, str):
+                        x = x.strip().replace(",", ".")
+                    v = float(x)
+                    return v if v > 0 else None
+                except Exception:
+                    return None
+
+            equity_val = _as_pos_float(equity_val)
+            if equity_val is None:
+                raise TradeExecutionError(
+                    "Équité du compte invalide ou introuvable pour le sizing. "
+                    "Renseigne market_context.active_broker_account.equity, ou configure risk_management.default_equity."
+                )
+
+            # MàJ du contexte pour que sizing.py récupère une valeur valide
+            account_ctx["equity"] = equity_val
+            ai = account_ctx.get("account_info") or {}
+            ai["equity"] = equity_val
+            account_ctx["account_info"] = ai
+            market_context["active_broker_account"] = account_ctx
+            # --- fin résolution équité ---
+
+            # passe une copie de trade_settings avec le risk% résolu + l'équité injectée
+            account_trade_settings_over = {
+                **account_trade_settings,
+                "risk_per_trade_percent": resolved_risk_pct,
+                "equity": equity_val,
+            }
+
+            volume_final = float(
+                _sizing_risk_volume(
+                    self,
+                    {
+                        "action": action,
+                        "asset": broker_symbol,
+                        "order_type": "MARKET" if is_burst else order_type,
+                        "confidence": trade_decision.get("confidence", 1.0),
+                        "rule_name": trade_decision.get("rule_name"),
+                        "volatility_factor": trade_decision.get("volatility_factor"),
+                        "sizing_scope": sizing_scope,      # BASKET si burst
+                        "burst_size": resolved_burst,      # ex: 5 → risk%/5 par ticket
+                    },
+                    active_config,
+                    market_context,
+                    symbol_info,
+                    entry_price_market,
+                    sl_price,
+                    account_trade_settings_over,
+                )
+            )
+
+            self.logger.info(
+                f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → lot/ticket={volume_final}"
+            )
 
         # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
         vol_before_norm = volume_final
