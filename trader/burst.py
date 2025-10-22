@@ -505,7 +505,10 @@ def monitor_burst_baskets(
     self,
     config: dict,
     max_loss_pips: float = 15.0,
-) -> None:
+    trail_trigger: float = 10.0,
+    trail_step: float = 5.0,
+    **_,
+):
     """
     Watchdog de paniers, SANS trailing.
 

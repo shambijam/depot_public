@@ -92,35 +92,96 @@ def prepare_order(self, decision_package: dict) -> dict:
         return round(vol, 8)
 
     # ---------- 1) Action ----------
-    action_raw = _first_non_empty(
-        trade_decision.get("final_action"),
-        trade_decision.get("selected_action"),
-        trade_decision.get("core_action"),
-        trade_decision.get("action"),
-        trade_decision.get("side"),
-        trade_decision.get("direction"),
+    # On cherche d'abord dans trade_decision (format normal),
+    # puis on tolère d'autres structures (final_decision, paquet top-level).
+    final_decision = {}
+    try:
+        if isinstance(decision_package, dict):
+            final_decision = (
+                decision_package.get("final_decision")
+                or decision_package.get("decision")
+                or {}
+            ) or {}
+    except Exception:
+        final_decision = {}
+
+    def _resolve_key(dct: dict, *names: str) -> Optional[str]:
+        if not isinstance(dct, dict):
+            return None
+        for n in names:
+            v = dct.get(n)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    action_raw = (
+        _resolve_key(
+            trade_decision,
+            "final_action",
+            "selected_action",
+            "core_action",
+            "action",
+            "side",
+            "direction",
+        )
+        or _resolve_key(
+            final_decision,
+            "final_action",
+            "selected_action",
+            "core_action",
+            "action",
+            "side",
+            "direction",
+        )
+        or _resolve_key(
+            decision_package,
+            "final_action",
+            "selected_action",
+            "core_action",
+            "action",
+            "side",
+            "direction",
+        )
     )
+
     action = _normalize_action(action_raw)
     if not action:
-        msg = f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE)."
-        self.logger.error(msg)
-        raise TradeExecutionError(msg)
+        # Log de debug utile pour diagnostiquer la structure réelle
+        try:
+            td_keys = list((trade_decision or {}).keys())
+            fd_keys = list((final_decision or {}).keys())
+        except Exception:
+            td_keys, fd_keys = [], []
+        self.logger.error(
+            f"[ORDER_BUILDER] action introuvable | "
+            f"trade_decision.keys={td_keys} | final_decision.keys={fd_keys} | "
+            f"top_keys={list((decision_package or {}).keys())}"
+        )
+        raise TradeExecutionError(
+            f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE)."
+        )
 
-    # ---------- 2) Asset ----------
-    raw_symbol = _first_non_empty(
-        trade_decision.get("asset"),
-        trade_decision.get("symbol"),
-        trade_decision.get("instrument"),
+
+       # ---------- 2) Asset ----------
+    raw_symbol = (
+        _first_non_empty(
+            trade_decision.get("asset"),
+            trade_decision.get("symbol"),
+            trade_decision.get("instrument"),
+        )
+        or _first_non_empty(
+            final_decision.get("asset"),
+            final_decision.get("symbol"),
+            final_decision.get("instrument"),
+        )
+        or _first_non_empty(
+            (decision_package or {}).get("asset"),
+            (decision_package or {}).get("symbol"),
+            (decision_package or {}).get("instrument"),
+        )
     )
     if not raw_symbol or raw_symbol.upper() == "UNKNOWN":
         msg = "Asset/symbole manquant ou 'UNKNOWN' dans la décision."
-        self.logger.error(msg)
-        raise TradeExecutionError(msg)
-    raw_symbol = raw_symbol.upper()
-
-    allowed = set(map(str.upper, active_config.get("tradeable_assets", [])))
-    if raw_symbol not in allowed:
-        msg = f"Asset '{raw_symbol}' non autorisé par la stratégie (whitelist: {sorted(allowed)})."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
