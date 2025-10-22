@@ -5,6 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, UTC
 
 
+# ======================================================================================
+# Fenêtre horaire / Spread / Exposition / Pré-checks / Fat-finger / Override manuel
+# (inchangés fonctionnellement, nettoyés trailing, typés, docs précises)
+# ======================================================================================
+
+
 def _check_trading_window(
     self, current_time_utc: datetime, symbol: str
 ) -> tuple[bool, str]:
@@ -710,3 +716,216 @@ def approve_pending_order(
             f"[MANUAL] Action inconnue '{action}' pour {order_id} → aucun changement."
         )
         return {"status": "error", "message": "Invalid action for pending order."}
+
+
+# ======================================================================================
+# VALIDATIONS DE CONFIG — SL/TP & BURST (sans trailing) + rétro-compat douce
+# ======================================================================================
+
+
+def _get_in(d: dict, path: str, default=None):
+    """
+    Accès nested avec chemin 'a.b.c'. Renvoie default si la clé n'existe pas.
+    """
+    cur = d or {}
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return default
+    return cur
+
+
+def _is_number(x) -> bool:
+    try:
+        return isinstance(x, (int, float)) and (x == x)
+    except Exception:
+        return False
+
+
+def validate_burst_and_sltp_config(self, config: dict) -> dict:
+    """
+    Valide la config scalping/burst (SL/TP + guardrails) sans échouer sur anciens champs trailing.
+    Retour:
+      {
+        "ok": bool,
+        "errors": [str],
+        "warnings": [str],
+      }
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    # --- Nœuds utiles ---
+    bs = _get_in(config, "entry_rules.scalping.burst_scalping", {}) or {}
+    sltp = bs.get("sltp", {}) or {}
+    closure = bs.get("closure_rules", {}) or {}
+
+    # === Burst size ===
+    bs_val = bs.get("burst_size")
+    if bs_val is not None:
+        try:
+            n = int(bs_val)
+            if n < 1:
+                errors.append(
+                    "entry_rules.scalping.burst_scalping.burst_size must be >= 1"
+                )
+        except Exception:
+            errors.append(
+                "entry_rules.scalping.burst_scalping.burst_size must be an integer"
+            )
+
+    # === SLTP (RR dynamique + méthode SL) ===
+    rr_base = sltp.get("rr_base", 1.5)
+    rr_floor = sltp.get("rr_floor", 1.0)
+    rr_cap = sltp.get("rr_cap", 3.0)
+    for key, val, cond, msg in [
+        (
+            "rr_base",
+            rr_base,
+            (_is_number(rr_base) and rr_base > 0),
+            "sltp.rr_base must be > 0",
+        ),
+        (
+            "rr_floor",
+            rr_floor,
+            (_is_number(rr_floor) and rr_floor >= 0),
+            "sltp.rr_floor must be >= 0",
+        ),
+        (
+            "rr_cap",
+            rr_cap,
+            (_is_number(rr_cap) and rr_cap >= rr_floor),
+            "sltp.rr_cap must be >= rr_floor",
+        ),
+    ]:
+        if not cond:
+            errors.append(f"entry_rules.scalping.burst_scalping.sltp.{msg}")
+
+    sl_method = str(sltp.get("sl_method", "PIPS") or "PIPS").upper()
+    if sl_method not in {"PIPS", "ATR", "SWING"}:
+        errors.append(
+            "entry_rules.scalping.burst_scalping.sltp.sl_method must be one of: PIPS, ATR, SWING"
+        )
+
+    # === Closure rules ===
+    def _must_bool(path: str):
+        v = _get_in(bs, f"closure_rules.{path}", None)
+        if v is None:
+            return
+        if not isinstance(v, bool):
+            errors.append(
+                f"entry_rules.scalping.burst_scalping.closure_rules.{path} must be boolean"
+            )
+
+    def _must_num_ge(path: str, ge: float):
+        v = _get_in(bs, f"closure_rules.{path}", None)
+        if v is None:
+            return
+        if not _is_number(v) or float(v) < ge:
+            errors.append(
+                f"entry_rules.scalping.burst_scalping.closure_rules.{path} must be >= {ge}"
+            )
+
+    def _must_int_ge(path: str, ge: int):
+        v = _get_in(bs, f"closure_rules.{path}", None)
+        if v is None:
+            return
+        try:
+            iv = int(v)
+            if iv < ge:
+                errors.append(
+                    f"entry_rules.scalping.burst_scalping.closure_rules.{path} must be >= {ge}"
+                )
+        except Exception:
+            errors.append(
+                f"entry_rules.scalping.burst_scalping.closure_rules.{path} must be integer >= {ge}"
+            )
+
+    _must_bool("close_on_full_profit")
+    _must_bool("require_full_count_for_profit_close")
+    _must_bool("require_all_seen_green_once")
+    _must_num_ge("all_seen_green_pips", 0.0)
+    _must_num_ge("min_green_pnl_pips", 0.0)
+    _must_int_ge("loss_guard_arming_ms", 0)
+    _must_int_ge("rt_fast_window_ms", 0)
+    _must_int_ge("rt_poll_interval_ms", 10)
+    _must_num_ge("max_loss_pips", 0.00001)
+    _must_num_ge("cooldown_after_exit_s", 0.0)
+
+    # === Cooldown (emplacement alternatif global accepté) ===
+    cd_glob = _get_in(config, "cooldown_after_exit_s", None)
+    cd_local = _get_in(bs, "closure_rules.cooldown_after_exit_s", None)
+    if (cd_glob is None) and (cd_local is None):
+        warnings.append(
+            "No cooldown_after_exit_s provided (either root or entry_rules.scalping.burst_scalping.closure_rules)."
+        )
+
+    # === Dépréciations: trailing / exit_rules single_master historiques ===
+    deprecated_paths = [
+        "entry_rules.scalping.trailing",
+        "exit_rules.trailing",
+        "exit_rules.single_master",
+        "smart_trailing_settings",
+        "smart_sl_tp_settings.trailing_enabled",
+    ]
+    for p in deprecated_paths:
+        if _get_in(config, p, None) is not None:
+            warnings.append(
+                f"Deprecated config detected: '{p}' (ignored in SL/TP burst mode)."
+            )
+
+    # === Résultat ===
+    ok = len(errors) == 0
+    if ok and not warnings:
+        self.logger.debug("[VALIDATORS] SL/TP & Burst config: OK.")
+    elif ok and warnings:
+        self.logger.warning(
+            f"[VALIDATORS] SL/TP & Burst config: OK with warnings: {warnings}"
+        )
+    else:
+        self.logger.error(f"[VALIDATORS] SL/TP & Burst config: ERRORS: {errors}")
+
+    return {"ok": ok, "errors": errors, "warnings": warnings}
+
+
+def validate_liquidity_config(self, config: dict) -> dict:
+    """
+    Validation légère pour la stratégie liquidity (rien de spécifique trailing).
+    Cible: présence de la liste d'actifs, risk_per_trade_percent > 0, quelques clés d'entry.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    assets = config.get("tradeable_assets", [])
+    if not isinstance(assets, list) or not assets:
+        errors.append("tradeable_assets must be a non-empty list")
+
+    r = config.get("risk_per_trade_percent", None)
+    if not _is_number(r) or float(r) <= 0:
+        errors.append("risk_per_trade_percent must be > 0")
+
+    # Exemple de présence minimale de blocs attendus
+    entry_rules = config.get("entry_rules", {})
+    if not isinstance(entry_rules, dict) or not entry_rules:
+        warnings.append("entry_rules not provided (using defaults may degrade results)")
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+
+def validate_config(self, strategy_name: str, config: dict) -> dict:
+    """
+    Point d’entrée générique pour valider une config de stratégie.
+    - Scalping: contrôle SL/TP & Burst (sans trailing)
+    - Liquidity: contrôle minimal (risque/actifs)
+    """
+    strat = (strategy_name or "").strip().lower()
+    if strat == "scalping":
+        return validate_burst_and_sltp_config(self, config)
+    if strat == "liquidity":
+        return validate_liquidity_config(self, config)
+    # Default: pas de blocage, mais avertissement
+    self.logger.warning(
+        f"[VALIDATORS] Unknown strategy '{strategy_name}', no strict validation applied."
+    )
+    return {"ok": True, "errors": [], "warnings": ["no_strict_validation_for_strategy"]}

@@ -1,56 +1,118 @@
-# trader/burst.py - Module de Gestion du salping_basket
-
+# trader/burst.py - Gestion des paniers (burst) SANS TRAILING
 from __future__ import annotations
 
 import logging
 import re
 import time
-import pandas as pd
-import math
-import hashlib
-import random
-from typing import Any, Dict, Any, Optional
-from datetime import datetime, timedelta, UTC, timezone
-from trader.sizing import _calculate_risk_based_volume
+from typing import Any, Dict, Optional, List, Tuple
 
 
-# ==============================
-# === Helpers Trading Utils ====
-# ==============================
+# ======================================================================================
+# Helpers génériques
+# ======================================================================================
 
 
 def _attach_burst_metadata(self, trade_decision: dict) -> dict:
     """
-    Attache des métadonnées de burst (basket_id, horodatage, etc.)
-    à une décision de trade unique.
+    Attache des métadonnées de burst (basket_id, horodatage, flag 'burst') à une décision.
     """
-    import time, uuid
+    import uuid, time as _t
 
     if not trade_decision:
         return trade_decision
 
     basket_id = trade_decision.get("basket_id") or f"burst_{uuid.uuid4().hex[:8]}"
     trade_decision["basket_id"] = basket_id
-    trade_decision["burst_timestamp"] = int(time.time())
+    trade_decision["burst_timestamp"] = int(_t.time())
     trade_decision.setdefault("meta", {})["burst"] = True
-
     return trade_decision
 
 
-def close_burst_basket(self, basket_id: str):
+def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     """
-    Ferme immédiatement toutes les positions appartenant au même burst `basket_id`.
-
-    • Trouve les positions du panier (basket_id/burst_id/comment avec motif strict).
-    • Tente une fermeture 'bulk' ; post-vérifie que tout est fermé.
-    • Fallback: ferme ticket par ticket via self.close_position(ticket=...), avec post-vérif.
-    • Annule UNIQUEMENT les ordres en attente qui portent le `basket_id` dans le commentaire.
-    • Mode urgence: pousse un SL au marché (buffer = max(tick, stops_level*point, freeze*point)+1*tick) sans jamais détendre un SL existant.
-    • Purge des états internes (trailing/lock) + cooldown par symbole. Déverrouillage assuré (finally).
+    Ouvre un panier de 'burst_size' tickets avec le MÊME SL/TP et le MÊME basket_id.
+    - Conserve le mode single-basket (guardrails effectués en amont).
+    - Comment compact ≤31 chars: 'burst_scalping|basket=<id8hex>'
+      (on n’ajoute PAS 'i/n' pour rester sous 31 chars).
+    - Met à jour self._last_burst_time pour le cooldown.
     """
-    import re, time
+    import uuid, time as _t
 
-    # ---------- Guards ----------
+    if not isinstance(base_request, dict) or burst_size is None:
+        return {"status": "failed", "reason": "bad_args"}
+
+    burst_size = int(burst_size) if burst_size else 1
+    if burst_size < 1:
+        burst_size = 1
+
+    # Génère un basket_id compact (8 hex) pour respecter 31 chars dans le comment
+    basket_id = f"{uuid.uuid4().hex[:8]}"
+    # Comment MT5 ≤31 (14 + 1 + 7 + 8 = 30)
+    comment = f"burst_scalping|basket={basket_id}"
+
+    # Prépare requête type (copie défensive)
+    def _base_req_copy():
+        r = dict(base_request)
+        r["comment"] = comment  # compact + détectable
+        # On s’assure que SL/TP existent tels que préparés par order_builder
+        r["sl"] = float(base_request.get("sl", 0.0) or 0.0)
+        if base_request.get("tp") is not None:
+            r["tp"] = float(base_request.get("tp", 0.0) or 0.0)
+        return r
+
+    tickets, errors = [], []
+    for _ in range(burst_size):
+        req = _base_req_copy()
+        try:
+            res = self.execute_order(req)
+            if res and res.get("status") in {"sent", "placed", "filled"}:
+                tk = res.get("order") or res.get("deal") or res.get("ticket")
+                if tk:
+                    tickets.append(int(tk))
+            else:
+                errors.append(res)
+        except Exception as e:
+            errors.append({"exc": str(e)})
+
+        # micro-délai anti-rafale (évite retcodes “trade context busy”)
+        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.02) or 0.02))
+
+    # marque le cooldown “dernier burst”
+    try:
+        self._last_burst_time = _t.time()
+    except Exception:
+        pass
+
+    status = (
+        "ok"
+        if len(tickets) == burst_size and not errors
+        else "partial" if tickets else "failed"
+    )
+    return {
+        "status": status,
+        "basket_id": basket_id,
+        "tickets": tickets,
+        "errors": errors,
+        "size": burst_size,
+        "comment": comment,
+    }
+
+
+# ======================================================================================
+# Fermeture d’un panier (close immédiate, sans trailing)
+# ======================================================================================
+
+
+def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
+    """
+    Ferme immédiatement TOUTES les positions appartenant au panier `basket_id`.
+
+    - Identifie les positions par motif strict dans comment/basket_id (regex).
+    - Tente une fermeture 'bulk'; sinon fallback ticket par ticket.
+    - Annule UNIQUEMENT les ordres en attente dont le commentaire contient le `basket_id`.
+    - Mode urgence: si nécessaire, pousse un SL 'au marché' (sans jamais détendre un SL existant).
+    - Purge des états internes de panier + pose d’un COOLDOWN par symbole si configuré.
+    """
     if not basket_id or not str(basket_id).strip():
         self.logger.warning("[CLOSE] appelé sans basket_id")
         return {"closed": False, "reason": "no_basket_id"}
@@ -61,13 +123,13 @@ def close_burst_basket(self, basket_id: str):
         return {"closed": False, "reason": "no_connector"}
     mt5 = getattr(mt5c, "mt5", None)
     if not mt5:
-        self.logger.error("[CLOSE] module MT5 indisponible sur le connecteur.")
+        self.logger.error("[CLOSE] module MT5 indisponible.")
         return {"closed": False, "reason": "no_mt5_module"}
 
-    # ---------- Budget de latence (option) ----------
+    # ---------- Fenêtre de temps optionnelle ----------
     try:
         max_close_ms = int(
-            self.config_manager.get("dynamic_trailing.max_latency_ms_on_close", 0) or 0
+            self.config_manager.get("burst_close.max_latency_ms", 0) or 0
         )
     except Exception:
         max_close_ms = 0
@@ -78,27 +140,18 @@ def close_burst_basket(self, basket_id: str):
             return True
         return (int(time.time() * 1000) - start_ms) < max_close_ms
 
-    # ---------- State structs ----------
-    if not hasattr(self, "_basket_peak_pips"):
-        self._basket_peak_pips = {}
-    if not hasattr(self, "_basket_trail_armed"):
-        self._basket_trail_armed = {}
-    if not hasattr(self, "_burst_trailing_state"):
-        self._burst_trailing_state = {}
-    if not hasattr(self, "_active_burst_locks"):
-        self._active_burst_locks = {}
+    # ---------- États internes ----------
     if not hasattr(self, "_closing_baskets"):
         self._closing_baskets = set()
     if not hasattr(self, "_cooldown_until"):
         self._cooldown_until = {}
 
-    # ---------- Lock concurrent ----------
     if basket_id in self._closing_baskets:
         self.logger.info(f"[CLOSE] Ignoré: '{basket_id}' déjà en fermeture.")
         return {"closed": False, "reason": "already_closing"}
     self._closing_baskets.add(basket_id)
 
-    # ---------- Helpers ----------
+    # ---------- Helpers locaux ----------
     def _v(p, key, d=None):
         if isinstance(p, dict):
             return p.get(key, d)
@@ -114,7 +167,8 @@ def close_burst_basket(self, basket_id: str):
         ep = _safe_float(_v(p, "entry_price"))
         return ep if ep is not None else _safe_float(_v(p, "price_open"))
 
-    def _extract_basket_id(pos):
+    def _extract_basket_id(pos) -> str:
+        """Reconstruit un basket_id depuis les métadonnées position/commande."""
         bid = _v(pos, "basket_id") or _v(pos, "burst_id")
         if bid:
             return str(bid)
@@ -148,8 +202,8 @@ def close_burst_basket(self, basket_id: str):
             pass
         return []
 
-    def _cancel_pending_orders_for_basket(bid: str):
-        """Annule SEULEMENT les ordres dont le commentaire contient explicitement le basket_id (substring)."""
+    def _cancel_pending_orders_for_basket(bid: str) -> int:
+        """Annule SEULEMENT les ordres en attente dont le commentaire contient explicitement le basket_id."""
         pend = _list_pending_orders()
         if not pend:
             return 0
@@ -166,10 +220,7 @@ def close_burst_basket(self, basket_id: str):
                     order_id = _v(od, "order") or _v(od, "ticket")
                     if order_id is None:
                         continue
-                    req = {
-                        "action": mt5.TRADE_ACTION_REMOVE,
-                        "order": int(order_id),
-                    }
+                    req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order_id)}
                     res = mt5c.order_send(req)
                     if res and getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
                         cancelled += 1
@@ -184,10 +235,10 @@ def close_burst_basket(self, basket_id: str):
                 self.logger.error(f"[CLOSE] Annulation ordre KO: {e}")
         return cancelled
 
-    def _force_sl_sweep(symbol: str, positions: list):
+    def _force_sl_sweep(symbol: str, positions: list) -> bool:
         """
-        Pousse un SL quasi-au-marché pour forcer la sortie (sans détendre).
-        Buffer = max(tick_size, stops_level*point, freeze_level*point) + 1*tick.
+        Dernier recours: pousse un SL quasi-au-marché pour forcer la sortie (sans détendre le SL existant).
+        Buffer = max(tick, stops_level*point, freeze_level*point) + 1*tick.
         """
         try:
             si = mt5.symbol_info(symbol)
@@ -234,7 +285,6 @@ def close_burst_basket(self, basket_id: str):
                     new_sl = ref + buf
 
                 cur_sl = _safe_float(_v(p, "sl"))
-
                 # ne pas détendre
                 if typ == 0 and cur_sl is not None and new_sl <= cur_sl:
                     continue
@@ -263,52 +313,50 @@ def close_burst_basket(self, basket_id: str):
             )
         return ok > 0
 
-    def _purge_states(bid: str, symbol_hint: str = None):
-        self._basket_peak_pips.pop(bid, None)
-        self._basket_trail_armed.pop(bid, None)
-        self._burst_trailing_state.pop(bid, None)
-
+    def _purge_states(bid: str, symbol_hint: Optional[str] = None):
+        """Nettoie les états internes liés au panier et applique le cooldown par symbole si configuré."""
         # COOLDOWN post-exit par symbole
         try:
             cd = float(self.config_manager.get("cooldown_after_exit_s", 0) or 0.0)
             if cd <= 0:
                 cd = float(
                     self.config_manager.get(
-                        "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
-                        0,
+                        "entry_rules.scalping.burst_scalping.cooldown_after_exit_s", 0
                     )
                     or 0.0
                 )
             if cd > 0 and symbol_hint:
-                import time as _t
-
-                self._cooldown_until[str(symbol_hint).upper()] = _t.time() + cd
+                self._cooldown_until[str(symbol_hint).upper()] = time.time() + cd
                 self.logger.info(
                     f"[COOLDOWN] {str(symbol_hint).upper()} bloqué {int(cd)}s après fermeture panier '{bid}'."
                 )
         except Exception as _e:
             self.logger.warning(f"[COOLDOWN] set KO: {_e}")
 
-        if symbol_hint:
-            self._active_burst_locks.pop(str(symbol_hint).upper(), None)
-        else:
-            to_del = None
-            for k, v in list(self._active_burst_locks.items()):
+        # Libération éventuelle des locks par symbole
+        if hasattr(self, "_active_burst_locks"):
+            if symbol_hint:
                 try:
-                    if (v or {}).get("basket_id") == bid:
-                        to_del = k
-                        break
+                    self._active_burst_locks.pop(str(symbol_hint).upper(), None)
                 except Exception:
                     pass
-            if to_del is not None:
-                self._active_burst_locks.pop(to_del, None)
+            else:
+                try:
+                    for k, v in list(self._active_burst_locks.items()):
+                        if (v or {}).get("basket_id") == bid:
+                            self._active_burst_locks.pop(k, None)
+                except Exception:
+                    pass
 
-    # ---------- Core with guaranteed unlock ----------
+    # ---------- Core avec déverrouillage garanti ----------
     cancelled = 0
     try:
         # 1) positions du panier
-        all_pos = _list_open_positions()
-        basket_pos = [p for p in all_pos if _extract_basket_id(p) == basket_id]
+        try:
+            all_pos = _list_open_positions()
+            basket_pos = [p for p in all_pos if _extract_basket_id(p) == basket_id]
+        except Exception:
+            basket_pos = []
 
         if not basket_pos:
             self.logger.info(f"[CLOSE] Aucune position pour basket '{basket_id}'")
@@ -323,15 +371,11 @@ def close_burst_basket(self, basket_id: str):
 
         symbol_hint = str(_v(basket_pos[0], "symbol", "") or "").upper()
 
-        # 2) annule pendings attachés au basket (avant de fermer)
+        # 2) annule pendings attachés (avant fermeture)
         if _time_left_ok():
             cancelled = _cancel_pending_orders_for_basket(basket_id)
-        else:
-            self.logger.warning(
-                "[CLOSE] Budget de latence atteint avant l'annulation des pendings."
-            )
 
-        # 3) Bulk close si dispo + post-check rapide
+        # 3) Bulk close si dispo + post-check
         tickets = []
         for p in basket_pos:
             tk = _v(p, "ticket")
@@ -353,7 +397,7 @@ def close_burst_basket(self, basket_id: str):
         ):
             try:
                 mt5c.close_positions(tickets=tickets)
-                time.sleep(0.05)  # petit poll
+                time.sleep(0.05)
                 left = [
                     p
                     for p in _list_open_positions()
@@ -375,18 +419,15 @@ def close_burst_basket(self, basket_id: str):
                     self.logger.warning(
                         f"[CLOSE] Bulk partielle: {len(left)} restants → fallback tickets."
                     )
-                    tickets = []
-                    for p in left:
-                        tk = _v(p, "ticket")
-                        if tk is not None:
-                            try:
-                                tickets.append(int(tk))
-                            except Exception:
-                                pass
+                    tickets = [
+                        int(_v(p, "ticket"))
+                        for p in left
+                        if _v(p, "ticket") is not None
+                    ]
             except Exception as e:
                 self.logger.error(f"[CLOSE] bulk close_positions KO: {e}")
 
-        # 4) Fallback ticket par ticket via TA fonction robuste
+        # 4) Fallback ticket par ticket
         if tickets and _time_left_ok():
             for tk in tickets:
                 if not _time_left_ok():
@@ -395,29 +436,25 @@ def close_burst_basket(self, basket_id: str):
                     )
                     break
                 try:
-                    ret = self.close_position(
-                        ticket=int(tk)
-                    )  # ✅ utilise ta version avec retry/slippage
-                    if ret and ret.get("success"):
-                        # post-vérif ticket
-                        time.sleep(0.02)
-                        still = [
-                            p for p in _list_open_positions() if _v(p, "ticket") == tk
-                        ]
-                        if still:
-                            tickets_failed += 1
-                            self.logger.warning(
-                                f"[CLOSE] ticket {tk} non fermé (fallback)."
-                            )
-                        else:
-                            tickets_closed += 1
-                    else:
+                    # ✅ On appelle directement le connector (pas self.close_position qui peut ne pas exister)
+                    mt5c.close_position(int(tk))
+
+                    # Petit délai puis vérif effective de fermeture
+                    time.sleep(0.02)
+                    still = [p for p in _list_open_positions() if _v(p, "ticket") == tk]
+                    if still:
                         tickets_failed += 1
+                        self.logger.warning(
+                            f"[CLOSE] ticket {tk} non fermé (fallback)."
+                        )
+                    else:
+                        tickets_closed += 1
+
                 except Exception as e:
                     tickets_failed += 1
                     self.logger.error(f"[CLOSE] Échec clôture ticket {tk}: {e}")
 
-        # 5) Si il reste quelque chose → mode urgence SL balai
+        # 5) Si reste quelque chose → mode urgence SL
         left_now = [
             p for p in _list_open_positions() if _extract_basket_id(p) == basket_id
         ]
@@ -456,70 +493,46 @@ def close_burst_basket(self, basket_id: str):
         }
 
     finally:
-        # déverrouillage inconditionnel
         self._closing_baskets.discard(basket_id)
 
 
-def _get_ref_price(self, symbol: str, is_buy: bool, entry_style: str):
-    """
-    Donne un prix de référence POSITIF et cohérent avec le côté.
-    - Pour FOK (market-like) : BUY → ask, SELL → bid
-    - Pour LIMIT (pending) : on place au meilleur côté (BUY → bid, SELL → ask)
-    Fallback: dernière close valide si tick absent.
-    """
-    mt5 = getattr(self.mt5_connector, "mt5", None)
-    tick = mt5.symbol_info_tick(symbol) if mt5 else None
-    bid = float(getattr(tick, "bid", 0.0) or 0.0)
-    ask = float(getattr(tick, "ask", 0.0) or 0.0)
-
-    if entry_style.endswith("FOK"):
-        ref = ask if is_buy else bid
-    else:
-        ref = bid if is_buy else ask
-
-    if ref <= 0.0:
-        # petit filet de sécurité : on tente la dernière close M1
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1) if mt5 else None
-        if rates and len(rates) and float(rates[0]["close"]) > 0:
-            ref = float(rates[0]["close"])
-
-    return ref if ref > 0.0 else None
+# ======================================================================================
+# Outils de monitoring  — close sur conditions de panier
+# ======================================================================================
 
 
 def monitor_burst_baskets(
     self,
     config: dict,
     max_loss_pips: float = 15.0,
-    trail_trigger: float = 10.0,
-    trail_step: float = 5.0,
 ) -> None:
     """
-    Watchdog burst en temps réel :
-    - FAST loop:
-        • close immédiat si panier PLEIN & TOUT VERT (every ticket >= min_green_pnl_pips)
-        • trailing de panier: armement à trail_trigger_pips, close si retracement >= trail_distance_pips
-    - Filet de perte : close si pnl panier <= -max_loss_pips
-    - Phase B (une passe) : même logique en secours
+    Watchdog de paniers, SANS trailing.
 
-    Lit les clés depuis config.entry_rules.scalping.burst_scalping.closure_rules :
-    close_on_full_profit (bool)
-    require_full_count_for_profit_close (bool)
-    min_green_pnl_pips (float)
-    rt_fast_window_ms (int)
-    rt_poll_interval_ms (int)
-    max_loss_pips (float)
-    trail_trigger_pips (float)
-    trail_distance_pips (float)
-    trail_require_full_count (bool)
-    trail_update_min_interval_ms (int)   # <- NOUVEAU (rate limit trailing), défaut 120
+    Règles supportées (via config.entry_rules.scalping.burst_scalping.closure_rules) :
+    - close_on_full_profit (bool) :
+        Ferme si chaque ticket du panier est >= min_green_pnl_pips (optionnellement seulement si panier 'plein').
+    - require_full_count_for_profit_close (bool) :
+        Nécessite que le nombre de tickets ouverts atteigne le burst_size attendu.
+    - min_green_pnl_pips (float) :
+        Seuil de pips à atteindre 'au moins une fois' par ticket si require_all_seen_green_once=true.
+    - require_all_seen_green_once (bool) :
+        Tous les tickets doivent avoir été 'verts' au moins une fois avant qu’un close profit puisse s'appliquer.
+    - rt_fast_window_ms / rt_poll_interval_ms :
+        Fenêtre courte de surveillance réactive (boucle fast) pour close profit uniquement (pas de trailing).
+    - max_loss_pips (float) :
+        Filet de perte au niveau du panier (pips moyens du panier <= -max_loss_pips → close).
+    - loss_guard_arming_ms (int) :
+        Délai minimal avant d’activer le filet de perte si require_all_seen_green_once=true.
+
+    NB: pas de BE/trailing. Les SL/TP fixés à l’entrée (via order_builder) restent prioritaires.
     """
-    import re, time
-
     # ---- Conf ----
     burst_cfg = (
         config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
     ) or {}
     closure = burst_cfg.get("closure_rules", {}) or {}
+
     require_all_seen_once = bool(closure.get("require_all_seen_green_once", False))
     all_seen_green_pips = float(closure.get("all_seen_green_pips", 3.0))
     loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
@@ -530,34 +543,12 @@ def monitor_burst_baskets(
     rt_fast_window_ms = int(closure.get("rt_fast_window_ms", 2500))
     rt_poll_interval_ms = int(closure.get("rt_poll_interval_ms", 100))
     max_loss_pips = float(closure.get("max_loss_pips", float(max_loss_pips)))
-    trail_trigger_pips = float(closure.get("trail_trigger_pips", float(trail_trigger)))
-    trail_distance_pips = float(
-        closure.get(
-            "trail_distance_pips", (trail_step if float(trail_step) > 0 else 5.0)
-        )
-    )
-    trail_require_full = bool(closure.get("trail_require_full_count", False))
-    # NOUVEAU: intervalle mini entre deux updates de trailing broker (anti-spam)
-    trail_update_min_interval_ms = int(closure.get("trail_update_min_interval_ms", 120))
-
-    # Garde-fous
-    trail_trigger_pips = max(0.0, trail_trigger_pips)
-    trail_distance_pips = max(0.0, trail_distance_pips)
 
     # ---- Connexion / états ----
     mt5c = getattr(self, "mt5_connector", None)
     if not mt5c:
         return
-    mt5 = getattr(mt5c, "mt5", None)
 
-    if not hasattr(self, "_basket_peak_pips"):
-        self._basket_peak_pips = {}
-    if not hasattr(self, "_basket_trail_armed"):
-        self._basket_trail_armed = {}
-    if not hasattr(self, "_burst_trailing_state"):
-        self._burst_trailing_state = {}
-    if not hasattr(self, "_last_trail_update_ms"):
-        self._last_trail_update_ms = {}
     if not hasattr(self, "_basket_seen_green"):
         self._basket_seen_green = {}  # basket_id -> set(ticket)
     if not hasattr(self, "_basket_all_seen"):
@@ -584,7 +575,6 @@ def monitor_burst_baskets(
             return {}
 
     def _gv(si, key, default=None):
-        """Tolérant: dict ou objet."""
         if si is None:
             return default
         if isinstance(si, dict):
@@ -592,19 +582,12 @@ def monitor_burst_baskets(
         return getattr(si, key, default)
 
     def _pip_size_for_symbol(sym: str) -> float:
-        """
-        EURUSD/GBPUSD (digits=5) -> 1 pip = 10 points
-        XAUUSD (digits=2)       -> 1 pip = 1 point
-        """
+        """EURUSD/GBPUSD(digits=5) -> 1 pip = 10 points ; XAUUSD(digits=2) -> 1 pip = 1 point"""
         si = _symbol_info(sym)
         point = _safe_float(_gv(si, "point", 0.0001), 0.0001) or 0.0001
         digits = int(_gv(si, "digits", 5) or 5)
         points_per_pip = 10.0 if digits in (3, 5) else 1.0
         return point * points_per_pip
-
-    def _digits_for_symbol(sym: str) -> int:
-        si = _symbol_info(sym)
-        return int(_gv(si, "digits", 5) or 5)  # FIX anti 'SymbolInfoFallback.get'
 
     def _current_price(pos):
         cp = _safe_float(_v(pos, "current_price"))
@@ -616,9 +599,11 @@ def monitor_burst_baskets(
         bid = _safe_float(_v(pos, "bid"))
         ask = _safe_float(_v(pos, "ask"))
         t = _v(pos, "type")  # 0=BUY 1=SELL
-        if str(_v(pos, "action", "")).upper() == "BUY" or t == 0:
-            return ask if ask is not None else bid
-        return bid if bid is not None else ask
+        return (
+            (ask if ask is not None else bid)
+            if t == 0
+            else (bid if bid is not None else ask)
+        )
 
     def _entry_price(pos):
         ep = _safe_float(_v(pos, "entry_price"))
@@ -632,7 +617,7 @@ def monitor_burst_baskets(
             return d
         return "BUY" if _v(pos, "type") == 0 else "SELL"
 
-    def _extract_basket_id(pos):
+    def _extract_basket_id(pos) -> str:
         bid = _v(pos, "basket_id") or _v(pos, "burst_id")
         if bid:
             return str(bid)
@@ -655,34 +640,8 @@ def monitor_burst_baskets(
         except Exception:
             return []
 
-    def _update_seen_green(basket_id: str, positions, min_seen_pips: float):
-        """
-        Marque un ticket comme 'déjà vert' dès qu'il a atteint min_seen_pips au moins une fois.
-        Met self._basket_all_seen[basket_id] = True si tous les tickets ont été verts au moins une fois.
-        """
-        seen = self._basket_seen_green.setdefault(basket_id, set())
-        expected = _expected_count_from(positions)
-        if expected is None:
-            expected = len(positions)
-
-        for p in positions:
-            tk = _v(p, "ticket")
-            ep = _safe_float(_entry_price(p))
-            cp = _safe_float(_current_price(p))
-            if tk is None or ep is None or cp is None:
-                continue
-            sym = str(_v(p, "symbol", "") or "").upper()
-            d = _direction(p)
-            pip = _pip_size_for_symbol(sym)
-            pp = ((cp - ep) / pip) if d == "BUY" else ((ep - cp) / pip)
-            if pp >= float(min_seen_pips):
-                seen.add(int(tk))
-
-        # Tous déjà vus 'verts' ?
-        self._basket_all_seen[basket_id] = len(seen) >= expected
-
-    def _group_baskets(positions):
-        buckets = {}
+    def _group_baskets(positions: List[dict]) -> Dict[str, List[dict]]:
+        buckets: Dict[str, List[dict]] = {}
         for p in positions:
             bid = _extract_basket_id(p)
             if not bid:
@@ -690,7 +649,9 @@ def monitor_burst_baskets(
             buckets.setdefault(bid, []).append(p)
         return buckets
 
-    def _basket_stats(positions):
+    def _basket_stats(
+        positions: List[dict],
+    ) -> Optional[Tuple[str, str, float, float, float, float]]:
         """Retourne (symbol, direction, pip_size, avg_entry, avg_price, pnl_pips)."""
         if not positions:
             return None
@@ -712,8 +673,8 @@ def monitor_burst_baskets(
         )
         return sym, direction, pip_size, avg_entry, avg_price, pnl_pips
 
-    def _expected_count_from(positions):
-        # 1) chercher sur les positions
+    def _expected_count_from(positions: List[dict]) -> Optional[int]:
+        # 1) lire burst_size embarqué sur positions
         exp = 0
         for p in positions:
             bs = _safe_float(_v(p, "burst_size"))
@@ -734,12 +695,12 @@ def monitor_burst_baskets(
             if m:
                 try:
                     exp = int(m.group(2))
-                except:
+                except Exception:
                     exp = 0
         return exp if exp > 0 else None
 
-    def _all_green_and_full(positions) -> bool:
-        """Vrai si (optionnellement) panier plein ET chaque ticket >= min_green_pnl_pips."""
+    def _all_green_and_full(positions: List[dict]) -> bool:
+        """Vrai si (optionnel) panier plein ET chaque ticket >= min_green_pnl_pips."""
         expected = _expected_count_from(positions) if require_full_count else None
         if expected is not None and len(positions) < expected:
             return False
@@ -756,18 +717,47 @@ def monitor_burst_baskets(
                 return False
         return True
 
-    def _close_basket(basket_id, positions):
-        """Ferme et vérifie vraiment que tout est fermé; sinon fallback par ticket."""
-        # 1) bulk
-        try:
-            if hasattr(mt5c, "close_positions"):
+    def _update_seen_green(basket_id: str, positions: List[dict], min_seen_pips: float):
+        """
+        Marque un ticket comme 'déjà vert' dès qu'il a atteint min_seen_pips au moins une fois.
+        Met self._basket_all_seen[basket_id] = True si tous les tickets ont été verts au moins une fois.
+        """
+        seen = self._basket_seen_green.setdefault(basket_id, set())
+        expected = _expected_count_from(positions)
+        if expected is None:
+            expected = len(positions)
+
+        for p in positions:
+            tk = _v(p, "ticket")
+            ep = _safe_float(_entry_price(p))
+            cp = _safe_float(_current_price(p))
+            if tk is None or ep is None or cp is None:
+                continue
+            sym = str(_v(p, "symbol", "") or "").upper()
+            d = _direction(p)
+            pip = _pip_size_for_symbol(sym)
+            pp = ((cp - ep) / pip) if d == "BUY" else ((ep - cp) / pip)
+            if pp >= float(min_seen_pips):
+                try:
+                    seen.add(int(tk))
+                except Exception:
+                    pass
+
+        self._basket_all_seen[basket_id] = len(seen) >= expected
+
+    def _close_basket(basket_id: str, positions: List[dict]) -> bool:
+        """Ferme le panier (bulk si possible; sinon ticket par ticket) et retourne True si plus aucune position."""
+        # bulk
+        mt5c_close = getattr(mt5c, "close_positions", None)
+        if callable(mt5c_close):
+            try:
                 tickets = []
                 for p in positions:
                     tk = _v(p, "ticket")
                     if tk is not None:
                         tickets.append(int(tk))
                 if tickets:
-                    mt5c.close_positions(tickets=tickets)
+                    mt5c_close(tickets=tickets)
                     time.sleep(0.05)
                     left = [
                         p
@@ -775,51 +765,41 @@ def monitor_burst_baskets(
                         if _extract_basket_id(p) == basket_id
                     ]
                     if not left:
-                        # purges d'état
-                        self._basket_peak_pips.pop(basket_id, None)
-                        self._basket_trail_armed.pop(basket_id, None)
-                        self._burst_trailing_state.pop(basket_id, None)
-                        self._last_trail_update_ms.pop(basket_id, None)  # NOUVEAU
-                        self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (bulk).")
-                        # === COOLDOWN POST-EXIT (par symbole) ===
+                        # cooldown
                         try:
-                            if not hasattr(self, "_cooldown_until"):
-                                self._cooldown_until = {}
-                            cd = float(
-                                self.config_manager.get("cooldown_after_exit_s", 0)
-                                or 0.0
+                            sym_from_positions = (
+                                (str(_v(positions[0], "symbol", "") or "").upper())
+                                if positions
+                                else ""
                             )
-                            if cd <= 0:
+                            if sym_from_positions:
                                 cd = float(
-                                    self.config_manager.get(
-                                        "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
-                                        0,
-                                    )
+                                    self.config_manager.get("cooldown_after_exit_s", 0)
                                     or 0.0
                                 )
-                            if cd > 0:
-                                import time as _t
-
-                                sym_from_positions = (
-                                    str(_v(positions[0], "symbol", "") or "").upper()
-                                    if positions
-                                    else ""
-                                )
-                                if sym_from_positions:
+                                if cd <= 0:
+                                    cd = float(
+                                        self.config_manager.get(
+                                            "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                            0,
+                                        )
+                                        or 0.0
+                                    )
+                                if cd > 0:
                                     self._cooldown_until[sym_from_positions] = (
-                                        _t.time() + cd
+                                        time.time() + cd
                                     )
                                     self.logger.info(
                                         f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
                                     )
                         except Exception as _e:
                             self.logger.warning(f"[COOLDOWN] set KO: {_e}")
-
+                        self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (bulk).")
                         return True
-        except Exception as e:
-            self.logger.error(f"[CLOSE] close_positions bulk KO: {e}")
+            except Exception as e:
+                self.logger.error(f"[CLOSE] close_positions bulk KO: {e}")
 
-        # 2) fallback ticket par ticket
+        # fallback ticket par ticket
         ok, ko = 0, 0
         for p in positions:
             try:
@@ -835,107 +815,44 @@ def monitor_burst_baskets(
         time.sleep(0.05)
         left = [p for p in _snapshot_positions() if _extract_basket_id(p) == basket_id]
         if not left:
-            self._basket_peak_pips.pop(basket_id, None)
-            self._basket_trail_armed.pop(basket_id, None)
-            self._burst_trailing_state.pop(basket_id, None)
-            self._last_trail_update_ms.pop(basket_id, None)  # NOUVEAU
-            self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback tickets).")
-            # === COOLDOWN POST-EXIT (par symbole) ===
             try:
-                if not hasattr(self, "_cooldown_until"):
-                    self._cooldown_until = {}
-                cd = float(self.config_manager.get("cooldown_after_exit_s", 0) or 0.0)
-                if cd <= 0:
+                sym_from_positions = (
+                    (str(_v(positions[0], "symbol", "") or "").upper())
+                    if positions
+                    else ""
+                )
+                if sym_from_positions:
                     cd = float(
-                        self.config_manager.get(
-                            "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
-                            0,
+                        self.config_manager.get("cooldown_after_exit_s", 0) or 0.0
+                    )
+                    if cd <= 0:
+                        cd = float(
+                            self.config_manager.get(
+                                "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                0,
+                            )
+                            or 0.0
                         )
-                        or 0.0
-                    )
-                if cd > 0:
-                    import time as _t
-
-                    sym_from_positions = (
-                        str(_v(positions[0], "symbol", "") or "").upper()
-                        if positions
-                        else ""
-                    )
-                    if sym_from_positions:
-                        self._cooldown_until[sym_from_positions] = _t.time() + cd
+                    if cd > 0:
+                        self._cooldown_until[sym_from_positions] = time.time() + cd
                         self.logger.info(
                             f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
                         )
             except Exception as _e:
                 self.logger.warning(f"[COOLDOWN] set KO: {_e}")
-
+            self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback tickets).")
             return True
 
-        # 3) dernier recours : on laisse la phase B/emergency gérer
         self.logger.warning(
             f"[CLOSE] Fermeture partielle '{basket_id}' ({ok}/{ok+ko})."
         )
         return False
 
-    def _push_broker_trailing_sl(
-        basket_id,
-        positions,
-        direction,
-        sym,
-        avg_entry,
-        pip_size,
-        peak_pips,
-        distance_pips,
-    ):
-        """Monte (BUY) / descend (SELL) les SL individuels au niveau peak±distance (sans jamais détendre)."""
-        if not mt5:
-            return
-        digits = _digits_for_symbol(sym)
-        peak_price = (
-            (avg_entry + (peak_pips * pip_size))
-            if direction == "BUY"
-            else (avg_entry - (peak_pips * pip_size))
-        )
-        target_sl = (
-            (peak_price - distance_pips * pip_size)
-            if direction == "BUY"
-            else (peak_price + distance_pips * pip_size)
-        )
-
-        for p in positions:
-            try:
-                tk = _v(p, "ticket")
-                cur_sl = _safe_float(_v(p, "sl"))
-                if tk is None:
-                    continue
-                # ne jamais détendre
-                if direction == "BUY" and cur_sl is not None and target_sl <= cur_sl:
-                    continue
-                if direction == "SELL" and cur_sl is not None and target_sl >= cur_sl:
-                    continue
-
-                req = {
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "symbol": sym,
-                    "position": int(tk),
-                    "sl": round(float(target_sl), digits),
-                    "tp": _safe_float(_v(p, "tp"), 0.0) or 0.0,
-                }
-                res = mt5c.order_send(req)
-                if res and getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
-                    self.logger.info(f"[TRAIL→SL] {sym} pos#{tk} SL => {req['sl']}")
-                else:
-                    self.logger.warning(
-                        f"[TRAIL→SL] ❌ pos#{tk} retcode={getattr(res,'retcode',None)}"
-                    )
-            except Exception as e:
-                self.logger.error(f"[TRAIL→SL] err pos SL update: {e}")
-
     # ==============
-    # Phase A — FAST (boucle courte, décision immédiate)
+    # Phase A — FAST (boucle courte: profit-only)
     # ==============
     if rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
-        deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)  # M1 monotonic
+        deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         while True:
             open_positions = _snapshot_positions()
             if not open_positions:
@@ -946,26 +863,25 @@ def monitor_burst_baskets(
 
             any_action = False
             for basket_id, pos in baskets.items():
-
-                # --- 3b: age panier + mémoire 'ever green' ---
+                # init age & mémoire
                 if basket_id not in self._basket_first_seen_ts:
                     self._basket_first_seen_ts[basket_id] = time.time()
                 age_ms = int(
                     (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
                 )
 
-                # met à jour la mémoire: quels tickets ont déjà été verts au moins une fois
+                # mettre à jour tickets déjà 'verts' au moins une fois
                 _update_seen_green(basket_id, pos, all_seen_green_pips)
                 all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
 
-                # 1) CLOSE INSTANTANÉ : Panier plein & TOUT VERT
+                # CLOSE profit-only (panier plein & tout vert)
                 if close_on_full_profit and _all_green_and_full(pos):
                     if (
                         require_all_seen_once
                         and not all_seen_ok
                         and age_ms < loss_guard_arming_ms
                     ):
-                        # On attend que chaque ticket ait été vert au moins une fois
+                        # on attend que chaque ticket ait été vert au moins une fois
                         pass
                     else:
                         self.logger.info(
@@ -974,77 +890,6 @@ def monitor_burst_baskets(
                         if _close_basket(basket_id, pos):
                             any_action = True
                             continue
-
-                # 2) Trailing de panier (armement & retracement)
-                stats = _basket_stats(pos)
-                if not stats:
-                    continue
-                sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
-
-                expected = _expected_count_from(pos)
-                is_full = expected is not None and len(pos) >= expected
-                if pnl_pips >= trail_trigger_pips and (
-                    (not trail_require_full) or is_full
-                ):
-                    if not self._basket_trail_armed.get(basket_id, False):
-                        self._basket_trail_armed[basket_id] = True
-                        self._basket_peak_pips[basket_id] = pnl_pips
-                        self.logger.info(
-                            f"🛡️ [FAST] {basket_id} ARMÉ à {pnl_pips:.1f}p (trigger={trail_trigger_pips:.1f})"
-                        )
-
-                if self._basket_trail_armed.get(basket_id, False):
-                    # peak
-                    if pnl_pips > float(
-                        self._basket_peak_pips.get(basket_id, pnl_pips)
-                    ):
-                        self._basket_peak_pips[basket_id] = pnl_pips
-                    # --- M2: RATE LIMIT TRAILING (Phase A) ---
-                    _now_ms = int(time.monotonic() * 1000)
-                    _last_ms = int(self._last_trail_update_ms.get(basket_id, 0) or 0)
-                    if _now_ms - _last_ms >= trail_update_min_interval_ms:
-                        _push_broker_trailing_sl(
-                            basket_id,
-                            pos,
-                            direction,
-                            sym,
-                            avg_entry,
-                            pip_size,
-                            peak_pips=float(
-                                self._basket_peak_pips.get(basket_id, pnl_pips)
-                            ),
-                            distance_pips=trail_distance_pips,
-                        )
-                        self._last_trail_update_ms[basket_id] = _now_ms
-                    # retracement ⇒ close
-                    dd = (
-                        float(self._basket_peak_pips.get(basket_id, pnl_pips))
-                        - pnl_pips
-                    )
-                    if dd >= trail_distance_pips and pnl_pips > 0.0:
-                        if (
-                            require_all_seen_once
-                            and not all_seen_ok
-                            and age_ms < loss_guard_arming_ms
-                        ):
-                            self.logger.info(
-                                f"⏸️ [FAST] {basket_id} retrace {dd:.1f}p mais pas 'all_seen' (age={age_ms}ms)"
-                            )
-                        else:
-                            self.logger.warning(
-                                f"🔒 [FAST] {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
-                            )
-                            if _close_basket(basket_id, pos):
-                                any_action = True
-                                continue
-
-                # état debug
-                self._burst_trailing_state[basket_id] = {
-                    "armed": self._basket_trail_armed.get(basket_id, False),
-                    "peak_pips": self._basket_peak_pips.get(basket_id, 0.0),
-                    "trigger": trail_trigger_pips,
-                    "distance": trail_distance_pips,
-                }
 
             if time.monotonic() >= deadline:
                 break
@@ -1064,7 +909,7 @@ def monitor_burst_baskets(
         return
 
     for basket_id, pos in baskets.items():
-        # --- 3c: age panier + mémoire 'ever green' (Phase B) ---
+        # init age & mémoire
         if basket_id not in self._basket_first_seen_ts:
             self._basket_first_seen_ts[basket_id] = time.time()
         age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
@@ -1107,630 +952,12 @@ def monitor_burst_baskets(
                     _close_basket(basket_id, pos)
                     continue
 
-            # 3) trailing (armement / peak / retrace)
-            expected = _expected_count_from(pos)
-            is_full = expected is not None and len(pos) >= expected
-            if pnl_pips >= trail_trigger_pips and ((not trail_require_full) or is_full):
-                if not self._basket_trail_armed.get(basket_id, False):
-                    self._basket_trail_armed[basket_id] = True
-                    self._basket_peak_pips[basket_id] = pnl_pips
-                    self.logger.info(f"🛡️ {basket_id} ARMÉ (Phase B) à {pnl_pips:.1f}p")
-
-            if self._basket_trail_armed.get(basket_id, False):
-                if pnl_pips > float(self._basket_peak_pips.get(basket_id, pnl_pips)):
-                    self._basket_peak_pips[basket_id] = pnl_pips
-
-                # --- M2: RATE LIMIT TRAILING (Phase B) ---
-                _now_ms = int(time.monotonic() * 1000)
-                _last_ms = int(self._last_trail_update_ms.get(basket_id, 0) or 0)
-                if _now_ms - _last_ms >= trail_update_min_interval_ms:
-                    _push_broker_trailing_sl(
-                        basket_id,
-                        pos,
-                        direction,
-                        sym,
-                        avg_entry,
-                        pip_size,
-                        peak_pips=float(
-                            self._basket_peak_pips.get(basket_id, pnl_pips)
-                        ),
-                        distance_pips=trail_distance_pips,
-                    )
-                    self._last_trail_update_ms[basket_id] = _now_ms
-
-                dd = float(self._basket_peak_pips.get(basket_id, pnl_pips)) - pnl_pips
-                if dd >= trail_distance_pips and pnl_pips > 0.0:
-                    if (
-                        require_all_seen_once
-                        and not all_seen_ok
-                        and age_ms < loss_guard_arming_ms
-                    ):
-                        self.logger.info(
-                            f"⏸️ {basket_id} retrace {dd:.1f}p mais pas 'all_seen' (age={age_ms}ms)"
-                        )
-                    else:
-                        self.logger.warning(
-                            f"🔒 {basket_id} retrace {dd:.1f}p ≥ {trail_distance_pips:.1f}p → CLOSE"
-                        )
-                        _close_basket(basket_id, pos)
-                        continue
-
-            # état debug
-            self._burst_trailing_state[basket_id] = {
-                "armed": self._basket_trail_armed.get(basket_id, False),
-                "peak_pips": self._basket_peak_pips.get(basket_id, 0.0),
-                "trigger": trail_trigger_pips,
-                "distance": trail_distance_pips,
-            }
-
         except Exception as e:
             self.logger.error(
                 f"[MONITOR] Erreur basket {basket_id}: {e}", exc_info=True
             )
 
 
-def build_single_master_request(
-    self,
-    trade_decision: dict,
-    config: dict,
-    volume: float,
-    symbol_info: object,
-    entry_price: float = 0.0,  # optionnel, le prix sera rafraîchi à l'envoi
-) -> dict:
-    """
-    Builder pour le mode Burst Single-Master (1 seule position, trailing-only).
-    - ❌ Aucun TP/SL côté MT5 (SL/TP = 0.0) ; le trailing est géré par l’exécuteur.
-    - ✅ Reprend les mêmes chemins de config que execute_burst_single_master.
-    - ✅ Commentaire court = basket_id (<=31, ASCII).
-    - ⚠️ Le volume est déjà calculé/normalisé en amont (prepare_order) → pas de re-floor.
-    """
-    import re, secrets, math
-    from trader.errors import TradeExecutionError
-
-    if not isinstance(trade_decision, dict):
-        raise TradeExecutionError("trade_decision invalide (dict attendu).")
-
-    action = str(trade_decision.get("action", "")).upper()
-    if action not in {"BUY", "SELL"}:
-        raise TradeExecutionError(f"[SINGLE_MASTER] Action invalide: '{action}'.")
-
-    if not symbol_info:
-        raise TradeExecutionError("[SINGLE_MASTER] symbol_info manquant.")
-    try:
-        digits = int(getattr(symbol_info, "digits", 0) or 0)
-        symbol_name = (
-            getattr(symbol_info, "name", "")
-            or getattr(symbol_info, "symbol", "")
-            or str(trade_decision.get("asset") or "")
-        ).upper()
-    except Exception:
-        raise TradeExecutionError("[SINGLE_MASTER] symbol_info illisible.")
-
-    if not symbol_name:
-        raise TradeExecutionError("[SINGLE_MASTER] symbole introuvable.")
-
-    # Volume : validation simple (déjà calculé/quantifié en amont)
-    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
-        raise TradeExecutionError(f"[SINGLE_MASTER] Volume invalide ({volume}).")
-
-    # Basket / Comment
-    basket_id = str(trade_decision.get("basket_id") or "").strip()
-    if not basket_id:
-        hex6 = secrets.token_hex(3)
-        sym6 = re.sub(r"[^A-Z]", "", symbol_name)[:6] or "ASSET"
-        basket_id = f"burst_{sym6}_{hex6}"
-    comment = re.sub(
-        r"[^A-Za-z0-9._-]", "", basket_id.replace("|", "").replace(" ", "")
-    )[:31]
-
-    # Deviation & magic
-    def _cfg(path, default=None):
-        try:
-            if hasattr(self, "config_manager"):
-                v = self.config_manager.get(path, None)
-                if v is not None:
-                    return v
-        except Exception:
-            pass
-        # fallback dans le dict config (dotted)
-        node = config or {}
-        try:
-            for part in path.split("."):
-                node = node[part]
-            return node
-        except Exception:
-            return default
-
-    deviation_points = int(
-        _cfg(
-            "execution_policy.max_deviation_points",
-            _cfg("trade_executor_settings.slippage_points", 20),
-        )
-        or 20
-    )
-    magic = int(
-        _cfg("trade_executor_settings.magic", _cfg("defaults.magic_number", 0)) or 0
-    )
-
-    # Trailing (mêmes chemins que execute_burst_single_master)
-    trailing_cfg = {
-        "trigger_pips": float(
-            _cfg(
-                "entry_rules.scalping.burst_single_master.trail.trigger_pips",
-                _cfg("dynamic_trailing.trigger_pips", 10.0),
-            )
-            or 10.0
-        ),
-        "distance_pips": float(
-            _cfg(
-                "entry_rules.scalping.burst_single_master.trail.distance_pips",
-                _cfg("dynamic_trailing.distance_pips", 5.0),
-            )
-            or 5.0
-        ),
-        "min_hold_ms": int(
-            _cfg(
-                "entry_rules.scalping.burst_single_master.min_hold_ms",
-                _cfg("dynamic_trailing.min_hold_ms", 0),
-            )
-            or 0
-        ),
-    }
-
-    # MT5 consts (type et action MARKET)
-    mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None)
-    if not mt5:
-        try:
-            import MetaTrader5 as _mt5  # type: ignore
-
-            mt5 = _mt5
-        except Exception:
-            raise TradeExecutionError("[SINGLE_MASTER] MT5 indisponible.")
-    order_type_const = getattr(mt5, f"ORDER_TYPE_{action}", None)
-    action_const = getattr(mt5, "TRADE_ACTION_DEAL", None)
-    if order_type_const is None or action_const is None:
-        raise TradeExecutionError("[SINGLE_MASTER] Constantes MT5 manquantes.")
-
-    # Requête (SL/TP à 0.0 — trailing-only)
-    req = {
-        "symbol": symbol_name,
-        "type": order_type_const,
-        "action": action_const,
-        "volume": float(volume),
-        "price": round(float(entry_price or 0.0), digits) if entry_price else 0.0,
-        "deviation": int(deviation_points),
-        "magic": int(magic),
-        "comment": comment,
-        "sl": float(trade_decision.get("sl_price", 0.0)) or 0.0,
-        "tp": 0.0,
-        # meta (ignoré par MT5)
-        "strategy_type": "scalping",
-        "rule_name": str(trade_decision.get("rule_name") or "burst_single_master"),
-        "basket_id": basket_id,
-        "is_burst_trade": True,
-        "_meta_trailing": trailing_cfg,
-    }
-
-    self.logger.info(
-        f"[SINGLE_MASTER] Build req: {action} {symbol_name} | vol={req['volume']:.4f} | "
-        f"price_hint={req['price']} | basket={basket_id} | trailing={trailing_cfg}"
-    )
-    return req
-
-
-def execute_burst_single_master(self, payload: dict) -> dict:
-    """
-    Envoie UNE SEULE position 'master' (market deal) pour un burst single-master
-    et initialise l'état de trailing. Retourne {status, basket_id, ticket, deal, request, retcode, retcode_str}.
-    """
-    import time, logging, hashlib, random, math, re
-    from datetime import datetime, timezone
-
-    logger = getattr(self, "logger", logging.getLogger(__name__))
-
-    # --------- Helpers ---------
-    def _is_connected() -> bool:
-        try:
-            attr = getattr(self.mt5_connector, "is_connected", None)
-            return bool(attr()) if callable(attr) else bool(attr)
-        except Exception:
-            return False
-
-    def _reconnect_if_needed():
-        try:
-            fn = getattr(self.mt5_connector, "reconnect_if_needed", None) or getattr(
-                self.mt5_connector, "connect", None
-            )
-            if callable(fn):
-                fn()
-        except Exception:
-            pass
-
-    def _normalize_comment(text: str, fallback: str, max_len: int = 31) -> str:
-        raw = (text or fallback or "").strip()
-        raw = raw.replace("|", "").replace(" ", "")
-        raw = re.sub(r"[^A-Za-z0-9._-]", "", raw)
-        return raw[:max_len]
-
-    def _get_cfg(path: str, default=None):
-        try:
-            if hasattr(self, "config_manager"):
-                v = self.config_manager.get(path, None)
-                if v is not None:
-                    return v
-        except Exception:
-            pass
-        node = active_config or {}
-        try:
-            for part in path.split("."):
-                node = node[part]
-            return node
-        except Exception:
-            return default
-
-    # --------- 0) Déballage ---------
-    td = (payload or {}).get("trade_decision") or {}
-    market_context = (payload or {}).get("market_context") or {}
-    active_config = (payload or {}).get("active_config") or {}
-
-    action = str(td.get("action", "")).upper()
-    asset = str(td.get("asset", "")).upper()
-    rule_name = td.get("rule_name") or "burst_single_master"
-    strategy_type = td.get("strategy_type") or "scalping"
-    order_id = td.get("order_id", "N/A")
-
-    if action not in ("BUY", "SELL") or not asset or asset == "UNKNOWN":
-        reason = f"execute_burst_single_master input invalide: action={action}, asset={asset}"
-        logger.error(reason)
-        return {"status": "failed", "reason": reason}
-
-    # Connexion
-    if not _is_connected():
-        _reconnect_if_needed()
-    if not _is_connected():
-        reason = "mt5_not_connected"
-        logger.error(reason)
-        return {"status": "failed", "reason": reason}
-
-    mt5 = getattr(self.mt5_connector, "mt5", None)
-    if not mt5:
-        return {"status": "failed", "reason": "mt5_not_available"}
-
-    # --------- 1) Mapping & sélection symbole ---------
-    try:
-        broker_symbol = self._map_symbol_for_broker(asset, market_context) or asset
-    except Exception:
-        broker_symbol = asset
-    broker_symbol = str(broker_symbol).upper()
-
-    try:
-        resolve = getattr(self.mt5_connector, "resolve_broker_symbol", None)
-        if callable(resolve):
-            broker_symbol = resolve(broker_symbol) or broker_symbol
-        si = self.mt5_connector.get_symbol_info(broker_symbol)
-        if not si or not getattr(si, "name", None):
-            return {"status": "failed", "reason": f"invalid_symbol:{broker_symbol}"}
-    except Exception as e:
-        logger.error(f"Symbol info KO: {e}")
-        return {"status": "failed", "reason": f"symbol_info_error:{e}"}
-
-    try:
-        sel = getattr(self.mt5_connector, "ensure_symbol_selected", None)
-        ok_sel = bool(sel(broker_symbol)) if callable(sel) else True
-        if not ok_sel:
-            info = self.mt5_connector.get_symbol_info(broker_symbol)
-            if not info or (hasattr(info, "visible") and not info.visible):
-                sub = getattr(self.mt5_connector, "symbol_select", None)
-                if callable(sub) and not sub(broker_symbol, True):
-                    return {
-                        "status": "failed",
-                        "reason": f"symbol_not_selected:{broker_symbol}",
-                    }
-    except Exception as e:
-        logger.warning(f"ensure_symbol_selected KO: {e}")
-
-    # --------- 2) Volume (décidé en amont par prepare_order) ---------
-    try:
-        vol = float(td["volume"])
-        if not math.isfinite(vol) or vol <= 0:
-            raise ValueError("invalid_volume")
-    except Exception:
-        reason = "missing_or_invalid_volume"
-        logger.error(reason)
-        return {"status": "failed", "reason": reason}
-
-    # --------- 3) Prix & policies ---------
-    deviation = int(
-        _get_cfg("execution_policy.max_deviation_points", None)
-        or _get_cfg("trade_executor_settings.slippage_points", 20)
-        or 20
-    )
-    magic = int(
-        _get_cfg("trade_executor_settings.magic", None)
-        or _get_cfg("defaults.magic_number", 0)
-        or 0
-    )
-
-    def _get_price(sym: str, side: str) -> float:
-        try:
-            t = mt5.symbol_info_tick(sym)
-            if not t:
-                return 0.0
-            if side == "BUY" and getattr(t, "ask", None):
-                return float(t.ask)
-            if side == "SELL" and getattr(t, "bid", None):
-                return float(t.bid)
-            return float(getattr(t, "ask", 0.0) or getattr(t, "bid", 0.0) or 0.0)
-        except Exception:
-            return 0.0
-
-    price = _get_price(broker_symbol, action)
-    if price <= 0:
-        return {"status": "failed", "reason": "price_unavailable"}
-
-    mt5_type = (
-        getattr(mt5, "ORDER_TYPE_BUY", 0)
-        if action == "BUY"
-        else getattr(mt5, "ORDER_TYPE_SELL", 1)
-    )
-
-    # --------- 4) Trailing params ---------
-    trailing = ((td.get("_meta") or {}).get("trailing")) or {}
-    trigger_pips = float(
-        trailing.get(
-            "trigger_pips",
-            _get_cfg(
-                "entry_rules.scalping.burst_single_master.trail.trigger_pips",
-                _get_cfg("dynamic_trailing.trigger_pips", 10.0),
-            ),
-        )
-        or 10.0
-    )
-    distance_pips = float(
-        trailing.get(
-            "distance_pips",
-            _get_cfg(
-                "entry_rules.scalping.burst_single_master.trail.distance_pips",
-                _get_cfg("dynamic_trailing.distance_pips", 5.0),
-            ),
-        )
-        or 5.0
-    )
-    min_hold_ms = int(
-        _get_cfg(
-            "entry_rules.scalping.burst_single_master.min_hold_ms",
-            _get_cfg("dynamic_trailing.min_hold_ms", 0),
-        )
-        or 0
-    )
-
-    # --------- 5) Basket & commentaire ---------
-    basket_id = td.get("basket_id")
-    if not basket_id:
-        seed = f"{asset}|{int(time.time()*1000)}|{random.random()}"
-        hid = hashlib.sha1(seed.encode()).hexdigest()[:8]
-        basket_id = f"burst_{asset}_{hid}"
-
-    comment = _normalize_comment(basket_id, fallback=f"burst_{asset}")
-
-    # --------- 6) Construction requête DEAL (laisser order_send gérer le filling) ---------
-    req = {
-        "action": getattr(mt5, "TRADE_ACTION_DEAL", 1),
-        "symbol": getattr(si, "name", broker_symbol),
-        "type": mt5_type,
-        "volume": float(vol),
-        "price": float(price),
-        "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
-        "deviation": int(deviation),
-        "magic": int(magic),
-        "comment": comment,
-        "sl": 0.0,
-        "tp": 0.0,
-        # meta hors MT5
-        "strategy_type": strategy_type,
-        "rule_name": rule_name,
-        "basket_id": basket_id,
-        "is_burst_trade": True,
-    }
-
-    # --------- 7) Envoi (wrapper order_send avec retry interne) ---------
-    RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
-    RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", 10008)
-    RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10031)
-    OK_CODES = {RET_DONE, RET_PLACED, RET_DONE_PARTIAL}
-
-    max_retries = int(_get_cfg("trade_executor_settings.max_send_retries", 2) or 2)
-    sleep_between = float(
-        _get_cfg("trade_executor_settings.retry_sleep_seconds", 0.05) or 0.05
-    )
-
-    result = None
-    retcode = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            result = self.mt5_connector.order_send(req)
-        except Exception as e:
-            logger.error(
-                f"[BURST] order_send exception (try {attempt+1}/{max_retries+1}): {e}",
-                exc_info=True,
-            )
-            result = None
-
-        retcode = getattr(result, "retcode", None)
-        if retcode in OK_CODES:
-            break
-
-        # Retry simples : le wrapper gère déjà la plupart des cas, on temporise
-        time.sleep(sleep_between)
-
-    # mapping retcode lisible
-    retcode_str = str(retcode)
-    try:
-        for k, v in (
-            (getattr(self, "mt5_mappings", {}) or {}).get("trade_retcodes", {}).items()
-        ):
-            if getattr(mt5, v, None) == retcode:
-                retcode_str = k
-                break
-    except Exception:
-        pass
-
-    if not result or retcode not in OK_CODES:
-        reason = f"retcode={retcode_str}"
-        logger.error(f"[BURST] ❌ Order send FAILED ({broker_symbol}) {reason}")
-
-        try:
-            fb = self.feedback_pipeline(
-                order_id=order_id, status="failed", reason=reason
-            )
-            self._feedback_safe(td, fb)
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "audit_logger"):
-                self.audit_logger.log_trade_execution(
-                    {
-                        "status": "rejected",
-                        "symbol": broker_symbol,
-                        "action": action,
-                        "order_type": "MARKET",
-                        "volume": req["volume"],
-                        "entry_price": req["price"],
-                        "sl_price": req["sl"],
-                        "tp_price": req["tp"],
-                        "strategy_type": req.get("strategy_type"),
-                        "rule_name": req.get("rule_name"),
-                        "magic_number": req.get("magic"),
-                        "request": req,
-                        "response": {"retcode": retcode, "retcode_str": retcode_str},
-                        "is_burst_trade": True,
-                    },
-                    getattr(self, "execution_context", {}) or {},
-                )
-        except Exception:
-            pass
-
-        return {
-            "status": "failed",
-            "reason": reason,
-            "request": req,
-            "retcode": retcode,
-            "retcode_str": retcode_str,
-        }
-
-    # --------- 8) Post-envoi : trailing state & locks ---------
-    ticket = getattr(result, "order", None)
-    deal = getattr(result, "deal", None)
-
-    if not hasattr(self, "_open_positions"):
-        self._open_positions = {}
-    if not hasattr(self, "_burst_trailing_state"):
-        self._burst_trailing_state = {}
-    if not hasattr(self, "_basket_trail_armed"):
-        self._basket_trail_armed = {}
-    if not hasattr(self, "_basket_peak_pips"):
-        self._basket_peak_pips = {}
-    if not hasattr(self, "_active_burst_locks"):
-        self._active_burst_locks = {}
-
-    self._burst_trailing_state[basket_id] = {
-        "trigger": float(trigger_pips),
-        "distance": float(distance_pips),
-        "trigger_pips": float(trigger_pips),
-        "distance_pips": float(distance_pips),
-        "min_hold_ms": int(min_hold_ms),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    self._basket_trail_armed[basket_id] = False
-    self._basket_peak_pips[basket_id] = 0.0
-    try:
-        self._active_burst_locks[str(broker_symbol).upper()] = {
-            "basket_id": basket_id,
-            "since": time.time(),
-        }
-        self._last_burst_time = time.time()
-    except Exception:
-        pass
-
-    try:
-        if ticket is not None:
-            self._open_positions[int(ticket)] = {
-                "ticket": int(ticket),
-                "symbol": getattr(si, "name", broker_symbol),
-                "type": 0 if action == "BUY" else 1,
-                "volume": float(vol),
-                "entry_price": float(req["price"]),
-                "sl": 0.0,
-                "tp": 0.0,
-                "magic": int(magic),
-                "comment": comment,
-                "open_time": datetime.now(timezone.utc).isoformat(),
-                "profit": 0.0,
-                "_meta": {
-                    "basket_id": basket_id,
-                    "trailing": {
-                        "trigger_pips": float(trigger_pips),
-                        "distance_pips": float(distance_pips),
-                        "min_hold_ms": int(min_hold_ms),
-                    },
-                    "rule_name": rule_name,
-                    "strategy_type": strategy_type,
-                },
-            }
-    except Exception:
-        pass
-
-    logger.info(
-        f"[BURST] ✅ MASTER {action} {broker_symbol} vol={vol} ticket={ticket or 'NA'} "
-        f"basket={basket_id} (trg={trigger_pips}p, dist={distance_pips}p, mh={min_hold_ms}ms)"
-    )
-
-    try:
-        fb = self.feedback_pipeline(
-            order_id=order_id, status="sent", reason="burst_master_sent"
-        )
-        self._feedback_safe(td, fb)
-    except Exception:
-        pass
-    try:
-        if hasattr(self, "audit_logger"):
-            self.audit_logger.log_trade_execution(
-                {
-                    "status": "placed" if retcode == RET_PLACED else "filled",
-                    "symbol": broker_symbol,
-                    "action": action,
-                    "order_type": "MARKET",
-                    "volume": req["volume"],
-                    "entry_price": req["price"],
-                    "sl_price": req["sl"],
-                    "tp_price": req["tp"],
-                    "strategy_type": req.get("strategy_type"),
-                    "rule_name": req.get("rule_name"),
-                    "magic_number": req.get("magic"),
-                    "ticket": ticket or deal,
-                    "request": req,
-                    "response": {
-                        "retcode": retcode,
-                        "retcode_str": retcode_str,
-                        "comment": getattr(result, "comment", ""),
-                        "order": ticket,
-                        "deal": deal,
-                        "is_burst_trade": True,
-                    },
-                },
-                getattr(self, "execution_context", {}) or {},
-            )
-    except Exception:
-        pass
-
-    return {
-        "status": "sent",
-        "mode": "burst",
-        "basket_id": basket_id,
-        "ticket": ticket,
-        "deal": deal,
-        "request": req,
-        "retcode": retcode,
-        "retcode_str": retcode_str,
-    }
+# ======================================================================================
+# NOTE: Tous les anciens modes 'single-master' et TOUTE logique de trailing ont été supprimés.
+# ======================================================================================

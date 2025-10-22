@@ -21,11 +21,13 @@ def prepare_order(self, decision_package: dict) -> dict:
     - Tout volume présent dans la décision est ignoré.
     - La normalisation broker fait un FLOOR (jamais d'augmentation) pour ne pas dépasser le budget.
 
-    ✅ Burst scalping (conforme au cahier des charges)
-    - PAS de LIMIT_FOK ici : exécution **MARKET**, split géré par l'exécuteur.
+    ✅ Burst scalping (nouveau cahier des charges SL/TP)
+    - Exécution master **MARKET** (split géré par l'exécuteur/pipeline).
     - `burst_size` résolu (decision → conf) et propagé.
     - `sizing_scope="BASKET"` pour que le sizing fasse `risk_per_trade_percent / burst_size`.
-    - SL OBLIGATOIRE, TP désactivé (trailing only).
+    - SL **OBLIGATOIRE** et **TP ACTIF** pour le burst (plus de trailing-only).
+      → SL/TP **identiques en distance** pour tous les tickets du panier.
+      → RR dynamique possible via hints (ex: `tp_rr_ratio_hint`) consommés dans `_calculate_sl_tp_prices`.
     """
 
     self.logger.info("Préparation de l'ordre MT5...")
@@ -346,46 +348,23 @@ def prepare_order(self, decision_package: dict) -> dict:
         if trade_decision.get("rule_name") == "burst_scalping":
             # sizing panier (risk% / burst_size) même si l'appelant ne l’a pas mis
             trade_decision.setdefault("sizing_scope", "BASKET")
-            # ici on force une intention MARKET pour le master (le split est géré ailleurs)
+            # intention MARKET pour le master (le split est géré ailleurs)
             trade_decision.setdefault("order_type", "MARKET")
 
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"
 
         # ---------- 7bis) SL/TP ----------
-        if is_burst:
-            # SL OBLIGATOIRE, pas de TP
-            sl_candidate = trade_decision.get("sl_price", None)
-            try:
-                sl_price = float(sl_candidate) if sl_candidate is not None else 0.0
-            except Exception:
-                sl_price = 0.0
-
-            if not (
-                isinstance(sl_price, float)
-                and math.isfinite(sl_price)
-                and sl_price > 0.0
-            ):
-                sl_calc, _tp_ignored = self._calculate_sl_tp_prices(
-                    trade_decision,
-                    active_config,
-                    symbol_info,
-                    entry_price_market,
-                    market_context,
-                )
-                sl_price = float(sl_calc or 0.0)
-            if not (math.isfinite(sl_price) and sl_price > 0.0):
-                raise TradeExecutionError("Burst scalping: SL requis mais introuvable")
-
-            tp_price = None
-        else:
-            sl_price, tp_price = self._calculate_sl_tp_prices(
-                trade_decision,
-                active_config,
-                symbol_info,
-                entry_price_market,
-                market_context,
-            )
+        # Nouveau: en burst, SL **et** TP sont calculés/attendus (plus de trailing-only)
+        sl_price, tp_price = self._calculate_sl_tp_prices(
+            trade_decision,
+            active_config,
+            symbol_info,
+            entry_price_market,
+            market_context,
+        )
+        if not (isinstance(sl_price, (int, float)) and sl_price > 0):
+            raise TradeExecutionError("SL requis mais introuvable (calcul SL/TP).")
 
         # ---------- 8a) Sécurité broker & normalisation prix ----------
         try:
@@ -423,7 +402,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             def _floor_to_tick(x: float) -> float:
                 return round(math.floor(x / tick) * tick, digits)
 
-            has_tp = (tp_price is not None) and (rule_name_local != "burst_scalping")
+            has_tp = tp_price is not None
 
             if action == "BUY":
                 if (entry_price_market - sl_price) < min_gap_price:
@@ -469,17 +448,13 @@ def prepare_order(self, decision_package: dict) -> dict:
         except Exception as e:
             self.logger.warning(f"[SAFETY] Normalisation SL/TP échouée: {e}")
 
-        # ---------- 8bis) RR minimum (soft) ----------
+        # ---------- 8bis) RR minimum (soft, si TP présent) ----------
         try:
             min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
         except Exception:
             min_rr = 0.0
         rr_value = None
-        if (
-            rule_name_local != "burst_scalping"
-            and min_rr > 0.0
-            and tp_price is not None
-        ):
+        if min_rr > 0.0 and tp_price is not None:
             if action == "BUY":
                 risk = max(entry_price_market - sl_price, 0.0)
                 reward = max(tp_price - entry_price_market, 0.0)
@@ -602,24 +577,20 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
 
         # ---------- 10) Construction requête ----------
-        # ❌ SUPPRIMÉ: branche LIMIT_FOK burst pending
-        # 🚀 Burst scalping = MARKET single-master + trailing (pas de TP)
-        if is_burst:
-            return self.build_burst_trailing_request(
-                trade_decision,
-                active_config,
-                volume_final,
-                entry_price_market,
-                sl_price,
-                symbol_info,
-            )
-
-        # 🏦 Autres stratégies → chemin standard
+        # ❌ SUPPRIMÉ: tout chemin "burst trailing-only"
+        # 🚀 Burst scalping = MARKET single-master **avec SL/TP**
         return self._build_mt5_request(
             {
                 "action": action,
                 "asset": broker_symbol,
-                "order_type": order_type,
+                "order_type": "MARKET",  # master MARKET; split géré en aval
+                "rule_name": trade_decision.get("rule_name"),
+                "comment": trade_decision.get("comment"),
+                "meta_rr_projected": trade_decision.get("meta_rr_projected")
+                or trade_decision.get("rr")
+                or trade_decision.get("rr_effective"),
+                "basket_id": trade_decision.get("basket_id"),
+                "time_in_force": trade_decision.get("time_in_force"),
             },
             active_config,
             volume_final,
@@ -628,7 +599,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             tp_price,
             symbol_info,
             trigger_price,
-            order_type,
+            "MARKET",
         )
 
     except TradeExecutionError:
@@ -805,12 +776,10 @@ def _build_mt5_request(
     )
     deviation_points = max(0, deviation_points)
 
-    # --- Burst: jamais de TP dans la requête ---
+    # --- Burst: TP **autorisé** (plus d'ignorance du TP) ---
     rule = str(trade_decision.get("rule_name", "")).lower()
     is_burst = rule == "burst_scalping"
-    has_tp = (not is_burst) and (tp_price is not None and tp_price > 0)
-    if is_burst and (tp_price is not None and tp_price > 0):
-        self.logger.debug("[BURST] Ignoring provided TP → trailing stop only")
+    has_tp = (tp_price is not None and tp_price > 0)
 
     # --- Basket/comment ---
     raw_comment = str(trade_decision.get("comment") or "")
@@ -859,43 +828,9 @@ def _build_mt5_request(
         "is_burst_trade": is_burst,
     }
     if has_tp:
-        request["tp"] = float(tp_price)  # seulement si TP actif
+        request["tp"] = float(tp_price)  # TP actif si calculé
 
     # --- TIF pour MARKET (FOK/IOC si demandé dans la décision) ---
-    if order_type_str == "MARKET":
-        tif = str(trade_decision.get("time_in_force", "")).upper()
-        if tif == "FOK":
-            request["type_filling"] = ORDER_FILLING_FOK
-        elif tif == "IOC":
-            request["type_filling"] = ORDER_FILLING_IOC
-
-    # --- FOK-like pour PENDING (LIMIT/STOP) ---
-    try:
-        tif = str(trade_decision.get("time_in_force", "")).upper()
-        validity_ms = int(trade_decision.get("validity_ms", 800))
-        if (
-            order_type_str in {"BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
-            and tif == "FOK"
-        ):
-            # FOK-like via expiration ultra-courte (en timestamp UTC)
-            request["type_time"] = ORDER_TIME_SPECIFIED
-            expiry_ts = int(
-                (
-                    datetime.now(timezone.utc) + timedelta(milliseconds=validity_ms)
-                ).timestamp()
-            )
-            request["expiration"] = expiry_ts
-            request["comment"] = _normalize_mt5_comment(
-                (request.get("comment") or "") + "_FOKexp"
-            )
-    except Exception as _e:
-        self.logger.warning(f"[ORDER_BUILDER] setup FOK-like expir failed: {_e}")
-
-    # --- Timeout & mitigation (meta only) ---
-    request["_meta_timeout_bars"] = int(trade_decision.get("timeout_bars", 0) or 0)
-    request["_meta_use_mitigation"] = bool(trade_decision.get("use_mitigation", False))
-
-    # --- Détermination du type d’ordre & prix de référence ---
     if order_type_str == "MARKET":
         request["action"] = mt5_action_deal
         request["type"] = ORDER_TYPE_BUY if action_str == "BUY" else ORDER_TYPE_SELL
@@ -903,9 +838,9 @@ def _build_mt5_request(
         request.setdefault(
             "type_filling", mt5_filling_policy
         )  # ne pas écraser un FOK/IOC explicite
-        price_ref = float(request["price"])
 
-    elif order_type_str in ("BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"):
+    # --- FOK-like pour PENDING (LIMIT/STOP) ---
+    elif order_type_str in {"BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}:
         request["action"] = mt5_action_pending
         mapped = order_map.get(order_type_str, f"ORDER_TYPE_{order_type_str}")
         order_type_const = getattr(mt5, mapped, None)
@@ -965,13 +900,14 @@ def _build_mt5_request(
             )
 
         request["price"] = trig
-        price_ref = float(trig)
 
         # Expiration policy (n’écrase pas un FOK-like déjà en SPECIFIED)
-        expiration_policy = str(
-            (config.get("order_expiration_policy") or {}).get("type", "GTC")
-        ).upper()
+        ORDER_TIME_DAY = getattr(mt5, "ORDER_TIME_DAY", None)
+        ORDER_TIME_SPECIFIED = getattr(mt5, "ORDER_TIME_SPECIFIED", None)
         if request.get("type_time") == ORDER_TIME_GTC:
+            expiration_policy = str(
+                (config.get("order_expiration_policy") or {}).get("type", "GTC")
+            ).upper()
             if expiration_policy == "DAY" and ORDER_TIME_DAY is not None:
                 request["type_time"] = ORDER_TIME_DAY
             elif expiration_policy == "SPECIFIED" and ORDER_TIME_SPECIFIED is not None:
@@ -994,6 +930,9 @@ def _build_mt5_request(
                     request["type_time"] = ORDER_TIME_GTC
     else:
         raise TradeExecutionError(f"Type d'ordre non géré: '{order_type_str}'")
+
+    # --- Détermination du prix de référence pour les vérifs distance ---
+    price_ref = float(request.get("price") or entry_price_market)
 
     # --- Distances min broker (SL/TP vs price_ref) ---
     if min_stop_distance_price > 0:

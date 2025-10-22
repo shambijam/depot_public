@@ -333,6 +333,9 @@ class DecisionPipeline:
                                     _ensure_asset(master, "XAUUSD")
                                     master.setdefault("execution_status", "ready")
                                     master.setdefault("rule_name", "burst_scalping")
+                                    master["is_burst_trade"] = True
+                                    master["burst_enabled"] = True
+                                    master["burst_size"] = len(sublist)
 
                                     # Pack complet pour l'exécuteur (fan-out unique côté TradeExecutor)
                                     meta_master = master.setdefault("meta", {})
@@ -1261,79 +1264,7 @@ class DecisionPipeline:
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
 
-            # ✅ Patch : pas de TP pour burst
-            if trade_decision.get("rule_name") == "burst_scalping":
-                levels = normalize_levels(
-                    entry_price=trade_decision.get("entry_price"),
-                    action=trade_decision.get("action"),
-                    pip_size=pip_size,
-                    sl_pips=trade_decision.get("target_sl_pips"),
-                    sl_price=trade_decision.get("sl_price"),
-                    # 🚫 pas de tp_pips ni tp_price
-                )
-                trade_decision["sl_price"] = levels["sl"]
-                # volontairement pas de TP
-            else:
-                levels = normalize_levels(
-                    entry_price=trade_decision.get("entry_price"),
-                    action=trade_decision.get("action"),
-                    pip_size=pip_size,
-                    sl_pips=trade_decision.get("target_sl_pips"),
-                    tp_pips=trade_decision.get("target_tp_pips"),
-                    sl_price=trade_decision.get("sl_price"),
-                    tp_price=trade_decision.get("tp_price"),
-                )
-                trade_decision["sl_price"] = levels["sl"]
-                trade_decision["tp_price"] = levels["tp"]
-
-        # === RÈGLE 2 : Trailing Stop
-        try:
-            if normalized_action in {"BUY", "SELL"}:
-                trail_cfg = (current_config.get("scalping") or {}).get(
-                    "trailing_stop", {}
-                ) or {}
-                enable_trail = bool(trail_cfg.get("enabled", True))
-                trail_distance_pips = float(trail_cfg.get("distance_pips", 5.0))
-
-                md_asset = (context.get("market_data", {}) or {}).get(
-                    asset_raw, {}
-                ) or {}
-                # --- PATCH E: utiliser uniquement `si` (asset_sig supprimé) ---
-                si = (
-                    md_asset.get("symbol_info")
-                    or current_config.get("symbol_info")
-                    or {}
-                ) or {}
-                point = float(si.get("point") or 0.0001)
-                digits = int(si.get("digits") or 5)
-                pip_points = 10.0 if digits in (3, 5) else 1.0
-                pip_size = point * pip_points
-
-                if (
-                    enable_trail
-                    and isinstance(price, float)
-                    and math.isfinite(price)
-                    and pip_size > 0
-                ):
-                    if normalized_action == "BUY":
-                        trade_decision["trailing_stop"] = price - (
-                            trail_distance_pips * pip_size
-                        )
-                    else:
-                        trade_decision["trailing_stop"] = price + (
-                            trail_distance_pips * pip_size
-                        )
-
-                    trade_decision["rule_name"] = (
-                        trade_decision.get("rule_name", "") + "+trailing"
-                    )
-                    self.logger.info(
-                        f"Trailing Stop appliqué ({trail_distance_pips} pips) pour {asset_raw}"
-                    )
-                    print(f"🪢 [CORE] Trailing appliqué ({trail_distance_pips} pips).")
-        except Exception as e:
-            self.logger.warning(f"Erreur application Trailing Stop: {e}")
-            print(f"⚠️ [CORE] Erreur trailing: {e}")
+            # ✅ Normalisation unique (SL & TP), y compris pour burst
             levels = normalize_levels(
                 entry_price=trade_decision.get("entry_price"),
                 action=trade_decision.get("action"),
@@ -1344,17 +1275,39 @@ class DecisionPipeline:
                 tp_price=trade_decision.get("tp_price"),
             )
             trade_decision["sl_price"] = levels["sl"]
+            trade_decision["tp_price"] = levels["tp"]
+            
+            # 💡 RR dynamique → hint pour le moteur SLTP
+            try:
+                # Base/fourchettes depuis la conf (s’il y en a)
+                bs_cfg = (((current_config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
+                        .get("burst_scalping", {}) or {})
+                sltp_cfg = (bs_cfg.get("sltp", {}) or {})
+                rr_base  = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
+                rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
+                rr_cap   = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
 
-            # 🚫 Burst scalping : pas de TP
-            if trade_decision.get("rule_name") == "burst_scalping":
-                trade_decision.pop("tp_price", None)
-            else:
-                trade_decision["tp_price"] = levels["tp"]
+                # Facteurs dynamiques
+                vol_factor = float(trade_decision.get("volatility_factor", 1.0) or 1.0)
+                # Confiance du signal comme proxy de "trigger strength"
+                asset_sym = trade_decision.get("asset")
+                conf = 0.5
+                try:
+                    conf = float((signals.get(asset_sym, {}) or {}).get("confidence_score", 0.5))
+                    if not (0.0 <= conf <= 1.0):
+                        conf = 0.5
+                except Exception:
+                    conf = 0.5
+                trigger_boost = 0.9 + 0.2 * conf  # 0→0.9 ; 0.5→1.0 ; 1→1.1
 
-        self.logger.debug(
-            f"[CORE] Niveaux normalisés pour {trade_decision['asset']} → SL={levels['sl']} | TP={levels['tp']}"
-        )
+                rr_hint = rr_base * vol_factor * trigger_boost
+                # clamp
+                rr_hint = max(rr_floor, min(rr_cap, rr_hint))
 
+                trade_decision["tp_rr_ratio_hint"] = float(rr_hint)
+            except Exception:
+                pass
+      
         # Log final (décision avant exécution)
         self.config_manager.log_decision(
             current_config,
@@ -1367,12 +1320,22 @@ class DecisionPipeline:
             f"{trade_decision.get('asset','?')} | vol={trade_decision.get('volume','?')} | "
             f"SL={trade_decision.get('sl_price','?')} | TP={trade_decision.get('tp_price','?')}"
         )
-        # === Tag spécial pour Burst Scalping ===
+        # === Tag spécial pour Burst Scalping (SL/TP actif) ===
         if str(trade_decision.get("rule_name", "")).lower() == "burst_scalping":
             trade_decision["is_burst_trade"] = True
-            trade_decision["no_tp"] = True  # sécurité supplémentaire
+            trade_decision["burst_enabled"] = True
+            # Expose burst_size au pipeline d'exécution ; fallback conf si absent
+            try:
+                bs = int(trade_decision.get("burst_size")
+                        or ((current_config.get("entry_rules", {}) or {})
+                            .get("scalping", {}).get("burst_scalping", {})
+                            .get("burst_size", 1)))
+            except Exception:
+                bs = 1
+            trade_decision["burst_size"] = max(1, bs)
         else:
             trade_decision["is_burst_trade"] = False
+
 
         # ==========================================================
         # 📋 Log final enrichi avec analyse patterns (si dispo)

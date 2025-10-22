@@ -1,16 +1,25 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "Schéma de Validation pour une Stratégie SNIPER_X",
-    "description": "Définit la structure et les contraintes pour un fichier de configuration de stratégie (ex: config_trade_scalping.json).",
+    "description": "Structure et contraintes des fichiers de config (scalping/liquidity) pour exécution SL/TP (sans trailing).",
     "type": "object",
+    "additionalProperties": true,
     "properties": {
         "strategy_name": {
             "description": "Nom unique et descriptif de la stratégie.",
             "type": "string",
             "minLength": 3
         },
+        "version": {
+            "description": "Version libre (ex. 3.0).",
+            "type": "string"
+        },
+        "description": {
+            "description": "Description courte de la stratégie.",
+            "type": "string"
+        },
         "tradeable_assets": {
-            "description": "Liste des symboles d'actifs autorisés pour cette stratégie.",
+            "description": "Liste des symboles d'actifs autorisés.",
             "type": "array",
             "items": {
                 "type": "string",
@@ -20,59 +29,54 @@
             "uniqueItems": true
         },
         "magic_number": {
-            "description": "Numéro unique (Magic Number) pour identifier les ordres de cette stratégie sur MT5.",
+            "description": "Identifiant (Magic Number) pour MT5.",
             "type": "integer",
             "minimum": 1
         },
-        "risk_per_trade_percent": {
-            "description": "Pourcentage du capital à risquer sur un seul trade.",
+        "confidence_threshold": {
+            "description": "Seuil de confiance [0..1] pour l'entrée.",
             "type": "number",
-            "minimum": 0.01,
-            "maximum": 10
+            "minimum": 0,
+            "maximum": 1
         },
-        "max_daily_loss_percent": {
-            "description": "Perte journalière maximale autorisée avant l'arrêt de la stratégie.",
-            "type": "number",
-            "minimum": 0.1,
-            "maximum": 20
-        },
-        "max_drawdown_percent": {
-            "description": "Drawdown maximal autorisé pour cette stratégie.",
-            "type": "number",
-            "minimum": 0.1,
-            "maximum": 30
-        },
-        "max_trades_per_day": {
-            "description": "Nombre maximum de trades autorisés par jour.",
-            "type": "integer",
-            "minimum": 1
-        },
-        "take_profit_pips": {
-            "description": "Objectif de Take Profit en pips.",
-            "type": "number",
-            "minimum": 0
-        },
-        "stop_loss_pips": {
-            "description": "Niveau de Stop Loss en pips.",
-            "type": "number",
-            "minimum": 1
-        },
-        "max_spread_points": {
-            "description": "Spread maximal autorisé en points pour ouvrir un trade.",
-            "type": "number",
-            "minimum": 0
-        },
-        "halt_on_major_news": {
-            "description": "Indique si la stratégie doit s'arrêter avant les annonces économiques majeures.",
-            "type": "boolean"
-        },
-        "phase_detection": {
-            "description": "Paramètres pour le module de détection de phase.",
+        "global_safety": {
+            "description": "Garde-fous globaux (compte).",
             "type": "object",
             "properties": {
+                "max_open_positions": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "additionalProperties": true
+        },
+        "execution_policy": {
+            "description": "Contraintes d'exécution broker.",
+            "type": "object",
+            "properties": {
+                "max_spread_points": {
+                    "type": "number",
+                    "minimum": 0
+                }
+            },
+            "additionalProperties": true
+        },
+        "phase_detection": {
+            "description": "Paramètres de détection de phase.",
+            "type": "object",
+            "properties": {
+                "use_phase_observer": {
+                    "type": "boolean"
+                },
+                "allowed_phases": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "lookback_window": {
                     "type": "integer",
-                    "minimum": 5
+                    "minimum": 1
                 },
                 "volatility_threshold": {
                     "type": "number",
@@ -92,13 +96,376 @@
                 }
             },
             "required": [
-                "lookback_window",
-                "volatility_threshold",
-                "volume_zscore"
-            ]
+                "lookback_window"
+            ],
+            "additionalProperties": true
+        },
+        "entry_rules": {
+            "description": "Règles d'entrée par stratégie.",
+            "type": "object",
+            "properties": {
+                "scalping": {
+                    "type": "object",
+                    "properties": {
+                        "burst_scalping": {
+                            "description": "Mode Burst en SL/TP (zéro trailing).",
+                            "type": "object",
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean"
+                                },
+                                "burst_size": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "entry_mode": {
+                                    "type": "string",
+                                    "enum": [
+                                        "MARKET"
+                                    ]
+                                },
+                                "enforce_single_basket": {
+                                    "type": "boolean"
+                                },
+                                "per_leg_virtual": {
+                                    "type": "boolean"
+                                },
+                                "sltp": {
+                                    "description": "Paramétrage SL/TP (RR dynamique).",
+                                    "type": "object",
+                                    "properties": {
+                                        "rr_base": {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0
+                                        },
+                                        "rr_floor": {
+                                            "type": "number",
+                                            "minimum": 0
+                                        },
+                                        "rr_cap": {
+                                            "type": "number",
+                                            "minimum": 0
+                                        },
+                                        "sl_method": {
+                                            "type": "string",
+                                            "enum": [
+                                                "PIPS",
+                                                "ATR",
+                                                "SWING"
+                                            ]
+                                        }
+                                    },
+                                    "required": [
+                                        "rr_base",
+                                        "rr_floor",
+                                        "rr_cap",
+                                        "sl_method"
+                                    ],
+                                    "additionalProperties": true
+                                },
+                                "closure_rules": {
+                                    "description": "Clôture de panier (sans trailing).",
+                                    "type": "object",
+                                    "properties": {
+                                        "close_on_full_profit": {
+                                            "type": "boolean"
+                                        },
+                                        "require_full_count_for_profit_close": {
+                                            "type": "boolean"
+                                        },
+                                        "require_all_seen_green_once": {
+                                            "type": "boolean"
+                                        },
+                                        "all_seen_green_pips": {
+                                            "type": "number",
+                                            "minimum": 0
+                                        },
+                                        "min_green_pnl_pips": {
+                                            "type": "number",
+                                            "minimum": 0
+                                        },
+                                        "rt_fast_window_ms": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        },
+                                        "rt_poll_interval_ms": {
+                                            "type": "integer",
+                                            "minimum": 10
+                                        },
+                                        "loss_guard_arming_ms": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        },
+                                        "max_loss_pips": {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0
+                                        },
+                                        "cooldown_after_exit_s": {
+                                            "type": "number",
+                                            "minimum": 0
+                                        }
+                                    },
+                                    "additionalProperties": true
+                                }
+                            },
+                            "required": [
+                                "enabled",
+                                "burst_size",
+                                "sltp"
+                            ],
+                            "additionalProperties": true
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "liquidity": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "eqh_eql_break": {
+                            "type": "object",
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean"
+                                },
+                                "lookback_bars": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "threshold_points": {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                "min_distance_points": {
+                                    "type": "number",
+                                    "minimum": 0
+                                }
+                            },
+                            "additionalProperties": true
+                        },
+                        "range_accumulation": {
+                            "type": "object",
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean"
+                                },
+                                "max_range_pips": {
+                                    "type": "number",
+                                    "minimum": 0
+                                },
+                                "min_consolidation_bars": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    },
+                    "additionalProperties": true
+                }
+            },
+            "additionalProperties": true
+        },
+        "exit_rules": {
+            "description": "Règles de sortie (sans trailing).",
+            "type": "object",
+            "properties": {
+                "managed_by": {
+                    "type": "string",
+                    "enum": [
+                        "sltp"
+                    ]
+                },
+                "time_based": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "max_trade_minutes": {
+                            "type": "integer",
+                            "minimum": 1
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "invalidated_setup": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "close_on_break_even_if_reenter": {
+                            "type": "boolean"
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "news_exit": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "minutes_before": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "minutes_after": {
+                            "type": "integer",
+                            "minimum": 0
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "liquidity_exit": {
+                    "type": "object",
+                    "properties": {
+                        "max_bars_in_trade": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "volume_exit_threshold": {
+                            "type": "number",
+                            "minimum": 0
+                        }
+                    },
+                    "additionalProperties": true
+                }
+            },
+            "additionalProperties": true
+        },
+        "cooldown_after_exit_s": {
+            "description": "Cooldown global post-fermeture (secondes).",
+            "type": "number",
+            "minimum": 0
+        },
+        "risk": {
+            "description": "Paramétrage de risque.",
+            "type": "object",
+            "properties": {
+                "position_size": {
+                    "type": "string",
+                    "enum": [
+                        "risk_based"
+                    ]
+                },
+                "risk_per_trade_percent": {
+                    "type": "number",
+                    "minimum": 0.01,
+                    "maximum": 10
+                },
+                "max_positions_per_symbol": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "stop_distance_pips": {
+                    "type": "number",
+                    "minimum": 0
+                }
+            },
+            "additionalProperties": true
+        },
+        "risk_per_trade_percent": {
+            "description": "Risque par trade (héritage). Préférer `risk.risk_per_trade_percent`.",
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 10
+        },
+        "smart_sl_tp_settings": {
+            "description": "[Déprécié mais supporté] Fallback SL/TP si `entry_rules.*.sltp` absent.",
+            "type": "object",
+            "properties": {
+                "sl_placement_method": {
+                    "type": "string",
+                    "enum": [
+                        "PIPS",
+                        "ATR",
+                        "SWING"
+                    ]
+                },
+                "tp_placement_method": {
+                    "type": "string",
+                    "enum": [
+                        "RR",
+                        "ATR_MULTIPLE",
+                        "PIPS"
+                    ]
+                },
+                "tp_rr_ratio": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                },
+                "sl_atr_period": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "sl_atr_multiplier": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                },
+                "tp_atr_period": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "tp_atr_multiplier": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                },
+                "sl_swing_lookback_period": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "sl_buffer_pips": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "take_profit_pips": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "stop_loss_pips": {
+                    "type": "number",
+                    "minimum": 1
+                }
+            },
+            "additionalProperties": true
+        },
+        "smart_targets": {
+            "description": "Limites dures (points) appliquées par le moteur SL/TP.",
+            "type": "object",
+            "properties": {
+                "stop_loss": {
+                    "type": "object",
+                    "properties": {
+                        "hard_min_points": {
+                            "type": "number",
+                            "minimum": 0
+                        },
+                        "hard_max_points": {
+                            "type": "number",
+                            "minimum": 0
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "take_profit": {
+                    "type": "object",
+                    "properties": {
+                        "hard_max_points": {
+                            "type": "number",
+                            "minimum": 0
+                        }
+                    },
+                    "additionalProperties": true
+                }
+            },
+            "additionalProperties": true
         },
         "decision_rules": {
-            "description": "Ensemble des règles de décision pour le moteur de trading.",
+            "description": "Règles de décision.",
             "type": "array",
             "minItems": 1,
             "items": {
@@ -134,7 +501,8 @@
                         },
                         "required": [
                             "min_confidence"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "order_type": {
                         "type": "string",
@@ -157,7 +525,8 @@
                         "required": [
                             "BUY",
                             "SELL"
-                        ]
+                        ],
+                        "additionalProperties": true
                     }
                 },
                 "required": [
@@ -166,7 +535,8 @@
                     "conditions",
                     "order_type",
                     "action_logic"
-                ]
+                ],
+                "additionalProperties": true
             }
         }
     },

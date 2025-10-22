@@ -9,7 +9,6 @@ from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
 from phase_observer.detectors import Detectors
-from phase_observer.market_analyzer import MarketAnalyzer
 from trader.sizing import _calculate_risk_based_volume
 from phase_observer.footprint_analyzer import FootprintAnalyzer
 
@@ -17,14 +16,14 @@ from phase_observer.footprint_analyzer import FootprintAnalyzer
 class ScalpingStrategy(BaseStrategy):
     """
     Stratégie SCALPING focalisée sur :
-      1) Burst Scalping (basket d’ordres simultanés) — priorité
-      2) Liquidity Sweep (cassures HH/LL récentes) — optionnel
+    1) Burst Scalping (basket d’ordres simultanés) — priorité
+    2) Liquidity Sweep (cassures HH/LL récentes) — optionnel
 
-    ➤ Zéro dépendance Bollinger/midline/Katana.
+    ➤ AUCUNE règle basée sur la lecture de chandeliers (marubozu, patterns, etc.).
     ➤ Les tailles (volume) sont déléguées au TradeExecutor (risk-based).
-    ➤ Les SL/TP peuvent être fournis en pips (convertis en prix) ou
-       laissés au moteur de SL/TP du TradeExecutor (_calculate_sl_tp_prices).
+    ➤ Les SL/TP sont gérés par le moteur SL/TP (RR dynamique) côté exécuteur.
     """
+
 
     def __init__(
         self,
@@ -42,9 +41,7 @@ class ScalpingStrategy(BaseStrategy):
         self.strategy_config = strategy_config or {}
         self.mt5_connector = mt5_connector  # ✅ plus d'erreur
         self.logger = logger or getattr(config_manager, "logger", None)
-        self.market_analyzer = MarketAnalyzer(
-            config_manager=self.config_manager, logger=self.logger
-        )
+       
 
         # Initialisation des détecteurs
         self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
@@ -163,133 +160,19 @@ class ScalpingStrategy(BaseStrategy):
 
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
-
-            # --- 0b) Analyse via MarketAnalyzer ---
-            patterns, latest_pattern = [], None
-            candles_enabled = True
-            try:
-                cs = (
-                    self.config_manager.get(
-                        "phase_detection_defaults.candlestick_analysis", {}
-                    )
-                    or {}
-                )
-                candles_enabled = bool(cs.get("enabled", True))
-            except Exception:
-                candles_enabled = True
-
-            if candles_enabled and isinstance(df_work, pd.DataFrame):
-                try:
-                    market_analyzer = MarketAnalyzer(
-                        config_manager=self.config_manager,
-                        logger=self.logger,
-                    )
-                    market_results = market_analyzer.analyze(df_work, asset)
-                    patterns = market_results.get("patterns", {}).get("combos", [])
-                    latest_pattern = market_results.get("patterns", {}).get(
-                        "candles", [None]
-                    )[-1]
-                    if latest_pattern:
-                        self.logger.info(
-                            f"[{asset}] Dernier pattern détecté: "
-                            f"{latest_pattern.get('pattern')} "
-                            f"(type={latest_pattern.get('type')}, bullish={latest_pattern.get('is_bullish')})"
-                        )
-                        asset_signals["latest_pattern"] = latest_pattern
-                except Exception as e:
-                    self.logger.warning(f"[{asset}] MarketAnalyzer skipped: {e}")
-            else:
-                if not candles_enabled:
-                    self.logger.info(
-                        f"[{asset}] ⛔ Analyse chandeliers/patterns/combos désactivée via config."
-                    )
-                else:
-                    self.logger.debug(
-                        f"[{asset}] MarketAnalyzer skip: df_work indisponible ou < 50 barres."
-                    )
-
+           
             # --- 1) Métadonnées (pip_size, spread, etc.) ---
             meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
             pip_size = meta["pip_size"]
             if pip_size <= 0:
                 self.logger.warning(f"[{asset}] pip_size invalide.")
                 return {}
-
-            # --- Banque privée: décision patterns chandeliers ---
-            if latest_pattern and isinstance(df_work, pd.DataFrame) and len(df_work) > 0:
-                last_candle = df_work.iloc[-1]
-                pattern_action = self.decide_from_patterns(
-                    asset,
-                    latest_pattern,
-                    last_candle,
-                    ctx={
-                        "atr_m1_pips": None,
-                        "spread_pips": meta.get("spread_pips", 999.0),
-                        "trend_hint": None,
-                        "near_resistance": meta.get("near_resistance"),
-                        "near_support": meta.get("near_support"),
-                        "sma_fast_up": meta.get("sma_fast_up"),
-                        "sma_fast_down": meta.get("sma_fast_down"),
-                    },
-                )
-                if pattern_action in ("BUY", "SELL"):
-                    action = pattern_action
-                    self.logger.info(
-                        f"[{asset}] 📊 decide_from_patterns → action={action} "
-                        f"(pattern={latest_pattern.get('pattern')})"
-                    )
-
+           
             # --- 2) Prix courant ---
             price = self._safe_price_from_signals(asset_signals)
             if not price:
                 self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
-                return {}
-
-            # --- 3) Marubozu Playbook ---
-            mp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_playbook", {})
-            )
-            if (
-                mp_cfg.get("enabled", True)
-                and isinstance(df_work, pd.DataFrame)
-                and latest_pattern
-                and "marubozu" in str(latest_pattern.get("pattern", "")).lower()
-            ):
-                mp_decision = self._rule_marubozu_playbook(
-                    asset=asset,
-                    df=df_work,
-                    price=price,
-                    meta=meta,
-                    mtf_ctx=(analyzed_context.get("market_data") or {}).get(asset, {}),
-                    cfg=mp_cfg,
-                )
-                if mp_decision:
-                    return self._finalize_decision(mp_decision, analyzed_context)
-
-            # --- 3b) Marubozu Impulse ---
-            imp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_impulse", {})
-            )
-            if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
-                impulse_decision = self._rule_marubozu_impulse(
-                    df=df_work, asset=asset, price=price, meta=meta, cfg=imp_cfg
-                )
-                if impulse_decision:
-                    return self._finalize_decision(impulse_decision, analyzed_context)
-
-            # --- 4) Biais directionnel MTF / fallback SMA20 ---
-            action = self._infer_action_from_signals(asset_signals)
-            if action is None:
-                if isinstance(df_work, pd.DataFrame) and len(df_work) >= 20:
-                    sma = self._sma(df_work["close"].astype(float), 20).iloc[-1]
-                    action = "BUY" if price >= sma else "SELL"
-                else:
-                    self.logger.info(f"[{asset}] Aucune direction claire.")
-                    return {}
+                return {}                  
 
             # --- 5) Range Accumulation MTF ---
             try:
@@ -491,165 +374,7 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
-
-    # =====================================================
-    # BANQUE PRIVÉE — Décision via Patterns Chandeliers
-    # =====================================================
-    @staticmethod
-    def decide_from_patterns(
-        asset: str, latest_pattern: dict, last_candle, ctx: dict = None
-    ):
-        """
-        Renvoie 'BUY' | 'SELL' | None selon pattern + contexte.
-        Helpers _has et _candle_parts sont définis en local pour éviter les NameError.
-        """
-
-        # --- helpers locaux (aucune dépendance externe) ---
-        def _has(pname: str, *keys) -> bool:
-            pname = (pname or "").lower()
-            return any(k.lower() in pname for k in keys)
-
-        def _candle_parts(c):
-            # support objet OHLC (attributs) ou pandas Series (clés)
-            def _get(obj, key):
-                if hasattr(obj, key):
-                    return getattr(obj, key)
-                if isinstance(obj, dict) and key in obj:
-                    return obj[key]
-                # pandas Series
-                try:
-                    return obj[key]
-                except Exception:
-                    return None
-
-            o = float(_get(c, "open"))
-            h = float(_get(c, "high"))
-            l = float(_get(c, "low"))
-            cl = float(_get(c, "close"))
-
-            rng = max(1e-9, h - l)
-            body = abs(cl - o)
-            is_green = cl >= o
-            upper_wick = h - max(o, cl)
-            lower_wick = min(o, cl) - l
-            return o, h, l, cl, body, rng, upper_wick, lower_wick, is_green
-
-        # --- extraction candle + pattern ---
-        pname = str((latest_pattern or {}).get("pattern", "")).lower()
-        o, h, l, cl, body, rng, wu, wd, is_green = _candle_parts(last_candle)
-
-        # --- contexte/guardrails ---
-        ctx = ctx or {}
-        atr_pips = ctx.get("atr_m1_pips")
-        min_atr_pips = ctx.get("min_atr_pips", 0.1)
-        spread_pips = ctx.get("spread_pips", 999.0)
-        max_spread = ctx.get("max_spread_pips", 999.0)
-        trend_hint = ctx.get("trend_hint")  # 'up' | 'down' | None
-        near_res = bool(ctx.get("near_resistance", False))
-        near_sup = bool(ctx.get("near_support", False))
-        sma_fast_up = bool(ctx.get("sma_fast_up", False))
-        sma_fast_down = bool(ctx.get("sma_fast_down", False))
-
-        # Liquidity / ATR / spread
-        if atr_pips is not None and atr_pips < float(min_atr_pips):
-            return None
-        if float(spread_pips) > float(max_spread):
-            return None
-
-        # --- règles unitaires ---
-        action = None
-
-        # Engulfing
-        if _has(pname, "bullish engulfing", "engulfing_bull") and is_green:
-            action = "BUY"
-        if _has(pname, "bearish engulfing", "engulfing_bear") and not is_green:
-            action = "SELL"
-
-        # Marubozu
-        if _has(pname, "marubozu"):
-            action = "BUY" if is_green else "SELL"
-
-        # Doji/indécision → reject
-        if _has(pname, "doji", "spinning_top") or (body < 0.1 * rng):
-            return None
-
-        # Hammer / Hanging man
-        hammer_like = wd > 2 * body and wu < body
-        if _has(pname, "hammer") or hammer_like:
-            if is_green and not near_res:
-                action = "BUY"
-            else:
-                action = None
-
-        if _has(pname, "hanging man"):
-            if not is_green and not near_sup:
-                action = "SELL"
-
-        # Shooting star
-        shoot_like = wu > 2 * body and wd < body
-        if _has(pname, "shooting_star") or shoot_like:
-            if not is_green and not near_sup:
-                action = "SELL"
-
-        # --- combos ---
-        if _has(pname, "morning_star"):
-            action = "BUY"
-        if _has(pname, "evening_star"):
-            action = "SELL"
-        if _has(pname, "harami_bull") and is_green:
-            action = "BUY"
-        if _has(pname, "harami_bear") and not is_green:
-            action = "SELL"
-        if _has(pname, "tweezer_bottom"):
-            action = "BUY"
-        if _has(pname, "tweezer_top"):
-            action = "SELL"
-        if _has(pname, "three_white_soldiers"):
-            action = "BUY"
-        if _has(pname, "three_black_crows"):
-            action = "SELL"
-
-        # --- figures chartistes ---
-        if _has(pname, "double_bottom"):
-            action = "BUY"
-        if _has(pname, "double_top"):
-            action = "SELL"
-        if _has(pname, "inverse_head_shoulders", "inv_head_shoulders"):
-            action = "BUY"
-        if _has(pname, "head_shoulders", "head-and-shoulders"):
-            action = "SELL"
-        if _has(pname, "bull_flag", "bull_pennant"):
-            action = "BUY"
-        if _has(pname, "bear_flag", "bear_pennant"):
-            action = "SELL"
-        if _has(pname, "ascending_triangle"):
-            action = "BUY"
-        if _has(pname, "descending_triangle"):
-            action = "SELL"
-        if _has(pname, "symmetrical_triangle"):
-            action = None  # neutre
-
-        # --- confluences directionnelles ---
-        if action == "BUY" and trend_hint == "down":
-            action = None
-        if action == "SELL" and trend_hint == "up":
-            action = None
-        if action == "BUY" and sma_fast_down:
-            action = None
-        if action == "SELL" and sma_fast_up:
-            action = None
-        if action == "BUY" and near_res:
-            action = None
-        if action == "SELL" and near_sup:
-            action = None
-
-        # --- filtres finaux de cohérence (no BUY sur bougie rouge, etc.) ---
-        if action == "BUY" and not is_green:
-            return None
-        if action == "SELL" and is_green:
-            return None
-
-        return action
+  
 
     # =====================================================
     # Tes règles scalping/liquidity existantes commencent ici
@@ -790,44 +515,6 @@ class ScalpingStrategy(BaseStrategy):
             return "BUY"
         return None
 
-    def _rule_marubozu_playbook(
-        self,
-        asset: str,
-        df: pd.DataFrame,
-        price: float,
-        meta: Dict[str, Any],
-        mtf_ctx: Dict[str, Any],
-        cfg: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Détecte marubozu / réintégration / range actif et propose un trade.
-        Patchée pour intégrer le dernier pattern bougie détecté.
-        """
-
-        # --- A) Biais MTF ---
-        if cfg.get("mtf_bias", {}).get("use", True):
-            bias_h1 = (mtf_ctx.get("bias_h1") or "").lower()
-            bias_m15 = (mtf_ctx.get("bias_m15") or "").lower()
-            prefer_h1 = cfg["mtf_bias"].get("prefer_h1", True)
-            block_against_both = cfg["mtf_bias"].get("block_against_both", True)
-
-            def dir_ok(direction: str) -> bool:
-                def bias_to_dir(b):
-                    return (
-                        "buy"
-                        if "up" in b or "bull" in b
-                        else ("sell" if "down" in b or "bear" in b else "neutre")
-                    )
-
-                d_h1, d_m15 = bias_to_dir(bias_h1), bias_to_dir(bias_m15)
-                if block_against_both and d_h1 != "neutre" and d_m15 != "neutre":
-                    if direction == "buy" and d_h1 == "sell" and d_m15 == "sell":
-                        return False
-                    if direction == "sell" and d_h1 == "buy" and d_m15 == "buy":
-                        return False
-                if prefer_h1 and d_h1 != "neutre" and direction != d_h1:
-                    pass
-                return True
 
         # --- B) Helpers ---
         def last_big_candle(df_, atr_period, min_mult, min_body):
@@ -1076,111 +763,7 @@ class ScalpingStrategy(BaseStrategy):
                 "confidence": 0.7,
             }
 
-        if dec and latest_pat:
-            pat_name = str(latest_pat.get("pattern", "")).lower()
-            pat_bull = latest_pat.get("is_bullish")
-            if dec["action"] == "BUY" and pat_bull is True:
-                dec["confidence"] += 0.2
-            elif dec["action"] == "SELL" and pat_bull is False:
-                dec["confidence"] += 0.2
-            elif pat_bull is not None:
-                dec["confidence"] -= 0.1
-            dec["rule_name"] += f"+pattern:{pat_name}"
-            dec["meta"] = dec.get("meta", {})
-            dec["meta"]["pattern"] = latest_pat
-
         return dec
-
-    # === Règle Marubozu / Impulsion ===
-    def _rule_marubozu_impulse(
-        self,
-        df: pd.DataFrame,
-        asset: str,
-        price: float,
-        meta: Dict[str, Any],
-        cfg: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Détecte une bougie marubozu (impulsion propre, sans mèches)
-        et propose un trade dans sa direction.
-        - Utilise pip_size pour calculer SL/TP
-        - Intègre le dernier pattern bougie détecté (latest_pattern)
-        - Jamais bloquant : retourne None si les conditions ne sont pas réunies
-        """
-        if len(df) < 2:
-            return None
-
-        last = df.iloc[-1]
-        size = float(last["high"] - last["low"])
-        body = abs(float(last["close"] - last["open"]))
-        upper_wick = float(last["high"] - max(last["open"], last["close"]))
-        lower_wick = float(min(last["open"], last["close"]) - last["low"])
-
-        pip_size = meta.get("pip_size", 0.0001)
-        latest_pat = meta.get("latest_pattern")
-
-        # --- Critères marubozu ---
-        if size <= 0:
-            return None
-
-        body_ratio = body / size
-        min_body_ratio = float(cfg.get("min_body_ratio", 0.9))  # ex: 90% du range
-        max_wick_ratio = float(
-            cfg.get("max_wick_ratio", 0.1)
-        )  # ex: mèches < 10% du corps
-
-        if (
-            body_ratio >= min_body_ratio
-            and upper_wick <= max_wick_ratio * body
-            and lower_wick <= max_wick_ratio * body
-        ):
-            action = "BUY" if last["close"] > last["open"] else "SELL"
-
-            # SL : derrière l'extrême
-            sl_price = (
-                (last["low"] - 2 * pip_size)
-                if action == "BUY"
-                else (last["high"] + 2 * pip_size)
-            )
-            sl_pips = abs(price - sl_price) / pip_size
-
-            # TP : R:R basé sur config
-            rr_target = float(cfg.get("rr_target", 2.0))
-            tp_pips = sl_pips * rr_target
-            tp_price = (
-                price + tp_pips * pip_size
-                if action == "BUY"
-                else price - tp_pips * pip_size
-            )
-
-            decision = {
-                "action": action,
-                "asset": asset,
-                "entry_price": price,
-                "sl_price": round(sl_price, 5),
-                "tp_price": round(tp_price, 5),
-                "target_sl_pips": round(sl_pips, 2),
-                "target_tp_pips": round(tp_pips, 2),
-                "rule_name": "marubozu_impulse",
-                "strategy_type": "scalping",
-                "confidence": 0.8,
-                "meta": {
-                    "body_ratio": round(body_ratio, 3),
-                    "upper_wick": round(upper_wick, 5),
-                    "lower_wick": round(lower_wick, 5),
-                },
-            }
-
-            # Ajout éventuel du dernier pattern bougie
-            if latest_pat:
-                decision["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
-                decision["meta"]["pattern"] = latest_pat
-
-            return decision
-
-        return None
-
-        # --- API attendue par BaseStrategy (stubs fonctionnels) ---
 
     def get_parameters(self) -> Dict[str, any]:
         """
@@ -1385,35 +968,4 @@ class ScalpingStrategy(BaseStrategy):
         atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
         return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
 
-    # --- Price Action light (au cas où tu veux filtrer)
-    @staticmethod
-    def _is_engulfing(
-        o: float, h: float, l: float, c: float, oo: float, cc: float
-    ) -> bool:
-        # engulfing sur 2 bougies (précédente: oo->cc, actuelle: o->c)
-        body_prev = abs(cc - oo)
-        body_now = abs(c - o)
-        if body_prev <= 0 or body_now <= 0:
-            return False
-        # avale complètement
-        bull = (cc > oo) and (c < o) and (o > cc) and (c < oo)
-        bear = (cc < oo) and (c > o) and (o < cc) and (c > oo)
-        return bull or bear
-
-    @staticmethod
-    def _is_pinbar(o: float, h: float, l: float, c: float) -> bool:
-        rng = h - l
-        body = abs(c - o)
-        if rng <= 0:
-            return False
-        upper = h - max(o, c)
-        lower = min(o, c) - l
-        return (upper >= 2 * body and lower <= body) or (
-            lower >= 2 * body and upper <= body
-        )
-
-    @staticmethod
-    def _is_doji(o: float, c: float, h: float, l: float) -> bool:
-        rng = h - l
-        body = abs(c - o)
-        return rng > 0 and (body / rng) <= 0.1
+  

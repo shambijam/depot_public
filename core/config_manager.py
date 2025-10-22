@@ -24,6 +24,7 @@ from typing import (
     TYPE_CHECKING,
 )  # TYPE_CHECKING est déjà là
 from functools import lru_cache
+from enum import Enum
 from core.config_loader import ConfigLoader
 from core.ai_interface import AIInterface
 from core.audit_logger import AuditLogger
@@ -40,6 +41,10 @@ if TYPE_CHECKING:
     from core.config_manager import (
         ConfigManager,
     )
+class ManualAction(Enum):
+    TRADE_APPROVED = "TRADE_APPROVED"
+    TRADE_REJECTED = "TRADE_REJECTED"
+    
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,7 @@ class ConfigManager:
         self._broker_accounts_config = base_configs.get(
             "_broker_accounts_config", {"accounts": []}
         )
+        self.ManualAction = ManualAction
 
         # Logger level
         log_level_str = self.get("log_level", "INFO").upper()
@@ -312,6 +318,36 @@ class ConfigManager:
         if isinstance(current_level, dict) and "value" in current_level:
             return current_level["value"]
         return current_level
+    
+        # --- Helpers lecture conf Burst/SLTP ---
+    def get_burst_conf(self) -> Dict[str, Any]:
+        return self.get("entry_rules.scalping.burst_scalping", {}) or {}
+
+    def get_burst_sltp_conf(self) -> Dict[str, Any]:
+        return self.get("entry_rules.scalping.burst_scalping.sltp", {}) or {}
+
+    def get_burst_closure_conf(self) -> Dict[str, Any]:
+        return self.get("entry_rules.scalping.burst_scalping.closure_rules", {}) or {}
+
+    def coalesce_rr_settings(self) -> Dict[str, float]:
+        """
+        Retourne {rr_base, rr_floor, rr_cap} en lisant d'abord le nouveau bloc SLTP,
+        sinon en retombant sur smart_sl_tp_settings (legacy).
+        """
+        sltp = self.get_burst_sltp_conf()
+        if sltp:
+            return {
+                "rr_base": float(sltp.get("rr_base", 1.5)),
+                "rr_floor": float(sltp.get("rr_floor", 1.0)),
+                "rr_cap": float(sltp.get("rr_cap", 3.0)),
+            }
+        legacy = self.get("smart_sl_tp_settings", {}) or {}
+        return {
+            "rr_base": float(legacy.get("tp_rr_ratio", 1.5)),
+            "rr_floor": float(legacy.get("rr_floor", 1.0)),
+            "rr_cap": float(legacy.get("rr_cap", 3.0)),
+        }
+
 
     def initialize_dynamic_config(
         self, template_path: str, output_path: str, config_dir: str
@@ -1453,6 +1489,49 @@ class ConfigManager:
             self.logger.critical(
                 "ConfigManager ne peut pas loguer la décision : AuditLogger non initialisé. La décision n'est pas enregistrée dans l'audit trail."
             )
+            # === Manual Override API (utilisé par validators.py) ===
+    def log_manual_intervention(self, user: str, action: str, details: Dict[str, Any] | None = None) -> None:
+        """
+        Journalise une action manuelle opérateur (APPROVE / REJECT).
+        """
+        payload = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "user": user,
+            "action": action,
+            "details": details or {},
+        }
+        try:
+            if hasattr(self, "audit_logger") and self.audit_logger is not None:
+                self.audit_logger.log_config_change(
+                    change_info={"action": "manual_intervention", **payload},
+                    source="manual_override",
+                    dynamic_config_snapshot=self.get_current_dynamic_config(),
+                )
+                self.logger.info(f"[MANUAL] Intervention consignée: {action} par {user}.")
+            else:
+                self.logger.warning("[MANUAL] AuditLogger indisponible: intervention non archivée.")
+        except Exception as e:
+            self.logger.error(f"[MANUAL] Échec log intervention: {e}", exc_info=True)
+
+    def request_manual_override(self, reason: str, trade_decision: Dict[str, Any], context: Dict[str, Any] | None = None) -> None:
+        """
+        Déclenche une notification opérateur pour approbation manuelle.
+        Utilise le canal Telegram si activé (clé: telegram_manual_override).
+        """
+        try:
+            symbol = str(trade_decision.get("symbol") or trade_decision.get("asset") or "UNKNOWN").upper()
+            vol = trade_decision.get("volume")
+            msg = (
+                f"🛑 **Approbation requise**\n"
+                f"Raison: {reason}\n"
+                f"Symbole: `{symbol}` | Volume: `{vol}`\n"
+            )
+            # Laisse la conf décider si le canal est activé
+            self.send_alert(msg, "telegram_manual_override")
+            self.logger.info(f"[MANUAL] Notification d'override envoyée pour {symbol}.")
+        except Exception as e:
+            self.logger.error(f"[MANUAL] Envoi notification override KO: {e}", exc_info=True)
+    
 
     def send_alert(self, message: str, alert_type: str = "telegram_critical") -> None:
         """
