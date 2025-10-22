@@ -686,6 +686,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         account_trade_settings_over = {
             **account_trade_settings,
             "risk_per_trade_percent": resolved_risk_pct,
+            "equity": equity_val,
         }
 
         volume_final = float(
