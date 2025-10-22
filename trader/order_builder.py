@@ -81,6 +81,27 @@ def prepare_order(self, decision_package: dict) -> dict:
             vol = vmin
 
         return round(vol, 8)
+      
+    def _resolve_key(dct, *names):
+        """
+        Retourne la première valeur non vide trouvée dans 'dct' parmi les clés données.
+        Tolère les valeurs non-string (converties en str), ignore None / vides.
+        """
+        if not isinstance(dct, dict):
+            return None
+        for n in names:
+            try:
+                v = dct.get(n)
+            except Exception:
+                v = None
+            if v is None:
+                continue
+            # accepte str ou autres types convertibles
+            s = v if isinstance(v, str) else str(v)
+            s = s.strip()
+            if s:
+                return s
+        return None
 
     # ---------- 1) Action ----------
     final_decision = {}
