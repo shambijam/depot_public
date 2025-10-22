@@ -553,11 +553,12 @@ def prepare_order(self, decision_package: dict) -> dict:
         else:
             self.logger.debug("[RR] TP absent → RR non évalué (soft).")
 
-           # ---------- 9) Volume via sizing risk-based ----------
+        # ---------- 9) Volume via sizing risk-based ----------
         account_trade_settings = (
             market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
         )
 
+        # On accepte "0.25", "0,25", "0.25%", etc. -> float(0.25)
         def _to_float(x):
             try:
                 if isinstance(x, str):
@@ -568,42 +569,67 @@ def prepare_order(self, decision_package: dict) -> dict:
                 return None
 
         def _cascade(*vals) -> float:
+            """Renvoie le premier float > 0 trouvé parmi vals, sinon 0.0"""
             for v in vals:
                 f = _to_float(v)
                 if f is not None and f > 0:
                     return f
             return 0.0
 
-        # 🔎 NEW: on cascade plusieurs sources pour trouver un risk% > 0
+        # 🎯 Sources élargies (décision → config active → conf globale → env → fallback sûr)
+        import os
         resolved_risk_pct = _cascade(
+            # 1) compte/broker
             account_trade_settings.get("risk_per_trade_percent"),
+            # 2) décision (plusieurs alias tolérés)
             trade_decision.get("risk_per_trade_percent"),
             trade_decision.get("risk_pct"),
+            trade_decision.get("risk_percent"),
+            # 3) config active
             (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
             (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
+            # 4) conf globale (plusieurs chemins)
             self.config_manager.get("risk_management.risk_per_trade_percent"),
             self.config_manager.get("risk_management.default_risk_per_trade_percent"),
+            self.config_manager.get("defaults.risk_per_trade_percent"),
+            # 5) env (au cas où tu le pilotes par variable)
+            os.getenv("SNIPERX_RISK_PCT"),
+            # 6) fallback explicitement fourni par décision/config
+            trade_decision.get("fallback_risk_per_trade_percent"),
+            (active_config.get("risk_management", {}) or {}).get("fallback_risk_per_trade_percent"),
         )
 
-        if resolved_risk_pct <= 0 or not sl_price or sl_price <= 0:
-            self.logger.error(
-                "[SIZING] risk_per_trade_percent introuvable (>0 requis). "
-                f"sources: account={account_trade_settings.get('risk_per_trade_percent')}, "
-                f"decision={trade_decision.get('risk_per_trade_percent') or trade_decision.get('risk_pct')}, "
-                f"active.sizing={(active_config.get('sizing',{}) or {}).get('risk_per_trade_percent')}, "
-                f"active.rm={(active_config.get('risk_management',{}) or {}).get('risk_per_trade_percent')}, "
-                f"global.rm={self.config_manager.get('risk_management.risk_per_trade_percent')}"
-            )
-            raise TradeExecutionError(
-                f"Risk sizing impossible: risk%={resolved_risk_pct}, sl_price={sl_price}"
-            )
+        # Clamp via conf (sécurité)
+        min_risk = _to_float(self.config_manager.get("risk_management.min_risk_per_trade_percent", 0.01)) or 0.01
+        max_risk = _to_float(self.config_manager.get("risk_management.max_risk_per_trade_percent", 2.0)) or 2.0
 
-        # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
+        used_fallback = False
+        if resolved_risk_pct <= 0:
+            # dernier filet si TOUT est vide → 0.25% par défaut "safe"
+            resolved_risk_pct = 0.25
+            used_fallback = True
+
+        # clamp
+        if resolved_risk_pct < min_risk:
+            self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} < min {min_risk} → forcé à {min_risk}")
+            resolved_risk_pct = min_risk
+        elif resolved_risk_pct > max_risk:
+            self.logger.warning(f"[SIZING] risk% {resolved_risk_pct} > max {max_risk} → forcé à {max_risk}")
+            resolved_risk_pct = max_risk
+
+        if used_fallback:
+            self.logger.warning(f"[SIZING] Aucune source valide → fallback risk%={resolved_risk_pct} (configure `risk_per_trade_percent`)")
+
+        # SL requis pour le sizing
+        if not sl_price or sl_price <= 0:
+            raise TradeExecutionError(f"Risk sizing impossible: sl_price invalide ({sl_price})")
+
+        # ✅ IMPORTANT: en burst on force le scope panier (risk% / burst_size)
         sizing_scope = trade_decision.get("sizing_scope")
         if is_burst:
             sizing_scope = "BASKET"
 
-        # On passe une copie de trade_settings en forçant le risk% résolu
+        # passe une copie de trade_settings avec le risk% résolu
         account_trade_settings_over = {
             **account_trade_settings,
             "risk_per_trade_percent": resolved_risk_pct,
@@ -611,7 +637,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         volume_final = float(
             _sizing_risk_volume(
-                self,  # la fonction attend self en 1er paramètre
+                self,
                 {
                     "action": action,
                     "asset": broker_symbol,
@@ -619,8 +645,8 @@ def prepare_order(self, decision_package: dict) -> dict:
                     "confidence": trade_decision.get("confidence", 1.0),
                     "rule_name": trade_decision.get("rule_name"),
                     "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,  # sera forcé BASKET si burst
-                    "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
+                    "sizing_scope": sizing_scope,      # BASKET si burst
+                    "burst_size": resolved_burst,      # ex: 5 → risk%/5 par ticket
                 },
                 active_config,
                 market_context,
@@ -630,9 +656,9 @@ def prepare_order(self, decision_package: dict) -> dict:
                 account_trade_settings_over,
             )
         )
+
         self.logger.info(
-            f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
-            f"risk%={resolved_risk_pct} → lot/ticket={volume_final}"
+            f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → lot/ticket={volume_final}"
         )
 
         # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
@@ -643,9 +669,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             f"(min={getattr(symbol_info,'volume_min',None)}, step={getattr(symbol_info,'volume_step',None)}, max={getattr(symbol_info,'volume_max',None)})"
         )
         if volume_final <= 0:
-            raise TradeExecutionError(
-                f"Volume final invalide après normalisation ({volume_final})."
-            )
+            raise TradeExecutionError(f"Volume final invalide après normalisation ({volume_final}).")
 
         # ---------- 9b) Sécurités volume (fat-finger / caps) ----------
         try:
@@ -663,20 +687,13 @@ def prepare_order(self, decision_package: dict) -> dict:
                     )
 
             cap_global = tes.get("max_absolute_volume_safety", None)
-            if (
-                vol_safety_enabled
-                and isinstance(cap_global, (int, float))
-                and volume_final > float(cap_global)
-            ):
+            if vol_safety_enabled and isinstance(cap_global, (int, float)) and volume_final > float(cap_global):
                 raise TradeExecutionError(
                     f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}."
                 )
 
             account_trade_settings = (
-                market_context.get("active_broker_account", {}).get(
-                    "trade_settings", {}
-                )
-                or {}
+                market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
             )
             acc_min = account_trade_settings.get("min_lot")
             acc_step = account_trade_settings.get("lot_step")
@@ -686,18 +703,13 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
 
             if isinstance(acc_max, (int, float)) and volume_final > float(acc_max):
-                raise TradeExecutionError(
-                    f"Volume {volume_final} > max lot compte {float(acc_max)}."
-                )
+                raise TradeExecutionError(f"Volume {volume_final} > max lot compte {float(acc_max)}.")
         except TradeExecutionError:
             raise
         except Exception as e:
-            self.logger.warning(
-                f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
-            )
+            self.logger.warning(f"Vérif volume (fat-finger/caps) partielle échouée: {e}")
 
         # ---------- 10) Construction requête ----------
-        # ❌ SUPPRIMÉ: tout chemin "burst trailing-only"
         # 🚀 Burst scalping = MARKET single-master **avec SL/TP**
         return self._build_mt5_request(
             {
@@ -707,8 +719,8 @@ def prepare_order(self, decision_package: dict) -> dict:
                 "rule_name": trade_decision.get("rule_name"),
                 "comment": trade_decision.get("comment"),
                 "meta_rr_projected": trade_decision.get("meta_rr_projected")
-                or trade_decision.get("rr")
-                or trade_decision.get("rr_effective"),
+                    or trade_decision.get("rr")
+                    or trade_decision.get("rr_effective"),
                 "basket_id": trade_decision.get("basket_id"),
                 "time_in_force": trade_decision.get("time_in_force"),
             },
@@ -721,6 +733,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             trigger_price,
             "MARKET",
         )
+
 
     except TradeExecutionError:
         raise
