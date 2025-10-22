@@ -629,6 +629,59 @@ def prepare_order(self, decision_package: dict) -> dict:
         if is_burst:
             sizing_scope = "BASKET"
 
+        # --- [SIZING] Résolution robuste de l'équité du compte (évite 'Équité du compte invalide') ---
+        account_ctx = market_context.get("active_broker_account") or {}
+        equity_val = account_ctx.get("equity")
+
+        # 1) chemins alternatifs connus
+        if equity_val is None or equity_val == "":
+            equity_val = ((account_ctx.get("account_info") or {}).get("equity")
+                        or (account_ctx.get("info") or {}).get("equity"))
+
+        # 2) lecture MT5 si dispo
+        if equity_val is None or equity_val == "":
+            try:
+                ai = self.mt5_connector.get_account_info()
+                equity_val = getattr(ai, "equity", None)
+                if equity_val not in (None, ""):
+                    self.logger.info(f"[SIZING] Équité résolue via MT5: {equity_val}")
+            except Exception as e:
+                self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
+
+        # 3) fallback conf (utile en dry-run/backtest)
+        if equity_val is None or equity_val == "":
+            try:
+                equity_val = self.config_manager.get("risk_management.default_equity")
+                if equity_val not in (None, ""):
+                    self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
+            except Exception:
+                equity_val = None
+
+        # 4) validation finale et injection dans le contexte
+        def _as_pos_float(x):
+            try:
+                if isinstance(x, str):
+                    x = x.strip().replace(",", ".")
+                v = float(x)
+                return v if v > 0 else None
+            except Exception:
+                return None
+
+        equity_val = _as_pos_float(equity_val)
+        if equity_val is None:
+            raise TradeExecutionError(
+                "Équité du compte invalide ou introuvable pour le sizing. "
+                "Renseigne market_context.active_broker_account.equity, ou configure risk_management.default_equity."
+            )
+
+        # MàJ du contexte pour que sizing.py récupère une valeur valide
+        account_ctx["equity"] = equity_val
+        ai = account_ctx.get("account_info") or {}
+        ai["equity"] = equity_val
+        account_ctx["account_info"] = ai
+        market_context["active_broker_account"] = account_ctx
+        # --- fin résolution équité ---
+
         # passe une copie de trade_settings avec le risk% résolu
         account_trade_settings_over = {
             **account_trade_settings,
