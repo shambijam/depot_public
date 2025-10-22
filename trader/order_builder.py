@@ -551,50 +551,87 @@ def prepare_order(self, decision_package: dict) -> dict:
                 self.logger.info(
                     f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté (permissif)."
                 )
-
-        # ---------- 9) Volume via sizing risk-based ----------
-        account_trade_settings = (
-            market_context.get("active_broker_account", {}).get("trade_settings", {})
-            or {}
-        )
-        risk_pct = float(
-            account_trade_settings.get("risk_per_trade_percent", 0.0) or 0.0
-        )
-        if risk_pct <= 0 or not sl_price or sl_price <= 0:
-            raise TradeExecutionError(
-                f"Risk sizing impossible: risk%={risk_pct}, sl_price={sl_price}"
+            # ---------- 9) Volume via sizing risk-based ----------
+            account_trade_settings = (
+                market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
             )
 
-        # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
-        sizing_scope = trade_decision.get("sizing_scope")
-        if is_burst:
-            sizing_scope = "BASKET"
-        volume_final = float(
-            _sizing_risk_volume(
-                self,  # la fonction attend self en 1er paramètre
-                {
-                    "action": action,
-                    "asset": broker_symbol,
-                    "order_type": "MARKET" if is_burst else order_type,
-                    "confidence": trade_decision.get("confidence", 1.0),
-                    "rule_name": trade_decision.get("rule_name"),
-                    "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,  # sera forcé à BASKET si burst
-                    "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
-                },
-                active_config,
-                market_context,
-                symbol_info,
-                entry_price_market,
-                sl_price,
-                account_trade_settings,
+            def _to_float(x):
+                try:
+                    if isinstance(x, str):
+                        xs = x.strip().replace("%", "").replace(",", ".")
+                        return float(xs)
+                    return float(x)
+                except Exception:
+                    return None
+
+            def _cascade(*vals) -> float:
+                for v in vals:
+                    f = _to_float(v)
+                    if f is not None and f > 0:
+                        return f
+                return 0.0
+
+            # 🔎 NEW: on cascade plusieurs sources pour trouver un risk% > 0
+            resolved_risk_pct = _cascade(
+                account_trade_settings.get("risk_per_trade_percent"),
+                trade_decision.get("risk_per_trade_percent"),
+                trade_decision.get("risk_pct"),
+                (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
+                (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
+                self.config_manager.get("risk_management.risk_per_trade_percent"),
+                self.config_manager.get("risk_management.default_risk_per_trade_percent"),
             )
-        )
-        self.logger.info(
-            f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
-            f"risk%={account_trade_settings.get('risk_per_trade_percent')} "
-            f"→ lot/ticket={volume_final}"
-        )
+
+            if resolved_risk_pct <= 0 or not sl_price or sl_price <= 0:
+                self.logger.error(
+                    "[SIZING] risk_per_trade_percent introuvable (>0 requis). "
+                    f"sources: account={account_trade_settings.get('risk_per_trade_percent')}, "
+                    f"decision={trade_decision.get('risk_per_trade_percent') or trade_decision.get('risk_pct')}, "
+                    f"active.sizing={(active_config.get('sizing',{}) or {}).get('risk_per_trade_percent')}, "
+                    f"active.rm={(active_config.get('risk_management',{}) or {}).get('risk_per_trade_percent')}, "
+                    f"global.rm={self.config_manager.get('risk_management.risk_per_trade_percent')}"
+                )
+                raise TradeExecutionError(
+                    f"Risk sizing impossible: risk%={resolved_risk_pct}, sl_price={sl_price}"
+                )
+
+            # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
+            sizing_scope = trade_decision.get("sizing_scope")
+            if is_burst:
+                sizing_scope = "BASKET"
+
+            # On passe une copie de trade_settings en forçant le risk% résolu
+            account_trade_settings_over = {
+                **account_trade_settings,
+                "risk_per_trade_percent": resolved_risk_pct,
+            }
+
+            volume_final = float(
+                _sizing_risk_volume(
+                    self,  # la fonction attend self en 1er paramètre
+                    {
+                        "action": action,
+                        "asset": broker_symbol,
+                        "order_type": "MARKET" if is_burst else order_type,
+                        "confidence": trade_decision.get("confidence", 1.0),
+                        "rule_name": trade_decision.get("rule_name"),
+                        "volatility_factor": trade_decision.get("volatility_factor"),
+                        "sizing_scope": sizing_scope,  # sera forcé BASKET si burst
+                        "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
+                    },
+                    active_config,
+                    market_context,
+                    symbol_info,
+                    entry_price_market,
+                    sl_price,
+                    account_trade_settings_over,
+                )
+            )
+            self.logger.info(
+                f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
+                f"risk%={resolved_risk_pct} → lot/ticket={volume_final}"
+            )
 
         # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
         vol_before_norm = volume_final
