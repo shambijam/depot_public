@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from trader.errors import TradeExecutionError
+from trader.sizing import _calculate_risk_based_volume as _sizing_risk_volume
 
 
 def prepare_order(self, decision_package: dict) -> dict:
@@ -512,9 +513,9 @@ def prepare_order(self, decision_package: dict) -> dict:
         sizing_scope = trade_decision.get("sizing_scope")
         if is_burst:
             sizing_scope = "BASKET"
-
         volume_final = float(
-            self._calculate_risk_based_volume(
+            _sizing_risk_volume(
+                self,  # la fonction attend self en 1er paramètre
                 {
                     "action": action,
                     "asset": broker_symbol,
@@ -522,8 +523,8 @@ def prepare_order(self, decision_package: dict) -> dict:
                     "confidence": trade_decision.get("confidence", 1.0),
                     "rule_name": trade_decision.get("rule_name"),
                     "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,
-                    "burst_size": resolved_burst,
+                    "sizing_scope": sizing_scope,  # sera forcé à BASKET si burst
+                    "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
                 },
                 active_config,
                 market_context,
@@ -534,7 +535,9 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
         )
         self.logger.info(
-            f"[VOLUME] Calcul risk-based réussi: risk%={risk_pct}, vol={volume_final:.4f}"
+            f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
+            f"risk%={account_trade_settings.get('risk_per_trade_percent')} "
+            f"→ lot/ticket={volume_final}"
         )
 
         # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
