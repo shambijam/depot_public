@@ -416,7 +416,25 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
         is_burst = rule_name_local == "burst_scalping"
+        
+        # --- PATCH A: normaliser et injecter l'action pour SL/TP ---
+        try:
+            # utilise le résolveur robuste (aliases, nested, etc.)
+            side = resolve_side(
+                trade_decision or final_decision or decision_package
+            )  # → 'BUY' / 'SELL'
+        except Exception as e:
+            # fallback: on tente l'action déjà normalisée localement
+            side = action if isinstance(action, str) and action in ("BUY", "SELL") else ""
+            if not side:
+                self.logger.error(f"[ORDER_BUILDER] Action non résolue avant SL/TP: {e}")
+                raise
 
+        # ✅ injecte explicitement l'action pour que sltp._calculate_sl_tp_prices n'échoue pas
+        trade_decision["action"] = side
+        trade_decision["final_action"] = side
+        self.logger.debug(f"[ORDER_BUILDER] Action normalisée pour SL/TP: {side}")
+             
         # ---------- 7bis) SL/TP ----------
         # Nouveau: en burst, SL **et** TP sont calculés/attendus (plus de trailing-only)
         sl_price, tp_price = self._calculate_sl_tp_prices(

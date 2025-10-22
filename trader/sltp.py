@@ -94,38 +94,76 @@ def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | 
 # --- Helpers de normalisation ---
 from trader.errors import TradeExecutionError
 
-
-def resolve_side(obj: dict) -> str:
+def resolve_side(decision: Mapping[str, Any]) -> str:
     """
-    Normalise la direction en 'BUY' ou 'SELL' en regardant plusieurs alias.
-    Accepte: action/side/order_action/direction/final_action/trade_action, LONG/SHORT, B/S, +1/-1/1/-1.
+    Retourne 'BUY' ou 'SELL' en fouillant tous les alias courants, y compris imbriqués.
+    Tolère: action/final_action/side/direction/order_side/entry_side/position_side,
+            decision.action, metadata.action, execution.action, setup.action, entry.action
+    Synonymes: LONG->BUY, SHORT->SELL, bull/bear, up/down, b/s, +1/-1.
     """
-    candidates = [
-        obj.get("action"),
-        obj.get("side"),
-        obj.get("order_action"),
-        obj.get("direction"),
-        obj.get("final_action"),
-        obj.get("trade_action"),
-    ]
+    if not isinstance(decision, dict):
+        raise TradeExecutionError("Action invalide pour SL/TP: 'decision' n'est pas un dict.")
 
-    # numérique ?
-    for c in candidates:
-        if isinstance(c, (int, float)):
-            return "BUY" if float(c) > 0 else "SELL"
+    # --- utilitaires case-insensitive ---
+    def _get_ci(d: Mapping[str, Any], key: str):
+        for k, v in d.items():
+            if isinstance(k, str) and k.lower() == key.lower():
+                return v
+        return None
 
-    # textuel
-    for c in candidates:
-        if c is None:
+    def _dig_ci(d: Mapping[str, Any], path: str):
+        cur = d
+        for part in path.split("."):
+            if not isinstance(cur, dict):
+                return None
+            cur = _get_ci(cur, part)
+            if cur is None:
+                return None
+        return cur
+
+    candidates = []
+    flat_keys = (
+        "action",
+        "final_action",
+        "side",
+        "direction",
+        "order_side",
+        "entry_side",
+        "position_side",
+    )
+    nested_paths = (
+        "decision.action",
+        "decision.side",
+        "metadata.action",
+        "execution.action",
+        "setup.action",
+        "entry.action",
+    )
+
+    for k in flat_keys:
+        v = _get_ci(decision, k)
+        if v is not None:
+            candidates.append(v)
+    for p in nested_paths:
+        v = _dig_ci(decision, p)
+        if v is not None:
+            candidates.append(v)
+
+    # Prend le premier candidat textuel non vide
+    for v in candidates:
+        s = str(v).strip().lower()
+        if not s:
             continue
-        s = str(c).strip().upper()
-        if s in ("BUY", "LONG", "B", "+1", "1"):
+        if s in {"buy", "long", "b", "bull", "bullish", "up", "+", "+1", "1"}:
             return "BUY"
-        if s in ("SELL", "SHORT", "S", "-1"):
+        if s in {"sell", "short", "s", "bear", "bearish", "down", "-", "-1"}:
             return "SELL"
 
+    # Rien trouvé → message d’erreur utile (liste les clés présentes)
+    present_keys = ", ".join(map(str, decision.keys()))
     raise TradeExecutionError(
-        "Action invalide pour SL/TP: vide ou non reconnue (aucun alias trouvé)."
+        "Action invalide pour SL/TP: vide ou non reconnue (aucun alias trouvé). "
+        f"Clés présentes dans 'decision': [{present_keys}]"
     )
 
 
