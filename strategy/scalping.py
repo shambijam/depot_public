@@ -107,6 +107,18 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
+            # --- 0b) Action hint (BUY/SELL) par défaut ---
+            action = None
+
+            def _norm_dir(x):
+                if not x:
+                    return None
+                x = str(x).upper()
+                if x in ("BUY", "LONG", "BULL", "BULLISH"):
+                    return "BUY"
+                if x in ("SELL", "SHORT", "BEAR", "BEARISH"):
+                    return "SELL"
+                return None
 
             # --- 0a) Config stratégie (pour meta & règles) ---
             try:
@@ -136,7 +148,7 @@ class ScalpingStrategy(BaseStrategy):
                 if (
                     fp_status == "BEARISH"
                     and fp_score > 0
-                    and asset_signals.get("phase", "").lower().startsWith("bear")
+                    and asset_signals.get("phase", "").lower().startswith("bear")
                 ):
                     asset_signals["confidence_score"] = min(
                         1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.15
@@ -157,7 +169,36 @@ class ScalpingStrategy(BaseStrategy):
                     )
                 else:
                     asset_signals["early_entry_allowed"] = False
+                    
+                # --- 0d) Déduction robuste de l'action ---
+                # 1) indices directs depuis les signaux
+                action = (
+                    _norm_dir(asset_signals.get("action"))
+                    or _norm_dir(asset_signals.get("bias"))
+                    or _norm_dir(asset_signals.get("direction"))
+                    or action
+                )
 
+                # 2) fallback via la phase quand aucun indice direct
+                if action is None:
+                    ph = str(asset_signals.get("phase", "")).lower()
+                    if ph.startswith("trend_bull") or ph.startswith("breakout_bull"):
+                        action = "BUY"
+                    elif ph.startswith("trend_bear") or ph.startswith("breakout_bear"):
+                        action = "SELL"
+
+                # 3) dernier filet via le footprint (si résumé dispo)
+                try:
+                    if action is None and isinstance(fp_summary, dict):
+                        d = fp_summary.get("delta_total")
+                        if isinstance(d, (int, float)):
+                            if d > 0:
+                                action = "BUY"
+                            elif d < 0:
+                                action = "SELL"
+                except Exception:
+                    pass
+    
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
            
