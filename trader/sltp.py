@@ -89,7 +89,47 @@ def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | 
             f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}"
         )
         return None
+def resolve_side(action_raw, order_type, position_type, mt5):
+    s = (action_raw or "").strip().upper()
+    if s in ("BUY", "SELL"):
+        return s
 
+    # order_type sous forme string
+    if isinstance(order_type, str):
+        t = order_type.strip().upper()
+        if t in ("BUY", "BUY_LIMIT", "BUY_STOP", "BUY_STOP_LIMIT"):
+            return "BUY"
+        if t in ("SELL", "SELL_LIMIT", "SELL_STOP", "SELL_STOP_LIMIT"):
+            return "SELL"
+
+    # order_type sous forme int (constantes MT5)
+    if mt5 is not None and isinstance(order_type, int):
+        if order_type in (
+            getattr(mt5, "ORDER_TYPE_BUY", -1),
+            getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -1),
+            getattr(mt5, "ORDER_TYPE_BUY_STOP", -1),
+            getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -1),
+        ):
+            return "BUY"
+        if order_type in (
+            getattr(mt5, "ORDER_TYPE_SELL", -1),
+            getattr(mt5, "ORDER_TYPE_SELL_LIMIT", -1),
+            getattr(mt5, "ORDER_TYPE_SELL_STOP", -1),
+            getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -1),
+        ):
+            return "SELL"
+
+    # position_type (si on modifie une position existante)
+    if mt5 is not None:
+        if position_type == getattr(mt5, "POSITION_TYPE_BUY", -1):
+            return "BUY"
+        if position_type == getattr(mt5, "POSITION_TYPE_SELL", -1):
+            return "SELL"
+
+    raise TradeExecutionError(
+        f"Impossible de déduire le sens (action='{action_raw}', "
+        f"order_type={order_type}, position_type={position_type})"
+    )
 
 # ==============================
 # === Calcul SL / TP (RR dyn) ===

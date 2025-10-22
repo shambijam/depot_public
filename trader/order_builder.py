@@ -8,6 +8,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from trader.errors import TradeExecutionError
 from trader.sizing import _calculate_risk_based_volume as _sizing_risk_volume
+from trader.sltp import resolve_side
+
 
 
 def prepare_order(self, decision_package: dict) -> dict:

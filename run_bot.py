@@ -1318,38 +1318,46 @@ def run_single_pipeline_cycle(
                 td["order_action"] = side        # compat héritée (si sltp.py la lit)
 
 
-            # 🔧 BLOC BURST (refacto SLTP) — standardisation + sizing + exécution (sans `continue`)
-            try:
-                # 1) Normaliser l'action pour le moteur SLTP
-                side = str(td.get("action") or td.get("side") or td.get("order_action") or "").upper().strip()
-                valid_side = side in {"BUY", "SELL"}
-                td["action"] = side
-                td["side"] = side
-                td["order_action"] = side
+           # --- Exécution Scalping (burst) : ACTION → nested order + SLTP + sizing ---
+            for td in scalping_decisions:
+                try:
+                    # 0) Normaliser/propager l'action
+                    side = str(
+                        td.get("action")
+                        or td.get("side")
+                        or td.get("order_action")
+                        or td.get("order_side")
+                        or td.get("trade_action")
+                        or td.get("direction")
+                        or ""
+                    ).upper().strip()
+                    if side in {"LONG", "BUY_LONG"}: side = "BUY"
+                    if side in {"SHORT", "SELL_SHORT"}: side = "SELL"
+                    if side not in {"BUY", "SELL"}:
+                        logger.error(f"[SCALPING] action manquante/invalide → skip. payload={td}")
+                        continue
 
-                if not valid_side:
-                    logger.debug(f"[SCALPING] décision ignorée (side invalide): {td}")
-                else:
-                    # Symbole pour logs/config
+                    # 1) Symbole
                     sym = str(td.get("asset") or td.get("symbol") or "").upper()
+                    if not sym:
+                        logger.error(f"[SCALPING] symbole manquant → skip. payload={td}")
+                        continue
+                    td["asset"] = sym
+                    td["symbol"] = sym
 
-                    # 2) Normaliser le rule_name (aliases → 'burst_scalping')
+                    # 2) rule_name → burst_scalping
                     _alias = str(td.get("rule_name", "")).lower().strip()
-                    if _alias in {"burst", "burst_master", "scalping_burst", "burst_single_master", "burst_single", ""}:
+                    if _alias in {"burst","burst_master","scalping_burst","burst_single_master","burst_single",""}:
                         td["rule_name"] = "burst_scalping"
-
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
-                    # 3) Purge TP/Trailing & injection SLTP (aucun trailing ici)
+                    # 3) Purge TP/trailing codés en dur + activer SLTP
                     if rn == "burst_scalping":
-                        # Retirer tout TP/trailing codé dans la décision
-                        for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices", "trailing"):
+                        for k in ("tp_price","tp_pips","target_tp_pips","tp_prices","trailing"):
                             td.pop(k, None)
+                        td["no_tp"] = False  # laisser SLTP poser SL/TP
 
-                        # Laisser le moteur SLTP calculer SL/TP (TP autorisé)
-                        td["no_tp"] = False
-
-                        # Config SLTP: priorité asset_config > prod_config
+                        # sltp cfg (asset_config > prod_config)
                         sltp_cfg = (
                             (global_context.get("asset_configs", {}) or {})
                             .get(sym, {})
@@ -1357,81 +1365,68 @@ def run_single_pipeline_cycle(
                             .get("scalping", {})
                             .get("burst_scalping", {})
                             .get("sltp", {})
+                        ) or (
+                            base_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("sltp", {})
+                            or {}
                         )
-                        if not sltp_cfg:
-                            sltp_cfg = (
-                                base_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                .get("sltp", {})
-                                or {}
-                            )
                         if sltp_cfg:
                             td["sltp"] = sltp_cfg
 
-                    # 4) Résoudre burst_size (décision > conf.burst_single_master > conf.burst_scalping > 1)
-                    try:
-                        conf_burst = (
-                            base_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_single_master", {})
-                            or {}
-                        ).get("burst_size")
-                    except Exception:
-                        conf_burst = None
-                    if not conf_burst:
-                        try:
-                            conf_burst = (
-                                base_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                or {}
-                            ).get("burst_size")
-                        except Exception:
-                            conf_burst = None
-
+                    # 4) burst_size
+                    conf_burst = (
+                        (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_single_master", {}) or {}).get("burst_size")
+                        or (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {}).get("burst_size")
+                    )
                     resolved_burst = int(td.get("burst_size") or td.get("burst_count") or conf_burst or 1)
-                    if resolved_burst < 1:
-                        resolved_burst = 1
+                    if resolved_burst < 1: resolved_burst = 1
 
-                    # 5) Standardiser l'ordre pour l'exécuteur
-                    td.pop("burst_volume_each", None)        # lot calculé via risk% / burst_size
-                    td.pop("entry_style", None)              # on standardise par order_type
-                    td["burst_size"] = resolved_burst
-                    td["sizing_scope"] = "BASKET"            # risk% réparti sur le panier
-                    td.setdefault("order_type", "MARKET")    # exécution MARKET
+                    # 5) Standardisation exec
+                    td.pop("burst_volume_each", None)
+                    td.pop("entry_style", None)
+                    td["burst_size"]   = resolved_burst
+                    td["sizing_scope"] = "BASKET"
+                    td.setdefault("order_type", "MARKET")
+
+                    # 6) *** CRITIQUE *** — renseigner le sous-dict 'order' que SLTP lit en priorité
+                    od = td.get("order") if isinstance(td.get("order"), dict) else {}
+                    od.update({
+                        "action": side,          # <- évite action_raw == ''
+                        "side": side,
+                        "type": td.get("order_type", "MARKET"),
+                        "symbol": sym,
+                    })
+                    td["order"] = od
+                    # (bonus) certains chemins lisent 'trade'
+                    trade = td.get("trade") if isinstance(td.get("trade"), dict) else {}
+                    trade.update({"action": side, "side": side})
+                    td["trade"] = trade
+
+                    # Dupliquer au top-level aussi (compat)
+                    for k in ("action","side","order_action","order_side","trade_action"):
+                        td[k] = side
 
                     logger.info(f"[BURST][PLAN] {side} {sym} style=MARKET burst_size={resolved_burst} (lot via risk%/burst)")
+                    logger.debug(f"[SLTP-ACTION-CHECK] top.action={td.get('action')} | order.action={td.get('order',{}).get('action')}")
 
-                    # 6) Exécuter (MARKET single-master burst, SL/TP par moteur SLTP)
-                    decision_pkg = {
-                        "final_decision": td,
-                        "context": global_context,
-                        "active_config": base_config,
-                    }
+                    # 7) Exécution
+                    decision_pkg = {"final_decision": td, "context": global_context, "active_config": base_config}
                     res = run_trade_execution_pipeline(trade_executor, decision_pkg, is_dry_run=is_dry_run)
                     status = (res or {}).get("status", "")
                     if status not in {"failed", ""}:
                         trade_executed_successfully = True
 
-                    # 7) Post-exec: sécurité paniers (pas de trailing params ici)
+                    # 8) Post-exec: garde-fou panier
                     try:
-                        max_loss = float(
-                            (
-                                base_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                .get("closure_rules", {})
-                                or {}
-                            ).get("max_loss_pips", 15.0)
-                        )
+                        max_loss = float(((base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}).get("closure_rules", {}) or {}).get("max_loss_pips", 15.0)))
                         trade_executor.monitor_burst_baskets(config=base_config, max_loss_pips=max_loss)
                     except Exception as e:
                         logger.warning(f"[BURST EXIT] Post-exec (SLTP): {e}")
 
-            except Exception as e:
-                logger.error(f"[BURST] bloc SLTP error: {e}", exc_info=True)
-
+                except Exception as e:
+                    logger.error(f"[BURST] Erreur bloc scalping/SLTP: {e}", exc_info=True)
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:
