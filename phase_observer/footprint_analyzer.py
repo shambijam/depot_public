@@ -401,25 +401,28 @@ class FootprintAnalyzer:
         self.validator = DataValidator()
         self.normalizer = DatetimeNormalizer()
         self.scorer = ConfidenceScorer()
-        
-    # --- PATCH: soft logging & gating ---
+
+    # --- SOFT-QUIET-XAU: helpers ---
     def _fp_settings(self, strategy_config):
         node = (strategy_config or {}).get("logging", {})
-        # modes: off | soft | verbose
+        # modes: off | soft | verbose (par défaut: soft)
         mode = str(node.get("footprint_mode", "soft")).lower()
-        enabled = set(map(str.upper, (strategy_config or {}).get("footprint", {}).get(
-            "enabled_assets", ["XAUUSD"]
-        )))
+        enabled = set(
+            map(
+                str.upper,
+                (strategy_config or {})
+                .get("footprint", {})
+                .get("enabled_assets", ["XAUUSD"]),
+            )
+        )
         return mode, enabled
 
     def _fp_can_log(self, asset_upper: str, tag: str) -> bool:
-        # tag ∈ {"SNAPSHOT","NO_CAND","SUMMARY","DETAIL"}
+        # tag ∈ {"SUMMARY","SNAPSHOT","DETAIL"}
         if self._fp_mode == "off":
             return False
-        # en mode "soft", on ne garde que le résumé final
-        if self._fp_mode == "soft" and tag in {"SNAPSHOT", "NO_CAND", "DETAIL"}:
+        if self._fp_mode == "soft" and tag != "SUMMARY":
             return False
-        # on ne logge que pour les actifs autorisés (par défaut XAUUSD)
         return asset_upper in self._fp_enabled
 
     def _fp_log(self, tag: str, fmt: str, *args, level: str = "info"):
@@ -428,7 +431,15 @@ class FootprintAnalyzer:
         if not self._fp_can_log(self._asset_upper, tag):
             return
         getattr(self.logger, level, self.logger.info)(fmt, *args)
-  
+        
+    def _log_error(self, where: str, exc: Exception, extra: Optional[Dict[str, Any]] = None):
+        if not getattr(self, "logger", None):
+            return
+        try:
+            self.logger.debug("[FP-ERR][%s] %s extra=%s", where, repr(exc), extra or {})
+        except Exception:
+            pass
+    
     # ---- public -------------------------------------------------------
 
     def analyze_footprint_triggers(
@@ -438,20 +449,17 @@ class FootprintAnalyzer:
         bars: Optional[pd.DataFrame],
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
-        
-        # --- PATCH: gating & mode ---
-        self._asset_upper = str(asset).upper()
-        # --- FIX-LOG-01: chronométrage et comptage soft des ticks ---
-        t0 = time.perf_counter()
-        try:
-            tick_count_soft = int(len(ticks)) if ticks is not None else 0
-        except Exception:
-            tick_count_soft = 0
 
+        # --- SOFT-QUIET-XAU: gating + timers visibles partout ---
+        self._asset_upper = str(asset).upper()
         self._fp_mode, self._fp_enabled = self._fp_settings(strategy_config)
-        t0 = time.perf_counter()
+
+        # triggers seulement sur actifs autorisés (par défaut: XAUUSD)
         if self._asset_upper not in self._fp_enabled:
             return False, {"reason": "TRIG_DISABLED_ASSET", "asset": self._asset_upper}
+
+        t0 = time.perf_counter()      # chrono pour le résumé
+        tick_count_soft = "?"         # fixé après validation
 
         with self.monitor.measure_phase("total"):
             # 0) pré-traitement feed-agnostic (price/volume)
@@ -460,11 +468,18 @@ class FootprintAnalyzer:
             # 1) validation
             with self.monitor.measure_phase("validation"):
                 vt = self.validator.validate_ticks(ticks)
+                try:
+                    # si vt.metrics existe, on l’utilise ; sinon fallback len(ticks)
+                    tick_count_soft = int(getattr(vt, "metrics", {}).get("row_count", len(ticks)))
+                except Exception:
+                    tick_count_soft = len(ticks) if ticks is not None else "?"
+
                 if not vt.is_valid:
                     return False, {
                         "reason": vt.message,
                         "error_code": vt.error_code.value,
                     }
+
                 vb = self.validator.validate_bars(bars)
                 if not vb.is_valid:
                     return False, {
@@ -482,8 +497,7 @@ class FootprintAnalyzer:
                     ticks = self.normalizer.normalize_dataframe(ticks.copy(), "dt")
                     bars = (
                         self.normalizer.normalize_dataframe(bars.copy(), "time")
-                        if bars is not None
-                        else None
+                        if bars is not None else None
                     )
                 except Exception as e:
                     return False, {
@@ -498,14 +512,11 @@ class FootprintAnalyzer:
 
             for pass_type in ("normal", "soft"):
                 params_map: Dict[str, Any] = (
-                    cfg.to_dict()
-                    if pass_type == "normal"
+                    cfg.to_dict() if pass_type == "normal"
                     else {**cfg.to_dict(), **cfg.soft_params}
                 )
 
-                for win in params_map.get(
-                    "window_candidates_s", cfg.window_candidates_s
-                ):
+                for win in params_map.get("window_candidates_s", cfg.window_candidates_s):
                     with self.monitor.measure_phase(f"window_{int(win)}s"):
                         decision, meta, used_win = self._analyze_single_window(
                             ticks=ticks,
@@ -515,24 +526,41 @@ class FootprintAnalyzer:
                             price_step=price_step,
                             cfg=cfg,
                         )
-
                         if decision and decision.get("ok"):
                             if (best_decision is None) or (
                                 float(decision.get("confidence", 0))
                                 > float(best_decision.get("confidence", 0))
                             ):
-                                best_decision, best_meta, best_win = (
-                                    decision,
-                                    meta,
-                                    used_win,
-                                )
+                                best_decision, best_meta, best_win = decision, meta, used_win
 
                 if best_decision:
-                    break  # on s'arrête dès qu'on a un signal dans la passe courante
+                    break
 
-            # 5) Build response
+            # 5) build response / logs
             if not best_decision:
+                self._fp_log(
+                    "SUMMARY",
+                    "[TRIG][%s] none | wins=%s | ticks=%s | dt=%.1fms",
+                    self._asset_upper,
+                    "/".join(map(str, cfg.window_candidates_s)),
+                    str(tick_count_soft),
+                    (time.perf_counter() - t0) * 1000.0,
+                    level="info",
+                )
                 return False, {"reason": "no_trigger_detected"}
+                              
+            self._fp_log(
+                "SUMMARY",
+                "[TRIG][%s] %s %s | conf=%.2f | win=%ss | dt=%.1fms",
+                self._asset_upper,
+                str(best_decision.get("trigger", "footprint")),
+                str(best_decision.get("direction", best_decision.get("action",""))).upper(),
+                float(best_decision.get("confidence", 0.0)),
+                int(best_win or cfg.window_candidates_s[0]),
+                (time.perf_counter() - t0) * 1000.0,
+                level="info",
+            )
+
 
             return True, self._build_trigger_response(
                 asset=asset,
@@ -607,7 +635,9 @@ class FootprintAnalyzer:
             # 3) delta_ratio = |delta| / max(vol, eps)
             if "delta_ratio" not in df_levels.columns:
                 eps = 1e-9
-                df_levels["delta_ratio"] = (df_levels["delta"].abs()) / (df_levels["vol"].abs() + eps)
+                df_levels["delta_ratio"] = (df_levels["delta"].abs()) / (
+                    df_levels["vol"].abs() + eps
+                )
 
             # 4) zscore_vol (robuste) — indispensable pour l’absorption
             if "zscore_vol" not in df_levels.columns:
@@ -629,13 +659,19 @@ class FootprintAnalyzer:
                 "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
                 int(window_s),
                 int(len(df_levels)),
-                float(df_levels['vol'].median() if 'vol' in df_levels else 0.0),
-                float(df_levels['zscore_vol'].max() if 'zscore_vol' in df_levels else 0.0),
-                float(df_levels['delta_ratio'].quantile(0.95) if 'delta_ratio' in df_levels else 0.0),
-                float(df_levels['delta'].sum() if 'delta' in df_levels else 0.0),
-                level="debug"
+                float(df_levels["vol"].median() if "vol" in df_levels else 0.0),
+                float(
+                    df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
+                ),
+                float(
+                    df_levels["delta_ratio"].quantile(0.95)
+                    if "delta_ratio" in df_levels
+                    else 0.0
+                ),
+                float(df_levels["delta"].sum() if "delta" in df_levels else 0.0),
+                level="debug",
             )
-                        
+
         except Exception as e:
             self._log_error("snapshot", e, {"window_s": window_s})
             return None, None, None
@@ -699,19 +735,22 @@ class FootprintAnalyzer:
             d2 = detect_imbalance_stacking(df_levels, **stack_kwargs)
             if d2.get("ok"):
                 candidates.append(d2)
-                
+
             else:
                 try:
-                    self.logger.debug(
+                    self._fp_log(
+                        "DETAIL",
                         "[FP-STACK] no trigger | win=%ss | reason=%s | stats={levels:%s, dr_mean:%.3f}",
                         int(window_s),
                         d2.get("reason", "thresholds_not_met"),
                         d2.get("meta", {}).get("levels"),
-                        float(d2.get("meta", {}).get("delta_ratio_mean", 0.0)),
+                        float((d2.get("meta", {}).get("delta_ratio_mean") or 0.0)),
+                        level="debug",
                     )
+
                 except Exception:
                     pass
-  
+
         except Exception as e:
             self._log_error(
                 "stacking_detection", e, {"kwargs": stack_kwargs, "window_s": window_s}
@@ -752,16 +791,15 @@ class FootprintAnalyzer:
                 "NO_CAND",
                 "[FP-NO-CAND] win=%ss | zmax=%.2f dr_p95=%.2f dr_p90=%.2f dr_mean=%.2f vol_med=%.2f dsum=%.2f",
                 int(window_s),
-                float(df_levels['zscore_vol'].max()),
-                float(df_levels['delta_ratio'].quantile(0.95)),
-                float(df_levels['delta_ratio'].quantile(0.90)),
-                float(df_levels['delta_ratio'].mean()),
-                float(df_levels['vol'].median()),
-                float(df_levels['delta'].sum()),
-                level="debug"
+                float(df_levels["zscore_vol"].max()),
+                float(df_levels["delta_ratio"].quantile(0.95)),
+                float(df_levels["delta_ratio"].quantile(0.90)),
+                float(df_levels["delta_ratio"].mean()),
+                float(df_levels["vol"].median()),
+                float(df_levels["delta"].sum()),
+                level="debug",
             )
             return None, meta, window_s
-
 
         # --- boost confiance & sélection ---
         for d in candidates:
@@ -773,37 +811,12 @@ class FootprintAnalyzer:
 
         try:
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
+            return best, meta, window_s
+            
         except Exception:
             pass
+
         
-        # Dernier recours: momentum gate (optionnel)
-        if not best:
-            try:
-                dsum = float(df_levels["delta"].sum())
-                dr_p95 = float(df_levels["delta_ratio"].quantile(0.95))
-                zmax = float(df_levels["zscore_vol"].max())
-                if abs(dsum) > 0 and dr_p95 >= 1.15 and zmax >= 1.0:
-                    direction = "BUY" if dsum > 0 else "SELL"
-                    best = {
-                        "ok": True,
-                        "trigger": "stacking_inline",
-                        "direction": direction,
-                        "confidence": 0.62 if zmax < 1.5 else 0.68,
-                        "anchor_price": float(df_levels.index.values[-1]),
-                        "meta": {
-                            "dsum": dsum,
-                            "dr_p95": dr_p95,
-                            "zmax": zmax,
-                            "fallback": "momentum_gate",
-                        },
-                    }
-            except Exception:
-                pass
-                      
-            return False, {"reason": "no_trigger_detected"}
-
-        return best, meta, window_s
-
     def _build_trigger_response(
         self,
         asset: str,

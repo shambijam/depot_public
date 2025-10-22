@@ -352,6 +352,14 @@
                     "phase0_mult_micro_atr_10s": 0.8,
                     "phase1_drawdown_mult": 1.2,
                     "phase2_drawdown_mult": 2.0
+                },
+                "footprint": {
+                    "enabled_assets": [
+                        "XAUUSD"
+                    ]
+                },
+                "logging": {
+                    "footprint_mode": "soft"
                 }
             }
         }
