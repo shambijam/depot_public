@@ -93,5 +93,19 @@
         "take_profit": {
             "hard_max_points": 200000
         }
-    }
+    },
+    "decision_rules": [
+        {
+            "name": "liquidity_entry",
+            "priority": 1,
+            "conditions": {
+                "min_confidence": 0.25
+            },
+            "order_type": "MARKET",
+            "action_logic": {
+                "BUY": "enter_on_liquidity_signal",
+                "SELL": "enter_on_liquidity_signal"
+            }
+        }
+    ]
 }
