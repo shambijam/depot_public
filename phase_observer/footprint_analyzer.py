@@ -401,7 +401,34 @@ class FootprintAnalyzer:
         self.validator = DataValidator()
         self.normalizer = DatetimeNormalizer()
         self.scorer = ConfidenceScorer()
+        
+    # --- PATCH: soft logging & gating ---
+    def _fp_settings(self, strategy_config):
+        node = (strategy_config or {}).get("logging", {})
+        # modes: off | soft | verbose
+        mode = str(node.get("footprint_mode", "soft")).lower()
+        enabled = set(map(str.upper, (strategy_config or {}).get("footprint", {}).get(
+            "enabled_assets", ["XAUUSD"]
+        )))
+        return mode, enabled
 
+    def _fp_can_log(self, asset_upper: str, tag: str) -> bool:
+        # tag ∈ {"SNAPSHOT","NO_CAND","SUMMARY","DETAIL"}
+        if self._fp_mode == "off":
+            return False
+        # en mode "soft", on ne garde que le résumé final
+        if self._fp_mode == "soft" and tag in {"SNAPSHOT", "NO_CAND", "DETAIL"}:
+            return False
+        # on ne logge que pour les actifs autorisés (par défaut XAUUSD)
+        return asset_upper in self._fp_enabled
+
+    def _fp_log(self, tag: str, fmt: str, *args, level: str = "info"):
+        if not getattr(self, "logger", None):
+            return
+        if not self._fp_can_log(self._asset_upper, tag):
+            return
+        getattr(self.logger, level, self.logger.info)(fmt, *args)
+  
     # ---- public -------------------------------------------------------
 
     def analyze_footprint_triggers(
@@ -411,6 +438,21 @@ class FootprintAnalyzer:
         bars: Optional[pd.DataFrame],
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
+        
+        # --- PATCH: gating & mode ---
+        self._asset_upper = str(asset).upper()
+        # --- FIX-LOG-01: chronométrage et comptage soft des ticks ---
+        t0 = time.perf_counter()
+        try:
+            tick_count_soft = int(len(ticks)) if ticks is not None else 0
+        except Exception:
+            tick_count_soft = 0
+
+        self._fp_mode, self._fp_enabled = self._fp_settings(strategy_config)
+        t0 = time.perf_counter()
+        if self._asset_upper not in self._fp_enabled:
+            return False, {"reason": "TRIG_DISABLED_ASSET", "asset": self._asset_upper}
+
         with self.monitor.measure_phase("total"):
             # 0) pré-traitement feed-agnostic (price/volume)
             ticks = self._ensure_price_volume_columns(ticks)
@@ -581,20 +623,18 @@ class FootprintAnalyzer:
                 else:
                     df_levels["zscore_vol"] = 0.0
 
-            # 5) LOG instantané pour comprendre pourquoi ça ne déclenche pas
-            try:
-                self.logger.info(
-                    "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
-                    int(window_s),
-                    int(len(df_levels)),
-                    float(df_levels['vol'].median() if 'vol' in df_levels else 0.0),
-                    float(df_levels['zscore_vol'].max() if 'zscore_vol' in df_levels else 0.0),
-                    float(df_levels['delta_ratio'].quantile(0.95) if 'delta_ratio' in df_levels else 0.0),
-                    float(df_levels['delta'].sum() if 'delta' in df_levels else 0.0),
-                )
-            except Exception:
-                pass
-
+            # 5) LOG instantané (visible seulement en verbose sur actifs autorisés)
+            self._fp_log(
+                "SNAPSHOT",
+                "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
+                int(window_s),
+                int(len(df_levels)),
+                float(df_levels['vol'].median() if 'vol' in df_levels else 0.0),
+                float(df_levels['zscore_vol'].max() if 'zscore_vol' in df_levels else 0.0),
+                float(df_levels['delta_ratio'].quantile(0.95) if 'delta_ratio' in df_levels else 0.0),
+                float(df_levels['delta'].sum() if 'delta' in df_levels else 0.0),
+                level="debug"
+            )
                         
         except Exception as e:
             self._log_error("snapshot", e, {"window_s": window_s})
@@ -708,20 +748,20 @@ class FootprintAnalyzer:
                     candidates.append(fb2)
 
         if not candidates:
-            try:
-                self.logger.info(
-                    "[FP-NO-CAND] win=%ss | zmax=%.2f dr_p95=%.2f dr_p90=%.2f dr_mean=%.2f vol_med=%.2f dsum=%.2f",
-                    int(window_s),
-                    float(df_levels['zscore_vol'].max()),
-                    float(df_levels['delta_ratio'].quantile(0.95)),
-                    float(df_levels['delta_ratio'].quantile(0.90)),
-                    float(df_levels['delta_ratio'].mean()),
-                    float(df_levels['vol'].median()),
-                    float(df_levels['delta'].sum()),
-                )
-            except Exception:
-                pass
+            self._fp_log(
+                "NO_CAND",
+                "[FP-NO-CAND] win=%ss | zmax=%.2f dr_p95=%.2f dr_p90=%.2f dr_mean=%.2f vol_med=%.2f dsum=%.2f",
+                int(window_s),
+                float(df_levels['zscore_vol'].max()),
+                float(df_levels['delta_ratio'].quantile(0.95)),
+                float(df_levels['delta_ratio'].quantile(0.90)),
+                float(df_levels['delta_ratio'].mean()),
+                float(df_levels['vol'].median()),
+                float(df_levels['delta'].sum()),
+                level="debug"
+            )
             return None, meta, window_s
+
 
         # --- boost confiance & sélection ---
         for d in candidates:
@@ -759,6 +799,8 @@ class FootprintAnalyzer:
                     }
             except Exception:
                 pass
+                      
+            return False, {"reason": "no_trigger_detected"}
 
         return best, meta, window_s
 
