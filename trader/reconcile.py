@@ -12,19 +12,26 @@ from trader.errors import TradeExecutionError
 def reconcile_state_with_broker(self) -> None:
     """
     Réconcilie l'état interne des positions avec le broker (MT5).
-    - Source de vérité: broker; on fusionne pour préserver les métadonnées internes (risque, trailing, tags).
+    - Source de vérité : broker ; on fusionne en préservant les métadonnées internes utiles (ex: basket_id, sizing).
     - Reconstitue le risque initial si manquant (order_calc_profit), sinon 0.0.
-    - Purge les tickets clos; met à jour last_reconciliation_time (UTC).
-    - Applique un trailing si la position le demande et si apply_dynamic_trailing(...) est disponible.
+    - Purge les tickets clos ; met à jour last_reconciliation_time (UTC).
+    - AUCUN trailing appliqué (refonte SL/TP).
     """
+    from datetime import datetime, timezone
+
     # MT5 local via connecteur (pas d'import module global)
     mt5 = getattr(getattr(self, "mt5_connector", None), "mt5", None) or getattr(self, "mt5", None)
     if mt5 is None:
-        self.logger.warning("[RECONCILE] MT5 indisponible → skip.")
+        try:
+            self.logger.warning("[RECONCILE] MT5 indisponible → skip.")
+        except Exception:
+            pass
         return
 
-
-    self.logger.info("Réconciliation des positions avec le broker...")
+    try:
+        self.logger.info("Réconciliation des positions avec le broker...")
+    except Exception:
+        pass
 
     # -------- Helpers sûrs --------
     def _is_connected_safe() -> bool:
@@ -37,9 +44,7 @@ def reconcile_state_with_broker(self) -> None:
     def _reconnect_if_needed():
         try:
             if not _is_connected_safe():
-                rec = getattr(
-                    self.mt5_connector, "reconnect_if_needed", None
-                ) or getattr(self.mt5_connector, "connect", None)
+                rec = getattr(self.mt5_connector, "reconnect_if_needed", None) or getattr(self.mt5_connector, "connect", None)
                 if callable(rec):
                     rec()
         except Exception:
@@ -55,19 +60,10 @@ def reconcile_state_with_broker(self) -> None:
                 pass
         # extraction tolérante par attributs fréquents
         fields = (
-            "ticket",
-            "symbol",
-            "type",
-            "volume",
-            "price_open",
-            "price_current",
-            "profit",
-            "sl",
-            "tp",
-            "magic",
-            "comment",
-            "time",
-            "time_msc",
+            "ticket", "symbol", "type", "volume",
+            "price_open", "price_current", "profit",
+            "sl", "tp", "magic", "comment",
+            "time", "time_msc",
         )
         d = {}
         for f in fields:
@@ -81,15 +77,21 @@ def reconcile_state_with_broker(self) -> None:
             if pos:
                 return [_pos_to_dict(x) for x in pos]
         except Exception as e:
-            self.logger.warning(f"[RECONCILE] get_positions wrapper KO: {e}")
+            try:
+                self.logger.warning(f"[RECONCILE] get_positions wrapper KO: {e}")
+            except Exception:
+                pass
         # fallback MT5 brut
         try:
-            mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
-            if mt5:
-                pos = mt5.positions_get()
+            mt5_local = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
+            if mt5_local:
+                pos = mt5_local.positions_get()
                 return [_pos_to_dict(x) for x in (pos or [])]
         except Exception as e:
-            self.logger.error(f"[RECONCILE] mt5.positions_get KO: {e}")
+            try:
+                self.logger.error(f"[RECONCILE] mt5.positions_get KO: {e}")
+            except Exception:
+                pass
         return []
 
     def _estimate_initial_risk_usd(pos: dict) -> float:
@@ -98,8 +100,8 @@ def reconcile_state_with_broker(self) -> None:
         Retourne 0.0 si non calculable.
         """
         try:
-            mt5 = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
-            if not mt5:
+            mt5_local = getattr(self.mt5_connector, "mt5", None) or getattr(self, "mt5", None)
+            if not mt5_local:
                 return 0.0
             vol = float(pos.get("volume") or 0.0)
             entry = float(pos.get("price_open") or pos.get("entry_price") or 0.0)
@@ -108,14 +110,8 @@ def reconcile_state_with_broker(self) -> None:
             if vol <= 0 or entry <= 0 or sl <= 0:
                 return 0.0
             # type position = 0 BUY / 1 SELL en MT5
-            order_type = (
-                getattr(mt5, "ORDER_TYPE_BUY", 0)
-                if typ == 0
-                else getattr(mt5, "ORDER_TYPE_SELL", 1)
-            )
-            profit = mt5.order_calc_profit(
-                order_type, str(pos.get("symbol")), vol, entry, sl
-            )
+            order_type = (getattr(mt5_local, "ORDER_TYPE_BUY", 0) if typ == 0 else getattr(mt5_local, "ORDER_TYPE_SELL", 1))
+            profit = mt5_local.order_calc_profit(order_type, str(pos.get("symbol")), vol, entry, sl)
             # Certaines builds renvoient tuple (retcode, value). Tolérance:
             if isinstance(profit, (tuple, list)) and len(profit) >= 2:
                 profit = profit[1]
@@ -137,76 +133,67 @@ def reconcile_state_with_broker(self) -> None:
 
     def _merge_internal(broker_pos: dict, internal_pos: dict | None) -> dict:
         """
-        Fusionne en privilégiant:
-        - Données volatiles du broker: price_current, profit, sl, tp, comment
-        - Métadonnées internes: initial_risk_usd, trailing flags/params, basket tags, etc.
+        Fusionne en privilégiant :
+        - Données volatiles broker : price_current, profit, sl, tp, comment
+        - Métadonnées internes : initial_risk_usd, basket_id, sizing, tags, etc.
         """
         base = dict(internal_pos or {})
-        base.update(
-            {  # valeurs fraîches broker
-                "ticket": broker_pos.get("ticket"),
-                "symbol": broker_pos.get("symbol"),
-                "type": broker_pos.get("type"),
-                "volume": broker_pos.get("volume"),
-                "entry_price": broker_pos.get("price_open"),
-                "current_price": broker_pos.get("price_current"),
-                "profit": broker_pos.get("profit"),
-                "sl": broker_pos.get("sl"),
-                "tp": broker_pos.get("tp"),
-                "magic": broker_pos.get("magic"),
-                "comment": broker_pos.get("comment"),
-                "open_time": _safe_dt(broker_pos.get("time")),
-            }
-        )
-        # initial_risk_usd: préserver s'il existe, sinon essayer de le (re)calculer
-        if (
-            not isinstance(base.get("initial_risk_usd"), (int, float))
-            or base["initial_risk_usd"] <= 0
-        ):
+        base.update({  # valeurs fraîches broker
+            "ticket": broker_pos.get("ticket"),
+            "symbol": broker_pos.get("symbol"),
+            "type": broker_pos.get("type"),
+            "volume": broker_pos.get("volume"),
+            "entry_price": broker_pos.get("price_open"),
+            "current_price": broker_pos.get("price_current"),
+            "profit": broker_pos.get("profit"),
+            "sl": broker_pos.get("sl"),
+            "tp": broker_pos.get("tp"),
+            "magic": broker_pos.get("magic"),
+            "comment": broker_pos.get("comment"),
+            "open_time": _safe_dt(broker_pos.get("time")),
+        })
+        # initial_risk_usd : préserver s'il existe, sinon essayer de le (re)calculer
+        if not isinstance(base.get("initial_risk_usd"), (int, float)) or base["initial_risk_usd"] <= 0:
             base["initial_risk_usd"] = _estimate_initial_risk_usd(base)
-
-        # placeholders/compat
-        base.setdefault("use_trailing", base.get("use_trailing", False))
-        base.setdefault("trailing_params", base.get("trailing_params", {}))
-        base.setdefault("sl_pips", base.get("sl_pips", None))
-        base.setdefault("atr_pips", base.get("atr_pips", None))
         return base
 
     # -------- Ensure connection then pull broker state --------
     if not _is_connected_safe():
-        self.logger.warning(
-            "MT5 non connecté pour la réconciliation — tentative de reconnexion..."
-        )
+        try:
+            self.logger.warning("MT5 non connecté pour la réconciliation — tentative de reconnexion...")
+        except Exception:
+            pass
         _reconnect_if_needed()
     if not _is_connected_safe():
-        self.logger.error("MT5 toujours non connecté — abandon de la réconciliation.")
+        try:
+            self.logger.error("MT5 toujours non connecté — abandon de la réconciliation.")
+        except Exception:
+            pass
         return
 
     try:
         broker_positions = _get_positions()
         if broker_positions is None:
-            self.logger.error("Impossible d'obtenir les positions broker (None).")
+            try:
+                self.logger.error("Impossible d'obtenir les positions broker (None).")
+            except Exception:
+                pass
             return
 
-        if not hasattr(self, "_open_positions") or not isinstance(
-            self._open_positions, dict
-        ):
+        if not hasattr(self, "_open_positions") or not isinstance(self._open_positions, dict):
             self._open_positions = {}
 
-        broker_map = {
-            int(p.get("ticket")): p
-            for p in broker_positions
-            if p.get("ticket") is not None
-        }
+        broker_map = {int(p.get("ticket")): p for p in broker_positions if p.get("ticket") is not None}
         reconciled: dict[int, dict] = {}
 
         # 1) maj/fusion pour chaque position broker
         for ticket, bpos in broker_map.items():
             ipos = self._open_positions.get(ticket)
             if ipos is None:
-                self.logger.warning(
-                    f"[RECONCILE] Position #{ticket} ({bpos.get('symbol')}) vue broker mais absente en interne → ajout."
-                )
+                try:
+                    self.logger.warning(f"[RECONCILE] Position #{ticket} ({bpos.get('symbol')}) vue broker mais absente en interne → ajout.")
+                except Exception:
+                    pass
             merged = _merge_internal(bpos, ipos)
             reconciled[ticket] = merged
 
@@ -217,57 +204,26 @@ def reconcile_state_with_broker(self) -> None:
                 sym = self._open_positions[tk].get("symbol")
             except Exception:
                 sym = "?"
-            self.logger.info(
-                f"[RECONCILE] Ticket #{tk} ({sym}) introuvable broker → purge interne."
-            )
+            try:
+                self.logger.info(f"[RECONCILE] Ticket #{tk} ({sym}) introuvable broker → purge interne.")
+            except Exception:
+                pass
 
         # 3) swap atomique + horodatage
         self._open_positions = reconciled
         self._last_reconciliation_time = datetime.now(timezone.utc)
-        self.logger.info(
-            f"Réconciliation OK — {len(self._open_positions)} position(s) actives synchronisées."
-        )
+        try:
+            self.logger.info(f"Réconciliation OK — {len(self._open_positions)} position(s) actives synchronisées.")
+        except Exception:
+            pass
 
-        # 4) Trailing auto si demandé et si la méthode existe
-        if hasattr(self, "apply_dynamic_trailing") and callable(
-            getattr(self, "apply_dynamic_trailing")
-        ):
-            for tk, pos in self._open_positions.items():
-                try:
-                    if pos.get("use_trailing"):
-                        params = pos.get("trailing_params", {}) or {}
-                        trigger_pips = float(params.get("trigger_pips", 15.0))
-                        step_pips = float(params.get("step_pips", 5.0))
-                        self.apply_dynamic_trailing(
-                            ticket=tk,
-                            sl_pips=trigger_pips,
-                            atr_pips=step_pips,
-                            symbol=pos.get("symbol"),
-                        )
-                    else:
-                        # fallback technique (optionnel mais sûr)
-                        sl_pips = float(pos.get("sl_pips", 6.0) or 6.0)
-                        atr_pips = float(pos.get("atr_pips", 3.0) or 3.0)
-                        self.logger.info(
-                            f"[SAFE TRAILING] #{tk} ({pos.get('symbol')}) sans params explicites → trigger={sl_pips}p, step={atr_pips}p"
-                        )
-                        self.apply_dynamic_trailing(
-                            ticket=tk,
-                            sl_pips=sl_pips,
-                            atr_pips=atr_pips,
-                            symbol=pos.get("symbol"),
-                        )
-                except Exception as e:
-                    self.logger.warning(
-                        f"[RECONCILE] Trailing non appliqué sur #{tk}: {e}"
-                    )
-        else:
-            self.logger.debug(
-                "[RECONCILE] apply_dynamic_trailing indisponible — étape ignorée."
-            )
+        # 4) Trailing auto (SUPPRIMÉ dans la refonte SL/TP) — no-op
 
     except Exception as e:
-        self.logger.error(f"Échec réconciliation: {e}", exc_info=True)
+        try:
+            self.logger.error(f"Échec réconciliation: {e}", exc_info=True)
+        except Exception:
+            pass
         try:
             # alerte tolérante si config_manager expose l’envoi d’alertes
             if hasattr(self, "config_manager"):
@@ -276,6 +232,7 @@ def reconcile_state_with_broker(self) -> None:
                     send("Réconciliation Échec", f"{e}", "telegram_critical")
         except Exception:
             pass
+        return
 
 
 def _update_internal_position_state(self, mt5_result: Any, initial_risk: float) -> None:

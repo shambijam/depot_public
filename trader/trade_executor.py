@@ -19,15 +19,18 @@ from trader.errors import TradeExecutionError
 from trader.order_builder import prepare_order, _build_mt5_request
 from trader.sizing import _calculate_risk_based_volume
 from trader.sltp import _calculate_sl_tp_prices, _normalize_stops, _split_multi_tp_orders
-from trader.burst import monitor_burst_baskets  # gardé pour la surveillance post-trade
+from trader.burst import monitor_burst_baskets  
 from trader.reconcile import (
-    _update_internal_position_state,
     reconcile_state_with_broker,
-    approve_pending_order,
-    manual_override_if_needed,
-    execute_exit_orders,
-    monitor_pending_orders,
+    _update_internal_position_state,
 )
+
+# Ces deux fonctions viennent de validators (pas de reconcile)
+from trader.validators import (
+    manual_override_if_needed,
+    approve_pending_order,
+)
+
 from trader.audit import _log_audit_trail, _mark_trade_sent, generate_report
 
 
@@ -328,19 +331,14 @@ TradeExecutor._load_settings = _update_internal_position_state.__globals__.get("
 TradeExecutor.prepare_order = prepare_order
 TradeExecutor._build_mt5_request = _build_mt5_request
 TradeExecutor._split_multi_tp_orders = _split_multi_tp_orders
-
 TradeExecutor._calculate_risk_based_volume = _calculate_risk_based_volume
 TradeExecutor._calculate_sl_tp_prices = _calculate_sl_tp_prices
 TradeExecutor._normalize_stops = _normalize_stops
 TradeExecutor.monitor_burst_baskets = monitor_burst_baskets
-
 TradeExecutor._update_internal_position_state = _update_internal_position_state
 TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
 TradeExecutor.approve_pending_order = approve_pending_order
 TradeExecutor.manual_override_if_needed = manual_override_if_needed
-TradeExecutor.execute_exit_orders = execute_exit_orders
-TradeExecutor.monitor_pending_orders = monitor_pending_orders
-
 TradeExecutor._log_audit_trail = _log_audit_trail
 TradeExecutor._mark_trade_sent = _mark_trade_sent
 TradeExecutor.generate_report = generate_report
