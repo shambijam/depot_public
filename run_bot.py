@@ -1071,24 +1071,22 @@ def run_single_pipeline_cycle(
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
-        # === [BURST EXIT MANAGEMENT] Fermer les paniers avant toute nouvelle décision ===
+        # === [BURST EXIT MANAGEMENT] Fermer les paniers (SL/TP only — zéro trailing)
         try:
-            burst_cfg = (
+            closure_cfg = (
                 base_config.get("entry_rules", {})
                 .get("scalping", {})
                 .get("burst_scalping", {})
+                .get("closure_rules", {})
                 or {}
             )
-            trail_cfg = burst_cfg.get("trailing", {}) or {}
-            closure_cfg = burst_cfg.get("closure_rules", {}) or {}
-
-            # 2) Monitoring collectif (perte max + trailing collectif)
             trade_executor.monitor_burst_baskets(
                 config=base_config,
                 max_loss_pips=float(closure_cfg.get("max_loss_pips", 15.0)),
-                trail_trigger=float(trail_cfg.get("trigger_pips", 10.0)),
-                trail_step=float(trail_cfg.get("step_pips", 5.0)),
             )
+        except Exception as e:
+            logger.warning(f"[BURST EXIT] Contrôle fermeture panier (SLTP): {e}")
+
         except Exception as e:
             logger.warning(f"[BURST EXIT] Contrôle fermeture panier: {e}")
 
@@ -1314,128 +1312,126 @@ def run_single_pipeline_cycle(
                 if side not in {"BUY", "SELL"}:
                     logger.debug(f"[SCALPING] décision ignorée (side invalide): {td}")
                     continue
+                # 🔒 Normalisation multi-clés pour compat SLTP / order_builder
+                td["action"] = side              # clé standard
+                td["side"] = side                # compat éventuelle
+                td["order_action"] = side        # compat héritée (si sltp.py la lit)
 
-                # 🔧 Standardiser le rule_name + activer trailing/No-TP pour burst
-                try:
+
+            # 🔧 BLOC BURST (refacto SLTP) — standardisation + sizing + exécution (sans `continue`)
+            try:
+                # 1) Normaliser l'action pour le moteur SLTP
+                side = str(td.get("action") or td.get("side") or td.get("order_action") or "").upper().strip()
+                valid_side = side in {"BUY", "SELL"}
+                td["action"] = side
+                td["side"] = side
+                td["order_action"] = side
+
+                if not valid_side:
+                    logger.debug(f"[SCALPING] décision ignorée (side invalide): {td}")
+                else:
+                    # Symbole pour logs/config
+                    sym = str(td.get("asset") or td.get("symbol") or "").upper()
+
+                    # 2) Normaliser le rule_name (aliases → 'burst_scalping')
                     _alias = str(td.get("rule_name", "")).lower().strip()
-                    if _alias in {
-                        "burst",
-                        "burst_master",
-                        "scalping_burst",
-                        "burst_single_master",
-                        "burst_single",
-                        "",
-                    }:
+                    if _alias in {"burst", "burst_master", "scalping_burst", "burst_single_master", "burst_single", ""}:
                         td["rule_name"] = "burst_scalping"
 
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
+                    # 3) Purge TP/Trailing & injection SLTP (aucun trailing ici)
                     if rn == "burst_scalping":
-                        # on supprime tout TP (burst = trailing only)
-                        for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices"):
+                        # Retirer tout TP/trailing codé dans la décision
+                        for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices", "trailing"):
                             td.pop(k, None)
-                        td["no_tp"] = True
 
-                        # trailing par défaut si activé en config
-                        trailing_cfg = (
-                            (td.get("trailing") or {}) if td.get("trailing") else {}
-                        ) or (
+                        # Laisser le moteur SLTP calculer SL/TP (TP autorisé)
+                        td["no_tp"] = False
+
+                        # Config SLTP: priorité asset_config > prod_config
+                        sltp_cfg = (
                             (global_context.get("asset_configs", {}) or {})
-                            .get(td.get("asset", ""), {})
+                            .get(sym, {})
                             .get("entry_rules", {})
                             .get("scalping", {})
                             .get("burst_scalping", {})
-                            .get("trailing", {})
-                            or {}
+                            .get("sltp", {})
                         )
-                        if trailing_cfg.get("enabled", True):
-                            td["trailing"] = {
-                                "enabled": True,
-                                "activate_after_rr": float(trailing_cfg.get("activate_after_rr", 1.0)),
-                                "step_pips": float(trailing_cfg.get("step_pips", 5)),
-                            }
-                except Exception:
-                    pass
+                        if not sltp_cfg:
+                            sltp_cfg = (
+                                base_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("sltp", {})
+                                or {}
+                            )
+                        if sltp_cfg:
+                            td["sltp"] = sltp_cfg
 
-              
-                try:
-                    conf_burst = (
-                        base_config.get("entry_rules", {})
-                        .get("scalping", {})
-                        .get("burst_single_master", {})
-                        or {}
-                    ).get("burst_size")
-                except Exception:
-                    conf_burst = None
-                if not conf_burst:
+                    # 4) Résoudre burst_size (décision > conf.burst_single_master > conf.burst_scalping > 1)
                     try:
                         conf_burst = (
                             base_config.get("entry_rules", {})
                             .get("scalping", {})
-                            .get("burst_scalping", {})
+                            .get("burst_single_master", {})
                             or {}
                         ).get("burst_size")
                     except Exception:
                         conf_burst = None
+                    if not conf_burst:
+                        try:
+                            conf_burst = (
+                                base_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                or {}
+                            ).get("burst_size")
+                        except Exception:
+                            conf_burst = None
 
-                resolved_burst = int(
-                    td.get("burst_size") or td.get("burst_count") or conf_burst or 1
-                )
-                if resolved_burst < 1:
-                    resolved_burst = 1
+                    resolved_burst = int(td.get("burst_size") or td.get("burst_count") or conf_burst or 1)
+                    if resolved_burst < 1:
+                        resolved_burst = 1
 
-                # ✅ On prépare une décision "MARKET burst" pour le pipeline d'exécution
-                td.pop("burst_volume_each", None)  # on ne fige pas le lot par enfant
-                td.pop("entry_style", None)  # on supprime LIMIT_FOK hérité
-                td["burst_size"] = int(resolved_burst)
-                td["sizing_scope"] = (
-                    "BASKET"  # calcule lot = risk% / burst_size côté sizing
-                )
-                td["no_tp"] = True  # trailing only
-                # (SL et trailing seront imposés dans l'exécuteur selon la conf/SLTP)
+                    # 5) Standardiser l'ordre pour l'exécuteur
+                    td.pop("burst_volume_each", None)        # lot calculé via risk% / burst_size
+                    td.pop("entry_style", None)              # on standardise par order_type
+                    td["burst_size"] = resolved_burst
+                    td["sizing_scope"] = "BASKET"            # risk% réparti sur le panier
+                    td.setdefault("order_type", "MARKET")    # exécution MARKET
 
-                sym = str(td.get("asset") or td.get("symbol") or "").upper()
+                    logger.info(f"[BURST][PLAN] {side} {sym} style=MARKET burst_size={resolved_burst} (lot via risk%/burst)")
 
-                logger.info(
-                    f"[BURST][PLAN] {side} {sym} style=MARKET burst_size={resolved_burst} (lot via risk%/burst)"
-                )
+                    # 6) Exécuter (MARKET single-master burst, SL/TP par moteur SLTP)
+                    decision_pkg = {
+                        "final_decision": td,
+                        "context": global_context,
+                        "active_config": base_config,
+                    }
+                    res = run_trade_execution_pipeline(trade_executor, decision_pkg, is_dry_run=is_dry_run)
+                    status = (res or {}).get("status", "")
+                    if status not in {"failed", ""}:
+                        trade_executed_successfully = True
 
-                # 🛠️ Déléguer entièrement à l'exécuteur (MARKET single-master burst)
-                decision_pkg = {
-                    "final_decision": td,
-                    "context": global_context,
-                    "active_config": base_config,
-                }
-                res = run_trade_execution_pipeline(
-                    trade_executor, decision_pkg, is_dry_run=is_dry_run
-                )
-                status = (res or {}).get("status", "")
-                if status not in {"failed", ""}:
-                    trade_executed_successfully = True
+                    # 7) Post-exec: sécurité paniers (pas de trailing params ici)
                     try:
-                        tr_cfg = (
-                            base_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            .get("trailing", {})
-                            or {}
+                        max_loss = float(
+                            (
+                                base_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("closure_rules", {})
+                                or {}
+                            ).get("max_loss_pips", 15.0)
                         )
-                        trade_executor.monitor_burst_baskets(
-                            config=base_config,
-                            max_loss_pips=float(
-                                (
-                                    base_config.get("entry_rules", {})
-                                    .get("scalping", {})
-                                    .get("burst_scalping", {})
-                                    .get("closure_rules", {})
-                                    or {}
-                                ).get("max_loss_pips", 15.0)
-                            ),
-                            trail_trigger=float(tr_cfg.get("trigger_pips", 10.0)),
-                            trail_step=float(tr_cfg.get("step_pips", 5.0)),
-                        )
+                        trade_executor.monitor_burst_baskets(config=base_config, max_loss_pips=max_loss)
                     except Exception as e:
-                        logger.warning(f"[BURST EXIT] Post-exec trailing setup: {e}")
+                        logger.warning(f"[BURST EXIT] Post-exec (SLTP): {e}")
+
+            except Exception as e:
+                logger.error(f"[BURST] bloc SLTP error: {e}", exc_info=True)
+
 
         # --- Exécution Liquidity ---
         if liquidity_decisions:
