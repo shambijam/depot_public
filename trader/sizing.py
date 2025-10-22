@@ -1,7 +1,7 @@
 # trader/sizing.py - Module de Dimensionnement des Positions pour le Bot SNIPER_X
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import math
 
 from trader.errors import TradeExecutionError
@@ -123,16 +123,6 @@ def compute_lot_from_risk(
                 return 0.0
 
     return round(min(max(lots_q, vmin), vmax), decimals)
-
-
-# trader/sizing.py - Module de Dimensionnement des Positions pour le Bot SNIPER_X
-from __future__ import annotations
-
-from typing import Any, Dict, Optional
-import math
-
-from trader.errors import TradeExecutionError
-
 
 # ------------------------------------------------------------
 # Utilitaires internes
