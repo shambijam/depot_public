@@ -629,16 +629,12 @@ def prepare_order(self, decision_package: dict) -> dict:
             if is_burst:
                 sizing_scope = "BASKET"
 
-            # --- [SIZING] Résolution robuste de l'équité du compte (évite 'Équité du compte invalide') ---
+            # --- [SIZING] Résolution robuste de l'équité du compte ---
             account_ctx = market_context.get("active_broker_account") or {}
             equity_val = account_ctx.get("equity")
-
-            # 1) Chemins alternatifs connus
             if equity_val is None or equity_val == "":
                 equity_val = ((account_ctx.get("account_info") or {}).get("equity")
                             or (account_ctx.get("info") or {}).get("equity"))
-
-            # 2) lecture MT5 si dispo
             if equity_val is None or equity_val == "":
                 try:
                     ai = self.mt5_connector.get_account_info()
@@ -648,16 +644,11 @@ def prepare_order(self, decision_package: dict) -> dict:
                 except Exception as e:
                     self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
 
-            # 3) fallback conf (utile en dry-run/backtest)
             if equity_val is None or equity_val == "":
-                try:
-                    equity_val = self.config_manager.get("risk_management.default_equity")
-                    if equity_val not in (None, ""):
-                        self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
-                except Exception:
-                    equity_val = None
+                equity_val = self.config_manager.get("risk_management.default_equity")
+                if equity_val not in (None, ""):
+                    self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
 
-            # 4) validation finale et injection dans le contexte
             def _as_pos_float(x):
                 try:
                     if isinstance(x, str):
@@ -674,7 +665,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                     "Renseigne market_context.active_broker_account.equity, ou configure risk_management.default_equity."
                 )
 
-            # MàJ du contexte pour que sizing.py récupère une valeur valide
             account_ctx["equity"] = equity_val
             ai = account_ctx.get("account_info") or {}
             ai["equity"] = equity_val
@@ -689,6 +679,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 "equity": equity_val,
             }
 
+            # --- Résolution du volume en fonction du sizing et de l'équité ---
             volume_final = float(
                 _sizing_risk_volume(
                     self,
@@ -715,15 +706,34 @@ def prepare_order(self, decision_package: dict) -> dict:
                 f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → lot/ticket={volume_final}"
             )
 
-        # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
-        vol_before_norm = volume_final
-        volume_final = _normalize_volume(symbol_info, volume_final)
-        self.logger.info(
-            f"[VOLUME] normalisation symbole: avant={vol_before_norm} → après={volume_final} "
-            f"(min={getattr(symbol_info,'volume_min',None)}, step={getattr(symbol_info,'volume_step',None)}, max={getattr(symbol_info,'volume_max',None)})"
-        )
-        if volume_final <= 0:
-            raise TradeExecutionError(f"Volume final invalide après normalisation ({volume_final}).")
+            # Si volume final calculé est valide, continue
+            if volume_final <= 0:
+                raise TradeExecutionError(f"Volume final invalide après normalisation ({volume_final}).")
+
+            # Passer à la préparation de la requête MT5 avec volume final
+            return self._build_mt5_request(
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": "MARKET",  # master MARKET; split géré en aval
+                    "rule_name": trade_decision.get("rule_name"),
+                    "comment": trade_decision.get("comment"),
+                    "meta_rr_projected": trade_decision.get("meta_rr_projected")
+                    or trade_decision.get("rr")
+                    or trade_decision.get("rr_effective"),
+                    "basket_id": trade_decision.get("basket_id"),
+                    "time_in_force": trade_decision.get("time_in_force"),
+                },
+                active_config,
+                volume_final,
+                entry_price_market,
+                sl_price,
+                tp_price,
+                symbol_info,
+                trigger_price,
+                "MARKET",
+            )
+
 
         # ---------- 9b) Sécurités volume (fat-finger / caps) ----------
         try:
