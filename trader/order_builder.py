@@ -11,12 +11,10 @@ from trader.sizing import _calculate_risk_based_volume as _sizing_risk_volume
 from trader.sltp import resolve_side
 
 
-
 def prepare_order(self, decision_package: dict) -> dict:
     """
     Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
-    Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide
-    avant toute requête MT5.
+    Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide avant toute requête MT5.
 
     ✅ Décision unique du volume
     - Le volume est TOUJOURS calculé via `_calculate_risk_based_volume(...)`.
@@ -38,15 +36,6 @@ def prepare_order(self, decision_package: dict) -> dict:
     trade_decision = (decision_package or {}).get("trade_decision", {}) or {}
     market_context = (decision_package or {}).get("market_context", {}) or {}
     active_config = (decision_package or {}).get("active_config", {}) or {}
-
-    # --- Raccourcis locaux (garde-fous) ---
-    trade_decision = decision_package.get("trade_decision", {}) or {}
-    active_config = (
-        decision_package.get("active_config")
-        or decision_package.get("config_used")
-        or {}
-    )
-    market_context = decision_package.get("market_context", {}) or {}
 
     # ---------- Helpers internes ----------
     def _first_non_empty(*vals):
@@ -94,8 +83,6 @@ def prepare_order(self, decision_package: dict) -> dict:
         return round(vol, 8)
 
     # ---------- 1) Action ----------
-    # On cherche d'abord dans trade_decision (format normal),
-    # puis on tolère d'autres structures (final_decision, paquet top-level).
     final_decision = {}
     try:
         if isinstance(decision_package, dict):
@@ -106,15 +93,6 @@ def prepare_order(self, decision_package: dict) -> dict:
             ) or {}
     except Exception:
         final_decision = {}
-
-    def _resolve_key(dct: dict, *names: str) -> Optional[str]:
-        if not isinstance(dct, dict):
-            return None
-        for n in names:
-            v = dct.get(n)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        return None
 
     action_raw = (
         _resolve_key(
@@ -163,8 +141,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             f"Action de trade invalide: '{action_raw}' (attendu: BUY/SELL/CLOSE)."
         )
 
-
-       # ---------- 2) Asset ----------
+    # ---------- 2) Asset ----------
     raw_symbol = (
         _first_non_empty(
             trade_decision.get("asset"),
@@ -205,25 +182,6 @@ def prepare_order(self, decision_package: dict) -> dict:
         msg = f"Mapping broker invalide pour l'asset '{raw_symbol}' (résultat: '{broker_symbol}')."
         self.logger.error(msg)
         raise TradeExecutionError(msg)
-
-    # ---------- 3bis) Fenêtre/Calendrier de trading ----------
-    try:
-        tes = self.config_manager.get("trade_executor_settings", {}) or {}
-        start_h = int(tes.get("trading_start_hour_utc", 0))
-        end_h = int(tes.get("trading_end_hour_utc", 24))
-        allowed_wd = set(tes.get("allowed_weekdays", list(range(7))))
-    except Exception:
-        start_h, end_h, allowed_wd = 0, 24, set(range(7))
-
-    now_utc = datetime.utcnow()
-    if now_utc.weekday() not in allowed_wd:
-        raise TradeExecutionError(
-            f"Jour non autorisé pour trader (weekday={now_utc.weekday()})."
-        )
-    if not (start_h <= now_utc.hour < end_h):
-        raise TradeExecutionError(
-            f"Hors fenêtre horaire UTC ({start_h:02d}-{end_h:02d})."
-        )
 
     # ---------- [BURST GUARDRAILS] ----------
     try:
@@ -367,7 +325,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             else:
                 trigger_price = entry_price_market
 
-        # --- Résolution `burst_size` (decision -> conf -> défaut) ---
+        # Résolution `burst_size` (decision -> conf -> défaut)
         def _resolve_burst_size(fd: dict, cfg: dict) -> int:
             try:
                 v = fd.get("burst_count") or fd.get("burst_size")
@@ -409,9 +367,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # Hints explicites pour le sizing/exécution burst (idempotents)
         if trade_decision.get("rule_name") == "burst_scalping":
-            # sizing panier (risk% / burst_size) même si l'appelant ne l’a pas mis
             trade_decision.setdefault("sizing_scope", "BASKET")
-            # intention MARKET pour le master (le split est géré ailleurs)
             trade_decision.setdefault("order_type", "MARKET")
 
         rule_name_local = str(trade_decision.get("rule_name", "")).lower()
@@ -419,24 +375,20 @@ def prepare_order(self, decision_package: dict) -> dict:
         
         # --- PATCH A: normaliser et injecter l'action pour SL/TP ---
         try:
-            # utilise le résolveur robuste (aliases, nested, etc.)
             side = resolve_side(
                 trade_decision or final_decision or decision_package
             )  # → 'BUY' / 'SELL'
         except Exception as e:
-            # fallback: on tente l'action déjà normalisée localement
             side = action if isinstance(action, str) and action in ("BUY", "SELL") else ""
             if not side:
                 self.logger.error(f"[ORDER_BUILDER] Action non résolue avant SL/TP: {e}")
                 raise
 
-        # ✅ injecte explicitement l'action pour que sltp._calculate_sl_tp_prices n'échoue pas
         trade_decision["action"] = side
         trade_decision["final_action"] = side
         self.logger.debug(f"[ORDER_BUILDER] Action normalisée pour SL/TP: {side}")
              
         # ---------- 7bis) SL/TP ----------
-        # Nouveau: en burst, SL **et** TP sont calculés/attendus (plus de trailing-only)
         sl_price, tp_price = self._calculate_sl_tp_prices(
             trade_decision,
             active_config,
@@ -531,107 +483,136 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         # ---------- 8bis) RR minimum (soft, si TP présent) ----------
         try:
-            min_rr = float(self.config_manager.get("risk_management.min_rr", 0) or 0.0)
+            # Permet un override éventuel côté décision/config (ex: "min_rr_hint")
+            rm_cfg = (self.config_manager.get("risk_management") or {})
+            min_rr_cfg = rm_cfg.get("min_rr", 0) or 0.0
+            min_rr_hint = (
+                trade_decision.get("min_rr_hint")
+                or trade_decision.get("rr_min_hint")
+                or ((active_config.get("risk_management") or {}).get("min_rr_hint"))
+            )
+            def _f(x):
+                try:
+                    return float(str(x).replace(",", "."))
+                except Exception:
+                    return None
+            min_rr = _f(min_rr_hint)
+            if min_rr is None:
+                min_rr = _f(min_rr_cfg) or 0.0
         except Exception:
             min_rr = 0.0
+
         rr_value = None
-        if min_rr > 0.0 and tp_price is not None:
+        if tp_price is not None:
+            eps = 1e-9
             if action == "BUY":
                 risk = max(entry_price_market - sl_price, 0.0)
                 reward = max(tp_price - entry_price_market, 0.0)
-            else:
+            else:  # SELL
                 risk = max(sl_price - entry_price_market, 0.0)
                 reward = max(entry_price_market - tp_price, 0.0)
-            rr_value = (reward / risk) if risk > 0 else 0.0
-            if risk <= 0.0 or reward <= 0.0:
+
+            if risk <= eps or reward <= eps:
+                rr_value = 0.0
                 self.logger.warning(
                     f"⚠️ RR invalide (risk={risk:.6f}, reward={reward:.6f}) → accepté (permissif)."
                 )
-            elif rr_value < min_rr:
-                self.logger.info(
-                    f"ℹ️ RR insuffisant {rr_value:.2f} < min {min_rr:.2f} → accepté (permissif)."
+            else:
+                rr_value = reward / risk
+                self.logger.debug(
+                    f"[RR] effectif={rr_value:.3f} (risk={risk:.6f}, reward={reward:.6f}, min={float(min_rr):.3f})"
                 )
-            # ---------- 9) Volume via sizing risk-based ----------
-            account_trade_settings = (
-                market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
+                if float(min_rr) > 0.0 and rr_value < float(min_rr):
+                    self.logger.info(
+                        f"ℹ️ RR insuffisant {rr_value:.2f} < min {float(min_rr):.2f} → accepté (permissif)."
+                    )
+
+            # Expose l'info pour l’aval/audit/telemetry
+            trade_decision["rr_effective"] = rr_value
+        else:
+            self.logger.debug("[RR] TP absent → RR non évalué (soft).")
+
+           # ---------- 9) Volume via sizing risk-based ----------
+        account_trade_settings = (
+            market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
+        )
+
+        def _to_float(x):
+            try:
+                if isinstance(x, str):
+                    xs = x.strip().replace("%", "").replace(",", ".")
+                    return float(xs)
+                return float(x)
+            except Exception:
+                return None
+
+        def _cascade(*vals) -> float:
+            for v in vals:
+                f = _to_float(v)
+                if f is not None and f > 0:
+                    return f
+            return 0.0
+
+        # 🔎 NEW: on cascade plusieurs sources pour trouver un risk% > 0
+        resolved_risk_pct = _cascade(
+            account_trade_settings.get("risk_per_trade_percent"),
+            trade_decision.get("risk_per_trade_percent"),
+            trade_decision.get("risk_pct"),
+            (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
+            (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
+            self.config_manager.get("risk_management.risk_per_trade_percent"),
+            self.config_manager.get("risk_management.default_risk_per_trade_percent"),
+        )
+
+        if resolved_risk_pct <= 0 or not sl_price or sl_price <= 0:
+            self.logger.error(
+                "[SIZING] risk_per_trade_percent introuvable (>0 requis). "
+                f"sources: account={account_trade_settings.get('risk_per_trade_percent')}, "
+                f"decision={trade_decision.get('risk_per_trade_percent') or trade_decision.get('risk_pct')}, "
+                f"active.sizing={(active_config.get('sizing',{}) or {}).get('risk_per_trade_percent')}, "
+                f"active.rm={(active_config.get('risk_management',{}) or {}).get('risk_per_trade_percent')}, "
+                f"global.rm={self.config_manager.get('risk_management.risk_per_trade_percent')}"
+            )
+            raise TradeExecutionError(
+                f"Risk sizing impossible: risk%={resolved_risk_pct}, sl_price={sl_price}"
             )
 
-            def _to_float(x):
-                try:
-                    if isinstance(x, str):
-                        xs = x.strip().replace("%", "").replace(",", ".")
-                        return float(xs)
-                    return float(x)
-                except Exception:
-                    return None
+        # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
+        sizing_scope = trade_decision.get("sizing_scope")
+        if is_burst:
+            sizing_scope = "BASKET"
 
-            def _cascade(*vals) -> float:
-                for v in vals:
-                    f = _to_float(v)
-                    if f is not None and f > 0:
-                        return f
-                return 0.0
+        # On passe une copie de trade_settings en forçant le risk% résolu
+        account_trade_settings_over = {
+            **account_trade_settings,
+            "risk_per_trade_percent": resolved_risk_pct,
+        }
 
-            # 🔎 NEW: on cascade plusieurs sources pour trouver un risk% > 0
-            resolved_risk_pct = _cascade(
-                account_trade_settings.get("risk_per_trade_percent"),
-                trade_decision.get("risk_per_trade_percent"),
-                trade_decision.get("risk_pct"),
-                (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
-                (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
-                self.config_manager.get("risk_management.risk_per_trade_percent"),
-                self.config_manager.get("risk_management.default_risk_per_trade_percent"),
+        volume_final = float(
+            _sizing_risk_volume(
+                self,  # la fonction attend self en 1er paramètre
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": "MARKET" if is_burst else order_type,
+                    "confidence": trade_decision.get("confidence", 1.0),
+                    "rule_name": trade_decision.get("rule_name"),
+                    "volatility_factor": trade_decision.get("volatility_factor"),
+                    "sizing_scope": sizing_scope,  # sera forcé BASKET si burst
+                    "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
+                },
+                active_config,
+                market_context,
+                symbol_info,
+                entry_price_market,
+                sl_price,
+                account_trade_settings_over,
             )
-
-            if resolved_risk_pct <= 0 or not sl_price or sl_price <= 0:
-                self.logger.error(
-                    "[SIZING] risk_per_trade_percent introuvable (>0 requis). "
-                    f"sources: account={account_trade_settings.get('risk_per_trade_percent')}, "
-                    f"decision={trade_decision.get('risk_per_trade_percent') or trade_decision.get('risk_pct')}, "
-                    f"active.sizing={(active_config.get('sizing',{}) or {}).get('risk_per_trade_percent')}, "
-                    f"active.rm={(active_config.get('risk_management',{}) or {}).get('risk_per_trade_percent')}, "
-                    f"global.rm={self.config_manager.get('risk_management.risk_per_trade_percent')}"
-                )
-                raise TradeExecutionError(
-                    f"Risk sizing impossible: risk%={resolved_risk_pct}, sl_price={sl_price}"
-                )
-
-            # ✅ IMPORTANT: pour burst, on force sizing_scope="BASKET" (risk%/burst_size)
-            sizing_scope = trade_decision.get("sizing_scope")
-            if is_burst:
-                sizing_scope = "BASKET"
-
-            # On passe une copie de trade_settings en forçant le risk% résolu
-            account_trade_settings_over = {
-                **account_trade_settings,
-                "risk_per_trade_percent": resolved_risk_pct,
-            }
-
-            volume_final = float(
-                _sizing_risk_volume(
-                    self,  # la fonction attend self en 1er paramètre
-                    {
-                        "action": action,
-                        "asset": broker_symbol,
-                        "order_type": "MARKET" if is_burst else order_type,
-                        "confidence": trade_decision.get("confidence", 1.0),
-                        "rule_name": trade_decision.get("rule_name"),
-                        "volatility_factor": trade_decision.get("volatility_factor"),
-                        "sizing_scope": sizing_scope,  # sera forcé BASKET si burst
-                        "burst_size": resolved_burst,  # ex: 5 → risque%/5 par ticket
-                    },
-                    active_config,
-                    market_context,
-                    symbol_info,
-                    entry_price_market,
-                    sl_price,
-                    account_trade_settings_over,
-                )
-            )
-            self.logger.info(
-                f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
-                f"risk%={resolved_risk_pct} → lot/ticket={volume_final}"
-            )
+        )
+        self.logger.info(
+            f"[SIZING] scope={sizing_scope} burst={resolved_burst} "
+            f"risk%={resolved_risk_pct} → lot/ticket={volume_final}"
+        )
 
         # ---------- 9a) Normalisation par contraintes symbole (FLOOR only) ----------
         vol_before_norm = volume_final
