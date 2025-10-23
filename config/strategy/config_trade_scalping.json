@@ -11,6 +11,9 @@
         "min_confidence": 0.2
       },
       "name": "scalping_entry",
+      "tradeable_assets": [
+        "XAUUSD"
+      ],
       "order_type": "MARKET",
       "priority": 1
     }
