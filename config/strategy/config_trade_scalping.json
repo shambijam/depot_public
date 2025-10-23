@@ -100,5 +100,15 @@
     "risk_management": {
       "default_equity": 10000
     }
+  },
+  "trade_executor_settings": {
+    "volume_safety_enabled": true,
+    "fat_finger_check": {
+      "enabled": true,
+      "policy": "FLOOR",
+      "max_absolute_volume_for_asset": {
+        "XAUUSD": 1.5
+      }
+    }
   }
 }

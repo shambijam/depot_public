@@ -830,14 +830,52 @@ def prepare_order(self, decision_package: dict) -> dict:
                 steps = math.floor(volume_final / acc_step + 1e-12)
                 volume_final = round(steps * acc_step, 8)
 
+            # utilitaire: floor au pas broker sans jamais augmenter (retourne None si < vmin)
+            def _floor_broker(vol: float):
+                try:
+                    bmin  = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+                    bmax  = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+                    bstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+                except Exception:
+                    bmin, bmax, bstep = 0.01, 100.0, 0.01
+                if vol < bmin:
+                    return None
+                steps = math.floor((vol - bmin) / bstep + 1e-12)
+                v = bmin + steps * bstep
+                if v > bmax:
+                    v = bmax
+                return round(v, 8)
+
+            # Politique de fat-finger: "REJECT" (défaut) ou "FLOOR" (réduction auto au cap)
+            cap_policy = (
+                (ff.get("policy") or tes.get("fat_finger_policy") or "REJECT")
+                if isinstance(ff, dict) else "REJECT"
+            )
+            cap_policy = str(cap_policy).strip().upper()
+
             # Fat-finger par actif
             if ff_enabled:
                 per_asset = ff.get("max_absolute_volume_for_asset") or {}
                 cap_sym = _to_pos_float(per_asset.get(raw_symbol))
                 if cap_sym is not None and volume_final > cap_sym:
-                    raise TradeExecutionError(
-                        f"Fat-finger: volume {volume_final} > cap absolu {cap_sym} sur {raw_symbol}."
-                    )
+                    if cap_policy in {"FLOOR", "CLAMP", "REDUCE"}:
+                        target = min(volume_final, cap_sym)
+                        new_vol = _floor_broker(target)
+                        if new_vol is None:
+                            # cap < min broker → impossible sans augmenter; on stoppe (sécurité)
+                            raise TradeExecutionError(
+                                f"Fat-finger: cap {cap_sym} < min lot broker → impossible de réduire sans augmenter."
+                            )
+                        self.logger.warning(
+                            f"[FAT-FINGER] clamp: {volume_final} → {new_vol} (cap actif={cap_sym}, policy={cap_policy})"
+                        )
+                        volume_final = new_vol
+                    else:
+                        # Politique REJECT (comportement historique)
+                        raise TradeExecutionError(
+                            f"Fat-finger: volume {volume_final} > cap absolu {cap_sym} sur {raw_symbol}."
+                        )
+
 
             # Cap global de sécurité
             cap_global = _to_pos_float(tes.get("max_absolute_volume_safety"))
