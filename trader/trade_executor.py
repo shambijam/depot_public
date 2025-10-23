@@ -353,12 +353,11 @@ def run_trade_execution_pipeline(
                 or (raw_cfg.get("risk") or {}).get("risk_per_trade_percent")
                 or 0.0
             )
-
             lot_per_leg = _calculate_risk_based_volume(
                 symbol_info=symbol_info,
                 entry_price=float(entry_price) if entry_price is not None else 0.0,
                 sl_price=float(sl_price) if sl_price is not None else 0.0,
-                account_equity=equity,
+                equity=float(equity),
                 risk_per_trade_percent=float(risk_pct or 0.0),
                 burst_size=int(td["burst_size"]),
                 logger=logger,
