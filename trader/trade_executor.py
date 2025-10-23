@@ -123,7 +123,7 @@ class TradeExecutor:
         # Envoi
         result = None
         try:
-            result = self.mt5_connector.send_order(request)
+            result = self.mt5_connector.order_send(request)
         except Exception as e:
             self.logger.error(f"[MT5] order_send exception: {e}", exc_info=True)
             return {"status": "failed", "reason": f"order_send_exception: {e}"}
