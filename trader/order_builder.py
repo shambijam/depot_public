@@ -643,27 +643,20 @@ def prepare_order(self, decision_package: dict) -> dict:
         if is_burst:
             sizing_scope = "BASKET"
 
-        # --- Résolution STRicte de l'équité du compte (obligatoire > 0) ---
+        # --- Résolution STRICTE de l'équité du compte (obligatoire > 0) ---
         account_ctx = market_context.get("active_broker_account") or {}
+
+        # Sources possibles (cascade prioritaire)
         equity_val = (
-            # 0) si déjà passé via trade_settings (rare mais supporté)
+            # 0) Si déjà passé via trade_settings (rare mais supporté)
             account_trade_settings.get("equity")
-            # 1) contexte courant
+            # 1) Contexte courant
             or account_ctx.get("equity")
             or (account_ctx.get("account_info") or {}).get("equity")
             or (account_ctx.get("info") or {}).get("equity")
         )
 
-        def _as_pos_float(x):
-            try:
-                if isinstance(x, str):
-                    x = x.strip().replace(",", ".")
-                v = float(x)
-                return v if v > 0 else None
-            except Exception:
-                return None
-
-        # 2) Lecture MT5 directe si encore vide
+        # 2) Lecture MT5 directe si encore None
         if equity_val in (None, ""):
             try:
                 ai = self.mt5_connector.get_account_info()
@@ -671,32 +664,26 @@ def prepare_order(self, decision_package: dict) -> dict:
                 if equity_val not in (None, ""):
                     self.logger.info(f"[SIZING] Équité résolue via MT5: {equity_val}")
             except Exception as e:
-                self.logger.warning(
-                    f"[SIZING] Impossible de lire l'équité via MT5: {e}"
-                )
+                self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
+
         # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
-                # 3a) config manager (clé plate)
+                import os
+                # 3a) Config manager
                 equity_val = self.config_manager.get("risk_management.default_equity")
-                # 3b) active_config imbriqué
+                # 3b) Active config
                 if equity_val in (None, ""):
-                    equity_val = (active_config.get("risk_management") or {}).get(
-                        "default_equity"
-                    )
-                # 3c) variable d'env
+                    equity_val = (active_config.get("risk_management") or {}).get("default_equity")
+                # 3c) Variable d'environnement
                 if equity_val in (None, ""):
-                    import os
-
                     equity_val = os.getenv("SNIPERX_DEFAULT_EQUITY")
                 if equity_val not in (None, ""):
-                    self.logger.warning(
-                        f"[SIZING] Fallback default_equity utilisé: {equity_val}"
-                    )
+                    self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
             except Exception:
                 equity_val = None
 
-        # Normalisation & validation finale (>0)
+        # Normalisation & validation finale (>0 requis)
         def _as_pos_float(x):
             try:
                 if isinstance(x, str):
@@ -707,38 +694,42 @@ def prepare_order(self, decision_package: dict) -> dict:
                 return None
 
         equity_val = _as_pos_float(equity_val)
+
         if equity_val is None:
-            # ⛔ Bloquant ici (mieux que d’échouer dans sizing.py)
+            # ⛔ BLOQUANT (évite l'erreur dans sizing.py)
             raise TradeExecutionError(
-                "Équité du compte invalide. "
-                "Configure `risk_management.default_equity` (ou SNIPERX_DEFAULT_EQUITY) pour DEMO/dry-run "
-                "ou assure le retour MT5 (get_account_info().equity)."
+                "❌ Équité du compte invalide ou manquante.\n"
+                "Solutions possibles :\n"
+                "  1) Configure `risk_management.default_equity` dans ta config YAML\n"
+                "  2) Définis la variable d'environnement SNIPERX_DEFAULT_EQUITY\n"
+                "  3) Assure-toi que MT5 est connecté (get_account_info().equity)\n"
+                "  4) En mode DEMO/dry-run, une equity par défaut est OBLIGATOIRE."
             )
 
-        # Propagation stricte (context + account_info)
+        # Propagation stricte dans tous les contextes
         account_ctx["equity"] = equity_val
         ai = account_ctx.get("account_info") or {}
         ai["equity"] = equity_val
         account_ctx["account_info"] = ai
         market_context["active_broker_account"] = account_ctx
-        self.logger.info(f"[SIZING] Équité retenue (strict) → {equity_val}")
 
-        # --- Injection equity dans trade_settings & calcul du lot ---
-        # 1) s'assurer que le trade_settings du contexte existe et porte l'equity (si sizing.py le relit de là)
+        self.logger.info(f"✅ [SIZING] Équité résolue et validée → {equity_val}")
+
+        # --- Préparation du payload pour sizing.py ---
+        # 1) Mise à jour du trade_settings du contexte
         ab = market_context.get("active_broker_account") or {}
         ts = dict((ab.get("trade_settings") or {}))
-        ts["equity"] = equity_val
+        ts["equity"] = equity_val  # ⬅ CRITIQUE
+        ts["risk_per_trade_percent"] = resolved_risk_pct
         ab["trade_settings"] = ts
         market_context["active_broker_account"] = ab
 
-        # 2) payload explicite passé à sizing.py (PRIORITAIRE)
+        # 2) Payload EXPLICITE (prioritaire pour sizing.py)
         account_trade_settings_over = dict(account_trade_settings or {})
         account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
-        account_trade_settings_over["equity"] = (
-            equity_val  # ⬅ OBLIGATOIRE pour sizing.py
-        )
+        account_trade_settings_over["equity"] = equity_val  # ⬅ OBLIGATOIRE
 
-        # Guards anti-régression
+        # Guards anti-régression (sécurité supplémentaire)
         if account_trade_settings_over.get("equity") in (None, "", 0, 0.0):
             raise TradeExecutionError(
                 "[SIZING] Guard: equity manquante dans le payload transmis à sizing.py"
@@ -748,32 +739,36 @@ def prepare_order(self, decision_package: dict) -> dict:
                 f"Risk sizing impossible: sl_price invalide ({sl_price})"
             )
 
-        # Log de contrôle
+        # Log de contrôle détaillé
         self.logger.info(
-            f"[SIZING] Inputs → equity={equity_val}, risk%={resolved_risk_pct}, scope={sizing_scope}, burst={resolved_burst}"
+            f"📊 [SIZING] Inputs validés:\n"
+            f"   ├─ equity={equity_val}\n"
+            f"   ├─ risk%={resolved_risk_pct}\n"
+            f"   ├─ scope={sizing_scope}\n"
+            f"   ├─ burst_size={resolved_burst}\n"
+            f"   └─ sl_price={sl_price}"
         )
 
         # 3) Calcul du lot (risk% / burst_size si scope BASKET)
         volume_final = float(
-            _sizing_risk_volume(
-                self,
-                {
-                    "action": action,
-                    "asset": broker_symbol,
-                    "order_type": "MARKET" if is_burst else order_type,
-                    "confidence": trade_decision.get("confidence", 1.0),
-                    "rule_name": trade_decision.get("rule_name"),
-                    "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,  # "BASKET" en burst → risk%/burst_size par ticket
-                    "burst_size": resolved_burst,  # ex: 5
-                },
-                active_config,
-                market_context,
-                symbol_info,
-                entry_price_market,
-                sl_price,
-                account_trade_settings_over,
-            )
+        _sizing_risk_volume(
+            self,
+            {
+                "action": action,
+                "asset": broker_symbol,
+                "order_type": "MARKET" if is_burst else order_type,
+                "confidence": trade_decision.get("confidence", 1.0),
+                "rule_name": trade_decision.get("rule_name"),
+                "volatility_factor": trade_decision.get("volatility_factor"),
+                "sizing_scope": sizing_scope,
+                "burst_size": resolved_burst,
+            },
+            active_config,
+            market_context,
+            symbol_info,
+            entry_price_market,
+            sl_price,
+            account_trade_settings_over,  # ← contient maintenant equity garantie
         )
 
         # 4) Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
