@@ -664,22 +664,29 @@ def prepare_order(self, decision_package: dict) -> dict:
                 if equity_val not in (None, ""):
                     self.logger.info(f"[SIZING] Équité résolue via MT5: {equity_val}")
             except Exception as e:
-                self.logger.warning(f"[SIZING] Impossible de lire l'équité via MT5: {e}")
+                self.logger.warning(
+                    f"[SIZING] Impossible de lire l'équité via MT5: {e}"
+                )
 
         # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
                 import os
+
                 # 3a) Config manager
                 equity_val = self.config_manager.get("risk_management.default_equity")
                 # 3b) Active config
                 if equity_val in (None, ""):
-                    equity_val = (active_config.get("risk_management") or {}).get("default_equity")
+                    equity_val = (active_config.get("risk_management") or {}).get(
+                        "default_equity"
+                    )
                 # 3c) Variable d'environnement
                 if equity_val in (None, ""):
                     equity_val = os.getenv("SNIPERX_DEFAULT_EQUITY")
                 if equity_val not in (None, ""):
-                    self.logger.warning(f"[SIZING] Fallback default_equity utilisé: {equity_val}")
+                    self.logger.warning(
+                        f"[SIZING] Fallback default_equity utilisé: {equity_val}"
+                    )
             except Exception:
                 equity_val = None
 
@@ -750,7 +757,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         )
 
         # 3) Calcul du lot (risk% / burst_size si scope BASKET)
-        volume_final = float(
+        volume_final = float
         _sizing_risk_volume(
             self,
             {
