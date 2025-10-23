@@ -678,14 +678,14 @@ def prepare_order(self, decision_package: dict) -> dict:
         # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
-                # 3a) clé plate "risk_management.default_equity"
+                # 3a) clé plate (config manager)
                 equity_val = self.config_manager.get("risk_management.default_equity")
-                # 3b) variante imbriquée côté active_config
+                # 3b) variante imbriquée active_config
                 if equity_val in (None, ""):
                     equity_val = (active_config.get("risk_management") or {}).get(
                         "default_equity"
                     )
-                # 3c) variable d'env tolérée
+                # 3c) variable d'environnement
                 if equity_val in (None, ""):
                     import os
 
@@ -698,6 +698,15 @@ def prepare_order(self, decision_package: dict) -> dict:
                 equity_val = None
 
         # Normalisation & validation finale (>0)
+        def _as_pos_float(x):
+            try:
+                if isinstance(x, str):
+                    x = x.strip().replace(",", ".")
+                v = float(x)
+                return v if v > 0 else None
+            except Exception:
+                return None
+
         equity_val = _as_pos_float(equity_val)
         if equity_val is None:
             # ⛔ Bloquant ici (mieux que d’échouer dans sizing.py)
@@ -715,21 +724,26 @@ def prepare_order(self, decision_package: dict) -> dict:
         market_context["active_broker_account"] = account_ctx
         self.logger.info(f"[SIZING] Équité retenue (strict) → {equity_val}")
 
-        # --- Injection equity dans trade_settings & calcul du lot ---
-        account_trade_settings_over = dict(account_trade_settings or {})
-        account_trade_settings_over["risk_per_trade_percent"] = (
-            resolved_risk_pct  # risk% résolu plus haut
-        )
-        account_trade_settings_over["equity"] = (
-            equity_val  # ⬅ OBLIGATOIRE pour sizing.py
-        )
+        # --- Injection equity dans trade_settings & calcul du lot (EQ-C) ---
+        # 1) s'assurer que le trade_settings de contexte existe et contient equity (au cas où sizing.py le lise)
+        ab = market_context.get("active_broker_account") or {}
+        ts = ab.get("trade_settings") or {}
+        ts = dict(ts)  # copie
+        ts["equity"] = equity_val
+        ab["trade_settings"] = ts
+        market_context["active_broker_account"] = ab
 
-        # Log de contrôle
+        # 2) payload explicit passé à sizing.py (PRIORITAIRE)
+        account_trade_settings_over = dict(account_trade_settings or {})
+        account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
+        account_trade_settings_over["equity"] = equity_val  # ⬅ OBLIGATOIRE
+
+        # Sanity log avant sizing
         self.logger.info(
             f"[SIZING] Inputs → equity={equity_val}, risk%={resolved_risk_pct}, scope={sizing_scope}, burst={resolved_burst}"
         )
 
-        # Calcul du lot (risk% / burst_size si scope BASKET)
+        # 3) Calcul du lot (risk% / burst_size si scope BASKET)
         volume_final = float(
             _sizing_risk_volume(
                 self,
@@ -752,7 +766,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
         )
 
-        # Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
+        # 4) Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
         volume_final = _normalize_volume(symbol_info, volume_final)
         self.logger.info(
             f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → "
