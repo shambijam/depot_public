@@ -221,11 +221,6 @@
       "max_open_positions": 10,
       "max_risk_per_trade_percent": 10.0
     },
-    "cooldowns": {
-      "enabled": true,
-      "trade_cooldown_seconds": 120,
-      "per_symbol_cooldown_candles": 5
-    },
     "logging": {
       "note_only": true
     }
