@@ -96,6 +96,9 @@
     },
     "take_profit": {
       "hard_max_points": 200000
+    },
+    "risk_management": {
+      "default_equity": 10000
     }
   }
 }

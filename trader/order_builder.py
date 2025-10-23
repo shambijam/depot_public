@@ -678,7 +678,18 @@ def prepare_order(self, decision_package: dict) -> dict:
         # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
+                # 3a) clé plate "risk_management.default_equity"
                 equity_val = self.config_manager.get("risk_management.default_equity")
+                # 3b) variante imbriquée côté active_config
+                if equity_val in (None, ""):
+                    equity_val = (active_config.get("risk_management") or {}).get(
+                        "default_equity"
+                    )
+                # 3c) variable d'env tolérée
+                if equity_val in (None, ""):
+                    import os
+
+                    equity_val = os.getenv("SNIPERX_DEFAULT_EQUITY")
                 if equity_val not in (None, ""):
                     self.logger.warning(
                         f"[SIZING] Fallback default_equity utilisé: {equity_val}"
@@ -686,12 +697,13 @@ def prepare_order(self, decision_package: dict) -> dict:
             except Exception:
                 equity_val = None
 
+        # Normalisation & validation finale (>0)
         equity_val = _as_pos_float(equity_val)
         if equity_val is None:
             # ⛔ Bloquant ici (mieux que d’échouer dans sizing.py)
             raise TradeExecutionError(
                 "Équité du compte invalide. "
-                "Configure `risk_management.default_equity` pour DEMO/dry-run "
+                "Configure `risk_management.default_equity` (ou SNIPERX_DEFAULT_EQUITY) pour DEMO/dry-run "
                 "ou assure le retour MT5 (get_account_info().equity)."
             )
 
@@ -704,12 +716,20 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.info(f"[SIZING] Équité retenue (strict) → {equity_val}")
 
         # --- Injection equity dans trade_settings & calcul du lot ---
-        account_trade_settings_over = {
-            **account_trade_settings,
-            "risk_per_trade_percent": resolved_risk_pct,  # risk% résolu plus haut
-            "equity": equity_val,  # ⬅ OBLIGATOIRE pour sizing.py
-        }
+        account_trade_settings_over = dict(account_trade_settings or {})
+        account_trade_settings_over["risk_per_trade_percent"] = (
+            resolved_risk_pct  # risk% résolu plus haut
+        )
+        account_trade_settings_over["equity"] = (
+            equity_val  # ⬅ OBLIGATOIRE pour sizing.py
+        )
 
+        # Log de contrôle
+        self.logger.info(
+            f"[SIZING] Inputs → equity={equity_val}, risk%={resolved_risk_pct}, scope={sizing_scope}, burst={resolved_burst}"
+        )
+
+        # Calcul du lot (risk% / burst_size si scope BASKET)
         volume_final = float(
             _sizing_risk_volume(
                 self,
@@ -720,8 +740,8 @@ def prepare_order(self, decision_package: dict) -> dict:
                     "confidence": trade_decision.get("confidence", 1.0),
                     "rule_name": trade_decision.get("rule_name"),
                     "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,  # BASKET si burst
-                    "burst_size": resolved_burst,  # ex: 5 → risk%/5 par ticket
+                    "sizing_scope": sizing_scope,  # "BASKET" en burst → risk%/burst_size par ticket
+                    "burst_size": resolved_burst,  # ex: 5
                 },
                 active_config,
                 market_context,
