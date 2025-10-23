@@ -1,7 +1,7 @@
 # trader/sltp.py - Module de Gestion des Stop Loss et Take Profit pour le Bot SNIPER_X
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Mapping
 
 from trader.errors import TradeExecutionError
 

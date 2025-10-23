@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 import math
+import logging
 
 from trader.errors import TradeExecutionError
 
@@ -136,14 +137,22 @@ def _qdown(val: float, step: float) -> float:
 
 def _as_float(x, name: str) -> float:
     try:
+        # ⚠️ FIX: Fallback si None (surtout pour equity)
+        if x is None:
+            if "équité" in name.lower() or "equity" in name.lower():
+                import os
+                fallback = float(os.getenv("SNIPERX_DEFAULT_EQUITY", "10000"))
+                # Pas de logger ici, on utilise print ou on laisse silencieux
+                print(f"⚠️ [SIZING] {name} manquante → fallback à {fallback}")
+                return fallback
+        
         v = float(x)
         if not math.isfinite(v):
             raise ValueError
         return v
     except Exception:
         raise TradeExecutionError(f"{name} invalide")
-
-
+    
 def _sget(obj, *names, default=None):
     """getattr/[] tolérant sur dict/obj."""
     for n in names:
