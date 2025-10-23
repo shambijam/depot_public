@@ -1,49 +1,50 @@
 {
+  "strategy_name": "scalping",
+  "description": "Scalping Burst — Single-Basket with SL/TP (no trailing, no candle-pattern rules)",
+  "version": "3.0",
+  "tradeable_assets": [
+    "XAUUSD"
+  ],
+  "magic_number": 52001,
   "confidence_threshold": 0.2,
-  "cooldown_after_exit_s": 12,
   "decision_rules": [
     {
-      "action_logic": {
-        "BUY": "enter_on_scalping_signal",
-        "SELL": "enter_on_scalping_signal"
-      },
+      "name": "scalping_entry",
+      "priority": 1,
       "conditions": {
         "min_confidence": 0.2
       },
-      "name": "scalping_entry",
-      "tradeable_assets": [
-        "XAUUSD"
-      ],
       "order_type": "MARKET",
-      "priority": 1
+      "action_logic": {
+        "BUY": "enter_on_scalping_signal",
+        "SELL": "enter_on_scalping_signal"
+      }
     }
   ],
-  "description": "Scalping Burst — Single-Basket with SL/TP (no trailing, no candle-pattern rules)",
   "entry_rules": {
     "scalping": {
       "burst_scalping": {
-        "burst_size": 5,
-        "closure_rules": {
-          "all_seen_green_pips": 5,
-          "close_on_full_profit": true,
-          "cooldown_after_exit_s": 12,
-          "loss_guard_arming_ms": 5000,
-          "max_loss_pips": 200,
-          "min_green_pnl_pips": 8,
-          "require_all_seen_green_once": true,
-          "require_full_count_for_profit_close": true,
-          "rt_fast_window_ms": 3000,
-          "rt_poll_interval_ms": 150
-        },
         "enabled": true,
-        "enforce_single_basket": true,
         "entry_mode": "MARKET",
+        "burst_size": 5,
+        "enforce_single_basket": false,
         "per_leg_virtual": false,
         "sltp": {
           "rr_base": 1.6,
-          "rr_cap": 3.0,
           "rr_floor": 1.0,
+          "rr_cap": 3.0,
           "sl_method": "PIPS"
+        },
+        "closure_rules": {
+          "close_on_full_profit": true,
+          "require_full_count_for_profit_close": true,
+          "require_all_seen_green_once": true,
+          "all_seen_green_pips": 5,
+          "min_green_pnl_pips": 8,
+          "max_loss_pips": 200,
+          "rt_fast_window_ms": 3000,
+          "rt_poll_interval_ms": 150,
+          "loss_guard_arming_ms": 5000
         }
       }
     }
@@ -52,25 +53,23 @@
     "managed_by": "sltp",
     "use_trailing_stop": false
   },
-  "halt_on_major_news": false,
-  "magic_number": 52001,
   "phase_detection": {
+    "use_phase_observer": false,
     "allowed_phases": [
       "liquidity_eqh_eql",
       "range_retail",
       "transitional"
     ],
-    "eq_level_tolerance": 0.0,
-    "impulse_threshold": 0.0,
     "lookback_window": 12,
-    "use_phase_observer": false,
     "volatility_threshold": 0.0,
-    "volume_zscore": 0.0
+    "volume_zscore": 0.0,
+    "eq_level_tolerance": 0.0,
+    "impulse_threshold": 0.0
   },
   "risk": {
-    "max_positions_per_symbol": 1,
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.50,
+    "risk_per_trade_percent": 0.5,
+    "max_positions_per_symbol": 1,
     "stop_distance_pips": 60
   },
   "smart_sl_tp_settings": {
@@ -80,36 +79,33 @@
     "sl_buffer_pips": 4,
     "tp_placement_method": "RR",
     "tp_rr_ratio": 1.8,
+    "tp_atr_period": 14,
+    "tp_atr_multiplier": 2.0,
     "sl_swing_lookback_period": 10,
     "stop_loss_pips": 70,
-    "take_profit_pips": 100,
-    "tp_atr_multiplier": 2.0,
-    "tp_atr_period": 14
+    "take_profit_pips": 100
   },
   "smart_targets": {
     "risk_management": {
       "default_equity": 10000
     },
     "stop_loss": {
-      "hard_max_points": 100000,
-      "hard_min_points": 0
+      "hard_min_points": 0,
+      "hard_max_points": 100000
     },
     "take_profit": {
       "hard_max_points": 200000
     }
   },
-  "strategy_name": "scalping",
   "trade_executor_settings": {
+    "version": "3.0",
     "fat_finger_check": {
       "enabled": true,
+      "policy": "FLOOR",
       "max_absolute_volume_for_asset": {
         "XAUUSD": 1.5
-      },
-      "policy": "FLOOR"
-    },
-    "tradeable_assets": [
-      "XAUUSD"
-    ],
-    "version": "3.0"
-  }
+      }
+    }
+  },
+  "halt_on_major_news": false
 }
