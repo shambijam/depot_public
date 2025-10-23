@@ -57,7 +57,7 @@
   "overrides": {
     "scalping": {
       "burst": {
-        "burst_size": 5
+        "burst_size": 8
       },
       "entry_rules": {
         "scalping": {
