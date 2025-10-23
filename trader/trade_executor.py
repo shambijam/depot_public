@@ -299,7 +299,77 @@ def run_trade_execution_pipeline(
             "info",
             f"[BURST][PLAN] {action} {asset} | style=MARKET | SL/TP actifs | scope={td.get('sizing_scope')}",
         )
+        
+    # -------------------- 3bis) Résolution burst_size + sizing per-leg ----------
+    # Récup éventuelle des asset_configs pour l'actif
+    asset_configs = decision_package.get("asset_configs") or market_context.get("asset_configs") or {}
+    asset_cfg = asset_configs.get(asset) or {}
 
+    # Résolution robuste du burst_size (ordre de priorité)
+    # 1) décision -> 2) config.scalping.burst.burst_size -> 3) vieux chemin entry_rules... -> 4) fallback=1
+    burst_size_from_cfg = (
+        td.get("burst_count")
+        or td.get("burst_size")
+        or (raw_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
+        or (((raw_cfg.get("entry_rules") or {}).get("scalping") or {})
+            .get("burst_scalping", {}).get("burst_size"))
+        or (asset_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
+        or 1
+    )
+    try:
+        burst_size_from_cfg = int(burst_size_from_cfg)
+        if burst_size_from_cfg <= 0:
+            burst_size_from_cfg = 1
+    except Exception:
+        burst_size_from_cfg = 1
+
+    td["burst_size"] = burst_size_from_cfg  # on fige dans la décision
+
+    # Si volume manquant/≤0 → sizing de secours ici (risk%/burst → lot par leg)
+    vol_in = float(td.get("volume") or 0.0)
+    if vol_in <= 0.0:
+        try:
+            from trader.sizing import _calculate_risk_based_volume
+
+            # equity
+            acc_info = decision_package.get("account_info") or market_context.get("account_info") or {}
+            equity = float(acc_info.get("equity") or 0.0)
+
+            # entry / SL
+            entry_price = td.get("entry_price_market") or td.get("entry_price")
+            sl_price = td.get("sl_price")
+
+            # symbol_info si dispo via trade_executor
+            symbol_info = None
+            if hasattr(trade_executor, "get_symbol_info"):
+                try:
+                    symbol_info = trade_executor.get_symbol_info(asset)
+                except Exception:
+                    symbol_info = None
+
+            # risk%
+            risk_pct = (
+                (asset_cfg.get("risk") or {}).get("risk_per_trade_percent")
+                or (raw_cfg.get("risk") or {}).get("risk_per_trade_percent")
+                or 0.0
+            )
+
+            lot_per_leg = _calculate_risk_based_volume(
+                symbol_info=symbol_info,
+                entry_price=float(entry_price) if entry_price is not None else 0.0,
+                sl_price=float(sl_price) if sl_price is not None else 0.0,
+                account_equity=equity,
+                risk_per_trade_percent=float(risk_pct or 0.0),
+                burst_size=int(td["burst_size"]),
+                logger=logger,
+            )
+
+            td["volume"] = float(lot_per_leg or 0.0)
+            _log("info", f"[SIZING][FALLBACK] lot/leg={td['volume']} burst={td['burst_size']} risk%={risk_pct}")
+        except Exception as _e:
+            _log("error", f"[SIZING][FALLBACK] échec sizing per-leg: {_e}")
+            td["volume"] = 0.0
+       
     # -------------------- 4) Adapter le package et construire la requête --------
     # ⚠️ prepare_order attend trade_decision / market_context / active_config
     adapted_package = {
@@ -346,13 +416,16 @@ def run_trade_execution_pipeline(
             return default
 
     burst_size = _to_int_pos(
-        td.get("burst_count")
-        or td.get("burst_size")
+        td.get("burst_size")
+        or (raw_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
         or (((raw_cfg.get("entry_rules") or {}).get("scalping") or {})
-            .get("burst_scalping", {})
-            .get("burst_size", 1)),
+            .get("burst_scalping", {}).get("burst_size"))
+        or ((decision_package.get("asset_configs") or {}).get(asset, {}).get("scalping", {})\
+            .get("burst", {}).get("burst_size"))
+        or 1,
         1,
     )
+
 
     # -------------------- 7) STANDARD (pas burst ou burst_size==1) --------------
     if not is_burst or burst_size == 1:
@@ -396,6 +469,16 @@ def run_trade_execution_pipeline(
         req_i = dict(mt5_request)  # shallow copy
         # commentaire court compatible guard (<=31 chars)
         req_i["comment"] = _short_comment(f"burst_scalping|basket={basket_id}|{i}/{burst_size}")
+        
+        # Si prepare_order n'a pas posé volume (ou 0), on force le lot/leg de la décision
+        if not float(req_i.get("volume") or 0):
+            req_i["volume"] = float(td.get("volume") or 0.0)
+
+        if not req_i["volume"] or req_i["volume"] <= 0:
+            _log("error", f"[EXEC_PIPE][BURST] volume<=0 sur leg {i}/{burst_size} → skip envoi.")
+            results.append({"status": "failed", "reason": "volume<=0"})
+            continue
+        
         r = trade_executor.execute_order(req_i)
         results.append(r)
 
