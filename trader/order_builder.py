@@ -674,18 +674,17 @@ def prepare_order(self, decision_package: dict) -> dict:
                 self.logger.warning(
                     f"[SIZING] Impossible de lire l'équité via MT5: {e}"
                 )
-
         # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
-                # 3a) clé plate (config manager)
+                # 3a) config manager (clé plate)
                 equity_val = self.config_manager.get("risk_management.default_equity")
-                # 3b) variante imbriquée active_config
+                # 3b) active_config imbriqué
                 if equity_val in (None, ""):
                     equity_val = (active_config.get("risk_management") or {}).get(
                         "default_equity"
                     )
-                # 3c) variable d'environnement
+                # 3c) variable d'env
                 if equity_val in (None, ""):
                     import os
 
@@ -724,21 +723,32 @@ def prepare_order(self, decision_package: dict) -> dict:
         market_context["active_broker_account"] = account_ctx
         self.logger.info(f"[SIZING] Équité retenue (strict) → {equity_val}")
 
-        # --- Injection equity dans trade_settings & calcul du lot (EQ-C) ---
-        # 1) s'assurer que le trade_settings de contexte existe et contient equity (au cas où sizing.py le lise)
+        # --- Injection equity dans trade_settings & calcul du lot ---
+        # 1) s'assurer que le trade_settings du contexte existe et porte l'equity (si sizing.py le relit de là)
         ab = market_context.get("active_broker_account") or {}
-        ts = ab.get("trade_settings") or {}
-        ts = dict(ts)  # copie
+        ts = dict((ab.get("trade_settings") or {}))
         ts["equity"] = equity_val
         ab["trade_settings"] = ts
         market_context["active_broker_account"] = ab
 
-        # 2) payload explicit passé à sizing.py (PRIORITAIRE)
+        # 2) payload explicite passé à sizing.py (PRIORITAIRE)
         account_trade_settings_over = dict(account_trade_settings or {})
         account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
-        account_trade_settings_over["equity"] = equity_val  # ⬅ OBLIGATOIRE
+        account_trade_settings_over["equity"] = (
+            equity_val  # ⬅ OBLIGATOIRE pour sizing.py
+        )
 
-        # Sanity log avant sizing
+        # Guards anti-régression
+        if account_trade_settings_over.get("equity") in (None, "", 0, 0.0):
+            raise TradeExecutionError(
+                "[SIZING] Guard: equity manquante dans le payload transmis à sizing.py"
+            )
+        if not sl_price or sl_price <= 0:
+            raise TradeExecutionError(
+                f"Risk sizing impossible: sl_price invalide ({sl_price})"
+            )
+
+        # Log de contrôle
         self.logger.info(
             f"[SIZING] Inputs → equity={equity_val}, risk%={resolved_risk_pct}, scope={sizing_scope}, burst={resolved_burst}"
         )
@@ -784,41 +794,66 @@ def prepare_order(self, decision_package: dict) -> dict:
             ff_enabled = bool(ff.get("enabled", False))
             vol_safety_enabled = bool(tes.get("volume_safety_enabled", False))
 
-            if ff_enabled:
-                per_asset = ff.get("max_absolute_volume_for_asset") or {}
-                cap_sym = per_asset.get(raw_symbol)
-                if isinstance(cap_sym, (int, float)) and volume_final > float(cap_sym):
-                    raise TradeExecutionError(
-                        f"Fat-finger: volume {volume_final} > cap absolu {float(cap_sym)} sur {raw_symbol}."
-                    )
+            def _to_pos_float(x):
+                try:
+                    if isinstance(x, str):
+                        x = x.strip().replace(",", ".")
+                    v = float(x)
+                    return v if v > 0 else None
+                except Exception:
+                    return None
 
-            cap_global = tes.get("max_absolute_volume_safety", None)
-            if (
-                vol_safety_enabled
-                and isinstance(cap_global, (int, float))
-                and volume_final > float(cap_global)
-            ):
-                raise TradeExecutionError(
-                    f"Safety cap (global): volume {volume_final} > cap sécurité {float(cap_global)}."
-                )
-
-            account_trade_settings = (
+            # Contraintes compte (en plus des contraintes broker déjà appliquées)
+            account_trade_settings_ctx = (
                 market_context.get("active_broker_account", {}).get(
                     "trade_settings", {}
                 )
                 or {}
             )
-            acc_min = account_trade_settings.get("min_lot")
-            acc_step = account_trade_settings.get("lot_step")
-            acc_max = account_trade_settings.get("max_lot")
+            acc_min = _to_pos_float(account_trade_settings_ctx.get("min_lot"))
+            acc_step = _to_pos_float(account_trade_settings_ctx.get("lot_step"))
+            acc_max = _to_pos_float(account_trade_settings_ctx.get("max_lot"))
             self.logger.info(
                 f"[VOLUME] constraints compte: min={acc_min}, step={acc_step}, max={acc_max}"
             )
 
-            if isinstance(acc_max, (int, float)) and volume_final > float(acc_max):
+            # Re-normalisation éventuelle au pas COMPTE (FLOOR uniquement — jamais d'augmentation)
+            if acc_step and acc_step > 0:
+                steps = math.floor(volume_final / acc_step + 1e-12)
+                volume_final = round(steps * acc_step, 8)
+
+            # Fat-finger par actif
+            if ff_enabled:
+                per_asset = ff.get("max_absolute_volume_for_asset") or {}
+                cap_sym = _to_pos_float(per_asset.get(raw_symbol))
+                if cap_sym is not None and volume_final > cap_sym:
+                    raise TradeExecutionError(
+                        f"Fat-finger: volume {volume_final} > cap absolu {cap_sym} sur {raw_symbol}."
+                    )
+
+            # Cap global de sécurité
+            cap_global = _to_pos_float(tes.get("max_absolute_volume_safety"))
+            if (
+                vol_safety_enabled
+                and cap_global is not None
+                and volume_final > cap_global
+            ):
                 raise TradeExecutionError(
-                    f"Volume {volume_final} > max lot compte {float(acc_max)}."
+                    f"Safety cap (global): volume {volume_final} > cap sécurité {cap_global}."
                 )
+
+            # Cap compte (max)
+            if acc_max is not None and volume_final > acc_max:
+                raise TradeExecutionError(
+                    f"Volume {volume_final} > max lot compte {acc_max}."
+                )
+
+            # Min compte (politique: on n'augmente JAMAIS → on stoppe si en dessous)
+            if acc_min is not None and volume_final < acc_min:
+                raise TradeExecutionError(
+                    f"Volume {volume_final} < min lot compte {acc_min} (politique: pas d’augmentation)."
+                )
+
         except TradeExecutionError:
             raise
         except Exception as e:
@@ -834,14 +869,16 @@ def prepare_order(self, decision_package: dict) -> dict:
                 "order_type": "MARKET",  # master MARKET; split géré en aval
                 "rule_name": trade_decision.get("rule_name"),
                 "comment": trade_decision.get("comment"),
-                "meta_rr_projected": trade_decision.get("meta_rr_projected")
-                or trade_decision.get("rr")
-                or trade_decision.get("rr_effective"),
+                "meta_rr_projected": (
+                    trade_decision.get("meta_rr_projected")
+                    or trade_decision.get("rr")
+                    or trade_decision.get("rr_effective")
+                ),
                 "basket_id": trade_decision.get("basket_id"),
                 "time_in_force": trade_decision.get("time_in_force"),
             },
             active_config,
-            volume_final,
+            volume_final,  # ← volume déjà normalisé broker + éventuel pas compte
             entry_price_market,
             sl_price,
             tp_price,
