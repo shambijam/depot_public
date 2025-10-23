@@ -67,10 +67,9 @@
   "risk": {
     "max_positions_per_symbol": 1,
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.11,
+    "risk_per_trade_percent": 0.50,
     "stop_distance_pips": 60
   },
-  "risk_per_trade_percent": 0.11,
   "smart_sl_tp_settings": {
     "sl_atr_multiplier": 1.2,
     "sl_atr_period": 14,
