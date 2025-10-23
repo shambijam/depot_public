@@ -760,26 +760,29 @@ def prepare_order(self, decision_package: dict) -> dict:
             self.logger.warning("⚠️ Equity manquante, fallback à 10000")
 
         # 3) Calcul du lot (risk% / burst_size si scope BASKET)
-        volume_final = float
-        _sizing_risk_volume(
-            self,
-            {
-                "action": action,
-                "asset": broker_symbol,
-                "order_type": "MARKET" if is_burst else order_type,
-                "confidence": trade_decision.get("confidence", 1.0),
-                "rule_name": trade_decision.get("rule_name"),
-                "volatility_factor": trade_decision.get("volatility_factor"),
-                "sizing_scope": sizing_scope,
-                "burst_size": resolved_burst,
-            },
-            active_config,
-            market_context,
-            symbol_info,
-            entry_price_market,
-            sl_price,
-            account_trade_settings_over,  # ← contient maintenant equity garantie
+        volume_final = float(
+            _sizing_risk_volume(
+                self,
+                {
+                    "action": action,
+                    "asset": broker_symbol,
+                    "order_type": "MARKET" if is_burst else order_type,
+                    "confidence": trade_decision.get("confidence", 1.0),
+                    "rule_name": trade_decision.get("rule_name"),
+                    "volatility_factor": trade_decision.get("volatility_factor"),
+                    "sizing_scope": sizing_scope,
+                    "burst_size": resolved_burst,
+                },
+                active_config,
+                market_context,
+                symbol_info,
+                entry_price_market,
+                sl_price,
+                account_trade_settings_over,  # ← contient equity > 0
+            )
         )
+        if not isinstance(volume_final, (int, float)) or not math.isfinite(volume_final) or volume_final <= 0:
+            raise TradeExecutionError(f"Lot calculé invalide: {volume_final!r}")
 
         # 4) Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
         volume_final = _normalize_volume(symbol_info, volume_final)
