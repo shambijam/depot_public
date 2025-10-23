@@ -1041,6 +1041,31 @@ class MT5Connector:
                         tp_out = round(limit, digits)
 
             return sl_out, tp_out, min_pts
+        
+        def _points_per_pip(self, symbol_info) -> int:
+            """
+            Convertit 1 pip -> N points MT5 en fonction du symbole.
+            Par défaut:
+            - Forex 5 digits -> 1 pip = 10 points
+            - Forex 3 digits -> 1 pip = 10 points
+            - Métaux (ex XAUUSD) -> override via config sinon heuristique: 1 pip = 10 points si tick=0.01 et pip=0.10
+            """
+            point = float(symbol_info.point)
+            # Override par config si dispo
+            sym = symbol_info.name
+            overrides = (getattr(self, "symbol_overrides", {}) or {}).get(sym, {})
+            pip_size = overrides.get("pip_size")  # ex: 0.10 pour XAUUSD
+            if pip_size is None:
+                # Heuristiques propres: ajuste selon digits / tick
+                if "XAU" in sym and abs(point - 0.01) < 1e-12:
+                    pip_size = 0.10  # pip “trader” le plus courant pour l’or
+                elif symbol_info.digits in (3, 5):
+                    pip_size = point * 10.0  # ex EURUSD(5d): point=0.00001 => pip=0.0001
+                else:
+                    pip_size = point  # fallback conservateur
+
+            ppp = max(1, int(round(pip_size / point)))
+            return ppp
 
         # --- 1) récupérer la position / symbole / digits ----------------------------
         pos = _pos_by_ticket(ticket)
@@ -2145,6 +2170,65 @@ class MT5Connector:
             for k in ("stop_loss", "sl_price", "take_profit", "tp_price"):
                 req.pop(k, None)
             return req.get("sl"), req.get("tp")
+        
+        def _compute_sltp_levels(self, symbol: str, side: str, entry_price: float, strategy: str, cfg: dict, atr_value: float | None, symbol_info) -> tuple[float | None, float | None]:
+            point = float(symbol_info.point)
+            stops_level_points = int(getattr(symbol_info, "trade_stops_level", 0) or 0)
+            ppp = self._points_per_pip(symbol_info)  # points per pip
+
+            # Buffers en points
+            buffer_pts = int(cfg.get("sl_buffer_pips", 0) * ppp)
+
+            # --- Distance SL en points ---
+            sl_method = cfg.get("sl_placement_method", "ATR").upper()
+            if sl_method == "ATR" and atr_value is not None:
+                # ATR est en PRIX -> convertir en points
+                atr_pts = int(round(atr_value / point))
+                sl_pts = int(round(atr_pts * float(cfg.get("sl_atr_multiplier", 1.0))))
+            elif sl_method == "SWING":
+                sl_pts = self._swing_sl_points(symbol, side, lookback=int(cfg.get("sl_swing_lookback_period", 10)), point=point)
+            elif sl_method == "FIXED":
+                sl_pts = int(cfg.get("stop_loss_pips", 0) * ppp)
+            else:
+                # fallback sûr
+                sl_pts = int(cfg.get("stop_loss_pips", 0) * ppp)
+
+            # Respect des niveaux mini broker + buffer
+            sl_pts = max(sl_pts + buffer_pts, stops_level_points + buffer_pts, 1)
+
+            # --- Distance TP en points (selon stratégie) ---
+            tp_pts = None
+            if strategy.lower() != "scalping":  # Discipline projet: scalping => PAS de TP
+                tp_method = cfg.get("tp_placement_method", "RR").upper()
+                if tp_method == "RR":
+                    tp_pts = int(round(sl_pts * float(cfg.get("tp_rr_ratio", 1.5))))
+                elif tp_method == "ATR" and atr_value is not None:
+                    atr_pts = int(round(atr_value / point))
+                    tp_pts = int(round(atr_pts * float(cfg.get("tp_atr_multiplier", 2.0))))
+                elif tp_method == "FIXED":
+                    tp_pts = int(cfg.get("take_profit_pips", 0) * ppp)
+
+            # Prix finaux
+            if side.upper() == "BUY":
+                sl_price = entry_price - sl_pts * point
+                tp_price = (entry_price + tp_pts * point) if tp_pts else None
+            else:
+                sl_price = entry_price + sl_pts * point
+                tp_price = (entry_price - tp_pts * point) if tp_pts else None
+
+            # Diag
+            self._logger.info(
+                "[SLTP_PLAN] %s side=%s strat=%s point=%.5f p/pip=%s ATR=%.5f sl_pts=%s tp_pts=%s sl=%.2f tp=%s",
+                symbol, side, strategy, point, ppp, (atr_value or 0.0), sl_pts, (tp_pts if tp_pts else 0),
+                sl_price, ("{:.2f}".format(tp_price) if tp_price else "None")
+            )
+
+            # Alerte si trop court
+            if (tp_pts is not None and tp_pts < max(5, stops_level_points)) or sl_pts < max(5, stops_level_points):
+                self._logger.warning("[SLTP_TOO_TIGHT] %s sl_pts=%s tp_pts=%s stops_level=%s", symbol, sl_pts, tp_pts, stops_level_points)
+
+            return sl_price, tp_price
+
 
         def _symbol_ctx(symbol: str):
             si = None
