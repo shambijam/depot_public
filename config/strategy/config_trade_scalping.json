@@ -77,12 +77,12 @@
     "sl_buffer_pips": 2,
     "sl_placement_method": "PIPS",
     "sl_swing_lookback_period": 10,
-    "stop_loss_pips": 60,
-    "take_profit_pips": 90,
+    "stop_loss_pips": 70,
+    "take_profit_pips": 100,
     "tp_atr_multiplier": 2.0,
     "tp_atr_period": 14,
     "tp_placement_method": "RR",
-    "tp_rr_ratio": 1.6
+    "tp_rr_ratio": 2.0
   },
   "smart_targets": {
     "risk_management": {

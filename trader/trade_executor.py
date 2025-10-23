@@ -14,6 +14,7 @@ except Exception:  # MT5 peut ne pas être dispo en environnement de test
     mt5 = None  # noqa
 
 from core.utils import CustomJSONEncoder
+from trader.errors import TradeExecutionError
 from trader.errors import InvalidDecisionPackageError
 # --- Briques (binding en bas du fichier) ---
 from trader.order_builder import prepare_order, _build_mt5_request
