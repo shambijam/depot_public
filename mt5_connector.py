@@ -233,6 +233,11 @@ class MT5Connector:
                 for key, value in self.mt5_mappings.get("timeframes", {}).items()
             }
             self.TIMEFRAME_M1 = self.TIMEFRAMES.get("M1", mt5.TIMEFRAME_M1)
+            
+            # Magic number du bot (fallbacks possibles)
+            self.magic = int(self.config_manager.get("magic_number", 0)
+                            or self.config_manager.get("defaults.magic_number", 0)
+                            or 0)
 
             self.logger.info(
                 "MT5Connector initialisé avec succès, constantes MT5 chargées via ConfigManager."
@@ -271,6 +276,7 @@ class MT5Connector:
         - position BUY -> ordre SELL au Bid
         - position SELL -> ordre BUY à l'Ask
         """
+                
         try:
             order_type = self.ORDER_TYPE_FROM_POSITION.get(position.type)
             if order_type is None:
@@ -360,6 +366,30 @@ class MT5Connector:
         - Arrondit le prix aux digits du symbole.
         """
         import time
+        
+        # 🔒 Ne jamais fermer un trade manuel
+        try:
+            pos = self._get_position_by_ticket(ticket)
+        except Exception:
+            pos = None
+
+        bot_magic = int(getattr(self, "magic", 0)
+                        or self.config_manager.get("magic_number", 0)
+                        or self.config_manager.get("defaults.magic_number", 0)
+                        or 0)
+        if pos is not None and int(getattr(pos, "magic", -1)) != bot_magic:
+            self.logger.info("[CLOSE][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
+                            ticket, getattr(pos, "magic", None), bot_magic)
+            return False
+            
+         
+
+        bot_magic = int(getattr(self, "magic", 0) or self.config_manager.get("defaults.magic_number", 0) or 0)
+        if pos is not None and int(getattr(pos, "magic", -1)) != bot_magic:
+            self.logger.info("[CLOSE][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
+                            ticket, getattr(pos, "magic", None), bot_magic)
+            return False
+
 
         pos = self._get_position_by_ticket(ticket)
         if not pos:
@@ -515,7 +545,7 @@ class MT5Connector:
         Attendues par close_burst_basket(...).
         """
         import time
-
+                
         total = len(tickets or [])
         ok = ko = 0
         tickets = [int(t) for t in (tickets or []) if t is not None]
@@ -895,6 +925,26 @@ class MT5Connector:
         Retourne (ok: bool, result: Any).
         """
         mt5 = self.mt5
+        
+        # 🔒 Immunité manuels: on ne modifie que les positions du bot
+        def _pos_magic(p): 
+            return int(getattr(p, "magic", -1))
+        def _pos_by_ticket_safe(tk: int):
+            try:
+                poss = list(mt5.positions_get() or [])
+                for p in poss:
+                    if int(getattr(p, "ticket", -1)) == int(tk):
+                        return p
+            except Exception:
+                pass
+            return None
+
+        bot_magic = int(getattr(self, "magic", 0) or self.config_manager.get("defaults.magic_number", 0) or 0)
+        _pos = _pos_by_ticket_safe(int(ticket))
+        if _pos is not None and _pos_magic(_pos) != bot_magic:
+            self.logger.info("[SLTP][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
+                            ticket, getattr(_pos, "magic", None), bot_magic)
+            return True, None  # on considère 'OK' mais on ne touche pas
 
         # --- helpers locaux ---------------------------------------------------------
         def _f(x):
@@ -2584,35 +2634,41 @@ class MT5Connector:
                         and is_market_action
                         and (sl_val is not None or tp_val is not None)
                     ):
-                        # attacher SL/TP à la position la plus récente
+                        # attacher SL/TP sur la dernière position **du BOT** (filtrée par magic/comment)
                         def _attach_sltp(symbol: str, target_sl, target_tp):
                             req_mod = {
-                                "action": _mt5_const(
-                                    "trade_actions", "SLTP", "TRADE_ACTION_SLTP"
-                                ),
+                                "action": _mt5_const("trade_actions", "SLTP", "TRADE_ACTION_SLTP"),
                                 "symbol": symbol,
                             }
                             try:
                                 positions = list(mt5.positions_get(symbol=symbol) or [])
                             except Exception:
                                 positions = []
+
+                            # 🔒 Filtrage strict: ne toucher **que** les positions du bot
+                            bot_magic = int(request.get("magic", 0))
+                            bot_comment = str(request.get("comment", ""))
+
+                            positions = [
+                                p for p in positions
+                                if int(getattr(p, "magic", -1)) == bot_magic
+                                and (not bot_comment or bot_comment in str(getattr(p, "comment", "")))
+                            ]
                             if not positions:
+                                self.logger.info("[SLTP] Skip attach: aucune position du bot (magic/comment) sur %s", symbol)
                                 return None
-                            latest = sorted(
-                                positions,
-                                key=lambda p: int(getattr(p, "ticket", 0)),
-                                reverse=True,
-                            )[0]
-                            req_mod["position"] = int(getattr(latest, "ticket"))
+
+                            latest = sorted(positions, key=lambda p: int(getattr(p, "ticket", 0)), reverse=True)[0]
+                            req_mod["position"] = int(getattr(latest, "ticket", 0))
+
                             if target_sl is not None:
-                                req_mod["sl"] = target_sl
+                                req_mod["sl"] = float(target_sl)
                             if target_tp is not None:
-                                req_mod["tp"] = target_tp
+                                req_mod["tp"] = float(target_tp)
+
                             return mt5.order_send(req_mod)
 
-                        res_mod = _attach_sltp(
-                            symbol, request.get("sl"), request.get("tp")
-                        )
+                        res_mod = _attach_sltp(symbol, request.get("sl"), request.get("tp"))
                         if getattr(res_mod, "retcode", None) == RET_INVALID_STOPS:
                             sl_fix, tp_fix, _ = _enforce_sltp_constraints(
                                 symbol,
@@ -2623,43 +2679,7 @@ class MT5Connector:
                                 ctx,
                             )
                             _ = _attach_sltp(symbol, sl_fix, tp_fix)
-                    break
 
-                if (ret in retryable) and attempt < max_retries:
-                    if ret in {RET_TIMEOUT, RET_NO_CONN}:
-                        try:
-                            rec = getattr(self, "connect", None) or getattr(
-                                self, "reconnect_if_needed", None
-                            )
-                            if callable(rec):
-                                rec()
-                        except Exception:
-                            pass
-                    time.sleep(sleep_between)
-                    _refresh_price_for_retry(req_base)
-                    attempt += 1
-                    continue
-
-                if (ret == RET_INVALID_STOPS) and (
-                    sl_val is not None or tp_val is not None
-                ):
-                    # re-send sans SL/TP; attach après exec si MARKET
-                    req2 = dict(req_base)
-                    req2.pop("sl", None)
-                    req2.pop("tp", None)
-                    try:
-                        res2 = mt5.order_send(req2)
-                    except Exception as ex:
-                        self.logger.exception(
-                            f"MT5: Exception fallback sans SL/TP: {ex}"
-                        )
-                        res2 = None
-                    if res2 and getattr(res2, "retcode", None) in success_set:
-                        result = res2
-                        if (
-                            getattr(res2, "retcode", None) in executed_set
-                            and is_market_action
-                        ):
 
                             def _attach2(symbol: str, target_sl, target_tp):
                                 req_mod = {
