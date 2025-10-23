@@ -106,7 +106,7 @@
     },
     "volume_safety_enabled": true,
     "cooldown": {
-      "enabled": true,
+      "enabled": false,
       "per_asset_cooldown_s": 0,
       "min_gap_any_trade_s": 0,
       "max_new_trades_per_cycle": 99,
