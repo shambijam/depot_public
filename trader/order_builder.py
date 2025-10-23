@@ -202,7 +202,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
-    # ---------- [BURST GUARDRAILS] ----------
+   # ---------- [BURST GUARDRAILS] ----------
     try:
         rule_name = str(trade_decision.get("rule_name", "")).lower()
         if rule_name == "burst_scalping":
@@ -210,18 +210,19 @@ def prepare_order(self, decision_package: dict) -> dict:
                 (active_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}
             ).get("burst_scalping", {}) or {}
             guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+
+            # PATCH BURST-COOL-KILL — désactivation totale des freins temps/panier
             max_open_positions = int(guard_cfg.get("max_open_positions", 5))
-            cooldown_seconds = int(guard_cfg.get("cooldown_seconds", 90))
-            enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
-            single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+            cooldown_seconds = 0                                      # kill cooldown
+            enforce_closure = bool(guard_cfg.get("enforce_burst_closure", False))   # OFF par défaut
+            single_burst_global = bool(guard_cfg.get("single_burst_global", False)) # OFF par défaut
 
             import re, time
 
             def _field(obj, key, default=None):
-                if isinstance(obj, dict):
-                    return obj.get(key, default)
-                return getattr(obj, key, default)
+                return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
+            # Scope (uniquement pour logs)
             if single_burst_global:
                 all_open = self.mt5_connector.get_positions() or []
                 scope_lbl = "global"
@@ -229,6 +230,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 all_open = self.mt5_connector.get_positions(symbol=broker_symbol) or []
                 scope_lbl = broker_symbol
 
+            # Parse des paniers (on conserve l’info pour debug, mais on ne bloque plus)
             open_burst_ids = set()
             for p in all_open:
                 c = str(_field(p, "comment", "") or "")
@@ -237,19 +239,23 @@ def prepare_order(self, decision_package: dict) -> dict:
                     open_burst_ids.add(m.group(1))
 
             now_ts = time.time()
-            if enforce_closure and len(open_burst_ids) > 0:
-                raise TradeExecutionError(
-                    f"⛔ Burst guard ({scope_lbl}): panier(s) en cours = {', '.join(sorted(open_burst_ids))} → interdit d’en démarrer un nouveau."
-                )
-
             last_burst_time = getattr(self, "_last_burst_time", 0)
-            if cooldown_seconds > 0 and (now_ts - last_burst_time) < cooldown_seconds:
-                raise TradeExecutionError(
-                    f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
-                )
+
+            # (GUARD OFF) Ne plus bloquer si panier(s) déjà ouvert(s)
+            # if enforce_closure and len(open_burst_ids) > 0:
+            #     raise TradeExecutionError(
+            #         f"⛔ Burst guard ({scope_lbl}): panier(s) en cours = {', '.join(sorted(open_burst_ids))} → interdit d’en démarrer un nouveau."
+            #     )
+
+            # (COOLDOWN OFF) Ne plus bloquer sur délai entre bursts
+            # if cooldown_seconds > 0 and (now_ts - last_burst_time) < cooldown_seconds:
+            #     raise TradeExecutionError(
+            #         f"⏳ Cooldown actif ({now_ts - last_burst_time:.1f}s < {cooldown_seconds}s)."
+            #     )
 
             self.logger.info(
-                f"[BURST GUARD] OK pour démarrer (scope={scope_lbl}, aucun panier actif, cooldown OK)."
+                f"[BURST GUARD] bypass: cooldown=OFF, enforce_closure={enforce_closure}, "
+                f"single_burst_global={single_burst_global}, scope={scope_lbl}"
             )
     except TradeExecutionError:
         raise
