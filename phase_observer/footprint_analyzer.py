@@ -431,16 +431,49 @@ class FootprintAnalyzer:
         if not self._fp_can_log(self._asset_upper, tag):
             return
         getattr(self.logger, level, self.logger.info)(fmt, *args)
-        
-    def _log_error(self, where: str, exc: Exception, extra: Optional[Dict[str, Any]] = None):
+
+    def _log_error(
+        self, where: str, exc: Exception, extra: Optional[Dict[str, Any]] = None
+    ):
         if not getattr(self, "logger", None):
             return
         try:
             self.logger.debug("[FP-ERR][%s] %s extra=%s", where, repr(exc), extra or {})
         except Exception:
             pass
-    
+
     # ---- public -------------------------------------------------------
+    def _dynamic_window_plan(
+        self, ticks: pd.DataFrame, cfg: TriggerConfig, tick_count_soft: int
+    ) -> list[int]:
+        """
+        Construit une liste de fenêtres en secondes, adaptée à la densité de ticks.
+        - Si flux maigre: on ajoute 13s et 21s.
+        - Si flux très dense: on privilégie les petites fenêtres d'abord.
+        """
+        base = list(cfg.window_candidates_s)
+        try:
+            # densité ~ ticks / durée observée
+            if "dt" in ticks.columns:
+                span_s = (ticks["dt"].max() - ticks["dt"].min()).total_seconds()
+            else:
+                span_s = float(len(ticks))  # fallback conservateur
+            span_s = max(1.0, float(span_s))
+            density = float(tick_count_soft) / span_s
+        except Exception:
+            density = 0.0
+
+        # Flux maigre → on prolonge la fenêtre
+        if tick_count_soft < 60 or density < 2.0:
+            base += [13, 21]
+
+        # Flux pléthorique → on s'assure que 3s est testé en priorité
+        if density >= 8.0 and 3 not in base:
+            base = [3] + base
+
+        # Dé-dup + ordonnancement
+        plan = sorted(set(int(x) for x in base))
+        return plan
 
     def analyze_footprint_triggers(
         self,
@@ -458,8 +491,8 @@ class FootprintAnalyzer:
         if self._asset_upper not in self._fp_enabled:
             return False, {"reason": "TRIG_DISABLED_ASSET", "asset": self._asset_upper}
 
-        t0 = time.perf_counter()      # chrono pour le résumé
-        tick_count_soft = "?"         # fixé après validation
+        t0 = time.perf_counter()  # chrono pour le résumé
+        tick_count_soft = "?"  # fixé après validation
 
         with self.monitor.measure_phase("total"):
             # 0) pré-traitement feed-agnostic (price/volume)
@@ -470,7 +503,9 @@ class FootprintAnalyzer:
                 vt = self.validator.validate_ticks(ticks)
                 try:
                     # si vt.metrics existe, on l’utilise ; sinon fallback len(ticks)
-                    tick_count_soft = int(getattr(vt, "metrics", {}).get("row_count", len(ticks)))
+                    tick_count_soft = int(
+                        getattr(vt, "metrics", {}).get("row_count", len(ticks))
+                    )
                 except Exception:
                     tick_count_soft = len(ticks) if ticks is not None else "?"
 
@@ -497,13 +532,16 @@ class FootprintAnalyzer:
                     ticks = self.normalizer.normalize_dataframe(ticks.copy(), "dt")
                     bars = (
                         self.normalizer.normalize_dataframe(bars.copy(), "time")
-                        if bars is not None else None
+                        if bars is not None
+                        else None
                     )
                 except Exception as e:
                     return False, {
                         "reason": f"Datetime normalization failed: {e}",
                         "error_code": ErrorCode.DATETIME_NORMALIZATION.value,
                     }
+            # ---- plan de fenêtres adaptatif (densité ticks) ----
+            window_plan = self._dynamic_window_plan(ticks, cfg, tick_count_soft)
 
             # 4) exploration multi-fenêtres / double passe
             best_decision = None
@@ -512,11 +550,12 @@ class FootprintAnalyzer:
 
             for pass_type in ("normal", "soft"):
                 params_map: Dict[str, Any] = (
-                    cfg.to_dict() if pass_type == "normal"
+                    cfg.to_dict()
+                    if pass_type == "normal"
                     else {**cfg.to_dict(), **cfg.soft_params}
                 )
 
-                for win in params_map.get("window_candidates_s", cfg.window_candidates_s):
+                for win in window_plan:
                     with self.monitor.measure_phase(f"window_{int(win)}s"):
                         decision, meta, used_win = self._analyze_single_window(
                             ticks=ticks,
@@ -531,7 +570,11 @@ class FootprintAnalyzer:
                                 float(decision.get("confidence", 0))
                                 > float(best_decision.get("confidence", 0))
                             ):
-                                best_decision, best_meta, best_win = decision, meta, used_win
+                                best_decision, best_meta, best_win = (
+                                    decision,
+                                    meta,
+                                    used_win,
+                                )
 
                 if best_decision:
                     break
@@ -542,25 +585,29 @@ class FootprintAnalyzer:
                     "SUMMARY",
                     "[TRIG][%s] none | wins=%s | ticks=%s | dt=%.1fms",
                     self._asset_upper,
-                    "/".join(map(str, cfg.window_candidates_s)),
+                    "/".join(map(str, window_plan)),
                     str(tick_count_soft),
                     (time.perf_counter() - t0) * 1000.0,
                     level="info",
                 )
-                return False, {"reason": "no_trigger_detected"}
-                              
+                return False, {
+                    "reason": "no_trigger_detected",
+                    "diag": {"wins": window_plan, "ticks": tick_count_soft},
+                }
+
             self._fp_log(
                 "SUMMARY",
                 "[TRIG][%s] %s %s | conf=%.2f | win=%ss | dt=%.1fms",
                 self._asset_upper,
                 str(best_decision.get("trigger", "footprint")),
-                str(best_decision.get("direction", best_decision.get("action",""))).upper(),
+                str(
+                    best_decision.get("direction", best_decision.get("action", ""))
+                ).upper(),
                 float(best_decision.get("confidence", 0.0)),
                 int(best_win or cfg.window_candidates_s[0]),
                 (time.perf_counter() - t0) * 1000.0,
                 level="info",
             )
-
 
             return True, self._build_trigger_response(
                 asset=asset,
@@ -676,6 +723,50 @@ class FootprintAnalyzer:
             self._log_error("snapshot", e, {"window_s": window_s})
             return None, None, None
 
+        # 6) Adaptation contextuelle des seuils (PATCH C)
+        #    - Relâchement léger si snapshot faible (zmax/dr_p95 bas)
+        #    - Sans effet quand snapshot déjà fort
+        dyn_params = dict(params)
+        try:
+            zmax = float(
+                df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
+            )
+            dr_p95 = float(
+                df_levels["delta_ratio"].quantile(0.95)
+                if "delta_ratio" in df_levels
+                else 0.0
+            )
+
+            # Volume anémique → absorption un peu plus permissive
+            if zmax < 1.0:
+                dyn_params["abs_vol_z_min"] = max(
+                    0.70,
+                    float(dyn_params.get("abs_vol_z_min", cfg.abs_vol_z_min)) * 0.85,
+                )
+
+            # Déséquilibres faibles → stacking un peu plus permissif
+            if dr_p95 < 0.90:
+                dyn_params["stack_delta_ratio_min"] = max(
+                    1.05,
+                    float(
+                        dyn_params.get(
+                            "stack_delta_ratio_min", cfg.stack_delta_ratio_min
+                        )
+                    )
+                    * 0.90,
+                )
+        except Exception:
+            dyn_params = dict(params)
+
+        # Booster méta : delta total (si absent)
+        try:
+            if meta is not None and "delta_total" not in meta:
+                meta["delta_total"] = float(
+                    df_levels["delta"].sum() if "delta" in df_levels else 0.0
+                )
+        except Exception:
+            pass
+
         candidates: List[Dict[str, Any]] = []
 
         # --- 1) Climax (bars optionnelles) ---
@@ -683,24 +774,26 @@ class FootprintAnalyzer:
             climax_kwargs = {}
             try:
                 lookback = int(
-                    params.get("climax_lookback_bars", cfg.climax_lookback_bars)
+                    dyn_params.get("climax_lookback_bars", cfg.climax_lookback_bars)
                 )
                 bar_slice = bars.tail(max(lookback + 5, 30))  # slice perf
                 climax_kwargs = dict(
                     lookback_bars=lookback,
                     vol_ratio_min=float(
-                        params.get("climax_vol_ratio_min", cfg.climax_vol_ratio_min)
+                        dyn_params.get("climax_vol_ratio_min", cfg.climax_vol_ratio_min)
                     ),
                     delta_ratio_min=float(
-                        params.get("climax_delta_ratio_min", cfg.climax_delta_ratio_min)
+                        dyn_params.get(
+                            "climax_delta_ratio_min", cfg.climax_delta_ratio_min
+                        )
                     ),
                     need_consolidation=bool(
-                        params.get(
+                        dyn_params.get(
                             "climax_need_consolidation", cfg.climax_need_consolidation
                         )
                     ),
                     consolidation_max_atr_mult=float(
-                        params.get("climax_cons_atr_max", cfg.climax_cons_atr_max)
+                        dyn_params.get("climax_cons_atr_max", cfg.climax_cons_atr_max)
                     ),
                 )
                 d1 = detect_volume_climax_after_consolidation(
@@ -720,16 +813,18 @@ class FootprintAnalyzer:
         try:
             stack_kwargs = dict(
                 delta_ratio_min=float(
-                    params.get("stack_delta_ratio_min", cfg.stack_delta_ratio_min)
+                    dyn_params.get("stack_delta_ratio_min", cfg.stack_delta_ratio_min)
                 ),
-                min_levels=int(params.get("stack_min_levels", cfg.stack_min_levels)),
+                min_levels=int(
+                    dyn_params.get("stack_min_levels", cfg.stack_min_levels)
+                ),
                 invalidate_opposite_ratio=float(
-                    params.get(
+                    dyn_params.get(
                         "stack_invalidate_opp_ratio", cfg.stack_invalidate_opp_ratio
                     )
                 ),
                 vol_level_min_ratio_median_30s=float(
-                    params.get("stack_vol_lvl_min_med", cfg.stack_vol_lvl_min_med)
+                    dyn_params.get("stack_vol_lvl_min_med", cfg.stack_vol_lvl_min_med)
                 ),
             )
             d2 = detect_imbalance_stacking(df_levels, **stack_kwargs)
@@ -760,11 +855,15 @@ class FootprintAnalyzer:
         abs_kwargs = {}
         try:
             abs_kwargs = dict(
-                vol_zscore_min=float(params.get("abs_vol_z_min", cfg.abs_vol_z_min)),
-                delta_ratio_max=float(
-                    params.get("abs_delta_ratio_max", cfg.abs_delta_ratio_max)
+                vol_zscore_min=float(
+                    dyn_params.get("abs_vol_z_min", cfg.abs_vol_z_min)
                 ),
-                attempts_min=int(params.get("abs_attempts_min", cfg.abs_attempts_min)),
+                delta_ratio_max=float(
+                    dyn_params.get("abs_delta_ratio_max", cfg.abs_delta_ratio_max)
+                ),
+                attempts_min=int(
+                    dyn_params.get("abs_attempts_min", cfg.abs_attempts_min)
+                ),
             )
             d3 = detect_absorption_reject(df_levels, **abs_kwargs)
             if d3.get("ok"):
@@ -812,11 +911,10 @@ class FootprintAnalyzer:
         try:
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
             return best, meta, window_s
-            
+
         except Exception:
             pass
 
-        
     def _build_trigger_response(
         self,
         asset: str,
