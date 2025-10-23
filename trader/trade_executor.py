@@ -387,20 +387,7 @@ def run_trade_execution_pipeline(
     # Renseigne la décision (immuable ensuite)
     td["burst_size"] = burst_size
 
-    # -------------------- 4) HARD GUARD — volume requis (>0), pas de fallback ---
-    vol_in = float(td.get("volume") or 0.0)
-    if vol_in <= 0.0:
-        reason = "[EXEC][ABORT] volume manquant ou <= 0 (NO-FALLBACK). La décision doit fournir un lot/leg > 0."
-        _log("error", f"{reason} action={action} asset={asset} burst_size={burst_size}")
-        _audit(
-            "rejected",
-            {
-                "asset": asset,
-                "mode": "burst" if is_burst_flag else "standard",
-                "reason": "VOLUME_REQUIRED",
-            },
-        )
-        return {"status": "failed", "reason": "VOLUME_REQUIRED"}
+  
 
     # -------------------- 5) Adapter package & construire la requête ------------
     adapted_package = {
