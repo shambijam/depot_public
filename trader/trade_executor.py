@@ -20,8 +20,12 @@ from trader.errors import TradeExecutionError, InvalidDecisionPackageError
 # --- Briques (binding en bas du fichier) ---
 from trader.order_builder import prepare_order, _build_mt5_request
 from trader.sizing import _calculate_risk_based_volume
-from trader.sltp import _calculate_sl_tp_prices, _normalize_stops, _split_multi_tp_orders
-from trader.burst import monitor_burst_baskets  
+from trader.sltp import (
+    _calculate_sl_tp_prices,
+    _normalize_stops,
+    _split_multi_tp_orders,
+)
+from trader.burst import monitor_burst_baskets
 from trader.reconcile import (
     reconcile_state_with_broker,
     _update_internal_position_state,
@@ -73,9 +77,13 @@ class TradeExecutor:
     # ------------------------------------------------------------------------
     # Helpers "safe" (alert & feedback)
     # ------------------------------------------------------------------------
-    def _send_alert_safe(self, level: str, message: str, alert_type: str = "telegram_critical") -> None:
+    def _send_alert_safe(
+        self, level: str, message: str, alert_type: str = "telegram_critical"
+    ) -> None:
         try:
-            self.config_manager.send_alert(level if level else "ALERTE", message, alert_type=alert_type)
+            self.config_manager.send_alert(
+                level if level else "ALERTE", message, alert_type=alert_type
+            )
         except TypeError:
             # compat signatures anciennes
             try:
@@ -83,7 +91,9 @@ class TradeExecutor:
             except Exception:
                 self.logger.warning("Échec send_alert (toutes variantes).")
 
-    def _feedback_safe(self, trade_decision: Dict[str, Any], feedback: Dict[str, Any]) -> None:
+    def _feedback_safe(
+        self, trade_decision: Dict[str, Any], feedback: Dict[str, Any]
+    ) -> None:
         try:
             if hasattr(self.config_manager, "log_decision"):
                 self.config_manager.log_decision(
@@ -119,8 +129,16 @@ class TradeExecutor:
                 digits = int(getattr(si, "digits", 5) or 5) if si else 5
             except Exception:
                 digits = 5
-            request["sl"] = round(float(sl), digits) if isinstance(sl, (int, float)) else 0.0 if sl else 0.0
-            request["tp"] = round(float(tp), digits) if isinstance(tp, (int, float)) else 0.0 if tp else 0.0
+            request["sl"] = (
+                round(float(sl), digits)
+                if isinstance(sl, (int, float))
+                else 0.0 if sl else 0.0
+            )
+            request["tp"] = (
+                round(float(tp), digits)
+                if isinstance(tp, (int, float))
+                else 0.0 if tp else 0.0
+            )
 
         # Envoi
         result = None
@@ -144,11 +162,19 @@ class TradeExecutor:
         # Codes MT5 usuels
         RET_DONE = getattr(mt5, "TRADE_RETCODE_DONE", 10009) if mt5 else 10009
         RET_PLACED = getattr(mt5, "TRADE_RETCODE_PLACED", 10008) if mt5 else 10008
-        RET_DONE_PARTIAL = getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010) if mt5 else 10010
-        RET_INVALID_STOPS = getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", 10016) if mt5 else 10016
+        RET_DONE_PARTIAL = (
+            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010) if mt5 else 10010
+        )
+        RET_INVALID_STOPS = (
+            getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", 10016) if mt5 else 10016
+        )
 
         summary = {
-            "status": "sent" if retcode in (RET_DONE, RET_PLACED, RET_DONE_PARTIAL) else "failed",
+            "status": (
+                "sent"
+                if retcode in (RET_DONE, RET_PLACED, RET_DONE_PARTIAL)
+                else "failed"
+            ),
             "order": order,
             "deal": deal,
             "ticket": order or deal,
@@ -163,7 +189,8 @@ class TradeExecutor:
         try_attach = (
             retcode in (RET_DONE, RET_DONE_PARTIAL)
             and (request.get("sl") or request.get("tp"))
-            and retcode == RET_INVALID_STOPS  # certains brokers renvoient INVALID_STOPS même si exécuté
+            and retcode
+            == RET_INVALID_STOPS  # certains brokers renvoient INVALID_STOPS même si exécuté
         )
         if try_attach:
             try:
@@ -171,7 +198,9 @@ class TradeExecutor:
                 if pos_id:
                     self.logger.info("[POST-FILL] tentative attache SL/TP.")
                     self.mt5_connector.modify_position_stops(
-                        position=pos_id, sl=request.get("sl") or 0.0, tp=request.get("tp") or 0.0
+                        position=pos_id,
+                        sl=request.get("sl") or 0.0,
+                        tp=request.get("tp") or 0.0,
                     )
                     summary["status"] = "filled"
                     summary["message"] = f"{retcode_str} + post-fill SL/TP attach"
@@ -209,19 +238,29 @@ class TradeExecutor:
 #  Pipeline d’exécution (pont DecisionPipeline -> TradeExecutor)
 # ======================================================================================
 
+
 def run_trade_execution_pipeline(
     trade_executor: "TradeExecutor",
     decision_package: Dict[str, Any],
     is_dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
-    Pipeline d’exécution unique (STANDARD + BURST SL/TP).
+    Pipeline d’exécution (STANDARD + BURST).
 
-    - SUPPRIME le trailing / branches LIMIT_FOK spécifiques.
-    - BURST: on conserve SL/TP calculés par order_builder.
-    - Le sizing BURST est géré en scope 'BASKET' (si fourni côté décision).
-    - Journalisation et audit propres.
+    Mode desk (PROD):
+    - ❌ Aucun fallback de sizing: si la décision ne fournit pas un volume > 0, ABORT.
+    - ✅ Burst: envoi N tickets (N = burst_size), chacun avec le **même lot/leg** (= td["volume"]).
+    - ✅ Préserve SL/TP fournis (order_builder); pas de trailing ici.
+    - ✅ Journalisation stricte + audit.
+
+    Contrat d’entrée (décision):
+    - td["action"] ∈ {"BUY","SELL"} (LONG/SHORT acceptés et normalisés)
+    - td["asset"] / "symbol"
+    - td["volume"]  > 0  (lot **par leg**)
+    - td["burst_size"] (optionnel) sinon résolu via conf.
     """
+    import logging
+
     logger = logging.getLogger(__name__)
 
     def _log(level: str, msg: str):
@@ -242,8 +281,13 @@ def run_trade_execution_pipeline(
             pass
 
     # -------------------- 1) Extraction/normalisation entrée --------------------
-    if not isinstance(decision_package, dict) or "final_decision" not in decision_package:
-        raise InvalidDecisionPackageError("decision_package manquant ou invalide (clé 'final_decision').")
+    if (
+        not isinstance(decision_package, dict)
+        or "final_decision" not in decision_package
+    ):
+        raise InvalidDecisionPackageError(
+            "decision_package manquant ou invalide (clé 'final_decision')."
+        )
 
     td = dict(decision_package.get("final_decision") or {})
 
@@ -261,173 +305,161 @@ def run_trade_execution_pipeline(
 
     # Contexte marché (clé normalisée)
     market_context = dict(
-        decision_package.get("market_context")
-        or decision_package.get("context")
-        or {}
+        decision_package.get("market_context") or decision_package.get("context") or {}
     )
 
     # Asset / symbol
-    asset = (td.get("asset") or td.get("symbol") or td.get("instrument") or "").strip().upper()
+    asset = (
+        (td.get("asset") or td.get("symbol") or td.get("instrument") or "")
+        .strip()
+        .upper()
+    )
     if not asset:
         raise InvalidDecisionPackageError("Asset/symbol manquant dans final_decision.")
+    td["symbol"] = asset
 
-    # Harmonisation action
+    # Harmonisation action (une seule fois)
     action = str(td.get("action", "")).strip().upper()
     if action in ("LONG", "SHORT"):
         action = "BUY" if action == "LONG" else "SELL"
-
+    if action not in ("BUY", "SELL"):
+        raise InvalidDecisionPackageError(
+            "Action invalide ou manquante dans final_decision."
+        )
     td["action"] = action
-    td["symbol"] = asset
 
-
-    # -------------------- 2) Harmonisation Action/Symbole -----------------------
-    action = str(td.get("action", "")).strip().upper()
-    if action in ("LONG", "SHORT"):
-        action = "BUY" if action == "LONG" else "SELL"
-        td["action"] = action
-    td["symbol"] = asset
-
-    # -------------------- 3) Alignement BURST (SL/TP conservés) -----------------
-    # simple flag si la décision signale un burst
-    is_burst_flag = bool(td.get("burst_enabled") or td.get("burst") or td.get("is_burst"))
+    # -------------------- 2) Alignement BURST (flags + style) -------------------
+    is_burst_flag = bool(
+        td.get("burst_enabled") or td.get("burst") or td.get("is_burst")
+    )
     if is_burst_flag:
-        # sizing scope recommandé pour repartir le risk% sur le panier
         td.setdefault("sizing_scope", "BASKET")
-        # master = MARKET (split géré ici)
-        td["entry_style"] = "MARKET"
+        td["entry_style"] = "MARKET"  # split géré ici
         _log(
             "info",
             f"[BURST][PLAN] {action} {asset} | style=MARKET | SL/TP actifs | scope={td.get('sizing_scope')}",
         )
-        
-    # -------------------- 3bis) Résolution burst_size + sizing per-leg ----------
-    # Récup éventuelle des asset_configs pour l'actif
-    asset_configs = decision_package.get("asset_configs") or market_context.get("asset_configs") or {}
+
+    # -------------------- 3) Résolution burst_size (robuste, sans fallback lot) -
+    # Asset overrides si fournis
+    asset_configs = (
+        decision_package.get("asset_configs")
+        or market_context.get("asset_configs")
+        or {}
+    )
     asset_cfg = asset_configs.get(asset) or {}
 
-    # Résolution robuste du burst_size (ordre de priorité)
-    # 1) décision -> 2) config.scalping.burst.burst_size -> 3) vieux chemin entry_rules... -> 4) fallback=1
-    burst_size_from_cfg = (
-        td.get("burst_count")
-        or td.get("burst_size")
-        or (raw_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
-        or (((raw_cfg.get("entry_rules") or {}).get("scalping") or {})
-            .get("burst_scalping", {}).get("burst_size"))
-        or (asset_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
-        or 1
-    )
-    try:
-        burst_size_from_cfg = int(burst_size_from_cfg)
-        if burst_size_from_cfg <= 0:
-            burst_size_from_cfg = 1
-    except Exception:
-        burst_size_from_cfg = 1
-
-    td["burst_size"] = burst_size_from_cfg  # on fige dans la décision
-
-    # Si volume manquant/≤0 → sizing de secours ici (risk%/burst → lot par leg)
-    vol_in = float(td.get("volume") or 0.0)
-    if vol_in <= 0.0:
-        try:
-            from trader.sizing import _calculate_risk_based_volume
-
-            # equity
-            acc_info = decision_package.get("account_info") or market_context.get("account_info") or {}
-            equity = float(acc_info.get("equity") or 0.0)
-
-            # entry / SL
-            entry_price = td.get("entry_price_market") or td.get("entry_price")
-            sl_price = td.get("sl_price")
-
-            # symbol_info si dispo via trade_executor
-            symbol_info = None
-            if hasattr(trade_executor, "get_symbol_info"):
-                try:
-                    symbol_info = trade_executor.get_symbol_info(asset)
-                except Exception:
-                    symbol_info = None
-
-            # risk%
-            risk_pct = (
-                (asset_cfg.get("risk") or {}).get("risk_per_trade_percent")
-                or (raw_cfg.get("risk") or {}).get("risk_per_trade_percent")
-                or 0.0
-            )
-            lot_per_leg = _calculate_risk_based_volume(
-                symbol_info=symbol_info,
-                entry_price=float(entry_price) if entry_price is not None else 0.0,
-                sl_price=float(sl_price) if sl_price is not None else 0.0,
-                equity=float(equity),
-                risk_per_trade_percent=float(risk_pct or 0.0),
-                burst_size=int(td["burst_size"]),
-                logger=logger,
-            )
-
-            td["volume"] = float(lot_per_leg or 0.0)
-            _log("info", f"[SIZING][FALLBACK] lot/leg={td['volume']} burst={td['burst_size']} risk%={risk_pct}")
-        except Exception as _e:
-            _log("error", f"[SIZING][FALLBACK] échec sizing per-leg: {_e}")
-            td["volume"] = 0.0
-       
-    # -------------------- 4) Adapter le package et construire la requête --------
-    # ⚠️ prepare_order attend trade_decision / market_context / active_config
-    adapted_package = {
-        "trade_decision": td,
-        "market_context": market_context,
-        "active_config": raw_cfg,
-        # on laisse 'final_decision' pour compat éventuelle d’autres appels
-        "final_decision": td,
-    }
-
-    try:
-        mt5_request = trade_executor.prepare_order(adapted_package)
-    except Exception as e:
-        reason = f"Préparation d'ordre échouée: {e}"
-        logger.error(reason, exc_info=True)
-        # on alerte “safe” si dispo
-        if hasattr(trade_executor, "_send_alert_safe"):
-            trade_executor._send_alert_safe("CRITIQUE", reason, alert_type="telegram_critical")
-        feedback = {"status": "failed", "reason": str(e)}
-        if hasattr(trade_executor, "_feedback_safe"):
-            trade_executor._feedback_safe(td, feedback)
-        return {"status": "failed", "reason": str(e)}
-
-    # -------------------- 5) DRY RUN -------------------------------------------
-    if is_dry_run:
-        return {
-            "status": "dry_run_ready",
-            "mode": "standard",
-            "request": mt5_request,
-            "trade_decision": td,
-        }
-
-    # -------------------- 6) Résolution BURST ----------------------------------
-    rule = str(td.get("rule") or td.get("rule_name") or "").lower()
-    is_burst = bool(
-        is_burst_flag or ("burst" in rule)
-    )
-
-    def _to_int_pos(x, default=1) -> int:
+    def _to_pos_int(x, default=1) -> int:
         try:
             v = int(x)
             return v if v > 0 else default
         except Exception:
             return default
 
-    burst_size = _to_int_pos(
+    # Recherche priorisée
+    burst_size = _to_pos_int(
         td.get("burst_size")
+        or td.get("burst_count")
+        or (asset_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
         or (raw_cfg.get("scalping") or {}).get("burst", {}).get("burst_size")
-        or (((raw_cfg.get("entry_rules") or {}).get("scalping") or {})
-            .get("burst_scalping", {}).get("burst_size"))
-        or ((decision_package.get("asset_configs") or {}).get(asset, {}).get("scalping", {})\
-            .get("burst", {}).get("burst_size"))
+        or (
+            ((raw_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                "burst_scalping", {}
+            )
+            or {}
+        ).get("burst_size")
         or 1,
         1,
     )
 
+    # Respect éventuel d'une borne haute en conf (optionnelle)
+    max_burst_cfg = (asset_cfg.get("scalping") or {}).get("burst", {}).get(
+        "max_burst_size"
+    ) or (raw_cfg.get("scalping") or {}).get("burst", {}).get("max_burst_size")
+    if max_burst_cfg:
+        try:
+            max_burst = int(max_burst_cfg)
+            if max_burst > 0:
+                burst_size = min(burst_size, max_burst)
+        except Exception:
+            pass
 
-    # -------------------- 7) STANDARD (pas burst ou burst_size==1) --------------
-    if not is_burst or burst_size == 1:
+    # Renseigne la décision (immuable ensuite)
+    td["burst_size"] = burst_size
+
+    # -------------------- 4) HARD GUARD — volume requis (>0), pas de fallback ---
+    vol_in = float(td.get("volume") or 0.0)
+    if vol_in <= 0.0:
+        reason = "[EXEC][ABORT] volume manquant ou <= 0 (NO-FALLBACK). La décision doit fournir un lot/leg > 0."
+        _log("error", f"{reason} action={action} asset={asset} burst_size={burst_size}")
+        _audit(
+            "rejected",
+            {
+                "asset": asset,
+                "mode": "burst" if is_burst_flag else "standard",
+                "reason": "VOLUME_REQUIRED",
+            },
+        )
+        return {"status": "failed", "reason": "VOLUME_REQUIRED"}
+
+    # -------------------- 5) Adapter package & construire la requête ------------
+    adapted_package = {
+        "trade_decision": td,
+        "market_context": market_context,
+        "active_config": raw_cfg,
+        "final_decision": td,  # compat
+    }
+
+    try:
+        mt5_request = trade_executor.prepare_order(adapted_package)
+    except Exception as e:
+        reason = f"Préparation d'ordre échouée: {e}"
+        _log("error", reason)
+        if hasattr(trade_executor, "_send_alert_safe"):
+            try:
+                trade_executor._send_alert_safe(
+                    "CRITIQUE", reason, alert_type="telegram_critical"
+                )
+            except Exception:
+                pass
+        feedback = {"status": "failed", "reason": str(e)}
+        if hasattr(trade_executor, "_feedback_safe"):
+            try:
+                trade_executor._feedback_safe(td, feedback)
+            except Exception:
+                pass
+        return {"status": "failed", "reason": str(e)}
+
+    # DRY RUN
+    if is_dry_run:
+        # assure la visibilité du volume utilisé
+        if not float(mt5_request.get("volume") or 0.0):
+            mt5_request["volume"] = vol_in
+        return {
+            "status": "dry_run_ready",
+            "mode": "standard" if burst_size == 1 else "burst",
+            "request": mt5_request,
+            "trade_decision": td,
+        }
+
+    # -------------------- 6) STANDARD (pas burst ou burst_size==1) --------------
+    if not is_burst_flag or burst_size == 1:
+        # Force le volume si prepare_order n'a rien posé
+        if not float(mt5_request.get("volume") or 0.0):
+            mt5_request["volume"] = vol_in
+
+        # Garde-fou final
+        if not float(mt5_request.get("volume") or 0.0):
+            reason = (
+                "[EXEC][ABORT][STD] volume absent après prepare_order (NO-FALLBACK)."
+            )
+            _log("error", f"{reason} asset={asset}")
+            _audit(
+                "rejected",
+                {"asset": asset, "mode": "standard", "reason": "VOLUME_REQUIRED"},
+            )
+            return {"status": "failed", "reason": "VOLUME_REQUIRED"}
+
         execution_result = trade_executor.execute_order(mt5_request)
         ok = isinstance(execution_result, dict) and execution_result.get("status") in {
             "sent",
@@ -437,56 +469,78 @@ def run_trade_execution_pipeline(
         if not ok:
             _log(
                 "error",
-                f"[EXEC_PIPE][STD_FAIL] asset={asset} reason={isinstance(execution_result, dict) and execution_result.get('reason')}",
+                f"[EXEC][STD_FAIL] asset={asset} reason={isinstance(execution_result, dict) and execution_result.get('reason')}",
             )
             _audit(
                 "rejected",
                 {
                     "asset": asset,
+                    "mode": "standard",
                     "reason": isinstance(execution_result, dict)
                     and execution_result.get("reason"),
-                    "mode": "standard",
                 },
             )
         else:
-            _log("info", f"[EXEC_PIPE][STD_OK] asset={asset} ticket={execution_result.get('ticket')}")
+            _log(
+                "info",
+                f"[EXEC][STD_OK] asset={asset} ticket={execution_result.get('ticket')}",
+            )
             _audit("filled", {"asset": asset, "mode": "standard"})
         return execution_result
 
-    # -------------------- 8) BURST: envoi N tickets -----------------------------
+    # -------------------- 7) BURST: envoi N tickets -----------------------------
     results: list[dict] = []
-    symbol = str(mt5_request.get("symbol") or td.get("symbol") or td.get("asset") or "").upper()
+    symbol = str(
+        mt5_request.get("symbol") or td.get("symbol") or td.get("asset") or ""
+    ).upper()
     basket_id = str(mt5_request.get("basket_id") or f"burst_{symbol}")
 
     def _short_comment(txt: str, max_len: int = 31) -> str:
         import re
+
         raw = (txt or "").strip().replace(" ", "")
         raw = re.sub(r"[^A-Za-z0-9._|-]", "", raw)
         return raw[:max_len]
 
-    for i in range(1, burst_size + 1):
-        req_i = dict(mt5_request)  # shallow copy
-        # commentaire court compatible guard (<=31 chars)
-        req_i["comment"] = _short_comment(f"burst_scalping|basket={basket_id}|{i}/{burst_size}")
-        
-        # Si prepare_order n'a pas posé volume (ou 0), on force le lot/leg de la décision
-        if not float(req_i.get("volume") or 0):
-            req_i["volume"] = float(td.get("volume") or 0.0)
+    # Sécurité : s’assure que la requête source a un volume
+    base_request = dict(mt5_request)
+    if not float(base_request.get("volume") or 0.0):
+        base_request["volume"] = vol_in
 
-        if not req_i["volume"] or req_i["volume"] <= 0:
-            _log("error", f"[EXEC_PIPE][BURST] volume<=0 sur leg {i}/{burst_size} → skip envoi.")
-            results.append({"status": "failed", "reason": "volume<=0"})
-            continue
-        
+    for i in range(1, burst_size + 1):
+        req_i = dict(base_request)  # shallow copy
+        # commentaire court compatible guard (<=31 chars)
+        req_i["comment"] = _short_comment(
+            f"burst_scalping|basket={basket_id}|{i}/{burst_size}"
+        )
+        # Force le lot/leg (NO-FALLBACK)
+        req_i["volume"] = vol_in
+
         r = trade_executor.execute_order(req_i)
         results.append(r)
 
-    ok_any = any(isinstance(r, dict) and r.get("status") in {"sent", "placed", "filled"} for r in results)
-
+    ok_any = any(
+        isinstance(r, dict) and r.get("status") in {"sent", "placed", "filled"}
+        for r in results
+    )
     if ok_any:
         _audit("filled", {"asset": asset, "mode": "burst", "burst_size": burst_size})
     else:
-        _audit("rejected", {"asset": asset, "mode": "burst", "burst_size": burst_size})
+        # remonte au moins la première raison connue si dispo
+        reason = None
+        for r in results:
+            if isinstance(r, dict) and r.get("reason"):
+                reason = r.get("reason")
+                break
+        _audit(
+            "rejected",
+            {
+                "asset": asset,
+                "mode": "burst",
+                "burst_size": burst_size,
+                "reason": reason or "UNKNOWN",
+            },
+        )
 
     return {
         "status": "filled" if ok_any else "failed",
@@ -500,7 +554,11 @@ def run_trade_execution_pipeline(
 #  Binding des fonctions des briques comme méthodes de TradeExecutor
 #  (on supprime TOUT ce qui venait de trailing.py)
 # ======================================================================================
-TradeExecutor._load_settings = _update_internal_position_state.__globals__.get("_load_settings") or (lambda *a, **k: None)  # fallback si absent
+TradeExecutor._load_settings = _update_internal_position_state.__globals__.get(
+    "_load_settings"
+) or (
+    lambda *a, **k: None
+)  # fallback si absent
 TradeExecutor.prepare_order = prepare_order
 TradeExecutor._build_mt5_request = _build_mt5_request
 TradeExecutor._split_multi_tp_orders = _split_multi_tp_orders
