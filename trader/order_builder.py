@@ -643,13 +643,27 @@ def prepare_order(self, decision_package: dict) -> dict:
         if is_burst:
             sizing_scope = "BASKET"
 
+        # --- Résolution STRicte de l'équité du compte (obligatoire > 0) ---
         account_ctx = market_context.get("active_broker_account") or {}
         equity_val = (
-            account_ctx.get("equity")
+            # 0) si déjà passé via trade_settings (rare mais supporté)
+            account_trade_settings.get("equity")
+            # 1) contexte courant
+            or account_ctx.get("equity")
             or (account_ctx.get("account_info") or {}).get("equity")
             or (account_ctx.get("info") or {}).get("equity")
         )
 
+        def _as_pos_float(x):
+            try:
+                if isinstance(x, str):
+                    x = x.strip().replace(",", ".")
+                v = float(x)
+                return v if v > 0 else None
+            except Exception:
+                return None
+
+        # 2) Lecture MT5 directe si encore vide
         if equity_val in (None, ""):
             try:
                 ai = self.mt5_connector.get_account_info()
@@ -661,6 +675,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                     f"[SIZING] Impossible de lire l'équité via MT5: {e}"
                 )
 
+        # 3) Fallback de configuration (utile DEMO/dry-run)
         if equity_val in (None, ""):
             try:
                 equity_val = self.config_manager.get("risk_management.default_equity")
@@ -671,32 +686,28 @@ def prepare_order(self, decision_package: dict) -> dict:
             except Exception:
                 equity_val = None
 
-        def _as_pos_float(x):
-            try:
-                if isinstance(x, str):
-                    x = x.strip().replace(",", ".")
-                v = float(x)
-                return v if v > 0 else None
-            except Exception:
-                return None
-
         equity_val = _as_pos_float(equity_val)
         if equity_val is None:
+            # ⛔ Bloquant ici (mieux que d’échouer dans sizing.py)
             raise TradeExecutionError(
-                "Équité du compte invalide ou introuvable pour le sizing. "
-                "Renseigne market_context.active_broker_account.equity, ou configure risk_management.default_equity."
+                "Équité du compte invalide. "
+                "Configure `risk_management.default_equity` pour DEMO/dry-run "
+                "ou assure le retour MT5 (get_account_info().equity)."
             )
 
+        # Propagation stricte (context + account_info)
         account_ctx["equity"] = equity_val
         ai = account_ctx.get("account_info") or {}
         ai["equity"] = equity_val
         account_ctx["account_info"] = ai
         market_context["active_broker_account"] = account_ctx
+        self.logger.info(f"[SIZING] Équité retenue (strict) → {equity_val}")
 
+        # --- Injection equity dans trade_settings & calcul du lot ---
         account_trade_settings_over = {
             **account_trade_settings,
-            "risk_per_trade_percent": resolved_risk_pct,
-            "equity": equity_val,
+            "risk_per_trade_percent": resolved_risk_pct,  # risk% résolu plus haut
+            "equity": equity_val,  # ⬅ OBLIGATOIRE pour sizing.py
         }
 
         volume_final = float(
@@ -709,8 +720,8 @@ def prepare_order(self, decision_package: dict) -> dict:
                     "confidence": trade_decision.get("confidence", 1.0),
                     "rule_name": trade_decision.get("rule_name"),
                     "volatility_factor": trade_decision.get("volatility_factor"),
-                    "sizing_scope": sizing_scope,
-                    "burst_size": resolved_burst,
+                    "sizing_scope": sizing_scope,  # BASKET si burst
+                    "burst_size": resolved_burst,  # ex: 5 → risk%/5 par ticket
                 },
                 active_config,
                 market_context,
@@ -721,10 +732,11 @@ def prepare_order(self, decision_package: dict) -> dict:
             )
         )
 
-        # Normalisation broker (FLOOR au pas)
+        # Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
         volume_final = _normalize_volume(symbol_info, volume_final)
         self.logger.info(
-            f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → lot/ticket(normalisé)={volume_final}"
+            f"[SIZING] scope={sizing_scope} burst={resolved_burst} risk%={resolved_risk_pct} → "
+            f"lot/ticket(normalisé)={volume_final}"
         )
         if not isinstance(volume_final, (int, float)) or volume_final <= 0:
             raise TradeExecutionError(
