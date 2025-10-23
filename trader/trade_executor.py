@@ -14,8 +14,8 @@ except Exception:  # MT5 peut ne pas être dispo en environnement de test
     mt5 = None  # noqa
 
 from core.utils import CustomJSONEncoder
-from trader.errors import TradeExecutionError
 from trader.errors import InvalidDecisionPackageError
+
 # --- Briques (binding en bas du fichier) ---
 from trader.order_builder import prepare_order, _build_mt5_request
 from trader.sizing import _calculate_risk_based_volume
@@ -242,28 +242,42 @@ def run_trade_execution_pipeline(
 
     # -------------------- 1) Extraction/normalisation entrée --------------------
     if not isinstance(decision_package, dict) or "final_decision" not in decision_package:
-        raise InvalidDecisionPackageError(
-            "decision_package manquant ou invalide (clé 'final_decision')."
-        )
+        raise InvalidDecisionPackageError("decision_package manquant ou invalide (clé 'final_decision').")
 
     td = dict(decision_package.get("final_decision") or {})
 
-    # config “active” (fallback sur config dynamique live si non passée)
+    # Config active (ordre de priorité cohérent)
     raw_cfg = dict(
-        decision_package.get("config_used")
-        or decision_package.get("active_config")
+        decision_package.get("active_config")
+        or decision_package.get("config_used")
         or decision_package.get("config")
-        or (getattr(trade_executor, "config_manager", None) and trade_executor.config_manager.get_current_dynamic_config())
+        or (
+            getattr(trade_executor, "config_manager", None)
+            and trade_executor.config_manager.get_current_dynamic_config()
+        )
         or {}
     )
 
-    # contexte marché (clé normalisée = market_context, pas 'context')
+    # Contexte marché (clé normalisée)
     market_context = dict(
-        decision_package.get("market_context") or
-        decision_package.get("context") or {}
+        decision_package.get("market_context")
+        or decision_package.get("context")
+        or {}
     )
 
-    asset = (td.get("asset") or td.get("symbol") or "").upper()
+    # Asset / symbol
+    asset = (td.get("asset") or td.get("symbol") or td.get("instrument") or "").strip().upper()
+    if not asset:
+        raise InvalidDecisionPackageError("Asset/symbol manquant dans final_decision.")
+
+    # Harmonisation action
+    action = str(td.get("action", "")).strip().upper()
+    if action in ("LONG", "SHORT"):
+        action = "BUY" if action == "LONG" else "SELL"
+
+    td["action"] = action
+    td["symbol"] = asset
+
 
     # -------------------- 2) Harmonisation Action/Symbole -----------------------
     action = str(td.get("action", "")).strip().upper()
