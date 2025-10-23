@@ -25,7 +25,7 @@ from trader.sltp import (
     _normalize_stops,
     _split_multi_tp_orders,
 )
-from trader.burst import monitor_burst_baskets
+from trader.burst import monitor_burst_baskets, open_burst_basket
 from trader.reconcile import (
     reconcile_state_with_broker,
     _update_internal_position_state,
@@ -424,3 +424,4 @@ TradeExecutor.manual_override_if_needed = manual_override_if_needed
 TradeExecutor._log_audit_trail = _log_audit_trail
 TradeExecutor._mark_trade_sent = _mark_trade_sent
 TradeExecutor.generate_report = generate_report
+TradeExecutor.open_burst_basket = open_burst_basket
