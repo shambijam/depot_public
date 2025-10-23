@@ -71,17 +71,17 @@
     "stop_distance_pips": 60
   },
   "smart_sl_tp_settings": {
-    "sl_atr_multiplier": 1.2,
+    "sl_placement_method": "ATR",
     "sl_atr_period": 14,
-    "sl_buffer_pips": 2,
-    "sl_placement_method": "PIPS",
+    "sl_atr_multiplier": 1.8,
+    "sl_buffer_pips": 4,
+    "tp_placement_method": "RR",
+    "tp_rr_ratio": 1.8,
     "sl_swing_lookback_period": 10,
     "stop_loss_pips": 70,
     "take_profit_pips": 100,
     "tp_atr_multiplier": 2.0,
-    "tp_atr_period": 14,
-    "tp_placement_method": "RR",
-    "tp_rr_ratio": 2.0
+    "tp_atr_period": 14
   },
   "smart_targets": {
     "risk_management": {
@@ -104,7 +104,17 @@
       },
       "policy": "FLOOR"
     },
-    "volume_safety_enabled": true
+    "volume_safety_enabled": true,
+    "cooldown": {
+      "enabled": true,
+      "per_asset_cooldown_s": 0,
+      "min_gap_any_trade_s": 0,
+      "max_new_trades_per_cycle": 99,
+      "per_symbol": {
+        "default": 0,
+        "XAUUSD": 0
+      }
+    }
   },
   "tradeable_assets": [
     "XAUUSD"
