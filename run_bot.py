@@ -1256,7 +1256,51 @@ def run_single_pipeline_cycle(
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
+        # === Helper: résolution robuste du burst_size ===
+        def _resolve_burst_size(sym: str) -> int:
+            """
+            Priorité:
+            1) decision_package.active_config/config_used
+            2) asset_config.entry_rules.scalping.burst_scalping.burst_size
+            3) asset_config.overrides.scalping.burst.burst_size  (legacy)
+            4) strategy_manager.get_strategy_config('scalping')
+            5) base_config.entry_rules.scalping.burst_scalping.burst_size
+            6) défaut=5
+            """
+            # 1) paquet décisionnel (si la stratégie a déjà injecté sa conf)
+            ac = decision_package.get("active_config") or decision_package.get("config_used") or {}
+            v = (((ac.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
 
+            # 2) asset_config → entry_rules
+            asset_cfgs = (global_context.get("asset_configs") or {}).get(sym, {}) or {}
+            v = ((((asset_cfgs.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size"))
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+
+            # 3) asset_config → overrides (legacy)
+            v = (((asset_cfgs.get("overrides") or {}).get("scalping") or {}).get("burst") or {}).get("burst_size")
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+
+            # 4) config stratégie 'scalping'
+            try:
+                strat_conf = strategy_manager.get_strategy_config("scalping") or {}
+                v = (((strat_conf.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+                if isinstance(v, (int, float)) and v > 0:
+                    return int(v)
+            except Exception:
+                pass
+
+            # 5) base_config (fallback)
+            v = (((base_config.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+
+            # 6) défaut
+            return 5
+                
         # --- Exécution Scalping ---
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
@@ -1375,27 +1419,12 @@ def run_single_pipeline_cycle(
                         if sltp_cfg:
                             td["sltp"] = sltp_cfg
 
-                    # 4) burst_size — priorité à l’override d’actif, sinon global
-                    asset_cfgs = (global_context.get("asset_configs", {}) or {})
-                    per_asset_burst = (
-                        asset_cfgs.get(sym, {})
-                        .get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
-                        .get("burst_size")
-                    )
-                    global_burst = (
-                        base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
-                    ).get("burst_size")
-
-                    resolved_burst = int(
-                        td.get("burst_size") or      # si la décision a imposé une valeur
-                        td.get("burst_count") or
-                        per_asset_burst or           # ← override par actif (ex: config/assets_config/XAUUSD.json)
-                        global_burst or              # ← fallback global (ex: prod_config.json)
-                        1
-                    )
+                    # 4) burst_size — résolution multi-sources (helper)
+                    resolved_burst = int(td.get("burst_size") or td.get("burst_count") or _resolve_burst_size(sym))
                     if resolved_burst < 1:
                         resolved_burst = 1
-                    logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst} (asset={per_asset_burst}, global={global_burst})")
+                    logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst}")
+
 
                     # 5) Standardisation exec
                     td.pop("burst_volume_each", None)
