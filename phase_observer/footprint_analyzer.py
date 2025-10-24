@@ -402,7 +402,6 @@ class FootprintAnalyzer:
         self.normalizer = DatetimeNormalizer()
         self.scorer = ConfidenceScorer()
         self._last_signal: Dict[str, Dict[str, Any]] = {}
-        
 
     # --- SOFT-QUIET-XAU: helpers ---
     def _fp_settings(self, strategy_config):
@@ -443,9 +442,15 @@ class FootprintAnalyzer:
             self.logger.debug("[FP-ERR][%s] %s extra=%s", where, repr(exc), extra or {})
         except Exception:
             pass
-        
-    def _passes_hysteresis(self, asset: str, new_dir: str, new_conf: float,
-                           cooldown_s: int = 0, extra_conf: float = 0.0) -> bool:
+
+    def _passes_hysteresis(
+        self,
+        asset: str,
+        new_dir: str,
+        new_conf: float,
+        cooldown_s: int = 0,
+        extra_conf: float = 0.0,
+    ) -> bool:
         """
         Si cooldown_s==0 -> désactivé (comportement actuel).
         Sinon, empêche un renversement rapide de direction à confiance trop proche.
@@ -461,7 +466,7 @@ class FootprintAnalyzer:
         if st["dir"] != new_dir and new_conf < (st["conf"] + extra_conf):
             return False
         return True
-  
+
     # ---- public -------------------------------------------------------
     def _dynamic_window_plan(
         self, ticks: pd.DataFrame, cfg: TriggerConfig, tick_count_soft: int
@@ -561,20 +566,36 @@ class FootprintAnalyzer:
                         "error_code": ErrorCode.DATETIME_NORMALIZATION.value,
                     }
             # --- runtime feature flags depuis la strategy_config (tous optionnels) ---
-            ft_node = (strategy_config or {}).get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}).get("footprint_triggers", {}) or {}
+            ft_node = (strategy_config or {}).get("entry_rules", {}).get(
+                "scalping", {}
+            ).get("burst_scalping", {}).get("footprint_triggers", {}) or {}
             profile = str(ft_node.get("profile", "balanced")).lower()
             min_votes = int(ft_node.get("min_votes", 1))  # 1 = comportement actuel
             cooldown_s = int(ft_node.get("cooldown_s", 0))  # 0 = off (actuel)
             extra_conf = float(ft_node.get("hysteresis_extra_conf", 0.05))
-            spread_pts = (strategy_config or {}).get("market", {}).get("spread_pts", None)
-            spread_max = (strategy_config or {}).get("guardrails", {}).get("spread_max_pts", 999)
+            spread_pts = (
+                (strategy_config or {}).get("market", {}).get("spread_pts", None)
+            )
+            spread_max = (
+                (strategy_config or {}).get("guardrails", {}).get("spread_max_pts", 999)
+            )
             regime = (strategy_config or {}).get("market", {}).get("regime", None)
             tick_rate = (strategy_config or {}).get("market", {}).get("tick_rate", None)
 
             # simple spread gating (optionnel)
             if spread_pts is not None and spread_pts > spread_max:
-                self._fp_log("SUMMARY","[TRIG][%s] none | reason=spread_too_wide (%s>%s)", self._asset_upper, str(spread_pts), str(spread_max), level="info")
-                return False, {"reason": "TRIG_SPREAD_TOO_WIDE", "diag": {"spread_pts": spread_pts, "spread_max": spread_max}}
+                self._fp_log(
+                    "SUMMARY",
+                    "[TRIG][%s] none | reason=spread_too_wide (%s>%s)",
+                    self._asset_upper,
+                    str(spread_pts),
+                    str(spread_max),
+                    level="info",
+                )
+                return False, {
+                    "reason": "TRIG_SPREAD_TOO_WIDE",
+                    "diag": {"spread_pts": spread_pts, "spread_max": spread_max},
+                }
 
             # micro-fallbacks autorisés selon régime
             allow_micro = True
@@ -588,7 +609,7 @@ class FootprintAnalyzer:
                 "min_votes": min_votes,
                 "tick_rate": tick_rate,
             }
-                    
+
             # ---- plan de fenêtres adaptatif (densité ticks) ----
             window_plan = self._dynamic_window_plan(ticks, cfg, tick_count_soft)
             window_decisions: List[Dict[str, Any]] = []
@@ -599,10 +620,12 @@ class FootprintAnalyzer:
             best_win: Optional[int] = None
 
             for pass_type in ("normal", "soft"):
-                base_params = (cfg.to_dict() if pass_type == "normal"
-                                else {**cfg.to_dict(), **cfg.soft_params})
+                base_params = (
+                    cfg.to_dict()
+                    if pass_type == "normal"
+                    else {**cfg.to_dict(), **cfg.soft_params}
+                )
                 params_map: Dict[str, Any] = {**base_params, **runtime_flags}
-
 
                 for win in window_plan:
                     with self.monitor.measure_phase(f"window_{int(win)}s"):
@@ -615,7 +638,9 @@ class FootprintAnalyzer:
                             cfg=cfg,
                         )
                         if decision and decision.get("ok"):
-                            window_decisions.append({"win": used_win, "decision": decision, "meta": meta})
+                            window_decisions.append(
+                                {"win": used_win, "decision": decision, "meta": meta}
+                            )
                             if (best_decision is None) or (
                                 float(decision.get("confidence", 0))
                                 > float(best_decision.get("confidence", 0))
@@ -625,30 +650,39 @@ class FootprintAnalyzer:
                                     meta,
                                     used_win,
                                 )
-                                
+
                 # confirmation par votes multi-fenêtres (optionnelle)
-                if not best_decision and int(runtime_flags.get("min_votes", 1)) > 1 and window_decisions:
+                if (
+                    not best_decision
+                    and int(runtime_flags.get("min_votes", 1)) > 1
+                    and window_decisions
+                ):
                     groups = {}
                     for wd in window_decisions:
                         d = wd["decision"]
                         alias = self.scorer._alias(d.get("trigger"))
-                        key = (alias, str(d.get("direction","")).upper())
+                        key = (alias, str(d.get("direction", "")).upper())
                         groups.setdefault(key, []).append(wd)
 
                     chosen_rec = None
                     for key, recs in groups.items():
                         if len(recs) >= int(runtime_flags["min_votes"]):
                             # boost léger, prend la plus confiante
-                            recs.sort(key=lambda r: float(r["decision"].get("confidence",0)), reverse=True)
+                            recs.sort(
+                                key=lambda r: float(r["decision"].get("confidence", 0)),
+                                reverse=True,
+                            )
                             chosen_rec = recs[0]
-                            chosen_rec["decision"]["confidence"] = min(0.99, float(chosen_rec["decision"]["confidence"]) + 0.04)
+                            chosen_rec["decision"]["confidence"] = min(
+                                0.99, float(chosen_rec["decision"]["confidence"]) + 0.04
+                            )
                             break
 
                     if chosen_rec:
                         best_decision = chosen_rec["decision"]
                         best_meta = chosen_rec["meta"]
                         best_win = chosen_rec["win"]
-         
+
                 if best_decision:
                     break
 
@@ -795,10 +829,12 @@ class FootprintAnalyzer:
         except Exception as e:
             self._log_error("snapshot", e, {"window_s": window_s})
             return None, None, None
-        
+
         # === CONTEXTE RAPIDE: tick_rate & pas des niveaux (pour micro-triggers) ===
         try:
-            coverage_s = float(meta.get("coverage_s") or meta.get("coverage_seconds") or window_s)
+            coverage_s = float(
+                meta.get("coverage_s") or meta.get("coverage_seconds") or window_s
+            )
             tick_count = int(meta.get("tick_count") or len(ticks))
             self._tick_rate_tmp = tick_count / max(1.0, coverage_s)
         except Exception:
@@ -807,7 +843,9 @@ class FootprintAnalyzer:
         try:
             idx = df_levels.index.values.astype(float)
             diffs = np.diff(np.unique(idx))
-            self._lvl_step_tmp = float(np.quantile(diffs[diffs > 0], 0.1)) if diffs.size else None
+            self._lvl_step_tmp = (
+                float(np.quantile(diffs[diffs > 0], 0.1)) if diffs.size else None
+            )
         except Exception:
             self._lvl_step_tmp = None
 
@@ -854,7 +892,7 @@ class FootprintAnalyzer:
                 dyn_params["abs_attempts_min"] = max(
                     1, int(dyn_params.get("abs_attempts_min", cfg.abs_attempts_min)) - 1
                 )
-                  
+
         except Exception:
             dyn_params = dict(params)
 
@@ -987,12 +1025,13 @@ class FootprintAnalyzer:
                 fb2 = self._micro_absorption(df_levels)
                 if fb2:
                     candidates.append(fb2)
-                   # 3) micro_burst si toujours rien et tick_rate élevé
+
+                # 3) micro_burst si toujours rien et tick_rate élevé
             if not candidates:
                 fb3 = self._micro_burst(df_levels, meta or {})
                 if fb3:
                     candidates.append(fb3)
-     
+
         if not candidates:
             self._fp_log(
                 "NO_CAND",
@@ -1021,22 +1060,27 @@ class FootprintAnalyzer:
             poc = float(meta.get("poc", 0.0) if meta else 0.0)
             anc = float(best.get("anchor_price", poc))
             if best.get("direction") == "BUY" and anc < (poc - price_step):
-                best["confidence"] = max(0.0, float(best.get("confidence",0)) - 0.05)
+                best["confidence"] = max(0.0, float(best.get("confidence", 0)) - 0.05)
             elif best.get("direction") == "SELL" and anc > (poc + price_step):
-                best["confidence"] = max(0.0, float(best.get("confidence",0)) - 0.05)
+                best["confidence"] = max(0.0, float(best.get("confidence", 0)) - 0.05)
             else:
                 if abs(anc - poc) >= 2 * price_step:
-                    best["confidence"] = min(0.99, float(best.get("confidence",0)) + 0.03)
+                    best["confidence"] = min(
+                        0.99, float(best.get("confidence", 0)) + 0.03
+                    )
         except Exception:
             pass
 
         # Hysteresis directionnel (optionnel)
         cooldown_s = int(params.get("cooldown_s", 0))
         extra_hyst = float(params.get("hysteresis_extra_conf", 0.05))
-        if not self._passes_hysteresis(self._asset_upper,
-                                       str(best.get("direction","")).upper(),
-                                       float(best.get("confidence",0)),
-                                       cooldown_s, extra_hyst):
+        if not self._passes_hysteresis(
+            self._asset_upper,
+            str(best.get("direction", "")).upper(),
+            float(best.get("confidence", 0)),
+            cooldown_s,
+            extra_hyst,
+        ):
             return None, meta, window_s
 
         # enrichit meta + retourne
@@ -1045,8 +1089,8 @@ class FootprintAnalyzer:
             # MàJ état hysteresis
             self._last_signal[self._asset_upper] = {
                 "ts": time.time(),
-                "dir": str(best.get("direction","")).upper(),
-                "conf": float(best.get("confidence",0))
+                "dir": str(best.get("direction", "")).upper(),
+                "conf": float(best.get("confidence", 0)),
             }
             return best, meta, window_s
         except Exception:
@@ -1080,201 +1124,590 @@ class FootprintAnalyzer:
     # ------------------- fallbacks micro -------------------
 
     def _micro_stacking(self, df_levels: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """2-3 niveaux adjacents, même signe, delta_ratio > 1.1 (tolère 1 gap)."""
+        """
+        Détection de micro-stacking :
+        - 2–4 niveaux adjacents (tolère 1 gap contrôlé) avec même signe
+        - delta_ratio >= seuil dynamique (base 1.20 ; 1.10 si flux dense/vol élevé)
+        - filtres anti-faux signaux (opposé fort à proximité, volume trop faible, etc.)
+        Confiance = base + bonus (run, delta_ratio moyen, zscore, tick_rate) – pénalités (opposé proche).
+        """
         try:
             lv = df_levels
             req = {"vol", "delta", "delta_ratio"}
-            if any(c not in lv.columns for c in req):
+            if lv is None or lv.empty or any(c not in lv.columns for c in req):
                 return None
-            lv = lv[lv["vol"] > 0].sort_index()
+
+            # Nettoyage + tri
+            lv = lv[lv["vol"].astype(float) > 0].sort_index()
             if lv.empty:
                 return None
 
-            idx = lv.index.values.astype(float)
-            sign = np.sign(lv["delta"].values)
-            ratio = lv["delta_ratio"].values
+            # Index prix normalisé
+            prices = pd.to_numeric(pd.Index(lv.index), errors="coerce").astype(float)
+            mask_ok = np.isfinite(prices)
+            if not bool(mask_ok.all()):
+                lv = lv.loc[mask_ok]
+                prices = prices[mask_ok]
+            if lv.empty:
+                return None
 
-            diffs = np.diff(np.unique(idx))
-            step = np.quantile(diffs[diffs > 0], 0.1) if len(diffs) > 0 else 0.0
+            # Colonnes en np.arrays
+            delta = lv["delta"].astype(float).values
+            sign = np.sign(delta)
+            ratio = lv["delta_ratio"].astype(float).values
+            zscore = (
+                lv["zscore_vol"].astype(float).values
+                if "zscore_vol" in lv.columns
+                else np.zeros(len(lv))
+            )
+            vol = lv["vol"].astype(float).values
+
+            # Step (pas) robuste: priorité à _lvl_step_tmp sinon quantile sur diffs
+            step = float(getattr(self, "_lvl_step_tmp", 0.0) or 0.0)
+            diffs = np.diff(np.unique(prices))
+            diffs = diffs[diffs > 0]
+            if diffs.size:
+                step = float(step) if step > 0 else float(np.quantile(diffs, 0.20))
+            else:
+                step = float(step)  # peut rester 0.0
+
+            # Contexte runtime
+            tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)  # ticks/s
+            zmed_global = float(np.median(zscore)) if zscore.size else 0.0
+            zmax_global = float(np.max(zscore)) if zscore.size else 0.0
+
+            # Seuils dynamiques
+            dr_base = 1.20
+            if tr >= 6.0 or zmax_global >= 2.0:
+                dr_base = 1.10
+            min_levels = 3
+            if tr >= 5.0 or zmed_global >= 1.2:
+                min_levels = 2  # autorise stacks plus courts si flux dense / vol fort
+
+            gap_mult = 1.6  # tolérance d'écart inter-niveaux
+            opp_inval_ratio = 0.60  # invalide si opposé >= 0.60 tout près
+
+            vmed = float(np.median(vol)) if vol.size else 0.0
 
             i = 0
-            while i < len(idx) - 1:
-                if sign[i] == 0 or ratio[i] < 1.1:
+            n = len(prices)
+            while i < n:
+                # point de départ valide ?
+                if sign[i] == 0 or ratio[i] < dr_base:
                     i += 1
                     continue
+
+                sgn = int(sign[i])
                 j = i + 1
-                gaps = 0
                 run = 1
-                sgn = sign[i]
-                while j < len(idx):
-                    if sign[j] != sgn or ratio[j] < 1.1:
+                gaps = 0
+                end_idx = i
+
+                while j < n:
+                    if sign[j] != sgn or ratio[j] < dr_base:
                         break
-                    if step > 0 and (idx[j] - idx[j - 1]) > 1.6 * step:
+                    if step > 0 and (prices[j] - prices[j - 1]) > gap_mult * step:
                         gaps += 1
                         if gaps > 1:
                             break
                     run += 1
+                    end_idx = j
                     j += 1
-                if run >= 2:
-                    # Seuils dynamiques si volume faible (zscore médian bas)
-                    zmed = float(lv["zscore_vol"].median() if "zscore_vol" in lv.columns else 0.0)
-                    dr_mean = float(ratio[i:j].mean())
-                    need_run = 3 if zmed < 0.8 else 2
-                    need_dratio = 1.15 if zmed < 0.8 else 1.10
-                    if run < need_run or dr_mean < need_dratio:
+
+                if run >= min_levels:
+                    # métriques locales sur le stack détecté
+                    seg = slice(i, end_idx + 1)
+                    dr_mean = float(np.mean(ratio[seg]))
+                    zmed_loc = float(np.median(zscore[seg])) if zscore.size else 0.0
+                    v_sum = float(np.sum(vol[seg]))
+
+                    # ajustements locaux des seuils quand zscore très bas
+                    need_levels = 3 if zmed_loc < 0.8 else min_levels
+                    need_ratio = 1.15 if zmed_loc < 0.8 else dr_base
+
+                    if run < need_levels or dr_mean < need_ratio:
                         i = j
                         continue
-                    
-                    direction = "BUY" if sgn > 0 else "SELL"
-                    anchor = float(idx[j - 1])
-                    conf = min(
-                        0.9,
-                        0.55
-                        + 0.15 * (run - 2)
-                        + 0.1 * np.clip(ratio[i:j].mean() / 1.1, 0, 1.5),
+
+                    # garde-fou volume: somme du segment vs médiane*run
+                    if vmed > 0 and v_sum < 0.7 * vmed * run:
+                        i = j
+                        continue
+
+                    # Invalidation par opposé fort à proximité (avant/après le bloc)
+                    def _opposite_strong(k_from: int, k_to: int) -> bool:
+                        if k_from < 0 or k_to >= n:
+                            return False
+                        k = k_from if k_from >= 0 and k_from < n else k_to
+                        return (
+                            (sign[k] == -sgn)
+                            and (ratio[k] >= opp_inval_ratio)
+                            and (
+                                step == 0.0
+                                or (
+                                    abs(
+                                        prices[k]
+                                        - prices[k_from if k == k_to else k_to]
+                                    )
+                                    <= 1.4 * max(step, 1e-12)
+                                )
+                            )
+                        )
+
+                    opp_near = _opposite_strong(i - 1, i) or _opposite_strong(
+                        end_idx + 1, end_idx
                     )
+                    if opp_near:
+                        i = j
+                        continue
+
+                    # Direction + ancre (fin du stack dans le sens du sgn)
+                    direction = "BUY" if sgn > 0 else "SELL"
+                    anchor = float(prices[end_idx])
+
+                    # Confiance
+                    conf = 0.56
+                    # + run (niv. au-delà de 2)
+                    conf += 0.06 * float(np.clip(run - 2, 0, 3))
+                    # + delta_ratio moyen au-dessus du seuil
+                    conf += 0.08 * float(
+                        np.clip((dr_mean - need_ratio) / 0.30, 0.0, 1.5)
+                    )
+                    # + zscore local
+                    conf += 0.06 * float(np.clip((zmed_loc - 1.0) / 1.0, 0.0, 1.0))
+                    # + tick_rate
+                    conf += 0.06 * float(np.clip((tr - 3.0) / 5.0, 0.0, 1.0))
+                    # pénalité si opposé non fort mais présent dans un rayon court
+                    near_opp_soft = False
+                    if step > 0:
+                        # cherche un opposé faible juste au bord
+                        klist = [i - 1, end_idx + 1]
+                        for k in klist:
+                            if (
+                                0 <= k < n
+                                and sign[k] == -sgn
+                                and (
+                                    prices[min(max(k, 0), n - 1)]
+                                    - prices[end_idx if k > end_idx else i]
+                                )
+                                <= 1.8 * step
+                            ):
+                                near_opp_soft = True
+                                break
+                    if near_opp_soft:
+                        conf -= 0.03
+
+                    conf = float(np.clip(conf, 0.56, 0.90))
+
+                    # Log diag
+                    if hasattr(self, "_fp_log"):
+                        self._fp_log(
+                            "DETAIL",
+                            (
+                                f"[MICRO_STACK] dir={direction} conf={conf:.3f} "
+                                f"levels={run} gaps={gaps} dr_mean={dr_mean:.2f} "
+                                f"zmed_loc={zmed_loc:.2f} tr={tr:.2f} step={step:.5f} anchor={anchor}"
+                            ),
+                        )
+
+                    # Trigger
+                    try:
+                        trig = TriggerType.MICRO_STACK.value
+                    except Exception:
+                        trig = "MICRO_STACK"
+
                     return {
                         "ok": True,
-                        "trigger": TriggerType.MICRO_STACK.value,
+                        "trigger": trig,
                         "direction": direction,
-                        "confidence": float(conf),
+                        "confidence": conf,
                         "anchor_price": anchor,
                         "meta": {
                             "levels": int(run),
-                            "delta_ratio_mean": float(ratio[i:j].mean()),
+                            "gaps_used": int(gaps),
+                            "delta_ratio_mean": float(dr_mean),
+                            "zscore_median_local": float(zmed_loc),
+                            "tick_rate": tr,
+                            "step_used": float(step),
+                            "volume_sum": v_sum,
+                            "volume_median": float(vmed),
                         },
                     }
+
+                # avancer
                 i = j
-            return None
-        except Exception:
+
             return None
 
-    def _micro_absorption(self, df_levels: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """zscore_vol >= 1.1 + voisin opposé clair (delta_ratio>=0.6)."""
+        except Exception as e:
+            if hasattr(self, "_fp_log"):
+                self._fp_log("ERROR", f"[MICRO_STACK] exception: {e!r}")
+            return None
+
+    def _micro_absorption(
+        self, df_levels: pd.DataFrame, meta: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Détecte une micro-absorption:
+        - niveau candidat: zscore_vol >= z_need && delta_ratio <= dr_max
+        - voisin immédiat: signe delta opposé ET delta_ratio >= dr_op_min
+        - proximité: |voisin - candidat| <= step * prox_mult
+        - volume voisin: >= 0.7 * median(vol) si dispo
+        Seuils dynamiques selon tick_rate.
+        """
         try:
             lv = df_levels
             req = {"zscore_vol", "delta_ratio", "delta"}
             if any(c not in lv.columns for c in req):
                 return None
+
+            # --- Tri + nettoyage chiffres ---
             lv = lv.sort_index()
-            # Pas de niveaux (issu du snapshot précédent), 0.0 si indisponible
-            step = float(getattr(self, "_lvl_step_tmp", 0.0) or 0.0)
+            # On tolère les index non-numériques en les convertissant (drop si NaN)
+            prices = pd.to_numeric(pd.Index(lv.index), errors="coerce").astype(float)
+            mask_ok = np.isfinite(prices)
+            if not bool(mask_ok.all()):
+                lv = lv.loc[mask_ok]
+                prices = prices[mask_ok]
+            if lv.empty:
+                return None
 
-            # PATCH: calcule un pas de niveau 'step' pour la contrainte de proximité des voisins
-            idx = lv.index.values.astype(float)
-            if idx.size >= 2:
-                diffs = np.diff(np.unique(idx))
+            # --- step (pas de niveau) robuste ---
+            step_cfg = float(getattr(self, "_lvl_step_tmp", 0.0) or 0.0)
+            if step_cfg <= 0.0:
+                diffs = np.diff(np.unique(prices))
                 diffs = diffs[diffs > 0]
-                step = float(np.quantile(diffs, 0.1)) if diffs.size else 0.0
+                step = float(np.quantile(diffs, 0.2)) if diffs.size else 0.0
             else:
-                step = 0.0
+                step = float(step_cfg)
 
+            # --- contexte runtime ---
             tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)
-            # Seuils dynamiques: en burst on tolère un peu plus de delta_ratio et on baisse un peu z-need
-            z_need = 1.1 if tr < 6.0 else 1.0
-            dr_max = 0.6 if tr < 6.0 else 0.7
-            cand = lv[(lv["zscore_vol"] >= z_need) & (lv["delta_ratio"] <= dr_max)]
 
+            # Seuils dynamiques (plus souples en burst)
+            if tr < 1.0:
+                z_need = 1.30
+                dr_max = 0.55
+                dr_op_min = 0.65
+                prox_mult = 1.1
+            elif tr < 4.0:
+                z_need = 1.15
+                dr_max = 0.60
+                dr_op_min = 0.60
+                prox_mult = 1.2
+            elif tr < 6.0:
+                z_need = 1.10
+                dr_max = 0.65
+                dr_op_min = 0.58
+                prox_mult = 1.3
+            else:
+                z_need = 1.05  # burst élevé → z requis un peu plus bas
+                dr_max = 0.70
+                dr_op_min = 0.55  # voisin “clair” un peu assoupli
+                prox_mult = 1.4
+
+            # --- présélection des candidats (niveau "absorbé") ---
+            cand = lv[(lv["zscore_vol"] >= z_need) & (lv["delta_ratio"] <= dr_max)]
             if cand.empty:
                 return None
-            for price, row in cand.iterrows():
-                i = lv.index.get_loc(price)
-                neigh = []
-                if i > 0:
-                    neigh.append(lv.iloc[i - 1])
-                if i + 1 < len(lv):
-                    neigh.append(lv.iloc[i + 1])
-                for nb in neigh:
-                    if (
-                        np.sign(nb["delta"]) != np.sign(row["delta"])
-                        and nb["delta_ratio"] >= 0.6
-                    ):
-                        # voisin proche + volume décent + zscore requis selon tick_rate
-                        if step > 0 and abs(float(nb.name) - float(price)) > step * 1.2:
-                            continue
-                        if "vol" in lv.columns:
-                            vmed = float(lv["vol"].median())
-                            if vmed > 0 and float(nb["vol"]) < 0.7 * vmed:
-                                continue
+            cand = cand.sort_values("zscore_vol", ascending=False)
 
-                        tick_rate = getattr(self, "_tick_rate_tmp", None)
-                        zneed = 1.3 if (tick_rate is not None and tick_rate < 1.2) else 1.1
-                        if float(row["zscore_vol"]) < zneed:
+            # Pré-calculs utiles
+            has_vol = "vol" in lv.columns
+            v_med = float(lv["vol"].median()) if has_vol else 0.0
+            # Pour retrouver l'index rapidement
+            pos_map = {float(p): i for i, p in enumerate(prices)}
+
+            for price, row in cand.iterrows():
+                p = float(price)
+                i = pos_map.get(p, None)
+                if i is None:
+                    # fallback si doublons: get_loc peut renvoyer un slice → on tente le 1er
+                    try:
+                        loc = lv.index.get_loc(price)
+                        i = loc.start if isinstance(loc, slice) else int(loc)
+                    except Exception:
+                        continue
+
+                # voisins gauche/droite
+                neighbors_idx = []
+                if i > 0:
+                    neighbors_idx.append(i - 1)
+                if i + 1 < len(lv):
+                    neighbors_idx.append(i + 1)
+
+                for j in neighbors_idx:
+                    nb = lv.iloc[j]
+                    nb_price = float(prices[j])
+                    nb_delta = float(nb["delta"])
+
+                    # Opposé clair en delta + ratio min sur le voisin
+                    if nb_delta == 0.0:
+                        continue
+                    if np.sign(nb_delta) == np.sign(float(row["delta"])):
+                        continue
+                    if float(nb["delta_ratio"]) < dr_op_min:
+                        continue
+
+                    # Proximité en pas de niveau
+                    if step > 0.0:
+                        if abs(nb_price - p) > step * prox_mult:
                             continue
-                        
-                        direction = "BUY" if nb["delta"] > 0 else "SELL"
-                        conf = min(0.9, 0.6 + 0.2 * (row["zscore_vol"] / 1.1))
-                        return {
-                            "ok": True,
-                            "trigger": TriggerType.MICRO_ABSORPTION.value,
-                            "direction": direction,
-                            "confidence": float(conf),
-                            "anchor_price": float(nb.name),
-                            "meta": {
-                                "absorbed_level": float(price),
-                                "absorbed_zscore": float(row["zscore_vol"]),
-                            },
-                        }
+
+                    # Volume voisin décent
+                    if has_vol and v_med > 0.0:
+                        if float(nb["vol"]) < 0.7 * v_med:
+                            continue
+
+                    # Vérification finale du z-score (cohérente avec z_need)
+                    if float(row["zscore_vol"]) < z_need:
+                        continue
+
+                    # --- Construction de la décision ---
+                    direction = "BUY" if nb_delta > 0 else "SELL"
+
+                    # Confiance: contributions (zscore, force du voisin, proximité, tick_rate)
+                    z_bonus = (
+                        np.clip((float(row["zscore_vol"]) - z_need) / 0.5, 0.0, 1.5)
+                        * 0.08
+                    )
+                    dr_bonus = (
+                        np.clip((float(nb["delta_ratio"]) - dr_op_min) / 0.4, 0.0, 1.0)
+                        * 0.07
+                    )
+                    tr_bonus = np.clip((tr - 4.0) / 3.0, 0.0, 1.0) * 0.06
+                    prox_bonus = 0.0
+                    if step > 0.0:
+                        d_steps = abs(nb_price - p) / step
+                        # plus c'est proche (<1.0–1.4 step), plus on bonifie
+                        prox_bonus = np.clip(1.4 - d_steps, 0.0, 1.0) * 0.05
+
+                    conf = 0.60 + z_bonus + dr_bonus + tr_bonus + prox_bonus
+                    conf = float(np.clip(conf, 0.58, 0.90))
+
+                    # TriggerType robuste
+                    try:
+                        trig = TriggerType.MICRO_ABSORPTION.value
+                    except Exception:
+                        trig = "MICRO_ABSORPTION"
+
+                    # Log diagnostique (si dispo)
+                    if hasattr(self, "_fp_log"):
+                        self._fp_log(
+                            "DETAIL",
+                            (
+                                f"[MICRO_ABS] dir={direction} conf={conf:.3f} "
+                                f"z={float(row['zscore_vol']):.2f} dr_nb={float(nb['delta_ratio']):.2f} "
+                                f"tick_rate={tr:.2f} step={step:.5f} "
+                                f"price={p} anchor={nb_price}"
+                            ),
+                        )
+
+                    return {
+                        "ok": True,
+                        "trigger": trig,
+                        "direction": direction,
+                        "confidence": conf,
+                        "anchor_price": float(nb_price),
+                        "meta": {
+                            "absorbed_level": float(p),
+                            "absorbed_zscore": float(row["zscore_vol"]),
+                            "neighbor_delta_ratio": float(nb["delta_ratio"]),
+                            "tick_rate": tr,
+                            "step_used": step,
+                        },
+                    }
+
             return None
-        except Exception:
+        except Exception as e:
+            # Optionnel: tracer l'exception en détail pour débogage silencieux
+            if hasattr(self, "_fp_log"):
+                self._fp_log("ERROR", f"[MICRO_ABS] exception: {e!r}")
             return None
-    def _micro_burst(self, df_levels: pd.DataFrame, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+
+    def _micro_burst(
+        self, df_levels: pd.DataFrame, meta: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """
-        Fallback 'burst' quand le flux est très dense:
-        - tick_rate >= 5/s
-        - direction prise sur le delta_total agrégé
-        - ancre = niveau au delta signé max dans la direction
+        Fallback 'burst' quand le flux est très dense et cohérent.
+        Améliorations:
+        - Seuils dynamiques avec tick_rate, couverture et cohérence des deltas.
+        - Direction robuste: delta_total puis fallback sur déséquilibre (imbalance_buy/sell).
+        - Ancre prioritaire: max delta signé DANS le haut quantile de zscore_vol; fallback POC; fallback VWAP(levels).
+        - Confiance = base + bonus (tick_rate, zmax, cohérence directionnelle, ratio |Δtot| / Σ|Δ|) – pénalités (couverture trop longue, absorption).
         """
         try:
-            tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)
-            if tr < 5.0:
-                return None
             lv = df_levels
             if lv is None or lv.empty:
                 return None
 
-            # delta total depuis méta ou somme des deltas
+            # --- index prix → float propre ---
+            lv = lv.sort_index()
+            prices = pd.to_numeric(pd.Index(lv.index), errors="coerce").astype(float)
+            mask_ok = np.isfinite(prices)
+            if not bool(mask_ok.all()):
+                lv = lv.loc[mask_ok]
+                prices = prices[mask_ok]
+            if lv.empty:
+                return None
+
+            # --- contexte runtime ---
+            tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)
+            tick_count = int(meta.get("tick_count", meta.get("tickrate_count", 0)) or 0)
+            coverage_s = float(
+                meta.get("coverage_s", meta.get("coverage_seconds", 0.0)) or 0.0
+            )
+
+            # Seuils: on déclenche en "vrai burst" OU "semi-burst" si zmax est élevé
+            zmax = float(lv["zscore_vol"].max() if "zscore_vol" in lv.columns else 0.0)
+            tr_min = 4.0 if zmax < 2.0 else 3.5
+            if tr < tr_min:
+                return None
+
+            # Ratio densité (ticks/seconde) si info disponible
+            # (si non dispo, on s'en remet à tr)
+            dense_ok = True
+            if tick_count > 0 and coverage_s > 0:
+                dens = tick_count / max(coverage_s, 1e-9)
+                dense_ok = dens >= max(3.0, 0.75 * tr_min)
+            if not dense_ok:
+                return None
+
+            # --- direction agrégée ---
+            dtot = None
             if "delta" in lv.columns:
                 dtot = float(meta.get("delta_total", lv["delta"].sum()))
             else:
                 dtot = float(meta.get("delta_total", 0.0))
-            if dtot == 0.0:
+
+            sgn: Optional[int] = None
+            if dtot and dtot != 0.0:
+                sgn = 1 if dtot > 0 else -1
+            else:
+                # Fallback: utiliser les déséquilibres s'ils existent
+                ib, is_ = meta.get("imbalance_buy"), meta.get("imbalance_sell")
+                if isinstance(ib, (int, float)) and isinstance(is_, (int, float)):
+                    diff = float(ib) - float(is_)
+                    if abs(diff) >= 2:
+                        sgn = 1 if diff > 0 else -1
+            if sgn is None:
                 return None
 
-            sgn = 1 if dtot > 0 else -1
+            # --- métriques de cohérence directionnelle ---
+            abs_sum = None
+            ratio_dir = 0.5
+            dtot_ratio = 0.0
+            if "delta" in lv.columns:
+                deltas = lv["delta"].astype(float)
+                abs_sum = float(np.sum(np.abs(deltas))) or 0.0
+                if abs_sum > 0.0:
+                    dtot_ratio = float(abs(dtot)) / abs_sum  # 0..1
+                dir_mask = (sgn * deltas) > 0
+                ratio_dir = float(np.mean(dir_mask)) if len(dir_mask) else 0.5
 
-            # ancre: niveau de delta signé maximal dans la direction
+            # --- step (pas de niveau) utile pour logs/diag (pas de filtre dur ici) ---
+            diffs = np.diff(np.unique(prices))
+            diffs = diffs[diffs > 0]
+            step = float(np.quantile(diffs, 0.2)) if diffs.size else 0.0
+
+            # --- sélection de l'ancre ---
             anchor = None
             if "delta" in lv.columns and len(lv) > 0:
-                if sgn > 0:
-                    idx = lv["delta"].idxmax()
+                # privilégie les niveaux dans le haut quantile de zscore_vol
+                if "zscore_vol" in lv.columns:
+                    q = float(lv["zscore_vol"].quantile(0.6))
+                    pool = lv[lv["zscore_vol"] >= q]
+                    if pool.empty:
+                        pool = lv
                 else:
-                    idx = lv["delta"].idxmin()
-                anchor = float(idx) if np.isfinite(float(idx)) else None
+                    pool = lv
 
+                # niveau de delta signé max dans la direction (sgn * delta max)
+                pool_signed_strength = sgn * pool["delta"].astype(float)
+                idx = pool_signed_strength.idxmax()
+                try:
+                    anchor = float(idx)
+                except Exception:
+                    anchor = None
+
+            # Fallback: POC → sinon VWAP (sur levels)
             if anchor is None:
-                anchor = float(meta.get("poc", 0.0) or 0.0)
+                poc = float(meta.get("poc", 0.0) or 0.0)
+                anchor = poc if np.isfinite(poc) and poc != 0.0 else None
+            if anchor is None:
+                if "vol" in lv.columns:
+                    vol = lv["vol"].astype(float).values
+                    if np.sum(vol) > 0:
+                        anchor = float(np.sum(prices * vol) / np.sum(vol))
+            if anchor is None or not np.isfinite(anchor):
+                return None
 
-            zmax = float(lv["zscore_vol"].max() if "zscore_vol" in lv.columns else 0.0)
+            # --- calcul de la confiance ---
+            # Base
+            conf = 0.58
 
-            # confiance: dépend du tick_rate et du zmax
-            conf = 0.58 + 0.04 * max(0.0, min(3.0, tr - 5.0)) + 0.03 * max(0.0, zmax - 1.0)
-            conf = float(np.clip(conf, 0.58, 0.82))
+            # + bonus tick_rate (max vers ~8/s)
+            conf += 0.10 * float(
+                np.clip((tr - tr_min) / max(1e-9, (8.0 - tr_min)), 0.0, 1.0)
+            )
+            # + bonus zmax (au-delà de 1.2)
+            conf += 0.07 * float(np.clip((zmax - 1.2) / 1.0, 0.0, 1.5))
+            # + bonus cohérence directionnelle (>=0.5 neutre)
+            conf += 0.08 * float(np.clip(ratio_dir - 0.5, 0.0, 0.5) * 2.0)
+            # + bonus intensité agrégée
+            conf += 0.08 * float(np.clip(dtot_ratio, 0.0, 1.0))
+
+            # Pénalités: couverture trop longue ou absorption détectée côté opposé
+            if coverage_s > 25.0:
+                conf -= 0.03
+            if bool(meta.get("absorption_flag", False)):
+                conf -= 0.04
+
+            conf = float(np.clip(conf, 0.58, 0.88))
+
+            # Trigger type robuste
+            try:
+                trig = TriggerType.MICRO_BURST.value
+            except Exception:
+                try:
+                    trig = TriggerType.MICRO_STACK.value
+                except Exception:
+                    trig = "MICRO_BURST"
+
+            # Log diag
+            if hasattr(self, "_fp_log"):
+                self._fp_log(
+                    "DETAIL",
+                    (
+                        f"[MICRO_BURST] dir={'BUY' if sgn>0 else 'SELL'} conf={conf:.3f} "
+                        f"tick_rate={tr:.2f} zmax={zmax:.2f} ratio_dir={ratio_dir:.2f} "
+                        f"dtot_ratio={dtot_ratio:.2f} ticks={tick_count} cov={coverage_s:.1f}s "
+                        f"step={step:.5f} anchor={anchor}"
+                    ),
+                )
 
             return {
                 "ok": True,
-                "trigger": TriggerType.MICRO_STACK.value,  # on s'aligne sur l'alias 'stacking_inline'
+                "trigger": trig,
                 "direction": "BUY" if sgn > 0 else "SELL",
                 "confidence": conf,
-                "anchor_price": anchor,
+                "anchor_price": float(anchor),
                 "meta": {
-                    "reason": "micro_burst_tickrate",
+                    "reason": "micro_burst_dense_flow",
                     "tick_rate": tr,
                     "zmax": zmax,
-                    "delta_total": dtot,
+                    "delta_total": float(dtot),
+                    "dtot_ratio": dtot_ratio,
+                    "ratio_dir": ratio_dir,
+                    "tick_count": tick_count,
+                    "coverage_s": coverage_s,
+                    "step_used": step,
                 },
             }
-        except Exception:
+
+        except Exception as e:
+            if hasattr(self, "_fp_log"):
+                self._fp_log("ERROR", f"[MICRO_BURST] exception: {e!r}")
             return None
 
     # ------------------- helpers -------------------
