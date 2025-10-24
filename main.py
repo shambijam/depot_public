@@ -370,19 +370,32 @@ def main(args: argparse.Namespace) -> None:
             output_path=str(config_file_path),
             config_dir=str(strategy_configs_path),
         )
-        # --- SNAPSHOT CFG BURST ---
+        # --- SNAPSHOT CFG BURST (complet) ---
         base_cfg = config_manager.get_current_dynamic_config() or {}
-        g_burst = (
-            base_cfg.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
-        ).get("burst_size")
+        g_burst = (((base_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+
+        # stratégie (config_trade_scalping.json via StrategyManager)
+        try:
+            strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
+        except Exception:
+            strat_cfg = {}
+        s_burst = (((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+
+        # asset XAUUSD : entry_rules + overrides (deux chemins possibles) + legacy
         try:
             xau = config_manager.load_asset_config("XAUUSD") or {}
-            a_burst = (
-                xau.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
-            ).get("burst_size")
         except Exception:
-            a_burst = None
-        logger.critical(f"[CFG@BOOT] burst_size global={g_burst} | XAUUSD={a_burst}")
+            xau = {}
+
+        a_entry   = ((((xau.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size"))
+        a_override = (((((xau.get("overrides") or {}).get("scalping") or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+        a_legacy  = (((xau.get("overrides") or {}).get("scalping") or {}).get("burst") or {}).get("burst_size")
+
+        logger.critical(
+            f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | "
+            f"XAUUSD.entry={a_entry} | XAUUSD.override={a_override} | XAUUSD.legacy={a_legacy}"
+        )
+
 
 
         # --- Étape B : Créer et Assembler toutes les "Briques" dans le bon ordre ---

@@ -1256,50 +1256,70 @@ def run_single_pipeline_cycle(
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
+        
         # === Helper: résolution robuste du burst_size ===
+        def _dig(d: dict, path: list):
+            cur = d or {}
+            for k in path:
+                if not isinstance(cur, dict):
+                    return None
+                cur = cur.get(k)
+            return cur
+
         def _resolve_burst_size(sym: str) -> int:
             """
-            Priorité:
-            1) decision_package.active_config/config_used
+            Priorité (première valeur >0 gagnante):
+            1) decision_package.active_config / decision_package.config_used (si la stratégie a injecté sa conf)
             2) asset_config.entry_rules.scalping.burst_scalping.burst_size
-            3) asset_config.overrides.scalping.burst.burst_size  (legacy)
-            4) strategy_manager.get_strategy_config('scalping')
+            3) asset_config.overrides.scalping.burst.burst_size (legacy)
+            4) strategy_manager.get_strategy_config('scalping').entry_rules.scalping.burst_scalping.burst_size
             5) base_config.entry_rules.scalping.burst_scalping.burst_size
-            6) défaut=5
+            6) base_config.trade_executor_settings.entry_rules.scalping.burst_scalping.burst_size   <-- (NOUVEAU chemin)
+            7) défaut = 5
             """
             # 1) paquet décisionnel (si la stratégie a déjà injecté sa conf)
-            ac = decision_package.get("active_config") or decision_package.get("config_used") or {}
-            v = (((ac.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+            ac = (decision_package.get("active_config")
+                or decision_package.get("config_used")
+                or {})
+            v = _dig(ac, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
                 return int(v)
 
             # 2) asset_config → entry_rules
-            asset_cfgs = (global_context.get("asset_configs") or {}).get(sym, {}) or {}
-            v = ((((asset_cfgs.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size"))
+            asset_cfgs_all = (global_context.get("asset_configs") or {})
+            asset_cfg = asset_cfgs_all.get(sym, {}) or {}
+            v = _dig(asset_cfg, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
                 return int(v)
 
             # 3) asset_config → overrides (legacy)
-            v = (((asset_cfgs.get("overrides") or {}).get("scalping") or {}).get("burst") or {}).get("burst_size")
+            v = _dig(asset_cfg, ["overrides", "scalping", "burst", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
                 return int(v)
 
             # 4) config stratégie 'scalping'
             try:
                 strat_conf = strategy_manager.get_strategy_config("scalping") or {}
-                v = (((strat_conf.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+                v = _dig(strat_conf, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
                 if isinstance(v, (int, float)) and v > 0:
                     return int(v)
             except Exception:
                 pass
 
-            # 5) base_config (fallback)
-            v = (((base_config.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+            # 5) base_config (chemin top-level éventuel)
+            v = _dig(base_config, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
                 return int(v)
 
-            # 6) défaut
+            # 6) *** NOUVEAU ***: chemin sous trade_executor_settings
+            v = _dig(base_config, ["trade_executor_settings", "entry_rules",
+                                "scalping", "burst_scalping", "burst_size"])
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+
+            # 7) défaut
             return 5
+
                 
         # --- Exécution Scalping ---
         if scalping_decisions:
