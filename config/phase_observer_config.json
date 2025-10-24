@@ -318,6 +318,14 @@
             },
             "footprint_triggers": {
                 "enabled": true,
+                "window_candidates_s": [
+                    3,
+                    5,
+                    8,
+                    13,
+                    21
+                ],
+                "vol_level_min_ratio_median_30s": 1.2,
                 "filters": {
                     "spread_max_pts": 20,
                     "tickrate_min_per5s": 2.0,

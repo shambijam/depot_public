@@ -401,6 +401,8 @@ class FootprintAnalyzer:
         self.validator = DataValidator()
         self.normalizer = DatetimeNormalizer()
         self.scorer = ConfidenceScorer()
+        self._last_signal: Dict[str, Dict[str, Any]] = {}
+        
 
     # --- SOFT-QUIET-XAU: helpers ---
     def _fp_settings(self, strategy_config):
@@ -441,7 +443,25 @@ class FootprintAnalyzer:
             self.logger.debug("[FP-ERR][%s] %s extra=%s", where, repr(exc), extra or {})
         except Exception:
             pass
-
+        
+    def _passes_hysteresis(self, asset: str, new_dir: str, new_conf: float,
+                           cooldown_s: int = 0, extra_conf: float = 0.0) -> bool:
+        """
+        Si cooldown_s==0 -> désactivé (comportement actuel).
+        Sinon, empêche un renversement rapide de direction à confiance trop proche.
+        """
+        if cooldown_s <= 0:
+            return True
+        st = self._last_signal.get(asset.upper())
+        now = time.time()
+        if not st:
+            return True
+        if st["dir"] != new_dir and (now - st["ts"]) < cooldown_s:
+            return False
+        if st["dir"] != new_dir and new_conf < (st["conf"] + extra_conf):
+            return False
+        return True
+  
     # ---- public -------------------------------------------------------
     def _dynamic_window_plan(
         self, ticks: pd.DataFrame, cfg: TriggerConfig, tick_count_soft: int
@@ -540,8 +560,38 @@ class FootprintAnalyzer:
                         "reason": f"Datetime normalization failed: {e}",
                         "error_code": ErrorCode.DATETIME_NORMALIZATION.value,
                     }
+            # --- runtime feature flags depuis la strategy_config (tous optionnels) ---
+            ft_node = (strategy_config or {}).get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}).get("footprint_triggers", {}) or {}
+            profile = str(ft_node.get("profile", "balanced")).lower()
+            min_votes = int(ft_node.get("min_votes", 1))  # 1 = comportement actuel
+            cooldown_s = int(ft_node.get("cooldown_s", 0))  # 0 = off (actuel)
+            extra_conf = float(ft_node.get("hysteresis_extra_conf", 0.05))
+            spread_pts = (strategy_config or {}).get("market", {}).get("spread_pts", None)
+            spread_max = (strategy_config or {}).get("guardrails", {}).get("spread_max_pts", 999)
+            regime = (strategy_config or {}).get("market", {}).get("regime", None)
+            tick_rate = (strategy_config or {}).get("market", {}).get("tick_rate", None)
+
+            # simple spread gating (optionnel)
+            if spread_pts is not None and spread_pts > spread_max:
+                self._fp_log("SUMMARY","[TRIG][%s] none | reason=spread_too_wide (%s>%s)", self._asset_upper, str(spread_pts), str(spread_max), level="info")
+                return False, {"reason": "TRIG_SPREAD_TOO_WIDE", "diag": {"spread_pts": spread_pts, "spread_max": spread_max}}
+
+            # micro-fallbacks autorisés selon régime
+            allow_micro = True
+            if str(regime) == "high_volatility_chaos":
+                allow_micro = False
+
+            runtime_flags = {
+                "allow_micro": allow_micro,
+                "cooldown_s": cooldown_s,
+                "hysteresis_extra_conf": extra_conf,
+                "min_votes": min_votes,
+                "tick_rate": tick_rate,
+            }
+                    
             # ---- plan de fenêtres adaptatif (densité ticks) ----
             window_plan = self._dynamic_window_plan(ticks, cfg, tick_count_soft)
+            window_decisions: List[Dict[str, Any]] = []
 
             # 4) exploration multi-fenêtres / double passe
             best_decision = None
@@ -549,11 +599,10 @@ class FootprintAnalyzer:
             best_win: Optional[int] = None
 
             for pass_type in ("normal", "soft"):
-                params_map: Dict[str, Any] = (
-                    cfg.to_dict()
-                    if pass_type == "normal"
-                    else {**cfg.to_dict(), **cfg.soft_params}
-                )
+                base_params = (cfg.to_dict() if pass_type == "normal"
+                                else {**cfg.to_dict(), **cfg.soft_params})
+                params_map: Dict[str, Any] = {**base_params, **runtime_flags}
+
 
                 for win in window_plan:
                     with self.monitor.measure_phase(f"window_{int(win)}s"):
@@ -566,6 +615,7 @@ class FootprintAnalyzer:
                             cfg=cfg,
                         )
                         if decision and decision.get("ok"):
+                            window_decisions.append({"win": used_win, "decision": decision, "meta": meta})
                             if (best_decision is None) or (
                                 float(decision.get("confidence", 0))
                                 > float(best_decision.get("confidence", 0))
@@ -575,7 +625,30 @@ class FootprintAnalyzer:
                                     meta,
                                     used_win,
                                 )
+                                
+                # confirmation par votes multi-fenêtres (optionnelle)
+                if not best_decision and int(runtime_flags.get("min_votes", 1)) > 1 and window_decisions:
+                    groups = {}
+                    for wd in window_decisions:
+                        d = wd["decision"]
+                        alias = self.scorer._alias(d.get("trigger"))
+                        key = (alias, str(d.get("direction","")).upper())
+                        groups.setdefault(key, []).append(wd)
 
+                    chosen_rec = None
+                    for key, recs in groups.items():
+                        if len(recs) >= int(runtime_flags["min_votes"]):
+                            # boost léger, prend la plus confiante
+                            recs.sort(key=lambda r: float(r["decision"].get("confidence",0)), reverse=True)
+                            chosen_rec = recs[0]
+                            chosen_rec["decision"]["confidence"] = min(0.99, float(chosen_rec["decision"]["confidence"]) + 0.04)
+                            break
+
+                    if chosen_rec:
+                        best_decision = chosen_rec["decision"]
+                        best_meta = chosen_rec["meta"]
+                        best_win = chosen_rec["win"]
+         
                 if best_decision:
                     break
 
@@ -873,8 +946,11 @@ class FootprintAnalyzer:
                 "absorption_detection", e, {"kwargs": abs_kwargs, "window_s": window_s}
             )
 
-        # --- 4) Fallbacks micro si rien ---
-        if not candidates:
+        # --- 4) Fallbacks micro si rien (optionnels selon régime) ---
+        allow_micro = bool(params.get("allow_micro", True))
+        self._tick_rate_tmp = params.get("tick_rate", None)  # pour micro_absorption
+        if not candidates and allow_micro:
+
             cols = set(df_levels.columns)
             if {"vol", "delta", "delta_ratio"}.issubset(cols):
                 fb1 = self._micro_stacking(df_levels)
@@ -908,8 +984,40 @@ class FootprintAnalyzer:
         if not best:
             return None, meta, window_s
 
+        # Ajustement "ancre vs POC" (petite pénalité/bonus)
+        try:
+            poc = float(meta.get("poc", 0.0) if meta else 0.0)
+            anc = float(best.get("anchor_price", poc))
+            if best.get("direction") == "BUY" and anc < (poc - price_step):
+                best["confidence"] = max(0.0, float(best.get("confidence",0)) - 0.05)
+            elif best.get("direction") == "SELL" and anc > (poc + price_step):
+                best["confidence"] = max(0.0, float(best.get("confidence",0)) - 0.05)
+            else:
+                if abs(anc - poc) >= 2 * price_step:
+                    best["confidence"] = min(0.99, float(best.get("confidence",0)) + 0.03)
+        except Exception:
+            pass
+
+        # Hysteresis directionnel (optionnel)
+        cooldown_s = int(params.get("cooldown_s", 0))
+        extra_hyst = float(params.get("hysteresis_extra_conf", 0.05))
+        if not self._passes_hysteresis(self._asset_upper,
+                                       str(best.get("direction","")).upper(),
+                                       float(best.get("confidence",0)),
+                                       cooldown_s, extra_hyst):
+            return None, meta, window_s
+
+        # enrichit meta + retourne
         try:
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
+            # MàJ état hysteresis
+            self._last_signal[self._asset_upper] = {
+                "ts": time.time(),
+                "dir": str(best.get("direction","")).upper(),
+                "conf": float(best.get("confidence",0))
+            }
+            return best, meta, window_s
+        except Exception:
             return best, meta, window_s
 
         except Exception:
@@ -976,6 +1084,15 @@ class FootprintAnalyzer:
                     run += 1
                     j += 1
                 if run >= 2:
+                    # Seuils dynamiques si volume faible (zscore médian bas)
+                    zmed = float(lv["zscore_vol"].median() if "zscore_vol" in lv.columns else 0.0)
+                    dr_mean = float(ratio[i:j].mean())
+                    need_run = 3 if zmed < 0.8 else 2
+                    need_dratio = 1.15 if zmed < 0.8 else 1.10
+                    if run < need_run or dr_mean < need_dratio:
+                        i = j
+                        continue
+                    
                     direction = "BUY" if sgn > 0 else "SELL"
                     anchor = float(idx[j - 1])
                     conf = min(
@@ -1008,6 +1125,15 @@ class FootprintAnalyzer:
             if any(c not in lv.columns for c in req):
                 return None
             lv = lv.sort_index()
+            # PATCH: calcule un pas de niveau 'step' pour la contrainte de proximité des voisins
+            idx = lv.index.values.astype(float)
+            if idx.size >= 2:
+                diffs = np.diff(np.unique(idx))
+                diffs = diffs[diffs > 0]
+                step = float(np.quantile(diffs, 0.1)) if diffs.size else 0.0
+            else:
+                step = 0.0
+
             cand = lv[(lv["zscore_vol"] >= 1.1) & (lv["delta_ratio"] <= 0.6)]
             if cand.empty:
                 return None
@@ -1023,6 +1149,16 @@ class FootprintAnalyzer:
                         np.sign(nb["delta"]) != np.sign(row["delta"])
                         and nb["delta_ratio"] >= 0.6
                     ):
+                        # voisin proche + volume décent + zscore requis selon tick_rate
+                        if step > 0 and abs(float(nb.name) - float(price)) > step * 1.2:
+                            continue
+                        if "vol" in lv.columns and float(nb["vol"]) < float(lv["vol"].median()):
+                            continue
+                        tick_rate = getattr(self, "_tick_rate_tmp", None)
+                        zneed = 1.3 if (tick_rate is not None and tick_rate < 1.2) else 1.1
+                        if float(row["zscore_vol"]) < zneed:
+                            continue
+                        
                         direction = "BUY" if nb["delta"] > 0 else "SELL"
                         conf = min(0.9, 0.6 + 0.2 * (row["zscore_vol"] / 1.1))
                         return {
