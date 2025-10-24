@@ -1375,13 +1375,27 @@ def run_single_pipeline_cycle(
                         if sltp_cfg:
                             td["sltp"] = sltp_cfg
 
-                    # 4) burst_size
-                    conf_burst = (
-                        (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_single_master", {}) or {}).get("burst_size")
-                        or (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {}).get("burst_size")
+                    # 4) burst_size — priorité à l’override d’actif, sinon global
+                    asset_cfgs = (global_context.get("asset_configs", {}) or {})
+                    per_asset_burst = (
+                        asset_cfgs.get(sym, {})
+                        .get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
+                        .get("burst_size")
                     )
-                    resolved_burst = int(td.get("burst_size") or td.get("burst_count") or conf_burst or 1)
-                    if resolved_burst < 1: resolved_burst = 1
+                    global_burst = (
+                        base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
+                    ).get("burst_size")
+
+                    resolved_burst = int(
+                        td.get("burst_size") or      # si la décision a imposé une valeur
+                        td.get("burst_count") or
+                        per_asset_burst or           # ← override par actif (ex: config/assets_config/XAUUSD.json)
+                        global_burst or              # ← fallback global (ex: prod_config.json)
+                        1
+                    )
+                    if resolved_burst < 1:
+                        resolved_burst = 1
+                    logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst} (asset={per_asset_burst}, global={global_burst})")
 
                     # 5) Standardisation exec
                     td.pop("burst_volume_each", None)

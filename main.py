@@ -370,6 +370,20 @@ def main(args: argparse.Namespace) -> None:
             output_path=str(config_file_path),
             config_dir=str(strategy_configs_path),
         )
+        # --- SNAPSHOT CFG BURST ---
+        base_cfg = config_manager.get_current_dynamic_config() or {}
+        g_burst = (
+            base_cfg.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
+        ).get("burst_size")
+        try:
+            xau = config_manager.load_asset_config("XAUUSD") or {}
+            a_burst = (
+                xau.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
+            ).get("burst_size")
+        except Exception:
+            a_burst = None
+        logger.critical(f"[CFG@BOOT] burst_size global={g_burst} | XAUUSD={a_burst}")
+
 
         # --- Étape B : Créer et Assembler toutes les "Briques" dans le bon ordre ---
         logger.info("Assemblage des modules principaux de l'application...")
