@@ -345,8 +345,8 @@
                     "validity_ms": 4000
                 },
                 "absorption": {
-                    "vol_zscore_min": 2.0,
-                    "delta_ratio_max": 0.4,
+                    "vol_zscore_min": 1.6,
+                    "delta_ratio_max": 0.5,
                     "attempts_min": 2
                 },
                 "order": {

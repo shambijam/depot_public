@@ -795,6 +795,21 @@ class FootprintAnalyzer:
         except Exception as e:
             self._log_error("snapshot", e, {"window_s": window_s})
             return None, None, None
+        
+        # === CONTEXTE RAPIDE: tick_rate & pas des niveaux (pour micro-triggers) ===
+        try:
+            coverage_s = float(meta.get("coverage_s") or meta.get("coverage_seconds") or window_s)
+            tick_count = int(meta.get("tick_count") or len(ticks))
+            self._tick_rate_tmp = tick_count / max(1.0, coverage_s)
+        except Exception:
+            self._tick_rate_tmp = None
+
+        try:
+            idx = df_levels.index.values.astype(float)
+            diffs = np.diff(np.unique(idx))
+            self._lvl_step_tmp = float(np.quantile(diffs[diffs > 0], 0.1)) if diffs.size else None
+        except Exception:
+            self._lvl_step_tmp = None
 
         # 6) Adaptation contextuelle des seuils (PATCH C)
         #    - Relâchement léger si snapshot faible (zmax/dr_p95 bas)
@@ -828,6 +843,18 @@ class FootprintAnalyzer:
                     )
                     * 0.90,
                 )
+            # Flux très dense → seuils un peu plus permissifs
+            tr = getattr(self, "_tick_rate_tmp", None)
+            if tr and tr >= 4.0:
+                # stacking: autoriser 1 niveau de moins (ex: 3 → 2)
+                dyn_params["stack_min_levels"] = max(
+                    2, int(dyn_params.get("stack_min_levels", cfg.stack_min_levels)) - 1
+                )
+                # absorption: exiger 1 tentative de moins
+                dyn_params["abs_attempts_min"] = max(
+                    1, int(dyn_params.get("abs_attempts_min", cfg.abs_attempts_min)) - 1
+                )
+                  
         except Exception:
             dyn_params = dict(params)
 
@@ -1125,6 +1152,9 @@ class FootprintAnalyzer:
             if any(c not in lv.columns for c in req):
                 return None
             lv = lv.sort_index()
+            # Pas de niveaux (issu du snapshot précédent), 0.0 si indisponible
+            step = float(getattr(self, "_lvl_step_tmp", 0.0) or 0.0)
+
             # PATCH: calcule un pas de niveau 'step' pour la contrainte de proximité des voisins
             idx = lv.index.values.astype(float)
             if idx.size >= 2:
