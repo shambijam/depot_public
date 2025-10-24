@@ -369,7 +369,9 @@
     "entry_rules": {
       "scalping": {
         "burst_scalping": {
-          "burst_size": 8
+          "enabled": true,
+          "entry_mode": "MARKET",
+          "burst_size": 5
         }
       }
     }

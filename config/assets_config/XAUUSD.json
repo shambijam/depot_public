@@ -29,7 +29,7 @@
     }
   },
   "risk_management": {
-    "risk_per_trade_percent": 0.50,
+    "risk_per_trade_percent": 0.73,
     "base_lot_size": 0.05,
     "daily_loss_limit_percent": {
       "value": 2.5
@@ -56,65 +56,69 @@
   ],
   "overrides": {
     "scalping": {
-      "burst": {
-        "burst_size": 8
-      },
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
-            "dir_gate": {
-              "min_slope": 0.10,
-              "min_bias": 0.51
-            },
-            "orderflow_gate": {
-              "min_ticks": 10,
-              "min_tick_rate": 1.5,
-              "min_imbalance": 0.48
-            },
-            "fp_gate": {
-              "min_ticks": 10,
-              "allow_short_coverage": true,
-              "min_score": 70
-            }
+            "burst_size": 8
           },
-          "range_accumulation": {
-            "dir_gate": {
-              "min_slope": 0.08,
-              "min_bias": 0.50
-            },
-            "orderflow_gate": {
-              "min_ticks": 8,
-              "min_tick_rate": 0.7,
-              "min_imbalance": 0.42
-            },
-            "fp_gate": {
-              "min_ticks": 8,
-              "allow_short_coverage": true,
-              "min_score": 65
-            }
-          },
-          "of_micro_burst": {
-            "enabled": true,
-            "when": {
-              "phase": [
-                "liquidity_eqh_eql"
-              ]
-            },
-            "dir_gate": {
-              "use_of_fallback": true,
-              "cvd_min_delta": 100,
-              "imbalance_min": 0.55
-            },
-            "orderflow_gate": {
-              "min_ticks": 10,
-              "min_tick_rate": 3.0,
-              "min_score": 60
-            },
-            "fp_gate": {
-              "min_score": 80
-            },
-            "risk": {
-              "use_default": true
+          "entry_rules": {
+            "scalping": {
+              "burst_scalping": {
+                "dir_gate": {
+                  "min_slope": 0.10,
+                  "min_bias": 0.51
+                },
+                "orderflow_gate": {
+                  "min_ticks": 10,
+                  "min_tick_rate": 1.5,
+                  "min_imbalance": 0.48
+                },
+                "fp_gate": {
+                  "min_ticks": 10,
+                  "allow_short_coverage": true,
+                  "min_score": 70
+                }
+              },
+              "range_accumulation": {
+                "dir_gate": {
+                  "min_slope": 0.08,
+                  "min_bias": 0.50
+                },
+                "orderflow_gate": {
+                  "min_ticks": 8,
+                  "min_tick_rate": 0.7,
+                  "min_imbalance": 0.42
+                },
+                "fp_gate": {
+                  "min_ticks": 8,
+                  "allow_short_coverage": true,
+                  "min_score": 65
+                }
+              },
+              "of_micro_burst": {
+                "enabled": true,
+                "when": {
+                  "phase": [
+                    "liquidity_eqh_eql"
+                  ]
+                },
+                "dir_gate": {
+                  "use_of_fallback": true,
+                  "cvd_min_delta": 100,
+                  "imbalance_min": 0.55
+                },
+                "orderflow_gate": {
+                  "min_ticks": 10,
+                  "min_tick_rate": 3.0,
+                  "min_score": 60
+                },
+                "fp_gate": {
+                  "min_score": 80
+                },
+                "risk": {
+                  "use_default": true
+                }
+              }
             }
           }
         }
