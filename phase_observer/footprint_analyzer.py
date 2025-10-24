@@ -1536,6 +1536,7 @@ class FootprintAnalyzer:
         - Ancre prioritaire: max delta signé DANS le haut quantile de zscore_vol; fallback POC; fallback VWAP(levels).
         - Confiance = base + bonus (tick_rate, zmax, cohérence directionnelle, ratio |Δtot| / Σ|Δ|) – pénalités (couverture trop longue, absorption).
         """
+                          
         try:
             lv = df_levels
             if lv is None or lv.empty:

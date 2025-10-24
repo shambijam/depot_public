@@ -10,6 +10,139 @@ from trader.errors import TradeExecutionError
 from trader.sizing import _calculate_risk_based_volume as _sizing_risk_volume
 from trader.sltp import resolve_side
 
+# --- FLOW/VOL GATE (soft) ----------------------------------------------------
+def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_context: dict, active_config: dict):
+    """
+    Garde-fou SOUPLE: on ne bloque le trade que si au moins 2 conditions
+    sont franchement mauvaises. Données lues depuis market_context.
+    - tick_rate (footprint M1)
+    - score footprint et/ou score orderflow
+    - ATR M1 (en pips, si dispo)
+    - direction (CVD/delta) alignée à BUY/SELL (soft)
+    """
+
+    def _num(x, d=None):
+        try: return float(x)
+        except Exception: return d
+
+    # pip_size (compat or): pour XAU (digits=2) → 1 pip = 1 point ; EURUSD (digits=5) → 1 pip = 10 points
+    try:
+        point  = _num(getattr(symbol_info, "point", 0.0001), 0.0001)
+        digits = int(getattr(symbol_info, "digits", 5) or 5)
+        pip_size = point * (10.0 if digits in (3, 5) else 1.0)
+    except Exception:
+        pip_size = 0.01
+
+    # --- Config très permissive par défaut (pour éviter un bot muet) ---
+    gate_cfg = (
+        ((active_config.get("entry_rules") or {}).get("scalping") or {}).get("flow_vol_gate", {})
+    ) or {}
+    enabled = bool(gate_cfg.get("enabled", True))  # activé par défaut (mode soft)
+    mode = str(gate_cfg.get("mode", "soft")).lower()
+    per_asset = gate_cfg.get("per_asset", {}) or {}
+    aset = per_asset.get(symbol.upper(), {})
+
+    # Seuils généraux (modérés) + overrides par actif possibles
+    min_tick_rate       = _num(aset.get("min_tick_rate", gate_cfg.get("min_tick_rate", 0.8)))     # 0.8 t/s par défaut
+    min_fp_score        = _num(aset.get("min_footprint_score", gate_cfg.get("min_footprint_score", 65.0)))
+    min_of_score        = _num(aset.get("min_orderflow_score", gate_cfg.get("min_orderflow_score", 60.0)))
+    min_atr_m1_pips     = _num(aset.get("min_atr_m1_pips", gate_cfg.get("min_atr_m1_pips", 0.0))) # 0 = ignoré
+    dir_filter          = bool(gate_cfg.get("dir_filter", True))
+    dir_strength_ratio  = _num(gate_cfg.get("dir_strength_ratio", 0.30))   # soft: n’exige l’alignement que si opposition “forte”
+    dir_strength_abs    = _num(gate_cfg.get("dir_strength_abs", 10.0))     # delta/CVD absolu minimal pour considérer “fort”
+    min_fails_to_block  = int(gate_cfg.get("min_fails_to_block", 2))       # clé de la souplesse: il faut ≥2 KO pour bloquer
+
+    if not enabled or mode == "off":
+        self.logger.info(f"[FLOW-GATE] disabled/off for {symbol}.")
+        return True, "disabled"
+
+    # --- Récup des métriques depuis market_context (robuste aux structures) ----
+    mc = market_context or {}
+    sym = symbol.upper()
+
+    # Footprint
+    fp = (
+        ((mc.get("trading_signals") or {}).get(sym) or {}).get("footprint")
+        or (mc.get("footprint") or {}).get(sym)
+        or (mc.get("footprints") or {}).get(sym)
+        or {}
+    )
+    fp_score    = _num(fp.get("score"))
+    tick_rate   = _num(fp.get("tick_rate"))
+    delta_total = _num(fp.get("delta_total"))
+    total_vol   = _num(fp.get("total_volume"))
+
+    # Orderflow
+    of = (
+        ((mc.get("trading_signals") or {}).get(sym) or {}).get("orderflow")
+        or (mc.get("orderflow") or {}).get(sym)
+        or {}
+    )
+    of_score = _num(of.get("score"))
+    cvd      = _num(of.get("cvd") or of.get("CVD"))
+    if total_vol is None:
+        total_vol = _num(of.get("total_volume"))
+
+    # ATR M1 (essaye plusieurs clés usuelles)
+    md = (mc.get("market_data") or {}).get(sym) or {}
+    atr_candidates = [
+        md.get("atr_m1"), md.get("ATR_M1"), md.get("atr_14_m1"),
+        md.get("atr_last_m1"), md.get("atr_m1_price"),
+    ]
+    atr_m1 = None
+    for v in atr_candidates:
+        atr_m1 = _num(v)
+        if atr_m1: break
+    atr_m1_pips = None
+    if atr_m1 and pip_size and pip_size > 0:
+        atr_m1_pips = atr_m1 / pip_size  # convertit prix → pips
+
+    # --- Évaluations (soft) ----------------------------------------------------
+    fails = []
+    info  = {}
+
+    if tick_rate is not None:
+        info["tick_rate"] = tick_rate
+        if min_tick_rate and tick_rate < float(min_tick_rate):
+            fails.append(f"tick_rate<{min_tick_rate}")
+    if fp_score is not None:
+        info["fp_score"] = fp_score
+        if min_fp_score and fp_score < float(min_fp_score):
+            fails.append(f"fp_score<{min_fp_score}")
+    if of_score is not None:
+        info["of_score"] = of_score
+        if min_of_score and of_score < float(min_of_score):
+            fails.append(f"of_score<{min_of_score}")
+    if atr_m1_pips is not None and min_atr_m1_pips and float(min_atr_m1_pips) > 0:
+        info["atr_m1_pips"] = atr_m1_pips
+        if atr_m1_pips < float(min_atr_m1_pips):
+            fails.append(f"atr_m1<{min_atr_m1_pips}pips")
+
+    # Direction (soft): on bloque seulement si opposition “forte”
+    if dir_filter:
+        dir_sign = 1.0 if str(action).upper() == "BUY" else -1.0
+        direction_val = cvd if cvd is not None else delta_total
+        if direction_val is not None:
+            info["dir_metric"] = direction_val
+            oppo = (dir_sign * direction_val) < 0
+            strong = False
+            if total_vol and total_vol > 0:
+                if abs(direction_val) / float(total_vol) >= float(dir_strength_ratio):
+                    strong = True
+            if abs(direction_val) >= float(dir_strength_abs):
+                strong = True
+            if oppo and strong:
+                fails.append("dir_opposition_strong")
+
+    # Décision soft
+    if len(fails) >= max(1, min_fails_to_block):
+        self.logger.info(f"[FLOW-GATE][REJECT] {symbol} action={action} fails={fails} info={info}")
+        return False, {"fails": fails, "info": info}
+    else:
+        self.logger.info(f"[FLOW-GATE][PASS] {symbol} action={action} info={info}")
+        return True, {"info": info}
+
+
 
 def prepare_order(self, decision_package: dict) -> dict:
     """
@@ -330,6 +463,10 @@ def prepare_order(self, decision_package: dict) -> dict:
                 raise TradeExecutionError(
                     f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips."
                 )
+        # ---------- 6ter) FLOW/VOL SOFT GATE ----------
+        ok_gate, why_gate = _passes_flow_vol_gate(self, broker_symbol, action, symbol_info, market_context, active_config)
+        if not ok_gate:
+            raise TradeExecutionError(f"FLOW/VOL gate: {why_gate}")
 
         # ---------- 7) Prix d'entrée ----------
         entry_price_market = self.mt5_connector.get_current_price(broker_symbol, action)

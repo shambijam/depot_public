@@ -66,52 +66,68 @@
               "min_slope": 0.10,
               "min_bias": 0.51
             },
-            "orderflow_gate": {
-              "min_ticks": 10,
-              "min_tick_rate": 1.5,
-              "min_imbalance": 0.48
+            "flow_vol_gate": {
+              "enabled": true,
+              "mode": "soft",
+              "min_tick_rate": 2.0,
+              "min_footprint_score": 65.0,
+              "min_orderflow_score": 60.0,
+              "min_atr_m1_pips": 0,
+              "dir_filter": true,
+              "dir_strength_ratio": 0.30,
+              "dir_strength_abs": 10.0,
+              "min_fails_to_block": 2,
+              "per_asset": {
+                "XAUUSD": {
+                  "min_tick_rate": 2.5
+                }
+              },
+              "orderflow_gate": {
+                "min_ticks": 10,
+                "min_tick_rate": 1.5,
+                "min_imbalance": 0.48
+              },
+              "fp_gate": {
+                "min_ticks": 10,
+                "allow_short_coverage": true,
+                "min_score": 70
+              }
             },
-            "fp_gate": {
-              "min_ticks": 10,
-              "allow_short_coverage": true,
-              "min_score": 70
-            }
-          },
-          "range_accumulation": {
-            "dir_gate": {
-              "min_slope": 0.08,
-              "min_bias": 0.50
+            "range_accumulation": {
+              "dir_gate": {
+                "min_slope": 0.08,
+                "min_bias": 0.50
+              },
+              "orderflow_gate": {
+                "min_ticks": 8,
+                "min_tick_rate": 0.7,
+                "min_imbalance": 0.42
+              },
+              "fp_gate": {
+                "min_ticks": 8,
+                "allow_short_coverage": true,
+                "min_score": 65
+              }
             },
-            "orderflow_gate": {
-              "min_ticks": 8,
-              "min_tick_rate": 0.7,
-              "min_imbalance": 0.42
-            },
-            "fp_gate": {
-              "min_ticks": 8,
-              "allow_short_coverage": true,
-              "min_score": 65
-            }
-          },
-          "of_micro_burst": {
-            "enabled": true,
-            "when": {
-              "phase": [
-                "liquidity_eqh_eql"
-              ]
-            },
-            "dir_gate": {
-              "use_of_fallback": true,
-              "cvd_min_delta": 100,
-              "imbalance_min": 0.55
-            },
-            "orderflow_gate": {
-              "min_ticks": 10,
-              "min_tick_rate": 3.0
+            "of_micro_burst": {
+              "enabled": true,
+              "when": {
+                "phase": [
+                  "liquidity_eqh_eql"
+                ]
+              },
+              "dir_gate": {
+                "use_of_fallback": true,
+                "cvd_min_delta": 100,
+                "imbalance_min": 0.55
+              },
+              "orderflow_gate": {
+                "min_ticks": 10,
+                "min_tick_rate": 3.0
+              }
             }
           }
         }
       }
     }
   }
-}
