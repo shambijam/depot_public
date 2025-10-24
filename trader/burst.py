@@ -126,6 +126,35 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
         self.logger.error("[CLOSE] module MT5 indisponible.")
         return {"closed": False, "reason": "no_mt5_module"}
 
+    # bot_magic une fois pour toutes
+    try:
+        BOT_MAGIC = int(
+            getattr(self, "magic", 0)
+            or self.config_manager.get("magic_number", 0)
+            or self.config_manager.get("defaults.magic_number", 0)
+            or 0
+        )
+    except Exception:
+        BOT_MAGIC = 0
+
+    def _is_bot_position(p) -> bool:
+        try:
+            return int(getattr(p, "magic", getattr(p, "magic", 0))) == BOT_MAGIC
+        except Exception:
+            return False
+
+    def _extract_basket_id_strict(pos) -> Optional[str]:
+        """
+        Retourne le basket_id UNIQUEMENT si le comment contient 'burst_scalping|basket=<id>'.
+        Aucune heuristique 'synthetic|...' ici (trop dangereux pour CLOSE).
+        """
+        try:
+            c = str(getattr(pos, "comment", "") or "")
+        except Exception:
+            c = ""
+        m = re.search(r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)", c)
+        return m.group(1) if m else None
+
     # ---------- Fenêtre de temps optionnelle ----------
     try:
         max_close_ms = int(
@@ -187,7 +216,9 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
 
     def _list_open_positions():
         try:
-            return mt5c.get_positions() or []
+            pos = mt5c.get_positions() or []
+            # ⛔ On ne garde que nos positions (magic du bot)
+            return [p for p in pos if _is_bot_position(p)]
         except Exception as e:
             self.logger.error(f"[CLOSE] impossible de lire les positions: {e}")
             return []
@@ -195,44 +226,101 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
     def _list_pending_orders():
         try:
             if hasattr(mt5c, "get_orders"):
-                return mt5c.get_orders() or []
-            if hasattr(mt5, "orders_get"):
-                return mt5.orders_get() or []
+                ords = mt5c.get_orders() or []
+            elif hasattr(mt5, "orders_get"):
+                ords = mt5.orders_get() or []
+            else:
+                ords = []
+            # ⛔ On ne garde que nos ordres (magic du bot)
+            out = []
+            for od in ords:
+                try:
+                    if int(getattr(od, "magic", 0)) == BOT_MAGIC:
+                        out.append(od)
+                except Exception:
+                    pass
+            return out
         except Exception:
-            pass
-        return []
+            return []
 
     def _cancel_pending_orders_for_basket(bid: str) -> int:
-        """Annule SEULEMENT les ordres en attente dont le commentaire contient explicitement le basket_id."""
+        """Annule SEULEMENT les ordres en attente du bot dont le commentaire contient
+        explicitement le tag 'burst_scalping|basket=<bid>'. Filtrage strict + budget latence.
+        """
         pend = _list_pending_orders()
-        if not pend:
+        if not pend or not bid:
             return 0
+
         cancelled = 0
+        # motif strict (≤ quelques segments avant basket=... pour rester tolérant mais sûr)
+        pat = re.compile(rf"burst_scalping\|(?:[^|]*\|){{0,5}}?basket={re.escape(bid)}")
+
+        # (optionnel) limite de sécurité pour éviter de balayer trop d’ordres
+        try:
+            max_cancel = int(
+                self.config_manager.get("burst_close.max_pending_cancel", 50) or 50
+            )
+        except Exception:
+            max_cancel = 50
+
+        # récupère le magic du bot (même logique que côté connector)
+        try:
+            BOT_MAGIC = int(
+                getattr(self, "magic", 0)
+                or self.config_manager.get("magic_number", 0)
+                or self.config_manager.get("defaults.magic_number", 0)
+                or 0
+            )
+        except Exception:
+            BOT_MAGIC = 0
+
         for od in pend:
             if not _time_left_ok():
                 self.logger.warning(
                     "[CLOSE] Budget de latence atteint pendant l'annulation des pendings."
                 )
                 break
+
             try:
-                comment = str(_v(od, "comment", "") or "")
-                if bid and (bid in comment):
-                    order_id = _v(od, "order") or _v(od, "ticket")
-                    if order_id is None:
+                # ⛔ ne jamais toucher aux ordres qui ne sont pas du bot
+                try:
+                    if int(getattr(od, "magic", 0)) != BOT_MAGIC:
                         continue
-                    req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order_id)}
-                    res = mt5c.order_send(req)
-                    if res and getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
-                        cancelled += 1
-                        self.logger.info(
-                            f"[CLOSE] Pending #{order_id} annulé (basket={bid})."
-                        )
-                    else:
-                        self.logger.warning(
-                            f"[CLOSE] Annulation ordre #{order_id} échec retcode={getattr(res,'retcode',None)}"
-                        )
+                except Exception:
+                    continue
+
+                comment = str(_v(od, "comment", "") or "")
+                # ⛔ exige le tag exact du panier
+                if not pat.search(comment):
+                    continue
+
+                order_id = _v(od, "order") or _v(od, "ticket")
+                if order_id is None:
+                    continue
+
+                req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(order_id)}
+                res = mt5c.order_send(req)
+
+                if res and getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                    cancelled += 1
+                    self.logger.info(
+                        f"[CLOSE] Pending #{order_id} annulé (basket={bid})."
+                    )
+                else:
+                    self.logger.warning(
+                        f"[CLOSE] Annulation ordre #{order_id} échec "
+                        f"retcode={getattr(res,'retcode',None)} comment={getattr(res,'comment','?')}"
+                    )
+
+                if cancelled >= max_cancel:
+                    self.logger.warning(
+                        f"[CLOSE] Seuil d'annulations atteint ({max_cancel}). Stop."
+                    )
+                    break
+
             except Exception as e:
                 self.logger.error(f"[CLOSE] Annulation ordre KO: {e}")
+
         return cancelled
 
     def _force_sl_sweep(symbol: str, positions: list) -> bool:
@@ -354,7 +442,15 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
         # 1) positions du panier
         try:
             all_pos = _list_open_positions()
-            basket_pos = [p for p in all_pos if _extract_basket_id(p) == basket_id]
+            # ⛔ On retient UNIQUEMENT nos positions ET tag exact du panier dans 'comment'
+            basket_pos = []
+            for p in all_pos:
+                if not _is_bot_position(p):
+                    continue
+                bid = _extract_basket_id_strict(p)
+                if bid == basket_id:
+                    basket_pos.append(p)
+
         except Exception:
             basket_pos = []
 
@@ -505,52 +601,56 @@ def monitor_burst_baskets(
     self,
     config: dict,
     max_loss_pips: float = 15.0,
-    trail_trigger: float = 10.0,
-    trail_step: float = 5.0,
+    trail_trigger: float = 10.0,  # ignoré (no trailing)
+    trail_step: float = 5.0,  # ignoré (no trailing)
     **_,
 ):
     """
     Watchdog de paniers, SANS trailing.
-
-    Règles supportées (via config.entry_rules.scalping.burst_scalping.closure_rules) :
-    - close_on_full_profit (bool) :
-        Ferme si chaque ticket du panier est >= min_green_pnl_pips (optionnellement seulement si panier 'plein').
-    - require_full_count_for_profit_close (bool) :
-        Nécessite que le nombre de tickets ouverts atteigne le burst_size attendu.
-    - min_green_pnl_pips (float) :
-        Seuil de pips à atteindre 'au moins une fois' par ticket si require_all_seen_green_once=true.
-    - require_all_seen_green_once (bool) :
-        Tous les tickets doivent avoir été 'verts' au moins une fois avant qu’un close profit puisse s'appliquer.
-    - rt_fast_window_ms / rt_poll_interval_ms :
-        Fenêtre courte de surveillance réactive (boucle fast) pour close profit uniquement (pas de trailing).
-    - max_loss_pips (float) :
-        Filet de perte au niveau du panier (pips moyens du panier <= -max_loss_pips → close).
-    - loss_guard_arming_ms (int) :
-        Délai minimal avant d’activer le filet de perte si require_all_seen_green_once=true.
-
-    NB: pas de BE/trailing. Les SL/TP fixés à l’entrée (via order_builder) restent prioritaires.
+    Ne touche qu'aux positions du bot taguées 'burst_scalping|basket=<id>' ET magic==BOT_MAGIC.
+    Fermetures auto désactivées par défaut (closure_rules.enabled=false).
     """
-    # ---- Conf ----
+
+    # ---- Conf / garde-fous ----
     burst_cfg = (
         config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
     ) or {}
     closure = burst_cfg.get("closure_rules", {}) or {}
 
-    require_all_seen_once = bool(closure.get("require_all_seen_green_once", False))
-    all_seen_green_pips = float(closure.get("all_seen_green_pips", 3.0))
-    loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
-
-    close_on_full_profit = bool(closure.get("close_on_full_profit", True))
+    enabled = bool(closure.get("enabled", False))  # <- kill switch
+    enable_profit_close = bool(closure.get("enable_profit_close", True))
+    enable_loss_guard = bool(closure.get("enable_loss_guard", True))
     require_full_count = bool(closure.get("require_full_count_for_profit_close", True))
+    require_all_seen = bool(closure.get("require_all_seen_green_once", False))
+    all_seen_green_pips = float(closure.get("all_seen_green_pips", 3.0))
     min_green_pnl_pips = float(closure.get("min_green_pnl_pips", 0.0))
-    rt_fast_window_ms = int(closure.get("rt_fast_window_ms", 2500))
-    rt_poll_interval_ms = int(closure.get("rt_poll_interval_ms", 100))
+    rt_fast_window_ms = int(closure.get("rt_fast_window_ms", 0))  # ← par défaut OFF
+    rt_poll_interval_ms = int(closure.get("rt_poll_interval_ms", 120))
     max_loss_pips = float(closure.get("max_loss_pips", float(max_loss_pips)))
+    loss_guard_arming_ms = int(closure.get("loss_guard_arming_ms", 3000))
+    min_age_ms_for_any_close = int(
+        closure.get("min_age_ms_for_any_close", 3000)
+    )  # anti-fermeture trop précoce
+
+    if not enabled:
+        # totalement passif si non activé
+        return
 
     # ---- Connexion / états ----
     mt5c = getattr(self, "mt5_connector", None)
     if not mt5c:
         return
+
+    # magic du bot (immunité trades manuels)
+    try:
+        BOT_MAGIC = int(
+            getattr(self, "magic", 0)
+            or self.config_manager.get("magic_number", 0)
+            or self.config_manager.get("defaults.magic_number", 0)
+            or 0
+        )
+    except Exception:
+        BOT_MAGIC = 0
 
     if not hasattr(self, "_basket_seen_green"):
         self._basket_seen_green = {}  # basket_id -> set(ticket)
@@ -560,6 +660,10 @@ def monitor_burst_baskets(
         self._basket_first_seen_ts = {}  # basket_id -> float(ts)
 
     # ---------- Helpers ----------
+    BASKET_TAG_RE = re.compile(
+        r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)"
+    )
+
     def _v(pos, key, default=None):
         if isinstance(pos, dict):
             return pos.get(key, default)
@@ -585,7 +689,7 @@ def monitor_burst_baskets(
         return getattr(si, key, default)
 
     def _pip_size_for_symbol(sym: str) -> float:
-        """EURUSD/GBPUSD(digits=5) -> 1 pip = 10 points ; XAUUSD(digits=2) -> 1 pip = 1 point"""
+        """EURUSD/GBPUSD(digits=5)=>1 pip=10 pts ; XAUUSD(digits=2)=>1 pip=1 pt"""
         si = _symbol_info(sym)
         point = _safe_float(_gv(si, "point", 0.0001), 0.0001) or 0.0001
         digits = int(_gv(si, "digits", 5) or 5)
@@ -603,9 +707,9 @@ def monitor_burst_baskets(
         ask = _safe_float(_v(pos, "ask"))
         t = _v(pos, "type")  # 0=BUY 1=SELL
         return (
-            (ask if ask is not None else bid)
-            if t == 0
-            else (bid if bid is not None else ask)
+            (ask if t == 0 else bid)
+            if (ask is not None and bid is not None)
+            else (ask or bid)
         )
 
     def _entry_price(pos):
@@ -620,26 +724,28 @@ def monitor_burst_baskets(
             return d
         return "BUY" if _v(pos, "type") == 0 else "SELL"
 
-    def _extract_basket_id(pos) -> str:
-        bid = _v(pos, "basket_id") or _v(pos, "burst_id")
-        if bid:
-            return str(bid)
+    def _is_bot_pos(pos) -> bool:
+        # only our positions (magic) AND explicit burst tag in comment
+        try:
+            if int(_v(pos, "magic", 0)) != BOT_MAGIC:
+                return False
+        except Exception:
+            return False
         c = str(_v(pos, "comment", "") or "")
-        m = re.search(r"burst_scalping\|(?:[^|]*\|){0,3}?basket=([A-Za-z0-9_]+)", c)
-        if m:
-            return m.group(1)
-        m = re.search(r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", c, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        sym = str(_v(pos, "symbol", "") or "").upper()
-        magic = _v(pos, "magic") or ""
-        ep = _safe_float(_entry_price(pos), 0.0)
-        ep_key = f"{ep:.2f}" if ep is not None else "na"
-        return f"synthetic|{sym}|{magic}|{ep_key}"
+        return bool(BASKET_TAG_RE.search(c))
+
+    def _extract_basket_id(pos) -> Optional[str]:
+        # renvoie None si pas notre panier
+        if not _is_bot_pos(pos):
+            return None
+        m = BASKET_TAG_RE.search(str(_v(pos, "comment", "") or ""))
+        return m.group(1) if m else None
 
     def _snapshot_positions():
         try:
-            return mt5c.get_positions() or []
+            # filtre *ici* : on ne travaille QUE sur nos paniers
+            allp = mt5c.get_positions() or []
+            return [p for p in allp if _is_bot_pos(p)]
         except Exception:
             return []
 
@@ -652,10 +758,8 @@ def monitor_burst_baskets(
             buckets.setdefault(bid, []).append(p)
         return buckets
 
-    def _basket_stats(
-        positions: List[dict],
-    ) -> Optional[Tuple[str, str, float, float, float, float]]:
-        """Retourne (symbol, direction, pip_size, avg_entry, avg_price, pnl_pips)."""
+    def _basket_stats(positions: List[dict]):
+        """Retourne (symbol, direction, pip_size, avg_entry, avg_price, pnl_pips) ou None."""
         if not positions:
             return None
         sym = str(_v(positions[0], "symbol", "") or "").upper()
@@ -677,13 +781,13 @@ def monitor_burst_baskets(
         return sym, direction, pip_size, avg_entry, avg_price, pnl_pips
 
     def _expected_count_from(positions: List[dict]) -> Optional[int]:
-        # 1) lire burst_size embarqué sur positions
+        # 1) burst_size embarqué si dispo
         exp = 0
         for p in positions:
             bs = _safe_float(_v(p, "burst_size"))
             if bs and int(bs) > 0:
                 exp = max(exp, int(bs))
-        # 2) sinon, fallback conf globale (burst_size)
+        # 2) fallback conf globale
         if exp == 0:
             try:
                 cfg_bs = int(burst_cfg.get("burst_size", 0) or 0)
@@ -691,15 +795,6 @@ def monitor_burst_baskets(
                     exp = cfg_bs
             except Exception:
                 pass
-        # 3) sinon, motif "x/y" éventuel dans le commentaire
-        if exp == 0 and positions:
-            c0 = str(_v(positions[0], "comment", "") or "")
-            m = re.search(r"\|(\d+)/(\d+)", c0)
-            if m:
-                try:
-                    exp = int(m.group(2))
-                except Exception:
-                    exp = 0
         return exp if exp > 0 else None
 
     def _all_green_and_full(positions: List[dict]) -> bool:
@@ -721,15 +816,8 @@ def monitor_burst_baskets(
         return True
 
     def _update_seen_green(basket_id: str, positions: List[dict], min_seen_pips: float):
-        """
-        Marque un ticket comme 'déjà vert' dès qu'il a atteint min_seen_pips au moins une fois.
-        Met self._basket_all_seen[basket_id] = True si tous les tickets ont été verts au moins une fois.
-        """
         seen = self._basket_seen_green.setdefault(basket_id, set())
-        expected = _expected_count_from(positions)
-        if expected is None:
-            expected = len(positions)
-
+        expected = _expected_count_from(positions) or len(positions)
         for p in positions:
             tk = _v(p, "ticket")
             ep = _safe_float(_entry_price(p))
@@ -745,20 +833,23 @@ def monitor_burst_baskets(
                     seen.add(int(tk))
                 except Exception:
                     pass
-
         self._basket_all_seen[basket_id] = len(seen) >= expected
 
     def _close_basket(basket_id: str, positions: List[dict]) -> bool:
-        """Ferme le panier (bulk si possible; sinon ticket par ticket) et retourne True si plus aucune position."""
+        """Ferme le panier (bulk si possible; sinon ticket par ticket)."""
+        # sécurité: n’agir que si tous les pos sont bien *nos* pos
+        if not positions or not all(_is_bot_pos(p) for p in positions):
+            return False
+
         # bulk
         mt5c_close = getattr(mt5c, "close_positions", None)
         if callable(mt5c_close):
             try:
-                tickets = []
-                for p in positions:
-                    tk = _v(p, "ticket")
-                    if tk is not None:
-                        tickets.append(int(tk))
+                tickets = [
+                    int(_v(p, "ticket"))
+                    for p in positions
+                    if _v(p, "ticket") is not None
+                ]
                 if tickets:
                     mt5c_close(tickets=tickets)
                     time.sleep(0.05)
@@ -768,7 +859,7 @@ def monitor_burst_baskets(
                         if _extract_basket_id(p) == basket_id
                     ]
                     if not left:
-                        # cooldown
+                        # cooldown par symbole si demandé
                         try:
                             sym_from_positions = (
                                 (str(_v(positions[0], "symbol", "") or "").upper())
@@ -789,6 +880,8 @@ def monitor_burst_baskets(
                                         or 0.0
                                     )
                                 if cd > 0:
+                                    if not hasattr(self, "_cooldown_until"):
+                                        self._cooldown_until = {}
                                     self._cooldown_until[sym_from_positions] = (
                                         time.time() + cd
                                     )
@@ -818,31 +911,6 @@ def monitor_burst_baskets(
         time.sleep(0.05)
         left = [p for p in _snapshot_positions() if _extract_basket_id(p) == basket_id]
         if not left:
-            try:
-                sym_from_positions = (
-                    (str(_v(positions[0], "symbol", "") or "").upper())
-                    if positions
-                    else ""
-                )
-                if sym_from_positions:
-                    cd = float(
-                        self.config_manager.get("cooldown_after_exit_s", 0) or 0.0
-                    )
-                    if cd <= 0:
-                        cd = float(
-                            self.config_manager.get(
-                                "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
-                                0,
-                            )
-                            or 0.0
-                        )
-                    if cd > 0:
-                        self._cooldown_until[sym_from_positions] = time.time() + cd
-                        self.logger.info(
-                            f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
-                        )
-            except Exception as _e:
-                self.logger.warning(f"[COOLDOWN] set KO: {_e}")
             self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback tickets).")
             return True
 
@@ -851,10 +919,10 @@ def monitor_burst_baskets(
         )
         return False
 
-    # ==============
-    # Phase A — FAST (boucle courte: profit-only)
-    # ==============
-    if rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
+    # =========================
+    # Phase A — FAST (profit-only)
+    # =========================
+    if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         while True:
             open_positions = _snapshot_positions()
@@ -866,26 +934,26 @@ def monitor_burst_baskets(
 
             any_action = False
             for basket_id, pos in baskets.items():
-                # init age & mémoire
+                # init âge & mémoire
                 if basket_id not in self._basket_first_seen_ts:
                     self._basket_first_seen_ts[basket_id] = time.time()
                 age_ms = int(
                     (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
                 )
 
-                # mettre à jour tickets déjà 'verts' au moins une fois
+                if age_ms < min_age_ms_for_any_close:
+                    continue
+
                 _update_seen_green(basket_id, pos, all_seen_green_pips)
                 all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
 
-                # CLOSE profit-only (panier plein & tout vert)
-                if close_on_full_profit and _all_green_and_full(pos):
+                if _all_green_and_full(pos):
                     if (
-                        require_all_seen_once
+                        require_all_seen
                         and not all_seen_ok
                         and age_ms < loss_guard_arming_ms
                     ):
-                        # on attend que chaque ticket ait été vert au moins une fois
-                        pass
+                        pass  # attend l’armement
                     else:
                         self.logger.info(
                             f"🎯 [FAST] {basket_id} PLEIN & TOUT VERT → CLOSE"
@@ -898,12 +966,13 @@ def monitor_burst_baskets(
                 break
             if not any_action:
                 time.sleep(rt_poll_interval_ms / 1000.0)
-            else:
-                continue
 
-    # ==============
-    # Phase B — passe de secours + filet de perte
-    # ==============
+    # =========================
+    # Phase B — filet de perte (optionnel)
+    # =========================
+    if not enable_loss_guard:
+        return
+
     open_positions = _snapshot_positions()
     if not open_positions:
         return
@@ -912,53 +981,43 @@ def monitor_burst_baskets(
         return
 
     for basket_id, pos in baskets.items():
-        # init age & mémoire
         if basket_id not in self._basket_first_seen_ts:
             self._basket_first_seen_ts[basket_id] = time.time()
         age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
+
         _update_seen_green(basket_id, pos, all_seen_green_pips)
         all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
 
-        try:
-            # 1) all-green encore (au cas où)
-            if close_on_full_profit and _all_green_and_full(pos):
-                if (
-                    require_all_seen_once
-                    and not all_seen_ok
-                    and age_ms < loss_guard_arming_ms
-                ):
-                    pass
-                else:
-                    self.logger.info(
-                        f"🎯 {basket_id} PLEIN & TOUT VERT (Phase B) → CLOSE"
-                    )
-                    _close_basket(basket_id, pos)
-                    continue
-
-            stats = _basket_stats(pos)
-            if not stats:
+        # encore une passe profit-only
+        if (
+            enable_profit_close
+            and age_ms >= min_age_ms_for_any_close
+            and _all_green_and_full(pos)
+        ):
+            if require_all_seen and not all_seen_ok and age_ms < loss_guard_arming_ms:
+                pass
+            else:
+                self.logger.info(f"🎯 {basket_id} PLEIN & TOUT VERT (Phase B) → CLOSE")
+                _close_basket(basket_id, pos)
                 continue
-            sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
-            # 2) filet de perte
-            if pnl_pips <= -abs(max_loss_pips):
-                if age_ms < loss_guard_arming_ms and (
-                    require_all_seen_once and not all_seen_ok
-                ):
-                    self.logger.warning(
-                        f"⏸️ {basket_id} perte {pnl_pips:.1f}p mais guard non armé (age={age_ms}ms<{loss_guard_arming_ms}ms)"
-                    )
-                else:
-                    self.logger.warning(
-                        f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
-                    )
-                    _close_basket(basket_id, pos)
-                    continue
+        stats = _basket_stats(pos)
+        if not stats:
+            continue
+        sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
-        except Exception as e:
-            self.logger.error(
-                f"[MONITOR] Erreur basket {basket_id}: {e}", exc_info=True
-            )
+        # filet de perte
+        if age_ms >= min_age_ms_for_any_close and pnl_pips <= -abs(max_loss_pips):
+            if age_ms < loss_guard_arming_ms and (require_all_seen and not all_seen_ok):
+                self.logger.warning(
+                    f"⏸️ {basket_id} perte {pnl_pips:.1f}p mais guard non armé "
+                    f"(age={age_ms}ms<{loss_guard_arming_ms}ms)"
+                )
+            else:
+                self.logger.warning(
+                    f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
+                )
+                _close_basket(basket_id, pos)
 
 
 # ======================================================================================

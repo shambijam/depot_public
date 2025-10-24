@@ -269,25 +269,46 @@ class MT5Connector:
         if s.startswith(("XAU", "XAG", "XPT", "XPD")):
             return 0.01
         return 0.0001  # majors FX
+    
+    # A mettre dans la classe MT5Connector (ex: en haut des méthodes close_*)
+    MT5_COMMENT_MAXLEN = 31  # MT5 limite ~31 chars
 
-    def close_position_market(self, position) -> bool:
+    def _compose_comment(self, base: str = "SNIPER_X close",
+                        reason: str | None = None,
+                        basket_id: str | int | None = None,
+                        extra: str | None = None,
+                        maxlen: int = MT5_COMMENT_MAXLEN) -> str:
+        parts = [base]
+        if reason:
+            parts.append(str(reason))
+        if basket_id is not None:
+            # court pour tenir dans 31 chars
+            bid = str(basket_id)
+            parts.append(f"b:{bid[-4:]}")
+        if extra:
+            parts.append(str(extra))
+        msg = " ".join(parts)
+        if len(msg) > maxlen:
+            msg = msg[:maxlen]
+        return msg
+
+
+    def close_position_market(self, position, *, reason: str | None = None,
+                            comment: str | None = None) -> bool:
         """
-        Ferme une position au marché en utilisant le type inverse:
-        - position BUY -> ordre SELL au Bid
-        - position SELL -> ordre BUY à l'Ask
+        Ferme une position au marché en utilisant le type inverse.
+        Optionnel: reason/comment pour tracer la source (affiché dans MT5).
         """
-                
         try:
             order_type = self.ORDER_TYPE_FROM_POSITION.get(position.type)
             if order_type is None:
                 self.logger.error(
                     "Mapping inverse manquant (position.type=%s). "
-                    "Vérifie mt5_mappings.position_types.",
-                    position.type,
+                    "Vérifie mt5_mappings.position_types.", position.type
                 )
                 return False
 
-            # --- Récupération symbol info (nécessaire pour filling & arrondis) ---
+            # --- Symbol info ---
             si = self.get_symbol_info(position.symbol)
             if not si:
                 self.logger.error("Symbol info introuvable pour %s.", position.symbol)
@@ -300,29 +321,28 @@ class MT5Connector:
                 return False
 
             price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
-
-            # Normalisation du prix selon digits du symbole
             digits = getattr(si, "digits", None)
             if isinstance(digits, int):
                 price = round(price, digits)
 
-            # --- Filling mode, résolu à partir du symbol info ---
+            # --- Filling mode ---
             try:
                 type_filling = self._resolve_order_filling(si, preferred="RETURN")
             except Exception:
-                # Fallback doux (si utilitaire indisponible)
                 type_filling = getattr(self, "ORDER_FILLING_RETURN", None)
 
             req = {
                 "action": self.TRADE_ACTION_DEAL,
                 "symbol": position.symbol,
                 "type": order_type,
-                "position": position.ticket,  # indispensable pour clôture
+                "position": position.ticket,  # indispensable
                 "volume": position.volume,
                 "price": price,
                 "deviation": 50,
                 "magic": getattr(self, "magic", 0),
-                "comment": "SNIPER_X close market",
+                "comment": comment or self._compose_comment(
+                    base="SNIPER_X close", reason=reason or "market"
+                ),
                 "type_filling": type_filling,
                 "type_time": self.ORDER_TIME_GTC,
             }
@@ -330,17 +350,15 @@ class MT5Connector:
             res = self.mt5.order_send(req)
             if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
                 self.logger.info(
-                    "Position #%s fermée (deal=%s).",
-                    position.ticket,
-                    getattr(res, "deal", "N/A"),
+                    "Position #%s fermée (deal=%s) reason=%s.",
+                    position.ticket, getattr(res, "deal", "N/A"), reason
                 )
                 return True
 
             self.logger.error(
-                "Échec fermeture #%s retcode=%s comment=%s",
-                position.ticket,
-                getattr(res, "retcode", "?"),
-                getattr(res, "comment", "?"),
+                "Échec fermeture #%s retcode=%s comment=%s reason=%s",
+                position.ticket, getattr(res, "retcode", "?"),
+                getattr(res, "comment", "?"), reason
             )
             return False
 
@@ -348,57 +366,99 @@ class MT5Connector:
             self.logger.exception("close_position_market: %s", e)
             return False
 
-    def _get_position_by_ticket(self, ticket: int):
-        """Retourne la position MT5 portant ce ticket, ou None."""
+
+    def _get_position_by_ticket(self, ticket: int, *, enforce_bot_magic: bool = False):
+        """
+        Retourne la position MT5 pour ce ticket, ou None.
+        - Fast-path: tente mt5.positions_get(ticket=...) si dispo.
+        - Fallback: parcourt self.get_open_positions().
+        - Optionnel: enforce_bot_magic=True -> ignore les positions dont le magic != bot.
+        """
         try:
-            positions = self.get_open_positions() or []
-            for p in positions:
-                if int(getattr(p, "ticket", -1)) == int(ticket):
+            tid = int(ticket)
+
+            # 1) Fast-path si l'API accepte le param 'ticket'
+            try:
+                res = self.mt5.positions_get(ticket=tid)  # peut lever TypeError selon version
+                if res:
+                    p = res[0] if isinstance(res, (list, tuple)) else res
+                    if enforce_bot_magic:
+                        bot_magic = int(
+                            getattr(self, "magic", 0)
+                            or self.config_manager.get("magic_number", 0)
+                            or self.config_manager.get("defaults.magic_number", 0)
+                            or 0
+                        )
+                        if int(getattr(p, "magic", -1)) != bot_magic:
+                            return None
                     return p
+            except TypeError:
+                # Version d'API sans support 'ticket=' -> on passe au fallback
+                pass
+            except Exception:
+                # Problème transitoire API -> on journalise en debug et on fallback
+                if hasattr(self, "logger"):
+                    self.logger.debug("_get_position_by_ticket fast-path failed", exc_info=True)
+
+            # 2) Fallback: scan des positions ouvertes
+            positions = self.get_open_positions() or []
+            bot_magic = None
+            if enforce_bot_magic:
+                bot_magic = int(
+                    getattr(self, "magic", 0)
+                    or self.config_manager.get("magic_number", 0)
+                    or self.config_manager.get("defaults.magic_number", 0)
+                    or 0
+                )
+
+            for p in positions:
+                if int(getattr(p, "ticket", -1)) == tid:
+                    if enforce_bot_magic and bot_magic is not None \
+                    and int(getattr(p, "magic", -1)) != bot_magic:
+                        return None
+                    return p
+
         except Exception:
-            pass
+            if hasattr(self, "logger"):
+                self.logger.debug("_get_position_by_ticket exception → None", exc_info=True)
         return None
 
-    def close_position(self, ticket: int, *, retry: int = 1) -> bool:
+    def close_position(self, ticket: int, *, retry: int = 1,
+                    reason: str | None = None,
+                    comment: str | None = None) -> bool:
         """
         Ferme une position par ticket avec un DEAL inverse.
-        - Choisit automatiquement un filling autorisé (RETURN/IOC/FOK) pour éviter 10030.
-        - Arrondit le prix aux digits du symbole.
+        - Choisit automatiquement un filling autorisé (RETURN/IOC/FOK)
+        - Affiche un commentaire court incluant la raison (31 chars max MT5).
         """
         import time
-        
+
         # 🔒 Ne jamais fermer un trade manuel
         try:
             pos = self._get_position_by_ticket(ticket)
         except Exception:
             pos = None
 
-        bot_magic = int(getattr(self, "magic", 0)
-                        or self.config_manager.get("magic_number", 0)
-                        or self.config_manager.get("defaults.magic_number", 0)
-                        or 0)
+        bot_magic = int(
+            getattr(self, "magic", 0)
+            or self.config_manager.get("magic_number", 0)
+            or self.config_manager.get("defaults.magic_number", 0)
+            or 0
+        )
         if pos is not None and int(getattr(pos, "magic", -1)) != bot_magic:
-            self.logger.info("[CLOSE][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
-                            ticket, getattr(pos, "magic", None), bot_magic)
-            return False
-            
-         
-
-        bot_magic = int(getattr(self, "magic", 0) or self.config_manager.get("defaults.magic_number", 0) or 0)
-        if pos is not None and int(getattr(pos, "magic", -1)) != bot_magic:
-            self.logger.info("[CLOSE][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
-                            ticket, getattr(pos, "magic", None), bot_magic)
+            self.logger.info(
+                "[CLOSE][IMMUNITY] Skip manuel: ticket=%s magic=%s != bot.magic=%s",
+                ticket, getattr(pos, "magic", None), bot_magic
+            )
             return False
 
-
-        pos = self._get_position_by_ticket(ticket)
         if not pos:
             self.logger.warning(
                 f"[MT5C] close_position: ticket {ticket} introuvable (déjà fermé ?)"
             )
-            return True  # considéré comme fermé
+            return True  # considéré fermé
 
-        # Sens inverse (BUY -> SELL ; SELL -> BUY)
+        # Sens inverse
         order_type = self.ORDER_TYPE_FROM_POSITION.get(getattr(pos, "type", None))
         if order_type is None:
             self.logger.error(
@@ -406,18 +466,16 @@ class MT5Connector:
             )
             return False
 
-        # Infos symbole (pour digits & filling)
+        # Infos symbole & filling
         try:
             si = self.get_symbol_info(pos.symbol)
         except Exception:
             si = None
 
-        # Resolve filling autorisé (fallback IOC/RETURN si pas d'info)
         try:
             type_filling = (
                 self._resolve_order_filling(si, preferred="RETURN")
-                if si
-                else getattr(self, "ORDER_FILLING_IOC", self.ORDER_FILLING_RETURN)
+                if si else getattr(self, "ORDER_FILLING_IOC", self.ORDER_FILLING_RETURN)
             )
         except Exception:
             type_filling = getattr(self, "ORDER_FILLING_IOC", self.ORDER_FILLING_RETURN)
@@ -425,13 +483,10 @@ class MT5Connector:
         # Prix côté inverse
         tick = self.mt5.symbol_info_tick(pos.symbol)
         if not tick:
-            self.logger.error(
-                f"[MT5C] close_position: tick indisponible pour {pos.symbol}"
-            )
+            self.logger.error(f"[MT5C] close_position: tick indisponible pour {pos.symbol}")
             return False
         price = tick.bid if order_type == self.ORDER_TYPE_SELL else tick.ask
 
-        # Arrondi prix aux digits du symbole si dispo
         digits = getattr(si, "digits", None)
         if isinstance(digits, int):
             try:
@@ -439,7 +494,7 @@ class MT5Connector:
             except Exception:
                 pass
 
-        # Normalisation volume sur le step du symbole (sécurité)
+        # Volume normalisé
         try:
             volume = float(getattr(pos, "volume", 0.0))
         except Exception:
@@ -473,15 +528,17 @@ class MT5Connector:
             "action": self.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
             "type": order_type,
-            "position": int(pos.ticket),  # indispensable pour clore la position
+            "position": int(pos.ticket),
             "volume": float(volume),
             "price": float(price),
             "deviation": deviation,
             "type_time": self.ORDER_TIME_GTC,
-            "comment": "SNIPER_X close by ticket",
+            "comment": comment or self._compose_comment(
+                base="SNIPER_X close", reason=reason or "by_ticket"
+            ),
         }
 
-        # Ordre d’essai des fillings: résolu -> IOC -> FOK -> RETURN (sans doublons)
+        # Ordre des fillings
         filling_candidates = []
         for tf in [
             type_filling,
@@ -502,77 +559,65 @@ class MT5Connector:
 
             if res and getattr(res, "retcode", None) == self.TRADE_RETCODE_DONE:
                 self.logger.info(
-                    f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal', 'N/A')}, filling={tf})."
+                    f"[MT5C] close_position: #{ticket} fermé (deal={getattr(res, 'deal','N/A')}, filling={tf}) reason={reason}."
                 )
                 return True
 
             ret = getattr(res, "retcode", None)
             com = getattr(res, "comment", "?")
             self.logger.warning(
-                f"[MT5C] close_position: tentative échouée ticket {ticket} retcode={ret} comment={com} filling={tf}"
+                f"[MT5C] close_position: tentative échouée ticket {ticket} retcode={ret} comment={com} filling={tf} reason={reason}"
             )
 
-            # Requote -> petit retry immédiat sur le même filling
             if retry > 0 and ret == getattr(self, "TRADE_RETCODE_REQUOTE", None):
                 time.sleep(0.15)
                 retry -= 1
                 continue
-
-            # Invalid/Unsupported filling -> on essaie le filling suivant
             if ret in (getattr(self, "TRADE_RETCODE_INVALID_FILL", 10030), 10030):
                 continue
-
-            # Autre erreur -> on ne s’acharne pas, on passera au post-check
             break
 
-        # Post-check tardif (latence serveur)
         time.sleep(0.15)
         still = self._get_position_by_ticket(ticket)
         if not still:
             self.logger.info(
-                f"[MT5C] close_position: #{ticket} confirmé fermé après post-check."
+                f"[MT5C] close_position: #{ticket} confirmé fermé après post-check (reason={reason})."
             )
             return True
 
         self.logger.warning(
-            f"[MT5C] close_position: échec final ticket {ticket} retcode={getattr(last_res, 'retcode', '?')} comment={getattr(last_res, 'comment', '?')}"
+            f"[MT5C] close_position: échec final ticket {ticket} retcode={getattr(last_res,'retcode','?')} comment={getattr(last_res,'comment','?')} reason={reason}"
         )
         return False
 
-    def close_positions(self, tickets: list[int]) -> dict:
+
+    def close_positions(self, tickets: list[int], *,
+                    reason: str | None = None,
+                    comment: str | None = None) -> dict:
         """
         Ferme en série une liste de tickets. Retourne un petit rapport.
-        Attendues par close_burst_basket(...).
         """
         import time
-                
         total = len(tickets or [])
         ok = ko = 0
         tickets = [int(t) for t in (tickets or []) if t is not None]
 
         for t in tickets:
-            if self.close_position(t):
+            if self.close_position(t, reason=reason, comment=comment):
                 ok += 1
             else:
                 ko += 1
             time.sleep(0.05)  # micro-throttle
 
-        # post-vérification: certaines fermetures sont async côté serveur
-        time.sleep(0.15)
-        still_open = []
-        open_now = {
-            int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])
-        }
-        for t in tickets:
-            if t in open_now:
-                still_open.append(t)
+        time.sleep(0.15)  # post-check
+        open_now = {int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])}
+        still_open = [t for t in tickets if t in open_now]
 
         if still_open:
-            self.logger.warning(
-                f"[MT5C] close_positions: restants non fermés: {still_open}"
-            )
+            self.logger.warning(f"[MT5C] close_positions: restants non fermés: {still_open} reason={reason}")
 
         return {"total": total, "closed": ok, "failed": ko, "still_open": still_open}
+
 
     def _resolve_order_filling(self, symbol_info, preferred: str | None = None):
         """

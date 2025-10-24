@@ -36,15 +36,18 @@
           "sl_method": "PIPS"
         },
         "closure_rules": {
-          "close_on_full_profit": true,
+          "enabled": false,
+          "enable_profit_close": true,
+          "enable_loss_guard": false,
           "require_full_count_for_profit_close": true,
           "require_all_seen_green_once": true,
-          "all_seen_green_pips": 5,
-          "min_green_pnl_pips": 8,
-          "max_loss_pips": 200,
-          "rt_fast_window_ms": 3000,
-          "rt_poll_interval_ms": 150,
-          "loss_guard_arming_ms": 5000
+          "all_seen_green_pips": 3.0,
+          "min_green_pnl_pips": 1.0,
+          "rt_fast_window_ms": 0,
+          "rt_poll_interval_ms": 120,
+          "max_loss_pips": 15.0,
+          "loss_guard_arming_ms": 3000,
+          "min_age_ms_for_any_close": 3000
         }
       }
     }
