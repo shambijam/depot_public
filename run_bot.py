@@ -533,7 +533,41 @@ def run_single_pipeline_cycle(
         logger.info(
             f"[EXEC MODE] is_dry_run={is_dry_run} | execution_mode={execution_mode}"
         )
+        
+        # --- SNAPSHOT CFG BURST (BOOT: cycle 1 uniquement) ---
+        if cycle_count == 1:
+            def _dig(d, path):
+                cur = d or {}
+                for k in path:
+                    if not isinstance(cur, dict):
+                        return None
+                    cur = cur.get(k)
+                return cur
 
+            # global (prod_config)
+            g_burst = _dig(base_config, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
+
+            # strategy config (config_trade_scalping.json chargé via StrategyManager)
+            try:
+                strat_conf = strategy_manager.get_strategy_config("scalping") or {}
+                s_burst = _dig(strat_conf, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
+            except Exception:
+                s_burst = None
+
+            # asset XAUUSD (entry + overrides nouveau + legacy)
+            try:
+                xa = config_manager.load_asset_config("XAUUSD") or {}
+            except Exception:
+                xa = {}
+            xa_entry   = _dig(xa, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
+            xa_override= _dig(xa, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"])  # nouveau chemin
+            xa_legacy  = _dig(xa, ["overrides","scalping","burst","burst_size"])  # ancien chemin
+
+            logger.critical(
+                f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | "
+                f"XAUUSD.entry={xa_entry} | XAUUSD.override={xa_override} | XAUUSD.legacy={xa_legacy}"
+            )
+       
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
@@ -801,9 +835,12 @@ def run_single_pipeline_cycle(
                             )
                             raise RuntimeError("action invalid")
 
-                        burst_count = int(entry.get("burst_count", 5))
+                        _bc = entry.get("burst_count")
+                        burst_count = int(_bc) if isinstance(_bc, (int, float)) and _bc > 0 else None
                         burst_each = float(entry.get("burst_volume_each", 0.02))
-                        total_volume = round(burst_count * burst_each, 5)
+                        # évite TypeError si burst_count est None; le sizing réel sera résolu plus tard
+                        total_volume = round(((burst_count or 0) * burst_each), 5)
+
 
                         # 2) Prix d'entrée — fallback Ask/Bid si manquant (critique pour FOK)
                         price_val = float(entry.get("price", 0.0) or 0.0)
@@ -1258,68 +1295,72 @@ def run_single_pipeline_cycle(
             return False
         
         # === Helper: résolution robuste du burst_size ===
-        def _dig(d: dict, path: list):
-            cur = d or {}
-            for k in path:
-                if not isinstance(cur, dict):
-                    return None
-                cur = cur.get(k)
-            return cur
-
-        def _resolve_burst_size(sym: str) -> int:
+       
+        def _resolve_burst_size(sym: str):
             """
-            Priorité (première valeur >0 gagnante):
-            1) decision_package.active_config / decision_package.config_used (si la stratégie a injecté sa conf)
+            Priorité (première valeur >0 gagne) :
+            1) decision_package.active_config / decision_package.config_used
             2) asset_config.entry_rules.scalping.burst_scalping.burst_size
-            3) asset_config.overrides.scalping.burst.burst_size (legacy)
+            3) asset_config.overrides.scalping.entry_rules.scalping.burst_scalping.burst_size  (NOUVEAU override)
+                -> fallback legacy: asset_config.overrides.scalping.burst.burst_size
             4) strategy_manager.get_strategy_config('scalping').entry_rules.scalping.burst_scalping.burst_size
             5) base_config.entry_rules.scalping.burst_scalping.burst_size
-            6) base_config.trade_executor_settings.entry_rules.scalping.burst_scalping.burst_size   <-- (NOUVEAU chemin)
+            6) base_config.trade_executor_settings.entry_rules.scalping.burst_scalping.burst_size
             7) défaut = 5
+            Retourne (size:int, source:str)
             """
+            def _dig(d: dict, path: list):
+                cur = d or {}
+                for k in path:
+                    if not isinstance(cur, dict):
+                        return None
+                    cur = cur.get(k)
+                return cur
+
             # 1) paquet décisionnel (si la stratégie a déjà injecté sa conf)
             ac = (decision_package.get("active_config")
                 or decision_package.get("config_used")
                 or {})
             v = _dig(ac, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
-                return int(v)
+                return int(v), "active_config"
 
             # 2) asset_config → entry_rules
             asset_cfgs_all = (global_context.get("asset_configs") or {})
             asset_cfg = asset_cfgs_all.get(sym, {}) or {}
             v = _dig(asset_cfg, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
-                return int(v)
+                return int(v), "asset.entry_rules"
 
-            # 3) asset_config → overrides (legacy)
-            v = _dig(asset_cfg, ["overrides", "scalping", "burst", "burst_size"])
+            # 3) asset_config → overrides (nouveau), puis legacy
+            v = _dig(asset_cfg, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"])
             if isinstance(v, (int, float)) and v > 0:
-                return int(v)
+                return int(v), "asset.overrides(new)"
+            v = _dig(asset_cfg, ["overrides","scalping","burst","burst_size"])
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v), "asset.overrides(legacy)"
 
             # 4) config stratégie 'scalping'
             try:
                 strat_conf = strategy_manager.get_strategy_config("scalping") or {}
                 v = _dig(strat_conf, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
                 if isinstance(v, (int, float)) and v > 0:
-                    return int(v)
+                    return int(v), "strategy"
             except Exception:
                 pass
 
-            # 5) base_config (chemin top-level éventuel)
+            # 5) base_config (top-level)
             v = _dig(base_config, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
             if isinstance(v, (int, float)) and v > 0:
-                return int(v)
+                return int(v), "global"
 
-            # 6) *** NOUVEAU ***: chemin sous trade_executor_settings
-            v = _dig(base_config, ["trade_executor_settings", "entry_rules",
-                                "scalping", "burst_scalping", "burst_size"])
+            # 6) base_config (sous trade_executor_settings)
+            v = _dig(base_config, ["trade_executor_settings","entry_rules","scalping","burst_scalping","burst_size"])
             if isinstance(v, (int, float)) and v > 0:
-                return int(v)
+                return int(v), "global.executor_settings"
 
             # 7) défaut
-            return 5
-
+            return 5, "default"
                 
         # --- Exécution Scalping ---
         if scalping_decisions:
@@ -1440,10 +1481,12 @@ def run_single_pipeline_cycle(
                             td["sltp"] = sltp_cfg
 
                     # 4) burst_size — résolution multi-sources (helper)
-                    resolved_burst = int(td.get("burst_size") or td.get("burst_count") or _resolve_burst_size(sym))
-                    if resolved_burst < 1:
-                        resolved_burst = 1
-                    logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst}")
+                    # Résolution centralisée + purge des hints injectés par la stratégie
+                    size, source = _resolve_burst_size(sym)
+                    td.pop("burst_count", None)
+                    td.pop("burst_size", None)
+                    resolved_burst = max(int(size), 1)
+                    logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst} (source={source})")
 
 
                     # 5) Standardisation exec
