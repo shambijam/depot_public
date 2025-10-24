@@ -442,7 +442,7 @@ class ScalpingStrategy(BaseStrategy):
             return None
 
         entry_mode = str(sm_cfg.get("entry_mode", "MARKET")).upper()   # MARKET / BUY_LIMIT / SELL_LIMIT
-        burst_size = int(sm_cfg.get("burst_size", 5) or 5)
+        burst_size = int(sm_cfg.get("burst_size", 8) or 8)
         basket_id  = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
 
         return {
