@@ -987,7 +987,12 @@ class FootprintAnalyzer:
                 fb2 = self._micro_absorption(df_levels)
                 if fb2:
                     candidates.append(fb2)
-
+                   # 3) micro_burst si toujours rien et tick_rate élevé
+            if not candidates:
+                fb3 = self._micro_burst(df_levels, meta or {})
+                if fb3:
+                    candidates.append(fb3)
+     
         if not candidates:
             self._fp_log(
                 "NO_CAND",
@@ -1164,7 +1169,12 @@ class FootprintAnalyzer:
             else:
                 step = 0.0
 
-            cand = lv[(lv["zscore_vol"] >= 1.1) & (lv["delta_ratio"] <= 0.6)]
+            tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)
+            # Seuils dynamiques: en burst on tolère un peu plus de delta_ratio et on baisse un peu z-need
+            z_need = 1.1 if tr < 6.0 else 1.0
+            dr_max = 0.6 if tr < 6.0 else 0.7
+            cand = lv[(lv["zscore_vol"] >= z_need) & (lv["delta_ratio"] <= dr_max)]
+
             if cand.empty:
                 return None
             for price, row in cand.iterrows():
@@ -1182,8 +1192,11 @@ class FootprintAnalyzer:
                         # voisin proche + volume décent + zscore requis selon tick_rate
                         if step > 0 and abs(float(nb.name) - float(price)) > step * 1.2:
                             continue
-                        if "vol" in lv.columns and float(nb["vol"]) < float(lv["vol"].median()):
-                            continue
+                        if "vol" in lv.columns:
+                            vmed = float(lv["vol"].median())
+                            if vmed > 0 and float(nb["vol"]) < 0.7 * vmed:
+                                continue
+
                         tick_rate = getattr(self, "_tick_rate_tmp", None)
                         zneed = 1.3 if (tick_rate is not None and tick_rate < 1.2) else 1.1
                         if float(row["zscore_vol"]) < zneed:
@@ -1203,6 +1216,64 @@ class FootprintAnalyzer:
                             },
                         }
             return None
+        except Exception:
+            return None
+    def _micro_burst(self, df_levels: pd.DataFrame, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Fallback 'burst' quand le flux est très dense:
+        - tick_rate >= 5/s
+        - direction prise sur le delta_total agrégé
+        - ancre = niveau au delta signé max dans la direction
+        """
+        try:
+            tr = float(getattr(self, "_tick_rate_tmp", 0.0) or 0.0)
+            if tr < 5.0:
+                return None
+            lv = df_levels
+            if lv is None or lv.empty:
+                return None
+
+            # delta total depuis méta ou somme des deltas
+            if "delta" in lv.columns:
+                dtot = float(meta.get("delta_total", lv["delta"].sum()))
+            else:
+                dtot = float(meta.get("delta_total", 0.0))
+            if dtot == 0.0:
+                return None
+
+            sgn = 1 if dtot > 0 else -1
+
+            # ancre: niveau de delta signé maximal dans la direction
+            anchor = None
+            if "delta" in lv.columns and len(lv) > 0:
+                if sgn > 0:
+                    idx = lv["delta"].idxmax()
+                else:
+                    idx = lv["delta"].idxmin()
+                anchor = float(idx) if np.isfinite(float(idx)) else None
+
+            if anchor is None:
+                anchor = float(meta.get("poc", 0.0) or 0.0)
+
+            zmax = float(lv["zscore_vol"].max() if "zscore_vol" in lv.columns else 0.0)
+
+            # confiance: dépend du tick_rate et du zmax
+            conf = 0.58 + 0.04 * max(0.0, min(3.0, tr - 5.0)) + 0.03 * max(0.0, zmax - 1.0)
+            conf = float(np.clip(conf, 0.58, 0.82))
+
+            return {
+                "ok": True,
+                "trigger": TriggerType.MICRO_STACK.value,  # on s'aligne sur l'alias 'stacking_inline'
+                "direction": "BUY" if sgn > 0 else "SELL",
+                "confidence": conf,
+                "anchor_price": anchor,
+                "meta": {
+                    "reason": "micro_burst_tickrate",
+                    "tick_rate": tr,
+                    "zmax": zmax,
+                    "delta_total": dtot,
+                },
+            }
         except Exception:
             return None
 
