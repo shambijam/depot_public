@@ -1298,16 +1298,7 @@ def run_single_pipeline_cycle(
        
         def _resolve_burst_size(sym: str):
             """
-            Priorité (première valeur >0 gagne) :
-            1) decision_package.active_config / decision_package.config_used
-            2) asset_config.entry_rules.scalping.burst_scalping.burst_size
-            3) asset_config.overrides.scalping.entry_rules.scalping.burst_scalping.burst_size  (NOUVEAU override)
-                -> fallback legacy: asset_config.overrides.scalping.burst.burst_size
-            4) strategy_manager.get_strategy_config('scalping').entry_rules.scalping.burst_scalping.burst_size
-            5) base_config.entry_rules.scalping.burst_scalping.burst_size
-            6) base_config.trade_executor_settings.entry_rules.scalping.burst_scalping.burst_size
-            7) défaut = 5
-            Retourne (size:int, source:str)
+            ... (docstring inchangée)
             """
             def _dig(d: dict, path: list):
                 cur = d or {}
@@ -1317,50 +1308,72 @@ def run_single_pipeline_cycle(
                     cur = cur.get(k)
                 return cur
 
-            # 1) paquet décisionnel (si la stratégie a déjà injecté sa conf)
+            # NEW → lecture du flag
+            prefer_asset = bool(
+                ((base_config.get("entry_rules", {}) or {})
+                .get("scalping", {}) or {})
+                .get("burst_scalping", {})
+                .get("prefer_asset_overrides", False)
+            )
+
+            # Prépare les blocs de lecture
             ac = (decision_package.get("active_config")
                 or decision_package.get("config_used")
                 or {})
-            v = _dig(ac, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "active_config"
-
-            # 2) asset_config → entry_rules
             asset_cfgs_all = (global_context.get("asset_configs") or {})
             asset_cfg = asset_cfgs_all.get(sym, {}) or {}
-            v = _dig(asset_cfg, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "asset.entry_rules"
 
-            # 3) asset_config → overrides (nouveau), puis legacy
-            v = _dig(asset_cfg, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "asset.overrides(new)"
-            v = _dig(asset_cfg, ["overrides","scalping","burst","burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "asset.overrides(legacy)"
+            def read_active_config():
+                v = _dig(ac, ["entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "active_config") if isinstance(v,(int,float)) and v>0 else (None,None)
 
-            # 4) config stratégie 'scalping'
-            try:
-                strat_conf = strategy_manager.get_strategy_config("scalping") or {}
-                v = _dig(strat_conf, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
-                if isinstance(v, (int, float)) and v > 0:
-                    return int(v), "strategy"
-            except Exception:
-                pass
+            def read_asset_entry():
+                v = _dig(asset_cfg, ["entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "asset.entry_rules") if isinstance(v,(int,float)) and v>0 else (None,None)
 
-            # 5) base_config (top-level)
-            v = _dig(base_config, ["entry_rules", "scalping", "burst_scalping", "burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "global"
+            def read_asset_over_new():
+                v = _dig(asset_cfg, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "asset.overrides(new)") if isinstance(v,(int,float)) and v>0 else (None,None)
 
-            # 6) base_config (sous trade_executor_settings)
-            v = _dig(base_config, ["trade_executor_settings","entry_rules","scalping","burst_scalping","burst_size"])
-            if isinstance(v, (int, float)) and v > 0:
-                return int(v), "global.executor_settings"
+            def read_asset_over_legacy():
+                v = _dig(asset_cfg, ["overrides","scalping","burst","burst_size"])
+                return (int(v), "asset.overrides(legacy)") if isinstance(v,(int,float)) and v>0 else (None,None)
 
-            # 7) défaut
+            def read_strategy():
+                try:
+                    strat_conf = strategy_manager.get_strategy_config("scalping") or {}
+                except Exception:
+                    strat_conf = {}
+                v = _dig(strat_conf, ["entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "strategy") if isinstance(v,(int,float)) and v>0 else (None,None)
+
+            def read_global_top():
+                v = _dig(base_config, ["entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "global") if isinstance(v,(int,float)) and v>0 else (None,None)
+
+            def read_global_exec():
+                v = _dig(base_config, ["trade_executor_settings","entry_rules","scalping","burst_scalping","burst_size"])
+                return (int(v), "global.executor_settings") if isinstance(v,(int,float)) and v>0 else (None,None)
+
+            # ORDRE dynamique
+            if prefer_asset:
+                readers = [
+                    read_asset_entry, read_asset_over_new, read_asset_over_legacy,
+                    read_active_config, read_strategy, read_global_top, read_global_exec
+                ]
+            else:
+                readers = [
+                    read_active_config, read_asset_entry, read_asset_over_new, read_asset_over_legacy,
+                    read_strategy, read_global_top, read_global_exec
+                ]
+
+            for fn in readers:
+                val, src = fn()
+                if val:
+                    return val, src
+
             return 5, "default"
+
                 
         # --- Exécution Scalping ---
         if scalping_decisions:
