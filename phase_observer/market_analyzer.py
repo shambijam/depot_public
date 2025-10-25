@@ -13,8 +13,10 @@ from .detectors import (
     # detect_imbalance_stacking,
     # detect_absorption_reject,
     # detect_volume_climax_after_consolidation,
+    
 )
-from .footprint_analyzer import FootprintAnalyzer   
+from .footprint_analyzer import FootprintAnalyzer  
+from .fusion_manager import FusionManager
 
 LOG = logging.getLogger(__name__)
 
@@ -27,6 +29,8 @@ class MarketAnalyzer:
         self._last_results: Dict[str, Any] = {}
         self._confluence_cache: Dict[str, pd.DataFrame] = {}
         self.footprint = FootprintAnalyzer(logger=self.logger)
+        self.fusion_manager = FusionManager()
+
 
     # === Pass-through pour l'analyse des triggers footprint ===
     def analyze_footprint_triggers(
@@ -37,6 +41,58 @@ class MarketAnalyzer:
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
         return self.footprint.analyze_footprint_triggers(asset, ticks, bars, strategy_config)
+    
+    # ============================================================
+    # 🔹 FUSION MANAGER — décision unifiée (OFv5 + FP M1 + Trigger)
+    # ============================================================
+    def build_fused_decision(
+        self,
+        asset: str,
+        strategy_config: Dict[str, Any],
+        footprint_trigger: Optional[Dict[str, Any]],
+        market_results: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        of = (market_results or {}).get("patterns", {}).get("orderflow") or {}
+        latest = (market_results or {}).get("latest")
+
+        # Compacter le Footprint M1 depuis latest.*
+        fp_payload = {"status": "SUSPECT", "summary": {}}
+        if latest is not None:
+            summ = latest.get("footprint_summary")
+            # tolère str(dict)
+            if isinstance(summ, str):
+                try:
+                    import ast
+                    summ = ast.literal_eval(summ)
+                except Exception:
+                    summ = {}
+            fp_payload = {
+                "status": str(latest.get("footprint_status") or "SUSPECT"),
+                "score": float(latest.get("footprint_score") or 0.0),
+                "summary": summ or {},
+            }
+
+        trig = footprint_trigger or {}
+
+        # On transmet aussi un contexte optionnel (spread/session/régime/horodatage…)
+        ctx = dict(context or {})
+        ctx.setdefault("now_ts", None)  # si absent, FusionManager utilisera time.time()
+
+        # Run fusion
+        fused = self.fusion_manager.fuse(orderflow=of, footprint=fp_payload, triggers=trig, strategy_config=strategy_config, context=ctx)
+
+        # Si pas d'ancre côté trigger, la brique utilisera le POC footprint: on harmonise ici
+        if fused.get("anchor_price") is None:
+            poc = fp_payload.get("summary", {}).get("poc")
+            if poc is not None:
+                try:
+                    fused["anchor_price"] = float(poc)
+                except Exception:
+                    pass
+        return fused
+
 
         
     # ============================================================

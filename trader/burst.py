@@ -919,6 +919,33 @@ def monitor_burst_baskets(
         )
         return False
 
+    def _update_basket_sltp(bid: str, reason: str, force: bool = False) -> dict:
+        """
+        Pont vers sltp.update_basket_sltp_dynamically, tolérant:
+            - self.sltp.update_basket_sltp_dynamically(...)
+            - ou self.update_basket_sltp_dynamically(...) si self.sltp absent
+        """
+        owner = getattr(self, "sltp", None) or self
+        fn = getattr(owner, "update_basket_sltp_dynamically", None)
+        if not callable(fn):
+            try:
+                self.logger.warning(
+                    f"[BURST] Pas de fonction update_basket_sltp_dynamically sur {type(owner).__name__}"
+                )
+            except Exception:
+                pass
+            return {"status": "error", "reason": "no_update_fn"}
+        try:
+            return fn(basket_id=bid, reason=reason, force_refresh=bool(force))
+        except Exception as e:
+            try:
+                self.logger.debug(
+                    f"[BURST] update_basket_sltp_dynamically exception: {e}"
+                )
+            except Exception:
+                pass
+            return {"status": "error", "reason": "exception"}
+
     # =========================
     # Phase A — FAST (profit-only)
     # =========================
@@ -997,8 +1024,10 @@ def monitor_burst_baskets(
             if require_all_seen and not all_seen_ok and age_ms < loss_guard_arming_ms:
                 pass
             else:
-                self.logger.info(f"🎯 {basket_id} PLEIN & TOUT VERT (Phase B) → CLOSE")
-                _close_basket(basket_id, pos)
+                self.logger.info(
+                    f"🔄 {basket_id} PLEIN & TOUT VERT → OPTIMISE SL/TP (profit_optimization)"
+                )
+                _update_basket_sltp(basket_id, reason="profit_optimization", force=True)
                 continue
 
         stats = _basket_stats(pos)
@@ -1015,9 +1044,9 @@ def monitor_burst_baskets(
                 )
             else:
                 self.logger.warning(
-                    f"❌ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → CLOSE"
+                    f"🛡️ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → PROTECTION SL/TP"
                 )
-                _close_basket(basket_id, pos)
+                _update_basket_sltp(basket_id, reason="loss_protection", force=True)
 
 
 # ======================================================================================

@@ -10,11 +10,13 @@ from datetime import datetime, UTC, timezone
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from core.ai_interface import AIInterface
-from core.utils import ConfigValidationError, TradeStatus, normalize_levels
+from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
 from phase_observer.footprint_analyzer import FootprintAnalyzer
+from phase_observer.detectors import detect_orderflow_v5
+
 
 # PATCH PIPE-IMP-1 — import du pipeline (chemin: strategy/pipeline.py)
 try:
@@ -1180,6 +1182,71 @@ class DecisionPipeline:
             self.logger.warning(f"Erreur MarketAnalyzer: {e}")
 
         # ==========================================================
+        # 🔗 PATCH D — Fusion Manager (Orderflow + FootprintTriggers + Stratégie)
+        # ==========================================================
+        try:
+            # -- 1) Sources de données brutes (M1 + ticks) depuis le context --
+            md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+            df_m1 = (
+                md_asset.get("annotated_rates_df_m1")
+                or md_asset.get("annotated_rates_df")
+                or md_asset.get("rates_df")
+            )
+            ticks_df = (
+                md_asset.get("ticks")
+                or md_asset.get("ticks_buffer")
+                or md_asset.get("recent_ticks")
+            )
+
+            # -- 2) ORDERFLOW M1 (score + biais via delta_total) --
+            orderflow = {}
+            if isinstance(df_m1, pd.DataFrame) and not df_m1.empty:
+                # detect_orderflow_v5 -> {score, status, summary{delta_total,...}, patterns, df}
+                orderflow = detect_orderflow_v5(df_m1.copy())
+
+            # -- 3) TRIGGERS FOOTPRINT temps-réel (stacking / climax / absorption / micro-*) --
+            # MarketAnalyzer.expose FootprintAnalyzer.analyze_footprint_triggers()
+            # -> (ok, {action, trigger, direction, confidence, anchor_price, meta{poc, delta_total, ...}})
+            # cf. implémentation dans footprint_analyzer (retour normalisé). :contentReference[oaicite:1]{index=1}
+            trigger_ok, trigger = (False, {})
+            try:
+                # réutilise 'ma' si déjà créé pour la partie patterns, sinon instancie
+                if "ma" not in locals():
+                    ma = MarketAnalyzer(
+                        config_manager=self.config_manager, logger=self.logger
+                    )
+                bars_df = df_m1 if isinstance(df_m1, pd.DataFrame) else None
+                if isinstance(ticks_df, pd.DataFrame) and not ticks_df.empty:
+                    trigger_ok, trigger = ma.analyze_footprint_triggers(
+                        asset_raw, ticks_df, bars_df, current_config
+                    )
+                    if not trigger_ok:
+                        trigger = {}
+            except Exception as _e_tr:
+                self.logger.debug(f"[FUSION] triggers footprint indisponibles: {_e_tr}")
+
+            # -- 4) Appel brique de fusion (pondération + règles métier + veto) --
+            fused = self._fuse_signals_for_scalping(
+                asset=asset_raw,
+                strategy_decision=trade_decision.copy(),
+                orderflow=orderflow or {},
+                trigger=trigger or {},
+                current_config=current_config,
+                context=context,
+            )
+
+            # -- 5) Si la fusion produit une décision, on remplace la décision courante --
+            if fused and isinstance(fused, dict) and fused.get("action"):
+                trade_decision = fused
+                print(
+                    f"🧩 [FUSION] action={fused.get('action')} dir={fused.get('direction')} "
+                    f"conf={float(fused.get('confidence', 0)):.2f} | {fused.get('rationale')}"
+                )
+
+        except Exception as e:
+            self.logger.warning(f"[FUSION] erreur fusion: {e}")
+
+        # ==========================================================
         # ✅ CONTRÔLE LIMITES DE TRADES (dynamique depuis config)
         # ==========================================================
         rm_cfg = current_config.get("risk_management") or {}
@@ -1261,53 +1328,47 @@ class DecisionPipeline:
         self.logger.debug(f"Paramètres de risque calculés: {risk_params}")
 
         if isinstance(risk_params, dict) and risk_params.get("ok"):
+            # ✅ Propagation des niveaux (hints) — la finalisation se fait dans order_builder/sltp
             if risk_params.get("sl_price") is not None:
                 trade_decision["sl_price"] = float(risk_params["sl_price"])
+            if risk_params.get("tp_price") is not None:
+                trade_decision["tp_price"] = float(risk_params["tp_price"])
 
-            # ✅ Normalisation unique (SL & TP), y compris pour burst
-            levels = normalize_levels(
-                entry_price=trade_decision.get("entry_price"),
-                action=trade_decision.get("action"),
-                pip_size=pip_size,
-                sl_pips=trade_decision.get("target_sl_pips"),
-                tp_pips=trade_decision.get("target_tp_pips"),
-                sl_price=trade_decision.get("sl_price"),
-                tp_price=trade_decision.get("tp_price"),
-            )
-            trade_decision["sl_price"] = levels["sl"]
-            trade_decision["tp_price"] = levels["tp"]
-            
-            # 💡 RR dynamique → hint pour le moteur SLTP
+            if risk_params.get("sl_pips") is not None:
+                trade_decision["target_sl_pips"] = float(risk_params["sl_pips"])
+            if risk_params.get("tp_pips") is not None:
+                trade_decision["target_tp_pips"] = float(risk_params["tp_pips"])
+
+            # 💡 RR dynamique → hint pour le moteur SLTP (utilisé par order_builder)
             try:
-                # Base/fourchettes depuis la conf (s’il y en a)
-                bs_cfg = (((current_config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
-                        .get("burst_scalping", {}) or {})
-                sltp_cfg = (bs_cfg.get("sltp", {}) or {})
-                rr_base  = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
+                bs_cfg = (
+                    (current_config.get("entry_rules", {}) or {}).get("scalping", {})
+                    or {}
+                ).get("burst_scalping", {}) or {}
+                sltp_cfg = bs_cfg.get("sltp", {}) or {}
+                rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
                 rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
-                rr_cap   = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
+                rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
 
-                # Facteurs dynamiques
                 vol_factor = float(trade_decision.get("volatility_factor", 1.0) or 1.0)
-                # Confiance du signal comme proxy de "trigger strength"
                 asset_sym = trade_decision.get("asset")
-                conf = 0.5
                 try:
-                    conf = float((signals.get(asset_sym, {}) or {}).get("confidence_score", 0.5))
+                    conf = float(
+                        (signals.get(asset_sym, {}) or {}).get("confidence_score", 0.5)
+                    )
                     if not (0.0 <= conf <= 1.0):
                         conf = 0.5
                 except Exception:
                     conf = 0.5
-                trigger_boost = 0.9 + 0.2 * conf  # 0→0.9 ; 0.5→1.0 ; 1→1.1
 
+                trigger_boost = 0.9 + 0.2 * conf  # 0→0.9 ; 0.5→1.0 ; 1→1.1
                 rr_hint = rr_base * vol_factor * trigger_boost
-                # clamp
                 rr_hint = max(rr_floor, min(rr_cap, rr_hint))
 
                 trade_decision["tp_rr_ratio_hint"] = float(rr_hint)
             except Exception:
                 pass
-      
+
         # Log final (décision avant exécution)
         self.config_manager.log_decision(
             current_config,
@@ -1326,16 +1387,20 @@ class DecisionPipeline:
             trade_decision["burst_enabled"] = True
             # Expose burst_size au pipeline d'exécution ; fallback conf si absent
             try:
-                bs = int(trade_decision.get("burst_size")
-                        or ((current_config.get("entry_rules", {}) or {})
-                            .get("scalping", {}).get("burst_scalping", {})
-                            .get("burst_size", 1)))
+                bs = int(
+                    trade_decision.get("burst_size")
+                    or (
+                        (current_config.get("entry_rules", {}) or {})
+                        .get("scalping", {})
+                        .get("burst_scalping", {})
+                        .get("burst_size", 1)
+                    )
+                )
             except Exception:
                 bs = 1
             trade_decision["burst_size"] = max(1, bs)
         else:
             trade_decision["is_burst_trade"] = False
-
 
         # ==========================================================
         # 📋 Log final enrichi avec analyse patterns (si dispo)
@@ -1801,6 +1866,173 @@ class DecisionPipeline:
         atr_points = np.mean(tr[-w:])  # EMA pas indispensable ici pour le contrôle soft
         atr_pips = atr_points / pip_size
         return float(atr_pips)
+
+    def _fuse_signals_for_scalping(
+        self,
+        *,
+        asset: str,
+        strategy_decision: dict,
+        orderflow: dict,
+        trigger: dict,
+        current_config: dict,
+        context: dict,
+    ) -> dict:
+        """
+        Fusionne 3 sources:
+          - stratégie (pipeline scalping) -> action/direction + confidence
+          - orderflow M1 (detect_orderflow_v5) -> score + biais (signe de delta_total)
+          - triggers footprint temps-réel -> trigger_type + direction + confidence + meta{poc, delta_total, ...}
+        Applique: validation, cohérence, règles métier, pondération, veto.
+        Sortie normalisée: {action, direction, confidence, rule_name, meta{fused_debug...}, rationale}
+        """
+
+        def _norm_dir(x):
+            x = str(x or "").upper()
+            return x if x in ("BUY", "SELL") else "NEUTRAL"
+
+        # --- 1) Extraction directions & scores ---
+        strat_dir = _norm_dir(strategy_decision.get("action"))
+        strat_conf = float(strategy_decision.get("confidence", 0.6) or 0.6)
+
+        # Orderflow: biais par signe de delta_total (fallback neutre)
+        of_score = float(orderflow.get("score", 0) or 0)
+        dtot = float(((orderflow.get("summary") or {}).get("delta_total", 0)) or 0)
+        of_dir = "BUY" if dtot > 0 else ("SELL" if dtot < 0 else "NEUTRAL")
+
+        # Trigger footprint (conso: action/direction + confidence) :contentReference[oaicite:4]{index=4}
+        trig_dir = _norm_dir(trigger.get("direction") or trigger.get("action"))
+        trig_conf = float(trigger.get("confidence", 0.0) or 0.0)
+        trig_type = str(trigger.get("trigger", "")).lower()
+
+        # --- 2) Validation minimale (sinon on renvoie la décision stratégie telle quelle) ---
+        if strat_dir == "NEUTRAL" and trig_dir == "NEUTRAL":
+            return strategy_decision  # rien de mieux à fusionner
+
+        # --- 3) Cohérence (votes) ---
+        votes = [d for d in (strat_dir, of_dir, trig_dir) if d in ("BUY", "SELL")]
+        buy_votes = sum(1 for v in votes if v == "BUY")
+        sell_votes = sum(1 for v in votes if v == "SELL")
+        majority_dir = (
+            "BUY"
+            if buy_votes > sell_votes
+            else ("SELL" if sell_votes > buy_votes else strat_dir)
+        )
+        aligned_3 = buy_votes == 3 or sell_votes == 3
+        aligned_2 = (not aligned_3) and (max(buy_votes, sell_votes) == 2)
+        coherence_bonus = 0.15 if aligned_3 else (0.07 if aligned_2 else 0.0)
+        conflict_malus = 0.0 if (aligned_3 or aligned_2) else 0.12
+
+        # --- 4) Règles métier (veto/bonus) ---
+        # Never against strong orderflow
+        if of_score >= 80 and strat_dir in ("BUY", "SELL") and strat_dir != of_dir:
+            return {
+                "action": "NONE",
+                "direction": "NEUTRAL",
+                "confidence": 0.0,
+                "rule_name": "fusion_veto_strong_orderflow",
+                "meta": {
+                    "fused_debug": {
+                        "reason": "never_against_strong_orderflow",
+                        "of_score": of_score,
+                    }
+                },
+                "rationale": f"VETO: orderflow fort ({int(of_score)}) oppose la stratégie ({strat_dir}).",
+            }
+
+        # Veto absorption stricte (si trigger annonce une absorption contraire au flux)
+        if "absorption" in trig_type and of_dir != "NEUTRAL" and trig_dir != of_dir:
+            return {
+                "action": "NONE",
+                "direction": "NEUTRAL",
+                "confidence": 0.0,
+                "rule_name": "fusion_veto_absorption_conflict",
+                "meta": {
+                    "fused_debug": {"reason": "absorption_conflict", "trig": trig_type}
+                },
+                "rationale": "VETO: absorption footprint contraire à l’orderflow.",
+            }
+
+        # --- 5) Pondération (profil par défaut) ---
+        # 50% trigger, 30% orderflow alignment, 20% stratégie  (+/- cohérence)
+        align_component = (
+            1.0
+            if (trig_dir != "NEUTRAL" and trig_dir == of_dir and of_dir != "NEUTRAL")
+            else (0.55 if of_dir != "NEUTRAL" else 0.5)
+        )
+        fused = (
+            0.50 * (trig_conf or 0.5)
+            + 0.30 * align_component
+            + 0.20 * max(0.0, min(1.0, strat_conf))
+        )
+        fused = max(0.0, min(1.0, fused + coherence_bonus - conflict_malus))
+
+        # --- 6) Direction finale ---
+        final_dir = (
+            majority_dir
+            if majority_dir in ("BUY", "SELL")
+            else (trig_dir if trig_dir in ("BUY", "SELL") else strat_dir)
+        )
+        if fused < float(current_config.get("entry_threshold_min", 0.55)):
+            return {
+                "action": "NONE",
+                "direction": "NEUTRAL",
+                "confidence": fused,
+                "rule_name": "fusion_low_confidence",
+                "meta": {
+                    "fused_debug": {
+                        "coherence_bonus": coherence_bonus,
+                        "conflict_malus": conflict_malus,
+                        "trig_conf": trig_conf,
+                        "of_score": of_score,
+                        "align_component": align_component,
+                    }
+                },
+                "rationale": f"NO ENTRY: confiance fusionnée trop faible ({fused:.2f}).",
+            }
+
+        # --- 7) Rationale & retour normalisé ---
+        rationale = []
+        if final_dir == "BUY":
+            rationale.append("BUY car")
+        else:
+            rationale.append("SELL car")
+        if of_dir != "NEUTRAL":
+            rationale.append(f"orderflow {of_dir.lower()} (score {int(of_score)})")
+        if trig_dir != "NEUTRAL":
+            rationale.append(
+                f"trigger {trig_type or 'footprint'} {trig_dir.lower()} (conf {trig_conf:.2f})"
+            )
+        if aligned_3:
+            rationale.append("+ triple alignement")
+        elif aligned_2:
+            rationale.append("+ double alignement")
+        if coherence_bonus:
+            rationale.append(f"+ bonus cohérence {coherence_bonus:.2f}")
+        if conflict_malus:
+            rationale.append(f"- malus conflit {conflict_malus:.2f}")
+
+        out = {
+            "action": final_dir,
+            "direction": final_dir,
+            "confidence": fused,
+            "rule_name": (strategy_decision.get("rule_name") or "scalping")
+            + "+fusion_manager",
+            "asset": strategy_decision.get("asset", asset),
+            "meta": {
+                **(strategy_decision.get("meta") or {}),
+                "fusion_details": {
+                    "orderflow_score": of_score,
+                    "orderflow_dir": of_dir,
+                    "trigger_dir": trig_dir,
+                    "trigger_conf": trig_conf,
+                    "coherence_bonus": coherence_bonus,
+                    "conflict_malus": conflict_malus,
+                    "trigger_type": trig_type,
+                },
+            },
+            "rationale": " ".join(rationale),
+        }
+        return out
 
     def calculate_risk_parameters(
         self, context: dict, current_config: dict, trade_decision: dict

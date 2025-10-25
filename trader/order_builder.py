@@ -8,10 +8,22 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from trader.errors import TradeExecutionError
 from trader.sizing import _calculate_risk_based_volume as _sizing_risk_volume
-from trader.sltp import resolve_side
+from trader.sltp import (
+    resolve_side,
+    _calculate_sl_tp_prices,
+    _resolve_basket_context_for_sltp,
+)
+
 
 # --- FLOW/VOL GATE (soft) ----------------------------------------------------
-def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_context: dict, active_config: dict):
+def _passes_flow_vol_gate(
+    self,
+    symbol: str,
+    action: str,
+    symbol_info,
+    market_context: dict,
+    active_config: dict,
+):
     """
     Garde-fou SOUPLE: on ne bloque le trade que si au moins 2 conditions
     sont franchement mauvaises. Données lues depuis market_context.
@@ -22,12 +34,14 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
     """
 
     def _num(x, d=None):
-        try: return float(x)
-        except Exception: return d
+        try:
+            return float(x)
+        except Exception:
+            return d
 
     # pip_size (compat or): pour XAU (digits=2) → 1 pip = 1 point ; EURUSD (digits=5) → 1 pip = 10 points
     try:
-        point  = _num(getattr(symbol_info, "point", 0.0001), 0.0001)
+        point = _num(getattr(symbol_info, "point", 0.0001), 0.0001)
         digits = int(getattr(symbol_info, "digits", 5) or 5)
         pip_size = point * (10.0 if digits in (3, 5) else 1.0)
     except Exception:
@@ -35,7 +49,9 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
 
     # --- Config très permissive par défaut (pour éviter un bot muet) ---
     gate_cfg = (
-        ((active_config.get("entry_rules") or {}).get("scalping") or {}).get("flow_vol_gate", {})
+        ((active_config.get("entry_rules") or {}).get("scalping") or {}).get(
+            "flow_vol_gate", {}
+        )
     ) or {}
     enabled = bool(gate_cfg.get("enabled", True))  # activé par défaut (mode soft)
     mode = str(gate_cfg.get("mode", "soft")).lower()
@@ -43,14 +59,28 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
     aset = per_asset.get(symbol.upper(), {})
 
     # Seuils généraux (modérés) + overrides par actif possibles
-    min_tick_rate       = _num(aset.get("min_tick_rate", gate_cfg.get("min_tick_rate", 0.8)))     # 0.8 t/s par défaut
-    min_fp_score        = _num(aset.get("min_footprint_score", gate_cfg.get("min_footprint_score", 65.0)))
-    min_of_score        = _num(aset.get("min_orderflow_score", gate_cfg.get("min_orderflow_score", 60.0)))
-    min_atr_m1_pips     = _num(aset.get("min_atr_m1_pips", gate_cfg.get("min_atr_m1_pips", 0.0))) # 0 = ignoré
-    dir_filter          = bool(gate_cfg.get("dir_filter", True))
-    dir_strength_ratio  = _num(gate_cfg.get("dir_strength_ratio", 0.30))   # soft: n’exige l’alignement que si opposition “forte”
-    dir_strength_abs    = _num(gate_cfg.get("dir_strength_abs", 10.0))     # delta/CVD absolu minimal pour considérer “fort”
-    min_fails_to_block  = int(gate_cfg.get("min_fails_to_block", 2))       # clé de la souplesse: il faut ≥2 KO pour bloquer
+    min_tick_rate = _num(
+        aset.get("min_tick_rate", gate_cfg.get("min_tick_rate", 0.8))
+    )  # 0.8 t/s par défaut
+    min_fp_score = _num(
+        aset.get("min_footprint_score", gate_cfg.get("min_footprint_score", 65.0))
+    )
+    min_of_score = _num(
+        aset.get("min_orderflow_score", gate_cfg.get("min_orderflow_score", 60.0))
+    )
+    min_atr_m1_pips = _num(
+        aset.get("min_atr_m1_pips", gate_cfg.get("min_atr_m1_pips", 0.0))
+    )  # 0 = ignoré
+    dir_filter = bool(gate_cfg.get("dir_filter", True))
+    dir_strength_ratio = _num(
+        gate_cfg.get("dir_strength_ratio", 0.30)
+    )  # soft: n’exige l’alignement que si opposition “forte”
+    dir_strength_abs = _num(
+        gate_cfg.get("dir_strength_abs", 10.0)
+    )  # delta/CVD absolu minimal pour considérer “fort”
+    min_fails_to_block = int(
+        gate_cfg.get("min_fails_to_block", 2)
+    )  # clé de la souplesse: il faut ≥2 KO pour bloquer
 
     if not enabled or mode == "off":
         self.logger.info(f"[FLOW-GATE] disabled/off for {symbol}.")
@@ -67,10 +97,10 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
         or (mc.get("footprints") or {}).get(sym)
         or {}
     )
-    fp_score    = _num(fp.get("score"))
-    tick_rate   = _num(fp.get("tick_rate"))
+    fp_score = _num(fp.get("score"))
+    tick_rate = _num(fp.get("tick_rate"))
     delta_total = _num(fp.get("delta_total"))
-    total_vol   = _num(fp.get("total_volume"))
+    total_vol = _num(fp.get("total_volume"))
 
     # Orderflow
     of = (
@@ -79,27 +109,31 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
         or {}
     )
     of_score = _num(of.get("score"))
-    cvd      = _num(of.get("cvd") or of.get("CVD"))
+    cvd = _num(of.get("cvd") or of.get("CVD"))
     if total_vol is None:
         total_vol = _num(of.get("total_volume"))
 
     # ATR M1 (essaye plusieurs clés usuelles)
     md = (mc.get("market_data") or {}).get(sym) or {}
     atr_candidates = [
-        md.get("atr_m1"), md.get("ATR_M1"), md.get("atr_14_m1"),
-        md.get("atr_last_m1"), md.get("atr_m1_price"),
+        md.get("atr_m1"),
+        md.get("ATR_M1"),
+        md.get("atr_14_m1"),
+        md.get("atr_last_m1"),
+        md.get("atr_m1_price"),
     ]
     atr_m1 = None
     for v in atr_candidates:
         atr_m1 = _num(v)
-        if atr_m1: break
+        if atr_m1:
+            break
     atr_m1_pips = None
     if atr_m1 and pip_size and pip_size > 0:
         atr_m1_pips = atr_m1 / pip_size  # convertit prix → pips
 
     # --- Évaluations (soft) ----------------------------------------------------
     fails = []
-    info  = {}
+    info = {}
 
     if tick_rate is not None:
         info["tick_rate"] = tick_rate
@@ -136,12 +170,13 @@ def _passes_flow_vol_gate(self, symbol: str, action: str, symbol_info, market_co
 
     # Décision soft
     if len(fails) >= max(1, min_fails_to_block):
-        self.logger.info(f"[FLOW-GATE][REJECT] {symbol} action={action} fails={fails} info={info}")
+        self.logger.info(
+            f"[FLOW-GATE][REJECT] {symbol} action={action} fails={fails} info={info}"
+        )
         return False, {"fails": fails, "info": info}
     else:
         self.logger.info(f"[FLOW-GATE][PASS] {symbol} action={action} info={info}")
         return True, {"info": info}
-
 
 
 def prepare_order(self, decision_package: dict) -> dict:
@@ -335,7 +370,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.error(msg)
         raise TradeExecutionError(msg)
 
-   # ---------- [BURST GUARDRAILS] ----------
+    # ---------- [BURST GUARDRAILS] ----------
     try:
         rule_name = str(trade_decision.get("rule_name", "")).lower()
         if rule_name == "burst_scalping":
@@ -346,14 +381,22 @@ def prepare_order(self, decision_package: dict) -> dict:
 
             # PATCH BURST-COOL-KILL — désactivation totale des freins temps/panier
             max_open_positions = int(guard_cfg.get("max_open_positions", 5))
-            cooldown_seconds = 0                                      # kill cooldown
-            enforce_closure = bool(guard_cfg.get("enforce_burst_closure", False))   # OFF par défaut
-            single_burst_global = bool(guard_cfg.get("single_burst_global", False)) # OFF par défaut
+            cooldown_seconds = 0  # kill cooldown
+            enforce_closure = bool(
+                guard_cfg.get("enforce_burst_closure", False)
+            )  # OFF par défaut
+            single_burst_global = bool(
+                guard_cfg.get("single_burst_global", False)
+            )  # OFF par défaut
 
             import re, time
 
             def _field(obj, key, default=None):
-                return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                return (
+                    obj.get(key, default)
+                    if isinstance(obj, dict)
+                    else getattr(obj, key, default)
+                )
 
             # Scope (uniquement pour logs)
             if single_burst_global:
@@ -464,7 +507,9 @@ def prepare_order(self, decision_package: dict) -> dict:
                     f"Spread trop élevé: {spread_pips:.3f} pips > cap {max_spread_cap:.3f} pips."
                 )
         # ---------- 6ter) FLOW/VOL SOFT GATE ----------
-        ok_gate, why_gate = _passes_flow_vol_gate(self, broker_symbol, action, symbol_info, market_context, active_config)
+        ok_gate, why_gate = _passes_flow_vol_gate(
+            self, broker_symbol, action, symbol_info, market_context, active_config
+        )
         if not ok_gate:
             raise TradeExecutionError(f"FLOW/VOL gate: {why_gate}")
 
@@ -553,15 +598,50 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.debug(f"[ORDER_BUILDER] Action normalisée pour SL/TP: {side}")
 
         # ---------- 7bis) SL/TP ----------
-        sl_price, tp_price = self._calculate_sl_tp_prices(
-            trade_decision,
-            active_config,
-            symbol_info,
-            entry_price_market,
-            market_context,
-        )
+        # (Burst) Contexte panier frais pour guider le calcul (fill_ratio, PnL, phase, vol…)
+        basket_ctx = None
+        if is_burst:
+            try:
+                basket_ctx = _resolve_basket_context_for_sltp(
+                    self,
+                    trade_decision=trade_decision,
+                    basket_context=None,
+                    burst_manager=getattr(self, "burst_manager", None),
+                    ttl_sec=2.0,
+                )
+            except Exception as e:
+                try:
+                    self.logger.debug(f"[ORDER_BUILDER] basket_ctx resolve failed: {e}")
+                except Exception:
+                    pass
+                basket_ctx = None
+
+        # Calcul desk-grade des niveaux (respect bid/ask, stops_level, RR dynamique…)
+        try:
+            sl_price, tp_price = _calculate_sl_tp_prices(
+                self,
+                trade_decision=trade_decision,
+                config=active_config,
+                symbol_info=symbol_info,
+                entry_price=entry_price_market,
+                market_context=market_context,
+                basket_context=basket_ctx,  # important pour le burst
+            )
+        except Exception as e:
+            self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
+            raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
+
+        # Validation stricte du SL (obligatoire)
         if not (isinstance(sl_price, (int, float)) and sl_price > 0):
             raise TradeExecutionError("SL requis mais introuvable (calcul SL/TP).")
+
+        # (facultatif) Trace/audit dans la décision
+        try:
+            trade_decision["sl_price"] = float(sl_price)
+            if tp_price is not None:
+                trade_decision["tp_price"] = float(tp_price)
+        except Exception:
+            pass
 
         # ---------- 8a) Sécurité broker & normalisation prix ----------
         try:
@@ -898,8 +978,10 @@ def prepare_order(self, decision_package: dict) -> dict:
             f"   ├─ burst_size={resolved_burst}\n"
             f"   └─ sl_price={sl_price}"
         )
-        if "equity" not in account_trade_settings_over or account_trade_settings_over["equity"] in (None, "", 0):
-            account_trade_settings_over["equity"] = 10000.0  
+        if "equity" not in account_trade_settings_over or account_trade_settings_over[
+            "equity"
+        ] in (None, "", 0):
+            account_trade_settings_over["equity"] = 10000.0
             self.logger.warning("⚠️ Equity manquante, fallback à 10000")
 
         # 3) Calcul du lot (risk% / burst_size si scope BASKET)
@@ -924,7 +1006,11 @@ def prepare_order(self, decision_package: dict) -> dict:
                 account_trade_settings_over,  # ← contient equity > 0
             )
         )
-        if not isinstance(volume_final, (int, float)) or not math.isfinite(volume_final) or volume_final <= 0:
+        if (
+            not isinstance(volume_final, (int, float))
+            or not math.isfinite(volume_final)
+            or volume_final <= 0
+        ):
             raise TradeExecutionError(f"Lot calculé invalide: {volume_final!r}")
 
         # 4) Normalisation broker (FLOOR au pas) → ne jamais dépasser le budget
@@ -976,8 +1062,8 @@ def prepare_order(self, decision_package: dict) -> dict:
             # utilitaire: floor au pas broker sans jamais augmenter (retourne None si < vmin)
             def _floor_broker(vol: float):
                 try:
-                    bmin  = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-                    bmax  = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+                    bmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+                    bmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
                     bstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
                 except Exception:
                     bmin, bmax, bstep = 0.01, 100.0, 0.01
@@ -992,7 +1078,8 @@ def prepare_order(self, decision_package: dict) -> dict:
             # Politique de fat-finger: "REJECT" (défaut) ou "FLOOR" (réduction auto au cap)
             cap_policy = (
                 (ff.get("policy") or tes.get("fat_finger_policy") or "REJECT")
-                if isinstance(ff, dict) else "REJECT"
+                if isinstance(ff, dict)
+                else "REJECT"
             )
             cap_policy = str(cap_policy).strip().upper()
 
@@ -1018,7 +1105,6 @@ def prepare_order(self, decision_package: dict) -> dict:
                         raise TradeExecutionError(
                             f"Fat-finger: volume {volume_final} > cap absolu {cap_sym} sur {raw_symbol}."
                         )
-
 
             # Cap global de sécurité
             cap_global = _to_pos_float(tes.get("max_absolute_volume_safety"))

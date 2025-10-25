@@ -1126,6 +1126,54 @@ def run_single_pipeline_cycle(
 
         except Exception as e:
             logger.warning(f"[BURST EXIT] Contrôle fermeture panier: {e}")
+            
+        # [SLTP][PERIODIC] Mise à jour douce des paniers actifs (toutes les 30s)
+        try:
+            import time, re
+            sltp_owner = getattr(trade_executor, "sltp", None) or trade_executor
+            fn = getattr(sltp_owner, "update_basket_sltp_dynamically", None)
+            if callable(fn):
+                last_ts = float(getattr(sltp_owner, "_last_periodic_maintenance_ts", 0.0) or 0.0)
+                now_ts = time.time()
+                if (now_ts - last_ts) >= 30.0:
+                    # 1) récupérer la liste des paniers actifs
+                    basket_ids = set()
+                    bm = getattr(trade_executor, "burst_manager", None)
+                    get_active = getattr(bm, "get_active_baskets", None) if bm else None
+                    if callable(get_active):
+                        try:
+                            for bid in get_active() or []:
+                                if isinstance(bid, str) and bid:
+                                    basket_ids.add(bid)
+                        except Exception:
+                            pass
+                    if not basket_ids:
+                        # fallback: parse les comments des positions MT5
+                        try:
+                            positions = mt5_connector.get_positions() or []
+                            for p in positions:
+                                cmt = (p.get("comment") if isinstance(p, dict) else getattr(p, "comment", "")) or ""
+                                m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", str(cmt))
+                                if m:
+                                    basket_ids.add(m.group(1))
+                        except Exception:
+                            pass
+
+                    # 2) mise à jour SLTP douce pour chaque panier actif
+                    for bid in basket_ids:
+                        try:
+                            fn(basket_id=bid, reason="periodic_maintenance", force_refresh=False)
+                        except Exception:
+                            continue
+
+                    # 3) anti-spam: mémoriser le dernier run
+                    try:
+                        setattr(sltp_owner, "_last_periodic_maintenance_ts", now_ts)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"[SLTP][PERIODIC] maintenance skip: {e}")
+  
 
         # Appel pipeline de décision
         print("🤖 [PIPELINE] Appel du decision_pipeline...")

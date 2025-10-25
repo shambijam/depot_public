@@ -108,7 +108,28 @@
       "max_absolute_volume_for_asset": {
         "XAUUSD": 1.5
       }
-    }
+    },
+    "halt_on_major_news": false
   },
-  "halt_on_major_news": false
+  "fusion": {
+    "adaptive_weights": true,
+    "seuils_entree": {
+      "min_confidence": 0.65,
+      "min_orderflow_score": 60,
+      "max_spread_pts": 15
+    },
+    "ponderations": {
+      "trigger_weight": 0.50,
+      "orderflow_weight": 0.30,
+      "footprint_weight": 0.20,
+      "coherence_bonus_max": 0.15
+    },
+    "regles_metier": {
+      "veto_absorption": true,
+      "never_against_strong_orderflow": true,
+      "triple_confirmation_bonus": true,
+      "weak_footprint_score_th": 0.60
+    },
+    "base_trail_steps": 20
+  }
 }

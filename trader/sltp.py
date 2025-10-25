@@ -1,98 +1,13 @@
 # trader/sltp.py - Module de Gestion des Stop Loss et Take Profit pour le Bot SNIPER_X
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Mapping
+from typing import Any, Dict, List, Optional, Tuple, Mapping, Callable
 
 from trader.errors import TradeExecutionError
 
-
-# ==============================
-# === Helpers Trading Utils ====
-# ==============================
-
-
-def _normalize_stops(symbol_info, price, sl, tp):
-    """
-    Arrondit SL/TP aux digits du symbole et applique un minimum broker (stops_level) si nécessaire.
-    """
-    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
-    digits = int(getattr(symbol_info, "digits", 0) or 0)
-
-    # Arrondis sûrs si présents
-    if isinstance(sl, (int, float)):
-        sl = round(float(sl), digits)
-    else:
-        sl = None
-
-    if isinstance(tp, (int, float)):
-        tp = round(float(tp), digits)
-    else:
-        tp = None
-
-    # ⚠️ Ne fais des diffs que si la valeur existe
-    sl_dist = (price - sl) if (sl is not None) else None
-    tp_dist = (tp - price) if (tp is not None) else None
-
-    # Stops level broker
-    stops_lvl_pts = float(
-        getattr(symbol_info, "trade_stops_level", 0)
-        or getattr(symbol_info, "stops_level", 0)
-        or 0
-    )
-    min_stop = stops_lvl_pts * point
-
-    # Ajustement SL si présent (BUY: sl < price | SELL: sl > price)
-    if sl is not None and min_stop > 0:
-        if sl < price and (price - sl) < min_stop:
-            sl = round(price - min_stop, digits)
-        elif sl > price and (sl - price) < min_stop:
-            sl = round(price + min_stop, digits)
-
-    # TP : ne rien faire si None (mais le moteur SL/TP pour burst n'utilise plus de trailing-only)
-    return sl, tp
-
-
-def _attach_sl_tp(self, symbol: str, ticket: int, sl: float | None, tp: float | None):
-    """Attache (ou ré-attache) SL/TP à une position existante via MT5."""
-    mt5c = getattr(self, "mt5_connector", None)
-    mt5 = getattr(mt5c, "mt5", None) if mt5c else None
-    if not (mt5c and mt5):
-        self.logger.warning(
-            "[EXECUTOR] Impossible d’attacher SL/TP: mt5_connector absent."
-        )
-        return None
-
-    req = {
-        "action": getattr(mt5, "TRADE_ACTION_SLTP", None),
-        "symbol": symbol,
-        "position": int(ticket),
-    }
-    if sl is not None:
-        req["sl"] = float(sl)
-    if tp is not None:
-        req["tp"] = float(tp)
-
-    try:
-        res = mt5c.order_send(req)
-        rc = getattr(res, "retcode", None) if res else None
-        if rc == getattr(mt5, "TRADE_RETCODE_DONE", None):
-            self.logger.info(
-                f"[EXECUTOR] SL/TP attachés pour pos#{ticket} ({symbol}) → SL={req.get('sl')} TP={req.get('tp')}"
-            )
-        else:
-            self.logger.warning(
-                f"[EXECUTOR] Attache SL/TP échec pos#{ticket} ({symbol}) retcode={rc}"
-            )
-        return res
-    except Exception as e:
-        self.logger.warning(
-            f"[EXECUTOR] Attache SL/TP exception pos#{ticket} ({symbol}): {e}"
-        )
-        return None
 
 
 # --- Helpers de normalisation ---
-from trader.errors import TradeExecutionError
 
 def resolve_side(decision: Mapping[str, Any]) -> str:
     """
@@ -102,7 +17,9 @@ def resolve_side(decision: Mapping[str, Any]) -> str:
     Synonymes: LONG->BUY, SHORT->SELL, bull/bear, up/down, b/s, +1/-1.
     """
     if not isinstance(decision, dict):
-        raise TradeExecutionError("Action invalide pour SL/TP: 'decision' n'est pas un dict.")
+        raise TradeExecutionError(
+            "Action invalide pour SL/TP: 'decision' n'est pas un dict."
+        )
 
     # --- utilitaires case-insensitive ---
     def _get_ci(d: Mapping[str, Any], key: str):
@@ -179,6 +96,7 @@ def _calculate_sl_tp_prices(
     symbol_info: Any,
     entry_price: float,
     market_context: dict,
+    basket_context: Optional[dict] = None,
 ) -> tuple[float, Optional[float]]:
     """
     Calcule SL/TP à partir de SWING/ATR/PIPS pour le SL, et RR/ATR_MULTIPLE/PIPS pour le TP.
@@ -186,6 +104,9 @@ def _calculate_sl_tp_prices(
     - Respecte stops_level broker (+ soft buffer 2 ticks)
     - Supporte RR dynamique (tp_rr_ratio_hint) + modulation optionnelle par facteurs de contexte
     - Aucun trailing ici (burst_scalping = SL/TP only)
+    - ÉTAPE 1 contexte panier: accepte un paramètre optionnel `basket_context` (dict) et
+      en extrait un résumé validé (remplissage/phase/PNL) pour logging/metadata,
+      SANS impacter le calcul des prix SL/TP (rétrocompatibilité totale).
     Retour: (sl_price, tp_price|None)
     """
     import math
@@ -200,6 +121,103 @@ def _calculate_sl_tp_prices(
         raise TradeExecutionError(
             f"Action invalide pour SL/TP: vide ou non reconnue ({e})"
         )
+
+    # --- 0.1) Contexte panier (ÉTAPE 1: lecture/validation/log uniquement) ---
+    # Objectif: préparer le terrain au SLTP dynamique sans modifier les prix.
+    basket_summary = None
+    if isinstance(basket_context, dict) and basket_context:
+
+        def _to_int(x, default=None):
+            try:
+                xi = int(x)
+                return xi if (default is None or xi >= 0) else default
+            except Exception:
+                return default
+
+        def _to_float(x, default=None):
+            try:
+                xf = float(x)
+                return xf if (default is None or (xf == xf)) else default  # nan check
+            except Exception:
+                return default
+
+        def _clamp(v, lo, hi):
+            try:
+                return max(lo, min(hi, float(v)))
+            except Exception:
+                return None
+
+        bc = basket_context
+        basket_id = (
+            str(bc.get("basket_id")) if bc.get("basket_id") is not None else None
+        )
+        current_positions = _to_int(bc.get("current_positions"), default=None)
+        target_burst_size = _to_int(bc.get("target_burst_size"), default=None)
+        avg_entry_price = _to_float(bc.get("avg_entry_price"), default=None)
+        basket_pnl_pips = _to_float(bc.get("basket_pnl_pips"), default=None)
+        basket_age_minutes = _to_float(bc.get("basket_age_minutes"), default=None)
+        phase_provided = (
+            str(bc.get("basket_phase")).upper() if bc.get("basket_phase") else None
+        )
+
+        # fill_ratio et phase dérivée si possible
+        fill_ratio = None
+        phase_source = None
+        derived_phase = None
+        valid = (
+            target_burst_size is not None
+            and target_burst_size > 0
+            and current_positions is not None
+            and current_positions >= 0
+        )
+
+        if valid:
+            fill_ratio = _clamp(current_positions / float(target_burst_size), 0.0, 1.0)
+
+        allowed_phases = {"ACCUMULATION", "TARGETING", "SECURING"}
+        if phase_provided in allowed_phases:
+            phase = phase_provided
+            phase_source = "provided"
+        else:
+            # Déduction de la phase si possible
+            if fill_ratio is not None:
+                if fill_ratio <= 0.50:
+                    derived_phase = "ACCUMULATION"
+                elif fill_ratio <= 0.80:
+                    derived_phase = "TARGETING"
+                else:
+                    derived_phase = "SECURING"
+                phase = derived_phase
+                phase_source = "derived"
+            else:
+                phase = None
+                phase_source = None
+
+        basket_summary = {
+            "basket_id": basket_id,
+            "current_positions": current_positions,
+            "target_burst_size": target_burst_size,
+            "avg_entry_price": avg_entry_price,
+            "basket_pnl_pips": basket_pnl_pips,
+            "basket_age_minutes": basket_age_minutes,
+            "fill_ratio": fill_ratio,
+            "phase": phase,
+            "phase_source": phase_source,
+            "valid": bool(valid),
+        }
+
+        # Injection en metadata non bloquante
+        try:
+            extras = trade_decision.setdefault("extras", {})
+            extras["basket_context"] = basket_summary
+        except Exception:
+            pass
+
+        # Logging optionnel (silencieux si pas de logger)
+        try:
+            self.logger.debug(f"[SLTP][BasketCtx] {basket_summary}")
+        except Exception:
+            pass
 
     # --- 1) Sanity checks entrée ---
     if not (isinstance(entry_price, (int, float)) and entry_price > 0):
@@ -274,6 +292,18 @@ def _calculate_sl_tp_prices(
         rates_df = ((market_context or {}).get("market_data") or {}).get(symbol)
     except Exception:
         rates_df = None
+
+    # [PATCH] Résolution opportuniste du contexte panier si absent
+    if basket_context is None:
+        try:
+            basket_context = self._resolve_basket_context_for_sltp(
+                trade_decision=trade_decision,
+                basket_context=None,
+                burst_manager=getattr(self, "burst_manager", None),
+                ttl_sec=2.0,
+            )
+        except Exception:
+            basket_context = None
 
     # --- 5) Lecture de la configuration SLTP ---
     # Chemin privilégié (asset/strat): entry_rules.scalping.burst_scalping.sltp
@@ -543,6 +573,562 @@ def _calculate_sl_tp_prices(
     return float(stop_loss_price), take_profit_price
 
 
+# (A) >>> PATCH: helper de nettoyage du cache panier
+def _clean_cache_if_needed(self):
+    """
+    Nettoie le cache des paniers anciens ou fermés (sécurité mémoire et stabilité).
+    - Taille max: 50 paniers
+    - Âge max: 5 minutes
+    - Tolérant aux erreurs (ne doit jamais crasher)
+    """
+    import time
+
+    try:
+        cache = getattr(self, "_basket_ctx_cache", {})
+        if not isinstance(cache, dict) or not cache:
+            return
+
+        now = time.time()
+        max_cache_size = 50
+        max_cache_age = 300.0  # seconds
+
+        # Nettoyage par taille (garde les plus récents)
+        if len(cache) > max_cache_size:
+            sorted_items = sorted(
+                cache.items(),
+                key=lambda kv: (
+                    kv[1].get("_ts", 0.0) if isinstance(kv[1], dict) else 0.0
+                ),
+                reverse=True,
+            )
+            cache.clear()
+            for k, v in sorted_items[:max_cache_size]:
+                cache[k] = v
+
+        # Nettoyage par âge
+        stale_keys = []
+        for basket_id, item in list(cache.items()):
+            try:
+                item_ts = float(item.get("_ts", 0.0))
+            except Exception:
+                item_ts = 0.0
+            if now - item_ts > max_cache_age:
+                stale_keys.append(basket_id)
+
+        for k in stale_keys:
+            cache.pop(k, None)
+    except Exception:
+        # Ne jamais crasher sur du nettoyage
+        pass
+
+
+# (A) <<< PATCH
+
+
+# (B) >>> PATCH: version enrichie de _resolve_basket_context_for_sltp
+def _resolve_basket_context_for_sltp(
+    self,
+    trade_decision: dict,
+    basket_context: Optional[dict] = None,
+    burst_manager: Optional[Any] = None,
+    ttl_sec: float = 2.0,
+) -> Optional[dict]:
+    """
+    Résout un basket_context frais et cohérent pour SLTP :
+      - Si basket_context fourni → le nettoie/complète (fill_ratio/phase/performance_score) et retourne.
+      - Sinon, tente de le récupérer via burst_manager.get_basket_context(basket_id) avec cache TTL.
+      - Loggue HIT/MISS et métriques utiles (phase, fill).
+    Jamais d'exception : retourne None en cas d’impossibilité.
+    """
+    import time
+
+    # 0) Prépare cache léger local
+    try:
+        cache = getattr(self, "_basket_ctx_cache", None)
+        if cache is None or not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_basket_ctx_cache", cache)
+    except Exception:
+        cache = {}
+
+    def _derive_phase(ctx: dict) -> dict:
+        """Enrichit le contexte: fill_ratio, phase (si manquante), performance_score."""
+        try:
+            # Calcul fill_ratio
+            cur = ctx.get("current_positions")
+            tgt = ctx.get("target_burst_size")
+            fill_ratio = None
+            if (
+                isinstance(cur, (int, float))
+                and isinstance(tgt, (int, float))
+                and float(tgt) > 0
+            ):
+                fill_ratio = max(0.0, min(1.0, float(cur) / float(tgt)))
+
+            # Détermination phase
+            phase = (
+                str(ctx.get("basket_phase")).upper()
+                if ctx.get("basket_phase")
+                else None
+            )
+            if (
+                phase not in {"ACCUMULATION", "TARGETING", "SECURING"}
+                and fill_ratio is not None
+            ):
+                if fill_ratio <= 0.50:
+                    phase = "ACCUMULATION"
+                elif fill_ratio <= 0.80:
+                    phase = "TARGETING"
+                else:
+                    phase = "SECURING"
+
+            # Performance score (en fonction du PnL global en pips)
+            performance_score = None
+            pnl_pips = ctx.get("basket_pnl_pips", 0)
+            if isinstance(pnl_pips, (int, float)):
+                if pnl_pips > 10:
+                    performance_score = "HIGH"
+                elif pnl_pips > 5:
+                    performance_score = "MEDIUM"
+                elif pnl_pips > 0:
+                    performance_score = "LOW"
+                else:
+                    performance_score = "NEGATIVE"
+                ctx["performance_score"] = performance_score
+
+            # Application douce
+            if fill_ratio is not None and "fill_ratio" not in ctx:
+                ctx["fill_ratio"] = fill_ratio
+            if phase:
+                ctx["basket_phase"] = phase
+        except Exception:
+            pass
+        return ctx
+
+    # 1) Si déjà fourni → normaliser, logguer, retourner (source=external)
+    if isinstance(basket_context, dict) and basket_context:
+        try:
+            if "basket_id" not in basket_context and trade_decision:
+                bid = trade_decision.get("basket_id")
+                if bid:
+                    basket_context["basket_id"] = bid
+        except Exception:
+            pass
+        basket_context = _derive_phase(basket_context)
+
+        # Logging stratégique
+        try:
+            bid = basket_context.get("basket_id", trade_decision.get("basket_id"))
+            fr = basket_context.get("fill_ratio", 0.0)
+            ph = basket_context.get("basket_phase", "NA")
+            self.logger.debug(
+                f"[BASKET_CTX] MISS(EXTERNAL) | {bid} | Phase: {ph} | Fill: {fr:.0%}"
+            )
+        except Exception:
+            pass
+
+        # Hygiène cache (facultatif) : on n’écrit pas en cache ce contexte externe
+        try:
+            self._clean_cache_if_needed()
+        except Exception:
+            pass
+        return basket_context
+
+    # 2) Sinon, résolution via cache / burst_manager
+    try:
+        basket_id = (
+            str(trade_decision.get("basket_id"))
+            if trade_decision.get("basket_id")
+            else None
+        )
+    except Exception:
+        basket_id = None
+    if not basket_id:
+        return None
+
+    now = time.time()
+    from_cache = False
+    ctx = None
+
+    # 2.1) Tentative cache (TTL)
+    try:
+        cval = cache.get(basket_id)
+        if cval and isinstance(cval, dict):
+            ts = cval.get("_ts")
+            if isinstance(ts, (int, float)) and (now - float(ts)) <= float(ttl_sec):
+                ctx = dict(cval)
+                ctx.pop("_ts", None)
+                from_cache = True
+    except Exception:
+        ctx = None
+        from_cache = False
+
+    # 2.2) Si MISS, appeler le manager
+    if ctx is None:
+        bm = burst_manager or getattr(self, "burst_manager", None)
+        get_ctx = getattr(bm, "get_basket_context", None) if bm is not None else None
+        if callable(get_ctx):
+            try:
+                ctx = get_ctx(basket_id)
+            except Exception as e:
+                try:
+                    self.logger.debug(f"[SLTP] get_basket_context error: {e}")
+                except Exception:
+                    pass
+                ctx = None
+
+    # 2.3) Enrichissement, cache & logs
+    if isinstance(ctx, dict) and ctx:
+        ctx = _derive_phase(ctx)
+        # (re)Cache uniquement si source interne (cache / burst)
+        try:
+            ccopy = dict(ctx)
+            ccopy["_ts"] = now
+            cache[basket_id] = ccopy
+        except Exception:
+            pass
+
+        # Logging HIT/MISS
+        try:
+            fr = ctx.get("fill_ratio", 0.0)
+            ph = ctx.get("basket_phase", "NA")
+            cache_flag = "HIT" if from_cache else "MISS"
+            self.logger.debug(
+                f"[BASKET_CTX] {cache_flag} | {basket_id} | Phase: {ph} | Fill: {fr:.0%}"
+            )
+        except Exception:
+            pass
+
+        # Hygiène cache
+        try:
+            self._clean_cache_if_needed()
+        except Exception:
+            pass
+        return ctx
+
+    # 2.4) Rien trouvé → log léger, hygiène cache et None
+    try:
+        self.logger.debug(f"[BASKET_CTX] MISS(NULL) | {basket_id}")
+    except Exception:
+        pass
+    try:
+        self._clean_cache_if_needed()
+    except Exception:
+        pass
+    return None
+
+
+# (B) <<< PATCH
+
+
+def apply_dynamic_trailing(
+    self,
+    trade_decision: dict,
+    position_ticket: int,
+    current_price: float,
+    entry_price: float,
+    current_sl: float,
+    symbol_info: Any,
+    basket_context: Optional[dict],
+    volatility_pips: Optional[float],
+    current_tp: Optional[float] = None,
+    mt5_connector: Optional[Any] = None,
+    modify_fn: Optional[Callable[..., Any]] = None,
+    activation_pips: float = 2.0,
+    min_distance_pips: float = 2.0,
+    min_update_interval_sec: int = 2,
+    dry_run: bool = False,
+    force: bool = False,
+    market_context: Optional[dict] = None,
+    burst_manager: Optional[Any] = None,  # ← NOUVEAU
+) -> Optional[float]:
+    """
+    Orchestrateur CENTRALISE du trailing dynamique :
+      1) calcule un SL candidat via _calculate_dynamic_trailing(...)
+      2) applique les garde-fous finaux (arrondis, non-détérioration, distance min bid/ask)
+      3) si dry_run=False -> tente la modification broker (modify_fn ou mt5_connector)
+      4) si succès -> met à jour 'last_trailing_update_ts' (basket_context & trade_decision.extras)
+      5) renvoie le nouveau SL si changé, sinon None
+
+    Paramètres clés:
+      - current_tp: TP courant si le broker/méthode exige TP pour modifier le SL (sinon None)
+      - modify_fn: callback custom (ticket, sl[, tp]) -> (bool / objet retcodé / dict)
+      - mt5_connector: objet disposant de {modify_position_sl_tp|modify_position_sl|update_position_sl_tp|position_modify|modify_position}
+      - force: ignore anti-whipsaw (activation/délai) en passant activation_pips=0 et min_update_interval_sec=0 au calcul
+      - market_context: ticks récents (pour cohérence bid/ask)
+
+    Retour:
+      - float(new_sl) si modif effective (ou calculée en dry_run)
+      - None si aucun changement ou si échec broker
+    """
+    import math, time
+
+    # --- 0) Sanity rapide ---
+    try:
+        cp = float(current_price)
+        ep = float(entry_price)
+        csl = float(current_sl)
+        assert cp > 0 and ep > 0
+    except Exception:
+        return None
+
+    # Déterminer le sens (fallback si SL == entry)
+    try:
+        side = "BUY" if (csl < ep or (csl == ep and cp >= ep)) else "SELL"
+    except Exception:
+        side = "BUY" if cp >= ep else "SELL"
+
+    # --- 1) Calcul du SL candidat (anti-whipsaw configurable) ---
+    act_pips = 0.0 if force else float(activation_pips or 0.0)
+    min_int = 0 if force else int(min_update_interval_sec or 0)
+    # [PATCH D] Résolution opportuniste du contexte panier si absent
+    if not basket_context:
+        try:
+            basket_context = self._resolve_basket_context_for_sltp(
+                trade_decision=trade_decision,
+                basket_context=None,
+                burst_manager=burst_manager or getattr(self, "burst_manager", None),
+                ttl_sec=2.0,
+            )
+        except Exception:
+            basket_context = None
+
+    new_sl = self._calculate_dynamic_trailing(
+        current_price=cp,
+        entry_price=ep,
+        current_sl=csl,
+        basket_context=basket_context,
+        volatility=volatility_pips,
+        symbol_info=symbol_info,
+        min_distance_pips=float(min_distance_pips or 0.0),
+        activation_pips=act_pips,
+        min_update_interval_sec=min_int,
+    )
+    # Rien à faire si identique / None
+    try:
+        if new_sl is None or abs(float(new_sl) - csl) < 1e-12:
+            return None
+    except Exception:
+        return None
+
+    # --- 2) Garde-fous finaux: bid/ask + arrondis + non-détérioration ---
+    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+    digits = int(getattr(symbol_info, "digits", 0) or 0)
+    tick_size = float(
+        getattr(symbol_info, "trade_tick_size", 0.0) or (point if point > 0 else 0.0)
+    )
+    min_stop_points = int(
+        getattr(symbol_info, "trade_stops_level", 0)
+        or getattr(symbol_info, "stops_level", 0)
+        or 0
+    )
+    points_per_pip = 10.0 if digits in (3, 5) else 1.0 if digits else 10.0
+    pip_size = (point * points_per_pip) if point > 0 else 0.0001
+
+    def _ceil_to_tick(x: float) -> float:
+        if tick_size and tick_size > 0:
+            steps = math.ceil(float(x) / tick_size - 1e-12)
+            return round(steps * tick_size, digits)
+        return round(float(x), digits or 6)
+
+    def _floor_to_tick(x: float) -> float:
+        if tick_size and tick_size > 0:
+            steps = math.floor(float(x) / tick_size + 1e-12)
+            return round(steps * tick_size, digits)
+        return round(float(x), digits or 6)
+
+    # min broker + soft 2 ticks
+    soft_min_price = max(
+        float(min_stop_points) * (point if point > 0 else 0.0),
+        (2.0 * tick_size) if tick_size > 0 else 0.0,
+    )
+    # min business
+    min_business = max(soft_min_price, float(min_distance_pips or 0.0) * pip_size)
+
+    # Ajustement bid/ask (si disponible)
+    bid = ask = 0.0
+    try:
+        if isinstance(market_context, dict):
+            last_tick = market_context.get("last_tick") or {}
+            sym = str(
+                trade_decision.get("asset") or trade_decision.get("symbol") or ""
+            ).upper()
+            t = last_tick.get(sym) or {}
+            bid = float(t.get("bid") or 0.0)
+            ask = float(t.get("ask") or 0.0)
+    except Exception:
+        bid = ask = 0.0
+
+    cand = float(new_sl)
+
+    if side == "BUY":
+        # SL toujours < prix ; distance min
+        bound = (ask if (ask > 0 and ask > bid) else cp) - min_business
+        cand = min(cand, bound)
+        # non-détérioration
+        cand = max(csl, cand)
+        # arrondi
+        cand = _floor_to_tick(cand)
+        # cohérence stricte
+        if cand >= (ask if (ask > 0 and ask > bid) else cp):
+            cand = _floor_to_tick(
+                (ask if (ask > 0 and ask > bid) else cp) - min_business
+            )
+    else:
+        # SELL : SL toujours > prix ; distance min
+        bound = (bid if (bid > 0 and ask > bid) else cp) + min_business
+        cand = max(cand, bound)
+        # non-détérioration
+        cand = min(csl, cand)
+        # arrondi
+        cand = _ceil_to_tick(cand)
+        # cohérence stricte
+        if cand <= (bid if (bid > 0 and ask > bid) else cp):
+            cand = _ceil_to_tick(
+                (bid if (bid > 0 and ask > bid) else cp) + min_business
+            )
+
+    # Si après garde-fous on retombe sur l'ancien SL -> rien à faire
+    if abs(cand - csl) < 1e-12:
+        return None
+
+    # --- 3) DRY-RUN: on ne touche pas au broker, mais on trace & retourne le candidat ---
+    if dry_run:
+        try:
+            self.logger.debug(
+                "[SLTP][TrailDyn][DRY] side=%s price=%.6f entry=%.6f curSL=%.6f -> cand=%.6f "
+                "(act=%.2f pips, min=%.2f pips)",
+                side,
+                cp,
+                ep,
+                csl,
+                cand,
+                float(activation_pips or 0.0),
+                float(min_distance_pips or 0.0),
+            )
+        except Exception:
+            pass
+        return float(cand)
+
+    # --- 4) Application broker ---
+    ret = None
+
+    # a) callback custom prioritaire
+    if modify_fn is not None:
+        try:
+            # Essai par mots-clés (le cas le plus robuste)
+            try:
+                ret = modify_fn(ticket=position_ticket, sl=float(cand), tp=current_tp)
+            except TypeError:
+                # fallback positionnel
+                try:
+                    ret = modify_fn(position_ticket, float(cand), current_tp)
+                except TypeError:
+                    ret = modify_fn(position_ticket, float(cand))
+        except Exception as e:
+            try:
+                self.logger.warning(f"[SLTP][TrailDyn] modify_fn exception: {e}")
+            except Exception:
+                pass
+
+    # b) sinon via mt5_connector (ou self.mt5_connector)
+    if ret is None:
+        conn = mt5_connector or getattr(self, "mt5_connector", None)
+        if conn is not None:
+            candidates = [
+                (
+                    "modify_position_sl_tp",
+                    dict(ticket=position_ticket, sl=float(cand), tp=current_tp),
+                ),
+                ("modify_position_sl", dict(ticket=position_ticket, sl=float(cand))),
+                (
+                    "update_position_sl_tp",
+                    dict(ticket=position_ticket, sl=float(cand), tp=current_tp),
+                ),
+                (
+                    "position_modify",
+                    dict(ticket=position_ticket, sl=float(cand), tp=current_tp),
+                ),
+                ("modify_position", dict(ticket=position_ticket, sl=float(cand))),
+            ]
+            for mname, kwargs in candidates:
+                meth = getattr(conn, mname, None)
+                if meth is None:
+                    continue
+                try:
+                    ret = meth(**kwargs)
+                    break
+                except Exception as e:
+                    try:
+                        self.logger.debug(f"[SLTP][TrailDyn] {mname} failed: {e}")
+                    except Exception:
+                        pass
+                    ret = None
+
+    # c) évaluation du succès
+    def _is_success(x) -> bool:
+        try:
+            if isinstance(x, bool):
+                return x
+            rc = getattr(x, "retcode", None)
+            if isinstance(rc, int) and rc in (0, 10008, 10009, 10024):
+                return True
+            if isinstance(x, dict):
+                rc = x.get("retcode")
+                if isinstance(rc, int) and rc in (0, 10008, 10009, 10024):
+                    return True
+                ok = x.get("ok")
+                if isinstance(ok, bool) and ok:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    ok = _is_success(ret)
+
+    # --- 5) Timestamp & logs si succès ---
+    if ok:
+        now_ts = time.time()
+        try:
+            extras = trade_decision.setdefault("extras", {})
+            bcx = extras.setdefault("basket_context", {})
+            bcx["last_trailing_update_ts"] = now_ts
+        except Exception:
+            pass
+        try:
+            if isinstance(basket_context, dict):
+                basket_context["last_trailing_update_ts"] = now_ts
+        except Exception:
+            pass
+        try:
+            self.logger.debug(
+                "[SLTP][TrailDyn] OK side=%s ticket=%s curSL=%.6f -> newSL=%.6f (atr_pips=%s, act_pips=%.2f, min_pips=%.2f)",
+                side,
+                str(position_ticket),
+                csl,
+                cand,
+                str(volatility_pips),
+                float(activation_pips or 0.0),
+                float(min_distance_pips or 0.0),
+            )
+        except Exception:
+            pass
+        return float(cand)
+
+    # --- 6) Echec broker: trace & ne change rien ---
+    try:
+        self.logger.debug(
+            "[SLTP][TrailDyn] FAILED side=%s ticket=%s keepSL=%.6f ret=%s",
+            side,
+            str(position_ticket),
+            csl,
+            str(ret),
+        )
+    except Exception:
+        pass
+    return None
+
+
 # ================================================
 # === Split multi-TP (non utilisé en burst) ======
 # ================================================
@@ -555,80 +1141,1020 @@ def _split_multi_tp_orders(
     volume: float,
     entry_price_market: float,
     sl_price: float,
-    tp_prices: list,
+    tp_prices: list[float],
     symbol_info: Any,
     trigger_price: Optional[float] = None,
     order_type_str: str = "MARKET",
+    *,
+    basket_context: Optional[dict] = None,  # ← existant
+    burst_manager: Optional[Any] = None,  # ← NOUVEAU
 ) -> list[dict]:
     """
-    Si la stratégie fournit plusieurs TP (ex: [tp1, tp2]),
-    on split le volume en plusieurs ordres (répartition égale).
-    Chaque ordre est construit via _build_mt5_request.
+    Multi-TP builder (desk-grade) avec prise en charge du TP dynamique pour le burst.
 
-    ⚠️ En mode burst_scalping, on **n'utilise pas** de multi-TP:
-       → on garde un **TP unique** (SL/TP identiques pour tous les legs du panier).
+    - Non-burst : conserve le comportement historique (split du volume selon tp_prices et 'multi_tp.weights').
+    - Burst (scalping/burst_scalping) :
+        * Si basket_context est fourni : calcule un TP UNIQUE mais DYNAMIQUE en fonction du remplissage, de la performance
+          et (optionnellement) de la volatilité ; puis construit 1 seul ordre avec ce TP.
+        * Si basket_context est absent : comportement précédent (TP unique basé sur tp_prices[0]).
+
+    Args:
+        trade_decision : décision enrichie (action/asset/…).
+        config         : configuration dynamique courante.
+        volume         : volume total affecté à CE trade.
+        entry_price_market : prix de référence (market) utilisé pour la cohérence SL/TP.
+        sl_price       : stop-loss (déjà validé en amont).
+        tp_prices      : liste des TP bruts proposés.
+        symbol_info    : infos broker (digits/point/levels).
+        trigger_price  : prix de déclenchement pour pending.
+        order_type_str : "MARKET" | "LIMIT" | "STOP".
+        basket_context : contexte panier optionnel (voir spéc. panier).
+                         Clés attendues (toutes optionnelles) :
+                           - basket_id: str
+                           - current_positions: int
+                           - target_burst_size: int (>0)
+                           - avg_entry_price: float
+                           - basket_pnl_pips: float
+                           - basket_age_minutes: float
+                           - basket_phase: str in {"ACCUMULATION","TARGETING","SECURING"}
+                           - volatility_pips: float (ATR en pips si dispo)
+    Returns:
+        list[dict] : requêtes MT5 construites.
     """
-    rule = str(trade_decision.get("rule_name", "")).lower()
+    import math
 
-    # Cas BURST: forcer un seul TP (soit unique dans la liste, soit le premier)
-    if rule == "burst_scalping":
-        single_tp = None
-        if isinstance(tp_prices, list) and len(tp_prices) >= 1 and tp_prices[0]:
-            single_tp = float(tp_prices[0])
-        # construit une requête unique
-        return [
-            self._build_mt5_request(
-                trade_decision,
-                config,
-                float(volume),
-                entry_price_market,
-                float(sl_price),
-                float(single_tp) if single_tp else None,
-                symbol_info,
-                trigger_price,
-                order_type_str,
-            )
-        ]
-
-    # Standard (non-burst): 0 ou 1 TP → requête unique
-    if not isinstance(tp_prices, list) or len(tp_prices) <= 1:
-        return [
-            self._build_mt5_request(
-                trade_decision,
-                config,
-                float(volume),
-                entry_price_market,
-                float(sl_price),
-                float(tp_prices[0]) if tp_prices else None,
-                symbol_info,
-                trigger_price,
-                order_type_str,
-            )
-        ]
-
-    # === Split multi-TP (non-burst) ===
-    parts = max(
-        1, len([tp for tp in tp_prices if isinstance(tp, (int, float)) and tp > 0])
-    )
-    sub_vol = round(float(volume) / parts, 2)
-    requests = []
-
-    for tp in tp_prices:
-        if not isinstance(tp, (int, float)) or tp <= 0:
-            continue
-        req = self._build_mt5_request(
-            trade_decision,
-            config,
-            sub_vol,
-            entry_price_market,
-            float(sl_price),
-            float(tp),
-            symbol_info,
-            trigger_price,
-            order_type_str,
+    # --- 0) Validations / normalisations de base -----------------------------------
+    action = str(trade_decision.get("action", "")).upper()
+    asset = str(
+        trade_decision.get("asset", "") or trade_decision.get("symbol", "")
+    ).upper()
+    if action not in {"BUY", "SELL"} or not asset:
+        raise TradeExecutionError(
+            "Action ou symbole invalide pour _split_multi_tp_orders."
         )
-        # Annotation facultative (si besoin d’audit)
-        req["comment"] = f"{req.get('comment','')}|TP@{tp:.5f}"[:31]
+
+    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
+        raise TradeExecutionError(f"Volume invalide ({volume}).")
+
+    if not isinstance(entry_price_market, (int, float)) or entry_price_market <= 0:
+        raise TradeExecutionError("Prix d'entrée marché invalide.")
+
+    if (not isinstance(tp_prices, list)) or (len(tp_prices) == 0):
+        raise TradeExecutionError("tp_prices vide pour _split_multi_tp_orders.")
+
+    # Broker units
+    digits = int(getattr(symbol_info, "digits", 0) or 0)
+    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+    if point <= 0:
+        raise TradeExecutionError("symbol_info.point invalide (<=0).")
+
+    # PIP sizing
+    points_per_pip = 10.0 if digits in (3, 5) else 1.0
+    pip_size = point * points_per_pip
+
+    # [PATCH] Résolution opportuniste du contexte panier si absent
+    if basket_context is None:
+        try:
+            basket_context = self._resolve_basket_context_for_sltp(
+                trade_decision=trade_decision,
+                basket_context=None,
+                burst_manager=burst_manager or getattr(self, "burst_manager", None),
+                ttl_sec=2.0,
+            )
+        except Exception:
+            basket_context = None
+
+    # Rule canonical
+    rule_name = str(
+        trade_decision.get("rule_name", "") or trade_decision.get("strategy_rule", "")
+    ).lower()
+    canonical_rule = "burst_scalping" if "burst" in rule_name else rule_name
+
+    # Config SLTP (bornes RR)
+    sltp_cfg = (
+        ((config.get("entry_rules") or {}).get("scalping") or {})
+        .get("burst_scalping", {})
+        .get("sltp", {})
+    ) or {}
+    rr_floor = float(sltp_cfg.get("rr_floor", 0.5) or 0.5)
+    rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
+    rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
+
+    # --- 1) BRANCHE BURST — TP dynamique de panier ---------------------------------
+    if canonical_rule == "burst_scalping":
+        # a) Base TP distance
+        #    - priorité : distance du premier TP fourni
+        #    - fallback : RR base * risk
+        #    - fallback ultime : 20 pips
+        try:
+            base_tp_price = float(tp_prices[0])
+        except Exception:
+            base_tp_price = None
+
+        risk_dist = (
+            abs(float(entry_price_market) - float(sl_price))
+            if isinstance(sl_price, (int, float))
+            else 0.0
+        )
+        base_dist = (
+            abs(float(base_tp_price) - float(entry_price_market))
+            if base_tp_price
+            else 0.0
+        )
+        if not (math.isfinite(base_dist) and base_dist > 0):
+            if math.isfinite(risk_dist) and risk_dist > 0:
+                base_dist = max(pip_size, rr_base * risk_dist)
+            else:
+                base_dist = max(pip_size, 20.0 * pip_size)  # défense ultime
+
+        # b) Multiplicateurs (Performance × Remplissage × Volatilité)
+        mult_perf = 1.0
+        mult_fill = 1.0
+        mult_vol = 1.0
+
+        if isinstance(basket_context, dict) and basket_context:
+            # --- Performance (PnL global en pips) ---
+            pnl_pips = basket_context.get("basket_pnl_pips")
+            try:
+                pnl_pips = float(pnl_pips)
+            except Exception:
+                pnl_pips = None
+            if isinstance(pnl_pips, float) and math.isfinite(pnl_pips):
+                if pnl_pips > 10.0:
+                    mult_perf = 1.30
+                elif pnl_pips > 5.0:
+                    mult_perf = 1.15
+                elif pnl_pips > 0.0:
+                    mult_perf = 1.05
+                else:
+                    mult_perf = (
+                        0.90  # panier en difficulté → objectif plus conservateur
+                    )
+
+            # --- Remplissage (0-25 / 25-75 / 75-100) ---
+            cur = max(0, int(basket_context.get("current_positions", 0) or 0))
+            tgt = max(0, int(basket_context.get("target_burst_size", 0) or 0))
+            fill_ratio = float(cur) / float(tgt) if tgt > 0 else 0.0
+            if fill_ratio >= 0.75:
+                mult_fill = 1.20
+            elif fill_ratio >= 0.25:
+                mult_fill = 1.10
+            else:
+                mult_fill = 1.00
+
+            # --- Volatilité ---
+            # Sources possibles :
+            #   - basket_context["volatility_pips"]  (ATR en pips)
+            #   - trade_decision["atr_pips"]
+            #   - trade_decision["volatility_factor"] (dimensionless ~1.0)
+            vol_pips = basket_context.get(
+                "volatility_pips", trade_decision.get("atr_pips")
+            )
+            vf_hint = trade_decision.get("volatility_factor")
+            vol_level = "normal"
+
+            if isinstance(vol_pips, (int, float)) and math.isfinite(float(vol_pips)):
+                vp = float(vol_pips)
+                # Heuristique simple : seuils relatifs
+                if vp >= 12.0:
+                    vol_level = "high"
+                elif vp <= 4.0:
+                    vol_level = "low"
+                else:
+                    vol_level = "normal"
+            elif isinstance(vf_hint, (int, float)) and math.isfinite(float(vf_hint)):
+                vf = float(vf_hint)
+                if vf >= 1.20:
+                    vol_level = "high"
+                elif vf <= 0.80:
+                    vol_level = "low"
+                else:
+                    vol_level = "normal"
+
+            if vol_level == "high":
+                mult_vol = 0.90
+            elif vol_level == "low":
+                mult_vol = 1.10
+            else:
+                mult_vol = 1.00
+
+        total_mult = float(mult_perf) * float(mult_fill) * float(mult_vol)
+        dyn_dist = max(
+            pip_size, base_dist * max(0.10, min(total_mult, 3.0))
+        )  # garde-fou
+
+        # c) Bornes RR (0.5 ↔ 3.0 par défaut)
+        if math.isfinite(risk_dist) and risk_dist > 0:
+            rr_now = dyn_dist / risk_dist
+            if rr_now < rr_floor:
+                dyn_dist = rr_floor * risk_dist
+            elif rr_now > rr_cap:
+                dyn_dist = rr_cap * risk_dist
+
+        # d) Prix final cohérent avec la direction
+        if action == "BUY":
+            tp_dyn = float(entry_price_market) + float(dyn_dist)
+            # protection minimale côté ask/bid sera refaite dans _build_mt5_request
+            if tp_dyn <= entry_price_market:
+                tp_dyn = entry_price_market + pip_size
+        else:  # SELL
+            tp_dyn = float(entry_price_market) - float(dyn_dist)
+            if tp_dyn >= entry_price_market:
+                tp_dyn = entry_price_market - pip_size
+
+        # e) Construction de la requête unique
+        req = self._build_mt5_request(
+            trade_decision=trade_decision,
+            config=config,
+            volume=float(volume),
+            entry_price_market=float(entry_price_market),
+            sl_price=float(sl_price),
+            tp_price=float(tp_dyn),
+            symbol_info=symbol_info,
+            trigger_price=trigger_price,
+            order_type_str=order_type_str,
+        )
+        return [req]
+
+    # --- 2) NON-BURST — logique historique de split multi-TP -----------------------
+    # Validation des longueurs (équilibrage 1:1 si weights absent)
+    weights = None
+    try:
+        weights = (
+            ((config.get("entry_rules") or {}).get("scalping") or {})
+            .get("multi_tp", {})
+            .get("weights")
+        )
+        if isinstance(weights, list) and len(weights) != len(tp_prices):
+            # mismatch → on ignore les poids
+            weights = None
+    except Exception:
+        weights = None
+
+    # Normalisation des poids
+    if isinstance(weights, list) and weights:
+        try:
+            raw = [max(0.0, float(w)) for w in weights]
+            s = sum(raw)
+            if s <= 0:
+                weights = None
+            else:
+                weights = [w / s for w in raw]
+        except Exception:
+            weights = None
+
+    # Sans poids => split égal
+    if weights is None:
+        weights = [1.0 / float(len(tp_prices)) for _ in tp_prices]
+
+    # Construction des requêtes fractionnées
+    requests: list[dict] = []
+    for idx, tp in enumerate(tp_prices):
+        try:
+            w = float(weights[idx])
+        except Exception:
+            w = 0.0
+        if w <= 0:
+            continue
+
+        leg_vol = float(volume) * w
+        req = self._build_mt5_request(
+            trade_decision=trade_decision,
+            config=config,
+            volume=leg_vol,
+            entry_price_market=float(entry_price_market),
+            sl_price=float(sl_price),
+            tp_price=float(tp),
+            symbol_info=symbol_info,
+            trigger_price=trigger_price,
+            order_type_str=order_type_str,
+        )
+        requests.append(req)
+
+    if not requests:
+        # sécurité : au moins 1 ordre avec le 1er TP
+        req = self._build_mt5_request(
+            trade_decision=trade_decision,
+            config=config,
+            volume=float(volume),
+            entry_price_market=float(entry_price_market),
+            sl_price=float(sl_price),
+            tp_price=float(tp_prices[0]),
+            symbol_info=symbol_info,
+            trigger_price=trigger_price,
+            order_type_str=order_type_str,
+        )
         requests.append(req)
 
     return requests
+
+
+def update_basket_sltp_dynamically(
+    self,
+    basket_id: str,
+    reason: str = "periodic_update",
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    Coordonnateur central des mises à jour SL/TP dynamiques d'un panier.
+    - Récupère un contexte panier FRESK (_resolve_basket_context_for_sltp / burst_manager)
+    - Décide si une mise à jour est pertinente (perf/temps/phase/mouvement prix)
+    - Applique trailing dynamique (SL) via apply_dynamic_trailing()
+    - Ajuste TP de façon prudente (facultatif, borné RR) si un TP courant existe
+    - Journalise et renvoie un rapport d'audit structuré
+
+    Retour: dict(status=success|skipped|error, ... détails ...)
+    """
+    import time, math, threading
+
+    now = time.time()
+
+    # --- 0) Sanity & garde-fous globaux -------------------------------------------
+    if not isinstance(basket_id, str) or not basket_id.strip():
+        return {"status": "error", "reason": "invalid_basket_id"}
+
+    # Anti-spam global par panier (min 15s), bypass si force_refresh
+    try:
+        last_map = getattr(self, "_last_sltp_update", None)
+        if last_map is None:
+            last_map = {}
+            setattr(self, "_last_sltp_update", last_map)
+        last_ts = float(last_map.get(basket_id, 0.0))
+        if (now - last_ts) < 15.0 and not force_refresh:
+            return {"status": "skipped", "reason": "too_soon"}
+    except Exception:
+        pass
+
+    # Circuit breaker (échecs consécutifs)
+    try:
+        fails = getattr(self, "_consecutive_failures", None)
+        if fails is None:
+            fails = {}
+            setattr(self, "_consecutive_failures", fails)
+        if int(fails.get(basket_id, 0)) > 3 and not force_refresh:
+            return {"status": "error", "reason": "circuit_breaker"}
+    except Exception:
+        pass
+
+    # Budget horaire simple
+    try:
+        budget_ts = getattr(self, "_updates_budget_hour_ts", None)
+        budget_ct = getattr(self, "_updates_budget_hour_count", None)
+        if budget_ts is None or budget_ct is None or (now - float(budget_ts)) > 3600.0:
+            setattr(self, "_updates_budget_hour_ts", now)
+            setattr(self, "_updates_budget_hour_count", 0)
+        else:
+            if int(budget_ct) > 100 and not force_refresh:
+                return {"status": "error", "reason": "update_budget_exceeded"}
+    except Exception:
+        pass
+
+    # Verrou par panier pour éviter concurrent updates
+    try:
+        locks = getattr(self, "_basket_update_locks", None)
+        if locks is None:
+            locks = {}
+            setattr(self, "_basket_update_locks", locks)
+        lock = locks.get(basket_id)
+        if lock is None:
+            lock = threading.Lock()
+            locks[basket_id] = lock
+    except Exception:
+        lock = None
+
+    # Utilitaires internes ----------------------------------------------------------
+    def _get_symbol_info(symbol: str) -> Optional[Any]:
+        conn = getattr(self, "mt5_connector", None)
+        if conn is None:
+            return None
+        for mname in ("get_symbol_info", "symbol_info", "get_info"):
+            meth = getattr(conn, mname, None)
+            if callable(meth):
+                try:
+                    return meth(symbol)
+                except Exception:
+                    continue
+        return None
+
+    def _get_last_price(symbol: str) -> tuple[float, float, float]:
+        bid = ask = mid = 0.0
+        # essaye market_context-like
+        try:
+            ctx = getattr(self, "market_context", None) or {}
+            tick_map = ctx.get("last_tick") or {}
+            t = tick_map.get(symbol) or {}
+            bid = float(t.get("bid") or 0.0)
+            ask = float(t.get("ask") or 0.0)
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+                return bid, ask, mid
+        except Exception:
+            pass
+        # fallback: burst/basket current_avg_price comme "mid"
+        try:
+            bcx = local_ctx or {}
+            mid = float(bcx.get("current_avg_price") or 0.0)
+        except Exception:
+            mid = 0.0
+        return bid, ask, mid
+
+    def _fetch_positions_details(symbol: str) -> list[dict]:
+        # 1) priorise les détails fournis par le contexte panier (s'ils existent)
+        pos = []
+        try:
+            pdets = (local_ctx or {}).get("positions_details")
+            if isinstance(pdets, list) and pdets:
+                for p in pdets:
+                    if isinstance(p, dict):
+                        pos.append(p.copy())
+        except Exception:
+            pass
+        # 2) si SL/TP manquants → tentative MT5
+        need_enrich = (
+            any(("sl" not in p or "tp" not in p or p.get("sl") is None) for p in pos)
+            if pos
+            else True
+        )
+        if not need_enrich:
+            return pos
+        conn = getattr(self, "mt5_connector", None)
+        if conn is None:
+            return pos
+        # duck-typing: récupérer positions et filtrer par symbole et basket_id dans le comment si dispo
+        baskets = []
+        for mname in (
+            "get_open_positions",
+            "positions",
+            "list_positions",
+            "get_positions",
+        ):
+            meth = getattr(conn, mname, None)
+            if callable(meth):
+                try:
+                    baskets = meth()
+                    break
+                except Exception:
+                    baskets = []
+        try:
+            for it in baskets or []:
+                # support dict et objet
+                sym = (
+                    it.get("symbol")
+                    if isinstance(it, dict)
+                    else getattr(it, "symbol", None)
+                ) or ""
+                if str(sym).upper() != symbol:
+                    continue
+                cmt = (
+                    it.get("comment")
+                    if isinstance(it, dict)
+                    else getattr(it, "comment", "")
+                ) or ""
+                if basket_id not in str(cmt):
+                    continue
+                ticket = (
+                    it.get("ticket")
+                    if isinstance(it, dict)
+                    else getattr(it, "ticket", None)
+                )
+                sl = it.get("sl") if isinstance(it, dict) else getattr(it, "sl", None)
+                tp = it.get("tp") if isinstance(it, dict) else getattr(it, "tp", None)
+                entry = (
+                    it.get("entry_price")
+                    if isinstance(it, dict)
+                    else getattr(it, "price_open", None)
+                )
+                vol = (
+                    it.get("volume")
+                    if isinstance(it, dict)
+                    else getattr(it, "volume", None)
+                )
+                found = None
+                for p in pos:
+                    if p.get("ticket") == ticket:
+                        found = p
+                        break
+                if found is None:
+                    pos.append(
+                        {
+                            "ticket": ticket,
+                            "entry_price": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "volume": vol,
+                        }
+                    )
+                else:
+                    if found.get("sl") is None and sl is not None:
+                        found["sl"] = sl
+                    if found.get("tp") is None and tp is not None:
+                        found["tp"] = tp
+                    if found.get("entry_price") is None and entry is not None:
+                        found["entry_price"] = entry
+                    if found.get("volume") is None and vol is not None:
+                        found["volume"] = vol
+        except Exception:
+            pass
+        return pos
+
+    # --- 1) Lock & contexte frais --------------------------------------------------
+    if lock:
+        locked = lock.acquire(timeout=2.0)
+        if not locked:
+            return {"status": "skipped", "reason": "lock_timeout"}
+    else:
+        locked = False
+
+    try:
+        # Contexte frais (TTL court si pas force_refresh)
+        local_ctx = self._resolve_basket_context_for_sltp(
+            trade_decision={"basket_id": basket_id},
+            basket_context=None,
+            burst_manager=getattr(self, "burst_manager", None),
+            ttl_sec=0.0 if force_refresh else 2.0,
+        )
+        if not isinstance(local_ctx, dict) or not local_ctx:
+            return {
+                "status": "error",
+                "reason": "basket_not_found",
+                "basket_id": basket_id,
+            }
+
+        symbol = str(local_ctx.get("symbol") or "").upper()
+        direction = str(local_ctx.get("direction") or "").upper()
+        if not symbol or direction not in {"BUY", "SELL"}:
+            return {
+                "status": "error",
+                "reason": "invalid_basket_ctx",
+                "basket_id": basket_id,
+            }
+
+        positions = _fetch_positions_details(symbol)
+        if not positions:
+            return {
+                "status": "skipped",
+                "reason": "no_positions",
+                "basket_id": basket_id,
+            }
+
+        # --- 2) Décision de déclenchement -----------------------------------------
+        pnl_pips = float(local_ctx.get("basket_pnl_pips") or 0.0)
+        phase = str(local_ctx.get("basket_phase") or "NA").upper()
+        fill_ratio = float(local_ctx.get("fill_ratio") or 0.0)
+        vol_pips = local_ctx.get("volatility_pips", local_ctx.get("volatility_atr"))
+
+        # Time-based trigger (≥30s par défaut)
+        last_update = (
+            float(getattr(self, "_basket_last_update_ts", {}).get(basket_id, 0.0))
+            if isinstance(getattr(self, "_basket_last_update_ts", {}), dict)
+            else 0.0
+        )
+        time_ok = (now - last_update) >= 30.0
+
+        # Phase change trigger
+        last_phase_map = getattr(self, "_basket_last_phase", None) or {}
+        phase_changed = last_phase_map.get(basket_id) != phase
+
+        # Price-based: mouvement > 1 ATR (si ATR dispo)
+        bid, ask, mid = _get_last_price(symbol)
+        last_mid_map = getattr(self, "_basket_last_mid", None) or {}
+        last_mid = float(last_mid_map.get(basket_id, 0.0))
+        price_moved = False
+        if (
+            isinstance(vol_pips, (int, float))
+            and float(vol_pips) > 0
+            and mid > 0
+            and last_mid > 0
+        ):
+            pip_size = None
+            try:
+                si = _get_symbol_info(symbol)
+                digits = int(getattr(si, "digits", 0) or 0)
+                point = float(getattr(si, "point", 0.0) or 0.0)
+                points_per_pip = 10.0 if digits in (3, 5) else 1.0
+                pip_size = point * points_per_pip if point > 0 else None
+            except Exception:
+                pip_size = None
+            if pip_size:
+                price_moved = (abs(mid - last_mid) / pip_size) >= float(vol_pips)
+
+        perf_trigger = (pnl_pips >= 5.0) or (pnl_pips <= -5.0)
+        should_update = (
+            force_refresh or perf_trigger or time_ok or phase_changed or price_moved
+        )
+
+        if not should_update:
+            return {
+                "status": "skipped",
+                "reason": "no_trigger",
+                "basket_id": basket_id,
+                "pnl_pips": pnl_pips,
+                "phase": phase,
+                "fill": fill_ratio,
+            }
+
+        # --- 3) Recalcul des cibles optimales (SL/TP virtuels) ---------------------
+        symbol_info = _get_symbol_info(symbol)
+        if symbol_info is None:
+            return {
+                "status": "error",
+                "reason": "symbol_info_unavailable",
+                "basket_id": basket_id,
+            }
+
+        # Décision virtuelle (scalping burst)
+        virtual_decision = {
+            "action": direction,
+            "asset": symbol,
+            "rule_name": "burst_scalping",
+            "basket_id": basket_id,
+        }
+
+        # Contexte marché utilisé par _calculate_sl_tp_prices : on essaie d'exposer last_tick
+        current_market_data = getattr(self, "market_context", None) or {}
+        try:
+            sl_opt, tp_opt = self._calculate_sl_tp_prices(
+                trade_decision=virtual_decision,
+                config=getattr(self, "config", {}) or {},
+                symbol_info=symbol_info,
+                entry_price=float(local_ctx.get("avg_entry_price") or 0.0)
+                or (positions[0].get("entry_price") or 0.0),
+                market_context=current_market_data,
+                basket_context=local_ctx,
+            )
+        except Exception as e:
+            sl_opt, tp_opt = None, None
+            try:
+                self.logger.debug(
+                    f"[SLTP][BasketUpdate] _calculate_sl_tp_prices error: {e}"
+                )
+            except Exception:
+                pass
+
+        # --- 4) Application SL (trailing dynamique par position) -------------------
+        updates_applied = []
+        updates_failed = []
+        prev_sl_list = []
+        prev_tp_list = []
+        new_sl_list = []
+        new_tp_list = []
+
+        # volatilité ATR en pips (si connue)
+        volatility_pips = None
+        try:
+            if isinstance(vol_pips, (int, float)) and vol_pips > 0:
+                volatility_pips = float(vol_pips)
+        except Exception:
+            pass
+
+        # Appliquer SL dynamique par position (plus fiable que sl_opt agrégé)
+        for p in positions:
+            ticket = p.get("ticket")
+            entry = float(p.get("entry_price") or 0.0)
+            cur_sl = p.get("sl")
+            cur_tp = p.get("tp")
+            if not ticket or entry <= 0 or cur_sl is None:
+                # on tente d'enrichir via le connecteur (si disponible)
+                ok = False
+                try:
+                    conn = getattr(self, "mt5_connector", None)
+                    if conn is not None and ticket:
+                        g = getattr(conn, "get_position", None)
+                        if callable(g):
+                            obj = g(ticket=ticket)
+                            if obj:
+                                if cur_sl is None:
+                                    cur_sl = (
+                                        obj.get("sl")
+                                        if isinstance(obj, dict)
+                                        else getattr(obj, "sl", None)
+                                    )
+                                if cur_tp is None:
+                                    cur_tp = (
+                                        obj.get("tp")
+                                        if isinstance(obj, dict)
+                                        else getattr(obj, "tp", None)
+                                    )
+                                if entry <= 0:
+                                    entry = (
+                                        obj.get("price_open")
+                                        if isinstance(obj, dict)
+                                        else getattr(obj, "price_open", 0.0)
+                                    )
+                                ok = True
+                except Exception:
+                    pass
+                if not ok and (cur_sl is None or entry <= 0):
+                    updates_failed.append(
+                        {"ticket": ticket, "reason": "missing_position_data"}
+                    )
+                    continue
+
+            # price courant (mid) — tolère fallback
+            bid, ask, mid = _get_last_price(symbol)
+            price_for_trail = (
+                mid if mid > 0 else (ask if direction == "BUY" else bid) or entry
+            )
+
+            prev_sl_list.append(cur_sl)
+            prev_tp_list.append(cur_tp)
+
+            # Trailing dynamique (et application + timestamp en cas de succès)
+            try:
+                new_sl = self.apply_dynamic_trailing(
+                    trade_decision=virtual_decision,
+                    position_ticket=ticket,
+                    current_price=price_for_trail,
+                    entry_price=entry,
+                    current_sl=float(cur_sl),
+                    symbol_info=symbol_info,
+                    basket_context=local_ctx,
+                    volatility_pips=volatility_pips,
+                    current_tp=cur_tp,
+                    mt5_connector=getattr(self, "mt5_connector", None),
+                    modify_fn=None,  # on laisse la fonction choisir les méthodes dispo
+                    activation_pips=2.0,
+                    min_distance_pips=2.0,
+                    min_update_interval_sec=2,
+                    dry_run=False,
+                    force=False,
+                    market_context=current_market_data,
+                    burst_manager=getattr(self, "burst_manager", None),
+                )
+            except Exception as e:
+                new_sl = None
+                try:
+                    self.logger.debug(
+                        f"[SLTP][BasketUpdate] apply_dynamic_trailing error (ticket={ticket}): {e}"
+                    )
+                except Exception:
+                    pass
+
+            # TP dynamique prudent: seulement si TP courant existe (évite TP fantôme)
+            new_tp = None
+            try:
+                if cur_tp is not None:
+                    # calcule une distance 'base' depuis le TP actuel (ou RR base si manquant), puis applique multiplicateurs
+                    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+                    digits = int(getattr(symbol_info, "digits", 0) or 0)
+                    points_per_pip = 10.0 if digits in (3, 5) else 1.0
+                    pip_size = point * points_per_pip if point > 0 else 0.0001
+
+                    risk = abs(entry - float(cur_sl if new_sl is None else new_sl))
+                    base_dist = (
+                        abs(float(cur_tp) - entry)
+                        if cur_tp is not None
+                        else (1.5 * risk if risk > 0 else 20.0 * pip_size)
+                    )
+
+                    # multipliers (mêmes lignes directrices que _split_multi_tp_orders)
+                    perf_mult = 1.0
+                    if pnl_pips > 10.0:
+                        perf_mult = 1.30
+                    elif pnl_pips > 5.0:
+                        perf_mult = 1.15
+                    elif pnl_pips > 0.0:
+                        perf_mult = 1.05
+                    else:
+                        perf_mult = 0.90
+
+                    fill_mult = 1.0
+                    if fill_ratio >= 0.75:
+                        fill_mult = 1.20
+                    elif fill_ratio >= 0.25:
+                        fill_mult = 1.10
+                    else:
+                        fill_mult = 1.00
+
+                    vol_mult = 1.0
+                    if isinstance(vol_pips, (int, float)):
+                        vp = float(vol_pips)
+                        if vp >= 12.0:
+                            vol_mult = 0.90
+                        elif vp <= 4.0:
+                            vol_mult = 1.10
+                        else:
+                            vol_mult = 1.00
+
+                    dyn_dist = base_dist * perf_mult * fill_mult * vol_mult
+                    # bornes RR (0.5..3.0)
+                    if risk > 0:
+                        rr = dyn_dist / risk
+                        rr = max(0.5, min(3.0, rr))
+                        dyn_dist = rr * risk
+
+                    if direction == "BUY":
+                        candidate_tp = entry + dyn_dist
+                        if (
+                            cur_tp is None
+                            or candidate_tp > float(cur_tp) + 0.5 * pip_size
+                        ):
+                            new_tp = candidate_tp
+                    else:
+                        candidate_tp = entry - dyn_dist
+                        if (
+                            cur_tp is None
+                            or candidate_tp < float(cur_tp) - 0.5 * pip_size
+                        ):
+                            new_tp = candidate_tp
+
+                    # Application du nouveau TP (si on en a un et si le connecteur le permet)
+                    if new_tp is not None:
+                        # selon la méthode dispo, on tente d'abord un update couplé SL/TP si new_sl a bougé, sinon TP seul
+                        conn = getattr(self, "mt5_connector", None)
+                        ret = None
+                        if conn is not None:
+                            # préférer une méthode couplée si new_sl a bougé
+                            if new_sl is not None:
+                                candidates = [
+                                    (
+                                        "modify_position_sl_tp",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(new_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                    (
+                                        "update_position_sl_tp",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(new_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                    (
+                                        "position_modify",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(new_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                ]
+                            else:
+                                candidates = [
+                                    (
+                                        "modify_position_sl_tp",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(cur_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                    (
+                                        "update_position_sl_tp",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(cur_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                    (
+                                        "position_modify",
+                                        dict(
+                                            ticket=ticket,
+                                            sl=float(cur_sl),
+                                            tp=float(new_tp),
+                                        ),
+                                    ),
+                                ]
+                            for mname, kwargs in candidates:
+                                meth = getattr(conn, mname, None)
+                                if callable(meth):
+                                    try:
+                                        ret = meth(**kwargs)
+                                        break
+                                    except Exception:
+                                        ret = None
+                        # succès TP ?
+                        ok_tp = False
+                        try:
+                            if isinstance(ret, bool):
+                                ok_tp = ret
+                            rc = getattr(ret, "retcode", None)
+                            if isinstance(rc, int) and rc in (0, 10008, 10009, 10024):
+                                ok_tp = True
+                            if isinstance(ret, dict):
+                                rc = ret.get("retcode")
+                                ok_tp = (
+                                    ok_tp
+                                    or (
+                                        isinstance(rc, int)
+                                        and rc in (0, 10008, 10009, 10024)
+                                    )
+                                    or bool(ret.get("ok"))
+                                )
+                        except Exception:
+                            pass
+                        if not ok_tp:
+                            new_tp = None  # on n’impose pas si échec d’update
+                # fin TP
+            except Exception as e:
+                try:
+                    self.logger.debug(
+                        f"[SLTP][BasketUpdate] dynamic TP error (ticket={ticket}): {e}"
+                    )
+                except Exception:
+                    pass
+                new_tp = None
+
+            # Rapport par position
+            if new_sl is not None or new_tp is not None:
+                updates_applied.append(
+                    {"ticket": ticket, "new_sl": new_sl, "new_tp": new_tp}
+                )
+                new_sl_list.append(new_sl if new_sl is not None else cur_sl)
+                new_tp_list.append(new_tp if new_tp is not None else cur_tp)
+            else:
+                updates_failed.append({"ticket": ticket, "reason": "no_change"})
+
+        # --- 5) Bilan & état interne ----------------------------------------------
+        # Comptage budget
+        try:
+            setattr(
+                self,
+                "_updates_budget_hour_count",
+                int(getattr(self, "_updates_budget_hour_count", 0)) + 1,
+            )
+        except Exception:
+            pass
+
+        success = len(updates_applied) > 0
+        # Enregistreurs internes
+        try:
+            last_map = getattr(self, "_last_sltp_update", None)
+            if not isinstance(last_map, dict):
+                last_map = {}
+                setattr(self, "_last_sltp_update", last_map)
+
+            last_map[basket_id] = now
+        except Exception:
+            pass
+        try:
+            lm = getattr(self, "_basket_last_update_ts", None)
+            if lm is None:
+                lm = {}
+                setattr(self, "_basket_last_update_ts", lm)
+            lm[basket_id] = now
+        except Exception:
+            pass
+        try:
+            lpm = getattr(self, "_basket_last_phase", None)
+            if lpm is None:
+                lpm = {}
+                setattr(self, "_basket_last_phase", lpm)
+            lpm[basket_id] = phase
+        except Exception:
+            pass
+        try:
+            lmm = getattr(self, "_basket_last_mid", None)
+            if lmm is None:
+                lmm = {}
+                setattr(self, "_basket_last_mid", lmm)
+            if mid > 0:
+                lmm[basket_id] = mid
+        except Exception:
+            pass
+
+        # Compteurs d'échecs consécutifs
+        try:
+            if success:
+                fails[basket_id] = 0
+            else:
+                fails[basket_id] = int(fails.get(basket_id, 0)) + 1
+        except Exception:
+            pass
+
+        # Logging synthétique
+        try:
+            prev_sl = prev_sl_list[0] if prev_sl_list else None
+            prev_tp = prev_tp_list[0] if prev_tp_list else None
+            nsl = new_sl_list[0] if new_sl_list else prev_sl
+            ntp = new_tp_list[0] if new_tp_list else prev_tp
+            self.logger.info(
+                f"🎯 [SLTP_UPDATE] {basket_id} | SL: {prev_sl}→{nsl} | TP: {prev_tp}→{ntp} | "
+                f"PnL: {pnl_pips:.1f}pips | Phase: {phase} | Fill: {fill_ratio:.0%} | Raison: {reason}"
+            )
+        except Exception:
+            pass
+
+        status = "success" if success else "skipped"
+        return {
+            "status": status,
+            "basket_id": basket_id,
+            "timestamp": now,
+            "reason": reason,
+            "updates_applied": updates_applied,
+            "updates_failed": updates_failed,
+            "pnl_pips": pnl_pips,
+            "phase": phase,
+            "fill_ratio": fill_ratio,
+        }
+
+    finally:
+        if lock and locked:
+            try:
+                lock.release()
+            except Exception:
+                pass
