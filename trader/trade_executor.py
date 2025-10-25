@@ -414,7 +414,6 @@ TradeExecutor._build_mt5_request = _build_mt5_request
 TradeExecutor._split_multi_tp_orders = _split_multi_tp_orders
 TradeExecutor._calculate_risk_based_volume = _calculate_risk_based_volume
 TradeExecutor._calculate_sl_tp_prices = _calculate_sl_tp_prices
-TradeExecutor._normalize_stops = _normalize_stops
 TradeExecutor.monitor_burst_baskets = monitor_burst_baskets
 TradeExecutor._update_internal_position_state = _update_internal_position_state
 TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
