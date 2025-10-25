@@ -22,7 +22,6 @@ from trader.order_builder import prepare_order, _build_mt5_request
 from trader.sizing import _calculate_risk_based_volume
 from trader.sltp import (
     _calculate_sl_tp_prices,
-    _normalize_stops,
     _split_multi_tp_orders,
 )
 from trader.burst import monitor_burst_baskets, open_burst_basket
