@@ -481,7 +481,6 @@ def _execute_single_decision(
         return False
 
 
-
 def run_single_pipeline_cycle(
     mt5_connector: MT5Connector,
     decision_pipeline: DecisionPipeline,
@@ -518,6 +517,107 @@ def run_single_pipeline_cycle(
 
     # ✅ MarketAnalyzer unifié
     market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
+    
+    # [PATCH-FUSION] Fallback local si pas de FusionManager externe
+    try:
+        from phase_observer.fusion_manager import FusionManager  # si tu as un module dédié
+        _fusion_mgr = FusionManager(config_manager=config_manager, logger=logger)
+    except Exception:
+        _fusion_mgr = None
+
+    def _quick_vote_fusion(signals: dict, latest: dict, base_cfg: dict, sym: str, mt5c: MT5Connector):
+        """
+        Fusion minimaliste (vote direction + score pondéré) avec gates rapides.
+        Retourne None si veto.
+        """
+        try:
+            spread = float(signals.get("current_spread_points", float("inf")))
+            phase  = str(signals.get("phase", "neutral") or "neutral")
+            conf   = float(signals.get("confidence_score", 0.0) or 0.0)
+            fp     = signals.get("footprint_summary") or {}
+            of     = signals.get("orderflow_summary")  or {}
+
+            # --- Seuils (peuvent venir de ta conf)
+            sym_spread_max = {"EURUSD": 12, "GBPUSD": 18, "XAUUSD": 40}.get(sym, 999)
+            m1_min_ticks   = int(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("footprint", {}) or {}).get("m1_min_ticks", 15)))
+            m1_min_cov_s   = int(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("footprint", {}) or {}).get("m1_min_coverage_s", 20)))
+            of_delta_min   = float(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("orderflow", {}) or {}).get("delta_abs_min", 50.0)))
+            tickrate_min   = float(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("footprint", {}) or {}).get("tickrate_min", 2.0)))
+            ttl_ms         = int(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("fusion", {}) or {}).get("ttl_ms", 800)))
+            slippage_pts   = float(((base_cfg.get("entry_rules", {}).get("scalping", {}).get("fusion", {}) or {}).get("max_slippage_points", 10.0)))
+
+            # --- Gates rapides
+            ticks = int(fp.get("tick_count", 0) or 0)
+            cov   = float(fp.get("coverage_s", 0.0) or 0.0)
+            tr    = float(fp.get("tick_rate", 0.0) or 0.0)
+            dlt   = float(of.get("delta_total", 0.0) or 0.0)
+
+            if spread > sym_spread_max:
+                return None
+            if not ((ticks >= m1_min_ticks and cov >= m1_min_cov_s) or (tr >= tickrate_min and cov >= max(5.0, m1_min_cov_s - 10))):
+                return None
+            if abs(dlt) < of_delta_min:
+                return None
+
+            # --- Votes directionnels (3 sources)
+            vote = 0
+            # triggers via phase
+            if "bull" in phase or "up" in phase:
+                vote += 1; trig_dir = "BUY"
+            elif "bear" in phase or "down" in phase:
+                vote -= 1; trig_dir = "SELL"
+            else:
+                trig_dir = "NEUTRAL"
+
+            fp_dir = "BUY" if float(fp.get("delta_total", 0.0) or 0.0) > 0 else ("SELL" if float(fp.get("delta_total", 0.0) or 0.0) < 0 else "NEUTRAL")
+            vote += (1 if fp_dir == "BUY" else (-1 if fp_dir == "SELL" else 0))
+
+            of_dir = "BUY" if dlt > 0 else ("SELL" if dlt < 0 else "NEUTRAL")
+            vote += (1 if of_dir == "BUY" else (-1 if of_dir == "SELL" else 0))
+
+            if abs(vote) < 2:  # need 2/3 alignés
+                return None
+            action = "BUY" if vote > 0 else "SELL"
+
+            # --- Score fusion (pondérations simples)
+            fp_strength = min(1.0, max(0.0, (abs(float(fp.get("delta_total", 0.0) or 0.0)) / max(of_delta_min, 1.0)) * 0.75 + (tr / max(tickrate_min, 0.1)) * 0.25))
+            of_strength = min(1.0, max(0.0, abs(dlt) / max(of_delta_min, 1.0)))
+            trig_strength = conf
+            align_bonus = 0.1 if (trig_dir == fp_dir == of_dir and trig_dir in {"BUY","SELL"}) else 0.0
+            score = min(1.0, 0.25*trig_strength + 0.35*fp_strength + 0.40*of_strength + align_bonus)
+
+            # --- Prix de référence pour guard slippage (capturé maintenant)
+            price = None
+            try:
+                tk = getattr(mt5c, "get_symbol_tick", None)
+                if callable(tk):
+                    t = tk(sym)
+                    ask = t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None)
+                    bid = t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None)
+                else:
+                    t = getattr(mt5c.mt5 if hasattr(mt5c, "mt5") else None, "symbol_info_tick", None)
+                    t = t(sym) if callable(t) else None
+                    ask = getattr(t, "ask", None)
+                    bid = getattr(t, "bid", None)
+                price = float(ask if action == "BUY" else bid)
+            except Exception:
+                price = None
+
+            return {
+                "ok": True,
+                "action": action,
+                "score": float(score),
+                "price": price,
+                "ttl_ms": int(ttl_ms),
+                "rule_name": "fusion_scalping",
+                "no_fallback": True,   # respecte ta contrainte
+                "no_tp": True,         # scalping = trailing only
+                "meta": {"triggers_dir": trig_dir, "fp_dir": fp_dir, "of_dir": of_dir},
+                "slippage_guard_points": float(slippage_pts),
+                "ts_created": pd.Timestamp.utcnow().value // 1_000_000,  # ms epoch
+            }
+        except Exception:
+            return None
 
     try:
         if not getattr(mt5_connector, "is_connected", False):
@@ -608,6 +708,9 @@ def run_single_pipeline_cycle(
         timeframe_str = dcfg.get("default_timeframe", "M1")
         bars_to_fetch = int(dcfg.get("default_bars_count", 500))
         min_required_bars = 50
+        
+        # [PATCH-FUSION] Collecte des décisions Fusion
+        fusion_scalping_decisions: List[Dict[str, Any]] = []
 
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
@@ -894,8 +997,7 @@ def run_single_pipeline_cycle(
                                 "validity_ms": int(entry.get("validity_ms", 800)),
                                 # Important pour exécuteur: pas de fallback, pas de TP
                                 "no_fallback": True,
-                                "no_tp": True,
-                                # On garde l’info exit phases pour l’intégration du trailing avancé plus tard
+                                                           
                                 "footprint_exit": dec_fp.get("exit", {}),
                                 # Télémétrie contextuelle
                                 "trigger": dec_fp.get("trigger"),
@@ -919,7 +1021,7 @@ def run_single_pipeline_cycle(
                         f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True
                     )
 
-                # === PATCH ORDERFLOW V5 ANALYSE (avant footprint) ===
+                # === PATCH ORDERFLOW V5 ANALYSE (après footprint) ===
                 try:
                     # ✅ On récupère les 5 dernières bougies pour l'analyse d'orderflow
                     last_candles_df = annotated_rates_df.tail(5).copy()
@@ -1019,6 +1121,32 @@ def run_single_pipeline_cycle(
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
                 )
+                
+                # [PATCH-FUSION] Calcul de la FusionDecision pour cet actif
+                try:
+                    if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
+                        fdec = _fusion_mgr.fuse(signals=signals, latest=latest, base_config=base_config, symbol=asset, mt5c=mt5_connector)
+                    else:
+                        fdec = _quick_vote_fusion(signals=signals, latest=latest, base_cfg=base_config, sym=asset, mt5c=mt5_connector)
+                    if fdec and fdec.get("ok") and fdec.get("action") in {"BUY","SELL"}:
+                        # normalisation minimale pour compat exécuteur
+                        fusion_scalping_decisions.append({
+                            "rule_name": "fusion_scalping",
+                            "action": fdec["action"],
+                            "asset": asset,
+                            "price": fdec.get("price"),
+                            "confidence": fdec.get("score", 0.7),
+                            "no_fallback": True,
+                                                        "entry_style": "MARKET",  # fast-lane → market + guard slippage
+                            "validity_ms": int(fdec.get("ttl_ms", 800)),
+                            "slippage_guard_points": float(fdec.get("slippage_guard_points", 10.0)),
+                            "ts_created": int(fdec.get("ts_created")),
+                            "fusion_meta": fdec.get("meta", {}),
+                        })
+                        logger.info(f"[FUSION→DECISION][{asset}] {fdec['action']} score={fdec.get('score',0):.2f} price={fdec.get('price')}")
+                except Exception as _e:
+                    logger.warning(f"[FUSION] erreur: {_e}")
+
 
             except Exception as e:
                 logger.error(f"Erreur collecte données {asset}: {e}", exc_info=True)
@@ -1036,6 +1164,17 @@ def run_single_pipeline_cycle(
                 f"   {asset}: phase={sig.get('phase')} conf={sig.get('confidence_score')}"
             )
         print("=" * 60)
+              
+        # Charger configs des assets (une seule fois via cache du ConfigManager)
+        asset_configs = {}
+        for asset in tradeable_assets:
+            try:
+                cfg = config_manager.load_asset_config(asset)
+                if cfg:
+                    asset_configs[asset] = cfg
+            except Exception as e:
+                logger.warning(f"[{asset}] Impossible de charger la config: {e}")
+                
         # === PATCH B: GATECHECK (XAUUSD only) — imprime métriques vs seuils ===
         try:
             sig = (all_assets_trading_signals or {}).get("XAUUSD", {})
@@ -1080,17 +1219,7 @@ def run_single_pipeline_cycle(
                     f"(NCP-strong: Δ≥{ncp.get('of_delta_abs_min','?')} & rate≥{ncp.get('tickrate_min','?')}/s)"
                 )
         except Exception as _e:
-            logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
-
-        # Charger configs des assets (une seule fois via cache du ConfigManager)
-        asset_configs = {}
-        for asset in tradeable_assets:
-            try:
-                cfg = config_manager.load_asset_config(asset)
-                if cfg:
-                    asset_configs[asset] = cfg
-            except Exception as e:
-                logger.warning(f"[{asset}] Impossible de charger la config: {e}")
+            logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")    
 
         # Contexte global
         global_context = _build_global_context(
@@ -1107,6 +1236,130 @@ def run_single_pipeline_cycle(
         global_context["diag_tracker"] = get_tracker_from_context(global_context)
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
+        
+        # [PATCH-FUSION][FAST-LANE] Exécution immédiate si FusionDecision valide
+        try:
+            # 0) garde-boucle : si aucune décision fusion
+            if fusion_scalping_decisions:
+                # 1) guard "panier actif" avec cache local (évite coûteux get_positions multiples)
+                import re, time
+                _positions_cache = None
+                def _open_burst_ids():
+                    nonlocal _positions_cache
+                    try:
+                        if _positions_cache is None:
+                            _positions_cache = mt5_connector.get_positions() or []
+                        ids = set()
+                        for p in _positions_cache:
+                            c = (p.get("comment") if isinstance(p, dict) else getattr(p, "comment", "")) or ""
+                            m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", str(c))
+                            if m:
+                                ids.add(m.group(1))
+                        return ids
+                    except Exception:
+                        return set()
+
+                burst_cfg = (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}) or {})
+                guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
+                enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
+                single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+                if enforce_closure and single_burst_global and _open_burst_ids():
+                    logger.info("⛔ [FUSION][FAST-LANE] Panier actif détecté → fast-lane annulée.")
+                else:
+                    # 2) choisir la meilleure décision (score, fraicheur TTL)
+                    now_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
+                    def _score_fd(fd):
+                        age = max(0, now_ms - int(fd.get("ts_created", now_ms)))
+                        ttl = int(fd.get("validity_ms", 800))
+                        alive = 1 if age < ttl else 0
+                        return (alive, float(fd.get("confidence", 0.0)))
+                    fusion_scalping_decisions.sort(key=_score_fd, reverse=True)
+                    best = fusion_scalping_decisions[0]
+                    # 3) TTL check
+                    age = max(0, now_ms - int(best.get("ts_created", now_ms)))
+                    if age < int(best.get("validity_ms", 800)):
+                        # 4) guard slippage (sur MARKET: abort si dérive trop forte vs prix ref)
+                        sym = str(best.get("asset","")).upper()
+                        side = str(best.get("action","")).upper()
+                        slipp_pts = float(best.get("slippage_guard_points", 10.0) or 0.0)
+                        ok_price = True
+                        try:
+                            ref = float(best.get("price") or 0.0)
+                            if ref > 0.0 and hasattr(mt5_connector, "get_symbol_tick"):
+                                t = mt5_connector.get_symbol_tick(sym)
+                                ask = t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None)
+                                bid = t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None)
+                                now_price = float(ask if side=="BUY" else bid)
+                                if abs(now_price - ref)/getattr(mt5_connector.get_symbol_info(sym),"point",1.0) > slipp_pts:
+                                    ok_price = False
+                                    logger.info(f"[FUSION][FAST-LANE] slippage guard: ref={ref} now={now_price} pts>{slipp_pts} → abort.")
+                        except Exception:
+                            pass
+
+                        if ok_price and sym and side in {"BUY","SELL"}:
+                            # 5) résolution burst_size locale (asset > global)
+                            def _resolve(sym_):
+                                def _dig(d, path):
+                                    cur = d or {}
+                                    for k in path:
+                                        if not isinstance(cur, dict): return None
+                                        cur = cur.get(k)
+                                    return cur
+                                prefer_asset = bool((((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("burst_scalping", {}) or {}).get("prefer_asset_overrides", False))
+                                try:
+                                    aconf = config_manager.load_asset_config(sym_) or {}
+                                except Exception:
+                                    aconf = {}
+                                reads = []
+                                if prefer_asset:
+                                    reads = [
+                                        _dig(aconf, ["entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(aconf, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(aconf, ["overrides","scalping","burst","burst_size"]),
+                                        _dig(base_config, ["entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(base_config, ["trade_executor_settings","entry_rules","scalping","burst_scalping","burst_size"]),
+                                    ]
+                                else:
+                                    reads = [
+                                        _dig(base_config, ["entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(aconf, ["entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(aconf, ["overrides","scalping","entry_rules","scalping","burst_scalping","burst_size"]),
+                                        _dig(aconf, ["overrides","scalping","burst","burst_size"]),
+                                        _dig(base_config, ["trade_executor_settings","entry_rules","scalping","burst_scalping","burst_size"]),
+                                    ]
+                                for v in reads:
+                                    if isinstance(v,(int,float)) and v>0:
+                                        return int(v)
+                                return 5
+                            resolved_burst = max(int(_resolve(sym)), 1)
+
+                            # 6) construire la décision normalisée pour l’exécuteur (trailing only, no fallback)
+                            td = {
+                                "rule_name": "burst_scalping",
+                                "action": side, "side": side,
+                                "asset": sym, "symbol": sym,
+                                "order_type": "MARKET",
+                                "burst_size": resolved_burst,
+                                "sizing_scope": "BASKET",
+                                "no_fallback": True,
+                                                                "order": {"action": side, "side": side, "type": "MARKET", "symbol": sym},
+                                "trade": {"action": side, "side": side},
+                            }
+                            # sltp profile (trailing) depuis conf si dispo
+                            sltp_cfg = (((global_context.get("asset_configs", {}) or {}).get(sym, {}) or {}).get("entry_rules", {}) or {}).get("scalping", {}) or {}
+                            sltp_cfg = (sltp_cfg.get("burst_scalping", {}) or {}).get("sltp", {}) or (
+                                        (base_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}).get("sltp", {})) or {}
+                                    )
+                            if sltp_cfg:
+                                td["sltp"] = sltp_cfg  # l’implémentation SLTP doit ignorer TP si no_tp=True
+
+                            logger.info(f"[FUSION][FAST-LANE] {side} {sym} burst={resolved_burst} (market, trailing-only)")
+                            decision_pkg = {"final_decision": td, "context": global_context, "active_config": base_config}
+                            res = run_trade_execution_pipeline(trade_executor, decision_pkg, is_dry_run=is_dry_run)
+                            if (res or {}).get("status") not in {"failed", ""}:
+                                return True  # 🚀 exécution faite → fin immédiate du cycle
+        except Exception as e:
+            logger.warning(f"[FUSION][FAST-LANE] erreur: {e}")
 
         # === [BURST EXIT MANAGEMENT] Fermer les paniers (SL/TP only — zéro trailing)
         try:
@@ -1123,10 +1376,16 @@ def run_single_pipeline_cycle(
             )
         except Exception as e:
             logger.warning(f"[BURST EXIT] Contrôle fermeture panier (SLTP): {e}")
-
-        except Exception as e:
-            logger.warning(f"[BURST EXIT] Contrôle fermeture panier: {e}")
-            
+                           
+        # Appel pipeline de décision
+        print("🤖 [PIPELINE] Appel du decision_pipeline...")
+        decision_package = (
+            decision_pipeline.institutional_decision_pipeline(global_context) or {}
+        )
+        decision_package = (
+            decision_pipeline.institutional_decision_pipeline(global_context) or {}
+        )
+        
         # [SLTP][PERIODIC] Mise à jour douce des paniers actifs (toutes les 30s)
         try:
             import time, re
@@ -1173,13 +1432,6 @@ def run_single_pipeline_cycle(
                         pass
         except Exception as e:
             logger.debug(f"[SLTP][PERIODIC] maintenance skip: {e}")
-  
-
-        # Appel pipeline de décision
-        print("🤖 [PIPELINE] Appel du decision_pipeline...")
-        decision_package = (
-            decision_pipeline.institutional_decision_pipeline(global_context) or {}
-        )
 
         # === MERGE: décisions Footprint (Scalping Burst) dans le package ===
         try:
@@ -1204,7 +1456,27 @@ def run_single_pipeline_cycle(
                 )
         except Exception as e:
             logger.warning(f"[MERGE] Échec intégration décisions Footprint: {e}")
-
+        # === MERGE: décisions FUSION dans le package (reporting) ===
+        try:
+            if fusion_scalping_decisions:
+                decision_package.setdefault("scalping_decisions", [])
+                decision_package["scalping_decisions"].extend(fusion_scalping_decisions)
+                # si toujours pas de final_decision, promeut la meilleure fusion
+                decision_package.setdefault("final_decision", decision_package.get("final_decision") or {})
+                if not decision_package["final_decision"]:
+                    # sélectionne la plus fraîche et la mieux scorée
+                    now_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
+                    def _score_fd(fd):
+                        age = max(0, now_ms - int(fd.get("ts_created", now_ms)))
+                        ttl = int(fd.get("validity_ms", 800))
+                        alive = 1 if age < ttl else 0
+                        return (alive, float(fd.get("confidence", 0.0)))
+                    best = sorted(fusion_scalping_decisions, key=_score_fd, reverse=True)[0]
+                    decision_package["final_decision"] = best
+                logger.info(f"[MERGE] {len(fusion_scalping_decisions)} décision(s) Fusion intégrée(s).")
+        except Exception as e:
+            logger.warning(f"[MERGE] Échec intégration décisions Fusion: {e}")
+   
         # ====== LOG DÉCISION (anti-doublon) ======
         scalping_decisions = decision_package.get("scalping_decisions", []) or []
         liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
@@ -1517,42 +1789,65 @@ def run_single_pipeline_cycle(
                         td["rule_name"] = "burst_scalping"
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
-                    # 3) Purge TP/trailing codés en dur + activer SLTP
+                    # 3) SLTP dynamique (TP/trailing via config), conserve LIMIT_FOK si demandé
                     if rn == "burst_scalping":
-                        for k in ("tp_price","tp_pips","target_tp_pips","tp_prices","trailing"):
+                        # Nettoyage des hints hérités pour éviter les collisions avec le moteur SLTP
+                        for k in ("tp_price", "tp_pips", "target_tp_pips", "tp_prices", "trailing"):
                             td.pop(k, None)
-                        td["no_tp"] = False  # laisser SLTP poser SL/TP
 
-                        # sltp cfg (asset_config > prod_config)
-                        sltp_cfg = (
-                            (global_context.get("asset_configs", {}) or {})
-                            .get(sym, {})
-                            .get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            .get("sltp", {})
-                        ) or (
-                            base_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            .get("sltp", {})
-                            or {}
-                        )
-                        if sltp_cfg:
-                            td["sltp"] = sltp_cfg
+                        # Respecter le style d’entrée si fourni (LIMIT_FOK supporté), sinon MARKET
+                        style = str(td.get("entry_style", "MARKET")).upper()
+                        if style in {"LIMIT_FOK", "LIMIT-FOK", "FOK_LIMIT"}:
+                            td["order_type"] = "LIMIT"
+                            td.setdefault("time_in_force", "FOK")
+                            # Assurer un prix pour LIMIT/FOK
+                            if not td.get("price"):
+                                try:
+                                    tk = mt5_connector.get_symbol_tick(sym)
+                                    ask = tk.get("ask") if isinstance(tk, dict) else getattr(tk, "ask", None)
+                                    bid = tk.get("bid") if isinstance(tk, dict) else getattr(tk, "bid", None)
+                                    td["price"] = float(ask if side == "BUY" else bid)
+                                except Exception:
+                                    pass
+                        else:
+                            td["order_type"] = "MARKET"
+
+                        # SLTP dynamique: merge global -> asset -> override éventuel de la décision
+                        def _merge(a, b):
+                            out = dict(a or {})
+                            for k, v in (b or {}).items():
+                                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                                    out[k] = _merge(out[k], v)
+                                else:
+                                    out[k] = v
+                            return out
+
+                        sltp_global = (((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
+                                    .get("burst_scalping", {}) or {}).get("sltp", {}) or {}
+                        sltp_asset_block = ((((global_context.get("asset_configs", {}) or {}).get(sym, {}) or {})
+                                            .get("entry_rules", {}) or {}).get("scalping", {}) or {}) \
+                                            .get("burst_scalping", {}) or {}
+                        sltp_asset = (sltp_asset_block.get("sltp", {}) if isinstance(sltp_asset_block, dict) else {}) or {}
+
+                        sltp_cfg = _merge(sltp_global, sltp_asset)
+                        if isinstance(td.get("sltp"), dict):
+                            sltp_cfg = _merge(sltp_cfg, td["sltp"])  # override runtime si fourni par la décision
+
+                        # Activer explicitement le mode dynamique si la clé est supportée par sltp.py
+                        if isinstance(sltp_cfg, dict) and "dynamic" in sltp_cfg:
+                            sltp_cfg["dynamic"] = bool(sltp_cfg.get("dynamic", True))
+
+                        td["sltp"] = sltp_cfg
 
                     # 4) burst_size — résolution multi-sources (helper)
-                    # Résolution centralisée + purge des hints injectés par la stratégie
                     size, source = _resolve_burst_size(sym)
                     td.pop("burst_count", None)
                     td.pop("burst_size", None)
                     resolved_burst = max(int(size), 1)
                     logger.info(f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst} (source={source})")
-
-
-                    # 5) Standardisation exec
+                 
+                    # 5) Standardisation exec (ne pas supprimer entry_style)
                     td.pop("burst_volume_each", None)
-                    td.pop("entry_style", None)
                     td["burst_size"]   = resolved_burst
                     td["sizing_scope"] = "BASKET"
                     td.setdefault("order_type", "MARKET")
@@ -1566,6 +1861,7 @@ def run_single_pipeline_cycle(
                         "symbol": sym,
                     })
                     td["order"] = od
+                    
                     # (bonus) certains chemins lisent 'trade'
                     trade = td.get("trade") if isinstance(td.get("trade"), dict) else {}
                     trade.update({"action": side, "side": side})
