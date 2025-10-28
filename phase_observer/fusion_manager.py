@@ -587,3 +587,13 @@ class FusionManager:
         if "fused" in kw:
             out["fused_confidence"] = float(kw["fused"])
         return out
+    
+# === HOTFIX: bind des helpers module-level comme méthodes d'instance ===
+FusionManager._ensure_timestamp       = _ensure_timestamp
+FusionManager._hashable               = _hashable
+FusionManager._coh_key                = _coh_key
+FusionManager._coherence_cached       = _coherence_cached
+FusionManager._degraded_mode_decision = _degraded_mode_decision
+FusionManager._cross_system_validation= _cross_system_validation
+FusionManager._adaptive_weights       = _adaptive_weights
+FusionManager._update_metrics         = _update_metrics
