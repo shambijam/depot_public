@@ -228,6 +228,43 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 if mtf_decision:
                     return self._finalize_decision(mtf_decision, analyzed_context)
+                
+                          # --- 3) Momentum & Breakout (nouvelles règles) ---
+                try:
+                    mom_cfg = (strat_cfg.get("momentum") or {}) if isinstance(strat_cfg, dict) else {}
+                    pat_cfg = (strat_cfg.get("patterns") or {}) if isinstance(strat_cfg, dict) else {}
+                    weights = (strat_cfg.get("scoring_weights") or {"context": 0.3, "technical": 0.4, "orderflow": 0.2, "risk": 0.1})
+                    thresholds = (strat_cfg.get("scoring_thresholds") or {"direct": 0.70, "conditional": 0.50})
+
+                    candidates: List[Dict[str, Any]] = []
+
+                    rb = self._rule_breakout_consolidation(df_work, asset, price, meta, mom_cfg.get("breakout", {}) or {})
+                    if rb: candidates.append(rb)
+
+                    tpull = self._rule_trend_pullback(df_work, asset, price, meta, mom_cfg.get("trend_pullback", {}) or {})
+                    if tpull: candidates.append(tpull)
+
+                    ib = self._rule_inside_bar_breakout(df_work, asset, price, meta, (pat_cfg.get("inside_bar", {}) or {}))
+                    if ib: candidates.append(ib)
+
+                    ign = self._rule_momentum_ignition(df_work, asset, price, meta, mom_cfg.get("ignition", {}) or {})
+                    if ign: candidates.append(ign)
+
+                    if candidates:
+                        best = self._choose_best_candidate(
+                            candidates=candidates,
+                            asset=asset,
+                            meta=meta,
+                            asset_signals=asset_signals,
+                            analyzed_context=analyzed_context,
+                            weights=weights,
+                            thresholds=thresholds,
+                        )
+                        if best and float(best.get("score", 0.0)) >= float(thresholds.get("direct", 0.70)):
+                            return self._finalize_decision(best, analyzed_context)
+                except Exception as e:
+                    self.logger.debug(f"[{asset}] Momentum/Pattern block skipped: {e}")
+
             except Exception as e:
                 self.logger.debug(f"[{asset}] MTF range-accum skipped: {e}")
 
@@ -360,6 +397,264 @@ class ScalpingStrategy(BaseStrategy):
     # ==========================================================
     # =============       RÈGLES D’ENTRÉE       ================
     # ==========================================================
+    # === [SCORING] Multi-critères Contexte/Technique/OrderFlow/Risque ========
+    def _choose_best_candidate(
+        self,
+        candidates: List[Dict[str, Any]],
+        asset: str,
+        meta: Dict[str, Any],
+        asset_signals: Dict[str, Any],
+        analyzed_context: Dict[str, Any],
+        weights: Dict[str, float],
+        thresholds: Dict[str, float],
+    ) -> Optional[Dict[str, Any]]:
+        best = None
+        best_score = -1.0
+        for c in candidates:
+            s = self._score_candidate(c, meta, asset_signals, analyzed_context, weights)
+            c["score"] = float(max(0.0, min(1.0, s)))
+            if c["score"] > best_score:
+                best, best_score = c, c["score"]
+        return best
+
+    def _score_candidate(
+        self,
+        c: Dict[str, Any],
+        meta: Dict[str, Any],
+        asset_signals: Dict[str, Any],
+        analyzed_context: Dict[str, Any],
+        weights: Dict[str, float],
+    ) -> float:
+        # --- 1) Contexte (phase/MTF & confiance globale signaux) ---
+        phase = str(asset_signals.get("phase", "") or "").lower()
+        conf = float(asset_signals.get("confidence_score", 0.5) or 0.5)
+        align = 0.5
+        if c.get("action") == "BUY" and any(k in phase for k in ("bull", "up", "accum", "trend")):
+            align = 1.0
+        if c.get("action") == "SELL" and any(k in phase for k in ("bear", "down", "distrib", "trend")):
+            align = 1.0 if "trend" in phase or "bear" in phase else 0.8
+        context_score = 0.5 * conf + 0.5 * align
+        context_score = max(0.0, min(1.0, context_score))
+
+        # --- 2) Technique (score interne du setup) ---
+        tech = c.get("technical_score")
+        if tech is None:
+            tech = c.get("confidence", 0.6)
+        technical_score = max(0.0, min(1.0, float(tech)))
+
+        # --- 3) Order Flow (footprint/delta si dispo) ---
+        of = 0.0
+        try:
+            fp = float(asset_signals.get("footprint_score", 0.0) or 0.0) / 100.0
+            of = max(of, fp)
+            d = (asset_signals.get("footprint_summary") or {}).get("delta_total")
+            if isinstance(d, (int, float)):
+                of = max(of, min(abs(d) / 500.0, 1.0) * 0.7)  # plafonné
+        except Exception:
+            pass
+        orderflow_score = max(0.0, min(1.0, of))
+
+        # --- 4) Risque (spread bas = mieux ; heuristique simple) ---
+        sp = float(meta.get("spread_pips", 0.0) or 0.0)
+        if sp <= 5:
+            risk_score = 1.0
+        elif sp <= 10:
+            risk_score = 0.8
+        elif sp <= 15:
+            risk_score = 0.6
+        else:
+            risk_score = 0.3
+
+        w = lambda k, d: float(weights.get(k, d))
+        score = (
+            w("context", 0.3) * context_score
+            + w("technical", 0.4) * technical_score
+            + w("orderflow", 0.2) * orderflow_score
+            + w("risk", 0.1) * risk_score
+        )
+        return float(score)
+        # === [RÈGLES] Momentum & Patterns =========================================
+    def _rule_breakout_consolidation(
+        self, df: Optional[pd.DataFrame], asset: str, price: float, meta: Dict[str, Any], cfg: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Cassure d'une consolidation serrée (range étroit vs ATR), avec close hors range.
+        """
+        if df is None or len(df) < max(40, int(cfg.get("lookback_bars", 30))):
+            return None
+        lookback = int(cfg.get("lookback_bars", 30))
+        atr_p = int(cfg.get("atr_period", 14))
+        width_frac = float(cfg.get("max_width_over_atr", 1.4))  # range max vs ATR
+        breakout_buffer = float(cfg.get("breakout_buffer_frac", 0.10))  # % de la largeur
+
+        sub = df.tail(lookback)
+        hh, ll = float(sub["high"].max()), float(sub["low"].min())
+        width = hh - ll
+        atr = self._atr(df, period=atr_p)
+        if not (isinstance(atr, (int, float)) and atr > 0):
+            return None
+        if width / atr > width_frac:
+            return None
+
+        # Cassure franche au-dessus/au-dessous avec petit buffer
+        buf = breakout_buffer * width
+        if price >= hh + buf:
+            return {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "breakout_consolidation_up",
+                "strategy_type": "scalping",
+                "confidence": 0.72,
+                "technical_score": min(1.0, 0.6 + (width_frac - (width / atr)) * 0.15),
+            }
+        if price <= ll - buf:
+            return {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "breakout_consolidation_down",
+                "strategy_type": "scalping",
+                "confidence": 0.72,
+                "technical_score": min(1.0, 0.6 + (width_frac - (width / atr)) * 0.15),
+            }
+        return None
+
+    def _rule_trend_pullback(
+        self, df: Optional[pd.DataFrame], asset: str, price: float, meta: Dict[str, Any], cfg: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Tendance M1 par MAs, entrée sur pullback vers la courte.
+        """
+        if df is None or len(df) < 50:
+            return None
+        p_short = int(cfg.get("ma_short", 9))
+        p_long = int(cfg.get("ma_long", 21))
+        tol_frac = float(cfg.get("pullback_tolerance_frac", 0.25))  # % de (MA_long..MA_short)
+
+        close = df["close"].astype(float)
+        ma_s = self._sma(close, p_short)
+        ma_l = self._sma(close, p_long)
+        if ma_s is None or ma_l is None or pd.isna(ma_s.iloc[-1]) or pd.isna(ma_l.iloc[-1]):
+            return None
+
+        uptrend = ma_s.iloc[-1] > ma_l.iloc[-1] and ma_s.iloc[-3] > ma_l.iloc[-3]
+        downtrend = ma_s.iloc[-1] < ma_l.iloc[-1] and ma_s.iloc[-3] < ma_l.iloc[-3]
+        band_hi, band_lo = max(ma_s.iloc[-1], ma_l.iloc[-1]), min(ma_s.iloc[-1], ma_l.iloc[-1])
+        band = band_hi - band_lo
+        if band <= 0:
+            return None
+        near = (abs(price - ma_s.iloc[-1]) <= tol_frac * band)
+
+        if uptrend and near and price >= ma_s.iloc[-1]:
+            return {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "trend_pullback_buy",
+                "strategy_type": "scalping",
+                "confidence": 0.70,
+                "technical_score": 0.75,
+            }
+        if downtrend and near and price <= ma_s.iloc[-1]:
+            return {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "trend_pullback_sell",
+                "strategy_type": "scalping",
+                "confidence": 0.70,
+                "technical_score": 0.75,
+            }
+        return None
+
+    def _rule_inside_bar_breakout(
+        self, df: Optional[pd.DataFrame], asset: str, price: float, meta: Dict[str, Any], cfg: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Pattern inside bar + cassure de la mère.
+        """
+        if df is None or len(df) < 3:
+            return None
+        hi1, lo1 = float(df["high"].iloc[-1]), float(df["low"].iloc[-1])
+        hi2, lo2 = float(df["high"].iloc[-2]), float(df["low"].iloc[-2])
+        mother_inside = (hi1 <= hi2) and (lo1 >= lo2)
+        if not mother_inside:
+            return None
+
+        buffer_pips = float(cfg.get("breakout_buffer_pips", 1.0))
+        pip = float(meta.get("pip_size", 0.0001) or 0.0001)
+        up_lvl = hi2 + buffer_pips * pip
+        dn_lvl = lo2 - buffer_pips * pip
+
+        if price >= up_lvl:
+            return {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "inside_bar_breakout_up",
+                "strategy_type": "scalping",
+                "confidence": 0.68,
+                "technical_score": 0.70,
+            }
+        if price <= dn_lvl:
+            return {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "inside_bar_breakout_down",
+                "strategy_type": "scalping",
+                "confidence": 0.68,
+                "technical_score": 0.70,
+            }
+        return None
+
+    def _rule_momentum_ignition(
+        self, df: Optional[pd.DataFrame], asset: str, price: float, meta: Dict[str, Any], cfg: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Première impulsion directionnelle: grande bougie vs ATR, close proche des extrêmes.
+        """
+        if df is None or len(df) < 20:
+            return None
+        atr_p = int(cfg.get("atr_period", 14))
+        min_mult = float(cfg.get("min_atr_mult", 1.8))
+        edge_frac = float(cfg.get("close_edge_frac", 0.2))  # closings près du high/low
+
+        atr = self._atr(df, period=atr_p)
+        if not (isinstance(atr, (int, float)) and atr > 0):
+            return None
+        last = df.iloc[-1]
+        rng = float(last["high"]) - float(last["low"])
+        if rng < min_mult * atr:
+            return None
+
+        close = float(last["close"])
+        hi, lo = float(last["high"]), float(last["low"])
+        # proche du high → BUY ; proche du low → SELL
+        if (hi - close) <= edge_frac * rng and price >= close:
+            return {
+                "action": "BUY",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "momentum_ignition_buy",
+                "strategy_type": "scalping",
+                "confidence": 0.72,
+                "technical_score": 0.78,
+            }
+        if (close - lo) <= edge_frac * rng and price <= close:
+            return {
+                "action": "SELL",
+                "asset": asset,
+                "entry_price": price,
+                "rule_name": "momentum_ignition_sell",
+                "strategy_type": "scalping",
+                "confidence": 0.72,
+                "technical_score": 0.78,
+            }
+        return None
+
+
     def _get_atr_m1_pips(
         self,
         asset: str,

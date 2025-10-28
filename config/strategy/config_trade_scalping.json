@@ -138,6 +138,39 @@
       "min_orderflow_score": 60,
       "max_spread_pts": 15
     },
+    "scoring_weights": {
+      "context": 0.30,
+      "technical": 0.40,
+      "orderflow": 0.20,
+      "risk": 0.10
+    },
+    "scoring_thresholds": {
+      "direct": 0.70,
+      "conditional": 0.50
+    },
+    "momentum": {
+      "breakout": {
+        "lookback_bars": 30,
+        "atr_period": 14,
+        "max_width_over_atr": 1.4,
+        "breakout_buffer_frac": 0.10
+      },
+      "trend_pullback": {
+        "ma_short": 9,
+        "ma_long": 21,
+        "pullback_tolerance_frac": 0.25
+      },
+      "ignition": {
+        "atr_period": 14,
+        "min_atr_mult": 1.8,
+        "close_edge_frac": 0.20
+      }
+    },
+    "patterns": {
+      "inside_bar": {
+        "breakout_buffer_pips": 1.0
+      }
+    },
     "ponderations": {
       "trigger_weight": 0.50,
       "orderflow_weight": 0.30,
