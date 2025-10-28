@@ -56,6 +56,24 @@
   ],
   "overrides": {
     "scalping": {
+      "footprint": {
+        "m1_min_ticks": 80,
+        "m1_min_coverage_s": 12,
+        "burst_tolerance": {
+          "tickrate_min": 6.0,
+          "coverage_s_min_burst": 6
+        }
+      },
+      "phase_detection": {
+        "allow_no_clear_phase_if_strong": {
+          "of_delta_abs_min": 120.0,
+          "tickrate_min": 6.0
+        }
+      },
+      "fusion": {
+        "ttl_ms": 1200,
+        "max_slippage_points": 10.0
+      },
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
