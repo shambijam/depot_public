@@ -1228,38 +1228,90 @@ def run_single_pipeline_cycle(
         # === FUSION SUMMARY (affichage) ===
         print("\n" + "=" * 58)
         print("🔎 FUSION SUMMARY (par actif)")
+
+        def _fmt_float(x):
+            try:
+                v = float(x)
+                return f"{v:.2f}"
+            except Exception:
+                return str(x)
+
         for asset, sig in all_assets_trading_signals.items():
             try:
+                # Fusion uniquement pour XAUUSD
                 if asset.upper() != "XAUUSD":
                     print(f"   {asset:<7} → n/a (fusion off)")
                     continue
+
+                # Récupération robuste du 'latest' (clé normalisée)
+                _latest = (
+                    sig.get("__latest")
+                    or sig.get("__latest__")
+                    or sig.get("__latest____")
+                    or {}
+                )
+
+                # 1) Snapshot "maintenant" (recompute)
                 if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                    _latest = sig.get("__latest____", {})
                     _syminfo = mt5_connector.get_symbol_info(asset)
-                    of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(sig, _latest, _syminfo, mt5_connector, asset)
-                    fdec_syn = _fusion_mgr.fuse(orderflow=of, footprint=fp, triggers=trig, strategy_config=strat_cfg, context=ctx)
+                    of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
+                        sig, _latest, _syminfo, mt5_connector, asset
+                    )
+                    fdec_syn = _fusion_mgr.fuse(
+                        orderflow=of,
+                        footprint=fp,
+                        triggers=trig,
+                        strategy_config=strat_cfg,
+                        context=ctx,
+                    )
                 elif REQUIRE_FUSION_MGR:
                     fdec_syn = {"ok": False, "reason": "fusion_manager_missing"}
                 else:
                     fdec_syn = _quick_vote_fusion(
                         signals=sig,
-                        latest=sig.get("__latest____") or {},
+                        latest=_latest,
                         base_cfg=base_config,
                         sym=asset,
                         mt5c=mt5_connector,
                     )
+
             except Exception as _e:
                 fdec_syn = {"ok": False, "reason": f"fusion_error:{_e}"}
 
-            # Affichage systématique d'une ligne de synthèse
-            if fdec_syn and (fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY","SELL"}):
-                act = fdec_syn.get("action", "—")
-                sc  = fdec_syn.get("fused_confidence", None)
-                sc_txt = f"{sc:.2f}" if isinstance(sc, (int, float)) else str(sc)
-                print(f"   {asset:<7} → action={act:<4} score={sc_txt}")
+            # Construire la ligne "snapshot"
+            if fdec_syn and (fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY", "SELL"}):
+                act_now = fdec_syn.get("action", "—")
+                sc_now = (
+                    fdec_syn.get("fused_confidence", None)
+                    if isinstance(fdec_syn, dict)
+                    else None
+                )
+                if sc_now is None:
+                    sc_now = fdec_syn.get("score", None)  # fallback (quick_vote)
+                snap_line = f"snapshot: action={act_now:<4} score={_fmt_float(sc_now)}"
             else:
                 rz = (fdec_syn or {}).get("reason", "no_decision")
-                print(f"   {asset:<7} → action=—   score=—   veto={rz}")
+                snap_line = f"snapshot: action=—   score=—   veto={rz}"
+
+            # 2) Dernière décision effectivement retenue dans ce cycle (si présente)
+            lasts = [
+                d
+                for d in (fusion_scalping_decisions or [])
+                if str(d.get("asset", "")).upper() == asset.upper()
+            ]
+            if lasts:
+                # On prend la meilleure par 'confidence'
+                try:
+                    best = max(lasts, key=lambda d: float(d.get("confidence", 0.0)))
+                except Exception:
+                    best = lasts[-1]
+                act_used = best.get("action", "—")
+                sc_used = best.get("confidence", None)
+                used_line = f"used:     action={act_used:<4} score={_fmt_float(sc_used)}"
+                print(f"   {asset:<7} → {used_line} | {snap_line}")
+            else:
+                print(f"   {asset:<7} → {snap_line}")
+
 
         # === GATECHECK XAUUSD (diagnostic) ===
         try:
@@ -1568,6 +1620,12 @@ def run_single_pipeline_cycle(
                                 },
                                 "trade": {"action": side, "side": side},
                             }
+                            # --- Harmoniser fat-finger policy avec la voie normale ---
+                            safety = td.setdefault("safety", {})
+                            ff = safety.setdefault("fat_finger", {})
+                            ff.setdefault("policy", "FLOOR")  # clamp plutôt qu'abandon
+                            # (le cap max volume/order reste lu de la conf actif)
+
                             sltp_cfg = (
                                 (
                                     (global_context.get("asset_configs", {}) or {}).get(
@@ -1599,6 +1657,12 @@ def run_single_pipeline_cycle(
                                 "context": global_context,
                                 "active_config": base_config,
                             }
+                            decision_pkg.setdefault("audit_context", {}).update({
+                                "intent_symbol": td.get("symbol"),
+                                "intent_side": td.get("side"),
+                                "intent_burst": td.get("burst_size"),
+                            })
+                            
                             res = run_trade_execution_pipeline(
                                 trade_executor, decision_pkg, is_dry_run=is_dry_run
                             )
@@ -2126,6 +2190,12 @@ def run_single_pipeline_cycle(
                         "context": global_context,
                         "active_config": base_config,
                     }
+                    decision_pkg.setdefault("audit_context", {}).update({
+                        "intent_symbol": td.get("symbol"),
+                        "intent_side": td.get("side"),
+                        "intent_burst": td.get("burst_size"),
+                    })
+
                     res = run_trade_execution_pipeline(
                         trade_executor, decision_pkg, is_dry_run=is_dry_run
                     )
