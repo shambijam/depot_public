@@ -1109,7 +1109,7 @@ def run_single_pipeline_cycle(
                     or {}
                 )
 
-                signals["__latest"] = latest  # pour diag WHY_NO_TRADE
+                signals["__latest__"] = latest  # pour diag WHY_NO_TRADE
 
                 if CANDLES_ENABLED:
                     _pat = market_results.get("patterns", {})
@@ -1234,25 +1234,32 @@ def run_single_pipeline_cycle(
                     print(f"   {asset:<7} → n/a (fusion off)")
                     continue
                 if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                    _latest = sig.get("__latest__", {})
+                    _latest = sig.get("__latest____", {})
                     _syminfo = mt5_connector.get_symbol_info(asset)
                     of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(sig, _latest, _syminfo, mt5_connector, asset)
                     fdec_syn = _fusion_mgr.fuse(orderflow=of, footprint=fp, triggers=trig, strategy_config=strat_cfg, context=ctx)
                 elif REQUIRE_FUSION_MGR:
                     fdec_syn = {"ok": False, "reason": "fusion_manager_missing"}
                 else:
-                    fdec_syn = _quick_vote_fusion(signals=sig, latest=sig.get("__latest", {}), base_cfg=base_config, sym=asset, mt5c=mt5_connector)
-                        
+                    fdec_syn = _quick_vote_fusion(
+                        signals=sig,
+                        latest=sig.get("__latest____") or {},
+                        base_cfg=base_config,
+                        sym=asset,
+                        mt5c=mt5_connector,
+                    )
             except Exception as _e:
                 fdec_syn = {"ok": False, "reason": f"fusion_error:{_e}"}
 
-                if fdec_syn and (fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY","SELL"}):
-                    act = fdec_syn.get("action", "—")
-                    sc  = fdec_syn.get("fused_confidence", None)
-                    print(f"   {asset:<7} → action={act:<4} score={sc:.2f}")
-                else:
-                    rz = (fdec_syn or {}).get("reason", "no_decision")
-                    print(f"   {asset:<7} → action=—   score=—   veto={rz}")
+            # Affichage systématique d'une ligne de synthèse
+            if fdec_syn and (fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY","SELL"}):
+                act = fdec_syn.get("action", "—")
+                sc  = fdec_syn.get("fused_confidence", None)
+                sc_txt = f"{sc:.2f}" if isinstance(sc, (int, float)) else str(sc)
+                print(f"   {asset:<7} → action={act:<4} score={sc_txt}")
+            else:
+                rz = (fdec_syn or {}).get("reason", "no_decision")
+                print(f"   {asset:<7} → action=—   score=—   veto={rz}")
 
         # === GATECHECK XAUUSD (diagnostic) ===
         try:
@@ -1289,16 +1296,20 @@ def run_single_pipeline_cycle(
                     if isinstance(of.get("mean_imbalance"), (int, float))
                     else None
                 )
+                conf_txt = f"{conf:.3f}" if isinstance(conf, (int, float)) else str(conf)
+                rate_txt = f"{trate:.2f}/s" if isinstance(trate, (int, float)) else f"{trate}/s"
+                imb_txt  = f"{imb:.2f}" if isinstance(imb, (int, float)) else str(imb)
 
                 print(
                     "[GATECHECK][XAUUSD] "
-                    f"phase={phase} conf={conf:.3f if isinstance(conf,(int,float)) else conf} spread={spread} | "
-                    f"FP ticks={ticks} cov={cov}s rate={round(trate,2) if isinstance(trate,(int,float)) else trate}/s "
+                    f"phase={phase} conf={conf_txt} spread={spread} | "
+                    f"FP ticks={ticks} cov={cov}s rate={rate_txt} "
                     f"(TH: ticks≥{fpc.get('m1_min_ticks','?')}, cov≥{fpc.get('m1_min_coverage_s','?')}s "
                     f"OR burst≥{bt.get('tickrate_min','?')}/s & ≥{bt.get('coverage_s_min_burst','?')}s) | "
-                    f"OF Δ={dlt} imb={round(imb,2) if isinstance(imb,(int,float)) else imb} "
+                    f"OF Δ={dlt} imb={imb_txt} "
                     f"(NCP-strong: Δ≥{ncp.get('of_delta_abs_min','?')} & rate≥{ncp.get('tickrate_min','?')}/s)"
                 )
+
         except Exception as _e:
             logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
 
@@ -1743,15 +1754,19 @@ def run_single_pipeline_cycle(
                         logger.info(f"[WHY_NO_TRADE][{asset}] fusion_off")
                         continue
                     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
+                        _latest = sig.get("__latest____", {})
+                        _syminfo = mt5_connector.get_symbol_info(asset)
+                        of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(sig, _latest, _syminfo, mt5_connector, asset)
                         fdec_diag = _fusion_mgr.fuse(
-                            signals=sig,
-                            latest=sig.get("__latest", {}),
-                            base_config=base_config,
-                            symbol=asset,
-                            mt5c=mt5_connector,
+                            orderflow=of,
+                            footprint=fp,
+                            triggers=trig,
+                            strategy_config=strat_cfg,
+                            context=ctx,
                         )
                     else:
                         fdec_diag = {"ok": False, "reason": "fusion_manager_missing"}
+
                     if fdec_diag and fdec_diag.get("ok"):
                         logger.info(
                             f"[WHY_NO_TRADE][{asset}] fusion_ok_but_veto_upstream"
@@ -2151,7 +2166,7 @@ def run_single_pipeline_cycle(
             for td in liquidity_decisions:
                 action = str(td.get("action", "")).upper()
                 if action in {"BUY", "SELL"}:
-                    _execute_single_decision(
+                    res = _execute_single_decision(
                         td,
                         trade_executor,
                         mt5_connector,
@@ -2160,6 +2175,10 @@ def run_single_pipeline_cycle(
                         execution_mode,
                         logger,
                     )
+                    # si l'exécution ne remonte pas explicitement "failed", on considère le cycle comme réussi
+                    if res is None or res not in ("failed", False):
+                        trade_executed_successfully = True
+
         # === EXIT Liquidity forcés ===
         try:
             current_positions = mt5_connector.get_positions()
