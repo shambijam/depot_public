@@ -512,12 +512,18 @@ def run_single_pipeline_cycle(
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
 
-    Nouveautés :
-    - ✅ Utilise MarketAnalyzer (fusion PhaseObserver + PatternEngine)
-    - ✅ Cycle basé sur un seul scan lourd par actif
-    - ✅ Simplification des signaux consolidés
+    Architecture:
+      - MarketAnalyzer (PhaseObserver + PatternEngine) → annotated_df + latest
+      - Analyses d'entrée pour la fusion: Footprint M1 (ticks bougie) + Orderflow v5
+      - Signals consolidés par actif
+      - FusionManager → décisions scalping (XAUUSD uniquement)
+      - Fast-lane d'exécution si décision Fusion valide (avec gardes panier/slippage)
+      - decision_pipeline pour le reste (ex: Liquidity), mais scalping filtré Fusion-only
+      - SLTP dynamique (trailing-only pour scalping), maintenance périodique
     """
+    import logging, pandas as pd  # noqa
 
+    # --- Safe import diag tracker ---
     try:
         from core.diagnostics import get_tracker_from_context
     except Exception:
@@ -532,26 +538,21 @@ def run_single_pipeline_cycle(
     trade_executed_successfully = False
     global_context: Dict[str, Any] = {}
 
-    # ✅ MarketAnalyzer unifié
+    # === Moteurs d'analyse ===
     market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
 
-    # [PATCH-FUSION] Fallback local si pas de FusionManager externe
+    # === FusionManager requis pour scalping XAUUSD ===
     try:
-        from phase_observer.fusion_manager import (
-            FusionManager,
-        )  # si tu as un module dédié
+        from phase_observer.fusion_manager import FusionManager
 
         _fusion_mgr = FusionManager(config_manager=config_manager, logger=logger)
     except Exception:
         _fusion_mgr = None
 
+    # --- Fallback vote simple (jamais utilisé si REQUIRE_FUSION_MGR=True) ---
     def _quick_vote_fusion(
         signals: dict, latest: dict, base_cfg: dict, sym: str, mt5c: MT5Connector
     ):
-        """
-        Fusion minimaliste (vote direction + score pondéré) avec gates rapides.
-        Retourne un dict avec ok=True/False + reason (si veto) pour les logs.
-        """
         try:
             spread = float(signals.get("current_spread_points", float("inf")))
             phase = str(signals.get("phase", "neutral") or "neutral")
@@ -559,7 +560,6 @@ def run_single_pipeline_cycle(
             fp = signals.get("footprint_summary") or {}
             of = signals.get("orderflow_summary") or {}
 
-            # Seuils
             sym_spread_max = {"EURUSD": 12, "GBPUSD": 18, "XAUUSD": 40}.get(sym, 999)
             m1_min_ticks = int(
                 (
@@ -622,13 +622,11 @@ def run_single_pipeline_cycle(
                 )
             )
 
-            # Mesures
             ticks = int(fp.get("tick_count", 0) or 0)
             cov = float(fp.get("coverage_s", 0.0) or 0.0)
             tr = float(fp.get("tick_rate", 0.0) or 0.0)
             dlt = float(of.get("delta_total", 0.0) or 0.0)
 
-            # Gates → accumulate reasons
             if spread > sym_spread_max:
                 return {
                     "ok": False,
@@ -651,16 +649,13 @@ def run_single_pipeline_cycle(
                     "meta": {"delta_total": dlt},
                 }
 
-            # Votes
-            vote = 0
+            vote, trig_dir = 0, "NEUTRAL"
             if "bull" in phase or "up" in phase:
                 vote += 1
                 trig_dir = "BUY"
             elif "bear" in phase or "down" in phase:
                 vote -= 1
                 trig_dir = "SELL"
-            else:
-                trig_dir = "NEUTRAL"
 
             fp_dir = (
                 "BUY"
@@ -683,8 +678,6 @@ def run_single_pipeline_cycle(
                 }
 
             action = "BUY" if vote > 0 else "SELL"
-
-            # Score
             fp_strength = min(
                 1.0,
                 max(
@@ -698,26 +691,23 @@ def run_single_pipeline_cycle(
                 ),
             )
             of_strength = min(1.0, max(0.0, abs(dlt) / max(of_delta_min, 1.0)))
-            trig_strength = conf
-            align_bonus = (
-                0.1
-                if (trig_dir == fp_dir == of_dir and trig_dir in {"BUY", "SELL"})
-                else 0.0
-            )
             score = min(
                 1.0,
-                0.25 * trig_strength
+                0.25 * conf
                 + 0.35 * fp_strength
                 + 0.40 * of_strength
-                + align_bonus,
+                + (
+                    0.1
+                    if (trig_dir == fp_dir == of_dir and trig_dir in {"BUY", "SELL"})
+                    else 0.0
+                ),
             )
 
-            # Prix de référence
             price = None
             try:
-                tk = getattr(mt5c, "get_symbol_tick", None)
-                if callable(tk):
-                    t = tk(sym)
+                tkfun = getattr(mt5c, "get_symbol_tick", None)
+                if callable(tkfun):
+                    t = tkfun(sym)
                     ask = (
                         t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None)
                     )
@@ -753,6 +743,7 @@ def run_single_pipeline_cycle(
         except Exception as e:
             return {"ok": False, "reason": f"fusion_error:{e}"}
 
+    # === Préparation exécution ===
     try:
         if not getattr(mt5_connector, "is_connected", False):
             raise RuntimeError("MT5 a perdu la connexion persistante.")
@@ -760,66 +751,22 @@ def run_single_pipeline_cycle(
         base_config = config_manager.get_current_dynamic_config()
         execution_mode = str(base_config.get("mode_execution", "DEMO")).upper()
 
-        # --- LOGGING SWITCH (affichage) ---
-        logging_block = base_config.get("logging", {}) or {}
-        LOG_FUSION_ONLY: bool = bool(logging_block.get("fusion_only", True))
-
-        # --- FUSION SWITCH (garde d'existence) ---
-        fusion_block = base_config.get("fusion", {}) or {}
-        REQUIRE_FUSION_MGR: bool = bool(fusion_block.get("require_manager", True))
-
-        # --- Périmètre Fusion : par défaut uniquement XAUUSD (scalping only) ---
-        FUSION_ASSETS = {a.upper() for a in (fusion_block.get("assets") or ["XAUUSD"])}
+        # Logging & Fusion policy (durcies)
+        LOG_FUSION_ONLY: bool = True
+        REQUIRE_FUSION_MGR: bool = True
+        FUSION_ASSETS = {"XAUUSD"}
 
         def _fusion_applies(asset: str) -> bool:
-            """La fusion ne s’applique que sur le périmètre défini (par défaut XAUUSD)."""
             return asset.upper() in FUSION_ASSETS
 
-        def _emit_fusion_log(asset: str, fdec: dict, signals: dict, logger):
-            """Affiche UNE seule ligne par actif, issue de FusionManager (ou du fallback rapide)"""
-            try:
-                spread = signals.get("current_spread_points", None)
-                fp = signals.get("footprint_summary") or {}
-                of = signals.get("orderflow_summary") or {}
-                tr = fp.get("tick_rate")
-                cov = fp.get("coverage_s")
-                dlt = of.get("delta_total")
-
-                if fdec and fdec.get("ok"):
-                    logger.info(
-                        "[FUSION] %s → %s score=%.2f ttl=%dms | spread=%s | tickrate=%s/s cov=%ss | Δ=%s",
-                        asset,
-                        fdec.get("action", "?"),
-                        float(fdec.get("score", 0.0)),
-                        int(fdec.get("ttl_ms", 0)),
-                        spread,
-                        (f"{tr:.2f}" if isinstance(tr, (int, float)) else tr),
-                        (f"{cov:.0f}" if isinstance(cov, (int, float)) else cov),
-                        (f"{dlt:.2f}" if isinstance(dlt, (int, float)) else dlt),
-                    )
-                else:
-                    reason = (fdec or {}).get("reason") or "no_trigger_or_veto"
-                    logger.info(
-                        "[FUSION] %s → veto (%s) | spread=%s | tickrate=%s/s cov=%ss | Δ=%s",
-                        asset,
-                        reason,
-                        spread,
-                        (f"{tr:.2f}" if isinstance(tr, (int, float)) else tr),
-                        (f"{cov:.0f}" if isinstance(cov, (int, float)) else cov),
-                        (f"{dlt:.2f}" if isinstance(dlt, (int, float)) else dlt),
-                    )
-            except Exception:
-                pass
-
-        # --- EXEC MODE OVERRIDE (force depuis config) ---
+        logger.info(
+            f"[EXEC MODE] is_dry_run={bool(base_config.get('trade_execution', {}).get('dry_run', is_dry_run))} | execution_mode={execution_mode}"
+        )
         is_dry_run = bool(
             base_config.get("trade_execution", {}).get("dry_run", is_dry_run)
         )
-        logger.info(
-            f"[EXEC MODE] is_dry_run={is_dry_run} | execution_mode={execution_mode}"
-        )
 
-        # --- SNAPSHOT CFG BURST (BOOT: cycle 1 uniquement) ---
+        # Snapshot burst_size (cycle 1)
         if cycle_count == 1:
 
             def _dig(d, path):
@@ -830,12 +777,9 @@ def run_single_pipeline_cycle(
                     cur = cur.get(k)
                 return cur
 
-            # global (prod_config)
             g_burst = _dig(
                 base_config, ["entry_rules", "scalping", "burst_scalping", "burst_size"]
             )
-
-            # strategy config (config_trade_scalping.json chargé via StrategyManager)
             try:
                 strat_conf = strategy_manager.get_strategy_config("scalping") or {}
                 s_burst = _dig(
@@ -844,8 +788,6 @@ def run_single_pipeline_cycle(
                 )
             except Exception:
                 s_burst = None
-
-            # asset XAUUSD (entry + overrides nouveau + legacy)
             try:
                 xa = config_manager.load_asset_config("XAUUSD") or {}
             except Exception:
@@ -863,20 +805,17 @@ def run_single_pipeline_cycle(
                     "burst_scalping",
                     "burst_size",
                 ],
-            )  # nouveau chemin
-            xa_legacy = _dig(
-                xa, ["overrides", "scalping", "burst", "burst_size"]
-            )  # ancien chemin
-
+            )
+            xa_legacy = _dig(xa, ["overrides", "scalping", "burst", "burst_size"])
             logger.critical(
-                f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | "
-                f"XAUUSD.entry={xa_entry} | XAUUSD.override={xa_override} | XAUUSD.legacy={xa_legacy}"
+                f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | XAUUSD.entry={xa_entry} | XAUUSD.override={xa_override} | XAUUSD.legacy={xa_legacy}"
             )
 
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
             mode=execution_mode
         )
-        # [PATCH-CANDLES] Master switch lu une fois pour le cycle
+
+        # Candles switch
         try:
             _cs = (
                 config_manager.get("phase_detection_defaults.candlestick_analysis", {})
@@ -886,6 +825,7 @@ def run_single_pipeline_cycle(
         except Exception:
             CANDLES_ENABLED = True
 
+        # Assets autorisés
         global_safety = base_config.get("global_safety", {}) or {}
         all_symbols = list(global_safety.get("global_allowed_symbols", []))
         account_allowed = set(
@@ -897,32 +837,37 @@ def run_single_pipeline_cycle(
             else all_symbols
         )
 
+        # Hard-gate: FusionManager requis pour XAUUSD
+        if REQUIRE_FUSION_MGR and (_fusion_mgr is None):
+            if "XAUUSD" in {a.upper() for a in tradeable_assets}:
+                logger.critical(
+                    "[FUSION] FusionManager requis pour le scalping XAUUSD — XAUUSD retiré du cycle (aucun fallback)."
+                )
+                tradeable_assets = [
+                    a for a in tradeable_assets if a.upper() != "XAUUSD"
+                ]
+
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
             return False
 
-        # === Nouveau bloc collecte + analyse unifiée ===
+        # Collecte/Analyse
         all_assets_market_data: Dict[str, pd.DataFrame] = {}
         all_assets_trading_signals: Dict[str, Dict[str, Any]] = {}
-
-        # ⚡ Décisions Footprint (Scalping Burst) collectées pendant la boucle actifs
-        footprint_scalping_decisions: List[Dict[str, Any]] = []
+        fusion_scalping_decisions: List[Dict[str, Any]] = []
 
         dcfg = base_config.get("data_collection", {}) or {}
         timeframe_str = dcfg.get("default_timeframe", "M1")
         bars_to_fetch = int(dcfg.get("default_bars_count", 500))
         min_required_bars = 50
 
-        # [PATCH-FUSION] Collecte des décisions Fusion
-        fusion_scalping_decisions: List[Dict[str, Any]] = []
-
         for asset in tradeable_assets:
             print(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
                 if (
-                    rates_df is None
+                    (rates_df is None)
                     or rates_df.empty
                     or len(rates_df) < min_required_bars
                 ):
@@ -933,21 +878,17 @@ def run_single_pipeline_cycle(
                 if symbol_info_mt5:
                     rates_df["point"] = getattr(symbol_info_mt5, "point", 0.0)
                     rates_df["spread"] = getattr(symbol_info_mt5, "spread", 0)
-                # ✅ Initialiser l’historique du PhaseObserver si vide
+
+                # Seed history
                 if (
                     market_analyzer.phase_observer._history_df is None
-                    or market_analyzer.phase_observer._history_df.empty
-                ):
+                ) or market_analyzer.phase_observer._history_df.empty:
                     market_analyzer.phase_observer.load_initial_history(rates_df.copy())
 
-                # ✅ Mode "horloge suisse" — 200 au 1er cycle, puis rolling 50, avec recalibration périodique
-                dcfg = base_config.get("data_collection", {}) or {}
-                rolling_lookback = int(dcfg.get("rolling_lookback_bars", 50))  # ex: 50
-                full_refresh_bars = int(dcfg.get("full_refresh_bars", 200))  # ex: 200
-                recalib_n = int(
-                    dcfg.get("recalibration_every_n_cycles", 10)
-                )  # ex: toutes les 10 itérations
-
+                # Rolling vs full refresh
+                rolling_lookback = int(dcfg.get("rolling_lookback_bars", 50))
+                full_refresh_bars = int(dcfg.get("full_refresh_bars", 200))
+                recalib_n = int(dcfg.get("recalibration_every_n_cycles", 10))
                 do_full_refresh = (cycle_count == 1) or (
                     recalib_n > 0 and cycle_count % recalib_n == 0
                 )
@@ -957,7 +898,7 @@ def run_single_pipeline_cycle(
 
                 market_results = market_analyzer.analyze(subset_df, asset)
 
-                # [PATCH-CANDLES] Purge patterns & traces chandeliers si OFF (anti-effet de bord)
+                # Option: purge patterns si OFF
                 if not CANDLES_ENABLED:
                     try:
                         market_results.pop("patterns", None)
@@ -967,7 +908,6 @@ def run_single_pipeline_cycle(
                     except Exception:
                         pass
 
-                # ⚠️ Ne réinitialise pas l’historique à chaque cycle → limite les doublons de logs
                 if cycle_count == 1 or do_full_refresh:
                     market_analyzer.phase_observer.load_initial_history(
                         subset_df.copy()
@@ -977,7 +917,6 @@ def run_single_pipeline_cycle(
                         subset_df.copy()
                     )
 
-                # 🔍 Debug : log des clés retournées par MarketAnalyzer
                 logger.debug(
                     f"[{asset}] MarketAnalyzer → keys={list(market_results.keys())}"
                 )
@@ -991,7 +930,8 @@ def run_single_pipeline_cycle(
                 logger.info(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
-                # === LOG DIAGNOSTIQUE HISTORIQUE 200 bougies ===
+
+                # Log 200 bougies
                 if CANDLES_ENABLED:
                     try:
                         last_200 = annotated_rates_df.tail(200)
@@ -1001,7 +941,7 @@ def run_single_pipeline_cycle(
                             else None
                         )
                         avg_range = (
-                            (last_200["high"] - last_200["low"]).mean()
+                            ((last_200["high"] - last_200["low"]).mean())
                             if {"high", "low"} <= set(last_200.columns)
                             else None
                         )
@@ -1015,27 +955,17 @@ def run_single_pipeline_cycle(
                             if {"close", "open"} <= set(last_200.columns)
                             else 0
                         )
-
                         logger.info(
-                            f"[{asset}] Historique(200 bougies) → "
-                            f"Bull={bull_candles}, Bear={bear_candles}, "
-                            f"VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
+                            f"[{asset}] Historique(200) → Bull={bull_candles}, Bear={bear_candles}, VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
                         )
                     except Exception as e:
-                        logger.warning(
-                            f"[{asset}] Impossible de résumer l’historique 200 bougies: {e}"
-                        )
+                        logger.warning(f"[{asset}] Résumé 200 bougies impossible: {e}")
                 else:
-                    logger.debug(
-                        f"[{asset}] Skip log 200 bougies (candlestick_analysis disabled)."
-                    )
+                    logger.debug(f"[{asset}] Skip résumé 200 (candles disabled).")
 
-                # === PATCH FOOTPRINT ANALYSE (ciblage ticks dernière bougie) ===
+                # === FOOTPRINT ANALYSE (ticks de la dernière bougie M1) ===
                 try:
-                    # ✅ Récupération de la dernière bougie fermée
                     last_candle = annotated_rates_df.iloc[-1]
-
-                    # ✅ Gestion robuste du timestamp
                     if "time" in annotated_rates_df.columns:
                         start_ts = pd.to_datetime(
                             last_candle["time"], utc=True, errors="coerce"
@@ -1044,21 +974,14 @@ def run_single_pipeline_cycle(
                         start_ts = pd.to_datetime(
                             last_candle.name, utc=True, errors="coerce"
                         )
-
                     if pd.isna(start_ts):
                         start_ts = pd.Timestamp.utcnow()
-
-                    # ✅ Calcul end_ts cohérent (M1 = +1 minute)
                     end_ts = start_ts + pd.Timedelta(minutes=1)
 
-                    # ✅ Récupération des ticks pour cette bougie
                     ticks_df = mt5_connector.get_ticks_for_candle(
-                        asset,
-                        start_ts.to_pydatetime(),
-                        end_ts.to_pydatetime(),
+                        asset, start_ts.to_pydatetime(), end_ts.to_pydatetime()
                     )
 
-                    # Normalisation du temps
                     if "time" in annotated_rates_df.columns:
                         annotated_rates_df["time"] = pd.to_datetime(
                             annotated_rates_df["time"], utc=True, errors="coerce"
@@ -1068,7 +991,6 @@ def run_single_pipeline_cycle(
                         ticks_df["time"] = pd.to_datetime(
                             ticks_df["time"], utc=True, errors="coerce"
                         )
-
                         fp_res = footprint_validator(
                             annotated_rates_df,
                             ticks_df,
@@ -1076,192 +998,38 @@ def run_single_pipeline_cycle(
                             price_step=None,
                             imbalance_threshold=0.7,
                         )
-
                         latest = dict(latest)
                         latest["footprint_score"] = fp_res.get("score", 0)
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
-
                     else:
                         logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
-
                 except Exception as e:
                     logger.error(
                         f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
                     )
 
-                # === FOOTPRINT TRIGGERS → Décision Scalping Burst (LIMIT+FOK) ===
+                # === ORDERFLOW v5 ANALYSE (5 dernières bougies) ===
                 try:
-                    # 1) Ticks récents pour snapshot footprint (5–8s)
-                    ticks_recent_df = None
-                    try:
-                        # Si tu as une API range/now → privilégier 8s récents
-                        _now = pd.Timestamp.utcnow()
-                        start_recent = _now - pd.Timedelta(seconds=8)
-                        if hasattr(mt5_connector, "get_ticks_range"):
-                            ticks_recent_df = mt5_connector.get_ticks_range(
-                                asset,
-                                start_recent.to_pydatetime(),
-                                _now.to_pydatetime(),
-                            )
-                        elif hasattr(mt5_connector, "get_ticks_last_seconds"):
-                            ticks_recent_df = mt5_connector.get_ticks_last_seconds(
-                                asset, seconds=8
-                            )
-                    except Exception:
-                        ticks_recent_df = None
-
-                    # Fallback: réutiliser ticks_df de la bougie (si pas de better API)
-                    if (ticks_recent_df is None or ticks_recent_df.empty) and (
-                        "ticks_df" in locals()
-                    ):
-                        ticks_recent_df = ticks_df
-
-                    if ticks_recent_df is not None and not ticks_recent_df.empty:
-                        ok_fp, dec_fp = market_analyzer.analyze_footprint_triggers(
-                            asset=asset,
-                            ticks=ticks_recent_df,
-                            bars=annotated_rates_df,  # historique M1 (>= 20 barres)
-                            strategy_config=base_config,  # fallback si self.footprint_triggers manquant
-                        )
-                    else:
-                        ok_fp, dec_fp = False, {"reason": "no recent ticks"}
-
-                    if ok_fp:
-                        # Construire la décision pour ton exécuteur actuel
-                        # - rule_name=burst_scalping → tes gardes/trailing existants se branchent
-                        entry = dec_fp.get("entry", {}) or {}
-                        action = str(dec_fp.get("action", "")).upper()
-                        if action not in {"BUY", "SELL"}:
-                            logger.debug(
-                                f"[FOOTPRINT→DECISION][{asset}] skip: action invalide ({action})"
-                            )
-                            raise RuntimeError("action invalid")
-
-                        _bc = entry.get("burst_count")
-                        burst_count = (
-                            int(_bc)
-                            if isinstance(_bc, (int, float)) and _bc > 0
-                            else None
-                        )
-                        burst_each = float(entry.get("burst_volume_each", 0.02))
-                        # évite TypeError si burst_count est None; le sizing réel sera résolu plus tard
-                        total_volume = round(((burst_count or 0) * burst_each), 5)
-
-                        # 2) Prix d'entrée — fallback Ask/Bid si manquant (critique pour FOK)
-                        price_val = float(entry.get("price", 0.0) or 0.0)
-                        if price_val <= 0.0:
-                            price_val = None
-                            # a) via wrapper éventuel
-                            try:
-                                if hasattr(mt5_connector, "get_symbol_tick"):
-                                    tk = mt5_connector.get_symbol_tick(asset)
-                                    if tk is not None:
-                                        if isinstance(tk, dict):
-                                            ask = tk.get("ask")
-                                            bid = tk.get("bid")
-                                        else:
-                                            ask = getattr(tk, "ask", None)
-                                            bid = getattr(tk, "bid", None)
-                                        if action == "BUY" and ask:
-                                            price_val = float(ask)
-                                        elif action == "SELL" and bid:
-                                            price_val = float(bid)
-                            except Exception:
-                                price_val = None
-                            # b) fallback direct via module MT5 natif
-                            if price_val is None:
-                                try:
-                                    mt5mod = getattr(mt5_connector, "mt5", None)
-                                    if mt5mod:
-                                        tk = mt5mod.symbol_info_tick(asset)
-                                        if tk:
-                                            price_val = float(
-                                                tk.ask if action == "BUY" else tk.bid
-                                            )
-                                except Exception:
-                                    price_val = None
-
-                        if not price_val:
-                            logger.error(
-                                f"[FOOTPRINT→DECISION][{asset}] impossible d'obtenir le prix (Ask/Bid) → skip."
-                            )
-                            # On n’ajoute PAS de décision invalide (évite '[BURST] Paramètres d'entrée invalides.')
-                        else:
-                            fp_decision = {
-                                "rule_name": "burst_scalping",
-                                "action": action,
-                                "asset": dec_fp.get("asset", asset),
-                                "volume": total_volume,  # compat affichage pipeline
-                                "entry_style": entry.get("style", "LIMIT_FOK"),
-                                "price": float(price_val),
-                                "burst_count": burst_count,
-                                "burst_volume_each": burst_each,
-                                "validity_ms": int(entry.get("validity_ms", 800)),
-                                # Important pour exécuteur: pas de fallback, pas de TP
-                                "no_fallback": True,
-                                "footprint_exit": dec_fp.get("exit", {}),
-                                # Télémétrie contextuelle
-                                "trigger": dec_fp.get("trigger"),
-                                "confidence": float(dec_fp.get("confidence", 0.7)),
-                                "footprint_meta": dec_fp.get("meta", {}),
-                            }
-                            footprint_scalping_decisions.append(fp_decision)
-
-                            if not LOG_FUSION_ONLY:
-                                logger.info(
-                                    f"[FOOTPRINT→DECISION][{asset}] "
-                                    f"{fp_decision['action']} burst x{burst_count}@{fp_decision['price']} "
-                                    f"(trigger={fp_decision.get('trigger')}, conf={fp_decision.get('confidence'):.2f})"
-                                )
-
-                except Exception as e:
-                    logger.error(
-                        f"[FOOTPRINT→DECISION][{asset}] erreur: {e}", exc_info=True
-                    )
-
-                # === PATCH ORDERFLOW V5 ANALYSE (après footprint) ===
-                try:
-                    # ✅ On récupère les 5 dernières bougies pour l'analyse d'orderflow
                     last_candles_df = annotated_rates_df.tail(5).copy()
-
-                    # Normalisation du temps
                     if "time" in last_candles_df.columns:
                         last_candles_df["time"] = pd.to_datetime(
                             last_candles_df["time"], utc=True, errors="coerce"
                         )
                         last_candles_df.set_index("time", inplace=True)
-
-                    # ✅ Appel du nouvel analyseur OrderFlow V5
                     of_res = detect_orderflow_v5(last_candles_df)
-
-                    # ✅ Log des patterns si existants
-                    patterns = of_res.get("patterns", [])
-                    if patterns:
-                        logger.debug(f"[ORDERFLOW][{asset}] Patterns détectés:")
-                        for p in patterns:
-                            logger.debug(
-                                f"   ↳ {p.get('timestamp', '?')} | {p.get('pattern', '?')} | "
-                                f"Δ={p.get('delta', 0)} | Imb={p.get('imbalance', 0):.2f} | "
-                                f"Dom={p.get('dominance', '?')}"
-                            )
-                    else:
-                        logger.debug(f"[ORDERFLOW][{asset}] Aucun pattern détecté.")
-
-                    # ✅ Enregistrement dans latest (pour exploitation décisionnelle)
                     latest = dict(latest)
                     latest["orderflow_score"] = of_res.get("score", 0)
                     latest["orderflow_status"] = of_res.get("status", "N/A")
                     latest["orderflow_summary"] = of_res.get("summary", {})
                     latest["orderflow_patterns"] = of_res.get("patterns", [])
-
                 except Exception as e:
                     logger.error(
                         f"[ORDERFLOW][{asset}] Erreur analyse Orderflow: {e}",
                         exc_info=True,
                     )
 
-                # Signaux unifiés
+                # === Signals unifiés ===
                 signals: Dict[str, Any] = (
                     _build_asset_trading_signals(
                         latest,
@@ -1271,10 +1039,8 @@ def run_single_pipeline_cycle(
                     )
                     or {}
                 )
-                # --- WNT-1: attacher 'latest' pour diagnostic WHY_NO_TRADE (lecture seule)
-                signals["__latest"] = (
-                    latest  # permet d'accéder à footprint/orderflow summaries si non recopiés par _build_asset_trading_signals
-                )
+
+                signals["__latest"] = latest  # pour diag WHY_NO_TRADE
 
                 if CANDLES_ENABLED:
                     _pat = market_results.get("patterns", {})
@@ -1289,7 +1055,6 @@ def run_single_pipeline_cycle(
                 )
                 signals["structure"] = market_results.get("structure", {})
 
-                # Spread robuste
                 spread_pts = (
                     getattr(symbol_info_mt5, "spread", None)
                     if symbol_info_mt5
@@ -1300,17 +1065,18 @@ def run_single_pipeline_cycle(
                         "inf"
                     )
                 signals["current_spread_points"] = float(spread_pts)
-                # === PATCH A: expose FP/OF dans les signaux pour debug ultérieur ===
+
+                # exposer FP/OF
                 signals["footprint_summary"] = latest.get("footprint_summary")
                 signals["orderflow_summary"] = latest.get("orderflow_summary")
 
-                # Sauvegarde
+                # Persist
                 all_assets_trading_signals[asset] = signals
                 all_assets_market_data[asset] = _build_asset_market_data(
                     annotated_rates_df, symbol_info_mt5
                 )
 
-                # [PATCH-FUSION] Calcul de la FusionDecision pour cet actif (XAUUSD only par défaut)
+                # === Décision Fusion (XAUUSD seulement) ===
                 try:
                     if _fusion_applies(asset):
                         if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
@@ -1322,10 +1088,8 @@ def run_single_pipeline_cycle(
                                 mt5c=mt5_connector,
                             )
                         elif REQUIRE_FUSION_MGR:
-                            # Pas de fallback si on exige explicitement un FusionManager
                             fdec = {"ok": False, "reason": "fusion_manager_missing"}
                         else:
-                            # Fallback simple autorisé uniquement si require_manager=False
                             fdec = _quick_vote_fusion(
                                 signals=signals,
                                 latest=latest,
@@ -1371,9 +1135,6 @@ def run_single_pipeline_cycle(
                                 asset,
                                 (fdec or {}).get("reason", "no_decision"),
                             )
-                    else:
-                        # Hors périmètre fusion : on ne calcule rien et on ne spam pas les logs
-                        fdec = None
                 except Exception as _e:
                     logger.warning(f"[FUSION] erreur: {_e}")
 
@@ -1385,22 +1146,14 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun signal valide généré. Fin du cycle.")
             return False
 
-        # Trace pipeline synthétique
+        # === FUSION SUMMARY (affichage) ===
         print("\n" + "=" * 58)
         print("🔎 FUSION SUMMARY (par actif)")
-
-        # Gate locale : on n'applique la Fusion que pour XAUUSD (scalping scope)
-        def _fusion_applies_local(sym: str) -> bool:
-            return str(sym).upper() == "XAUUSD"
-
         for asset, sig in all_assets_trading_signals.items():
             try:
-                if not _fusion_applies_local(asset):
-                    # Pas de fusion sur cet actif → on affiche "n/a" proprement
+                if asset.upper() != "XAUUSD":
                     print(f"   {asset:<7} → n/a (fusion off)")
                     continue
-
-                # On recalcule une décision de synthèse pour affichage (léger)
                 if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                     fdec_syn = _fusion_mgr.fuse(
                         signals=sig,
@@ -1410,10 +1163,8 @@ def run_single_pipeline_cycle(
                         mt5c=mt5_connector,
                     )
                 elif REQUIRE_FUSION_MGR:
-                    # Si la fusion est requise mais pas de manager dispo → veto explicite
                     fdec_syn = {"ok": False, "reason": "fusion_manager_missing"}
                 else:
-                    # Fallback léger autorisé si require_manager=False
                     fdec_syn = _quick_vote_fusion(
                         signals=sig,
                         latest=sig.get("__latest", {}),
@@ -1421,7 +1172,6 @@ def run_single_pipeline_cycle(
                         sym=asset,
                         mt5c=mt5_connector,
                     )
-
             except Exception as _e:
                 fdec_syn = {"ok": False, "reason": f"fusion_error:{_e}"}
 
@@ -1432,22 +1182,18 @@ def run_single_pipeline_cycle(
             else:
                 rz = (fdec_syn or {}).get("reason", "no_decision")
                 print(f"   {asset:<7} → action=—   score=—   veto={rz}")
-
         print("=" * 58)
 
-        # === PATCH B: GATECHECK (XAUUSD only) — imprime métriques vs seuils ===
+        # === GATECHECK XAUUSD (diagnostic) ===
         try:
             sig = (all_assets_trading_signals or {}).get("XAUUSD", {})
             if sig:
                 fp = sig.get("footprint_summary") or {}
                 of = sig.get("orderflow_summary") or {}
-
-                # Charger directement la config XAUUSD (évite la dépendance à asset_configs)
                 try:
                     _xau_cfg_full = config_manager.load_asset_config("XAUUSD") or {}
                 except Exception:
                     _xau_cfg_full = {}
-
                 xcfg = (_xau_cfg_full.get("overrides", {}) or {}).get(
                     "scalping", {}
                 ) or {}
@@ -1463,7 +1209,6 @@ def run_single_pipeline_cycle(
                 ticks = fp.get("tick_count")
                 cov = fp.get("coverage_s")
                 trate = fp.get("tick_rate")
-
                 dlt = (
                     of.get("delta_total")
                     if isinstance(of.get("delta_total"), (int, float))
@@ -1487,7 +1232,7 @@ def run_single_pipeline_cycle(
         except Exception as _e:
             logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
 
-        # Contexte global
+        # === Contexte global ===
         global_context = _build_global_context(
             mt5_connector,
             all_assets_market_data,
@@ -1498,16 +1243,13 @@ def run_single_pipeline_cycle(
             tradeable_assets,
             active_mt5_account_details,
         )
-        # ✅ diag_tracker sûr (plus de NameError sur DiagnosticTracker)
         global_context["diag_tracker"] = get_tracker_from_context(global_context)
         print("✅ [PIPELINE] Contexte global construit avec succès !")
         print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
-        # [PATCH-FUSION][FAST-LANE] Exécution immédiate si FusionDecision valide
+        # === FAST-LANE (exécuter immédiatement la meilleure décision Fusion valide) ===
         try:
-            # 0) garde-boucle : si aucune décision fusion
             if fusion_scalping_decisions:
-                # 1) guard "panier actif" avec cache local (évite coûteux get_positions multiples)
                 import re, time
 
                 _positions_cache = None
@@ -1542,12 +1284,12 @@ def run_single_pipeline_cycle(
                 guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
                 enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
                 single_burst_global = bool(guard_cfg.get("single_burst_global", True))
+
                 if enforce_closure and single_burst_global and _open_burst_ids():
                     logger.info(
                         "⛔ [FUSION][FAST-LANE] Panier actif détecté → fast-lane annulée."
                     )
                 else:
-                    # 2) choisir la meilleure décision (score, fraicheur TTL)
                     now_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
 
                     def _score_fd(fd):
@@ -1558,10 +1300,8 @@ def run_single_pipeline_cycle(
 
                     fusion_scalping_decisions.sort(key=_score_fd, reverse=True)
                     best = fusion_scalping_decisions[0]
-                    # 3) TTL check
                     age = max(0, now_ms - int(best.get("ts_created", now_ms)))
                     if age < int(best.get("validity_ms", 800)):
-                        # 4) guard slippage (sur MARKET: abort si dérive trop forte vs prix ref)
                         sym = str(best.get("asset", "")).upper()
                         side = str(best.get("action", "")).upper()
                         slipp_pts = float(
@@ -1583,13 +1323,10 @@ def run_single_pipeline_cycle(
                                     else getattr(t, "bid", None)
                                 )
                                 now_price = float(ask if side == "BUY" else bid)
-                                if (
-                                    abs(now_price - ref)
-                                    / getattr(
-                                        mt5_connector.get_symbol_info(sym), "point", 1.0
-                                    )
-                                    > slipp_pts
-                                ):
+                                pts = abs(now_price - ref) / getattr(
+                                    mt5_connector.get_symbol_info(sym), "point", 1.0
+                                )
+                                if pts > slipp_pts:
                                     ok_price = False
                                     logger.info(
                                         f"[FUSION][FAST-LANE] slippage guard: ref={ref} now={now_price} pts>{slipp_pts} → abort."
@@ -1598,7 +1335,7 @@ def run_single_pipeline_cycle(
                             pass
 
                         if ok_price and sym and side in {"BUY", "SELL"}:
-                            # 5) résolution burst_size locale (asset > global)
+
                             def _resolve(sym_):
                                 def _dig(d, path):
                                     cur = d or {}
@@ -1623,7 +1360,6 @@ def run_single_pipeline_cycle(
                                     aconf = config_manager.load_asset_config(sym_) or {}
                                 except Exception:
                                     aconf = {}
-                                reads = []
                                 if prefer_asset:
                                     reads = [
                                         _dig(
@@ -1733,7 +1469,6 @@ def run_single_pipeline_cycle(
 
                             resolved_burst = max(int(_resolve(sym)), 1)
 
-                            # 6) construire la décision normalisée pour l’exécuteur (trailing only, no fallback)
                             td = {
                                 "rule_name": "burst_scalping",
                                 "action": side,
@@ -1752,7 +1487,6 @@ def run_single_pipeline_cycle(
                                 },
                                 "trade": {"action": side, "side": side},
                             }
-                            # sltp profile (trailing) depuis conf si dispo
                             sltp_cfg = (
                                 (
                                     (global_context.get("asset_configs", {}) or {}).get(
@@ -1774,9 +1508,7 @@ def run_single_pipeline_cycle(
                                 or {}
                             )
                             if sltp_cfg:
-                                td["sltp"] = (
-                                    sltp_cfg  # l’implémentation SLTP doit ignorer TP si no_tp=True
-                                )
+                                td["sltp"] = sltp_cfg
 
                             logger.info(
                                 f"[FUSION][FAST-LANE] {side} {sym} burst={resolved_burst} (market, trailing-only)"
@@ -1790,13 +1522,11 @@ def run_single_pipeline_cycle(
                                 trade_executor, decision_pkg, is_dry_run=is_dry_run
                             )
                             if (res or {}).get("status") not in {"failed", ""}:
-                                return (
-                                    True  # 🚀 exécution faite → fin immédiate du cycle
-                                )
+                                return True
         except Exception as e:
             logger.warning(f"[FUSION][FAST-LANE] erreur: {e}")
 
-        # === [BURST EXIT MANAGEMENT] Fermer les paniers (SL/TP only — zéro trailing)
+        # === Gestion fermetures SL/TP des paniers (sécurité) ===
         try:
             closure_cfg = (
                 base_config.get("entry_rules", {})
@@ -1812,13 +1542,13 @@ def run_single_pipeline_cycle(
         except Exception as e:
             logger.warning(f"[BURST EXIT] Contrôle fermeture panier (SLTP): {e}")
 
-        # Appel pipeline de décision
+        # === Pipeline institutionnel (peut produire Liquidity, etc.) ===
         print("🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = (
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
-        # [SLTP][PERIODIC] Mise à jour douce des paniers actifs (toutes les 30s)
+        # === Maintenance périodique SLTP dynamique (toutes les 30s) ===
         try:
             import time, re
 
@@ -1830,7 +1560,6 @@ def run_single_pipeline_cycle(
                 )
                 now_ts = time.time()
                 if (now_ts - last_ts) >= 30.0:
-                    # 1) récupérer la liste des paniers actifs
                     basket_ids = set()
                     bm = getattr(trade_executor, "burst_manager", None)
                     get_active = getattr(bm, "get_active_baskets", None) if bm else None
@@ -1842,7 +1571,6 @@ def run_single_pipeline_cycle(
                         except Exception:
                             pass
                     if not basket_ids:
-                        # fallback: parse les comments des positions MT5
                         try:
                             positions = mt5_connector.get_positions() or []
                             for p in positions:
@@ -1858,8 +1586,6 @@ def run_single_pipeline_cycle(
                                     basket_ids.add(m.group(1))
                         except Exception:
                             pass
-
-                    # 2) mise à jour SLTP douce pour chaque panier actif
                     for bid in basket_ids:
                         try:
                             fn(
@@ -1869,8 +1595,6 @@ def run_single_pipeline_cycle(
                             )
                         except Exception:
                             continue
-
-                    # 3) anti-spam: mémoriser le dernier run
                     try:
                         setattr(sltp_owner, "_last_periodic_maintenance_ts", now_ts)
                     except Exception:
@@ -1878,40 +1602,15 @@ def run_single_pipeline_cycle(
         except Exception as e:
             logger.debug(f"[SLTP][PERIODIC] maintenance skip: {e}")
 
-        # === MERGE: décisions Footprint (Scalping Burst) dans le package ===
-        try:
-            if not LOG_FUSION_ONLY and footprint_scalping_decisions:
-                decision_package.setdefault("scalping_decisions", [])
-                decision_package["scalping_decisions"].extend(
-                    footprint_scalping_decisions
-                )
-                decision_package.setdefault(
-                    "final_decision", decision_package.get("final_decision") or {}
-                )
-                if (
-                    not decision_package["final_decision"]
-                    and decision_package["scalping_decisions"]
-                ):
-                    decision_package["final_decision"] = decision_package[
-                        "scalping_decisions"
-                    ][0]
-                logger.info(
-                    f"[MERGE] {len(footprint_scalping_decisions)} décision(s) Footprint intégrée(s)."
-                )
-        except Exception as e:
-            logger.warning(f"[MERGE] Échec intégration décisions Footprint: {e}")
-
-        # === MERGE: décisions FUSION dans le package (reporting) ===
+        # === Intégrer les décisions Fusion dans le package ===
         try:
             if fusion_scalping_decisions:
                 decision_package.setdefault("scalping_decisions", [])
                 decision_package["scalping_decisions"].extend(fusion_scalping_decisions)
-                # si toujours pas de final_decision, promeut la meilleure fusion
                 decision_package.setdefault(
                     "final_decision", decision_package.get("final_decision") or {}
                 )
                 if not decision_package["final_decision"]:
-                    # sélectionne la plus fraîche et la mieux scorée
                     now_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
 
                     def _score_fd(fd):
@@ -1930,17 +1629,13 @@ def run_single_pipeline_cycle(
         except Exception as e:
             logger.warning(f"[MERGE] Échec intégration décisions Fusion: {e}")
 
-        # ====== LOG DÉCISION (anti-doublon) ======
+        # === Logs décisions ===
         scalping_decisions = decision_package.get("scalping_decisions", []) or []
         liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
-
-        # Compatibilité : fusion pour les logs globaux
         final_decisions = scalping_decisions + liquidity_decisions
-
         final = decision_package.get("final_decision", {}) or {}
         ctx_out = decision_package.get("context", {}) or {}
 
-        # 🔥 si plusieurs décisions, on les log toutes
         if final_decisions:
             print("📦 [PIPELINE] Décisions multiples détectées:")
             for d in final_decisions:
@@ -1950,7 +1645,6 @@ def run_single_pipeline_cycle(
         else:
             print("📦 [PIPELINE] Aucune décision multiple détectée.")
 
-        # Seulement si la pipeline n'a PAS déjà loggué elle-même
         if not ctx_out.get("__decision_logged"):
             print("3️⃣ DÉCISION RETOURNÉE:")
             print(f"   Action: {final.get('action', 'NONE')}")
@@ -1963,141 +1657,48 @@ def run_single_pipeline_cycle(
             )
             print("=" * 60 + "\n")
 
-        # === EXÉCUTION DES DÉCISIONS ===
-        scalping_decisions = decision_package.get("scalping_decisions", []) or []
-        liquidity_decisions = decision_package.get("liquidity_decisions", []) or []
+        # === Filtre scalping: FUSION-ONLY + XAUUSD ===
+        scalping_decisions = [
+            d
+            for d in (decision_package.get("scalping_decisions") or [])
+            if str(d.get("rule_name", "")).lower() == "fusion_scalping"
+            and str(d.get("asset", "")).upper() == "XAUUSD"
+        ]
 
+        # === WHY_NO_TRADE si rien à exécuter ===
         if not scalping_decisions and not liquidity_decisions:
-
-            # --- WNT-2: WHY_NO_TRADE ---
             try:
-                # Robust: éviter NameError si LOG_FUSION_ONLY n'existe pas
-                LOG_FUSION_ONLY_FLAG = bool(globals().get("LOG_FUSION_ONLY", False))
-
-                # Robust: garantir _fusion_applies (par défaut: Fusion uniquement pour XAUUSD)
-                if not callable(locals().get("_fusion_applies")):
-
-                    def _fusion_applies(sym: str) -> bool:
-                        return str(sym).upper() == "XAUUSD"
-
-                if LOG_FUSION_ONLY_FLAG:
-                    # Diagnostic centré Fusion (XAUUSD uniquement par défaut)
-                    for asset, sig in all_assets_trading_signals.items():
-                        try:
-                            if not _fusion_applies(asset):
-                                logger.info(f"[WHY_NO_TRADE][{asset}] fusion_off")
-                                continue
-
-                            # Chemin Fusion: manager > veto require_manager > fallback rapide
-                            if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                                fdec_diag = _fusion_mgr.fuse(
-                                    signals=sig,
-                                    latest=sig.get("__latest", {}),
-                                    base_config=base_config,
-                                    symbol=asset,
-                                    mt5c=mt5_connector,
-                                )
-                            elif REQUIRE_FUSION_MGR:
-                                fdec_diag = {
-                                    "ok": False,
-                                    "reason": "fusion_manager_missing",
-                                }
-                            else:
-                                fdec_diag = _quick_vote_fusion(
-                                    signals=sig,
-                                    latest=sig.get("__latest", {}),
-                                    base_cfg=base_config,
-                                    sym=asset,
-                                    mt5c=mt5_connector,
-                                )
-
-                            if fdec_diag and fdec_diag.get("ok"):
-                                # La fusion dit OK mais rien n'a été exécuté → veto amont du pipeline
-                                logger.info(
-                                    f"[WHY_NO_TRADE][{asset}] fusion_ok_but_veto_upstream"
-                                )
-                            else:
-                                reason = (fdec_diag or {}).get("reason", "no_decision")
-                                logger.info(f"[WHY_NO_TRADE][{asset}] veto={reason}")
-
-                        except Exception as _e:
-                            logger.info(f"[WHY_NO_TRADE][{asset}] DIAG_ERROR: {_e}")
-
-                else:
-                    # Ancien diagnostic FP/OF (hors mode fusion-only)
-                    SPREAD_MAX = {"EURUSD": 12, "GBPUSD": 18, "XAUUSD": 40}
-                    FP_MIN = {
-                        "EURUSD": (15, 20),
-                        "GBPUSD": (15, 20),
-                        "XAUUSD": (20, 10),
-                    }
-                    BURST_TR_MIN, BURST_COV_MIN = 2.0, 6.0
-
-                    for asset, sig in all_assets_trading_signals.items():
-                        try:
-                            phase = sig.get("phase")
-                            conf = float(sig.get("confidence_score", 0.0) or 0.0)
-                            spread = float(
-                                sig.get("current_spread_points", float("inf"))
-                            )
-
-                            latest = sig.get("__latest", {}) or {}
-                            fp_sum = (
-                                sig.get("footprint_summary")
-                                or latest.get("footprint_summary")
-                                or {}
-                            )
-
-                            ticks = int(fp_sum.get("tick_count", 0) or 0)
-                            cov = float(fp_sum.get("coverage_s", 0.0) or 0.0)
-                            tr = float(fp_sum.get("tick_rate", 0.0) or 0.0)
-
-                            tmin, cmin = FP_MIN.get(asset, (15, 20))
-                            reasons = []
-
-                            # 1) Qualité footprint
-                            if ticks < 3:
-                                reasons.append("FP_HARD_FAIL")
-                            elif (ticks < tmin or cov < cmin) and not (
-                                tr >= BURST_TR_MIN and cov >= BURST_COV_MIN
-                            ):
-                                reasons.append("FP_LOW_SAMPLE")
-
-                            # 2) Spread
-                            if spread > SPREAD_MAX.get(asset, 999):
-                                reasons.append("SPREAD_TOO_WIDE")
-
-                            # 3) Confiance phase
-                            if conf < 0.52:
-                                reasons.append("CONF_LOW")
-
-                            if not reasons:
-                                reasons = ["NO_SETUP"]
-
-                            logger.info(
-                                f"[WHY_NO_TRADE][{asset}] phase={phase} conf={conf:.3f} spread={spread} | "
-                                f"FP(ticks={ticks},win={cov:.0f}s,tr={tr:.2f}/s) | reasons="
-                                + ",".join(reasons)
-                            )
-
-                        except Exception as _e:
-                            logger.info(f"[WHY_NO_TRADE][{asset}] DIAG_ERROR: {_e}")
-
+                for asset, sig in all_assets_trading_signals.items():
+                    if asset.upper() != "XAUUSD":
+                        logger.info(f"[WHY_NO_TRADE][{asset}] fusion_off")
+                        continue
+                    if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
+                        fdec_diag = _fusion_mgr.fuse(
+                            signals=sig,
+                            latest=sig.get("__latest", {}),
+                            base_config=base_config,
+                            symbol=asset,
+                            mt5c=mt5_connector,
+                        )
+                    else:
+                        fdec_diag = {"ok": False, "reason": "fusion_manager_missing"}
+                    if fdec_diag and fdec_diag.get("ok"):
+                        logger.info(
+                            f"[WHY_NO_TRADE][{asset}] fusion_ok_but_veto_upstream"
+                        )
+                    else:
+                        logger.info(
+                            f"[WHY_NO_TRADE][{asset}] veto={(fdec_diag or {}).get('reason','no_decision')}"
+                        )
             except Exception as _e:
                 logger.debug(f"[WHY_NO_TRADE] diagnostic skip: {_e}")
-            # --- /WNT-2 ---
 
             print("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
 
         # === Helper: résolution robuste du burst_size ===
-
         def _resolve_burst_size(sym: str):
-            """
-            ... (docstring inchangée)
-            """
-
             def _dig(d: dict, path: list):
                 cur = d or {}
                 for k in path:
@@ -2106,14 +1707,11 @@ def run_single_pipeline_cycle(
                     cur = cur.get(k)
                 return cur
 
-            # NEW → lecture du flag
             prefer_asset = bool(
                 ((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {})
                 .get("burst_scalping", {})
                 .get("prefer_asset_overrides", False)
             )
-
-            # Prépare les blocs de lecture
             ac = (
                 decision_package.get("active_config")
                 or decision_package.get("config_used")
@@ -2212,9 +1810,8 @@ def run_single_pipeline_cycle(
                     else (None, None)
                 )
 
-            # ORDRE dynamique
-            if prefer_asset:
-                readers = [
+            readers = (
+                [
                     read_asset_entry,
                     read_asset_over_new,
                     read_asset_over_legacy,
@@ -2223,8 +1820,8 @@ def run_single_pipeline_cycle(
                     read_global_top,
                     read_global_exec,
                 ]
-            else:
-                readers = [
+                if prefer_asset
+                else [
                     read_active_config,
                     read_asset_entry,
                     read_asset_over_new,
@@ -2233,23 +1830,14 @@ def run_single_pipeline_cycle(
                     read_global_top,
                     read_global_exec,
                 ]
-
+            )
             for fn in readers:
                 val, src = fn()
                 if val:
                     return val, src
-
             return 5, "default"
 
-            # Filtrer les décisions scalping si fusion_only
-            if LOG_FUSION_ONLY:
-                scalping_decisions = [
-                    d
-                    for d in scalping_decisions or []
-                    if str(d.get("rule_name", "")).lower() == "fusion_scalping"
-                ]
-
-        # --- Exécution Scalping ---
+        # === Exécution Scalping (Fusion-only) ===
         if scalping_decisions:
             print("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
@@ -2257,7 +1845,7 @@ def run_single_pipeline_cycle(
                     f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
 
-            # === [BURST GUARD PIPELINE] bloque tout nouveau burst si un panier est actif (scope global) ===
+            # Burst guard global (pas de nouveau panier si un existe)
             try:
                 burst_cfg = (
                     base_config.get("entry_rules", {})
@@ -2268,7 +1856,6 @@ def run_single_pipeline_cycle(
                 guard_cfg = burst_cfg.get("burst_guardrails", {}) or {}
                 enforce_closure = bool(guard_cfg.get("enforce_burst_closure", True))
                 single_burst_global = bool(guard_cfg.get("single_burst_global", True))
-
                 if enforce_closure and single_burst_global:
                     import re
 
@@ -2299,33 +1886,8 @@ def run_single_pipeline_cycle(
                 logger.warning(f"[BURST GUARD][pipeline] check global échoué: {e}")
 
             for td in scalping_decisions:
-                # ✅ Toujours valider/normaliser le side en 1er (évite UnboundLocalError)
-                side = str(td.get("action") or td.get("side") or "").upper().strip()
-                if side not in {"BUY", "SELL"}:
-                    logger.debug(f"[SCALPING] décision ignorée (side invalide): {td}")
-                    continue
-                # 🔒 Normalisation multi-clés pour compat SLTP / order_builder
-                td["action"] = side  # clé standard
-                td["side"] = side  # compat éventuelle
-                td["order_action"] = side  # compat héritée (si sltp.py la lit)
-
-            # --- Exécution Scalping (burst) : ACTION → nested order + SLTP + sizing ---
-            for td in scalping_decisions:
                 try:
-                    # 0) Normaliser/propager l'action
-                    side = (
-                        str(
-                            td.get("action")
-                            or td.get("side")
-                            or td.get("order_action")
-                            or td.get("order_side")
-                            or td.get("trade_action")
-                            or td.get("direction")
-                            or ""
-                        )
-                        .upper()
-                        .strip()
-                    )
+                    side = str(td.get("action") or td.get("side") or "").upper().strip()
                     if side in {"LONG", "BUY_LONG"}:
                         side = "BUY"
                     if side in {"SHORT", "SELL_SHORT"}:
@@ -2336,7 +1898,6 @@ def run_single_pipeline_cycle(
                         )
                         continue
 
-                    # 1) Symbole
                     sym = str(td.get("asset") or td.get("symbol") or "").upper()
                     if not sym:
                         logger.error(
@@ -2346,7 +1907,6 @@ def run_single_pipeline_cycle(
                     td["asset"] = sym
                     td["symbol"] = sym
 
-                    # 2) rule_name → burst_scalping
                     _alias = str(td.get("rule_name", "")).lower().strip()
                     if _alias in {
                         "burst",
@@ -2359,9 +1919,7 @@ def run_single_pipeline_cycle(
                         td["rule_name"] = "burst_scalping"
                     rn = str(td.get("rule_name") or "burst_scalping").lower()
 
-                    # 3) SLTP dynamique (TP/trailing via config), conserve LIMIT_FOK si demandé
                     if rn == "burst_scalping":
-                        # Nettoyage des hints hérités pour éviter les collisions avec le moteur SLTP
                         for k in (
                             "tp_price",
                             "tp_pips",
@@ -2370,13 +1928,10 @@ def run_single_pipeline_cycle(
                             "trailing",
                         ):
                             td.pop(k, None)
-
-                        # Respecter le style d’entrée si fourni (LIMIT_FOK supporté), sinon MARKET
                         style = str(td.get("entry_style", "MARKET")).upper()
                         if style in {"LIMIT_FOK", "LIMIT-FOK", "FOK_LIMIT"}:
                             td["order_type"] = "LIMIT"
                             td.setdefault("time_in_force", "FOK")
-                            # Assurer un prix pour LIMIT/FOK
                             if not td.get("price"):
                                 try:
                                     tk = mt5_connector.get_symbol_tick(sym)
@@ -2396,7 +1951,6 @@ def run_single_pipeline_cycle(
                         else:
                             td["order_type"] = "MARKET"
 
-                        # SLTP dynamique: merge global -> asset -> override éventuel de la décision
                         def _merge(a, b):
                             out = dict(a or {})
                             for k, v in (b or {}).items():
@@ -2432,20 +1986,13 @@ def run_single_pipeline_cycle(
                             if isinstance(sltp_asset_block, dict)
                             else {}
                         ) or {}
-
                         sltp_cfg = _merge(sltp_global, sltp_asset)
                         if isinstance(td.get("sltp"), dict):
-                            sltp_cfg = _merge(
-                                sltp_cfg, td["sltp"]
-                            )  # override runtime si fourni par la décision
-
-                        # Activer explicitement le mode dynamique si la clé est supportée par sltp.py
+                            sltp_cfg = _merge(sltp_cfg, td["sltp"])
                         if isinstance(sltp_cfg, dict) and "dynamic" in sltp_cfg:
                             sltp_cfg["dynamic"] = bool(sltp_cfg.get("dynamic", True))
-
                         td["sltp"] = sltp_cfg
 
-                    # 4) burst_size — résolution multi-sources (helper)
                     size, source = _resolve_burst_size(sym)
                     td.pop("burst_count", None)
                     td.pop("burst_size", None)
@@ -2454,17 +2001,15 @@ def run_single_pipeline_cycle(
                         f"[BURST][RESOLVE] {sym} → burst_size={resolved_burst} (source={source})"
                     )
 
-                    # 5) Standardisation exec (ne pas supprimer entry_style)
                     td.pop("burst_volume_each", None)
                     td["burst_size"] = resolved_burst
                     td["sizing_scope"] = "BASKET"
                     td.setdefault("order_type", "MARKET")
 
-                    # 6) *** CRITIQUE *** — renseigner le sous-dict 'order' que SLTP lit en priorité
                     od = td.get("order") if isinstance(td.get("order"), dict) else {}
                     od.update(
                         {
-                            "action": side,  # <- évite action_raw == ''
+                            "action": side,
                             "side": side,
                             "type": td.get("order_type", "MARKET"),
                             "symbol": sym,
@@ -2472,12 +2017,9 @@ def run_single_pipeline_cycle(
                     )
                     td["order"] = od
 
-                    # (bonus) certains chemins lisent 'trade'
                     trade = td.get("trade") if isinstance(td.get("trade"), dict) else {}
                     trade.update({"action": side, "side": side})
                     td["trade"] = trade
-
-                    # Dupliquer au top-level aussi (compat)
                     for k in (
                         "action",
                         "side",
@@ -2488,13 +2030,12 @@ def run_single_pipeline_cycle(
                         td[k] = side
 
                     logger.info(
-                        f"[BURST][PLAN] {side} {sym} style=MARKET burst_size={resolved_burst} (lot via risk%/burst)"
+                        f"[BURST][PLAN] {side} {sym} style={td.get('order_type','MARKET')} burst_size={resolved_burst} (lot via risk%/burst)"
                     )
                     logger.debug(
                         f"[SLTP-ACTION-CHECK] top.action={td.get('action')} | order.action={td.get('order',{}).get('action')}"
                     )
 
-                    # 7) Exécution
                     decision_pkg = {
                         "final_decision": td,
                         "context": global_context,
@@ -2507,7 +2048,6 @@ def run_single_pipeline_cycle(
                     if status not in {"failed", ""}:
                         trade_executed_successfully = True
 
-                    # 8) Post-exec: garde-fou panier
                     try:
                         max_loss = float(
                             (
@@ -2531,14 +2071,13 @@ def run_single_pipeline_cycle(
                         f"[BURST] Erreur bloc scalping/SLTP: {e}", exc_info=True
                     )
 
-        # --- Exécution Liquidity ---
+        # === Exécution Liquidity ===
         if liquidity_decisions:
             print("📦 [PIPELINE] Décisions Liquidity détectées:")
             for d in liquidity_decisions:
                 print(
                     f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
-
             for td in liquidity_decisions:
                 action = str(td.get("action", "")).upper()
                 if action in {"BUY", "SELL"}:
@@ -2551,8 +2090,7 @@ def run_single_pipeline_cycle(
                         execution_mode,
                         logger,
                     )
-
-        # --- Vérification des EXIT Liquidity (sorties forcées) ---
+        # === EXIT Liquidity forcés ===
         try:
             current_positions = mt5_connector.get_positions()
             if current_positions:
@@ -2562,7 +2100,6 @@ def run_single_pipeline_cycle(
                     config_manager.get("strategies", {}).get("liquidity", {}) or {}
                 )
                 liqui = LiquidityStrategy(config_manager, liq_cfg)
-
                 exit_decisions = liqui.evaluate_exit(global_context, current_positions)
                 if exit_decisions:
                     trade_executor.execute_exit_orders(
@@ -2574,10 +2111,10 @@ def run_single_pipeline_cycle(
                     print(
                         f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
                     )
-        except Exception as e:
+        except Exception as e:  # <-- AJOUT
             logger.error(f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True)
 
-    except Exception as e:
+    except Exception as e:  # try GLOBAL (inchangé)
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
         trade_executed_successfully = False
     finally:
