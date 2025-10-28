@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple, Mapping, Callable
 from trader.errors import TradeExecutionError
 
 
-
 # --- Helpers de normalisation ---
+
 
 def resolve_side(decision: Mapping[str, Any]) -> str:
     """
@@ -82,6 +82,165 @@ def resolve_side(decision: Mapping[str, Any]) -> str:
         "Action invalide pour SL/TP: vide ou non reconnue (aucun alias trouvé). "
         f"Clés présentes dans 'decision': [{present_keys}]"
     )
+
+
+class SLTPError(Exception):
+    pass
+
+
+def _normalize_stops(
+    sl_price: float | None, tp_price: float | None, digits: int
+) -> tuple[float | None, float | None]:
+    """Arrondi propre des stops au nombre de décimales du symbole."""
+
+    def _r(x):
+        if x is None:
+            return None
+        factor = 10**digits
+        return round(float(x) * factor) / factor
+
+    return _r(sl_price), _r(tp_price)
+
+
+def _get(sym: dict, *keys, default=None):
+    for k in keys:
+        if k in sym and sym[k] is not None:
+            return sym[k]
+    return default
+
+
+def _min_stop_distance_points(symbol_info: dict) -> int:
+    # Compat: différents brokers/structs → plusieurs clés possibles
+    return int(
+        _get(
+            symbol_info,
+            "stops_level",
+            "min_stop_distance_points",
+            "StopLevel",
+            default=0,
+        )
+        or 0
+    )
+
+
+def apply_broker_constraints(
+    price: float,
+    side: int,
+    sl_price: float | None,
+    tp_price: float | None,
+    symbol_info: dict,
+) -> tuple[float | None, float | None]:
+    """
+    Applique la distance minimale broker (en points) et corrige la position
+    relative SL/TPh vs prix selon BUY/SELL.
+    """
+    point = float(_get(symbol_info, "point", "tick_size", default=0.0001))
+    digits = int(_get(symbol_info, "digits", "precision", default=5))
+    min_pts = _min_stop_distance_points(symbol_info)
+    min_dist = float(min_pts) * point
+
+    if side not in (1, -1):
+        raise SLTPError(f"side invalide: {side}")
+
+    if side == 1:  # BUY
+        if sl_price is not None:
+            sl_price = min(sl_price, price - min_dist)
+        if tp_price is not None:
+            tp_price = max(tp_price, price + min_dist)
+    else:  # SELL
+        if sl_price is not None:
+            sl_price = max(sl_price, price + min_dist)
+        if tp_price is not None:
+            tp_price = min(tp_price, price - min_dist)
+
+    return _normalize_stops(sl_price, tp_price, digits)
+
+
+def _safe_rr(
+    price: float, side: int, sl_price: float | None, tp_price: float | None
+) -> float | None:
+    """
+    Calcule RR = reward/risk si possible.
+    """
+    try:
+        if sl_price is None or tp_price is None:
+            return None
+        risk = abs(price - sl_price)
+        if risk <= 0:
+            return None
+        reward = abs(tp_price - price)
+        return (reward / risk) if reward > 0 else None
+    except Exception:
+        return None
+
+
+def build_final_sl_tp(
+    price: float,
+    action: str,
+    hints: dict,
+    symbol_info: dict,
+) -> dict:
+    """
+    Fusionne les 'hints' du pipeline avec les contraintes broker et produit
+    un SL/TP final cohérent (dynamique).
+    Priorités:
+    1) sl_price/tp_price explicites (si fournis)
+    2) sl_pips/tp_pips → conversion en prix
+    3) rr (tp_rr_ratio_hint) avec SL connu → dérive TP
+    4) fallback sur distance minimale broker (si rien d’autre)
+    """
+    if not action:
+        raise SLTPError("Action manquante pour SL/TP.")
+    act = action.upper()
+    side = resolve_side(act)
+
+    point = float(_get(symbol_info, "point", "tick_size", default=0.0001))
+    digits = int(_get(symbol_info, "digits", "precision", default=5))
+    min_pts = _min_stop_distance_points(symbol_info)
+    min_dist = float(min_pts) * point
+
+    sl_price = hints.get("sl_price")
+    tp_price = hints.get("tp_price")
+    sl_pips = hints.get("sl_pips")
+    tp_pips = hints.get("tp_pips")
+    rr_hint = hints.get("rr") or hints.get("tp_rr_ratio_hint") or hints.get("rr_hint")
+
+    # 1) Prix explicites → on les respecte d’abord
+    if sl_price is None and sl_pips:
+        # Convention: on traite 'pips' comme nombre de points si pas d’info différente
+        sl_price = price - side * float(sl_pips) * point
+    if tp_price is None and tp_pips:
+        tp_price = price + side * float(tp_pips) * point
+
+    # 3) Si SL connu + RR fourni mais TP manquant → dérive TP
+    if tp_price is None and rr_hint and sl_price is not None:
+        risk = abs(price - float(sl_price))
+        if risk > 0:
+            tp_price = price + side * float(rr_hint) * risk
+
+    # 4) Fallback si on n’a vraiment rien: on met du mini broker
+    if sl_price is None and tp_price is None:
+        # on pousse de 2x la distance mini pour éviter le bord
+        sl_price = price - side * (2.0 * min_dist)
+        tp_price = price + side * (2.0 * min_dist)
+
+    # Contraintes broker + arrondis
+    sl_price, tp_price = apply_broker_constraints(
+        price, side, sl_price, tp_price, symbol_info
+    )
+    rr = _safe_rr(price, side, sl_price, tp_price)
+
+    return {
+        "action": act,
+        "side": side,
+        "price": float(price),
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "rr": rr,
+        "digits": digits,
+        "point": point,
+        "min_stop_points": min_pts,
+    }
 
 
 # ==============================

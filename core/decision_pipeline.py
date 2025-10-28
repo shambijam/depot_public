@@ -247,6 +247,27 @@ class DecisionPipeline:
             # --- Helpers locaux ---
             def _norm_action(x: str) -> str:
                 return (x or "").strip().upper()
+            
+            def _to_buy_sell(action: str) -> str:
+                """
+                Normalise toutes les variantes vers BUY / SELL uniquement.
+                Gère LONG/SHORT, *_LIMIT, *_STOP, et laisse BUY/SELL inchangés.
+                Lève ValueError si vide/inconnu.
+                """
+                a = (_norm_action(action) or "").upper()
+                mapping = {
+                    "LONG": "BUY",
+                    "SHORT": "SELL",
+                    "BUY_LIMIT": "BUY",
+                    "SELL_LIMIT": "SELL",
+                    "BUY_STOP": "BUY",
+                    "SELL_STOP": "SELL",
+                }
+                if a in ("BUY", "SELL"):
+                    return a
+                if a in mapping:
+                    return mapping[a]
+                raise ValueError(f"Action invalide pour SL/TP: {action!r}")
 
             def _is_valid(dec: dict) -> bool:
                 return _norm_action(dec.get("action")) in {"BUY", "SELL", "CLOSE"}
@@ -1366,6 +1387,44 @@ class DecisionPipeline:
                 rr_hint = max(rr_floor, min(rr_cap, rr_hint))
 
                 trade_decision["tp_rr_ratio_hint"] = float(rr_hint)
+                # ⬇️⬇️ INSERT JUSTE APRÈS trade_decision["tp_rr_ratio_hint"] = float(rr_hint)
+            try:
+                # Construire un paquet de hints SLTP pour l'order builder
+                sl = trade_decision.get("sl_price")
+                tp = trade_decision.get("tp_price")
+                sl_pips = trade_decision.get("target_sl_pips")
+                tp_pips = trade_decision.get("target_tp_pips")
+                rr_hint_val = trade_decision.get("tp_rr_ratio_hint")
+
+                # Lire la conf SLTP de la stratégie (si dispo)
+                bs_cfg = ((current_config.get("entry_rules", {}) or {})
+                        .get("scalping", {}) or {}).get("burst_scalping", {}) or {}
+                sltp_cfg = bs_cfg.get("sltp", {}) or {}
+                multi_tp_enabled = bool(sltp_cfg.get("multi_tp_enabled", False))
+
+                trade_decision["sltp_hints"] = {
+                    "mode": "dynamic",                   # on est passé à SLTP dynamique
+                    "asset": asset_raw,
+                    "side": normalized_action,           # BUY/SELL
+                    "entry_price": (float(trade_decision.get("entry_price"))
+                                    if trade_decision.get("entry_price") is not None else None),
+
+                    # Hints de niveaux (si déjà évalués par le risk engine)
+                    "sl_price": (float(sl) if sl is not None else None),
+                    "tp_price": (float(tp) if tp is not None else None),
+                    "sl_pips": (float(sl_pips) if sl_pips is not None else None),
+                    "tp_pips": (float(tp_pips) if tp_pips is not None else None),
+
+                    # Hint de ratio pour calculer TP s'il n'y a pas de tp_price direct
+                    "rr_hint": (float(rr_hint_val) if rr_hint_val is not None else None),
+
+                    # Signal qu'on autorise la décomposition en multi-TP côté exécution
+                    "multi_tp_enabled": multi_tp_enabled,
+                }
+            except Exception as _e:
+                self.logger.debug(f"[CORE] SLTP hints non construits: {_e}")
+            # ⬆️⬆️ FIN INSERT
+                
             except Exception:
                 pass
 
@@ -1423,7 +1482,7 @@ class DecisionPipeline:
         except Exception as e:
             self.logger.debug(f"[PATTERN] Log final ignoré: {e}")
 
-        # [EXEC-01] Exécution immédiate : envoi au TradeExecutor (pas de dry-run)
+        # [EXEC-01] Exécution immédiate : envoi au TradeExecutor 
         try:
             from trader.trade_executor import (
                 TradeExecutor,
