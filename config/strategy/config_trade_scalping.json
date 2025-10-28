@@ -1,7 +1,7 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst — Single-Basket with SL/TP (no trailing, no candle-pattern rules)",
-  "version": "3.0",
+  "description": "Scalping Burst — trailing-only exits (no TP). Dynamic SL/Trailing driven by ATR with broker-aware floors.",
+  "version": "4.0-dynamic",
   "tradeable_assets": [
     "XAUUSD"
   ],
@@ -30,31 +30,73 @@
         "enforce_single_basket": false,
         "per_leg_virtual": false,
         "sltp": {
+          "sl_method": "ATR",
           "rr_base": 1.6,
           "rr_floor": 1.0,
           "rr_cap": 3.0,
-          "sl_method": "PIPS"
-        },
-        "closure_rules": {
-          "enabled": false,
-          "enable_profit_close": true,
-          "enable_loss_guard": false,
-          "require_full_count_for_profit_close": true,
-          "require_all_seen_green_once": true,
-          "all_seen_green_pips": 3.0,
-          "min_green_pnl_pips": 1.0,
-          "rt_fast_window_ms": 0,
-          "rt_poll_interval_ms": 120,
-          "max_loss_pips": 15.0,
-          "loss_guard_arming_ms": 3000,
-          "min_age_ms_for_any_close": 3000
+          "sl": {
+            "atr_period": 14,
+            "atr_multiplier": 2.2,
+            "buffer_pips": 6,
+            "swing_lookback": 10,
+            "pips": 70
+          },
+          "tp": {
+            "tp_method": "NONE",
+            "atr_period": 14,
+            "atr_multiplier": 2.0,
+            "pips": 100
+          }
         }
+      },
+      "trailing": {
+        "enabled": true,
+        "activation": {
+          "mode": "ATR",
+          "atr_period": 14,
+          "atr_multiple": 0.7,
+          "min_pips": 4.0
+        },
+        "step": {
+          "mode": "ATR",
+          "atr_multiple": 0.25,
+          "min_pips": 2.0,
+          "update_interval_ms": 600
+        },
+        "break_even": {
+          "enabled": true,
+          "trigger": {
+            "mode": "ATR",
+            "atr_multiple": 0.6,
+            "min_pips": 3.0
+          },
+          "offset_pips": 1.0
+        },
+        "broker_floors": {
+          "min_sl_distance_pips": 2.0,
+          "spread_multiplier": 2.0,
+          "extra_buffer_pips": 1.0
+        }
+      },
+      "closure_rules": {
+        "enabled": false,
+        "enable_profit_close": false,
+        "enable_loss_guard": false,
+        "require_full_count_for_profit_close": true,
+        "require_all_seen_green_once": true,
+        "all_seen_green_pips": 3.0,
+        "min_green_pnl_pips": 1.0,
+        "rt_fast_window_ms": 0,
+        "rt_poll_interval_ms": 120,
+        "max_loss_pips": 15.0,
+        "loss_guard_arming_ms": 3000,
+        "min_age_ms_for_any_close": 3000
       }
     }
   },
   "exit_rules": {
     "managed_by": "sltp",
-    "use_trailing_stop": false
+    "use_trailing_stop": true
   },
   "phase_detection": {
     "use_phase_observer": false,
@@ -74,31 +116,6 @@
     "risk_per_trade_percent": 0.73,
     "max_positions_per_symbol": 1,
     "stop_distance_pips": 60
-  },
-  "smart_sl_tp_settings": {
-    "sl_placement_method": "ATR",
-    "sl_atr_period": 14,
-    "sl_atr_multiplier": 1.8,
-    "sl_buffer_pips": 4,
-    "tp_placement_method": "RR",
-    "tp_rr_ratio": 1.8,
-    "tp_atr_period": 14,
-    "tp_atr_multiplier": 2.0,
-    "sl_swing_lookback_period": 10,
-    "stop_loss_pips": 70,
-    "take_profit_pips": 100
-  },
-  "smart_targets": {
-    "risk_management": {
-      "default_equity": 10000
-    },
-    "stop_loss": {
-      "hard_min_points": 0,
-      "hard_max_points": 100000
-    },
-    "take_profit": {
-      "hard_max_points": 200000
-    }
   },
   "trade_executor_settings": {
     "version": "3.0",
@@ -131,5 +148,31 @@
       "weak_footprint_score_th": 0.60
     },
     "base_trail_steps": 20
+  },
+  "smart_sl_tp_settings": {
+    "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility until code reads only the dynamic block.",
+    "sl_placement_method": "ATR",
+    "sl_atr_period": 14,
+    "sl_atr_multiplier": 2.2,
+    "sl_buffer_pips": 6,
+    "tp_placement_method": "NONE",
+    "tp_rr_ratio": 1.6,
+    "tp_atr_period": 14,
+    "tp_atr_multiplier": 2.0,
+    "sl_swing_lookback_period": 10,
+    "stop_loss_pips": 70,
+    "take_profit_pips": 100
+  },
+  "smart_targets": {
+    "risk_management": {
+      "default_equity": 10000
+    },
+    "stop_loss": {
+      "hard_min_points": 0,
+      "hard_max_points": 100000
+    },
+    "take_profit": {
+      "hard_max_points": 200000
+    }
   }
 }
