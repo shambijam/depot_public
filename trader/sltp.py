@@ -476,6 +476,28 @@ def _calculate_sl_tp_prices(
     rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
     rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
     sl_method = str(sltp_cfg.get("sl_method", "") or "").upper()
+        
+    # === [PATCH DYN SLTP] lecture prioritaire du bloc dynamique ===================
+    # On lit d'abord le nouveau schéma, puis on retombe sur l'ancien en fallback.
+    dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
+    dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
+    legacy = (config.get("smart_sl_tp_settings") or {}) if isinstance(config.get("smart_sl_tp_settings"), dict) else {}
+
+    # tp_method prioritaire côté dynamique, sinon fallback legacy, défaut "RR" (ou "NONE" si tu veux neutre)
+    tp_method = str(dyn_tp.get("tp_method", legacy.get("tp_placement_method", "RR"))).upper()
+
+    # --- SL (dyn -> legacy -> defaults)
+    sl_atr_period     = int( dyn_sl.get("atr_period",      legacy.get("sl_atr_period", 14)) )
+    sl_atr_multiplier = float(dyn_sl.get("atr_multiplier", legacy.get("sl_atr_multiplier", 1.8)) )
+    sl_buffer_pips    = float(dyn_sl.get("buffer_pips",    legacy.get("sl_buffer_pips", 2.0)) )
+    sl_swing_lookback = int( dyn_sl.get("swing_lookback",  legacy.get("sl_swing_lookback_period", 10)) )
+    sl_pips_default   = float(dyn_sl.get("pips",           legacy.get("stop_loss_pips", config.get("stop_loss_pips", 10))) )
+
+    # --- TP (dyn -> legacy -> defaults)
+    tp_atr_period     = int( dyn_tp.get("atr_period",      legacy.get("tp_atr_period", 14)) )
+    tp_atr_multiplier = float(dyn_tp.get("atr_multiplier", legacy.get("tp_atr_multiplier", 2.0)) )
+    tp_pips_default   = float(dyn_tp.get("pips",           legacy.get("take_profit_pips", config.get("take_profit_pips", 20))) )
+    # =============================================================================
 
     # Fallback historique
     prod_st = config.get("smart_sl_tp_settings", {}) or {}
@@ -545,8 +567,9 @@ def _calculate_sl_tp_prices(
     else:
         method = sl_method or "PIPS"
         if method == "SWING":
-            lookback = int(prod_st.get("sl_swing_lookback_period", 10) or 10)
-            buffer_pips = float(prod_st.get("sl_buffer_pips", 2) or 2.0)
+            lookback = int(sl_swing_lookback)
+            buffer_pips = float(sl_buffer_pips)
+
             if not (hasattr(rates_df, "tail") and len(rates_df or []) >= lookback):
                 method = "ATR"
             else:
@@ -556,14 +579,10 @@ def _calculate_sl_tp_prices(
                 else:
                     stop_loss_price = float(rates_df.tail(lookback)["high"].max()) + buf
 
-        if method == "ATR" and stop_loss_price == 0.0:
-            atr_p = int(
-                prod_st.get(
-                    "sl_atr_period", prod_st.get("atr_settings", {}).get("period", 14)
-                )
-                or 14
-            )
-            atr_mult = float(prod_st.get("sl_atr_multiplier", 1.2) or 1.2)
+            if method == "ATR" and stop_loss_price == 0.0:
+                atr_p = int(sl_atr_period)
+                atr_mult = float(sl_atr_multiplier)
+
             atr = _compute_atr(rates_df, atr_p)
             if not (atr == atr and atr > 0):
                 method = "PIPS"
@@ -574,7 +593,7 @@ def _calculate_sl_tp_prices(
                 )
 
         if method == "PIPS" and stop_loss_price == 0.0:
-            sl_pips = float(config.get("stop_loss_pips", 10) or 10.0)
+            sl_pips = float(sl_pips_default)
             sl_dist = sl_pips * pip_size
             stop_loss_price = (
                 entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
@@ -589,32 +608,37 @@ def _calculate_sl_tp_prices(
         )
     else:
         method = tp_method or "RR"
-        if method == "RR":
-            risk = abs(entry_price - stop_loss_price)
-            if risk > 0:
-                tp_dist = risk * rr_ratio
+
+        if method != "NONE":
+            if method == "RR":
+                risk = abs(entry_price - stop_loss_price)
+                if risk > 0:
+                    tp_dist = risk * rr_ratio
+                    take_profit_price = (
+                        entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                    )
+                else:
+                    method = "PIPS"
+
+            if method == "ATR_MULTIPLE" and take_profit_price is None:
+                atr_p = int(tp_atr_period)
+                atr_mult = float(tp_atr_multiplier)
+                atr = _compute_atr(rates_df, atr_p)
+                if atr == atr and atr > 0:
+                    tp_dist = atr_mult * atr
+                    take_profit_price = (
+                        entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                    )
+
+            if take_profit_price is None:  # fallback PIPS
+                tp_pips = float(tp_pips_default)
+                tp_dist = tp_pips * pip_size
                 take_profit_price = (
                     entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
                 )
-            else:
-                method = "PIPS"
-        if method == "ATR_MULTIPLE" and take_profit_price is None:
-            atr_p = int(
-                prod_st.get("tp_atr_period", prod_st.get("sl_atr_period", 14)) or 14
-            )
-            atr_mult = float(prod_st.get("tp_atr_multiplier", 2.0) or 2.0)
-            atr = _compute_atr(rates_df, atr_p)
-            if atr == atr and atr > 0:
-                tp_dist = atr_mult * atr
-                take_profit_price = (
-                    entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
-                )
-        if take_profit_price is None:  # fallback PIPS
-            tp_pips = float(config.get("take_profit_pips", 20) or 20.0)
-            tp_dist = tp_pips * pip_size
-            take_profit_price = (
-                entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
-            )
+        else:
+            # tp_method == "NONE" -> pas de TP (scalping trailing-only)
+            take_profit_price = None
 
     # --- 9) Validations distances ---
     sl_dist_price = (
@@ -779,10 +803,6 @@ def _clean_cache_if_needed(self):
     except Exception:
         # Ne jamais crasher sur du nettoyage
         pass
-
-
-# (A) <<< PATCH
-
 
 # (B) >>> PATCH: version enrichie de _resolve_basket_context_for_sltp
 def _resolve_basket_context_for_sltp(

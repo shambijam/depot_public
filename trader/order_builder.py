@@ -774,6 +774,30 @@ def prepare_order(self, decision_package: dict) -> dict:
             trade_decision["rr_effective"] = rr_value
         else:
             self.logger.debug("[RR] TP absent → RR non évalué (soft).")
+            
+        # ---------- 8c) Action SL/TP (résolution + whitelist) ----------
+        # Politique:
+        #  - Burst scalping: SL OBLIGATOIRE + TP OBLIGATOIRE → action "SET" (pose SL & TP)
+        #  - Sinon: si TP absent → "SET_SL_ONLY" (scalping trailing-only possible ailleurs)
+        #           si TP présent → "SET"
+        _ALLOWED_SLTP = {"SET", "SET_SL_ONLY", "UPDATE", "NONE"}
+
+        if is_burst:
+            # Exigence docstring: "SL OBLIGATOIRE et TP ACTIF pour le burst"
+            if tp_price is None:
+                raise TradeExecutionError("Burst: TP requis mais absent (tp_method/TP calculé manquant).")
+            sltp_action = "SET"
+        else:
+            sltp_action = "SET" if (tp_price is not None) else "SET_SL_ONLY"
+
+        if sltp_action not in _ALLOWED_SLTP:
+            raise TradeExecutionError(f"Action SL/TP non autorisée: {sltp_action}")
+
+        # Propagation pour l'aval (logs, exécuteur, trailing manager, etc.)
+        try:
+            trade_decision["sltp_action"] = sltp_action
+        except Exception:
+            pass
 
         # ---------- 9) Volume via sizing risk-based (TOUJOURS exécuté) ----------
         account_trade_settings = (
@@ -1141,9 +1165,10 @@ def prepare_order(self, decision_package: dict) -> dict:
             {
                 "action": action,
                 "asset": broker_symbol,
-                "order_type": "MARKET",  # master MARKET; split géré en aval
+                "order_type": "MARKET",  
                 "rule_name": trade_decision.get("rule_name"),
                 "comment": trade_decision.get("comment"),
+                "sltp_action": sltp_action,
                 "meta_rr_projected": (
                     trade_decision.get("meta_rr_projected")
                     or trade_decision.get("rr")
