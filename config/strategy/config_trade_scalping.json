@@ -31,21 +31,24 @@
         "per_leg_virtual": false,
         "sltp": {
           "sl_method": "ATR",
-          "rr_base": 1.6,
-          "rr_floor": 1.0,
+          "rr_base": 1.9,
+          "rr_floor": 1.2,
           "rr_cap": 3.0,
           "sl": {
             "atr_period": 14,
-            "atr_multiplier": 2.2,
-            "buffer_pips": 6,
+            "atr_multiplier": 2.8,
+            "buffer_pips": 8,
             "swing_lookback": 10,
             "pips": 70
           },
           "tp": {
-            "tp_method": "NONE",
+            "tp_method": "RR",
             "atr_period": 14,
-            "atr_multiplier": 2.0,
-            "pips": 100
+            "atr_multiplier": 2.8,
+            "pips": 100,
+            "execution": {
+              "min_sl_tp_distance_pips": 11.0
+            }
           }
         }
       },
@@ -54,12 +57,12 @@
         "activation": {
           "mode": "ATR",
           "atr_period": 14,
-          "atr_multiple": 0.7,
+          "atr_multiple": 1.1,
           "min_pips": 4.0
         },
         "step": {
           "mode": "ATR",
-          "atr_multiple": 0.25,
+          "atr_multiple": 0.40,
           "min_pips": 2.0,
           "update_interval_ms": 600
         },
@@ -67,10 +70,10 @@
           "enabled": true,
           "trigger": {
             "mode": "ATR",
-            "atr_multiple": 0.6,
+            "atr_multiple": 1.0,
             "min_pips": 3.0
           },
-          "offset_pips": 1.0
+          "offset_pips": 2.0
         },
         "broker_floors": {
           "min_sl_distance_pips": 2.0,
@@ -155,7 +158,7 @@
     "sl_atr_period": 14,
     "sl_atr_multiplier": 2.2,
     "sl_buffer_pips": 6,
-    "tp_placement_method": "NONE",
+    "tp_placement_method": "RR",
     "tp_rr_ratio": 1.6,
     "tp_atr_period": 14,
     "tp_atr_multiplier": 2.0,
