@@ -259,141 +259,122 @@ def _calculate_sl_tp_prices(
 ) -> tuple[float, Optional[float]]:
     """
     Calcule SL/TP à partir de SWING/ATR/PIPS pour le SL, et RR/ATR_MULTIPLE/PIPS pour le TP.
-    - Normalise la direction via resolve_side() (BUY/SELL), et la réécrit dans trade_decision["action"]
+    - Normalise l'action via resolve_side() (BUY/SELL) et l'écrit dans trade_decision["action"]
     - Respecte stops_level broker (+ soft buffer 2 ticks)
-    - Supporte RR dynamique (tp_rr_ratio_hint) + modulation optionnelle par facteurs de contexte
-    - Aucun trailing ici (burst_scalping = SL/TP only)
-    - ÉTAPE 1 contexte panier: accepte un paramètre optionnel `basket_context` (dict) et
-      en extrait un résumé validé (remplissage/phase/PNL) pour logging/metadata,
-      SANS impacter le calcul des prix SL/TP (rétrocompatibilité totale).
-    Retour: (sl_price, tp_price|None)
+    - RR dynamique (tp_rr_ratio_hint) + modulation optionnelle par facteurs de contexte
+    - Trailing géré ailleurs : ici calcul des PRIX SL/TP seulement (burst_scalping = SL/TP only)
+    - Contexte panier lu pour logging/metadata, SANS impacter les prix
+    Retour: (stop_loss_price, take_profit_price|None)
     """
     import math
 
-    # --- 0) Direction robuste (corrige l'erreur "Action invalide pour SL/TP: ''") ---
+    # ---------- 0) Direction & entrées ----------
     try:
-        action = resolve_side(
-            trade_decision
-        )  # BUY / SELL (accepte final_action/side/etc.)
-        trade_decision["action"] = action  # standardise pour tous les appels suivants
+        action = resolve_side(trade_decision)  # "BUY" / "SELL"
+        trade_decision["action"] = action
     except Exception as e:
         raise TradeExecutionError(
             f"Action invalide pour SL/TP: vide ou non reconnue ({e})"
         )
 
-    # --- 0.1) Contexte panier (ÉTAPE 1: lecture/validation/log uniquement) ---
-    # Objectif: préparer le terrain au SLTP dynamique sans modifier les prix.
-    basket_summary = None
-    if isinstance(basket_context, dict) and basket_context:
-
-        def _to_int(x, default=None):
-            try:
-                xi = int(x)
-                return xi if (default is None or xi >= 0) else default
-            except Exception:
-                return default
-
-        def _to_float(x, default=None):
-            try:
-                xf = float(x)
-                return xf if (default is None or (xf == xf)) else default  # nan check
-            except Exception:
-                return default
-
-        def _clamp(v, lo, hi):
-            try:
-                return max(lo, min(hi, float(v)))
-            except Exception:
-                return None
-
-        bc = basket_context
-        basket_id = (
-            str(bc.get("basket_id")) if bc.get("basket_id") is not None else None
-        )
-        current_positions = _to_int(bc.get("current_positions"), default=None)
-        target_burst_size = _to_int(bc.get("target_burst_size"), default=None)
-        avg_entry_price = _to_float(bc.get("avg_entry_price"), default=None)
-        basket_pnl_pips = _to_float(bc.get("basket_pnl_pips"), default=None)
-        basket_age_minutes = _to_float(bc.get("basket_age_minutes"), default=None)
-        phase_provided = (
-            str(bc.get("basket_phase")).upper() if bc.get("basket_phase") else None
-        )
-
-        # fill_ratio et phase dérivée si possible
-        fill_ratio = None
-        phase_source = None
-        derived_phase = None
-        valid = (
-            target_burst_size is not None
-            and target_burst_size > 0
-            and current_positions is not None
-            and current_positions >= 0
-        )
-
-        if valid:
-            fill_ratio = _clamp(current_positions / float(target_burst_size), 0.0, 1.0)
-
-        allowed_phases = {"ACCUMULATION", "TARGETING", "SECURING"}
-        if phase_provided in allowed_phases:
-            phase = phase_provided
-            phase_source = "provided"
-        else:
-            # Déduction de la phase si possible
-            if fill_ratio is not None:
-                if fill_ratio <= 0.50:
-                    derived_phase = "ACCUMULATION"
-                elif fill_ratio <= 0.80:
-                    derived_phase = "TARGETING"
-                else:
-                    derived_phase = "SECURING"
-                phase = derived_phase
-                phase_source = "derived"
-            else:
-                phase = None
-                phase_source = None
-
-        basket_summary = {
-            "basket_id": basket_id,
-            "current_positions": current_positions,
-            "target_burst_size": target_burst_size,
-            "avg_entry_price": avg_entry_price,
-            "basket_pnl_pips": basket_pnl_pips,
-            "basket_age_minutes": basket_age_minutes,
-            "fill_ratio": fill_ratio,
-            "phase": phase,
-            "phase_source": phase_source,
-            "valid": bool(valid),
-        }
-
-        # Injection en metadata non bloquante
-        try:
-            extras = trade_decision.setdefault("extras", {})
-            extras["basket_context"] = basket_summary
-        except Exception:
-            pass
-
-        # Logging optionnel (silencieux si pas de logger)
-        try:
-            self.logger.debug(f"[SLTP][BasketCtx] {basket_summary}")
-        except Exception:
-            pass
-
-    # --- 1) Sanity checks entrée ---
     if not (isinstance(entry_price, (int, float)) and entry_price > 0):
         raise TradeExecutionError("Prix d'entrée invalide.")
 
-    # --- 2) Broker params ---
+    # ---------- 0.1) Contexte panier (metadata only) ----------
+    if isinstance(basket_context, dict) and basket_context:
+        try:
+            bc = basket_context
+
+            def _to_int(x, d=None):
+                try:
+                    xi = int(x)
+                    return xi if (d is None or xi >= 0) else d
+                except Exception:
+                    return d
+
+            def _to_float(x, d=None):
+                try:
+                    xf = float(x)
+                    return xf if (d is None or (xf == xf)) else d  # NaN check
+                except Exception:
+                    return d
+
+            def _clamp(v, lo, hi):
+                try:
+                    return max(lo, min(hi, float(v)))
+                except Exception:
+                    return None
+
+            basket_id = (
+                str(bc.get("basket_id")) if bc.get("basket_id") is not None else None
+            )
+            current_positions = _to_int(bc.get("current_positions"))
+            target_burst_size = _to_int(bc.get("target_burst_size"))
+            avg_entry_price = _to_float(bc.get("avg_entry_price"))
+            basket_pnl_pips = _to_float(bc.get("basket_pnl_pips"))
+            basket_age_minutes = _to_float(bc.get("basket_age_minutes"))
+            phase_provided = (
+                str(bc.get("basket_phase")).upper() if bc.get("basket_phase") else None
+            )
+
+            fill_ratio = None
+            valid = (
+                isinstance(target_burst_size, int)
+                and target_burst_size > 0
+                and isinstance(current_positions, int)
+                and current_positions >= 0
+            )
+            if valid:
+                fill_ratio = _clamp(
+                    current_positions / float(target_burst_size), 0.0, 1.0
+                )
+
+            allowed_phases = {"ACCUMULATION", "TARGETING", "SECURING"}
+            if phase_provided in allowed_phases:
+                phase, phase_source = phase_provided, "provided"
+            else:
+                if fill_ratio is None:
+                    phase, phase_source = None, None
+                elif fill_ratio <= 0.50:
+                    phase, phase_source = "ACCUMULATION", "derived"
+                elif fill_ratio <= 0.80:
+                    phase, phase_source = "TARGETING", "derived"
+                else:
+                    phase, phase_source = "SECURING", "derived"
+
+            basket_summary = {
+                "basket_id": basket_id,
+                "current_positions": current_positions,
+                "target_burst_size": target_burst_size,
+                "avg_entry_price": avg_entry_price,
+                "basket_pnl_pips": basket_pnl_pips,
+                "basket_age_minutes": basket_age_minutes,
+                "fill_ratio": fill_ratio,
+                "phase": phase,
+                "phase_source": phase_source,
+                "valid": bool(valid),
+            }
+            extras = trade_decision.setdefault("extras", {})
+            extras["basket_context"] = basket_summary
+            try:
+                self.logger.debug(f"[SLTP][BasketCtx] {basket_summary}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---------- 1) Paramètres broker ----------
     point = float(getattr(symbol_info, "point", 0.0) or 0.0)
     if point <= 0:
         raise TradeExecutionError("symbol_info.point invalide (<=0).")
     digits = int(getattr(symbol_info, "digits", 0) or 0)
     tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or point)
-    min_stop_points = int(
+    stops_lvl = int(
         getattr(symbol_info, "trade_stops_level", 0)
         or getattr(symbol_info, "stops_level", 0)
         or 0
     )
-    min_stop_price = min_stop_points * point
+    min_stop_price = stops_lvl * point
 
     # soft buffer si broker annonce 0 → ~2 ticks
     min_ticks_soft = 2
@@ -403,13 +384,26 @@ def _calculate_sl_tp_prices(
     points_per_pip = 10.0 if digits in (3, 5) else 1.0
     pip_size = point * points_per_pip
 
-    # --- 3) Libs optionnelles pour ATR ---
+    # ---------- 2) Données marché, overrides ----------
+    sl_pips_override = trade_decision.get("target_sl_pips")
+    tp_pips_override = trade_decision.get("target_tp_pips")
+    spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
+
+    symbol = str(
+        trade_decision.get("asset") or trade_decision.get("symbol") or ""
+    ).upper()
+    try:
+        rates_df = ((market_context or {}).get("market_data") or {}).get(symbol)
+    except Exception:
+        rates_df = None
+
+    # ---------- 3) ATR helper (optionnel) ----------
     try:
         import pandas as pd  # type: ignore
         import numpy as np  # type: ignore
     except Exception:
-        pd = None  # type: ignore
-        np = None  # type: ignore
+        pd = None
+        np = None
 
     def _compute_atr(df, period: int) -> float:
         if (
@@ -439,33 +433,7 @@ def _calculate_sl_tp_prices(
         except Exception:
             return float("nan")
 
-    # --- 4) Overrides éventuels & inputs marché ---
-    sl_pips_override = trade_decision.get("target_sl_pips")
-    tp_pips_override = trade_decision.get("target_tp_pips")
-    spread_pips = float(trade_decision.get("spread_pips", 0.0) or 0.0)
-
-    symbol = str(
-        trade_decision.get("asset") or trade_decision.get("symbol") or ""
-    ).upper()
-    try:
-        rates_df = ((market_context or {}).get("market_data") or {}).get(symbol)
-    except Exception:
-        rates_df = None
-
-    # [PATCH] Résolution opportuniste du contexte panier si absent
-    if basket_context is None:
-        try:
-            basket_context = self._resolve_basket_context_for_sltp(
-                trade_decision=trade_decision,
-                basket_context=None,
-                burst_manager=getattr(self, "burst_manager", None),
-                ttl_sec=2.0,
-            )
-        except Exception:
-            basket_context = None
-
-    # --- 5) Lecture de la configuration SLTP ---
-    # Chemin privilégié (asset/strat): entry_rules.scalping.burst_scalping.sltp
+    # ---------- 4) Lecture configuration (dynamique > legacy) ----------
     sltp_cfg = (
         ((config.get("entry_rules") or {}).get("scalping") or {})
         .get("burst_scalping", {})
@@ -477,29 +445,17 @@ def _calculate_sl_tp_prices(
     rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
     sl_method = str(sltp_cfg.get("sl_method", "") or "").upper()
 
-    # === [PATCH DYN SLTP] lecture prioritaire du bloc dynamique ===================
-    # On lit d'abord le nouveau schéma, puis on retombe sur l'ancien en fallback.
     dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
     dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
+
     legacy = (
         (config.get("smart_sl_tp_settings") or {})
         if isinstance(config.get("smart_sl_tp_settings"), dict)
         else {}
     )
-    prefer_dynamic = bool(sltp_cfg)  # si un bloc dynamique existe, il est souverain
+    prefer_dynamic = bool(sltp_cfg)
 
-    # --- [NEW] Floors de distance issus de la conf ----------------------------
-    exec_cfg = {}
-    try:
-        exec_cfg = (
-            dyn_tp.get("execution", {})
-            if isinstance(dyn_tp.get("execution"), dict)
-            else {}
-        )
-    except Exception:
-        exec_cfg = {}
-    min_sl_tp_distance_pips = float(exec_cfg.get("min_sl_tp_distance_pips", 0.0) or 0.0)
-
+    # Trailing floors (pour le plancher anti-cisaille)
     trailing_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get(
         "trailing", {}
     ) or {}
@@ -508,16 +464,18 @@ def _calculate_sl_tp_prices(
     spread_mult = float(floors_cfg.get("spread_multiplier", 0.0) or 0.0)
     extra_buffer_pips = float(floors_cfg.get("extra_buffer_pips", 0.0) or 0.0)
 
-    # tp_method prioritaire côté dynamique, sinon fallback legacy, défaut "RR" (ou "NONE" si tu veux neutre)
-    tp_method = str(
-        dyn_tp.get("tp_method", legacy.get("tp_placement_method", "RR"))
-    ).upper()
+    # Exécution TP: min gap TP↔SL
     tp_exec = (
         dyn_tp.get("execution", {}) if isinstance(dyn_tp.get("execution"), dict) else {}
     )
     min_sl_tp_distance_pips = float(tp_exec.get("min_sl_tp_distance_pips", 0.0) or 0.0)
 
-    # --- SL (dyn -> legacy -> defaults)
+    # Méthode TP: dynamique prioritaire, sinon legacy, défaut RR
+    tp_method = str(dyn_tp.get("tp_method", "") or "").upper()
+    if not tp_method:
+        tp_method = str(legacy.get("tp_placement_method", "RR") or "RR").upper()
+
+    # Paramètres SL dyn -> legacy -> défauts
     sl_atr_period = int(dyn_sl.get("atr_period", legacy.get("sl_atr_period", 14)))
     sl_atr_multiplier = float(
         dyn_sl.get("atr_multiplier", legacy.get("sl_atr_multiplier", 1.8))
@@ -532,7 +490,7 @@ def _calculate_sl_tp_prices(
         )
     )
 
-    # --- TP (dyn -> legacy -> defaults)
+    # Paramètres TP dyn -> legacy -> défauts
     tp_atr_period = int(dyn_tp.get("atr_period", legacy.get("tp_atr_period", 14)))
     tp_atr_multiplier = float(
         dyn_tp.get("atr_multiplier", legacy.get("tp_atr_multiplier", 2.0))
@@ -542,38 +500,11 @@ def _calculate_sl_tp_prices(
             "pips", legacy.get("take_profit_pips", config.get("take_profit_pips", 20))
         )
     )
-    # =============================================================================
 
-    # Fallback historique
-    prod_st = {} if prefer_dynamic else (config.get("smart_sl_tp_settings", {}) or {})
-
-    # sl_method : on ne consulte le legacy que si le dynamique n’a rien donné
-    if not sl_method:
-        sl_method = str(prod_st.get("sl_placement_method", "PIPS") or "PIPS").upper()
-
-    # tp_method : on respecte d'abord le dynamique ; on ne tombe sur legacy que si vide
-    dyn_tp_method = str(dyn_tp.get("tp_method", "") or "").upper()
-    if dyn_tp_method:
-        tp_method = dyn_tp_method
-        # (optionnel) trace de conflit s’il existe aussi un param legacy différent
-        if prod_st.get("tp_placement_method"):
-            try:
-                self.logger.debug(
-                    "[SLTP] precedence: dynamic.tp_method=%s overrides legacy=%s",
-                    tp_method,
-                    str(prod_st.get("tp_placement_method")),
-                )
-            except Exception:
-                pass
-    else:
-        tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
-
-    # RR par défaut : garde rr_base dynamique si présent
+    # RR effectif (hint + facteurs)
     rr_default = float(
-        rr_base if prefer_dynamic else (prod_st.get("tp_rr_ratio", rr_base) or rr_base)
+        rr_base if prefer_dynamic else (legacy.get("tp_rr_ratio", rr_base) or rr_base)
     )
-
-    # RR dynamique (hint + modulation)
     rr_hint = trade_decision.get("tp_rr_ratio_hint")
     if isinstance(rr_hint, (int, float)) and math.isfinite(rr_hint) and rr_hint > 0:
         rr_ratio = float(rr_hint)
@@ -596,7 +527,7 @@ def _calculate_sl_tp_prices(
         else:
             conf = trade_decision.get("confidence")
             if isinstance(conf, (int, float)) and 0 <= float(conf) <= 1:
-                rr_ratio *= 0.9 + 0.2 * float(conf)  # 0→0.9 ; 0.5→1.0 ; 1.0→1.1
+                rr_ratio *= 0.9 + 0.2 * float(conf)  # 0→0.9 ; 0.5→1.0 ; 1→1.1
     rr_ratio = max(rr_floor, min(rr_cap, rr_ratio if rr_ratio > 0 else rr_default))
 
     # Hard limits historiques (points)
@@ -610,25 +541,8 @@ def _calculate_sl_tp_prices(
     tp_hard_max_points = float(
         st_tp.get("hard_max_points", float("inf")) or float("inf")
     )
-    # --- [NEW] Floors supplémentaires en points (pips -> points) --------------
-    exec_floor_pts = max(0.0, min_sl_tp_distance_pips) * points_per_pip
-    broker_floor_pts = max(0.0, broker_min_sl_pips) * points_per_pip
-    # spread élargi (anti-cisaillement) : k*spread + buffer, puis en points
-    spread_floor_pts = (
-        max(0.0, (spread_mult * spread_pips) + extra_buffer_pips) * points_per_pip
-    )
 
-    # applique au SL (distance minimale côté prix)
-    sl_dist_points = max(
-        sl_dist_points, exec_floor_pts, broker_floor_pts, spread_floor_pts
-    )
-    sl_dist_price = sl_dist_points * point
-
-    # Si on a un TP, on garantira plus loin que SL + spread au point C) existant
-    # (déjà en place dans ton code).
-    # --------------------------------------------------------------------------
-
-    # --- 6) Helpers arrondis ---
+    # ---------- 5) Helpers arrondis ----------
     def _ceil_to_tick(x: float) -> float:
         if tick_size <= 0:
             return round(float(x), digits)
@@ -641,7 +555,7 @@ def _calculate_sl_tp_prices(
         steps = math.floor(float(x) / tick_size + 1e-12)
         return round(steps * tick_size, digits)
 
-    # --- 7) Calcul SL ---
+    # ---------- 6) SL brut : SWING -> ATR -> PIPS (overrides prioritaire) ----------
     stop_loss_price: float = 0.0
     if isinstance(sl_pips_override, (int, float)) and sl_pips_override > 0:
         sl_dist = float(sl_pips_override) * pip_size
@@ -649,13 +563,14 @@ def _calculate_sl_tp_prices(
             entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
         )
     else:
-        method = sl_method or "PIPS"
-        if method == "SWING":
+        method_sl = (sl_method or "PIPS").upper()
+
+        # SWING
+        if method_sl == "SWING":
             lookback = int(sl_swing_lookback)
             buffer_pips = float(sl_buffer_pips)
-
             if not (hasattr(rates_df, "tail") and len(rates_df or []) >= lookback):
-                method = "ATR"
+                method_sl = "ATR"
             else:
                 buf = buffer_pips * pip_size
                 if action == "BUY":
@@ -663,27 +578,28 @@ def _calculate_sl_tp_prices(
                 else:
                     stop_loss_price = float(rates_df.tail(lookback)["high"].max()) + buf
 
-            if method == "ATR" and stop_loss_price == 0.0:
-                atr_p = int(sl_atr_period)
-                atr_mult = float(sl_atr_multiplier)
-
+        # ATR
+        if method_sl == "ATR" and stop_loss_price == 0.0:
+            atr_p = int(sl_atr_period)
+            atr_mult = float(sl_atr_multiplier)
             atr = _compute_atr(rates_df, atr_p)
-            if not (atr == atr and atr > 0):
-                method = "PIPS"
-            else:
+            if atr == atr and atr > 0:
                 sl_dist = atr_mult * atr
                 stop_loss_price = (
                     entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
                 )
+            else:
+                method_sl = "PIPS"
 
-        if method == "PIPS" and stop_loss_price == 0.0:
+        # PIPS (fallback final)
+        if method_sl == "PIPS" and stop_loss_price == 0.0:
             sl_pips = float(sl_pips_default)
             sl_dist = sl_pips * pip_size
             stop_loss_price = (
                 entry_price - sl_dist if action == "BUY" else entry_price + sl_dist
             )
 
-    # --- 8) Calcul TP (jamais neutralisé ici pour burst) ---
+    # ---------- 7) TP brut : RR / ATR_MULTIPLE / PIPS / NONE ----------
     take_profit_price: Optional[float] = None
     if isinstance(tp_pips_override, (int, float)) and tp_pips_override > 0:
         tp_dist = float(tp_pips_override) * pip_size
@@ -691,10 +607,9 @@ def _calculate_sl_tp_prices(
             entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
         )
     else:
-        method = tp_method or "RR"
-
-        if method != "NONE":
-            if method == "RR":
+        method_tp = (tp_method or "RR").upper()
+        if method_tp != "NONE":
+            if method_tp == "RR":
                 risk = abs(entry_price - stop_loss_price)
                 if risk > 0:
                     tp_dist = risk * rr_ratio
@@ -704,9 +619,9 @@ def _calculate_sl_tp_prices(
                         else entry_price - tp_dist
                     )
                 else:
-                    method = "PIPS"
+                    method_tp = "PIPS"
 
-            if method == "ATR_MULTIPLE" and take_profit_price is None:
+            if method_tp == "ATR_MULTIPLE" and take_profit_price is None:
                 atr_p = int(tp_atr_period)
                 atr_mult = float(tp_atr_multiplier)
                 atr = _compute_atr(rates_df, atr_p)
@@ -718,17 +633,16 @@ def _calculate_sl_tp_prices(
                         else entry_price - tp_dist
                     )
 
-            if take_profit_price is None:  # fallback PIPS
+            if take_profit_price is None and method_tp == "PIPS":
                 tp_pips = float(tp_pips_default)
                 tp_dist = tp_pips * pip_size
                 take_profit_price = (
                     entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
                 )
         else:
-            # tp_method == "NONE" -> pas de TP (scalping trailing-only)
-            take_profit_price = None
+            take_profit_price = None  # trailing-only
 
-    # --- 9) Validations distances ---
+    # ---------- 8) Distances brutes (prix) ----------
     sl_dist_price = (
         (entry_price - stop_loss_price)
         if action == "BUY"
@@ -747,12 +661,12 @@ def _calculate_sl_tp_prices(
         if not (tp_dist_price and tp_dist_price > 0):
             raise TradeExecutionError("Distance TP invalide (<=0).")
 
-    # A) min broker + soft 2 ticks
+    # ---------- A) Min broker + soft 2 ticks ----------
     sl_dist_price = max(sl_dist_price, soft_min_price)
     if tp_dist_price is not None:
         tp_dist_price = max(tp_dist_price, soft_min_price)
 
-    # B) Hard limits (points)
+    # ---------- B) Hard limits (points) ----------
     sl_dist_points = sl_dist_price / point
     sl_dist_points = max(sl_dist_points, sl_hard_min_points)
     sl_dist_points = min(sl_dist_points, sl_hard_max_points)
@@ -764,7 +678,21 @@ def _calculate_sl_tp_prices(
         tp_dist_points = min(tp_dist_points, tp_hard_max_points)
         tp_dist_price = tp_dist_points * point
 
-    # C) Ajustement min gap: impose TP >= SL + max(spread, min_sl_tp_distance_pips)
+    # ---------- (NEW) Floors anti-cisaille (Ajout B) ----------
+    # Appliqués APRÈS B) (hard limits) et AVANT C) (min gap TP)
+    exec_floor_pts = max(0.0, float(min_sl_tp_distance_pips)) * points_per_pip
+    broker_floor_pts = max(0.0, float(broker_min_sl_pips)) * points_per_pip
+    spread_floor_pts = (
+        max(0.0, (float(spread_mult) * float(spread_pips) + float(extra_buffer_pips)))
+        * points_per_pip
+    )
+
+    sl_dist_points = max(
+        sl_dist_points, exec_floor_pts, broker_floor_pts, spread_floor_pts
+    )
+    sl_dist_price = sl_dist_points * point
+
+    # ---------- C) Min gap TP: TP ≥ SL + max(spread, min_sl_tp_distance_pips) ----------
     if tp_dist_price is not None:
         sl_pips_now = sl_dist_points / points_per_pip
         tp_pips_now = (
@@ -777,7 +705,7 @@ def _calculate_sl_tp_prices(
             tp_dist_points = (sl_pips_now + min_gap_pips) * points_per_pip
             tp_dist_price = tp_dist_points * point
 
-    # D) Positionnement côté BID/ASK (si tick dispo)
+    # ---------- D) Positionnement côté BID/ASK (si tick dispo) ----------
     try:
         tick_map = (market_context or {}).get("last_tick") or {}
         tick = tick_map.get(symbol) or {}
@@ -802,18 +730,18 @@ def _calculate_sl_tp_prices(
     else:
         # fallback sans bid/ask
         stop_loss_price = (
-            entry_price - sl_dist_price
+            (entry_price - sl_dist_price)
             if action == "BUY"
-            else entry_price + sl_dist_price
+            else (entry_price + sl_dist_price)
         )
         if tp_dist_price is not None:
             take_profit_price = (
-                entry_price + tp_dist_price
+                (entry_price + tp_dist_price)
                 if action == "BUY"
-                else entry_price - tp_dist_price
+                else (entry_price - tp_dist_price)
             )
 
-    # E) Arrondi grille de ticks + cohérences directionnelles finales
+    # ---------- E) Arrondi grille de ticks + cohérences directionnelles ----------
     if action == "BUY":
         stop_loss_price = _floor_to_tick(
             min(stop_loss_price, entry_price - soft_min_price)
@@ -839,7 +767,7 @@ def _calculate_sl_tp_prices(
         if not (stop_loss_price > entry_price):
             stop_loss_price = _ceil_to_tick(entry_price + soft_min_price)
 
-    # --- 10) Sortie ---
+    # ---------- 9) Sortie ----------
     stop_loss_price = round(float(stop_loss_price), digits)
     take_profit_price = (
         None if take_profit_price is None else round(float(take_profit_price), digits)
