@@ -47,7 +47,7 @@
             "atr_multiplier": 2.8,
             "pips": 100,
             "execution": {
-              "min_sl_tp_distance_pips": 11.0
+              "min_sl_tp_distance_pips": 40
             }
           }
         }
