@@ -57,28 +57,28 @@
         "activation": {
           "mode": "ATR",
           "atr_period": 14,
-          "atr_multiple": 2.0,
-          "min_pips": 20.0
+          "atr_multiple": 1.4,
+          "min_pips": 6.0
         },
         "step": {
           "mode": "ATR",
           "atr_multiple": 0.40,
-          "min_pips": 2.0,
-          "update_interval_ms": 600
+          "min_pips": 3.5,
+          "update_interval_ms": 1500
         },
         "break_even": {
           "enabled": true,
           "trigger": {
             "mode": "ATR",
-            "atr_multiple": 1.0,
-            "min_pips": 3.0
+            "atr_multiple": 0.80,
+            "min_pips": 4.0
           },
-          "offset_pips": 2.0
+          "offset_pips": 4.0
         },
         "broker_floors": {
-          "min_sl_distance_pips": 2.0,
-          "spread_multiplier": 2.0,
-          "extra_buffer_pips": 1.0
+          "min_sl_distance_pips": 3.0,
+          "spread_multiplier": 2.5,
+          "extra_buffer_pips": 2.0
         }
       },
       "closure_rules": {
