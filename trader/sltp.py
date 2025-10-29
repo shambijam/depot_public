@@ -482,9 +482,12 @@ def _calculate_sl_tp_prices(
     dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
     dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
     legacy = (config.get("smart_sl_tp_settings") or {}) if isinstance(config.get("smart_sl_tp_settings"), dict) else {}
+    prefer_dynamic = bool(sltp_cfg)  # si un bloc dynamique existe, il est souverain
 
     # tp_method prioritaire côté dynamique, sinon fallback legacy, défaut "RR" (ou "NONE" si tu veux neutre)
     tp_method = str(dyn_tp.get("tp_method", legacy.get("tp_placement_method", "RR"))).upper()
+    tp_exec = dyn_tp.get("execution", {}) if isinstance(dyn_tp.get("execution"), dict) else {}
+    min_sl_tp_distance_pips = float(tp_exec.get("min_sl_tp_distance_pips", 0.0) or 0.0)
 
     # --- SL (dyn -> legacy -> defaults)
     sl_atr_period     = int( dyn_sl.get("atr_period",      legacy.get("sl_atr_period", 14)) )
@@ -500,11 +503,31 @@ def _calculate_sl_tp_prices(
     # =============================================================================
 
     # Fallback historique
-    prod_st = config.get("smart_sl_tp_settings", {}) or {}
+    prod_st = {} if prefer_dynamic else (config.get("smart_sl_tp_settings", {}) or {})
+
+    # sl_method : on ne consulte le legacy que si le dynamique n’a rien donné
     if not sl_method:
         sl_method = str(prod_st.get("sl_placement_method", "PIPS") or "PIPS").upper()
-    tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
-    rr_default = float(prod_st.get("tp_rr_ratio", rr_base) or rr_base)
+
+    # tp_method : on respecte d'abord le dynamique ; on ne tombe sur legacy que si vide
+    dyn_tp_method = str(dyn_tp.get("tp_method", "") or "").upper()
+    if dyn_tp_method:
+        tp_method = dyn_tp_method
+        # (optionnel) trace de conflit s’il existe aussi un param legacy différent
+        if prod_st.get("tp_placement_method"):
+            try:
+                self.logger.debug(
+                    "[SLTP] precedence: dynamic.tp_method=%s overrides legacy=%s",
+                    tp_method, str(prod_st.get("tp_placement_method"))
+                )
+            except Exception:
+                pass
+    else:
+        tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
+
+    # RR par défaut : garde rr_base dynamique si présent
+    rr_default = float(rr_base if prefer_dynamic else (prod_st.get("tp_rr_ratio", rr_base) or rr_base))
+
 
     # RR dynamique (hint + modulation)
     rr_hint = trade_decision.get("tp_rr_ratio_hint")
@@ -676,14 +699,13 @@ def _calculate_sl_tp_prices(
         tp_dist_points = min(tp_dist_points, tp_hard_max_points)
         tp_dist_price = tp_dist_points * point
 
-    # C) Ajustement spread: impose TP >= SL + spread (en pips) si on a TP
-    if tp_dist_price is not None and spread_pips > 0:
+    # C) Ajustement min gap: impose TP >= SL + max(spread, min_sl_tp_distance_pips)
+    if tp_dist_price is not None:
         sl_pips_now = sl_dist_points / points_per_pip
-        tp_pips_now = (
-            (tp_dist_points / points_per_pip) if tp_dist_points is not None else None
-        )
-        if tp_pips_now is not None and tp_pips_now < (sl_pips_now + spread_pips):
-            tp_dist_points = (sl_pips_now + spread_pips) * points_per_pip
+        tp_pips_now = (tp_dist_points / points_per_pip) if tp_dist_points is not None else None
+        min_gap_pips = max(float(spread_pips or 0.0), float(min_sl_tp_distance_pips or 0.0))
+        if tp_pips_now is not None and tp_pips_now < (sl_pips_now + min_gap_pips):
+            tp_dist_points = (sl_pips_now + min_gap_pips) * points_per_pip
             tp_dist_price = tp_dist_points * point
 
     # D) Positionnement côté BID/ASK (si tick dispo)
