@@ -476,30 +476,72 @@ def _calculate_sl_tp_prices(
     rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
     rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
     sl_method = str(sltp_cfg.get("sl_method", "") or "").upper()
-        
+
     # === [PATCH DYN SLTP] lecture prioritaire du bloc dynamique ===================
     # On lit d'abord le nouveau schéma, puis on retombe sur l'ancien en fallback.
     dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
     dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
-    legacy = (config.get("smart_sl_tp_settings") or {}) if isinstance(config.get("smart_sl_tp_settings"), dict) else {}
+    legacy = (
+        (config.get("smart_sl_tp_settings") or {})
+        if isinstance(config.get("smart_sl_tp_settings"), dict)
+        else {}
+    )
     prefer_dynamic = bool(sltp_cfg)  # si un bloc dynamique existe, il est souverain
 
+    # --- [NEW] Floors de distance issus de la conf ----------------------------
+    exec_cfg = {}
+    try:
+        exec_cfg = (
+            dyn_tp.get("execution", {})
+            if isinstance(dyn_tp.get("execution"), dict)
+            else {}
+        )
+    except Exception:
+        exec_cfg = {}
+    min_sl_tp_distance_pips = float(exec_cfg.get("min_sl_tp_distance_pips", 0.0) or 0.0)
+
+    trailing_cfg = ((config.get("entry_rules") or {}).get("scalping") or {}).get(
+        "trailing", {}
+    ) or {}
+    floors_cfg = trailing_cfg.get("broker_floors", {}) or {}
+    broker_min_sl_pips = float(floors_cfg.get("min_sl_distance_pips", 0.0) or 0.0)
+    spread_mult = float(floors_cfg.get("spread_multiplier", 0.0) or 0.0)
+    extra_buffer_pips = float(floors_cfg.get("extra_buffer_pips", 0.0) or 0.0)
+
     # tp_method prioritaire côté dynamique, sinon fallback legacy, défaut "RR" (ou "NONE" si tu veux neutre)
-    tp_method = str(dyn_tp.get("tp_method", legacy.get("tp_placement_method", "RR"))).upper()
-    tp_exec = dyn_tp.get("execution", {}) if isinstance(dyn_tp.get("execution"), dict) else {}
+    tp_method = str(
+        dyn_tp.get("tp_method", legacy.get("tp_placement_method", "RR"))
+    ).upper()
+    tp_exec = (
+        dyn_tp.get("execution", {}) if isinstance(dyn_tp.get("execution"), dict) else {}
+    )
     min_sl_tp_distance_pips = float(tp_exec.get("min_sl_tp_distance_pips", 0.0) or 0.0)
 
     # --- SL (dyn -> legacy -> defaults)
-    sl_atr_period     = int( dyn_sl.get("atr_period",      legacy.get("sl_atr_period", 14)) )
-    sl_atr_multiplier = float(dyn_sl.get("atr_multiplier", legacy.get("sl_atr_multiplier", 1.8)) )
-    sl_buffer_pips    = float(dyn_sl.get("buffer_pips",    legacy.get("sl_buffer_pips", 2.0)) )
-    sl_swing_lookback = int( dyn_sl.get("swing_lookback",  legacy.get("sl_swing_lookback_period", 10)) )
-    sl_pips_default   = float(dyn_sl.get("pips",           legacy.get("stop_loss_pips", config.get("stop_loss_pips", 10))) )
+    sl_atr_period = int(dyn_sl.get("atr_period", legacy.get("sl_atr_period", 14)))
+    sl_atr_multiplier = float(
+        dyn_sl.get("atr_multiplier", legacy.get("sl_atr_multiplier", 1.8))
+    )
+    sl_buffer_pips = float(dyn_sl.get("buffer_pips", legacy.get("sl_buffer_pips", 2.0)))
+    sl_swing_lookback = int(
+        dyn_sl.get("swing_lookback", legacy.get("sl_swing_lookback_period", 10))
+    )
+    sl_pips_default = float(
+        dyn_sl.get(
+            "pips", legacy.get("stop_loss_pips", config.get("stop_loss_pips", 10))
+        )
+    )
 
     # --- TP (dyn -> legacy -> defaults)
-    tp_atr_period     = int( dyn_tp.get("atr_period",      legacy.get("tp_atr_period", 14)) )
-    tp_atr_multiplier = float(dyn_tp.get("atr_multiplier", legacy.get("tp_atr_multiplier", 2.0)) )
-    tp_pips_default   = float(dyn_tp.get("pips",           legacy.get("take_profit_pips", config.get("take_profit_pips", 20))) )
+    tp_atr_period = int(dyn_tp.get("atr_period", legacy.get("tp_atr_period", 14)))
+    tp_atr_multiplier = float(
+        dyn_tp.get("atr_multiplier", legacy.get("tp_atr_multiplier", 2.0))
+    )
+    tp_pips_default = float(
+        dyn_tp.get(
+            "pips", legacy.get("take_profit_pips", config.get("take_profit_pips", 20))
+        )
+    )
     # =============================================================================
 
     # Fallback historique
@@ -518,7 +560,8 @@ def _calculate_sl_tp_prices(
             try:
                 self.logger.debug(
                     "[SLTP] precedence: dynamic.tp_method=%s overrides legacy=%s",
-                    tp_method, str(prod_st.get("tp_placement_method"))
+                    tp_method,
+                    str(prod_st.get("tp_placement_method")),
                 )
             except Exception:
                 pass
@@ -526,8 +569,9 @@ def _calculate_sl_tp_prices(
         tp_method = str(prod_st.get("tp_placement_method", "RR") or "RR").upper()
 
     # RR par défaut : garde rr_base dynamique si présent
-    rr_default = float(rr_base if prefer_dynamic else (prod_st.get("tp_rr_ratio", rr_base) or rr_base))
-
+    rr_default = float(
+        rr_base if prefer_dynamic else (prod_st.get("tp_rr_ratio", rr_base) or rr_base)
+    )
 
     # RR dynamique (hint + modulation)
     rr_hint = trade_decision.get("tp_rr_ratio_hint")
@@ -566,6 +610,23 @@ def _calculate_sl_tp_prices(
     tp_hard_max_points = float(
         st_tp.get("hard_max_points", float("inf")) or float("inf")
     )
+    # --- [NEW] Floors supplémentaires en points (pips -> points) --------------
+    exec_floor_pts = max(0.0, min_sl_tp_distance_pips) * points_per_pip
+    broker_floor_pts = max(0.0, broker_min_sl_pips) * points_per_pip
+    # spread élargi (anti-cisaillement) : k*spread + buffer, puis en points
+    spread_floor_pts = (
+        max(0.0, (spread_mult * spread_pips) + extra_buffer_pips) * points_per_pip
+    )
+
+    # applique au SL (distance minimale côté prix)
+    sl_dist_points = max(
+        sl_dist_points, exec_floor_pts, broker_floor_pts, spread_floor_pts
+    )
+    sl_dist_price = sl_dist_points * point
+
+    # Si on a un TP, on garantira plus loin que SL + spread au point C) existant
+    # (déjà en place dans ton code).
+    # --------------------------------------------------------------------------
 
     # --- 6) Helpers arrondis ---
     def _ceil_to_tick(x: float) -> float:
@@ -638,7 +699,9 @@ def _calculate_sl_tp_prices(
                 if risk > 0:
                     tp_dist = risk * rr_ratio
                     take_profit_price = (
-                        entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                        entry_price + tp_dist
+                        if action == "BUY"
+                        else entry_price - tp_dist
                     )
                 else:
                     method = "PIPS"
@@ -650,7 +713,9 @@ def _calculate_sl_tp_prices(
                 if atr == atr and atr > 0:
                     tp_dist = atr_mult * atr
                     take_profit_price = (
-                        entry_price + tp_dist if action == "BUY" else entry_price - tp_dist
+                        entry_price + tp_dist
+                        if action == "BUY"
+                        else entry_price - tp_dist
                     )
 
             if take_profit_price is None:  # fallback PIPS
@@ -702,8 +767,12 @@ def _calculate_sl_tp_prices(
     # C) Ajustement min gap: impose TP >= SL + max(spread, min_sl_tp_distance_pips)
     if tp_dist_price is not None:
         sl_pips_now = sl_dist_points / points_per_pip
-        tp_pips_now = (tp_dist_points / points_per_pip) if tp_dist_points is not None else None
-        min_gap_pips = max(float(spread_pips or 0.0), float(min_sl_tp_distance_pips or 0.0))
+        tp_pips_now = (
+            (tp_dist_points / points_per_pip) if tp_dist_points is not None else None
+        )
+        min_gap_pips = max(
+            float(spread_pips or 0.0), float(min_sl_tp_distance_pips or 0.0)
+        )
         if tp_pips_now is not None and tp_pips_now < (sl_pips_now + min_gap_pips):
             tp_dist_points = (sl_pips_now + min_gap_pips) * points_per_pip
             tp_dist_price = tp_dist_points * point
@@ -825,6 +894,7 @@ def _clean_cache_if_needed(self):
     except Exception:
         # Ne jamais crasher sur du nettoyage
         pass
+
 
 # (B) >>> PATCH: version enrichie de _resolve_basket_context_for_sltp
 def _resolve_basket_context_for_sltp(
@@ -2007,6 +2077,39 @@ def update_basket_sltp_dynamically(
                 volatility_pips = float(vol_pips)
         except Exception:
             pass
+
+        # --- [NEW] Pips d'activation et distance mini depuis la conf --------------
+        trailing_cfg = (
+            ((self.config or {}).get("entry_rules") or {}).get("scalping") or {}
+        ).get("trailing", {}) or {}
+        act_cfg = trailing_cfg.get("activation", {}) or {}
+        step_cfg = trailing_cfg.get("step", {}) or {}
+        floors = trailing_cfg.get("broker_floors", {}) or {}
+
+        act_min_pips = float(act_cfg.get("min_pips", 0.0) or 0.0)
+        step_min_pips = float(step_cfg.get("min_pips", 0.0) or 0.0)
+        floor_min_pips = float(floors.get("min_sl_distance_pips", 0.0) or 0.0)
+        spread_mult = float(floors.get("spread_multiplier", 0.0) or 0.0)
+        extra_buf = float(floors.get("extra_buffer_pips", 0.0) or 0.0)
+
+        # on récupère le spread courant si possible (ask-bid)
+        cur_spread_pips = 0.0
+        try:
+            bid, ask, mid = _get_last_price(symbol)
+            if bid and ask and bid > 0 and ask > bid:
+                # convertir en pips
+                point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+                digits = int(getattr(symbol_info, "digits", 0) or 0)
+                ppp = 10.0 if digits in (3, 5) else 1.0
+                pip_size = point * ppp if point > 0 else 0.0001
+                cur_spread_pips = (ask - bid) / pip_size
+        except Exception:
+            pass
+
+        # planchers anti-cisaillement
+        spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buf)
+        ACTIVATION_PIPS = max(act_min_pips, spread_floor_pips)
+        MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
 
         # Appliquer SL dynamique par position (plus fiable que sl_opt agrégé)
         for p in positions:
