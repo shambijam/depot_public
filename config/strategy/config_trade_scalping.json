@@ -134,9 +134,12 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.65,
-      "min_orderflow_score": 60,
-      "max_spread_pts": 15
+      "min_confidence": 0.72,
+      "min_orderflow_score": 65,
+      "max_spread_pts": 12,
+      "min_coherence_agreement": 0.60,
+      "min_trigger_confidence": 0.58,
+      "require_3_way_alignment_for_moderate": true
     },
     "scoring_weights": {
       "context": 0.30,
@@ -172,19 +175,22 @@
       }
     },
     "ponderations": {
-      "trigger_weight": 0.50,
-      "orderflow_weight": 0.30,
+      "trigger_weight": 0.40,
+      "orderflow_weight": 0.40,
       "footprint_weight": 0.20,
-      "coherence_bonus_max": 0.15
+      "coherence_bonus_max": 0.10
     },
-    "regles_metier": {
-      "veto_absorption": true,
-      "never_against_strong_orderflow": true,
-      "triple_confirmation_bonus": true,
-      "weak_footprint_score_th": 0.60
-    },
-    "base_trail_steps": 20
+    "orderflow_weight": 0.30,
+    "footprint_weight": 0.20,
+    "coherence_bonus_max": 0.15
   },
+  "regles_metier": {
+    "veto_absorption": true,
+    "never_against_strong_orderflow": true,
+    "triple_confirmation_bonus": true,
+    "weak_footprint_score_th": 0.65
+  },
+  "base_trail_steps": 22,
   "smart_sl_tp_settings": {
     "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility until code reads only the dynamic block.",
     "sl_placement_method": "ATR",
