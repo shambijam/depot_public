@@ -36,13 +36,13 @@
           "rr_cap": 3.0,
           "sl": {
             "atr_period": 14,
-            "atr_multiplier": 3.0,
-            "buffer_pips": 10,
+            "atr_multiplier": 3.8,
+            "buffer_pips": 14,
             "swing_lookback": 10,
             "pips": 70
           },
           "tp": {
-            "tp_method": "RR",
+            "tp_method": "NONE",
             "atr_period": 14,
             "atr_multiplier": 3.0,
             "pips": 120,
@@ -57,28 +57,28 @@
         "activation": {
           "mode": "ATR",
           "atr_period": 14,
-          "atr_multiple": 1.4,
-          "min_pips": 6.0
+          "atr_multiple": 2.0,
+          "min_pips": 10.0
         },
         "step": {
           "mode": "ATR",
-          "atr_multiple": 0.40,
-          "min_pips": 3.5,
-          "update_interval_ms": 1500
+          "atr_multiple": 0.60,
+          "min_pips": 5.0,
+          "update_interval_ms": 2200
         },
         "break_even": {
           "enabled": true,
           "trigger": {
             "mode": "ATR",
-            "atr_multiple": 0.80,
-            "min_pips": 4.0
+            "atr_multiple": 1.100,
+            "min_pips": 6.0
           },
-          "offset_pips": 4.0
+          "offset_pips": 6.0
         },
         "broker_floors": {
-          "min_sl_distance_pips": 3.0,
-          "spread_multiplier": 2.5,
-          "extra_buffer_pips": 2.0
+          "min_sl_distance_pips": 5.0,
+          "spread_multiplier": 3.0,
+          "extra_buffer_pips": 2.5
         }
       },
       "closure_rules": {
@@ -134,9 +134,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.82,
+      "min_confidence": 0.85,
       "min_orderflow_score": 70,
-      "max_spread_pts": 12,
+      "max_spread_pts": 10,
       "min_coherence_agreement": 0.65,
       "min_trigger_confidence": 0.70,
       "require_3_way_alignment_for_moderate": true
