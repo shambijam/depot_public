@@ -1,18 +1,17 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst — trailing-only exits (no TP). Dynamic SL/Trailing driven by ATR with broker-aware floors.",
-  "version": "4.0-dynamic",
+  "description": "Scalping Burst — trailing-only exits (no TP). Dynamic SL via ATR with broker- and spread-aware floors. Selective-trend fusion gating.",
+  "version": "4.1-selective-trend",
   "tradeable_assets": [
     "XAUUSD"
   ],
   "magic_number": 52001,
-  "confidence_threshold": 0.2,
   "decision_rules": [
     {
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.2
+        "min_confidence": 0.80
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -26,13 +25,13 @@
       "burst_scalping": {
         "enabled": true,
         "entry_mode": "MARKET",
-        "burst_size": 8,
-        "enforce_single_basket": false,
+        "burst_size": 5,
+        "enforce_single_basket": true,
         "per_leg_virtual": false,
         "sltp": {
           "sl_method": "ATR",
-          "rr_base": 2.1,
-          "rr_floor": 1.5,
+          "rr_base": 1.9,
+          "rr_floor": 1.2,
           "rr_cap": 3.0,
           "sl": {
             "atr_period": 14,
@@ -64,16 +63,16 @@
           "mode": "ATR",
           "atr_multiple": 0.65,
           "min_pips": 6.0,
-          "update_interval_ms": 8000
+          "update_interval_ms": 3000
         },
         "break_even": {
           "enabled": true,
           "trigger": {
             "mode": "ATR",
-            "atr_multiple": 1.40,
-            "min_pips": 9.0
+            "atr_multiple": 1.60,
+            "min_pips": 11.0
           },
-          "offset_pips": 7.0
+          "offset_pips": 8.0
         },
         "broker_floors": {
           "min_sl_distance_pips": 5.0,
@@ -102,11 +101,12 @@
     "use_trailing_stop": true
   },
   "phase_detection": {
-    "use_phase_observer": false,
+    "use_phase_observer": true,
     "allowed_phases": [
       "liquidity_eqh_eql",
-      "range_retail",
-      "transitional"
+      "transitional",
+      "trending_retail_bull",
+      "trending_retail_bear"
     ],
     "lookback_window": 12,
     "volatility_threshold": 0.0,
@@ -116,9 +116,9 @@
   },
   "risk": {
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.71,
+    "risk_per_trade_percent": 0.35,
     "max_positions_per_symbol": 1,
-    "stop_distance_pips": 100
+    "stop_distance_pips": 60
   },
   "trade_executor_settings": {
     "version": "3.0",
@@ -134,12 +134,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.85,
-      "min_orderflow_score": 70,
-      "max_spread_pts": 8,
-      "min_coherence_agreement": 0.65,
-      "min_trigger_confidence": 0.70,
-      "require_3_way_alignment_for_moderate": true
+      "min_confidence": 0.80,
+      "min_orderflow_score": 0.70,
+      "max_spread_pts": 6
     },
     "scoring_weights": {
       "context": 0.30,
@@ -175,14 +172,11 @@
       }
     },
     "ponderations": {
-      "trigger_weight": 0.45,
-      "orderflow_weight": 0.45,
-      "footprint_weight": 0.25,
+      "trigger_weight": 0.40,
+      "orderflow_weight": 0.40,
+      "footprint_weight": 0.20,
       "coherence_bonus_max": 0.10
-    },
-    "orderflow_weight": 0.30,
-    "footprint_weight": 0.20,
-    "coherence_bonus_max": 0.15
+    }
   },
   "regles_metier": {
     "veto_absorption": true,
@@ -190,14 +184,14 @@
     "triple_confirmation_bonus": true,
     "weak_footprint_score_th": 0.65
   },
-  "base_trail_steps": 22,
+  "base_trail_steps": 20,
   "smart_sl_tp_settings": {
     "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility until code reads only the dynamic block.",
     "sl_placement_method": "ATR",
     "sl_atr_period": 14,
     "sl_atr_multiplier": 2.2,
     "sl_buffer_pips": 6,
-    "tp_placement_method": "RR",
+    "tp_placement_method": "NONE",
     "tp_rr_ratio": 1.6,
     "tp_atr_period": 14,
     "tp_atr_multiplier": 2.0,
