@@ -92,7 +92,7 @@
         "rt_poll_interval_ms": 120,
         "max_loss_pips": 15.0,
         "loss_guard_arming_ms": 3000,
-        "min_age_ms_for_any_close": 3000
+        "min_age_ms_for_any_close": 5000
       }
     }
   },
@@ -191,13 +191,13 @@
     "sl_atr_period": 14,
     "sl_atr_multiplier": 2.2,
     "sl_buffer_pips": 6,
-    "tp_placement_method": "NONE",
+    "tp_placement_method": "PIPS",
     "tp_rr_ratio": 1.6,
     "tp_atr_period": 14,
     "tp_atr_multiplier": 2.0,
     "sl_swing_lookback_period": 10,
     "stop_loss_pips": 70,
-    "take_profit_pips": 100
+    "take_profit_pips": 1000
   },
   "smart_targets": {
     "risk_management": {
