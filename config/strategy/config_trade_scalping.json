@@ -64,7 +64,7 @@
           "mode": "ATR",
           "atr_multiple": 0.65,
           "min_pips": 6.0,
-          "update_interval_ms": 3000
+          "update_interval_ms": 8000
         },
         "break_even": {
           "enabled": true,
@@ -116,9 +116,9 @@
   },
   "risk": {
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.73,
+    "risk_per_trade_percent": 0.71,
     "max_positions_per_symbol": 1,
-    "stop_distance_pips": 60
+    "stop_distance_pips": 100
   },
   "trade_executor_settings": {
     "version": "3.0",
@@ -136,7 +136,7 @@
     "seuils_entree": {
       "min_confidence": 0.85,
       "min_orderflow_score": 70,
-      "max_spread_pts": 10,
+      "max_spread_pts": 8,
       "min_coherence_agreement": 0.65,
       "min_trigger_confidence": 0.70,
       "require_3_way_alignment_for_moderate": true
