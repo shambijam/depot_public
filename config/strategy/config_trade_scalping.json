@@ -1,7 +1,7 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst — WIDE-EXTREME: SL très éloignés (ATR×5 + buffer), TP dynamique désactivé, trailing tardif anti-cisaille.",
-  "version": "4.2-wide-extreme",
+  "description": "Scalping Burst — Fusion Manager only (Orderflow+Footprint+Trigger). SL structurel (SWING) large, trailing PIPS-only, BE off, close panier au profit.",
+  "version": "4.3-fusion-only",
   "tradeable_assets": [
     "XAUUSD"
   ],
@@ -29,24 +29,24 @@
         "enforce_single_basket": true,
         "per_leg_virtual": false,
         "sltp": {
-          "sl_method": "ATR",
-          "rr_base": 2.2,
+          "sl_method": "SWING",
+          "rr_base": 2.0,
           "rr_floor": 1.2,
-          "rr_cap": 5.0,
+          "rr_cap": 4.0,
           "sl": {
             "atr_period": 14,
-            "atr_multiplier": 5.0,
-            "buffer_pips": 20,
-            "swing_lookback": 30,
-            "pips": 200
+            "atr_multiplier": 3.0,
+            "buffer_pips": 24,
+            "swing_lookback": 25,
+            "pips": 250
           },
           "tp": {
             "tp_method": "NONE",
             "atr_period": 14,
-            "atr_multiplier": 4.0,
+            "atr_multiplier": 3.0,
             "pips": 400,
             "execution": {
-              "min_sl_tp_distance_pips": 120
+              "min_sl_tp_distance_pips": 80
             }
           }
         }
@@ -54,43 +54,41 @@
       "trailing": {
         "enabled": true,
         "activation": {
-          "mode": "ATR",
+          "mode": "PIPS",
+          "min_pips": 32.0,
           "atr_period": 14,
-          "atr_multiple": 4.0,
-          "min_pips": 25.0
+          "atr_multiple": 6.0
         },
         "step": {
-          "mode": "ATR",
-          "atr_multiple": 0.85,
-          "min_pips": 10.0,
-          "update_interval_ms": 4000
+          "mode": "PIPS",
+          "min_pips": 14.0,
+          "atr_multiple": 1.10,
+          "update_interval_ms": 5500
         },
         "break_even": {
-          "enabled": true,
+          "enabled": false,
           "trigger": {
-            "mode": "ATR",
-            "atr_multiple": 2.2,
-            "min_pips": 18.0
+            "mode": "PIPS",
+            "min_pips": 9999.0
           },
-          "offset_pips": 12.0
+          "offset_pips": 0.0
         },
         "broker_floors": {
-          "min_sl_distance_pips": 8.0,
-          "spread_multiplier": 4.0,
-          "extra_buffer_pips": 4.0
+          "min_sl_distance_pips": 10.0,
+          "spread_multiplier": 5.0,
+          "extra_buffer_pips": 5.0
         }
       },
       "closure_rules": {
-        "enabled": false,
-        "enable_profit_close": false,
+        "enabled": true,
+        "enable_profit_close": true,
         "enable_loss_guard": false,
         "require_full_count_for_profit_close": true,
         "require_all_seen_green_once": true,
-        "all_seen_green_pips": 3.0,
-        "min_green_pnl_pips": 1.0,
+        "all_seen_green_pips": 4.0,
+        "min_green_pnl_pips": 10.0,
         "rt_fast_window_ms": 0,
-        "rt_poll_interval_ms": 120,
-        "max_loss_pips": 15.0,
+        "rt_poll_interval_ms": 150,
         "loss_guard_arming_ms": 3000,
         "min_age_ms_for_any_close": 5000
       }
@@ -118,7 +116,7 @@
     "position_size": "risk_based",
     "risk_per_trade_percent": 0.30,
     "max_positions_per_symbol": 1,
-    "stop_distance_pips": 120
+    "stop_distance_pips": 150
   },
   "trade_executor_settings": {
     "version": "3.0",
@@ -135,8 +133,8 @@
     "adaptive_weights": true,
     "seuils_entree": {
       "min_confidence": 0.80,
-      "min_orderflow_score": 0.70,
-      "max_spread_pts": 8
+      "min_orderflow_score": 0.76,
+      "max_spread_pts": 6
     },
     "scoring_weights": {
       "context": 0.30,
@@ -186,7 +184,7 @@
   },
   "base_trail_steps": 20,
   "smart_sl_tp_settings": {
-    "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility until code reads only the dynamic block.",
+    "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility; dynamic block is authoritative.",
     "sl_placement_method": "ATR",
     "sl_atr_period": 14,
     "sl_atr_multiplier": 2.2,
@@ -196,7 +194,7 @@
     "tp_atr_period": 14,
     "tp_atr_multiplier": 2.0,
     "sl_swing_lookback_period": 10,
-    "stop_loss_pips": 200,
+    "stop_loss_pips": 250,
     "take_profit_pips": 10000
   },
   "smart_targets": {
