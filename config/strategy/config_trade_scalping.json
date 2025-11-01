@@ -63,7 +63,7 @@
           "mode": "PIPS",
           "min_pips": 8.0,
           "atr_multiple": 1.10,
-          "update_interval_ms": 900
+          "update_interval_sec": 2.0
         },
         "break_even": {
           "enabled": false,

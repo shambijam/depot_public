@@ -2022,8 +2022,15 @@ def update_basket_sltp_dynamically(
         ACTIVATION_PIPS   = max(act_min_pips, spread_floor_pips)
         MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
 
-        # intervalle d’update en secondes (min 2s)
-        MIN_UPDATE_SEC = int(max(2, (step_cfg.get("update_interval_ms", 900) or 900) / 1000))
+        # intervalle d’update en secondes (supporte 'update_interval_sec' ou fallback depuis 'update_interval_ms')
+        MIN_UPDATE_SEC = float(
+            step_cfg.get(
+                "update_interval_sec",
+                (step_cfg.get("update_interval_ms", 2000) or 2000) / 1000.0
+            )
+        )
+        # plancher de sécurité (évite spam) — ajuste si tu veux autoriser < 1s
+        MIN_UPDATE_SEC = max(1.0, MIN_UPDATE_SEC)
 
         # on récupère le spread courant si possible (ask-bid)
         cur_spread_pips = 0.0
@@ -2112,13 +2119,12 @@ def update_basket_sltp_dynamically(
                 modify_fn=None,
                 activation_pips=float(ACTIVATION_PIPS),                          
                 min_distance_pips=float(MIN_DISTANCE_PIPS),                
-                min_update_interval_sec=int(max(2, step_cfg.get("update_interval_ms", 900)/1000)),
+                min_update_interval_sec=float(MIN_UPDATE_SEC),
                 dry_run=False,
                 force=False,
                 market_context=current_market_data,
                 burst_manager=getattr(self, "burst_manager", None),
             )
-
                 
             except Exception as e:
                 new_sl = None
