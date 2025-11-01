@@ -4,7 +4,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple, Mapping, Callable
 
 from trader.errors import TradeExecutionError
-
+import time
+import threading
+import math 
 
 # --- Helpers de normalisation ---
 
@@ -266,8 +268,7 @@ def _calculate_sl_tp_prices(
     - Contexte panier lu pour logging/metadata, SANS impacter les prix
     Retour: (stop_loss_price, take_profit_price|None)
     """
-    import math
-
+  
     # ---------- 0) Direction & entrées ----------
     try:
         action = resolve_side(trade_decision)  # "BUY" / "SELL"
@@ -783,8 +784,7 @@ def _clean_cache_if_needed(self):
     - Âge max: 5 minutes
     - Tolérant aux erreurs (ne doit jamais crasher)
     """
-    import time
-
+    
     try:
         cache = getattr(self, "_basket_ctx_cache", {})
         if not isinstance(cache, dict) or not cache:
@@ -1060,7 +1060,7 @@ def apply_dynamic_trailing(
       - float(new_sl) si modif effective (ou calculée en dry_run)
       - None si aucun changement ou si échec broker
     """
-    import math, time
+   
 
     # --- 0) Sanity rapide ---
     try:
@@ -1380,7 +1380,7 @@ def _split_multi_tp_orders(
     Returns:
         list[dict] : requêtes MT5 construites.
     """
-    import math
+   
 
     # --- 0) Validations / normalisations de base -----------------------------------
     action = str(trade_decision.get("action", "")).upper()
@@ -1664,8 +1664,7 @@ def update_basket_sltp_dynamically(
 
     Retour: dict(status=success|skipped|error, ... détails ...)
     """
-    import time, math, threading
-
+   
     now = time.time()
 
     # --- 0) Sanity & garde-fous globaux -------------------------------------------
@@ -2006,19 +2005,25 @@ def update_basket_sltp_dynamically(
         except Exception:
             pass
 
-        # --- [NEW] Pips d'activation et distance mini depuis la conf --------------
-        trailing_cfg = (
-            ((self.config or {}).get("entry_rules") or {}).get("scalping") or {}
-        ).get("trailing", {}) or {}
-        act_cfg = trailing_cfg.get("activation", {}) or {}
-        step_cfg = trailing_cfg.get("step", {}) or {}
-        floors = trailing_cfg.get("broker_floors", {}) or {}
+        # === distances issues de la conf + planchers spread/broker ===
+        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("trailing") or {}) or {}
+        act_cfg    = trail_cfg.get("activation", {}) or {}
+        step_cfg   = trail_cfg.get("step", {}) or {}
+        floors_cfg = trail_cfg.get("broker_floors", {}) or {}
 
-        act_min_pips = float(act_cfg.get("min_pips", 0.0) or 0.0)
-        step_min_pips = float(step_cfg.get("min_pips", 0.0) or 0.0)
-        floor_min_pips = float(floors.get("min_sl_distance_pips", 0.0) or 0.0)
-        spread_mult = float(floors.get("spread_multiplier", 0.0) or 0.0)
-        extra_buf = float(floors.get("extra_buffer_pips", 0.0) or 0.0)
+        act_min_pips   = float((act_cfg.get("min_pips", 0.0) or 0.0))
+        step_min_pips  = float((step_cfg.get("min_pips", 0.0) or 0.0))
+        floor_min_pips = float((floors_cfg.get("min_sl_distance_pips", 0.0) or 0.0))
+
+        spread_mult        = float((floors_cfg.get("spread_multiplier", 0.0) or 0.0))
+        extra_buffer_pips  = float((floors_cfg.get("extra_buffer_pips", 0.0) or 0.0))
+             
+        # seuil d’activation réel et distance minimale réelle pour le trailing
+        ACTIVATION_PIPS   = max(act_min_pips, spread_floor_pips)
+        MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
+
+        # intervalle d’update en secondes (min 2s)
+        MIN_UPDATE_SEC = int(max(2, (step_cfg.get("update_interval_ms", 900) or 900) / 1000))
 
         # on récupère le spread courant si possible (ask-bid)
         cur_spread_pips = 0.0
@@ -2035,7 +2040,7 @@ def update_basket_sltp_dynamically(
             pass
 
         # planchers anti-cisaillement
-        spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buf)
+        spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buffer_pips)
         ACTIVATION_PIPS = max(act_min_pips, spread_floor_pips)
         MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
 
@@ -2094,25 +2099,27 @@ def update_basket_sltp_dynamically(
             # Trailing dynamique (et application + timestamp en cas de succès)
             try:
                 new_sl = self.apply_dynamic_trailing(
-                    trade_decision=virtual_decision,
-                    position_ticket=ticket,
-                    current_price=price_for_trail,
-                    entry_price=entry,
-                    current_sl=float(cur_sl),
-                    symbol_info=symbol_info,
-                    basket_context=local_ctx,
-                    volatility_pips=volatility_pips,
-                    current_tp=cur_tp,
-                    mt5_connector=getattr(self, "mt5_connector", None),
-                    modify_fn=None,  # on laisse la fonction choisir les méthodes dispo
-                    activation_pips=2.0,
-                    min_distance_pips=2.0,
-                    min_update_interval_sec=2,
-                    dry_run=False,
-                    force=False,
-                    market_context=current_market_data,
-                    burst_manager=getattr(self, "burst_manager", None),
-                )
+                trade_decision=virtual_decision,
+                position_ticket=ticket,
+                current_price=price_for_trail,
+                entry_price=entry,
+                current_sl=float(cur_sl),
+                symbol_info=symbol_info,
+                basket_context=local_ctx,
+                volatility_pips=volatility_pips,
+                current_tp=cur_tp,
+                mt5_connector=getattr(self, "mt5_connector", None),
+                modify_fn=None,
+                activation_pips=float(ACTIVATION_PIPS),                          
+                min_distance_pips=float(MIN_DISTANCE_PIPS),                
+                min_update_interval_sec=int(max(2, step_cfg.get("update_interval_ms", 900)/1000)),
+                dry_run=False,
+                force=False,
+                market_context=current_market_data,
+                burst_manager=getattr(self, "burst_manager", None),
+            )
+
+                
             except Exception as e:
                 new_sl = None
                 try:

@@ -30,15 +30,15 @@
         "per_leg_virtual": false,
         "sltp": {
           "sl_method": "SWING",
-          "rr_base": 2.0,
+          "rr_base": 1.8,
           "rr_floor": 1.2,
-          "rr_cap": 4.0,
+          "rr_cap": 3.0,
           "sl": {
             "atr_period": 14,
             "atr_multiplier": 3.0,
-            "buffer_pips": 24,
             "swing_lookback": 25,
-            "pips": 250
+            "pips": 400,
+            "buffer_pips": 2
           },
           "tp": {
             "tp_method": "NONE",
@@ -46,7 +46,7 @@
             "atr_multiplier": 3.0,
             "pips": 400,
             "execution": {
-              "min_sl_tp_distance_pips": 80
+              "min_sl_tp_distance_pips": 10
             }
           }
         }
@@ -55,15 +55,15 @@
         "enabled": true,
         "activation": {
           "mode": "PIPS",
-          "min_pips": 32.0,
+          "min_pips": 23.0,
           "atr_period": 14,
           "atr_multiple": 6.0
         },
         "step": {
           "mode": "PIPS",
-          "min_pips": 14.0,
+          "min_pips": 8.0,
           "atr_multiple": 1.10,
-          "update_interval_ms": 5500
+          "update_interval_ms": 900
         },
         "break_even": {
           "enabled": false,
@@ -74,9 +74,9 @@
           "offset_pips": 0.0
         },
         "broker_floors": {
-          "min_sl_distance_pips": 10.0,
-          "spread_multiplier": 5.0,
-          "extra_buffer_pips": 5.0
+          "min_sl_distance_pips": 6.0,
+          "spread_multiplier": 2.5,
+          "extra_buffer_pips": 1.0
         }
       },
       "closure_rules": {
