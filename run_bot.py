@@ -26,7 +26,7 @@ from phase_observer.fusion_manager import FusionManager
 load_dotenv()
 
 try:
-    from phase_observer.detectors import detect_orderflow_v5
+    from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
     from phase_observer.detectors import footprint_validator
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
@@ -1086,7 +1086,14 @@ def run_single_pipeline_cycle(
                             last_candles_df["time"], utc=True, errors="coerce"
                         )
                         last_candles_df.set_index("time", inplace=True)
-                    of_res = detect_orderflow_v5(last_candles_df)
+                    of_res = detect_orderflow_v6(
+                    last_candles_df,
+                    imbalance_threshold=0.20,
+                    cvd_smoothing=0.0,
+                    price_bins=24,
+                    logger=logger,
+                )
+
                     latest = dict(latest)
                     latest["orderflow_score"] = of_res.get("score", 0)
                     latest["orderflow_status"] = of_res.get("status", "N/A")

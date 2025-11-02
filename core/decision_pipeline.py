@@ -14,8 +14,13 @@ from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
-from phase_observer.footprint_analyzer import FootprintAnalyzer
-from phase_observer.detectors import detect_orderflow_v5
+from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
+
+try:
+    from phase_observer.detect_orderflow_v6.logging_manager import Span
+except Exception:
+    Span = None
+
 
 
 # PATCH PIPE-IMP-1 — import du pipeline (chemin: strategy/pipeline.py)
@@ -1235,33 +1240,43 @@ class DecisionPipeline:
                 or md_asset.get("ticks_buffer")
                 or md_asset.get("recent_ticks")
             )
+            md_asset = (context.get("market_data", {}) or {}).get(asset_raw, {}) or {}
+            df_m1 = (
+                md_asset.get("annotated_rates_df_m1")
+                or md_asset.get("annotated_rates_df")
+                or md_asset.get("rates_df")
+            )
+            ticks_df = (
+                md_asset.get("ticks")
+                or md_asset.get("ticks_buffer")
+                or md_asset.get("recent_ticks")
+            )
+            # --- INIT DÉFENSIF : toujours définis, même si les blocs suivants ne s’exécutent pas
+            orderflow: Dict[str, Any] = {}
+            trigger_ok: bool = False
+            trigger: Dict[str, Any] = {}
 
-            # -- 2) ORDERFLOW M1 (score + biais via delta_total) --
+            # -- 2) ORDERFLOW M1 (V6 institutionnel) : score + biais (delta_total) + VP (VPOC/VA) --
             orderflow = {}
             if isinstance(df_m1, pd.DataFrame) and not df_m1.empty:
-                # detect_orderflow_v5 -> {score, status, summary{delta_total,...}, patterns, df}
-                orderflow = detect_orderflow_v5(df_m1.copy())
+                of_cfg = ((current_config.get("phase_observer") or {}).get("orderflow_v6") or {})
+                try:
+                    kwargs = {
+                        "imbalance_threshold": float(of_cfg.get("imbalance_threshold", 0.20)),
+                        "cvd_smoothing":      float(of_cfg.get("cvd_smoothing", 0.0)),
+                        "price_bins":         int(of_cfg.get("price_bins", 24)),
+                        "logger":             self.logger,
+                    }
+                except Exception:
+                    # défauts sûrs si conf mal formée
+                    kwargs = {"imbalance_threshold": 0.20, "cvd_smoothing": 0.0, "price_bins": 24, "logger": self.logger}
 
-            # -- 3) TRIGGERS FOOTPRINT temps-réel (stacking / climax / absorption / micro-*) --
-            # MarketAnalyzer.expose FootprintAnalyzer.analyze_footprint_triggers()
-            # -> (ok, {action, trigger, direction, confidence, anchor_price, meta{poc, delta_total, ...}})
-            # cf. implémentation dans footprint_analyzer (retour normalisé). :contentReference[oaicite:1]{index=1}
-            trigger_ok, trigger = (False, {})
-            try:
-                # réutilise 'ma' si déjà créé pour la partie patterns, sinon instancie
-                if "ma" not in locals():
-                    ma = MarketAnalyzer(
-                        config_manager=self.config_manager, logger=self.logger
-                    )
-                bars_df = df_m1 if isinstance(df_m1, pd.DataFrame) else None
-                if isinstance(ticks_df, pd.DataFrame) and not ticks_df.empty:
-                    trigger_ok, trigger = ma.analyze_footprint_triggers(
-                        asset_raw, ticks_df, bars_df, current_config
-                    )
-                    if not trigger_ok:
-                        trigger = {}
-            except Exception as _e_tr:
-                self.logger.debug(f"[FUSION] triggers footprint indisponibles: {_e_tr}")
+                if Span:
+                    with Span(self.logger, "orderflow_v6", warn_ms=50):
+                        orderflow = detect_orderflow_v6(df_m1.copy(), **kwargs)
+                else:
+                    orderflow = detect_orderflow_v6(df_m1.copy(), **kwargs)
+
 
             # -- 4) Appel brique de fusion (pondération + règles métier + veto) --
             fused = self._fuse_signals_for_scalping(
@@ -1936,19 +1951,22 @@ class DecisionPipeline:
         return float(atr_pips)
 
     def _fuse_signals_for_scalping(
-        self,
         *,
         asset: str,
-        strategy_decision: dict,
-        orderflow: dict,
-        trigger: dict,
-        current_config: dict,
-        context: dict,
-    ) -> dict:
+        strategy_decision: Dict[str, Any],
+        orderflow: Optional[Dict[str, Any]] = None,
+        trigger: Optional[Dict[str, Any]] = None,
+        current_config: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        # normalisation défensive
+        orderflow = orderflow or {}
+        trigger = trigger or {}
+        
         """
         Fusionne 3 sources:
           - stratégie (pipeline scalping) -> action/direction + confidence
-          - orderflow M1 (detect_orderflow_v5) -> score + biais (signe de delta_total)
+          - orderflow M1 (detect_orderflow_v6) -> score + biais (signe de delta_total)
           - triggers footprint temps-réel -> trigger_type + direction + confidence + meta{poc, delta_total, ...}
         Applique: validation, cohérence, règles métier, pondération, veto.
         Sortie normalisée: {action, direction, confidence, rule_name, meta{fused_debug...}, rationale}

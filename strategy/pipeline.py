@@ -39,9 +39,9 @@ except Exception:  # pragma: no cover
     footprint_validator = None  # type: ignore
 
 try:
-    from orderflow.orderflow_v5 import detect_orderflow_v5  # type: ignore
+    from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6  # type: ignore
 except Exception:  # pragma: no cover
-    detect_orderflow_v5 = None  # type: ignore
+    detect_orderflow_v6 = None  # type: ignore
 
 try:
     # Tes stratégies existantes
@@ -254,23 +254,66 @@ class ScalpingPipeline:
         return None
 
     def _detect_orderflow(self, context: Dict[str, Any], asset: str) -> Optional[Dict[str, Any]]:
-        # 1) Déjà au contexte ?
+        """
+        Orderflow V6 (institutionnel) — lit les bougies M1 du context et renvoie {score,status,summary,patterns}.
+        Priorité: annotated_rates_df_m1 > annotated_rates_df > rates_df > ticks_window > ticks_m1.
+        """
+        # 1) Déjà calculé et présent dans le contexte ?
         try:
             of_ctx = (context.get("orderflow") or {}).get(asset)
             if isinstance(of_ctx, dict) and of_ctx:
                 return of_ctx
         except Exception:
             pass
-        # 2) Calcul si possible
+
+        # 2) Si la V6 est importée/chargeable, on calcule
         try:
-            if callable(detect_orderflow_v5):
+            if callable(detect_orderflow_v6):
                 md = (context.get("market_data") or {}).get(asset, {}) or {}
-                ticks_window = md.get("ticks_window") or md.get("ticks_m1")
-                if ticks_window is not None:
-                    return detect_orderflow_v5(ticks_window)
+
+                # Candidates de DataFrame pour la V6 (idéalement M1 OHLC+tick_volume)
+                df_m1 = (
+                    md.get("annotated_rates_df_m1")
+                    or md.get("annotated_rates_df")
+                    or md.get("rates_df")
+                    or md.get("ticks_window")
+                    or md.get("ticks_m1")
+                )
+
+                if isinstance(df_m1, pd.DataFrame) and not df_m1.empty:
+                    # Paramètres depuis la config (fallbacks sûrs)
+                    v6_cfg = ((self.config_manager.get("phase_observer") or {}).get("orderflow_v6") or {})
+                    imbalance_threshold = float(v6_cfg.get("imbalance_threshold", 0.20))
+                    cvd_smoothing      = float(v6_cfg.get("cvd_smoothing_alpha", 0.0))   # 0..1 (EMA alpha)
+                    price_bins         = int(v6_cfg.get("profile_bins", 24))
+
+                    # Aide logging: tag du symbole si absent
+                    try:
+                        if getattr(df_m1, "attrs", None) is not None:
+                            df_m1.attrs.setdefault("symbol", asset)
+                    except Exception:
+                        pass
+
+                    res = detect_orderflow_v6(
+                        df_m1,
+                        imbalance_threshold=imbalance_threshold,
+                        cvd_smoothing=cvd_smoothing,
+                        price_bins=price_bins,
+                        logger=self.logger,
+                    )
+
+                    # Option: on met en cache dans le contexte pour le reste du cycle
+                    try:
+                        context.setdefault("orderflow", {})[asset] = res
+                    except Exception:
+                        pass
+
+                    return res
         except Exception as e:
-            self.logger.debug(f"[{asset}] detect_orderflow_v5 skipped: {e}")
+            self.logger.debug(f"[{asset}] detect_orderflow_v6 skipped: {e}", exc_info=False)
+
         return None
+
 
     def _merge_signals(
         self,
@@ -306,7 +349,7 @@ class ScalpingPipeline:
 
         # Orderflow v5
         if isinstance(of, dict) and of:
-            sig["orderflow_v5"] = of
+            sig["orderflow_v6"] = of
             try:
                 s = of.get("summary", {})
                 sig["of_bias"] = str(s.get("bias", "")).upper() if isinstance(s, dict) else None

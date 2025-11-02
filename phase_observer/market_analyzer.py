@@ -8,15 +8,11 @@ from .detectors import (
     detect_single_candle,
     detect_multi_candle_patterns,
     detect_combos,
-    detect_orderflow_v5,
-    # (les 3 suivants sont optionnels ici si non utilisés directement)
-    # detect_imbalance_stacking,
-    # detect_absorption_reject,
-    # detect_volume_climax_after_consolidation,
-    
 )
-from .footprint_analyzer import FootprintAnalyzer  
+from .detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
+from .footprint_analyzer import FootprintAnalyzer
 from .fusion_manager import FusionManager
+
 
 LOG = logging.getLogger(__name__)
 
@@ -115,7 +111,7 @@ class MarketAnalyzer:
         ]
         multi_patterns = detect_multi_candle_patterns(annotated_df)
         combo_patterns = detect_combos(annotated_df)
-        orderflow_signals = detect_orderflow_v5(annotated_df)
+        orderflow_signals = detect_orderflow_v6(annotated_df)
 
         # 3️⃣ Dernier point brut (Series Pandas)
         latest = annotated_df.iloc[-1]  # ⚠️ garde la Series → pas de .to_dict()
