@@ -337,8 +337,11 @@
       "market_phases_enabled": true,
       "min_liquidity_threshold": 0,
       "closed_market_check_bars": 15,
-      "trading_start_hour_utc": 5,
-      "trading_end_hour_utc": 22,
+      "trading_timezone": "Europe/Paris",
+      "trading_hours_local": {
+        "start": "10:00",
+        "end": "17:00"
+      },
       "allowed_weekdays": [
         0,
         1,

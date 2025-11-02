@@ -15,6 +15,11 @@ import time
 from collections import deque
 from pathlib import Path
 from datetime import datetime, UTC, timedelta
+from datetime import time as dtime
+try:
+    from zoneinfo import ZoneInfo 
+except Exception:
+    ZoneInfo = None
 from typing import (
     Dict,
     Any,
@@ -534,30 +539,87 @@ class ConfigManager:
     def analyze_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Analyse le contexte de marché et système pour enrichir la prise de décision.
-        Cette fonction agrège des informations de diverses sources pour fournir une
-        vue complète et actionable pour les modules de décision.
+        - Priorité à la fenêtre locale (bot_behavior.trading_timezone + trading_hours_local)
+        → gère automatiquement l'heure d'été/hiver via zoneinfo.
+        - Fallback sur trading_start_hour_utc / trading_end_hour_utc en UTC si non défini.
         """
         self.logger.info("Analyse du contexte en cours...")
         analyzed_context = context.copy()
+
+        # Horloge
         current_time_utc = datetime.now(UTC)
         current_hour_utc = current_time_utc.hour
         current_weekday = current_time_utc.weekday()
 
+        # Config de base (fallback)
         start_hour = self.get("bot_behavior.trading_start_hour_utc", 8)
         end_hour = self.get("bot_behavior.trading_end_hour_utc", 17)
         allowed_weekdays = self.get("bot_behavior.allowed_weekdays", [0, 1, 2, 3, 4])
         default_vix = self.get("market_regime_detection.default_vix_index", 20)
 
-        analyzed_context["is_trading_hours"] = start_hour <= current_hour_utc < end_hour
-        analyzed_context["is_trading_day"] = current_weekday in allowed_weekdays
-        analyzed_context["is_market_open"] = (
-            analyzed_context["is_trading_hours"] and analyzed_context["is_trading_day"]
-        )
+        # --- Fenêtre de trading : priorité aux heures locales si disponibles ---
+        tz_name = self.get("bot_behavior.trading_timezone")
+        local_hours = self.get("bot_behavior.trading_hours_local", {}) or {}
 
-        analyzed_context["market_volatility_index"] = context.get(
-            "vix_index", default_vix
-        )
+        use_local = bool(tz_name and isinstance(local_hours, dict) and local_hours)
+        in_hours = False
+        is_trading_day = current_weekday in allowed_weekdays  # valeur par défaut
 
+        if use_local:
+            # Imports locaux → évite de patcher l'entête du fichier si tu ne veux pas
+            try:
+                from zoneinfo import ZoneInfo  # Python 3.9+
+            except Exception:
+                ZoneInfo = None
+            try:
+                from datetime import time as dtime
+            except Exception:
+                dtime = None
+
+            try:
+                tz = ZoneInfo(tz_name) if ZoneInfo else UTC
+            except Exception:
+                tz = UTC
+
+            now_local = current_time_utc.astimezone(tz)
+            # Jours autorisés (0=lundi … 6=dimanche)
+            is_trading_day = now_local.weekday() in allowed_weekdays
+
+            try:
+                start_s = str(local_hours.get("start", "10:00"))
+                end_s = str(local_hours.get("end", "17:00"))
+                h1, m1 = [int(x) for x in start_s.split(":")]
+                h2, m2 = [int(x) for x in end_s.split(":")]
+                if dtime is not None:
+                    t1 = dtime(h1, m1)
+                    t2 = dtime(h2, m2)
+                    cur = now_local.time()
+                    # Intervalle [start, end) : 10:00 inclus, 17:00 exclus
+                    if t1 <= t2:
+                        in_hours = (t1 <= cur < t2)
+                    else:
+                        # overnight (ex: 22:00–02:00) si jamais tu l'utilises plus tard
+                        in_hours = (cur >= t1) or (cur < t2)
+                else:
+                    # Si dtime indisponible, fallback conservateur (UTC)
+                    in_hours = start_hour <= current_hour_utc < end_hour
+            except Exception as e:
+                self.logger.warning(
+                    f"[analyze_context] Heures locales invalides ({e}). Fallback UTC."
+                )
+                in_hours = start_hour <= current_hour_utc < end_hour
+        else:
+            # Fallback legacy: fenêtre en UTC
+            in_hours = start_hour <= current_hour_utc < end_hour
+
+        analyzed_context["is_trading_hours"] = in_hours
+        analyzed_context["is_trading_day"] = is_trading_day
+        analyzed_context["is_market_open"] = in_hours and is_trading_day
+
+        # Volatilité (VIX ou proxy)
+        analyzed_context["market_volatility_index"] = context.get("vix_index", default_vix)
+
+        # Détails du compte broker actif (si login MT5 présent)
         current_mt5_login_numeric = context.get("account_info", {}).get("login")
         active_broker_account_details = None
 
@@ -567,31 +629,27 @@ class ConfigManager:
                     login_value_from_env = self._config.get("env_vars", {}).get(
                         account.get("login_env_var")
                     )
-                    if (
-                        login_value_from_env
-                        and int(login_value_from_env) == current_mt5_login_numeric
-                    ):
-                        active_broker_account_details = (
-                            self.get_mt5_account_credentials(
-                                account_id=account.get("account_id")
-                            )
+                    if login_value_from_env and int(login_value_from_env) == current_mt5_login_numeric:
+                        active_broker_account_details = self.get_mt5_account_credentials(
+                            account_id=account.get("account_id")
                         )
                         break
 
                 if active_broker_account_details:
-                    analyzed_context["active_broker_account"] = (
-                        active_broker_account_details
-                    )
+                    analyzed_context["active_broker_account"] = active_broker_account_details
                     self.logger.debug(
-                        f"Contexte enrichi avec les détails du compte broker actif : {active_broker_account_details.get('account_id')}."
+                        f"Contexte enrichi avec les détails du compte broker actif : "
+                        f"{active_broker_account_details.get('account_id')}."
                     )
                 else:
                     self.logger.warning(
-                        f"Détails du compte broker (Login MT5: {current_mt5_login_numeric}) introuvables ou inactifs dans 'broker_accounts.json'. Contexte non enrichi avec ces détails."
+                        f"Détails du compte broker (Login MT5: {current_mt5_login_numeric}) "
+                        f"introuvables ou inactifs dans 'broker_accounts.json'."
                     )
             except (ValueError, RuntimeError) as e:
                 self.logger.error(
-                    f"Erreur lors de la récupération des détails du compte broker actif (Login MT5: {current_mt5_login_numeric}): {e}",
+                    f"Erreur lors de la récupération des détails du compte broker actif "
+                    f"(Login MT5: {current_mt5_login_numeric}): {e}",
                     exc_info=True,
                 )
                 analyzed_context["active_broker_account"] = {"error": str(e)}
@@ -600,13 +658,15 @@ class ConfigManager:
                 "Aucun ID de compte MT5 actif dans le contexte pour récupérer les détails du compte broker."
             )
 
+        # Détection du régime de marché
         all_assets_market_data_from_context = context.get("market_data", {})
         analyzed_context["current_market_regime"] = self.detect_market_regime(
             analyzed_context, all_assets_market_data_from_context
         )
 
-        self.logger.debug(f"Analyse du contexte terminée.")
+        self.logger.debug("Analyse du contexte terminée.")
         return analyzed_context
+
 
     def detect_market_regime(
         self, context: Dict[str, Any], data: Dict[str, Any]

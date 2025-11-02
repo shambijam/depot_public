@@ -181,6 +181,23 @@ class DecisionPipeline:
             print("🤖 [DECISION] Étape 1: Analyse du contexte...")
             analyzed_context = self.config_manager.analyze_context(context) or {}
             print("🤖 [DECISION] Contexte analysé avec succès")
+            
+            # Gate: hors horaires → aucune nouvelle entrée
+            if not analyzed_context.get("is_market_open", True):
+                self.logger.info("[SESSION] Fenêtre fermée (hors horaires). Aucune nouvelle entrée.")
+                print("⛔ [SESSION] Hors horaires: pas de nouvelles entrées.")
+                base_cfg = self.config_manager.get_current_dynamic_config() or {}
+                return {
+                    "timestamp_utc": datetime.now(UTC).isoformat(),
+                    "context": analyzed_context,
+                    "config_used": base_cfg,
+                    "scalping_decisions": [],
+                    "liquidity_decisions": [],
+                    "final_decisions": [],
+                    "final_decision": {},
+                    "execution_context": {"sessions": {"blocked": True, "reason": "outside_trading_hours"}},
+                    "decision_trace": [],
+                }
 
             # === Snapshot guardrails / IA (debug) ===
             base_cfg = self.config_manager.get_current_dynamic_config() or {}

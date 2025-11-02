@@ -2029,6 +2029,22 @@ def update_basket_sltp_dynamically(
                 (step_cfg.get("update_interval_ms", 2000) or 2000) / 1000.0
             )
         )
+        # --- lecture des blocs "perte" (défense) ---
+        act_loss_cfg  = trail_cfg.get("activation_loss", {}) or {}
+        step_loss_cfg = trail_cfg.get("step_loss", {}) or {}
+
+        loss_min_pips       = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))
+        step_loss_min_pips  = float((step_loss_cfg.get("min_pips", 0.0) or 0.0))
+
+        # cadence défense (sec) : supporte sec, fallback ms
+        LOSS_UPDATE_SEC = float(
+            step_loss_cfg.get(
+                "update_interval_sec",
+                (step_loss_cfg.get("update_interval_ms", 2000) or 2000) / 1000.0
+            )
+        )
+        LOSS_UPDATE_SEC = max(1.0, LOSS_UPDATE_SEC)
+             
         # plancher de sécurité (évite spam) — ajuste si tu veux autoriser < 1s
         MIN_UPDATE_SEC = max(1.0, MIN_UPDATE_SEC)
 
@@ -2050,6 +2066,11 @@ def update_basket_sltp_dynamically(
         spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buffer_pips)
         ACTIVATION_PIPS = max(act_min_pips, spread_floor_pips)
         MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
+        
+        # paramètres de défense (perte) basés sur le spread courant
+        LOSS_ACTIVATION_PIPS   = max(loss_min_pips, spread_floor_pips)
+        MIN_DISTANCE_PIPS_LOSS = max(step_loss_min_pips, floor_min_pips, spread_floor_pips)
+
 
         # Appliquer SL dynamique par position (plus fiable que sl_opt agrégé)
         for p in positions:
@@ -2103,28 +2124,75 @@ def update_basket_sltp_dynamically(
             prev_sl_list.append(cur_sl)
             prev_tp_list.append(cur_tp)
 
-            # Trailing dynamique (et application + timestamp en cas de succès)
+            # Trailing dynamique (profit vs défense) et application + timestamp
             try:
-                new_sl = self.apply_dynamic_trailing(
-                trade_decision=virtual_decision,
-                position_ticket=ticket,
-                current_price=price_for_trail,
-                entry_price=entry,
-                current_sl=float(cur_sl),
-                symbol_info=symbol_info,
-                basket_context=local_ctx,
-                volatility_pips=volatility_pips,
-                current_tp=cur_tp,
-                mt5_connector=getattr(self, "mt5_connector", None),
-                modify_fn=None,
-                activation_pips=float(ACTIVATION_PIPS),                          
-                min_distance_pips=float(MIN_DISTANCE_PIPS),                
-                min_update_interval_sec=float(MIN_UPDATE_SEC),
-                dry_run=False,
-                force=False,
-                market_context=current_market_data,
-                burst_manager=getattr(self, "burst_manager", None),
-            )
+                # Sélection du mode : profit (pnl >= seuil) ou défense (pnl <= -seuil)
+                do_defense = (pnl_pips <= -float(LOSS_ACTIVATION_PIPS))
+                do_profit  = (pnl_pips >= float(ACTIVATION_PIPS))
+
+                if do_defense:
+                    # --- MODE DÉFENSE : on resserre le SL pour limiter la perte ---
+                    new_sl = self.apply_dynamic_trailing(
+                        trade_decision=virtual_decision,
+                        position_ticket=ticket,
+                        current_price=price_for_trail,
+                        entry_price=entry,
+                        current_sl=float(cur_sl),
+                        symbol_info=symbol_info,
+                        basket_context=local_ctx,
+                        volatility_pips=volatility_pips,
+                        current_tp=cur_tp,
+                        mt5_connector=getattr(self, "mt5_connector", None),
+                        modify_fn=None,
+                        activation_pips=0.0,  # on force l'activation immédiate en défense
+                        min_distance_pips=float(MIN_DISTANCE_PIPS_LOSS),
+                        min_update_interval_sec=float(LOSS_UPDATE_SEC),
+                        dry_run=False,
+                        force=True,  # important : applique même si la logique interne attend du profit
+                        market_context=current_market_data,
+                        burst_manager=getattr(self, "burst_manager", None),
+                    )
+                elif do_profit:
+                    # --- MODE PROFIT : trailing classique, activé après gain ---
+                    MIN_UPDATE_SEC = float(
+                        step_cfg.get(
+                            "update_interval_sec",
+                            (step_cfg.get("update_interval_ms", 2000) or 2000) / 1000.0
+                        )
+                    )
+                    MIN_UPDATE_SEC = max(1.0, MIN_UPDATE_SEC)
+
+                    new_sl = self.apply_dynamic_trailing(
+                        trade_decision=virtual_decision,
+                        position_ticket=ticket,
+                        current_price=price_for_trail,
+                        entry_price=entry,
+                        current_sl=float(cur_sl),
+                        symbol_info=symbol_info,
+                        basket_context=local_ctx,
+                        volatility_pips=volatility_pips,
+                        current_tp=cur_tp,
+                        mt5_connector=getattr(self, "mt5_connector", None),
+                        modify_fn=None,
+                        activation_pips=float(ACTIVATION_PIPS),
+                        min_distance_pips=float(MIN_DISTANCE_PIPS),
+                        min_update_interval_sec=float(MIN_UPDATE_SEC),
+                        dry_run=False,
+                        force=False,
+                        market_context=current_market_data,
+                        burst_manager=getattr(self, "burst_manager", None),
+                    )
+                else:
+                    new_sl = None
+            except Exception as e:
+                new_sl = None
+                try:
+                    self.logger.debug(
+                        f"[SLTP][BasketUpdate] apply_dynamic_trailing error (ticket={ticket}): {e}"
+                    )
+                except Exception:
+                    pass
+
                 
             except Exception as e:
                 new_sl = None

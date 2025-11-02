@@ -207,6 +207,15 @@
     },
     "take_profit": {
       "hard_max_points": 200000
+    },
+    "activation_loss": {
+      "mode": "PIPS",
+      "min_pips": 25.0
+    },
+    "step_loss": {
+      "mode": "PIPS",
+      "min_pips": 12.0,
+      "update_interval_sec": 2.0
     }
   }
 }
