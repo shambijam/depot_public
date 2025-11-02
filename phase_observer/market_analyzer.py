@@ -39,7 +39,7 @@ class MarketAnalyzer:
         return self.footprint.analyze_footprint_triggers(asset, ticks, bars, strategy_config)
     
     # ============================================================
-    # 🔹 FUSION MANAGER — décision unifiée (OFv5 + FP M1 + Trigger)
+    # 🔹 FUSION MANAGER — décision unifiée (OFv6 + FP M1 + Trigger)
     # ============================================================
     def build_fused_decision(
         self,
@@ -52,6 +52,18 @@ class MarketAnalyzer:
     ) -> Dict[str, Any]:
         of = (market_results or {}).get("patterns", {}).get("orderflow") or {}
         latest = (market_results or {}).get("latest")
+        
+        # Compat v6 → expose bias / poc au top-level pour la Fusion
+        try:
+            _summ = (of or {}).get("summary") or {}
+            if _summ:
+                if "bias" in _summ and "bias" not in of:
+                    of["bias"] = _summ.get("bias")
+                if ("poc" not in of) and (_summ.get("vpoc_price") is not None):
+                    of["poc"] = _summ.get("vpoc_price")
+        except Exception:
+            pass
+
 
         # Compacter le Footprint M1 depuis latest.*
         fp_payload = {"status": "SUSPECT", "summary": {}}

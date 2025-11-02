@@ -297,21 +297,47 @@ class FusionManager:
 
     # -------------- Normalisations --------------
     def _normalize_orderflow(self, of: Dict[str, Any]) -> Dict[str, Any]:
-        # of.score 0..100; of.status; of.summary{delta_total,poc,absorption_flag,bias?}
+        # of v6: {score:0..100, status, summary{delta_total, imbalance, cvd_slope, vpoc_price, bias, ...}}
         status = str(of.get("status", "SUSPECT")).upper()
         score01 = max(0.0, min(1.0, _to_float(of.get("score"), 0.0) / 100.0))
         if status != "VALID":
             score01 *= 0.6
+
         summ = of.get("summary") or {}
         if isinstance(summ, str):
-            try: summ = ast.literal_eval(summ)
-            except Exception: summ = {}
+            try:
+                import ast
+                summ = ast.literal_eval(summ)
+            except Exception:
+                summ = {}
+
         delta = _to_float(summ.get("delta_total"), 0.0)
-        poc = _to_float(summ.get("poc"), None)
+
+        # ✅ compat v6: 'vpoc_price' → champ interne 'poc'
+        poc = _to_float(
+            summ.get("poc", summ.get("vpoc_price", None)), None
+        )
+
+        # ✅ compat v6: bias peut être dans summary (BUY/SELL/NEUTRAL)
+        bias_top = of.get("bias")
+        bias_sum = summ.get("bias")
+        bias = str(bias_top or bias_sum or "")
+        if not bias:
+            bias = "BUY" if delta > 0 else ("SELL" if delta < 0 else "NEUTRAL")
+
         absorption = bool(summ.get("absorption_flag", False))
-        bias = str(of.get("bias", "")) or ("BUY" if delta>0 else "SELL" if delta<0 else "NEUTRAL")
-        dir_int = 1 if bias=="BUY" else (-1 if bias=="SELL" else _dir_from_sign(delta))
-        return {"score": score01, "status": status, "dir": dir_int, "delta_total": delta, "poc": poc, "absorption": absorption, "raw": of}
+        dir_int = 1 if bias == "BUY" else (-1 if bias == "SELL" else _dir_from_sign(delta))
+
+        return {
+            "score": score01,
+            "status": status,
+            "dir": dir_int,
+            "delta_total": delta,
+            "poc": poc,
+            "absorption": absorption,
+            "raw": of,
+        }
+
 
     def _normalize_footprint(self, fp: Dict[str, Any]) -> Dict[str, Any]:
         status = str(fp.get("status", "SUSPECT")).upper()
