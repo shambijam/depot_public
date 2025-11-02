@@ -1,7 +1,10 @@
 # phase_observer/market_analyzer.py
+from __future__ import annotations
+
 import logging
+from typing import Dict, Any, Tuple, Optional, List
+
 import pandas as pd
-from typing import Dict, Any, Tuple, Optional
 
 from .orchestrator import PhaseObserver
 from .detectors import (
@@ -18,15 +21,41 @@ LOG = logging.getLogger(__name__)
 
 
 class MarketAnalyzer:
+    """
+    Analyse unifiée du marché :
+      - PhaseObserver (annotation du DF)
+      - Détecteurs chandeliers (single/multi/combos)
+      - OrderFlow V6 (métriques institutionnelles + volume profile)
+      - Footprint triggers (pass-through)
+      - FusionManager (OFv6 + FP M1 + triggers) via `build_fused_decision`
+    """
+
     def __init__(self, config_manager=None, logger=None):
         self.logger = logger or LOG
         self.config_manager = config_manager
-        self.phase_observer = PhaseObserver(config_manager=config_manager)
+
+        # Briques principales (robustes à l’init)
+        try:
+            self.phase_observer = PhaseObserver(config_manager=config_manager)
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] PhaseObserver init failed: {e}")
+            self.phase_observer = None
+
         self._last_results: Dict[str, Any] = {}
         self._confluence_cache: Dict[str, pd.DataFrame] = {}
-        self.footprint = FootprintAnalyzer(logger=self.logger)
-        self.fusion_manager = FusionManager()
 
+        try:
+            self.footprint = FootprintAnalyzer(logger=self.logger)
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] FootprintAnalyzer init failed: {e}")
+            self.footprint = None
+
+        try:
+            # NB: si ta FusionManager accepte (config_manager, logger), branche-les ici
+            self.fusion_manager = FusionManager()
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] FusionManager init failed: {e}")
+            self.fusion_manager = None
 
     # === Pass-through pour l'analyse des triggers footprint ===
     def analyze_footprint_triggers(
@@ -36,8 +65,16 @@ class MarketAnalyzer:
         bars: Optional[pd.DataFrame],
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
-        return self.footprint.analyze_footprint_triggers(asset, ticks, bars, strategy_config)
-    
+        if self.footprint is None:
+            return False, {"error": "FootprintAnalyzer unavailable"}
+        try:
+            return self.footprint.analyze_footprint_triggers(
+                asset, ticks, bars, strategy_config
+            )
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] footprint triggers failed: {e}")
+            return False, {"error": str(e)}
+
     # ============================================================
     # 🔹 FUSION MANAGER — décision unifiée (OFv6 + FP M1 + Trigger)
     # ============================================================
@@ -50,9 +87,17 @@ class MarketAnalyzer:
         *,
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """
+        Construit la décision fusionnée.
+        Attend dans `market_results["patterns"]["orderflow"]` le dict OFv6.
+        Tolère l’absence de footprint/trigger et comble anchor depuis POC si nécessaire.
+        """
+        if self.fusion_manager is None:
+            return {"status": "SUSPECT", "reason": "FusionManager unavailable"}
+
         of = (market_results or {}).get("patterns", {}).get("orderflow") or {}
         latest = (market_results or {}).get("latest")
-        
+
         # Compat v6 → expose bias / poc au top-level pour la Fusion
         try:
             _summ = (of or {}).get("summary") or {}
@@ -64,7 +109,6 @@ class MarketAnalyzer:
         except Exception:
             pass
 
-
         # Compacter le Footprint M1 depuis latest.*
         fp_payload = {"status": "SUSPECT", "summary": {}}
         if latest is not None:
@@ -73,6 +117,7 @@ class MarketAnalyzer:
             if isinstance(summ, str):
                 try:
                     import ast
+
                     summ = ast.literal_eval(summ)
                 except Exception:
                     summ = {}
@@ -86,47 +131,119 @@ class MarketAnalyzer:
 
         # On transmet aussi un contexte optionnel (spread/session/régime/horodatage…)
         ctx = dict(context or {})
-        ctx.setdefault("now_ts", None)  # si absent, FusionManager utilisera time.time()
+        ctx.setdefault("now_ts", None)  # si absent, FusionManager utilise time.time()
 
-        # Run fusion
-        fused = self.fusion_manager.fuse(orderflow=of, footprint=fp_payload, triggers=trig, strategy_config=strategy_config, context=ctx)
+        try:
+            fused = self.fusion_manager.fuse(
+                orderflow=of,
+                footprint=fp_payload,
+                triggers=trig,
+                strategy_config=strategy_config,
+                context=ctx,
+            )
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] Fusion failed: {e}")
+            return {"status": "SUSPECT", "error": str(e)}
 
-        # Si pas d'ancre côté trigger, la brique utilisera le POC footprint: on harmonise ici
+        # Si pas d'ancre côté trigger, harmonise avec POC footprint, puis OF
         if fused.get("anchor_price") is None:
-            poc = fp_payload.get("summary", {}).get("poc")
-            if poc is not None:
+            poc_fp = fp_payload.get("summary", {}).get("poc")
+            if poc_fp is not None:
                 try:
-                    fused["anchor_price"] = float(poc)
+                    fused["anchor_price"] = float(poc_fp)
                 except Exception:
                     pass
+            if fused.get("anchor_price") is None:
+                poc_of = (of or {}).get("poc")
+                if poc_of is not None:
+                    try:
+                        fused["anchor_price"] = float(poc_of)
+                    except Exception:
+                        pass
+
         return fused
 
-
-        
     # ============================================================
     # 🔹 Analyse unifiée
     # ============================================================
-    
-    
     def analyze(self, df: pd.DataFrame, asset: str = "") -> Dict[str, Any]:
+        """
+        Étapes :
+          1) PhaseObserver (annotation df)
+          2) Détecteurs chandeliers et combos
+          3) OrderFlow V6 (avec paramètres issus de la config si dispo)
+          4) Dernier point (Series)
+          5) Qualité + confluence
+        """
         if df is None or df.empty:
             return {"annotated_df": pd.DataFrame(), "latest": None, "patterns": {}}
 
-        # 1️⃣ PhaseObserver (annotate le DF)
-        annotated_df = self.phase_observer.analyze(df.copy(), asset_symbol=asset)
+        # 1️⃣ PhaseObserver
+        if self.phase_observer is None:
+            self.logger.warning(
+                "[MarketAnalyzer] PhaseObserver unavailable → passthrough df"
+            )
+            annotated_df = df.copy()
+        else:
+            try:
+                annotated_df = self.phase_observer.analyze(
+                    df.copy(), asset_symbol=asset
+                )
+            except Exception as e:
+                self.logger.error(f"[MarketAnalyzer] PhaseObserver analyze failed: {e}")
+                annotated_df = df.copy()
+
         if annotated_df is None or annotated_df.empty:
             return {"annotated_df": pd.DataFrame(), "latest": None, "patterns": {}}
 
         # 2️⃣ Détecteurs factuels
-        candles = [
-            detect_single_candle(annotated_df, i) for i in range(len(annotated_df))
-        ]
-        multi_patterns = detect_multi_candle_patterns(annotated_df)
-        combo_patterns = detect_combos(annotated_df)
-        orderflow_signals = detect_orderflow_v6(annotated_df)
+        try:
+            candles = [
+                detect_single_candle(annotated_df, i) for i in range(len(annotated_df))
+            ]
+        except Exception as e:
+            self.logger.debug(f"[MarketAnalyzer] single_candle detectors failed: {e}")
+            candles = []
+
+        try:
+            multi_patterns = detect_multi_candle_patterns(annotated_df)
+        except Exception as e:
+            self.logger.debug(f"[MarketAnalyzer] multi_candle detectors failed: {e}")
+            multi_patterns = []
+
+        try:
+            combo_patterns = detect_combos(annotated_df)
+        except Exception as e:
+            self.logger.debug(f"[MarketAnalyzer] combo detectors failed: {e}")
+            combo_patterns = []
+
+        # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
+        of_kwargs = self._get_ofv6_params(asset)
+        try:
+            orderflow_signals = detect_orderflow_v6(
+                annotated_df,
+                imbalance_threshold=of_kwargs["imbalance_threshold"],
+                cvd_smoothing=of_kwargs["cvd_smoothing"],
+                price_bins=of_kwargs["price_bins"],
+                vp_options=of_kwargs["vp_options"],
+                logger=self.logger,
+            )
+            if not isinstance(orderflow_signals, dict):
+                raise TypeError("detect_orderflow_v6 must return a dict")
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] detect_orderflow_v6 failed: {e}")
+            orderflow_signals = {
+                "score": 0.0,
+                "status": "SUSPECT",
+                "summary": {"rescue_level": 2, "rescue_note": f"of_v6_failed:{e}"},
+                "patterns": {},
+            }
 
         # 3️⃣ Dernier point brut (Series Pandas)
-        latest = annotated_df.iloc[-1]  # ⚠️ garde la Series → pas de .to_dict()
+        try:
+            latest = annotated_df.iloc[-1]  # on garde la Series (compat en aval)
+        except Exception:
+            latest = None
 
         # 4️⃣ Scoring qualité
         quality_score, quality_diag = self._compute_quality_metrics(
@@ -146,8 +263,10 @@ class MarketAnalyzer:
                 "combos": combo_patterns,
                 "orderflow": orderflow_signals,
             },
-            "phase": latest.get("phase"),
-            "confidence": latest.get("confidence_score", 0.5),
+            "phase": (latest.get("phase") if latest is not None else None),
+            "confidence": (
+                latest.get("confidence_score", 0.5) if latest is not None else 0.5
+            ),
             "quality_metrics": quality_diag,
             "quality_score": quality_score,
             "confluence": confluence,
@@ -165,7 +284,6 @@ class MarketAnalyzer:
         """
         Exemple simple: qualité = nombre de barres valides, présence des colonnes essentielles.
         """
-        diag = {}
         if df is None or df.empty:
             return 0.0, {"reason": "empty_df"}
 
@@ -180,11 +298,7 @@ class MarketAnalyzer:
                 score += 0.1
             if has_time:
                 score += 0.1
-            diag = {
-                "n_bars": n_bars,
-                "has_volume": has_volume,
-                "has_time": has_time,
-            }
+            diag = {"n_bars": n_bars, "has_volume": has_volume, "has_time": has_time}
             return min(1.0, score), diag
         except Exception as e:
             return 0.0, {"error": str(e)}
@@ -214,7 +328,6 @@ class MarketAnalyzer:
     # ============================================================
     # 🔹 Ready & confluence check
     # ============================================================
-  
     def ready_and_confluence_ok(self, confluence_required: int = 2) -> Tuple[bool, str]:
         try:
             bullish_count = 0
@@ -236,3 +349,63 @@ class MarketAnalyzer:
             return False, "pas assez de confluence"
         except Exception as e:
             return True, f"skip check (erreur: {e})"
+
+    # ============================================================
+    # 🔹 Paramètres OrderFlow V6 (depuis config si dispo)
+    # ============================================================
+    def _get_ofv6_params(self, asset: str = "") -> Dict[str, Any]:
+        """
+        Lit des paramètres OFv6 depuis la config si disponible ; sinon valeurs sûres.
+        Cherche d’abord une section globale `orderflow_v6`, puis un override par actif.
+        """
+        # Défauts sûrs
+        params = {
+            "imbalance_threshold": 0.20,
+            "cvd_smoothing": 0.0,
+            "price_bins": 20,
+            "vp_options": {
+                # options avancées du Volume Profile ; toutes facultatives
+                # "use_ohlc_overlap": True, "body_gain": 0.6, "coverage": 0.70,
+                # "bin_width": None, "tick_size": None, "max_bins": 400, "ib_bars": 30,
+                # "return_nodes": False,
+            },
+        }
+
+        cm = self.config_manager
+        if cm is None:
+            return params
+
+        try:
+            # global
+            ofg = cm.get("orderflow_v6", {}) or {}
+            # override actif (si tu as une convention type config/assets/<ASSET>.json → à brancher ici)
+            ofa = {}
+            try:
+                # Exemple d’override par asset si ton ConfigManager expose une méthode dédiée :
+                # ofa = (cm.load_asset_config(asset) or {}).get("orderflow_v6", {}) or {}
+                pass
+            except Exception:
+                pass
+
+            # merge (asset override > global > defaults)
+            merged = dict(params)
+            for src in (ofg, ofa):
+                if not isinstance(src, dict):
+                    continue
+                if (
+                    "imbalance_threshold" in src
+                    and src["imbalance_threshold"] is not None
+                ):
+                    merged["imbalance_threshold"] = float(src["imbalance_threshold"])
+                if "cvd_smoothing" in src and src["cvd_smoothing"] is not None:
+                    merged["cvd_smoothing"] = float(src["cvd_smoothing"])
+                if "price_bins" in src and src["price_bins"] is not None:
+                    merged["price_bins"] = int(src["price_bins"])
+                if "vp_options" in src and isinstance(src["vp_options"], dict):
+                    # on n’écrase pas tout, on met à jour
+                    merged["vp_options"] = {**merged["vp_options"], **src["vp_options"]}
+
+            return merged
+        except Exception as e:
+            self.logger.debug(f"[MarketAnalyzer] _get_ofv6_params fallback: {e}")
+            return params

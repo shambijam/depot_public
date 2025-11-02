@@ -1,10 +1,11 @@
 # phase_observer/fusion_manager.py
 from __future__ import annotations
 from typing import Dict, Any, Optional, Tuple, List
-import math, time, logging, ast
+import time, logging, ast
 
 DirectionInt = int  # -1 SELL, 0 NEUTRAL, +1 BUY
 LOG = logging.getLogger(__name__)
+
 
 def _to_float(x, default=None):
     try:
@@ -12,17 +13,22 @@ def _to_float(x, default=None):
     except Exception:
         return default
 
+
 def _dir_from_sign(x: float) -> DirectionInt:
     return 1 if x > 0 else (-1 if x < 0 else 0)
+
 
 def _now_ts() -> float:
     try:
         return time.time()
     except Exception:
         return 0.0
-    
+
+
 # ---------- Helpers horodatage ----------
-def _ensure_timestamp(self, node: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+def _ensure_timestamp(
+    self, node: Dict[str, Any], ctx: Dict[str, Any]
+) -> Dict[str, Any]:
     if node.get("ts") is None:
         node["ts"] = ctx.get("now_ts") or _now_ts()
         node["ts_source"] = "generated"
@@ -30,18 +36,25 @@ def _ensure_timestamp(self, node: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[s
         node["ts_source"] = "input"
     return node
 
+
 # ---------- Hash & cache cohérence ----------
 def _hashable(self, obj: Any) -> str:
     try:
         import json
+
         return json.dumps(obj, sort_keys=True, default=str)
     except Exception:
         return str(obj)
 
-def _coh_key(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]) -> str:
+
+def _coh_key(
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+) -> str:
     import hashlib
+
     base = "|".join([self._hashable(n_of), self._hashable(n_fp), self._hashable(n_tr)])
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
 
 def _coherence_cached(self, key: str, compute_fn) -> Dict[str, Any]:
     now = _now_ts()
@@ -55,8 +68,11 @@ def _coherence_cached(self, key: str, compute_fn) -> Dict[str, Any]:
     self._coh_cache[key] = (now, res)
     return res
 
+
 # ---------- Mode dégradé ----------
-def _degraded_mode_decision(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]) -> Dict[str, Any]:
+def _degraded_mode_decision(
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+) -> Dict[str, Any]:
     available = {
         "orderflow": n_of["score"] > 0 or n_of["dir"] != 0,
         "footprint": True,  # on a toujours un status ; score heuristique si absent
@@ -64,11 +80,17 @@ def _degraded_mode_decision(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_
     }
     return {"available": available, "is_degraded": not available["triggers"]}
 
+
 # ---------- Validation croisée ----------
-def _cross_system_validation(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]) -> List[str]:
+def _cross_system_validation(
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+) -> List[str]:
     issues: List[str] = []
     try:
-        if abs(float(n_of.get("delta_total", 0))) > 100 and abs(float(n_fp.get("delta_total", 0))) < 10:
+        if (
+            abs(float(n_of.get("delta_total", 0))) > 100
+            and abs(float(n_fp.get("delta_total", 0))) < 10
+        ):
             issues.append("delta_mismatch_of_vs_fp")
     except Exception:
         pass
@@ -77,8 +99,11 @@ def _cross_system_validation(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n
         issues.append("trigger_vs_strong_OF_conflict")
     return issues
 
+
 # ---------- Poids adaptatifs ----------
-def _adaptive_weights(self, regime: Optional[str], volatility: Optional[str], session: Optional[str]) -> Optional[Dict[str, float]]:
+def _adaptive_weights(
+    self, regime: Optional[str], volatility: Optional[str], session: Optional[str]
+) -> Optional[Dict[str, float]]:
     # Valeurs par défaut None → pas d’override
     if not (regime or volatility or session):
         return None
@@ -88,20 +113,29 @@ def _adaptive_weights(self, regime: Optional[str], volatility: Optional[str], se
         w_tr, w_of, w_fp = 0.45, 0.40, 0.15
     # Trending → renforcer orderflow ; Range → renforcer footprint (structure)
     if (regime or "").lower().startswith("trend"):
-        w_of += 0.05; w_tr -= 0.03; w_fp -= 0.02
+        w_of += 0.05
+        w_tr -= 0.03
+        w_fp -= 0.02
     elif (regime or "").lower().startswith("range"):
-        w_fp += 0.05; w_tr -= 0.03; w_of -= 0.02
+        w_fp += 0.05
+        w_tr -= 0.03
+        w_of -= 0.02
     # Session London → triggers réactifs ; Asia → footprint/structure
     s = (session or "").lower()
     if "london" in s or "europe" in s:
-        w_tr += 0.03; w_of += 0.00; w_fp -= 0.03
+        w_tr += 0.03
+        w_of += 0.00
+        w_fp -= 0.03
     elif "asia" in s:
-        w_fp += 0.03; w_tr -= 0.02; w_of -= 0.01
+        w_fp += 0.03
+        w_tr -= 0.02
+        w_of -= 0.01
 
     # Normalise
     total = max(1e-9, w_tr + w_of + w_fp)
-    w_tr, w_of, w_fp = w_tr/total, w_of/total, w_fp/total
+    w_tr, w_of, w_fp = w_tr / total, w_of / total, w_fp / total
     return {"trigger": w_tr, "orderflow": w_of, "footprint": w_fp}
+
 
 # ---------- Maj métriques ----------
 def _update_metrics(self, dt: float, decision: str, veto: Dict[str, Any], fused: float):
@@ -119,37 +153,28 @@ def _update_metrics(self, dt: float, decision: str, veto: Dict[str, Any], fused:
             m["confidence_distribution"] = m["confidence_distribution"][-500:]
     except Exception:
         pass
- 
 
 
 class FusionManager:
     """
-    Orchestration modulaire:
-      - Input Validator
-      - Coherence Analyzer
-      - Business Rules Engine
-      - Confidence Fusion
-      - Veto Manager
-      - Decision Generator
-      - Rationale Builder
-
-    Sortie unifiée:
+    Orchestration modulaire (OFv6 + Footprint + Triggers).
+    Sortie :
       {
         "ok": bool,
         "action": "BUY"|"SELL"|"HOLD",
-        "signal_type": "HIGH_CONVICTION_BUY" | "MODERATE_BUY" | "CAUTIOUS_BUY" |
-                       "WAIT_CONFIRMATION" | "STRONG_VETO" | "INSUFFICIENT_DATA",
+        "signal_type": "HIGH_CONVICTION_*" | "MODERATE_*" | "CAUTIOUS_*" | "WAIT_CONFIRMATION" | "STRONG_VETO" | "INSUFFICIENT_DATA",
         "direction": "BUY"|"SELL"|"NEUTRAL",
         "fused_confidence": float(0..1),
         "anchor_price": float|None,
         "rationale": str,
-        "components": {...},         # inputs normalisés
+        "components": {"orderflow":..., "validator":..., "trigger":...},
         "consensus": {"maj": "BUY/SELL/TIE", "agreement": float, "votes":[...]},
         "quality": {"is_valid": bool, "quality_score": float, "missing":[], "warnings":[]},
         "veto": {"critical": bool, "reasons": [], "warnings": []},
         "suggested_trailing": {"distance": float, "unit": "price", "note": str}
       }
     """
+
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.log = logger or LOG
         # Metrics runtime
@@ -162,7 +187,7 @@ class FusionManager:
         # Mini-cache cohérence (TTL en secondes)
         self._coh_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._coh_cache_ttl: float = 5.0
-    
+
     # -------------- Public API --------------
     def fuse(
         self,
@@ -176,7 +201,9 @@ class FusionManager:
         ctx = context or {}
 
         # 1) Validation / qualité
-        quality = self._validate_inputs(orderflow or {}, footprint or {}, triggers or {})
+        quality = self._validate_inputs(
+            orderflow or {}, footprint or {}, triggers or {}
+        )
         if not quality["is_valid"]:
             return self._mk_hold(
                 signal_type="INSUFFICIENT_DATA",
@@ -200,10 +227,11 @@ class FusionManager:
         if x_issues:
             quality["warnings"].extend([f"csv:{w}" for w in x_issues])
 
-
         # 3) Cohérence (direction pondérée + matrice simple)
         _key = self._coh_key(n_of, n_fp, n_tr)
-        coherence = self._coherence_cached(_key, lambda: self._analyze_coherence(n_of, n_fp, n_tr, ctx))
+        coherence = self._coherence_cached(
+            _key, lambda: self._analyze_coherence(n_of, n_fp, n_tr, ctx)
+        )
         degraded = self._degraded_mode_decision(n_of, n_fp, n_tr)
         if degraded["is_degraded"]:
             quality["warnings"].append("degraded_mode_no_triggers")
@@ -212,19 +240,28 @@ class FusionManager:
         rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
-        fused = self._calculate_fused_confidence(n_of, n_fp, n_tr, coherence, quality, cfg, ctx)
+        fused = self._calculate_fused_confidence(
+            n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
+        )
 
         # 6) Veto Manager (critical/warning)
         veto = self._veto_manager(n_of, n_fp, n_tr, coherence, fused, quality, cfg, ctx)
         if veto["critical"]:
             decision = self._final_decision("HOLD", 0.0, n_tr, coherence, cfg)
-            rationale = self._rationale(decision, n_of, n_fp, n_tr, coherence, rules_eval, veto)
+            rationale = self._rationale(
+                decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
+            )
             return self._mk_hold(
                 signal_type="STRONG_VETO",
                 rationale=rationale,
                 quality=quality,
-                n_of=n_of, n_fp=n_fp, n_tr=n_tr,
-                coherence=coherence, veto=veto, fused=fused, cfg=cfg
+                n_of=n_of,
+                n_fp=n_fp,
+                n_tr=n_tr,
+                coherence=coherence,
+                veto=veto,
+                fused=fused,
+                cfg=cfg,
             )
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
@@ -234,10 +271,18 @@ class FusionManager:
         trail = self._suggest_trailing(fused, cfg, strategy_config)
 
         # 9) Rationale
-        rationale = self._rationale(decision, n_of, n_fp, n_tr, coherence, rules_eval, veto)
-        
+        rationale = self._rationale(
+            decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
+        )
+
         # metrics update
-        self._update_metrics(dt=_now_ts() - t0, decision=decision["action"], veto=veto, fused=fused)
+        self._update_metrics(
+            dt=_now_ts() - t0, decision=decision["action"], veto=veto, fused=fused
+        )
+
+        # consensus texte BUY/SELL/TIE
+        maj = coherence["majority"]
+        maj_str = "BUY" if maj > 0 else ("SELL" if maj < 0 else "TIE")
 
         return {
             "ok": decision["action"] != "HOLD",
@@ -248,14 +293,20 @@ class FusionManager:
             "anchor_price": decision["anchor_price"],
             "rationale": rationale,
             "components": {"orderflow": n_of, "validator": n_fp, "trigger": n_tr},
-            "consensus": {"maj": decision["direction"], "agreement": round(coherence["agreement"], 3), "votes": coherence["votes"]},
+            "consensus": {
+                "maj": maj_str,
+                "agreement": round(coherence["agreement"], 3),
+                "votes": coherence["votes"],
+            },
             "quality": quality,
             "veto": veto,
             "suggested_trailing": trail,
         }
 
     # -------------- 1) Input Validator --------------
-    def _validate_inputs(self, of: Dict[str, Any], fp: Dict[str, Any], tr: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_inputs(
+        self, of: Dict[str, Any], fp: Dict[str, Any], tr: Dict[str, Any]
+    ) -> Dict[str, Any]:
         missing, warnings = [], []
 
         def _req(d, path, keys):
@@ -268,7 +319,7 @@ class FusionManager:
         # schémas minimaux
         missing += _req(of, "orderflow", ["score", "status"])
         missing += _req(fp, "footprint", ["status"])
-        # triggers sont optionnels mais fortement recommandés
+        # triggers optionnels mais recommandés
         if not tr or (tr.get("direction") is None and tr.get("action") is None):
             warnings.append("trigger.missing_direction")
 
@@ -285,15 +336,20 @@ class FusionManager:
                 except Exception:
                     warnings.append(f"{name}.score_bad_type")
 
-        # score de qualité naïf
+        # score de qualité naïf (FIX: pénaliser s'il Y A des missing)
         quality_score = 1.0
         if warnings:
             quality_score -= min(0.3, 0.05 * len(warnings))
-        if any("missing" in m for m in missing):
+        if missing:
             quality_score -= 0.5
         quality_score = max(0.0, quality_score)
 
-        return {"is_valid": len(missing) == 0, "quality_score": quality_score, "missing": missing, "warnings": warnings}
+        return {
+            "is_valid": len(missing) == 0,
+            "quality_score": quality_score,
+            "missing": missing,
+            "warnings": warnings,
+        }
 
     # -------------- Normalisations --------------
     def _normalize_orderflow(self, of: Dict[str, Any]) -> Dict[str, Any]:
@@ -306,62 +362,87 @@ class FusionManager:
         summ = of.get("summary") or {}
         if isinstance(summ, str):
             try:
-                import ast
                 summ = ast.literal_eval(summ)
             except Exception:
                 summ = {}
 
         delta = _to_float(summ.get("delta_total"), 0.0)
 
-        # ✅ compat v6: 'vpoc_price' → champ interne 'poc'
-        poc = _to_float(
-            summ.get("poc", summ.get("vpoc_price", None)), None
-        )
+        # compat v6: 'vpoc_price' → champ interne 'poc'
+        poc = _to_float(summ.get("poc", summ.get("vpoc_price", None)), None)
 
-        # ✅ compat v6: bias peut être dans summary (BUY/SELL/NEUTRAL)
+        # bias (BUY/SELL/NEUTRAL)
         bias_top = of.get("bias")
         bias_sum = summ.get("bias")
         bias = str(bias_top or bias_sum or "")
         if not bias:
-            bias = "BUY" if delta > 0 else ("SELL" if delta < 0 else "NEUTRAL")
+            bias = (
+                "BUY"
+                if (delta or 0.0) > 0
+                else ("SELL" if (delta or 0.0) < 0 else "NEUTRAL")
+            )
 
         absorption = bool(summ.get("absorption_flag", False))
-        dir_int = 1 if bias == "BUY" else (-1 if bias == "SELL" else _dir_from_sign(delta))
+        dir_int = (
+            1
+            if bias == "BUY"
+            else (-1 if bias == "SELL" else _dir_from_sign(delta or 0.0))
+        )
 
         return {
             "score": score01,
             "status": status,
             "dir": dir_int,
-            "delta_total": delta,
+            "delta_total": float(delta or 0.0),
             "poc": poc,
             "absorption": absorption,
             "raw": of,
         }
-
 
     def _normalize_footprint(self, fp: Dict[str, Any]) -> Dict[str, Any]:
         status = str(fp.get("status", "SUSPECT")).upper()
         score01 = None
         if fp.get("score") is not None:
             score01 = max(0.0, min(1.0, _to_float(fp.get("score"), 0.0) / 100.0))
+
         summ = fp.get("summary") or {}
         if isinstance(summ, str):
-            try: summ = ast.literal_eval(summ)
-            except Exception: summ = {}
+            try:
+                summ = ast.literal_eval(summ)
+            except Exception:
+                summ = {}
+
         delta = _to_float(fp.get("delta_total"), None)
         if delta is None:
             delta = _to_float(summ.get("delta_total"), 0.0)
-        poc = _to_float(fp.get("poc"), None) if fp.get("poc") is not None else _to_float(summ.get("poc"), None)
+
+        poc = (
+            _to_float(fp.get("poc"), None)
+            if fp.get("poc") is not None
+            else _to_float(summ.get("poc"), None)
+        )
         absorption = bool(fp.get("absorption_flag", summ.get("absorption_flag", False)))
+
         if score01 is None:
             score01 = 0.7 if status == "VALID" else 0.4
-            if abs(delta) >= 1.0:
+            if abs(delta or 0.0) >= 1.0:
                 score01 += 0.05
             score01 = max(0.0, min(1.0, score01))
+
         if status != "VALID":
             score01 *= 0.6
-        dir_int = _dir_from_sign(delta)
-        return {"score": score01, "status": status, "dir": dir_int, "delta_total": float(delta or 0.0), "poc": poc, "absorption": absorption, "raw": fp}
+
+        dir_int = _dir_from_sign(delta or 0.0)
+
+        return {
+            "score": score01,
+            "status": status,
+            "dir": dir_int,
+            "delta_total": float(delta or 0.0),
+            "poc": poc,
+            "absorption": absorption,
+            "raw": fp,
+        }
 
     def _normalize_trigger(self, tr: Dict[str, Any]) -> Dict[str, Any]:
         a = str(tr.get("direction") or tr.get("action") or "").upper()
@@ -370,10 +451,23 @@ class FusionManager:
         anchor = _to_float(tr.get("anchor_price"), None)
         ttype = str(tr.get("trigger_type") or "unknown")
         ts = _to_float(tr.get("timestamp"), None)
-        return {"score": conf, "dir": dir_int, "anchor": anchor, "type": ttype, "ts": ts, "raw": tr}
+        return {
+            "score": conf,
+            "dir": dir_int,
+            "anchor": anchor,
+            "type": ttype,
+            "ts": ts,
+            "raw": tr,
+        }
 
     # -------------- 2) Coherence Analyzer --------------
-    def _analyze_coherence(self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def _analyze_coherence(
+        self,
+        n_of: Dict[str, Any],
+        n_fp: Dict[str, Any],
+        n_tr: Dict[str, Any],
+        ctx: Dict[str, Any],
+    ) -> Dict[str, Any]:
         votes = []
         if n_tr["dir"] != 0:
             votes.append(("trigger", n_tr["dir"], n_tr["score"]))
@@ -384,16 +478,23 @@ class FusionManager:
 
         pos = sum(w for _, d, w in votes if d > 0)
         neg = sum(w for _, d, w in votes if d < 0)
-        if pos > neg: maj = 1
-        elif neg > pos: maj = -1
-        else: maj = 0
+        if pos > neg:
+            maj = 1
+        elif neg > pos:
+            maj = -1
+        else:
+            maj = 0
         total_w = sum(w for *_, w in votes) or 1.0
         agreement = (max(pos, neg)) / total_w if total_w > 0 else 0.0
 
         # lead/lag (si timestamps fournis)
         now_ts = ctx.get("now_ts") or _now_ts()
         lead = {"trigger_age_s": None, "orderflow_age_s": None, "footprint_age_s": None}
-        for k, n in (("trigger_age_s", n_tr), ("orderflow_age_s", n_of), ("footprint_age_s", n_fp)):
+        for k, n in (
+            ("trigger_age_s", n_tr),
+            ("orderflow_age_s", n_of),
+            ("footprint_age_s", n_fp),
+        ):
             ts = n.get("ts")
             if ts is not None:
                 try:
@@ -402,18 +503,43 @@ class FusionManager:
                     lead[k] = None
 
         matrix = {
-            "trigger_vs_of": "aligned" if n_tr["dir"] == n_of["dir"] else "conflict" if (n_tr["dir"] * n_of["dir"] < 0) else "neutral",
-            "trigger_vs_fp": "aligned" if n_tr["dir"] == n_fp["dir"] else "conflict" if (n_tr["dir"] * n_fp["dir"] < 0) else "neutral",
-            "of_vs_fp": "aligned" if n_of["dir"] == n_fp["dir"] else "conflict" if (n_of["dir"] * n_fp["dir"] < 0) else "neutral",
+            "trigger_vs_of": (
+                "aligned"
+                if n_tr["dir"] == n_of["dir"]
+                else "conflict" if (n_tr["dir"] * n_of["dir"] < 0) else "neutral"
+            ),
+            "trigger_vs_fp": (
+                "aligned"
+                if n_tr["dir"] == n_fp["dir"]
+                else "conflict" if (n_tr["dir"] * n_fp["dir"] < 0) else "neutral"
+            ),
+            "of_vs_fp": (
+                "aligned"
+                if n_of["dir"] == n_fp["dir"]
+                else "conflict" if (n_of["dir"] * n_fp["dir"] < 0) else "neutral"
+            ),
         }
 
-        return {"majority": maj, "agreement": max(0.0, min(1.0, agreement)), "votes": [(n, "BUY" if d > 0 else "SELL" if d < 0 else "NEUTRAL", round(w, 3)) for n, d, w in votes], "matrix": matrix, "leadlag": lead}
+        return {
+            "majority": maj,
+            "agreement": max(0.0, min(1.0, agreement)),
+            "votes": [
+                (n, "BUY" if d > 0 else "SELL" if d < 0 else "NEUTRAL", round(w, 3))
+                for n, d, w in votes
+            ],
+            "matrix": matrix,
+            "leadlag": lead,
+        }
 
     # -------------- 3) Business Rules Engine --------------
-    def _apply_business_rules(self, n_of, n_fp, n_tr, coherence, cfg, ctx) -> Dict[str, Any]:
+    def _apply_business_rules(
+        self, n_of, n_fp, n_tr, coherence, cfg, ctx
+    ) -> Dict[str, Any]:
         rules = cfg.get("regles_metier", {}) or {}
         # priorités fixées par ton cahier des charges
-        never_against_strong_of = bool(rules.get("never_against_strong_orderflow", True))
+        never_against_strong_of = bool(
+            rules.get("never_against_strong_orderflow", True)
+        )
         veto_absorption = bool(rules.get("veto_absorption", True))
         triple_bonus = bool(rules.get("triple_confirmation_bonus", True))
         weak_fp_penalty_th = _to_float(rules.get("weak_footprint_score_th", 0.60), 0.60)
@@ -424,77 +550,100 @@ class FusionManager:
         # “NEVER AGAINST STRONG ORDERFLOW” (score > 0.80 → of fort)
         if never_against_strong_of and n_of["score"] >= 0.80:
             if n_tr["dir"] != 0 and n_tr["dir"] != n_of["dir"]:
-                allow = False; notes.append("AGAINST_STRONG_ORDERFLOW")
+                allow = False
+                notes.append("AGAINST_STRONG_ORDERFLOW")
 
         # “ABSORPTION VETO”
         if veto_absorption and n_fp["absorption"]:
-            # si absorption détectée, on évite d'entrer CONTRE ce signal structurel
             if n_tr["dir"] != 0 and n_tr["dir"] != n_fp["dir"]:
-                allow = False; notes.append("ABSORPTION_VETO")
+                allow = False
+                notes.append("ABSORPTION_VETO")
 
         # “WEAK FOOTPRINT PENALTY”
-        weak_fp = (n_fp["score"] < weak_fp_penalty_th)
+        weak_fp = n_fp["score"] < weak_fp_penalty_th
         if weak_fp:
             notes.append("WEAK_FOOTPRINT")
 
-        # “TRIPLE CONFIRMATION BONUS” → appliqué plus tard dans la confiance
-        aligned3 = (coherence["matrix"]["trigger_vs_of"] == "aligned" and coherence["matrix"]["trigger_vs_fp"] == "aligned" and coherence["matrix"]["of_vs_fp"] == "aligned")
+        # “TRIPLE CONFIRMATION BONUS” (cohérence 3/3)
+        aligned3 = (
+            coherence["matrix"]["trigger_vs_of"] == "aligned"
+            and coherence["matrix"]["trigger_vs_fp"] == "aligned"
+            and coherence["matrix"]["of_vs_fp"] == "aligned"
+        )
 
-        # Timing optimisation (lead/lag) — bonus léger si trigger récent et OF >= neutre
+        # Timing optimisation (lead/lag)
         timing_bonus = 0.0
         trig_age = coherence["leadlag"].get("trigger_age_s")
         if trig_age is not None and trig_age <= 5.0 and n_of["score"] >= 0.50:
             timing_bonus += 0.03
             notes.append("TIMING_OK")
 
-        return {"allow": allow, "reasons": notes, "aligned3": aligned3, "weak_fp": weak_fp, "timing_bonus": timing_bonus}
+        return {
+            "allow": allow,
+            "reasons": notes,
+            "aligned3": aligned3,
+            "weak_fp": weak_fp,
+            "timing_bonus": timing_bonus,
+            "weak_fp_penalty_th": weak_fp_penalty_th,
+            "triple_bonus": triple_bonus,
+        }
 
     # -------------- 4) Confidence Fusion System --------------
-    def _calculate_fused_confidence(self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx) -> float:
+    def _calculate_fused_confidence(
+        self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
+    ) -> float:
         p = cfg.get("ponderations", {}) or {}
         w_tr = _to_float(p.get("trigger_weight"), 0.50)
         w_of = _to_float(p.get("orderflow_weight"), 0.30)
         w_fp = _to_float(p.get("footprint_weight"), 0.20)
+
+        # Override adaptatif (si activé) basé sur contexte (regime/volatility/session)
+        aw_enabled = bool((cfg.get("adaptive_weights", True)))
+        if aw_enabled:
+            aw = self._adaptive_weights(
+                ctx.get("regime"), ctx.get("volatility"), ctx.get("session")
+            )
+            if aw:
+                w_tr, w_of, w_fp = aw["trigger"], aw["orderflow"], aw["footprint"]
+
+        # Normalisation des poids
         total = (w_tr or 0) + (w_of or 0) + (w_fp or 0)
         if total <= 0:
             w_tr, w_of, w_fp = 0.5, 0.3, 0.2
         else:
-            w_tr, w_of, w_fp = w_tr/total, w_of/total, w_fp/total
+            w_tr, w_of, w_fp = w_tr / total, w_of / total, w_fp / total
 
         base = (w_tr * n_tr["score"]) + (w_of * n_of["score"]) + (w_fp * n_fp["score"])
-        
-        # Override adaptatif (si activé) basé sur contexte (regime/volatility/session)
-        aw_enabled = bool((cfg.get("adaptive_weights", True)))
-        if aw_enabled:
-            aw = self._adaptive_weights(ctx.get("regime"), ctx.get("volatility"), ctx.get("session"))
-            if aw:
-                p = dict(p)  # copie
-                p["trigger_weight"] = aw["trigger"]
-                p["orderflow_weight"] = aw["orderflow"]
-                p["footprint_weight"] = aw["footprint"]
 
         # Bonus cohérence 0..15%
         coh_bonus_max = _to_float(p.get("coherence_bonus_max"), 0.15)
-        base *= (1.0 + coh_bonus_max * coherence["agreement"])
+        base *= 1.0 + coh_bonus_max * coherence["agreement"]
 
         # Malus conflit 0..25% si matrice montre des conflits
         matrix = coherence["matrix"]
         conflicts = sum(1 for v in matrix.values() if v == "conflict")
         conflict_malus = min(0.25, 0.10 * conflicts)
-        base *= (1.0 - conflict_malus)
+        base *= 1.0 - conflict_malus
 
-        # Qualité des données (validator)
+        # Qualité des données
         q = quality.get("quality_score", 1.0)
-        base *= (0.85 + 0.15 * q)  # si q=0.7 ⇒ ×0.955
+        base *= 0.85 + 0.15 * q
 
-        # Weak footprint malus
-        if n_fp["score"] < 0.60:
+        # Malus FP faible (seuil issu des règles)
+        if rules_eval.get("weak_fp", False):
             base *= 0.85
+
+        # Bonus triple-confirmation + bonus timing
+        if rules_eval.get("aligned3") and rules_eval.get("triple_bonus", True):
+            base *= 1.08
+        base = base + rules_eval.get("timing_bonus", 0.0)
 
         return max(0.0, min(0.99, float(base)))
 
     # -------------- 5) Veto Manager --------------
-    def _veto_manager(self, n_of, n_fp, n_tr, coherence, fused, quality, cfg, ctx) -> Dict[str, Any]:
+    def _veto_manager(
+        self, n_of, n_fp, n_tr, coherence, fused, quality, cfg, ctx
+    ) -> Dict[str, Any]:
         th = cfg.get("seuils_entree", {}) or {}
         min_of = _to_float(th.get("min_orderflow_score"), 0.60)
         max_spread = _to_float(th.get("max_spread_pts"), 15.0)
@@ -507,20 +656,27 @@ class FusionManager:
 
         # CRITICAL
         if n_of["score"] < (min_of - 0.20):  # < 0.40
-            critical = True; reasons.append("ORDERFLOW_TOO_WEAK")
+            critical = True
+            reasons.append("ORDERFLOW_TOO_WEAK")
         if n_fp["absorption"] and n_tr["dir"] != 0 and (n_tr["dir"] != n_fp["dir"]):
-            critical = True; reasons.append("ABSORPTION_CONFLICT")
+            critical = True
+            reasons.append("ABSORPTION_CONFLICT")
         if spread is not None and spread > max_spread:
-            critical = True; reasons.append("SPREAD_TOO_WIDE")
-        if coherence["matrix"]["trigger_vs_of"] == "conflict" and coherence["matrix"]["of_vs_fp"] == "conflict":
-            critical = True; reasons.append("MAJOR_CONFLICT_2V1")
+            critical = True
+            reasons.append("SPREAD_TOO_WIDE")
+        if (
+            coherence["matrix"]["trigger_vs_of"] == "conflict"
+            and coherence["matrix"]["of_vs_fp"] == "conflict"
+        ):
+            critical = True
+            reasons.append("MAJOR_CONFLICT_2V1")
 
         # WARNING
         if n_of["dir"] == 0:
             warns.append("ORDERFLOW_NEUTRAL")
         if n_tr["score"] < 0.55:
             warns.append("LOW_TRIGGER_CONFIDENCE")
-        # fraicheur des données
+        # fraîcheur des données
         for lbl, n in (("TRIGGER_AGE", n_tr), ("OF_AGE", n_of), ("FP_AGE", n_fp)):
             ts = n.get("ts")
             if ts is not None:
@@ -528,34 +684,75 @@ class FusionManager:
                 if age > 10.0:
                     warns.append(f"{lbl}_>10S")
 
-        # WARNING transforme parfois le seuil d’entrée
         if fused < min_conf and not critical:
             warns.append("CONFIDENCE_BELOW_MIN")
 
         return {"critical": bool(critical), "reasons": reasons, "warnings": warns}
 
     # -------------- 6) Decision Generator --------------
-    def _final_decision(self, mode: str, fused: float, n_tr, coherence, cfg) -> Dict[str, Any]:
+    def _final_decision(
+        self, mode: str, fused: float, n_tr, coherence, cfg
+    ) -> Dict[str, Any]:
         # direction finale: majorité pondérée; sinon direction du trigger; sinon NEUTRAL
         maj = coherence["majority"]
-        direction = "BUY" if maj > 0 else ("SELL" if maj < 0 else ("BUY" if n_tr["dir"]>0 else "SELL" if n_tr["dir"]<0 else "NEUTRAL"))
-        anchor_price = n_tr["anchor"]  # l’ancre du trigger reste prioritaire; POC pris plus haut si None
+        direction = (
+            "BUY"
+            if maj > 0
+            else (
+                "SELL"
+                if maj < 0
+                else (
+                    "BUY"
+                    if n_tr["dir"] > 0
+                    else "SELL" if n_tr["dir"] < 0 else "NEUTRAL"
+                )
+            )
+        )
+        anchor_price = n_tr[
+            "anchor"
+        ]  # l’ancre du trigger reste prioritaire; POC pris plus haut si None
 
-        # Catégorisation des signaux
         if mode == "HOLD":
-            return {"action": "HOLD", "signal_type": "STRONG_VETO", "direction": "NEUTRAL", "anchor_price": anchor_price}
+            return {
+                "action": "HOLD",
+                "signal_type": "STRONG_VETO",
+                "direction": "NEUTRAL",
+                "anchor_price": anchor_price,
+            }
 
-        if fused >= 0.80 and direction in ("BUY","SELL"):
-            return {"action": direction, "signal_type": f"HIGH_CONVICTION_{direction}", "direction": direction, "anchor_price": anchor_price}
-        if fused >= 0.65 and direction in ("BUY","SELL"):
-            return {"action": direction, "signal_type": f"MODERATE_{direction}", "direction": direction, "anchor_price": anchor_price}
-        if fused >= 0.55 and direction in ("BUY","SELL"):
-            return {"action": direction, "signal_type": f"CAUTIOUS_{direction}", "direction": direction, "anchor_price": anchor_price}
+        if fused >= 0.80 and direction in ("BUY", "SELL"):
+            return {
+                "action": direction,
+                "signal_type": f"HIGH_CONVICTION_{direction}",
+                "direction": direction,
+                "anchor_price": anchor_price,
+            }
+        if fused >= 0.65 and direction in ("BUY", "SELL"):
+            return {
+                "action": direction,
+                "signal_type": f"MODERATE_{direction}",
+                "direction": direction,
+                "anchor_price": anchor_price,
+            }
+        if fused >= 0.55 and direction in ("BUY", "SELL"):
+            return {
+                "action": direction,
+                "signal_type": f"CAUTIOUS_{direction}",
+                "direction": direction,
+                "anchor_price": anchor_price,
+            }
 
-        return {"action": "HOLD", "signal_type": "WAIT_CONFIRMATION", "direction": "NEUTRAL", "anchor_price": anchor_price}
+        return {
+            "action": "HOLD",
+            "signal_type": "WAIT_CONFIRMATION",
+            "direction": "NEUTRAL",
+            "anchor_price": anchor_price,
+        }
 
     # -------------- 7) Rationale Builder --------------
-    def _rationale(self, decision, n_of, n_fp, n_tr, coherence, rules_eval, veto) -> str:
+    def _rationale(
+        self, decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
+    ) -> str:
         parts = []
         st = decision["signal_type"]
         if decision["action"] == "HOLD":
@@ -563,15 +760,27 @@ class FusionManager:
         else:
             parts.append(f"{st} car")
 
-        dir_of = "bullish" if n_of["dir"]>0 else ("bearish" if n_of["dir"]<0 else "neutre")
-        dir_fp = "bullish" if n_fp["dir"]>0 else ("bearish" if n_fp["dir"]<0 else "neutre")
-        trig_txt = "aucun trigger" if n_tr["dir"]==0 else f"trigger={'BUY' if n_tr['dir']>0 else 'SELL'} conf={n_tr['score']:.2f}"
+        dir_of = (
+            "bullish"
+            if n_of["dir"] > 0
+            else ("bearish" if n_of["dir"] < 0 else "neutre")
+        )
+        dir_fp = (
+            "bullish"
+            if n_fp["dir"] > 0
+            else ("bearish" if n_fp["dir"] < 0 else "neutre")
+        )
+        trig_txt = (
+            "aucun trigger"
+            if n_tr["dir"] == 0
+            else f"trigger={'BUY' if n_tr['dir']>0 else 'SELL'} conf={n_tr['score']:.2f}"
+        )
 
         parts += [
             f"orderflow {dir_of} (score={n_of['score']:.2f}, Δ={n_of['delta_total']:.2f})",
             f"footprint {dir_fp}{' avec ABSORPTION' if n_fp['absorption'] else ''}",
             trig_txt,
-            f"cohérence={coherence['agreement']:.2f}, votes={coherence['votes']}"
+            f"cohérence={coherence['agreement']:.2f}, votes={coherence['votes']}",
         ]
         if rules_eval["reasons"]:
             parts.append("règles=" + ",".join(rules_eval["reasons"]))
@@ -580,15 +789,30 @@ class FusionManager:
         return " | ".join(parts)
 
     # -------------- Trailing-only (scalping) --------------
-    def _suggest_trailing(self, fused: float, cfg: Dict[str, Any], strategy_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _suggest_trailing(
+        self,
+        fused: float,
+        cfg: Dict[str, Any],
+        strategy_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         price_step = _to_float((strategy_config or {}).get("price_step", 0.01), 0.01)
         base_steps = _to_float(cfg.get("base_trail_steps"), 20.0)
-        mult = 0.8 if fused >= 0.80 else (1.0 if fused >= 0.65 else (1.1 if fused >= 0.55 else 1.25))
+        mult = (
+            0.8
+            if fused >= 0.80
+            else (1.0 if fused >= 0.65 else (1.1 if fused >= 0.55 else 1.25))
+        )
         dist = max(price_step, base_steps * price_step * mult)
-        return {"distance": float(dist), "unit": "price", "note": "Scalping: trailing-stop only, no TP."}
+        return {
+            "distance": float(dist),
+            "unit": "price",
+            "note": "Scalping: trailing-stop only, no TP.",
+        }
 
     # -------------- helpers --------------
-    def _mk_hold(self, signal_type: str, rationale: str, quality: Dict[str, Any], **kw) -> Dict[str, Any]:
+    def _mk_hold(
+        self, signal_type: str, rationale: str, quality: Dict[str, Any], **kw
+    ) -> Dict[str, Any]:
         out = {
             "ok": False,
             "action": "HOLD",
@@ -598,10 +822,16 @@ class FusionManager:
             "anchor_price": None,
             "rationale": rationale,
             "components": kw.get("components", {}),
-            "consensus": kw.get("coherence", {"maj": "TIE", "agreement": 0.0, "votes": []}),
+            "consensus": kw.get(
+                "coherence", {"maj": "TIE", "agreement": 0.0, "votes": []}
+            ),
             "quality": quality,
             "veto": kw.get("veto", {"critical": False, "reasons": [], "warnings": []}),
-            "suggested_trailing": {"distance": 0.0, "unit": "price", "note": "No decision"},
+            "suggested_trailing": {
+                "distance": 0.0,
+                "unit": "price",
+                "note": "No decision",
+            },
         }
         # enrich si fournis
         if "n_of" in kw or "n_fp" in kw or "n_tr" in kw:
@@ -613,13 +843,14 @@ class FusionManager:
         if "fused" in kw:
             out["fused_confidence"] = float(kw["fused"])
         return out
-    
+
+
 # === HOTFIX: bind des helpers module-level comme méthodes d'instance ===
-FusionManager._ensure_timestamp       = _ensure_timestamp
-FusionManager._hashable               = _hashable
-FusionManager._coh_key                = _coh_key
-FusionManager._coherence_cached       = _coherence_cached
+FusionManager._ensure_timestamp = _ensure_timestamp
+FusionManager._hashable = _hashable
+FusionManager._coh_key = _coh_key
+FusionManager._coherence_cached = _coherence_cached
 FusionManager._degraded_mode_decision = _degraded_mode_decision
-FusionManager._cross_system_validation= _cross_system_validation
-FusionManager._adaptive_weights       = _adaptive_weights
-FusionManager._update_metrics         = _update_metrics
+FusionManager._cross_system_validation = _cross_system_validation
+FusionManager._adaptive_weights = _adaptive_weights
+FusionManager._update_metrics = _update_metrics

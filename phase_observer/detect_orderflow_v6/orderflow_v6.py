@@ -11,18 +11,33 @@ from .institutional_metrics import calculate_volume_profile
 from .scoring_engine import calculate_score
 from .result_builder import build_result
 
+
 def detect_orderflow_v6(
     df_m1: pd.DataFrame,
     *,
     imbalance_threshold: float = 0.20,
     cvd_smoothing: float = 0.0,
     price_bins: int = 20,
-    vp_options: Optional[Dict[str, Any]] = None,  # options Volume Profile avancées (facultatives)
+    vp_options: Optional[
+        Dict[str, Any]
+    ] = None,  # options Volume Profile avancées (facultatives)
     logger=None,
 ) -> Dict[str, Any]:
     """
-    Interface publique V6 (compatible V5): retourne {score, status, summary, patterns}
-    + ajoute un volume_profile complet (et alias vpoc/va_* dans summary).
+    Interface publique V6 (compatible V5) → retourne:
+      {
+        "score": float(0..100),
+        "status": "VALID" | "SUSPECT",
+        "summary": { ...  },        # inclut alias V5: vpoc_price, va_low, va_high
+        "patterns": dict | list     # flags ou événements
+      }
+    + `summary.volume_profile` : bloc complet du Volume Profile (VPOC, VA, HVN/LVN, ...).
+
+    Paramètres clés:
+      - imbalance_threshold: 0.20 ≈ 70/30 si usage centré dans detect_patterns
+      - cvd_smoothing: alpha EMA ∈ (0,1] pour lisser le CVD (0 = off)
+      - price_bins: granularité de base du VP si pas de bin_width
+      - vp_options: dict d’options VP (ex: {"coverage":0.7, "body_gain":0.6, "max_bins":400, ...})
     """
     # --- 0) Garde-fou entrée ---
     if df_m1 is None or len(df_m1) == 0:
@@ -33,27 +48,48 @@ def detect_orderflow_v6(
             "patterns": {},
         }
 
-    # --- 1) Préparation / validation ---
+    # --- 1) Préparation / validation des données ---
     df, rescue_level, rescue_note = validate_and_prepare_data(df_m1)
+
+    # Si tout a été filtré/invalidé, on reste cohérent
+    if df is None or len(df) == 0:
+        return {
+            "score": 0.0,
+            "status": "SUSPECT",
+            "summary": {
+                "rescue_level": max(1, int(rescue_level or 1)),
+                "rescue_note": str(rescue_note or "empty_after_prepare"),
+            },
+            "patterns": {},
+        }
 
     # --- 2) Métriques volume (core) ---
     df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
-    # on garde l'imbalance globale (utile à certains détecteurs)
-    df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)
-
-    # --- 2.b) Runtime metrics (rows/coverage/tick_rate) pour scoring institutionnel ---
+    # garder l'imbalance globale sur df.attrs pour d’éventuels détecteurs en aval
     try:
-        rows = int(len(df))
-        metrics["rows"] = rows
-        coverage_s = None
-        if "time" in df.columns and rows >= 2:
+        df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)
+    except Exception:
+        pass
+
+    # --- 2.b) Runtime metrics (rows/coverage/tick_rate) → compléter si absents ---
+    try:
+        # rows
+        metrics.setdefault("rows", int(len(df)))
+
+        # coverage_s & tick_rate (si non fournis par calculate_volume_metrics)
+        if (
+            ("coverage_s" not in metrics or "tick_rate" not in metrics)
+            and "time" in df.columns
+            and len(df) >= 2
+        ):
             t0 = pd.to_datetime(df["time"].iloc[0], utc=True, errors="coerce")
             t1 = pd.to_datetime(df["time"].iloc[-1], utc=True, errors="coerce")
             if pd.notna(t0) and pd.notna(t1):
                 coverage_s = float((t1 - t0).total_seconds())
-        if coverage_s is not None and coverage_s > 0:
-            metrics["coverage_s"] = coverage_s
-            metrics["tick_rate"] = float(rows / coverage_s)
+                if coverage_s > 0:
+                    metrics.setdefault("coverage_s", coverage_s)
+                    # tick_rate simple par lignes (si tick_volume non fiable)
+                    metrics.setdefault("tick_rate", float(len(df) / coverage_s))
     except Exception as e_cov:
         safe_log(logger, "debug", f"[OF V6] coverage computation skipped: {e_cov}")
 
@@ -62,35 +98,52 @@ def detect_orderflow_v6(
         patterns = detect_patterns(df, imbalance_threshold=imbalance_threshold)
     except Exception as e_pat:
         safe_log(logger, "warning", f"[OF V6] pattern detection failed: {e_pat}")
-        patterns = {}
+        patterns = []  # format neutre (result_builder et scoring gèrent dict|list)
 
-    # --- 4) Volume Profile (options avancées) ---
-    vp_kwargs = {
-        "price_bins": price_bins,
-    }
-    # options facultatives (ne casse rien si non fournies)
-    if vp_options:
-        # seule règle: vp_options > paramètre simple
+    # --- 4) Volume Profile (avec options avancées fusionnées proprement) ---
+    vp_kwargs: Dict[str, Any] = {"price_bins": price_bins}
+    if isinstance(vp_options, dict):
+        # vp_options > paramètres par défaut
         vp_kwargs.update({k: v for k, v in vp_options.items() if v is not None})
+
     try:
         vp = calculate_volume_profile(df, **vp_kwargs)
     except Exception as e_vp:
         safe_log(logger, "warning", f"[OF V6] volume profile failed: {e_vp}")
-        vp = {"vpoc_price": None, "va_low": None, "va_high": None, "va_coverage": vp_kwargs.get("coverage", 0.70)}
+        vp = {
+            "vpoc_price": None,
+            "va_low": None,
+            "va_high": None,
+            "va_coverage": float(vp_kwargs.get("coverage", 0.70)),
+            "hvn": [],
+            "lvn": [],
+            "modality": "unknown",
+            "balance_metrics": {},
+            "ib": {},
+        }
 
     # --- 5) Score / statut ---
-    score, status, summary = calculate_score(metrics, patterns, rescue_level, rescue_note)
+    score, status, summary = calculate_score(
+        metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
+    )
 
-    # --- 6) Résultat final ---
+    # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
     res = build_result(score, status, summary, patterns, vp)
 
-    safe_log(
-        logger,
-        "info",
-        f"[OF V6] score={res['score']:.1f} status={res['status']} "
-        f"Δ={res['summary'].get('delta_total', 0.0):.1f} "
-        f"imb={res['summary'].get('imbalance', 0.0):.3f} "
-        f"vpoc={res['summary'].get('vpoc_price')}"
-    )
-    return res
+    # --- 7) Log synthétique (sécurisé) ---
+    try:
+        safe_log(
+            logger,
+            "info",
+            (
+                f"[OF V6] score={res.get('score', 0.0):.1f} status={res.get('status','SUSPECT')} "
+                f"Δ={float(res['summary'].get('delta_total', 0.0)):.1f} "
+                f"imb={float(res['summary'].get('imbalance', 0.0)):.3f} "
+                f"vpoc={res['summary'].get('vpoc_price')}"
+            ),
+        )
+    except Exception:
+        # ne bloque jamais le retour pour une erreur de formatage de log
+        pass
 
+    return res
