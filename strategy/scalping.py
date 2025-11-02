@@ -9,9 +9,6 @@ from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
 from phase_observer.detectors import Detectors
-from trader.sizing import _calculate_risk_based_volume
-from phase_observer.footprint_analyzer import FootprintAnalyzer
-
 
 class ScalpingStrategy(BaseStrategy):
     """
@@ -101,7 +98,13 @@ class ScalpingStrategy(BaseStrategy):
         try:
             # --- 0) Données & config ---
             ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-            df_m1 = ctx_md.get("df_m1") or ctx_md.get("df")
+            df_m1 = (
+                ctx_md.get("annotated_rates_df_m1")
+                or ctx_md.get("annotated_rates_df")
+                or ctx_md.get("df_m1")
+                or ctx_md.get("df")
+            )
+
             df_work = (
                 df_m1.copy()
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
