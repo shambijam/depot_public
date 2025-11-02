@@ -6,78 +6,6 @@ import pandas as pd
 import math
 
 
-def _accumulate_profile_ohlc_overlap(
-    o: np.ndarray,
-    h: np.ndarray,
-    l: np.ndarray,
-    c: np.ndarray,
-    vol: np.ndarray,
-    edges: np.ndarray,
-    *,
-    body_gain: float = 0.0,  # ignoré ici (uniforme), conservé pour compat
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """
-    Accumulation vectorisée du Volume Profile avec distribution UNIFORME par barre.
-    - Compat signature (o,h,l,c,vol,edges[, body_gain, eps]) attendue par le reste du code.
-    - Ignore body/wiсks: volume réparti uniformément sur [low, high] de la barre.
-    - Chunking automatique pour limiter la mémoire quand N×B est grand.
-
-    Retour: profil (len(edges)-1,)
-    """
-    # --- Préparation & garde-fous ---
-    o = np.asarray(o, dtype=float)
-    h = np.asarray(h, dtype=float)
-    l = np.asarray(l, dtype=float)
-    c = np.asarray(c, dtype=float)
-    vol = np.asarray(vol, dtype=float)
-    edges = np.asarray(edges, dtype=float)
-
-    # borne low/high par barre (on se fiche de o/c ici: uniforme sur le range)
-    lo = np.minimum(l, h)
-    hi = np.maximum(l, h)
-
-    ok = np.isfinite(lo) & np.isfinite(hi) & np.isfinite(vol) & (vol > 0.0) & (hi > lo)
-    if not np.any(ok):
-        return np.zeros(len(edges) - 1, dtype=float)
-
-    lo = lo[ok]
-    hi = hi[ok]
-    vol = vol[ok]
-
-    B = len(edges) - 1
-    if B <= 0:
-        return np.zeros(0, dtype=float)
-
-    bin_lo = edges[:-1][None, :]  # (1, B)
-    bin_hi = edges[1:][None, :]  # (1, B)
-
-    profile = np.zeros(B, dtype=float)
-
-    # --- Chunking pour éviter N×B massif en RAM ---
-    # cible ~5e6 cellules par bloc (≈ 40 Mo en float64 avec matrices intermédiaires)
-    target_cells = 5_000_000
-    N = lo.shape[0]
-    rows_per_chunk = max(1, int(target_cells // max(1, B)))
-
-    for start in range(0, N, rows_per_chunk):
-        end = min(N, start + rows_per_chunk)
-
-        lo_blk = lo[start:end][:, None]  # (n,1)
-        hi_blk = hi[start:end][:, None]  # (n,1)
-
-        left = np.maximum(lo_blk, bin_lo)  # (n,B)
-        right = np.minimum(hi_blk, bin_hi)  # (n,B)
-        overlap = np.maximum(0.0, right - left)
-
-        width = np.maximum(hi_blk - lo_blk, eps)  # (n,1)
-        density = vol[start:end][:, None] / width  # (n,1)
-
-        profile += np.sum(overlap * density, axis=0)  # (B,)
-
-    return profile
-
-
 def _value_area_from_profile(
     profile: np.ndarray, edges: np.ndarray, coverage: float = 0.70
 ) -> tuple[float | None, float | None, int | None]:
@@ -116,47 +44,47 @@ def _value_area_from_profile(
 # ============================
 # Helpers numériques
 # ============================
-
-
-def _to_num(s, default=0.0) -> np.ndarray:
-    return pd.to_numeric(s, errors="coerce").fillna(default).to_numpy(dtype=float)
+def _to_num(x, fallback=np.nan) -> np.ndarray:
+    a = np.asarray(pd.to_numeric(x, errors="coerce"), dtype=float)
+    if np.isnan(fallback):
+        return a
+    return np.where(np.isfinite(a), a, float(fallback))
 
 
 def _infer_tick_size(prices: np.ndarray) -> float:
-    """Déduit un pas de prix plausible à partir des incréments observés."""
-    if prices.size < 3:
-        return max(1e-6, np.nanstd(prices) * 1e-3) or 1e-4
-    diffs = np.diff(np.sort(prices))
-    diffs = diffs[diffs > 0]
-    if diffs.size == 0:
-        return max(1e-6, np.nanstd(prices) * 1e-3)
-    # On prend un petit quantile pour éviter les artefacts → 10e centile
-    return float(max(1e-6, np.quantile(diffs, 0.10)))
+    p = np.asarray(prices, dtype=float)
+    p = p[np.isfinite(p)]
+    if p.size < 2:
+        return 1e-4
+    u = np.unique(np.round(p, 10))
+    if u.size < 2:
+        return max(1e-9, abs(u[0]) * 1e-6)
+    d = np.diff(u)
+    d = d[d > 0]
+    return float(d.min()) if d.size else max(1e-9, (u.max() - u.min()) / 1e6)
 
 
 def _freedman_diaconis_bin_width(prices: np.ndarray) -> float:
-    """Largeur de bin par règle de Freedman–Diaconis."""
-    if prices.size < 3:
-        return max(1e-6, np.nanstd(prices) * 0.2)
-    iqr = np.subtract(*np.nanpercentile(prices, [75, 25]))
-    if iqr <= 0:
-        return max(1e-6, np.nanstd(prices) * 0.2)
-    n = prices.size
-    return float(2 * iqr * (n ** (-1 / 3)))
+    p = np.asarray(prices, dtype=float)
+    p = p[np.isfinite(p)]
+    if p.size < 2:
+        return 1e-4
+    q75, q25 = np.percentile(p, [75, 25])
+    iqr = max(1e-12, q75 - q25)
+    n = p.size
+    bw = 2.0 * iqr * (n ** (-1.0 / 3.0))
+    return float(max(1e-9, bw))
 
 
-def _build_edges(
-    pmin: float,
-    pmax: float,
-    bin_width: float,
-) -> np.ndarray:
-    if not np.isfinite(bin_width) or bin_width <= 0:
-        bin_width = (pmax - pmin) / 50.0 if pmax > pmin else 1e-3
-    # marge minime pour inclure le dernier prix
-    lo = pmin
-    hi = pmax + 1e-9
-    nbins = max(5, int(math.ceil((hi - lo) / bin_width)))
-    edges = lo + bin_width * np.arange(nbins + 1, dtype=float)
+def _build_edges(pmin: float, pmax: float, width: float) -> np.ndarray:
+    width = float(max(1e-12, width))
+    if not (math.isfinite(pmin) and math.isfinite(pmax)) or pmax <= pmin:
+        return np.array([0.0, 1.0], dtype=float)
+    n_bins = int(max(1, math.ceil((pmax - pmin) / width)))
+    edges = pmin + np.arange(n_bins + 1, dtype=float) * width
+    # assure l’inclusion de pmax
+    if edges[-1] < pmax:
+        edges = np.append(edges, edges[-1] + width)
     return edges
 
 
@@ -219,116 +147,6 @@ def _accumulate_profile_ohlc_overlap(
     h: np.ndarray,
     l: np.ndarray,
     c: np.ndarray,
-    vol_src: np.ndarray,
-    edges: np.ndarray,
-    body_gain: float = 0.6,
-) -> np.ndarray:
-    """
-    Distribution volumique par chevauchement [low, high] avec surpondération
-    de la zone de corps (entre open et close). body_gain∈[0..1] → multiplicateur 1+body_gain.
-    Complexité ~ O(n_bars * n_bins), robuste et déterministe.
-    """
-    nbins = edges.size - 1
-    out = np.zeros(nbins, dtype=float)
-    if nbins <= 0 or o.size == 0:
-        return out
-
-    body_gain = float(min(1.0, max(0.0, body_gain)))
-    body_mult = 1.0 + body_gain  # p.ex. 1.6 si gain=0.6
-
-    for i in range(o.size):
-        lo = float(min(l[i], h[i]))
-        hi = float(max(l[i], h[i]))
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
-            # bar plate → on reporte au bin du close
-            price = float(c[i]) if np.isfinite(c[i]) else float(o[i])
-            if not np.isfinite(price):
-                continue
-            idx = int(np.searchsorted(edges, price, side="right") - 1)
-            if 0 <= idx < nbins:
-                out[idx] += float(vol_src[i])
-            continue
-
-        # Overlaps longueur par bin
-        lefts = edges[:-1]
-        rights = edges[1:]
-        overlap = np.minimum(hi, rights) - np.maximum(lo, lefts)
-        overlap = np.maximum(overlap, 0.0)
-
-        if not np.any(overlap):
-            continue
-
-        # Surpondération du corps (zone [min(o,c), max(o,c)])
-        b_lo = float(min(o[i], c[i]))
-        b_hi = float(max(o[i], c[i]))
-        body_overlap = np.minimum(b_hi, rights) - np.maximum(b_lo, lefts)
-        body_overlap = np.maximum(body_overlap, 0.0)
-
-        # Densité piècewise: base 1.0 + bonus sur les bins traversant le corps
-        density = np.ones_like(overlap)
-        density = density + body_mult - 1.0  # set to body_mult everywhere
-        # Mais on neutralise hors corps
-        density[body_overlap <= 0.0] = 1.0
-
-        weights = overlap * density
-        sw = float(weights.sum())
-        if sw <= 0.0:
-            continue
-
-        out += float(vol_src[i]) * (weights / sw)
-
-    return out
-
-
-def _to_num(x, fallback=np.nan) -> np.ndarray:
-    a = np.asarray(pd.to_numeric(x, errors="coerce"), dtype=float)
-    if np.isnan(fallback):
-        return a
-    return np.where(np.isfinite(a), a, float(fallback))
-
-
-def _infer_tick_size(prices: np.ndarray) -> float:
-    p = np.asarray(prices, dtype=float)
-    p = p[np.isfinite(p)]
-    if p.size < 2:
-        return 1e-4
-    u = np.unique(np.round(p, 10))
-    if u.size < 2:
-        return max(1e-9, abs(u[0]) * 1e-6)
-    d = np.diff(u)
-    d = d[d > 0]
-    return float(d.min()) if d.size else max(1e-9, (u.max() - u.min()) / 1e6)
-
-
-def _freedman_diaconis_bin_width(prices: np.ndarray) -> float:
-    p = np.asarray(prices, dtype=float)
-    p = p[np.isfinite(p)]
-    if p.size < 2:
-        return 1e-4
-    q75, q25 = np.percentile(p, [75, 25])
-    iqr = max(1e-12, q75 - q25)
-    n = p.size
-    bw = 2.0 * iqr * (n ** (-1.0 / 3.0))
-    return float(max(1e-9, bw))
-
-
-def _build_edges(pmin: float, pmax: float, width: float) -> np.ndarray:
-    width = float(max(1e-12, width))
-    if not (math.isfinite(pmin) and math.isfinite(pmax)) or pmax <= pmin:
-        return np.array([0.0, 1.0], dtype=float)
-    n_bins = int(max(1, math.ceil((pmax - pmin) / width)))
-    edges = pmin + np.arange(n_bins + 1, dtype=float) * width
-    # assure l’inclusion de pmax
-    if edges[-1] < pmax:
-        edges = np.append(edges, edges[-1] + width)
-    return edges
-
-
-def _accumulate_profile_ohlc_overlap(
-    o: np.ndarray,
-    h: np.ndarray,
-    l: np.ndarray,
-    c: np.ndarray,
     vol: np.ndarray,
     edges: np.ndarray,
     *,
@@ -336,149 +154,197 @@ def _accumulate_profile_ohlc_overlap(
     eps: float = 1e-12,
 ) -> np.ndarray:
     """
-    Distribution du volume sur 3 segments par barre (wick bas, corps, wick haut),
-    pondérée (corps sur-pondéré) et conservant le volume exact.
-    Implémentation O(N+M) mémoire-sûre (sans broadcast 2D), via sweep-line + add.at.
+    Volume Profile par chevauchement OHLC (wick bas / corps / wick haut), avec
+    sur-pondération du corps et conservation exacte du volume.
+
+    Implémentation vectorisée sans matrice N×M :
+      - découpe chaque barre en 3 segments [lo, bl], [bl, bh], [bh, hi]
+      - intègre l'overlap segment↔bin via sweep-line + np.add.at
+      - mémoire O(M) (M = nb de bins), pas de broadcasting 2D
+
+    Paramètres
+    ----------
+    o,h,l,c : arrays
+        Séries OHLC (float).
+    vol : array
+        Volume par barre (float, >= 0).
+    edges : array
+        Bornes des bins strictement croissantes (taille M+1).
+    body_gain : float
+        Poids supplémentaire appliqué au corps (densité × (1 + body_gain)).
+    eps : float
+        Petite constante de stabilité numérique (évite division par 0).
+
+    Retour
+    ------
+    profile : np.ndarray (M,)
+        Volume par bin.
     """
 
-    # -- utilitaires --
-    def _accum_segments(
-        seg_lo: np.ndarray, seg_hi: np.ndarray, dens: np.ndarray
-    ) -> np.ndarray:
-        """
-        Accumule ∑ D * overlap([seg_lo, seg_hi], bins) sans matrices nb_bars×nb_bins.
-        dens = "masse du segment" (pas densité) → dens_per_unit = dens / width.
-        """
-        nbins = edges.size - 1
-        if nbins <= 0:
+    # --- Garde-fous edges ---
+    if edges is None:
+        return np.zeros(0, dtype=float)
+    edges = np.asarray(edges, dtype=float)
+    # nettoie et ordonne
+    edges = np.unique(edges[np.isfinite(edges)])
+    if edges.size < 2:
+        return np.zeros(0, dtype=float)
+    # après unique(), diff > 0 garanti si >=2
+    if not np.all(np.diff(edges) > 0):
+        # sécurité supplémentaire (très rare après unique) :
+        order = np.argsort(edges)
+        edges = edges[order]
+        edges = np.unique(edges)
+        if edges.size < 2 or not np.all(np.diff(edges) > 0):
             return np.zeros(0, dtype=float)
 
-        prof = np.zeros(nbins, dtype=float)
-        diff = np.zeros(nbins + 1, dtype=float)  # pour les pleins (inter-bins)
+    nbins = edges.size - 1
 
-        # clamp & filtrage des segments utiles
-        a = np.asarray(seg_lo, dtype=float)
-        b = np.asarray(seg_hi, dtype=float)
-        w = np.maximum(b - a, eps)
-        d = np.asarray(dens, dtype=float)
+    # --- utilitaire local : tolérant si _to_num n'existe pas ---
+    def _as_num(arr, default):
+        try:
+            return _to_num(arr, default)
+        except NameError:
+            a = np.asarray(arr, dtype=float)
+            if default is not np.nan:
+                a = np.nan_to_num(a, nan=default, posinf=default, neginf=default)
+            return a
 
-        # hors plage → aucun recouvrement
-        in_range = (b > edges[0]) & (a < edges[-1]) & (d > 0.0) & (w > 0.0)
-        if not np.any(in_range):
-            return prof
-
-        a = np.maximum(a[in_range], edges[0])
-        b = np.minimum(b[in_range], edges[-1])
-        w = np.maximum(w[in_range], eps)
-        d = d[in_range]
-        dpu = d / w  # densité par unité de prix (constante sur le segment)
-
-        # indices des bins
-        i0 = np.searchsorted(edges, a, side="right") - 1
-        i1 = np.searchsorted(edges, b, side="left") - 1
-        i0 = np.clip(i0, 0, nbins - 1)
-        i1 = np.clip(i1, 0, nbins - 1)
-
-        # cas mono-bin
-        same = i0 == i1
-        if np.any(same):
-            idx = i0[same]
-            val = dpu[same] * (b[same] - a[same])  # intégrale exacte
-            np.add.at(prof, idx, val)
-
-        # cas multi-bins
-        multi = ~same
-        if np.any(multi):
-            i0m = i0[multi]
-            i1m = i1[multi]
-            am = a[multi]
-            bm = b[multi]
-            dpum = dpu[multi]
-
-            # contributions partielles aux bords
-            left_len = edges[i0m + 1] - am
-            right_len = bm - edges[i1m]
-            np.add.at(prof, i0m, dpum * np.maximum(0.0, left_len))
-            np.add.at(prof, i1m, dpum * np.maximum(0.0, right_len))
-
-            # contributions pleines (bins intérieurs) via diff
-            start = i0m + 1
-            stop = i1m
-            has_range = start < stop
-            if np.any(has_range):
-                s = start[has_range]
-                t = stop[has_range]
-                wv = dpum[has_range]
-                np.add.at(diff, s, wv)
-                np.add.at(diff, t, -wv)
-
-        # finalise pleins: densité active × largeur du bin
-        active_dens = np.cumsum(diff[:-1])
-        prof += active_dens * (edges[1:] - edges[:-1])
-        return prof
-
-    # -- données propres --
-    o = _to_num(o, np.nan)
-    h = _to_num(h, np.nan)
-    l = _to_num(l, np.nan)
-    c = _to_num(c, np.nan)
-    vol = _to_num(vol, 0.0)
+    # --- Données nettoyées ---
+    o = _as_num(o, np.nan)
+    h = _as_num(h, np.nan)
+    l = _as_num(l, np.nan)
+    c = _as_num(c, np.nan)
+    vol = _as_num(vol, 0.0)
 
     ok = np.isfinite(o) & np.isfinite(h) & np.isfinite(l) & np.isfinite(c) & (vol > 0.0)
-    if not np.any(ok) or (edges is None) or (edges.size < 2):
-        return (
-            np.zeros(max(edges.size - 1, 0), dtype=float)
-            if edges is not None
-            else np.zeros(0, dtype=float)
-        )
+    if not np.any(ok):
+        return np.zeros(nbins, dtype=float)
 
     o, h, l, c, vol = o[ok], h[ok], l[ok], c[ok], vol[ok]
 
-    # bornes réelles de la barre (sécurité même si data sale)
+    # bornes réelles de la barre
     lo = np.minimum(l, h)
     hi = np.maximum(l, h)
 
-    # corps
-    bl = np.minimum(o, c)  # body low
-    bh = np.maximum(o, c)  # body high
-    bl = np.clip(bl, lo, hi)
-    bh = np.clip(bh, lo, hi)
+    # corps (bornes clampées dans [lo, hi])
+    bl = np.clip(np.minimum(o, c), lo, hi)
+    bh = np.clip(np.maximum(o, c), lo, hi)
 
-    # longueurs segments
+    # longueurs des segments
     len_wl = np.maximum(0.0, bl - lo)
     len_b = np.maximum(0.0, bh - bl)
     len_wh = np.maximum(0.0, hi - bh)
 
-    # pondérations (corps sur-pondéré)
+    # pondérations
     f_w = 1.0
     f_b = 1.0 + max(0.0, float(body_gain))
 
-    # masse totale par barre (pour conserver exactement le volume)
+    # masse totale par barre (assure conservation du volume)
     mass = f_w * (len_wl + len_wh) + f_b * len_b
     mass = np.where(mass > 0.0, mass, 1.0)
 
-    # "masses de segments" (pas densités) : seront converties en densité unitaire dans _accum_segments
+    # "masse segment" (convertie en densité unitaire plus bas)
     dens_w = vol * (f_w / mass)
     dens_b = vol * (f_b / mass)
 
-    profile = np.zeros(edges.size - 1, dtype=float)
+    profile = np.zeros(nbins, dtype=float)
 
-    # wick bas
-    m_wl = len_wl > 0.0
-    if np.any(m_wl):
-        profile += _accum_segments(lo[m_wl], bl[m_wl], dens_w[m_wl])
+    # --- accumulateur par segments (sweep-line) ---
+    def _accum_segments(
+        seg_lo: np.ndarray, seg_hi: np.ndarray, dens: np.ndarray
+    ) -> np.ndarray:
+        """
+        Version optimisée - remplace l'ancienne implémentation
+        """
+        out = np.zeros(nbins, dtype=float)
+        diff = np.zeros(nbins + 1, dtype=float)
 
-    # corps
-    m_b = len_b > 0.0
-    if np.any(m_b):
-        profile += _accum_segments(bl[m_b], bh[m_b], dens_b[m_b])
+        # Filtrage initial
+        valid_mask = (seg_hi > edges[0]) & (seg_lo < edges[-1]) & (dens > 1e-12)
+        if not np.any(valid_mask):
+            return out
 
-    # wick haut
-    m_wh = len_wh > 0.0
-    if np.any(m_wh):
-        profile += _accum_segments(bh[m_wh], hi[m_wh], dens_w[m_wh])
+        # Extraction directe
+        a = seg_lo[valid_mask]
+        b = seg_hi[valid_mask]
+        d = dens[valid_mask]
 
-    return profile
+        # Clamping et calcul de largeurs
+        a_clipped = np.maximum(a, edges[0])
+        b_clipped = np.minimum(b, edges[-1])
+        widths = np.maximum(b_clipped - a_clipped, 1e-12)
+
+        dpu = d / widths
+
+        # Calcul des indices
+        i0 = np.clip(np.searchsorted(edges, a_clipped, side="right") - 1, 0, nbins - 1)
+        i1 = np.clip(np.searchsorted(edges, b_clipped, side="left") - 1, 0, nbins - 1)
+
+        # Traitement par lots
+        batch_size = min(10000, len(a))
+        n_batches = (len(a) + batch_size - 1) // batch_size
+
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(a))
+
+            batch_i0 = i0[start_idx:end_idx]
+            batch_i1 = i1[start_idx:end_idx]
+            batch_a = a_clipped[start_idx:end_idx]
+            batch_b = b_clipped[start_idx:end_idx]
+            batch_dpu = dpu[start_idx:end_idx]
+
+            # Mono-bin vs Multi-bin
+            same_bin = batch_i0 == batch_i1
+            multi_bin = ~same_bin
+
+            # Traitement mono-bin avec bincount
+            if np.any(same_bin):
+                mono_indices = batch_i0[same_bin]
+                mono_lengths = batch_b[same_bin] - batch_a[same_bin]
+                mono_contrib = batch_dpu[same_bin] * mono_lengths
+
+                unique_indices, inverse = np.unique(mono_indices, return_inverse=True)
+                sums = np.bincount(inverse, weights=mono_contrib)
+                np.add.at(out, unique_indices, sums)
+
+            # Traitement multi-bin
+            if np.any(multi_bin):
+                i0m, i1m = batch_i0[multi_bin], batch_i1[multi_bin]
+                am, bm = batch_a[multi_bin], batch_b[multi_bin]
+                dpum = batch_dpu[multi_bin]
+
+                # Bords gauche
+                left_edges = edges[i0m + 1]
+                left_lengths = np.maximum(0.0, left_edges - am)
+                left_contrib = dpum * left_lengths
+                np.add.at(out, i0m, left_contrib)
+
+                # Bords droit
+                right_edges = edges[i1m]
+                right_lengths = np.maximum(0.0, bm - right_edges)
+                right_contrib = dpum * right_lengths
+                np.add.at(out, i1m, right_contrib)
+
+                # Bins intérieurs (différentiel)
+                has_interior = (i0m + 1) < i1m
+                if np.any(has_interior):
+                    start_indices = i0m[has_interior] + 1
+                    end_indices = i1m[has_interior]
+                    dpu_values = dpum[has_interior]
+
+                    for start, end, val in zip(start_indices, end_indices, dpu_values):
+                        if start < end:
+                            diff[start] += val
+                            diff[end] -= val
+
+        # Application finale du différentiel
+        active = np.cumsum(diff[:-1])
+        bin_widths = edges[1:] - edges[:-1]
+        out += active * bin_widths
+
+        return out
 
 
 def _expand_va(profile: np.ndarray, edges: np.ndarray, *, coverage: float = 0.70):
