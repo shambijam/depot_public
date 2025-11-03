@@ -1298,63 +1298,39 @@ class ScalpingStrategy(BaseStrategy):
         return series.rolling(window=period, min_periods=1).std(ddof=0)
 
     @staticmethod
-    def _atr(self, df, period: int = 14) -> float:
+    def _atr(self, df: pd.DataFrame, period: int = 14, return_series: bool = False):
         """
-        ATR robuste:
-        - Accepte DataFrame (colonnes: open/high/low/close ou variantes)
-        mais tolère aussi dict ou ndarray shape (N,>=4).
-        - Convertit toujours le TR en pandas.Series pour .rolling().
+        ATR (Average True Range) robuste.
+        - df: DataFrame avec colonnes 'high','low','close'
+        - period: fenêtre de moyenne glissante
+        - return_series: True → renvoie la série ATR ; False → dernière valeur (float)
         """
-      
-        def _to_df_ohlc(x):
-            # DataFrame déjà correct
-            if isinstance(x, pd.DataFrame):
-                cols = {c.lower(): c for c in x.columns}
-                # mappe automatiquement O/H/L/C (insensible à la casse)
-                def col(name_opts):
-                    for k in name_opts:
-                        if k in cols:
-                            return cols[k]
-                    return None
-                co = col(["open","o"]); ch = col(["high","h"]); cl = col(["low","l"]); cc = col(["close","c"])
-                if all([co, ch, cl, cc]):
-                    return x[[co, ch, cl, cc]].rename(columns={co:"open", ch:"high", cl:"low", cc:"close"})
-                # si colonnes manquantes → on essaie fallback numpy
-            # dict-like
-            if isinstance(x, dict):
-                try:
-                    return pd.DataFrame(
-                        {
-                            "open":  np.asarray(x.get("open",  x.get("o")) , dtype=float),
-                            "high":  np.asarray(x.get("high",  x.get("h")), dtype=float),
-                            "low":   np.asarray(x.get("low",   x.get("l")), dtype=float),
-                            "close": np.asarray(x.get("close", x.get("c")), dtype=float),
-                        }
-                    )
-                except Exception:
-                    pass
-            # ndarray : on suppose OHLC en colonnes
-            arr = np.asarray(x)
-            if arr.ndim == 2 and arr.shape[1] >= 4:
-                return pd.DataFrame(arr[:, :4], columns=["open","high","low","close"])
-            raise ValueError("ATR: format de df/array non reconnu (attendu DF OHLC, dict, ou ndarray Nx4).")
+        # Tolérance à l'inversion accidentelle des paramètres (compat)
+        # ex: _atr(14, df) → on swap automatiquement
+        if isinstance(df, (int, float)) and isinstance(period, pd.DataFrame):
+            df, period = period, int(df)
 
-        df_ohlc = _to_df_ohlc(df)
-        if len(df_ohlc) < max(2, int(period)):
-            return float("nan")
+        if df is None or len(df) == 0:
+            return np.nan if not return_series else pd.Series(dtype=float)
 
-        high  = pd.to_numeric(df_ohlc["high"], errors="coerce")
-        low   = pd.to_numeric(df_ohlc["low"], errors="coerce")
-        close = pd.to_numeric(df_ohlc["close"], errors="coerce")
+        # Assure des Series pandas (évite l'erreur "ndarray has no attribute rolling")
+        h = pd.Series(df["high"], dtype="float64", copy=False)
+        l = pd.Series(df["low"],  dtype="float64", copy=False)
+        c = pd.Series(df["close"], dtype="float64", copy=False)
 
-        # True Range (vectorisé)
-        prev_close = close.shift(1)
-        h_l  = (high - low).abs()
-        h_pc = (high - prev_close).abs()
-        l_pc = (low - prev_close).abs()
-        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+        prev_close = c.shift(1)
+        tr1 = (h - l).abs()
+        tr2 = (h - prev_close).abs()
+        tr3 = (l - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-        atr_series = tr.rolling(window=int(period), min_periods=int(period)).mean()
-        return float(atr_series.iloc[-1])
+        atr = tr.rolling(window=int(period), min_periods=int(period)).mean()
 
-  
+        if return_series:
+            return atr
+
+        val = atr.iloc[-1]
+        # Fallback si pas encore assez de barres : moyenne du TR dispo
+        return float(val) if pd.notna(val) else float(tr.tail(int(period)).mean())
+
+    
