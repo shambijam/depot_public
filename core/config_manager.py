@@ -538,130 +538,145 @@ class ConfigManager:
 
     def analyze_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analyse du contexte (propre et déterministe) :
-        - Priorité absolue à la fenêtre LOCALE si bot_behavior.trading_timezone est défini.
-        -> Heures locales lues dans bot_behavior.trading_hours_local {start,end} (HH:MM).
-        -> Défauts robustes: start=10:00, end=22:00.
-        -> Gère l'heure d'été/hiver via zoneinfo.
-        - Fallback UTC UNIQUEMENT si aucun timezone n'est fourni.
-        - Remplit: is_trading_hours, is_trading_day, is_market_open, market_volatility_index,
-        active_broker_account, current_market_regime.
+        Contexte marché/système basé EXCLUSIVEMENT sur l'heure locale déclarée.
+        - Utilise: bot_behavior.trading_timezone (ex: "Europe/Paris")
+                bot_behavior.trading_hours_local.start / .end ("HH:MM")
+                bot_behavior.allowed_weekdays (liste de 0=lundi ... 6=dimanche)
+        - Pas de fallback UTC bloquant. Si config invalide → on NE BLOQUE PAS.
         """
-        from datetime import datetime, time as dtime, timezone as _tz
+        self.logger.info("Analyse du contexte en cours...")
+        analyzed_context = context.copy() if isinstance(context, dict) else {}
+
+        from datetime import datetime, time as _time
         try:
-            from zoneinfo import ZoneInfo  # Python 3.9+
+            from zoneinfo import ZoneInfo
         except Exception:
             ZoneInfo = None
 
-        UTC = _tz.utc
-        now_utc = datetime.now(UTC)
+        # --- Lecture config stricte locale ---
+        tz_name = self.get("bot_behavior.trading_timezone")
+        local_hours = self.get("bot_behavior.trading_hours_local", {}) or {}
+        allowed_weekdays_cfg = self.get("bot_behavior.allowed_weekdays", [0, 1, 2, 3, 4])
+        default_vix = self.get("market_regime_detection.default_vix_index", 20)
 
-        # --- allowed_weekdays (0=lundi … 6=dimanche) ---
-        allowed_weekdays = self.get("bot_behavior.allowed_weekdays", [0, 1, 2, 3, 4])
+        # Normalisation jours autorisés
         try:
-            allowed_weekdays = {int(x) for x in (allowed_weekdays or [0, 1, 2, 3, 4])}
+            allowed_weekdays = {int(x) for x in (allowed_weekdays_cfg or [0, 1, 2, 3, 4])}
         except Exception:
             allowed_weekdays = {0, 1, 2, 3, 4}
 
-        default_vix = self.get("market_regime_detection.default_vix_index", 20)
+        def _parse_time(v) -> _time:
+            # Accepte "HH:MM" ou int/float -> "HH:00"
+            if isinstance(v, (int, float)):
+                return _time(int(v), 0)
+            s = str(v).strip()
+            if ":" in s:
+                hh, mm = s.split(":", 1)
+                return _time(int(hh), int(mm))
+            return _time(int(s), 0)
 
-        # --- Fenêtre LOCALE prioritaire si un TZ est défini ---
-        tz_name = self.get("bot_behavior.trading_timezone")
-        local_hours_cfg = self.get("bot_behavior.trading_hours_local", {}) or {}
+        # Valeurs par défaut non-bloquantes si config manquante
+        in_hours = True
+        is_trading_day = True
 
-        def _norm_hhmm(val, default_str: str) -> str:
-            """Retourne 'HH:MM' robuste."""
-            if isinstance(val, (int, float)):
-                h = max(0, min(23, int(val)))
-                return f"{h:02d}:00"
-            s = str(val).strip() if val is not None else default_str
-            if ":" not in s:
-                return default_str
-            hh, mm = s.split(":", 1)
-            try:
-                h, m = int(hh), int(mm)
-            except Exception:
-                return default_str
-            h = max(0, min(23, h))
-            m = max(0, min(59, m))
-            return f"{h:02d}:{m:02d}"
+        try:
+            # Vérifs minimales
+            if not tz_name or not isinstance(local_hours, dict) or "start" not in local_hours or "end" not in local_hours:
+                raise ValueError("trading_timezone ou trading_hours_local manquants")
 
-        start_s = _norm_hhmm(local_hours_cfg.get("start", "10:00"), "10:00")
-        end_s   = _norm_hhmm(local_hours_cfg.get("end",   "22:00"), "22:00")
+            if ZoneInfo is None:
+                raise RuntimeError("ZoneInfo non disponible")
 
-        used_local = bool(tz_name)
-        if used_local:
-            # --- Calcul en heure locale (DST auto si zoneinfo dispo) ---
-            try:
-                tz = ZoneInfo(tz_name) if ZoneInfo else UTC
-            except Exception:
-                tz = UTC
-            now_local = now_utc.astimezone(tz)
+            tz = ZoneInfo(str(tz_name))
+            now_local = datetime.now(tz)
 
-            is_trading_day = now_local.weekday() in allowed_weekdays
+            t1 = _parse_time(local_hours.get("start", "10:00"))
+            t2 = _parse_time(local_hours.get("end", "22:00"))
+            cur = now_local.time()
 
-            h1, m1 = [int(x) for x in start_s.split(":")]
-            h2, m2 = [int(x) for x in end_s.split(":")]
-            t1, t2, cur = dtime(h1, m1), dtime(h2, m2), now_local.time()
-
+            # Intervalle [start, end) — gère la fenêtre qui traverse minuit
             if t1 <= t2:
                 in_hours = (t1 <= cur < t2)
             else:
-                # Fenêtre qui traverse minuit (ex: 22:00–02:00)
                 in_hours = (cur >= t1) or (cur < t2)
 
-            self.logger.info(
-                "[SESSION] used_local=True tz=%s now=%s window=[%s-%s) weekday_ok=%s -> in_hours=%s",
-                tz_name, now_local.strftime("%Y-%m-%d %H:%M %Z"),
-                start_s, end_s, is_trading_day, in_hours
-            )
-        else:
-            # --- Fallback clair en UTC si PAS de timezone fourni ---
-            start_hour = int(self.get("bot_behavior.trading_start_hour_utc", 8) or 8)
-            end_hour   = int(self.get("bot_behavior.trading_end_hour_utc",   22) or 22)
-            is_trading_day = now_utc.weekday() in allowed_weekdays
-            in_hours = start_hour <= now_utc.hour < end_hour
+            is_trading_day = now_local.weekday() in allowed_weekdays
 
             self.logger.info(
-                "[SESSION] used_local=False (UTC) now=%s window=[%02d:00-%02d:00) weekday_ok=%s -> in_hours=%s",
-                now_utc.strftime("%Y-%m-%d %H:%M UTC"),
-                start_hour, end_hour, is_trading_day, in_hours
+                "[SESSION] local=%s now=%s window=[%s-%s) weekday_ok=%s -> in_hours=%s",
+                tz_name,
+                now_local.strftime("%Y-%m-%d %H:%M %Z"),
+                t1.strftime("%H:%M"),
+                t2.strftime("%H:%M"),
+                is_trading_day,
+                in_hours,
             )
 
-        # --- Contexte enrichi ---
-        analyzed_context = context.copy()
+        except Exception as e:
+            # Ici: on NE bloque PAS si la config est foireuse → pas de faux négatifs.
+            self.logger.error(
+                "[SESSION] Config locale invalide (%s). AUCUN fallback UTC bloquant. "
+                "market_open sera traité comme True pour ne pas stopper le pipeline.",
+                e,
+                exc_info=False,
+            )
+            in_hours = True
+            is_trading_day = True
+
+        # Flags de session
         analyzed_context["is_trading_hours"] = bool(in_hours)
         analyzed_context["is_trading_day"] = bool(is_trading_day)
         analyzed_context["is_market_open"] = bool(in_hours and is_trading_day)
+
+        # Volatilité (VIX ou proxy)
         analyzed_context["market_volatility_index"] = context.get("vix_index", default_vix)
 
-        # --- Détails compte broker actif (si login MT5 présent) ---
+        # Détails compte broker actif (inchangé)
         current_mt5_login_numeric = context.get("account_info", {}).get("login")
+        active_broker_account_details = None
         if current_mt5_login_numeric:
             try:
-                active = None
                 for account in self._broker_accounts_config.get("accounts", []):
-                    login_env = self._config.get("env_vars", {}).get(account.get("login_env_var"))
-                    if login_env and int(login_env) == int(current_mt5_login_numeric):
-                        active = self.get_mt5_account_credentials(account_id=account.get("account_id"))
+                    login_value_from_env = self._config.get("env_vars", {}).get(
+                        account.get("login_env_var")
+                    )
+                    if login_value_from_env and int(login_value_from_env) == current_mt5_login_numeric:
+                        active_broker_account_details = self.get_mt5_account_credentials(
+                            account_id=account.get("account_id")
+                        )
                         break
-                if active:
-                    analyzed_context["active_broker_account"] = active
+
+                if active_broker_account_details:
+                    analyzed_context["active_broker_account"] = active_broker_account_details
+                    self.logger.debug(
+                        "Contexte enrichi avec le compte broker actif: %s",
+                        active_broker_account_details.get("account_id"),
+                    )
                 else:
                     self.logger.warning(
-                        "Détails du compte broker (Login MT5: %s) introuvables dans broker_accounts.json.",
-                        current_mt5_login_numeric
+                        "Détails du compte broker (Login MT5: %s) introuvables/inactifs.",
+                        current_mt5_login_numeric,
                     )
             except (ValueError, RuntimeError) as e:
-                self.logger.error("Erreur récupération compte broker actif: %s", e, exc_info=True)
+                self.logger.error(
+                    "Erreur récupération compte broker actif (Login MT5: %s): %s",
+                    current_mt5_login_numeric, e, exc_info=True
+                )
                 analyzed_context["active_broker_account"] = {"error": str(e)}
+        else:
+            self.logger.debug(
+                "Aucun ID de compte MT5 actif dans le contexte pour enrichissement broker."
+            )
 
-        # --- Régime de marché ---
-        market_data = context.get("market_data", {}) or {}
-        analyzed_context["current_market_regime"] = self.detect_market_regime(analyzed_context, market_data)
+        # Détection du régime (inchangé)
+        all_assets_market_data_from_context = context.get("market_data", {})
+        analyzed_context["current_market_regime"] = self.detect_market_regime(
+            analyzed_context, all_assets_market_data_from_context
+        )
 
         self.logger.debug("Analyse du contexte terminée.")
         return analyzed_context
+
 
 
     def detect_market_regime(
