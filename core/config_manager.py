@@ -547,74 +547,115 @@ class ConfigManager:
         analyzed_context = context.copy()
 
         # Horloge
-        current_time_utc = datetime.now(UTC)
-        current_hour_utc = current_time_utc.hour
-        current_weekday = current_time_utc.weekday()
+        from datetime import timezone as _tz, time as _dtime
+        try:
+            from zoneinfo import ZoneInfo 
+        except Exception:
+            ZoneInfo = None
 
-        # Config de base (fallback)
+        current_time_utc = datetime.now(_tz.utc)
+        current_hour_utc = current_time_utc.hour
+        current_weekday_utc = current_time_utc.weekday()
+
+        # --- Config de base (fallback UTC si local non dispo) ---
         start_hour = self.get("bot_behavior.trading_start_hour_utc", 8)
-        end_hour = self.get("bot_behavior.trading_end_hour_utc", 17)
+        end_hour   = self.get("bot_behavior.trading_end_hour_utc", 17)
         allowed_weekdays = self.get("bot_behavior.allowed_weekdays", [0, 1, 2, 3, 4])
+        # Normalisation : accepter strings/ints
+        try:
+            allowed_weekdays = {int(x) for x in (allowed_weekdays or [0,1,2,3,4])}
+        except Exception:
+            allowed_weekdays = {0,1,2,3,4}
+
         default_vix = self.get("market_regime_detection.default_vix_index", 20)
 
         # --- Fenêtre de trading : priorité aux heures locales si disponibles ---
         tz_name = self.get("bot_behavior.trading_timezone")
         local_hours = self.get("bot_behavior.trading_hours_local", {}) or {}
+        use_local = bool(
+            tz_name
+            and isinstance(local_hours, dict)
+            and ("start" in local_hours)
+            and ("end" in local_hours)
+        )
+        # [PATCH DIAG] — tracer la fenêtre réellement utilisée
+        try:
+            _tz_dbg = tz_name or "None"
+            _use_local_dbg = bool(use_local)
+            _now_loc_dbg = now_local.strftime("%Y-%m-%d %H:%M:%S %Z") if 'now_local' in locals() else "n/a"
+            _hours_dbg = {
+                "local_hours_obj": local_hours,
+                "start_str": start_s if 'start_s' in locals() else None,
+                "end_str": end_s if 'end_s' in locals() else None,
+                "fallback_utc_window": [start_hour, end_hour],
+                "allowed_weekdays": allowed_weekdays,
+            }
+            self.logger.info(
+                f"[SESSION_DIAG] tz={_tz_dbg} use_local={_use_local_dbg} "
+                f"now_local={_now_loc_dbg} window={_hours_dbg} "
+                f"→ in_hours={in_hours} is_trading_day={is_trading_day}"
+            )
+        except Exception:
+            pass
 
-        use_local = bool(tz_name and isinstance(local_hours, dict) and local_hours)
         in_hours = False
-        is_trading_day = current_weekday in allowed_weekdays  # valeur par défaut
+        is_trading_day = current_weekday_utc in allowed_weekdays  # valeur par défaut (UTC)
 
         if use_local:
-            # Imports locaux → évite de patcher l'entête du fichier si tu ne veux pas
+            # Conversion en timezone locale
             try:
-                from zoneinfo import ZoneInfo  # Python 3.9+
+                tz = ZoneInfo(tz_name) if ZoneInfo else _tz.utc
             except Exception:
-                ZoneInfo = None
-            try:
-                from datetime import time as dtime
-            except Exception:
-                dtime = None
-
-            try:
-                tz = ZoneInfo(tz_name) if ZoneInfo else UTC
-            except Exception:
-                tz = UTC
+                tz = _tz.utc
 
             now_local = current_time_utc.astimezone(tz)
-            # Jours autorisés (0=lundi … 6=dimanche)
+            # Jours autorisés en LOCAL
             is_trading_day = now_local.weekday() in allowed_weekdays
 
+            # Parsing HH:MM
+            start_s = str(local_hours.get("start", "10:00")).strip()
+            end_s   = str(local_hours.get("end",   "17:00")).strip()
             try:
-                start_s = str(local_hours.get("start", "10:00"))
-                end_s = str(local_hours.get("end", "17:00"))
                 h1, m1 = [int(x) for x in start_s.split(":")]
                 h2, m2 = [int(x) for x in end_s.split(":")]
-                if dtime is not None:
-                    t1 = dtime(h1, m1)
-                    t2 = dtime(h2, m2)
-                    cur = now_local.time()
-                    # Intervalle [start, end) : 10:00 inclus, 17:00 exclus
-                    if t1 <= t2:
-                        in_hours = (t1 <= cur < t2)
-                    else:
-                        # overnight (ex: 22:00–02:00) si jamais tu l'utilises plus tard
-                        in_hours = (cur >= t1) or (cur < t2)
-                else:
-                    # Si dtime indisponible, fallback conservateur (UTC)
-                    in_hours = start_hour <= current_hour_utc < end_hour
-            except Exception as e:
-                self.logger.warning(
-                    f"[analyze_context] Heures locales invalides ({e}). Fallback UTC."
-                )
-                in_hours = start_hour <= current_hour_utc < end_hour
+            except Exception:
+                # Si invalide → fallback UTC
+                h1, m1, h2, m2 = start_hour, 0, end_hour, 0
+                tz = _tz.utc
+                now_local = current_time_utc
+
+            t1 = _dtime(h1, m1); t2 = _dtime(h2, m2); cur = now_local.time()
+            if t1 <= t2:
+                in_hours = (t1 <= cur < t2)
+            else:
+                # Fenêtre qui traverse minuit (ex: 22:00–02:00)
+                in_hours = (cur >= t1) or (cur < t2)
+
+            # Log diag complet
+            self.logger.info(
+                "[SESSION][ctx] used_local=True tz=%s now_local=%s window=[%02d:%02d-%02d:%02d) weekday_ok=%s -> in_hours=%s",
+                tz_name,
+                now_local.strftime("%Y-%m-%d %H:%M"),
+                h1, m1, h2, m2,
+                is_trading_day,
+                in_hours,
+            )
         else:
             # Fallback legacy: fenêtre en UTC
             in_hours = start_hour <= current_hour_utc < end_hour
+            self.logger.info(
+                "[SESSION][ctx] used_local=False (fallback UTC) now_utc=%s window=[%02d:00-%02d:00) weekday_ok=%s -> in_hours=%s",
+                current_time_utc.strftime("%Y-%m-%d %H:%M"),
+                int(start_hour), int(end_hour),
+                (current_weekday_utc in allowed_weekdays),
+                in_hours,
+            )
 
-        analyzed_context["is_trading_hours"] = in_hours
-        analyzed_context["is_trading_day"] = is_trading_day
-        analyzed_context["is_market_open"] = in_hours and is_trading_day
+        analyzed_context["is_trading_hours"] = bool(in_hours)
+        analyzed_context["is_trading_day"] = bool(is_trading_day)
+        analyzed_context["is_market_open"] = bool(in_hours and is_trading_day)
+        analyzed_context["market_volatility_index"] = context.get("vix_index", default_vix)
+
 
         # Volatilité (VIX ou proxy)
         analyzed_context["market_volatility_index"] = context.get("vix_index", default_vix)
