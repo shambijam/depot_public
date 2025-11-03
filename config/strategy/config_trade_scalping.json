@@ -11,7 +11,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.80
+        "min_confidence": 0.75
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -91,6 +91,15 @@
         "rt_poll_interval_ms": 150,
         "loss_guard_arming_ms": 3000,
         "min_age_ms_for_any_close": 5000
+      },
+      "fusion": {
+        "ttl_ms": 1500,
+        "max_slippage_points": 20,
+        "allow_degraded_vote": true,
+        "degraded_vote_conditions": {
+          "min_of_delta_abs": 150.0,
+          "min_of_score": 15.0
+        }
       }
     }
   },
@@ -132,9 +141,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.80,
-      "min_orderflow_score": 0.76,
-      "max_spread_pts": 6
+      "min_confidence": 0.61,
+      "min_orderflow_score": 0.55,
+      "max_spread_pts": 12
     },
     "scoring_weights": {
       "context": 0.30,
