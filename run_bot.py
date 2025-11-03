@@ -1051,18 +1051,17 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[{asset}] Résumé 200 bougies impossible: {e}")
                 else:
                     logger.debug(f"[{asset}] Skip résumé 200 (candles disabled).")
-
-                # === FOOTPRINT ANALYSE (ticks de la dernière bougie M1) ===
+                    
+                # === FOOTPRINT ANALYSE (bougie M1 clôturée, + option live si indispo) ===
                 try:
-                    last_candle = annotated_rates_df.iloc[-1]
+                    # 1) Bougie clôturée prioritaire (évite coverage partiel ~5s)
+                    use_idx = -2 if len(annotated_rates_df) >= 2 else -1
+                    candle_row = annotated_rates_df.iloc[use_idx]
+
                     if "time" in annotated_rates_df.columns:
-                        start_ts = pd.to_datetime(
-                            last_candle["time"], utc=True, errors="coerce"
-                        )
+                        start_ts = pd.to_datetime(candle_row["time"], utc=True, errors="coerce")
                     else:
-                        start_ts = pd.to_datetime(
-                            last_candle.name, utc=True, errors="coerce"
-                        )
+                        start_ts = pd.to_datetime(candle_row.name, utc=True, errors="coerce")
                     if pd.isna(start_ts):
                         start_ts = pd.Timestamp.utcnow()
                     end_ts = start_ts + pd.Timedelta(minutes=1)
@@ -1070,6 +1069,20 @@ def run_single_pipeline_cycle(
                     ticks_df = mt5_connector.get_ticks_for_candle(
                         asset, start_ts.to_pydatetime(), end_ts.to_pydatetime()
                     )
+
+                    # Fallback live (si l'historique close est vide)
+                    if ticks_df is None or ticks_df.empty:
+                        last_candle = annotated_rates_df.iloc[-1]
+                        if "time" in annotated_rates_df.columns:
+                            live_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                        else:
+                            live_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+                        if pd.isna(live_start):
+                            live_start = pd.Timestamp.utcnow()
+                        live_end = live_start + pd.Timedelta(minutes=1)
+                        ticks_df = mt5_connector.get_ticks_for_candle(
+                            asset, live_start.to_pydatetime(), live_end.to_pydatetime()
+                        )
 
                     if "time" in annotated_rates_df.columns:
                         annotated_rates_df["time"] = pd.to_datetime(
@@ -1092,11 +1105,9 @@ def run_single_pipeline_cycle(
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
                     else:
-                        logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu → skip.")
+                        logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu (close+live) → skip.")
                 except Exception as e:
-                    logger.error(
-                        f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
-                    )
+                    logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
 
                 # === ORDERFLOW v6 ANALYSE (5 dernières bougies) ===
                 try:
