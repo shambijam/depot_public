@@ -618,7 +618,7 @@ class ConfigManager:
         else:
             # --- Fallback clair en UTC si PAS de timezone fourni ---
             start_hour = int(self.get("bot_behavior.trading_start_hour_utc", 8) or 8)
-            end_hour   = int(self.get("bot_behavior.trading_end_hour_utc",   17) or 17)
+            end_hour   = int(self.get("bot_behavior.trading_end_hour_utc",   22) or 22)
             is_trading_day = now_utc.weekday() in allowed_weekdays
             in_hours = start_hour <= now_utc.hour < end_hour
 
