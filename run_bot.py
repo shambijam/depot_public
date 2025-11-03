@@ -544,6 +544,7 @@ def run_single_pipeline_cycle(
     # === FusionManager requis pour scalping XAUUSD ===
     try:
         from phase_observer.fusion_manager import FusionManager
+
         _fusion_mgr = FusionManager(logger=logger)
     except Exception:
         _fusion_mgr = None
@@ -656,15 +657,29 @@ def run_single_pipeline_cycle(
                 vote -= 1
                 trig_dir = "SELL"
 
-            fp_dir = (
-                "BUY"
-                if float(fp.get("delta_total", 0.0) or 0.0) > 0
-                else (
-                    "SELL"
-                    if float(fp.get("delta_total", 0.0) or 0.0) < 0
-                    else "NEUTRAL"
-                )
-            )
+            # Direction footprint: priorise aggressor_ratio puis counts, sinon neutre
+            try:
+                ar = fp.get("aggressor_ratio", None)
+                if isinstance(ar, (int, float)):
+                    fp_dir = "BUY" if ar > 0.5 else ("SELL" if ar < 0.5 else "NEUTRAL")
+                else:
+                    bt = fp.get("buy_ticks") or fp.get("buy_count")
+                    st = fp.get("sell_ticks") or fp.get("sell_count")
+                    if isinstance(bt, (int, float)) and isinstance(st, (int, float)):
+                        fp_dir = (
+                            "BUY" if bt > st else ("SELL" if st > bt else "NEUTRAL")
+                        )
+                    else:
+                        # fallback ultime: delta_total si présent, sinon neutre
+                        dt = fp.get("delta_total", 0.0)
+                        fp_dir = (
+                            "BUY"
+                            if float(dt or 0.0) > 0
+                            else ("SELL" if float(dt or 0.0) < 0 else "NEUTRAL")
+                        )
+            except Exception:
+                fp_dir = "NEUTRAL"
+
             vote += 1 if fp_dir == "BUY" else (-1 if fp_dir == "SELL" else 0)
             of_dir = "BUY" if dlt > 0 else ("SELL" if dlt < 0 else "NEUTRAL")
             vote += 1 if of_dir == "BUY" else (-1 if of_dir == "SELL" else 0)
@@ -741,7 +756,7 @@ def run_single_pipeline_cycle(
             }
         except Exception as e:
             return {"ok": False, "reason": f"fusion_error:{e}"}
-        
+
     # --- Helper: normaliser les inputs pour FusionManager ---
     def _scale100(x):
         try:
@@ -750,7 +765,9 @@ def run_single_pipeline_cycle(
         except Exception:
             return None
 
-    def _mk_fusion_inputs(signals: dict, latest: dict, symbol_info, mt5c: MT5Connector, sym: str):
+    def _mk_fusion_inputs(
+        signals: dict, latest: dict, symbol_info, mt5c: MT5Connector, sym: str
+    ):
         of_score = _scale100(latest.get("orderflow_score"))
         fp_score = _scale100(latest.get("footprint_score"))
 
@@ -787,8 +804,10 @@ def run_single_pipeline_cycle(
             tk = mt5c.get_symbol_tick(sym)
             ask = tk.get("ask") if isinstance(tk, dict) else getattr(tk, "ask", None)
             bid = tk.get("bid") if isinstance(tk, dict) else getattr(tk, "bid", None)
-            if trig_dir == "BUY" and ask: anchor = float(ask)
-            if trig_dir == "SELL" and bid: anchor = float(bid)
+            if trig_dir == "BUY" and ask:
+                anchor = float(ask)
+            if trig_dir == "SELL" and bid:
+                anchor = float(bid)
         except Exception:
             pass
 
@@ -808,9 +827,10 @@ def run_single_pipeline_cycle(
 
         # price_step utilisé par _suggest_trailing
         step = getattr(symbol_info, "point", None) if symbol_info else None
-        strat_cfg = {"price_step": float(step) if isinstance(step, (int, float)) else 0.01}
+        strat_cfg = {
+            "price_step": float(step) if isinstance(step, (int, float)) else 0.01
+        }
         return orderflow, footprint, triggers, strat_cfg, ctx
-
 
     # === Préparation exécution ===
     try:
@@ -1078,21 +1098,33 @@ def run_single_pipeline_cycle(
                         f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
                     )
 
-                # === ORDERFLOW v5 ANALYSE (5 dernières bougies) ===
+                # === ORDERFLOW v6 ANALYSE (5 dernières bougies) ===
                 try:
+
                     last_candles_df = annotated_rates_df.tail(5).copy()
                     if "time" in last_candles_df.columns:
                         last_candles_df["time"] = pd.to_datetime(
                             last_candles_df["time"], utc=True, errors="coerce"
                         )
                         last_candles_df.set_index("time", inplace=True)
+
+                    # Paramètres V6 pilotés par la conf (phase_observer_config.json)
+                    try:
+                        _ph = config_manager.get("phase_observer", {}) or {}
+                        _of6 = _ph.get("orderflow_v6", {}) or {}
+                        _imb = float(_of6.get("imbalance_threshold", 0.20))
+                        _cvd = float(_of6.get("cvd_smoothing", 0.0))
+                        _bins = int(_of6.get("price_bins", 24))
+                    except Exception:
+                        _imb, _cvd, _bins = 0.20, 0.0, 24
+
                     of_res = detect_orderflow_v6(
-                    last_candles_df,
-                    imbalance_threshold=0.20,
-                    cvd_smoothing=0.0,
-                    price_bins=24,
-                    logger=logger,
-                )
+                        last_candles_df,
+                        imbalance_threshold=_imb,
+                        cvd_smoothing=_cvd,
+                        price_bins=_bins,
+                        logger=logger,
+                    )
 
                     latest = dict(latest)
                     latest["orderflow_score"] = of_res.get("score", 0)
@@ -1156,21 +1188,51 @@ def run_single_pipeline_cycle(
                 try:
                     if _fusion_applies(asset):
                         if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                            of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(signals, latest, symbol_info_mt5, mt5_connector, asset)
-                            out = _fusion_mgr.fuse(orderflow=of, footprint=fp, triggers=trig, strategy_config=strat_cfg, context=ctx)
+                            of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
+                                signals, latest, symbol_info_mt5, mt5_connector, asset
+                            )
+                            out = _fusion_mgr.fuse(
+                                orderflow=of,
+                                footprint=fp,
+                                triggers=trig,
+                                strategy_config=strat_cfg,
+                                context=ctx,
+                            )
 
                             # TTL & slippage depuis la conf
-                            _fusion_cfg = (((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("fusion", {}) or {})
+                            _fusion_cfg = (
+                                (base_config.get("entry_rules", {}) or {}).get(
+                                    "scalping", {}
+                                )
+                                or {}
+                            ).get("fusion", {}) or {}
                             ttl_ms = int(_fusion_cfg.get("ttl_ms", 800))
-                            slippage_pts = float(_fusion_cfg.get("max_slippage_points", 10.0))
+                            slippage_pts = float(
+                                _fusion_cfg.get("max_slippage_points", 10.0)
+                            )
+
+                            # Confiance fusion → toujours 0..100 pour cohérence
+                            try:
+                                _fc = float(out.get("fused_confidence", 0.0) or 0.0)
+                                _score100 = _fc * 100.0 if 0.0 <= _fc <= 1.0 else _fc
+                            except Exception:
+                                _score100 = 0.0
+
                             fdec = {
                                 "ok": bool(out.get("ok")),
                                 "action": out.get("action"),
-                                "score": float(out.get("fused_confidence", 0.0) or 0.0),
-                                "price": (trig.get("anchor_price") if isinstance(trig, dict) else None),
+                                "score": float(_score100),
+                                "price": (
+                                    trig.get("anchor_price")
+                                    if isinstance(trig, dict)
+                                    else None
+                                ),
                                 "ttl_ms": ttl_ms,
                                 "slippage_guard_points": slippage_pts,
-                                "ts_created": __import__("pandas").Timestamp.utcnow().value // 1_000_000,
+                                "ts_created": __import__("pandas")
+                                .Timestamp.utcnow()
+                                .value
+                                // 1_000_000,
                                 "meta": {
                                     "signal_type": out.get("signal_type"),
                                     "consensus": out.get("consensus"),
@@ -1179,10 +1241,17 @@ def run_single_pipeline_cycle(
                                     "quality": out.get("quality"),
                                 },
                             }
+
                         elif REQUIRE_FUSION_MGR:
                             fdec = {"ok": False, "reason": "fusion_manager_missing"}
                         else:
-                            fdec = _quick_vote_fusion(signals=signals, latest=latest, base_cfg=base_config, sym=asset, mt5c=mt5_connector)
+                            fdec = _quick_vote_fusion(
+                                signals=signals,
+                                latest=latest,
+                                base_cfg=base_config,
+                                sym=asset,
+                                mt5c=mt5_connector,
+                            )
 
                         if (
                             fdec
@@ -1286,7 +1355,9 @@ def run_single_pipeline_cycle(
                 fdec_syn = {"ok": False, "reason": f"fusion_error:{_e}"}
 
             # Construire la ligne "snapshot"
-            if fdec_syn and (fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY", "SELL"}):
+            if fdec_syn and (
+                fdec_syn.get("ok") or fdec_syn.get("action") in {"BUY", "SELL"}
+            ):
                 act_now = fdec_syn.get("action", "—")
                 sc_now = (
                     fdec_syn.get("fused_confidence", None)
@@ -1314,11 +1385,12 @@ def run_single_pipeline_cycle(
                     best = lasts[-1]
                 act_used = best.get("action", "—")
                 sc_used = best.get("confidence", None)
-                used_line = f"used:     action={act_used:<4} score={_fmt_float(sc_used)}"
+                used_line = (
+                    f"used:     action={act_used:<4} score={_fmt_float(sc_used)}"
+                )
                 print(f"   {asset:<7} → {used_line} | {snap_line}")
             else:
                 print(f"   {asset:<7} → {snap_line}")
-
 
         # === GATECHECK XAUUSD (diagnostic) ===
         try:
@@ -1355,9 +1427,15 @@ def run_single_pipeline_cycle(
                     if isinstance(of.get("mean_imbalance"), (int, float))
                     else None
                 )
-                conf_txt = f"{conf:.3f}" if isinstance(conf, (int, float)) else str(conf)
-                rate_txt = f"{trate:.2f}/s" if isinstance(trate, (int, float)) else f"{trate}/s"
-                imb_txt  = f"{imb:.2f}" if isinstance(imb, (int, float)) else str(imb)
+                conf_txt = (
+                    f"{conf:.3f}" if isinstance(conf, (int, float)) else str(conf)
+                )
+                rate_txt = (
+                    f"{trate:.2f}/s"
+                    if isinstance(trate, (int, float))
+                    else f"{trate}/s"
+                )
+                imb_txt = f"{imb:.2f}" if isinstance(imb, (int, float)) else str(imb)
 
                 print(
                     "[GATECHECK][XAUUSD] "
@@ -1664,12 +1742,14 @@ def run_single_pipeline_cycle(
                                 "context": global_context,
                                 "active_config": base_config,
                             }
-                            decision_pkg.setdefault("audit_context", {}).update({
-                                "intent_symbol": td.get("symbol"),
-                                "intent_side": td.get("side"),
-                                "intent_burst": td.get("burst_size"),
-                            })
-                            
+                            decision_pkg.setdefault("audit_context", {}).update(
+                                {
+                                    "intent_symbol": td.get("symbol"),
+                                    "intent_side": td.get("side"),
+                                    "intent_burst": td.get("burst_size"),
+                                }
+                            )
+
                             res = run_trade_execution_pipeline(
                                 trade_executor, decision_pkg, is_dry_run=is_dry_run
                             )
@@ -1825,9 +1905,17 @@ def run_single_pipeline_cycle(
                         logger.info(f"[WHY_NO_TRADE][{asset}] fusion_off")
                         continue
                     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                        _latest = sig.get("__latest____", {})
+                        _latest = (
+                            sig.get("__latest")
+                            or sig.get("__latest__")
+                            or sig.get("__latest____")
+                            or {}
+                        )
+
                         _syminfo = mt5_connector.get_symbol_info(asset)
-                        of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(sig, _latest, _syminfo, mt5_connector, asset)
+                        of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
+                            sig, _latest, _syminfo, mt5_connector, asset
+                        )
                         fdec_diag = _fusion_mgr.fuse(
                             orderflow=of,
                             footprint=fp,
@@ -2197,11 +2285,13 @@ def run_single_pipeline_cycle(
                         "context": global_context,
                         "active_config": base_config,
                     }
-                    decision_pkg.setdefault("audit_context", {}).update({
-                        "intent_symbol": td.get("symbol"),
-                        "intent_side": td.get("side"),
-                        "intent_burst": td.get("burst_size"),
-                    })
+                    decision_pkg.setdefault("audit_context", {}).update(
+                        {
+                            "intent_symbol": td.get("symbol"),
+                            "intent_side": td.get("side"),
+                            "intent_burst": td.get("burst_size"),
+                        }
+                    )
 
                     res = run_trade_execution_pipeline(
                         trade_executor, decision_pkg, is_dry_run=is_dry_run
