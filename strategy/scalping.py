@@ -838,38 +838,78 @@ class ScalpingStrategy(BaseStrategy):
     ) -> Optional[str]:
         """
         Détecte un sweep simple des HH/LL sur 'lookback' barres.
-        BUY si on casse le plus bas récent (sweep bas), SELL si on casse le plus haut récent (sweep haut).
+        Contrarian:
+        - SELL si le close casse le plus haut récent (sweep au-dessus)
+        - BUY  si le close casse le plus bas récent (sweep en-dessous)
+        Retourne "BUY" / "SELL" / None.
         """
-        if df is None or len(df) < lookback:
+        try:
+            if df is None or lookback is None or int(lookback) < 2:
+                return None
+            if len(df) < int(lookback):
+                return None
+
+            recent = df.iloc[-int(lookback):]
+
+            # Cast robustes
+            hi = pd.to_numeric(recent["high"], errors="coerce")
+            lo = pd.to_numeric(recent["low"],  errors="coerce")
+            cl = pd.to_numeric(df["close"].iloc[-1], errors="coerce")
+
+            hh = float(hi.max()) if np.isfinite(hi.max()) else float("nan")
+            ll = float(lo.min()) if np.isfinite(lo.min()) else float("nan")
+            close = float(cl) if np.isfinite(cl) else float("nan")
+
+            if not (np.isfinite(hh) and np.isfinite(ll) and np.isfinite(close)):
+                return None
+
+            # Heuristique sweep (contrarian)
+            if close >= hh:
+                return "SELL"
+            if close <= ll:
+                return "BUY"
+            return None
+        except Exception:
             return None
 
-        recent = df.tail(lookback)
-        hh = float(recent["high"].max())
-        ll = float(recent["low"].min())
-        last = df.iloc[-1]
-        close = float(last["close"])
 
-        # heuristique sweep : close au-delà de HH/LL
-        if close >= hh:
-            return "SELL"  # prise de liquidité au-dessus → contrarian
-        if close <= ll:
-            return "BUY"
-        return None
+    def _rule_marubozu_range(
+        self,
+        df: pd.DataFrame,
+        asset: str,
+        price: float,
+        meta: Dict[str, Any],
+        cfg: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Détection marubozu (continuation / reversal) + range actif.
+        - Utilise des helpers internes et self._atr().
+        - Respecte cfg['detection'], cfg['continuation'], cfg['reversal'], cfg['range_active'].
+        Retourne un dict décision ou None.
+        """
+        if df is None or df.empty:
+            return None
 
+        pip_size = float(meta.get("pip_size", 0.0) or 0.0)
 
-        # --- B) Helpers ---
-        def last_big_candle(df_, atr_period, min_mult, min_body):
+        # --- Helpers (au bon niveau d'indentation) ---
+        def last_big_candle(df_: pd.DataFrame, atr_period: int, min_mult: float, min_body: float):
             if len(df_) < atr_period + 3:
                 return None
-            atr = self._atr(df_, period=atr_period)
-            if not isinstance(atr, (int, float)) or atr <= 0:
+            atr_val = self._atr(df_, period=atr_period)
+            if not isinstance(atr_val, (int, float)) or atr_val <= 0:
                 return None
             body = (df_["close"] - df_["open"]).abs()
             size = (df_["high"] - df_["low"]).abs()
-            body_ratio = (body / size.replace(0, np.nan)).fillna(0.0)
+            # éviter division par zéro
+            size_safe = size.replace(0, np.nan)
+            body_ratio = (body / size_safe).fillna(0.0)
+
+            # on scanne les 3 dernières bougies
             for idx in range(len(df_) - 1, max(len(df_) - 4, 1), -1):
-                csize, brat = float(size.iloc[idx]), float(body_ratio.iloc[idx])
-                if csize >= min_mult * atr and brat >= min_body:
+                csize = float(size.iloc[idx])
+                brat = float(body_ratio.iloc[idx])
+                if csize >= (min_mult * atr_val) and brat >= min_body:
                     return {
                         "index": idx,
                         "bull": df_["close"].iloc[idx] > df_["open"].iloc[idx],
@@ -879,33 +919,45 @@ class ScalpingStrategy(BaseStrategy):
                         "low": float(df_["low"].iloc[idx]),
                         "open": float(df_["open"].iloc[idx]),
                         "close": float(df_["close"].iloc[idx]),
-                        "mid": float(
-                            (df_["open"].iloc[idx] + df_["close"].iloc[idx]) / 2.0
-                        ),
+                        "mid": float((df_["open"].iloc[idx] + df_["close"].iloc[idx]) / 2.0),
                     }
             return None
 
-        def is_range_active(df_, lookback, max_range_over_atr, min_avg_candle_atr):
+        def is_range_active(
+            df_: pd.DataFrame,
+            lookback: int,
+            max_range_over_atr: float,
+            min_avg_candle_atr: float,
+        ):
             if len(df_) < lookback + 10:
                 return False, None
             sub = df_.tail(lookback)
             rng = float(sub["high"].max() - sub["low"].min())
-            atr = self._atr(df_, period=14)
-            if not isinstance(atr, (int, float)) or atr <= 0:
+            atr_val = self._atr(df_, period=14)
+            if not isinstance(atr_val, (int, float)) or atr_val <= 0:
                 return False, None
             avg_candle = float((sub["high"] - sub["low"]).mean())
-            if (
-                rng / atr <= max_range_over_atr
-                and (avg_candle / atr) >= min_avg_candle_atr
-            ):
+            if (rng / atr_val) <= max_range_over_atr and (avg_candle / atr_val) >= min_avg_candle_atr:
                 return True, {
                     "hh": float(sub["high"].max()),
                     "ll": float(sub["low"].min()),
                 }
             return False, None
 
+        def dir_ok(direction: str) -> bool:
+            """Petit helper local pour l’alignement MTF si activé dans cfg['mtf_bias']."""
+            mb = cfg.get("mtf_bias", {}) or {}
+            if not mb.get("use", True):
+                return True
+            bias = str(meta.get("mtf_bias_direction", "")).lower()
+            if bias in ("buy", "bull", "long"):
+                return direction == "buy"
+            if bias in ("sell", "bear", "short"):
+                return direction == "sell"
+            return True  # si inconnu, on ne bloque pas
+
         # --- C) Détection ---
-        det = cfg.get("detection", {})
+        det = cfg.get("detection", {}) or {}
         big = last_big_candle(
             df,
             atr_period=int(det.get("atr_period", 14)),
@@ -918,38 +970,27 @@ class ScalpingStrategy(BaseStrategy):
             direction = "buy" if big["bull"] else "sell"
 
             # (1) Continuation
-            if cfg.get("continuation", {}).get("enabled", True):
-                pmin = float(cfg["continuation"].get("pullback_frac_min", 0.2))
-                pmax = float(cfg["continuation"].get("pullback_frac_max", 0.4))
+            cont_cfg = cfg.get("continuation", {}) or {}
+            if cont_cfg.get("enabled", True):
+                pmin = float(cont_cfg.get("pullback_frac_min", 0.2))
+                pmax = float(cont_cfg.get("pullback_frac_max", 0.4))
                 hi, lo = big["high"], big["low"]
                 body_top = max(big["open"], big["close"])
                 body_bot = min(big["open"], big["close"])
-                pull_min = (
-                    body_top - pmax * (body_top - body_bot)
-                    if big["bull"]
-                    else body_bot + pmax * (body_top - body_bot)
-                )
-                pull_max = (
-                    body_top - pmin * (body_top - body_bot)
-                    if big["bull"]
-                    else body_bot + pmin * (body_top - body_bot)
-                )
-                in_zone = (
-                    (pull_min <= price <= pull_max)
-                    if big["bull"]
-                    else (pull_max <= price <= pull_min)
-                )
 
-                if in_zone and (
-                    not cfg.get("mtf_bias", {}).get("use", True) or dir_ok(direction)
-                ):
-                    sl = (
-                        (lo - meta["pip_size"] * 2)
-                        if big["bull"]
-                        else (hi + meta["pip_size"] * 2)
-                    )
-                    sl_pips = abs(price - sl) / meta["pip_size"]
-                    tp_pips = sl_pips * float(cfg["continuation"].get("rr_target", 1.5))
+                pull_min = (body_top - pmax * (body_top - body_bot)) if big["bull"] else (body_bot + pmax * (body_top - body_bot))
+                pull_max = (body_top - pmin * (body_top - body_bot)) if big["bull"] else (body_bot + pmin * (body_top - body_bot))
+
+                in_zone = (pull_min <= price <= pull_max) if big["bull"] else (pull_max <= price <= pull_min)
+
+                if in_zone and (not cfg.get("mtf_bias", {}).get("use", True) or dir_ok(direction)):
+                    sl = (lo - 2 * pip_size) if big["bull"] else (hi + 2 * pip_size)
+                    if pip_size > 0:
+                        sl_pips = abs(price - sl) / pip_size
+                        tp_pips = sl_pips * float(cont_cfg.get("rr_target", 1.5))
+                    else:
+                        sl_pips, tp_pips = 0.0, 0.0
+
                     dec = {
                         "action": "BUY" if big["bull"] else "SELL",
                         "asset": asset,
@@ -958,7 +999,7 @@ class ScalpingStrategy(BaseStrategy):
                         "target_tp_pips": round(tp_pips, 2),
                         "rule_name": "marubozu_continuation",
                         "strategy_type": "scalping",
-                        "confidence": 0.7,
+                        "confidence": 0.70,
                         "meta": {"marubozu": big},
                     }
                     if latest_pat:
@@ -967,30 +1008,24 @@ class ScalpingStrategy(BaseStrategy):
                     return dec
 
             # (2) Reversal
-            if (
-                cfg.get("reversal", {}).get("enabled", True)
-                and len(df) > big["index"] + 1
-            ):
+            rev_cfg = cfg.get("reversal", {}) or {}
+            if rev_cfg.get("enabled", True) and len(df) > big["index"] + 1:
                 nxt = big["index"] + 1
                 mid = big["mid"]
-                next_close, next_open = float(df["close"].iloc[nxt]), float(
-                    df["open"].iloc[nxt]
-                )
+                next_close = float(df["close"].iloc[nxt])
+                next_open = float(df["open"].iloc[nxt])
+
                 reintegrated = (next_close < mid) if big["bull"] else (next_close > mid)
-                closed_opposite = (
-                    (next_close < next_open)
-                    if big["bull"]
-                    else (next_close > next_open)
-                )
+                closed_opposite = (next_close < next_open) if big["bull"] else (next_close > next_open)
 
                 if reintegrated and closed_opposite:
-                    sl = (
-                        (big["high"] + meta["pip_size"] * 2)
-                        if big["bull"]
-                        else (big["low"] - meta["pip_size"] * 2)
-                    )
-                    sl_pips = abs(price - sl) / meta["pip_size"]
-                    tp_pips = sl_pips * float(cfg["reversal"].get("rr_target", 1.2))
+                    sl = (big["high"] + 2 * pip_size) if big["bull"] else (big["low"] - 2 * pip_size)
+                    if pip_size > 0:
+                        sl_pips = abs(price - sl) / pip_size
+                        tp_pips = sl_pips * float(rev_cfg.get("rr_target", 1.2))
+                    else:
+                        sl_pips, tp_pips = 0.0, 0.0
+
                     dec = {
                         "action": "SELL" if big["bull"] else "BUY",
                         "asset": asset,
@@ -1007,8 +1042,8 @@ class ScalpingStrategy(BaseStrategy):
                         dec["meta"]["pattern"] = latest_pat
                     return dec
 
-        # --- D) Range actif ---
-        rg_cfg = cfg.get("range_active", {})
+        # --- D) Range actif (même si pas de marubozu retenu) ---
+        rg_cfg = cfg.get("range_active", {}) or {}
         if rg_cfg.get("enabled", True):
             ok, info = is_range_active(
                 df,
@@ -1019,7 +1054,9 @@ class ScalpingStrategy(BaseStrategy):
             if ok and info:
                 hh, ll = info["hh"], info["ll"]
                 tol = float(rg_cfg.get("tolerance_frac", 0.15))
-                top_zone, bot_zone = hh - tol * (hh - ll), ll + tol * (hh - ll)
+                top_zone = hh - tol * (hh - ll)
+                bot_zone = ll + tol * (hh - ll)
+
                 dec = None
                 if price >= top_zone:
                     dec = {
@@ -1052,6 +1089,7 @@ class ScalpingStrategy(BaseStrategy):
 
         return None
 
+
     def _rule_range_accumulation(
         self,
         df: pd.DataFrame,
@@ -1077,7 +1115,8 @@ class ScalpingStrategy(BaseStrategy):
         if rng <= 0:
             return None
 
-        top_zone, bot_zone = hh - tolerance * rng, ll + tolerance * rng
+        top_zone = hh - tolerance * rng
+        bot_zone = ll + tolerance * rng
         latest_pat = meta.get("latest_pattern")
 
         dec = None
@@ -1104,7 +1143,12 @@ class ScalpingStrategy(BaseStrategy):
                 "confidence": 0.7,
             }
 
+        if dec and latest_pat:
+            dec["rule_name"] += f"+pattern:{latest_pat.get('pattern')}"
+            dec.setdefault("meta", {})["pattern"] = latest_pat
+
         return dec
+
 
     def get_parameters(self) -> Dict[str, any]:
         """
@@ -1298,39 +1342,25 @@ class ScalpingStrategy(BaseStrategy):
         return series.rolling(window=period, min_periods=1).std(ddof=0)
 
     @staticmethod
-    def _atr(self, df: pd.DataFrame, period: int = 14, return_series: bool = False):
+    def _atr(df: pd.DataFrame, period: int = 14) -> float:
         """
-        ATR (Average True Range) robuste.
-        - df: DataFrame avec colonnes 'high','low','close'
-        - period: fenêtre de moyenne glissante
-        - return_series: True → renvoie la série ATR ; False → dernière valeur (float)
+        ATR robuste sur Series Pandas (pas de numpy.reduce pour conserver .rolling()).
+        Retourne le dernier ATR (float) ou NaN si données insuffisantes.
         """
-        # Tolérance à l'inversion accidentelle des paramètres (compat)
-        # ex: _atr(14, df) → on swap automatiquement
-        if isinstance(df, (int, float)) and isinstance(period, pd.DataFrame):
-            df, period = period, int(df)
+        try:
+            if df is None or len(df) < max(2, int(period)):
+                return float("nan")
 
-        if df is None or len(df) == 0:
-            return np.nan if not return_series else pd.Series(dtype=float)
+            h = pd.to_numeric(df["high"], errors="coerce")
+            l = pd.to_numeric(df["low"],  errors="coerce")
+            c = pd.to_numeric(df["close"], errors="coerce")
+            pc = c.shift(1)
 
-        # Assure des Series pandas (évite l'erreur "ndarray has no attribute rolling")
-        h = pd.Series(df["high"], dtype="float64", copy=False)
-        l = pd.Series(df["low"],  dtype="float64", copy=False)
-        c = pd.Series(df["close"], dtype="float64", copy=False)
+            # True Range en Pandas → on garde une Series pour pouvoir .rolling()
+            tr = pd.concat([(h - l).abs(), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
 
-        prev_close = c.shift(1)
-        tr1 = (h - l).abs()
-        tr2 = (h - prev_close).abs()
-        tr3 = (l - prev_close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        atr = tr.rolling(window=int(period), min_periods=int(period)).mean()
-
-        if return_series:
-            return atr
-
-        val = atr.iloc[-1]
-        # Fallback si pas encore assez de barres : moyenne du TR dispo
-        return float(val) if pd.notna(val) else float(tr.tail(int(period)).mean())
-
-    
+            atr_series = tr.rolling(window=int(period), min_periods=int(period)).mean()
+            atr = atr_series.iloc[-1]
+            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+        except Exception:
+            return float("nan")
