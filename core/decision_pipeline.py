@@ -185,6 +185,12 @@ class DecisionPipeline:
             # === ÉTAPE 1: Analyse du contexte ===
             print("🤖 [DECISION] Étape 1: Analyse du contexte...")
             analyzed_context = self.config_manager.analyze_context(context) or {}
+            print(
+                f"🕒 [SESSION] market_open={analyzed_context.get('is_market_open')} "
+                f"(in_hours={analyzed_context.get('is_trading_hours')}, "
+                f"is_trading_day={analyzed_context.get('is_trading_day')})"
+            )
+            
             print("🤖 [DECISION] Contexte analysé avec succès")
             
             # Gate: hors horaires → aucune nouvelle entrée
