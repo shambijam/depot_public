@@ -10,6 +10,7 @@ from .pattern_detector import detect_patterns
 from .institutional_metrics import calculate_volume_profile
 from .scoring_engine import calculate_score
 from .result_builder import build_result
+from .divergence_detector import detect_divergences
 
 
 def detect_orderflow_v6(
@@ -50,6 +51,22 @@ def detect_orderflow_v6(
 
     # --- 1) Préparation / validation des données ---
     df, rescue_level, rescue_note = validate_and_prepare_data(df_m1)
+
+    # === PATCH TZ-NORMALIZE (2025-11-03) — neutralise les tz pour éviter .astype sur tz-aware ===
+    try:
+        # Index → tz-naive
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+
+        # Colonnes temporelles usuelles → tz-naive
+        for col in ("time", "timestamp", "datetime", "Date"):
+            if col in df.columns:
+                s = pd.to_datetime(df[col], errors="coerce", utc=True)
+                if s.notna().any():
+                    # on repasse en tz-naive pour éviter les .astype('datetime64[ns]') qui cassent
+                    df[col] = s.dt.tz_convert("UTC").dt.tz_localize(None)
+    except Exception as e_tz:
+        safe_log(logger, "warning", f"[OF V6][TZ] normalization skipped: {e_tz}")
 
     # Si tout a été filtré/invalidé, on reste cohérent
     if df is None or len(df) == 0:
@@ -99,6 +116,27 @@ def detect_orderflow_v6(
     except Exception as e_pat:
         safe_log(logger, "warning", f"[OF V6] pattern detection failed: {e_pat}")
         patterns = []  # format neutre (result_builder et scoring gèrent dict|list)
+
+    # --- 3.b) Divergences (prix vs indicateur: CVD/VWAP) ---
+    try:
+        divergences = detect_divergences(
+            df,
+            lookback=200,
+            pivot_window=3,
+            confirm_window=10,
+            fallback_indicator="cvd",
+        )
+    except Exception as e_div:
+        safe_log(logger, "warning", f"[OF V6] divergence detection failed: {e_div}")
+        divergences = []
+
+    # Fusionne proprement avec le format des patterns existants (liste V5 ou dict)
+    if isinstance(patterns, list):
+        patterns.extend(divergences)
+    elif isinstance(patterns, dict):
+        patterns = {"events": patterns, "divergences": divergences}
+    else:
+        patterns = {"events": [], "divergences": divergences}
 
     # --- 4) Volume Profile (avec options avancées fusionnées proprement) ---
     vp_kwargs: Dict[str, Any] = {"price_bins": price_bins}

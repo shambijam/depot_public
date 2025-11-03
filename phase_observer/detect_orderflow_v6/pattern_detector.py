@@ -28,6 +28,21 @@ def detect_patterns(
     if df is None or len(df) == 0:
         return events
 
+    # === PATCH TZ-NORMALIZE (2025-11-03) — neutralise les tz pour éviter .astype sur tz-aware ===
+    try:
+        # Index → tz-naive
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+
+        # Colonnes temporelles usuelles → tz-naive
+        for _col in ("time", "timestamp", "datetime", "Date"):
+            if _col in df.columns:
+                _s = pd.to_datetime(df[_col], errors="coerce", utc=True)
+                if _s.notna().any():
+                    df[_col] = _s.dt.tz_convert("UTC").dt.tz_localize(None)
+    except Exception:
+        pass
+
     # ---------- Helpers ----------
     def _num(s, default=0.0, dtype=float):
         # Conversion robuste -> numpy (évite copies inutiles plus tard)
@@ -61,16 +76,15 @@ def detect_patterns(
 
     agr = _num(df.get("aggressor_ratio", 0.5), default=0.5)
 
-    # Timestamps (chaînes prêtes)
+    # Timestamps (chaînes prêtes) — version tz-safe
     if "time" in df.columns:
-        ts = (
-            pd.to_datetime(df["time"], errors="coerce", utc=True)
-            .astype("datetime64[ns]")
-            .astype(str)
-            .to_numpy()
-        )
+        _s = pd.to_datetime(df["time"], errors="coerce", utc=True)
+        _s = _s.dt.tz_convert("UTC").dt.tz_localize(None)
+        ts = _s.astype("datetime64[ns]").astype(str).to_numpy()
     elif "timestamp" in df.columns:
-        ts = df["timestamp"].astype(str).to_numpy()
+        _s = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        _s = _s.dt.tz_convert("UTC").dt.tz_localize(None)
+        ts = _s.astype("datetime64[ns]").astype(str).to_numpy()
     else:
         ts = np.arange(n).astype(str)
 

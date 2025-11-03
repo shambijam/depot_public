@@ -4,6 +4,8 @@ from typing import Dict, Any, Tuple, List, Optional
 import numpy as np
 import pandas as pd
 import math
+import hashlib
+from collections import OrderedDict
 
 
 def _value_area_from_profile(
@@ -412,18 +414,15 @@ def calculate_volume_profile(
     return_nodes: bool = False,  # renvoyer les “nodes” (liste détaillée)
 ) -> Dict[str, Any]:
     """
-    Volume Profile institutionnel (avec LRU cache):
+    Volume Profile institutionnel (avec LRU cache durci):
       - Distribution par chevauchement OHLC (corps surpondéré si use_ohlc_overlap)
       - VPOC, VA (coverage), HVN/LVN, modalité, shape metrics (skew/kurt/entropy)
       - Initial Balance (ib_bars premières barres)
     """
-    import math
-    import hashlib
-    from collections import OrderedDict
-    import numpy as np
-    import pandas as pd
 
-    # ---- LRU cache module-global (créé à la volée) ----
+    # =======================
+    #  LRU cache robuste
+    # =======================
     cache: "OrderedDict[tuple, Dict[str, Any]]" = globals().setdefault(
         "_VP_CACHE", OrderedDict()
     )
@@ -469,8 +468,39 @@ def calculate_volume_profile(
         h.update(str(len(d)).encode())
         return h.hexdigest()
 
-    # ---- Clé de cache (données + paramètres) ----
-    fp = _fingerprint_df(df) if (df is not None and len(df) > 0) else "empty"
+    # =======================
+    #  Clé de cache
+    # =======================
+    if not isinstance(df, pd.DataFrame) or df is None or len(df) == 0:
+        # réponse minimale cohérente (et cachable)
+        fp = "empty"
+        key = (
+            fp,
+            int(price_bins or 0),
+            float(bin_width or 0.0),
+            float(tick_size or 0.0),
+            bool(use_ohlc_overlap),
+            round(float(body_gain), 4),
+            round(float(coverage), 4),
+            round(float(peak_std), 4),
+            int(min_separation_ticks),
+            int(max_bins),
+            int(ib_bars),
+            bool(return_nodes),
+        )
+        cached = _cache_get(key)
+        if cached is not None:
+            return dict(cached)
+        res = {
+            "vpoc_price": None,
+            "va_low": None,
+            "va_high": None,
+            "va_coverage": float(coverage),
+        }
+        _cache_put(key, res)
+        return dict(res)
+
+    fp = _fingerprint_df(df)
     key = (
         fp,
         int(price_bins or 0),
@@ -487,23 +517,14 @@ def calculate_volume_profile(
     )
     cached = _cache_get(key)
     if cached is not None:
-        # copie superficielle (évite mutation du cache par l'appelant)
         return dict(cached)
 
     # =======================
-    #  Calcul principal
+    #  Préparation des séries
     # =======================
-    if df is None or len(df) == 0:
-        res = {
-            "vpoc_price": None,
-            "va_low": None,
-            "va_high": None,
-            "va_coverage": coverage,
-        }
-        _cache_put(key, res)
-        return dict(res)
-
-    # ----------- Séries prix / volumes robustes -----------
+    # NB: _to_num, _infer_tick_size, _freedman_diaconis_bin_width, _build_edges,
+    #     _accumulate_profile_ohlc_overlap, _expand_va, _local_extrema, _suppress_close
+    #     sont supposés présents dans le module (comme avant).
     o = _to_num(df.get("open", np.nan), np.nan)
     h = _to_num(df.get("high", np.nan), np.nan)
     l = _to_num(df.get("low", np.nan), np.nan)
@@ -517,33 +538,60 @@ def calculate_volume_profile(
     else:
         vol_src = _to_num(df.get("tick_volume", 0.0), 0.0)
 
+    # masque validité prix (close)
     mask = np.isfinite(c)
     if not np.any(mask):
         res = {
             "vpoc_price": None,
             "va_low": None,
             "va_high": None,
-            "va_coverage": coverage,
+            "va_coverage": float(coverage),
         }
         _cache_put(key, res)
         return dict(res)
 
+    # Sélections valides
     prices = c[mask]
-    pmin = float(np.nanmin(np.minimum.reduce([o, h, l, c])))
-    pmax = float(np.nanmax(np.maximum.reduce([o, h, l, c])))
-    if not (np.isfinite(pmin) and np.isfinite(pmax)) or pmax <= pmin:
+    vols_for_hist = (
+        vol_src[mask]
+        if (isinstance(vol_src, np.ndarray) and vol_src.shape == c.shape)
+        else None
+    )
+
+    # bornes de prix robustes
+    pmin_raw = np.minimum.reduce([o, h, l, c])
+    pmax_raw = np.maximum.reduce([o, h, l, c])
+    pmin = (
+        float(np.nanmin(pmin_raw))
+        if np.isfinite(pmin_raw).any()
+        else float(np.nanmin(prices))
+    )
+    pmax = (
+        float(np.nanmax(pmax_raw))
+        if np.isfinite(pmax_raw).any()
+        else float(np.nanmax(prices))
+    )
+    if (not np.isfinite(pmin)) or (not np.isfinite(pmax)) or pmax <= pmin:
         pmin, pmax = float(np.nanmin(prices)), float(np.nanmax(prices))
-    if not (np.isfinite(pmin) and np.isfinite(pmax)) or pmax <= pmin:
-        # fallback ultime: histogramme du close
-        hist, edges = np.histogram(prices, bins=price_bins or 20, weights=vol_src[mask])
-        i = int(np.argmax(hist))
-        vpoc_price = float((edges[i] + edges[i + 1]) * 0.5)
-        va_low, va_high, _ = _expand_va(hist, edges, coverage=coverage)
+    if (not np.isfinite(pmin)) or (not np.isfinite(pmax)) or pmax <= pmin:
+        # fallback ultime: histogramme du close non-pondéré
+        hist, edges = np.histogram(prices, bins=int(price_bins or 20))
+        i = int(np.argmax(hist)) if hist.size else -1
+        vpoc_price = float((edges[i] + edges[i + 1]) * 0.5) if i >= 0 else None
+        va_low, va_high, _ = (
+            _expand_va(
+                hist.astype(float) if hist.size else np.array([0.0]),
+                edges,
+                coverage=coverage,
+            )
+            if hist.size
+            else (None, None, -1)
+        )
         res = {
             "vpoc_price": vpoc_price,
             "va_low": va_low,
             "va_high": va_high,
-            "va_coverage": coverage,
+            "va_coverage": float(coverage),
             "bins_count": int(hist.size),
             "bin_width": float(edges[1] - edges[0]) if edges.size > 1 else None,
             "price_min": float(edges[0]) if edges.size > 0 else None,
@@ -557,53 +605,121 @@ def calculate_volume_profile(
         _cache_put(key, res)
         return dict(res)
 
-    # ----------- Construction des bins -----------
+    # =======================
+    #  Construction des bins
+    # =======================
     ts = (
         float(tick_size)
         if (tick_size is not None and tick_size > 0)
         else _infer_tick_size(prices)
     )
+    # largeur
     if bin_width and bin_width > 0:
         width = float(bin_width)
     elif price_bins and price_bins > 0:
-        width = (pmax - pmin) / float(price_bins)
+        width = max(ts, (pmax - pmin) / float(price_bins))
     else:
-        fd = _freedman_diaconis_bin_width(prices)
+        fd = max(1e-12, _freedman_diaconis_bin_width(prices))  # garde-fou
         width = max(ts, fd)
-    edges = _build_edges(pmin, pmax, width)
-    if edges.size > max_bins + 1:
+
+    # edges robustes
+    edges = _build_edges(pmin, pmax, max(width, ts))
+    if edges is None or not isinstance(edges, np.ndarray) or edges.size < 2:
+        # fallback minimal 20 bins
+        edges = np.linspace(
+            pmin, pmax, num=int(min(max_bins, max(2, price_bins or 20))) + 1
+        )
+
+    # cap max bins
+    if edges.size - 1 > max_bins:
         k = int(math.ceil((edges.size - 1) / max_bins))
-        width *= k
+        width = max(width * k, ts)
         edges = _build_edges(pmin, pmax, width)
+        if edges.size - 1 > max_bins:
+            # ultime fallback linéaire
+            edges = np.linspace(pmin, pmax, num=max_bins + 1)
 
     centers = (edges[:-1] + edges[1:]) * 0.5
     nbins = edges.size - 1
 
-    # ----------- Accumulation du profil -----------
+    # =======================
+    #  Accumulation du profil
+    # =======================
+    vol_hist = None
     if use_ohlc_overlap:
-        vol_hist = _accumulate_profile_ohlc_overlap(
-            o, h, l, c, vol_src, edges, body_gain=body_gain
-        )
-    else:
-        vol_hist, _ = np.histogram(prices, bins=edges, weights=vol_src[mask])
+        try:
+            vol_hist = _accumulate_profile_ohlc_overlap(
+                o, h, l, c, vol_src, edges, body_gain=body_gain
+            )
+        except Exception:
+            vol_hist = None
 
-    vol_hist = np.nan_to_num(vol_hist, nan=0.0, posinf=0.0, neginf=0.0).astype(float)
+    if vol_hist is None:
+        # fallback: histogramme sur close (pondéré si possible)
+        try:
+            if vols_for_hist is not None and vols_for_hist.shape[0] == prices.shape[0]:
+                vol_hist, _ = np.histogram(prices, bins=edges, weights=vols_for_hist)
+            else:
+                vol_hist, _ = np.histogram(prices, bins=edges)
+        except Exception:
+            # dernier filet: zeros
+            vol_hist = np.zeros(nbins, dtype=float)
 
-    # ----------- VPOC + VA -----------
-    va_low, va_high, i_poc = _expand_va(vol_hist, edges, coverage=coverage)
-    if i_poc < 0:
+    # **Garde-fou central**: empêcher "'NoneType'.astype"
+    vol_hist = (
+        np.asarray(vol_hist, dtype=float)
+        if vol_hist is not None
+        else np.zeros(nbins, dtype=float)
+    )
+    # alignement taille
+    if vol_hist.shape[0] != nbins:
+        # pad/troncature pour correspondre aux bins
+        if vol_hist.shape[0] < nbins:
+            vol_hist = np.pad(vol_hist, (0, nbins - vol_hist.shape[0]), mode="constant")
+        else:
+            vol_hist = vol_hist[:nbins]
+
+    vol_hist = np.nan_to_num(vol_hist, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # si tout zéro → impossible d'extraire VA/VPOC de façon fiable
+    if float(vol_hist.sum()) <= 0.0:
+        # on renvoie un profil “vide” mais cohérent
         res = {
             "vpoc_price": None,
             "va_low": None,
             "va_high": None,
-            "va_coverage": coverage,
+            "va_coverage": float(coverage),
+            "bins_count": int(nbins),
+            "bin_width": float(edges[1] - edges[0]) if edges.size > 1 else None,
+            "price_min": float(pmin),
+            "price_max": float(pmax),
+            "hvn": [],
+            "lvn": [],
+            "modality": "unknown",
+            "balance_metrics": {},
+            "ib": {},
         }
         _cache_put(key, res)
         return dict(res)
 
+    # =======================
+    #  VPOC + VA
+    # =======================
+    va_low, va_high, i_poc = _expand_va(vol_hist, edges, coverage=coverage)
+    if (i_poc is None) or (i_poc < 0) or (i_poc >= nbins):
+        res = {
+            "vpoc_price": None,
+            "va_low": None,
+            "va_high": None,
+            "va_coverage": float(coverage),
+        }
+        _cache_put(key, res)
+        return dict(res)
     vpoc_price = float(centers[i_poc])
 
-    # ----------- HVN / LVN -----------
+    # =======================
+    #  HVN / LVN
+    # =======================
     peaks, valleys = _local_extrema(vol_hist)
     mean = float(np.mean(vol_hist))
     std = float(np.std(vol_hist)) or 1e-9
@@ -620,11 +736,12 @@ def calculate_volume_profile(
     )[:3]
 
     hvn = [
-        {"price": float(centers[i]), "volume": float(vol_hist[i])} for i in strong_peaks
+        {"price": float(centers[i]), "volume": float(vol_hist[i])}
+        for i in (strong_peaks or [])
     ]
     lvn = [
         {"price": float(centers[i]), "volume": float(vol_hist[i])}
-        for i in lvn_candidates
+        for i in (lvn_candidates or [])
     ]
 
     modality = (
@@ -633,13 +750,17 @@ def calculate_volume_profile(
         else ("bi" if len(strong_peaks) == 2 else "multi")
     )
 
-    # ----------- Shape metrics -----------
-    w = vol_hist / max(1e-12, vol_hist.sum())
+    # =======================
+    #  Shape metrics
+    # =======================
+    w_sum = float(vol_hist.sum())
+    w = vol_hist / (w_sum if w_sum > 0 else 1.0)
     mu = float(np.sum(w * centers))
     var = float(np.sum(w * (centers - mu) ** 2))
     std_p = math.sqrt(max(var, 1e-12))
     skew = float(np.sum(w * ((centers - mu) / std_p) ** 3))
     kurt = float(np.sum(w * ((centers - mu) / std_p) ** 4)) - 3.0
+    # entropie normalisée par log(nbins) (évite -0/0)
     entropy = float(-np.sum(w[w > 0] * np.log(w[w > 0])) / math.log(max(2, nbins)))
 
     va_width = (
@@ -654,41 +775,54 @@ def calculate_volume_profile(
         else np.nan
     )
 
-    left_tail = float(np.sum(vol_hist[centers < va_low]))
-    right_tail = float(np.sum(vol_hist[centers > va_high]))
-    tail_left_frac = float(left_tail / max(1e-12, vol_hist.sum()))
-    tail_right_frac = float(right_tail / max(1e-12, vol_hist.sum()))
+    left_tail = (
+        float(np.sum(vol_hist[centers < va_low])) if np.isfinite(va_low) else 0.0
+    )
+    right_tail = (
+        float(np.sum(vol_hist[centers > va_high])) if np.isfinite(va_high) else 0.0
+    )
+    tail_left_frac = float(left_tail / (w_sum if w_sum > 0 else 1.0))
+    tail_right_frac = float(right_tail / (w_sum if w_sum > 0 else 1.0))
 
-    # ----------- Initial Balance -----------
+    # =======================
+    #  Initial Balance
+    # =======================
     ib_info: Dict[str, Any] = {}
     if ib_bars and ib_bars > 1 and len(df) >= 2:
-        n = int(min(ib_bars, len(df)))
-        hi_ib = float(np.nanmax(_to_num(df["high"].iloc[:n], np.nan)))
-        lo_ib = float(np.nanmin(_to_num(df["low"].iloc[:n], np.nan)))
-        ib_width = (
-            float(hi_ib - lo_ib)
-            if np.isfinite(hi_ib) and np.isfinite(lo_ib)
-            else np.nan
-        )
-        vpoc_in_ib = (
-            bool(lo_ib <= vpoc_price <= hi_ib) if np.isfinite(ib_width) else False
-        )
-        ib_info = {
-            "bars": n,
-            "high": hi_ib,
-            "low": lo_ib,
-            "width": ib_width,
-            "vpoc_in_ib": vpoc_in_ib,
-        }
+        try:
+            n = int(min(ib_bars, len(df)))
+            hi_ib = float(np.nanmax(_to_num(df.get("high", np.nan).iloc[:n], np.nan)))
+            lo_ib = float(np.nanmin(_to_num(df.get("low", np.nan).iloc[:n], np.nan)))
+            ib_width = (
+                float(hi_ib - lo_ib)
+                if np.isfinite(hi_ib) and np.isfinite(lo_ib)
+                else np.nan
+            )
+            vpoc_in_ib = (
+                bool(lo_ib <= vpoc_price <= hi_ib)
+                if (np.isfinite(ib_width) and np.isfinite(vpoc_price))
+                else False
+            )
+            ib_info = {
+                "bars": n,
+                "high": hi_ib,
+                "low": lo_ib,
+                "width": ib_width,
+                "vpoc_in_ib": vpoc_in_ib,
+            }
+        except Exception:
+            ib_info = {}
 
-    # ----------- Sortie -----------
+    # =======================
+    #  Sortie
+    # =======================
     res: Dict[str, Any] = {
         "vpoc_price": vpoc_price,
         "va_low": va_low,
         "va_high": va_high,
         "va_coverage": float(coverage),
         "bins_count": int(nbins),
-        "bin_width": float(width),
+        "bin_width": float(edges[1] - edges[0]) if edges.size > 1 else None,
         "price_min": float(pmin),
         "price_max": float(pmax),
         "hvn": hvn,
@@ -733,14 +867,22 @@ def calculate_volume_profile(
             {
                 "type": "VAL",
                 "price": va_low,
-                "volume": float(np.sum(vol_hist[centers <= va_low])),
+                "volume": (
+                    float(np.sum(vol_hist[centers <= va_low]))
+                    if np.isfinite(va_low)
+                    else 0.0
+                ),
             }
         )
         nodes.append(
             {
                 "type": "VAH",
                 "price": va_high,
-                "volume": float(np.sum(vol_hist[centers >= va_high])),
+                "volume": (
+                    float(np.sum(vol_hist[centers >= va_high]))
+                    if np.isfinite(va_high)
+                    else 0.0
+                ),
             }
         )
         res["nodes"] = nodes
