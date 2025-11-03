@@ -1298,15 +1298,63 @@ class ScalpingStrategy(BaseStrategy):
         return series.rolling(window=period, min_periods=1).std(ddof=0)
 
     @staticmethod
-    def _atr(df: pd.DataFrame, period: int = 14) -> float:
-        if df is None or len(df) < period + 2:
+    def _atr(self, df, period: int = 14) -> float:
+        """
+        ATR robuste:
+        - Accepte DataFrame (colonnes: open/high/low/close ou variantes)
+        mais tolère aussi dict ou ndarray shape (N,>=4).
+        - Convertit toujours le TR en pandas.Series pour .rolling().
+        """
+      
+        def _to_df_ohlc(x):
+            # DataFrame déjà correct
+            if isinstance(x, pd.DataFrame):
+                cols = {c.lower(): c for c in x.columns}
+                # mappe automatiquement O/H/L/C (insensible à la casse)
+                def col(name_opts):
+                    for k in name_opts:
+                        if k in cols:
+                            return cols[k]
+                    return None
+                co = col(["open","o"]); ch = col(["high","h"]); cl = col(["low","l"]); cc = col(["close","c"])
+                if all([co, ch, cl, cc]):
+                    return x[[co, ch, cl, cc]].rename(columns={co:"open", ch:"high", cl:"low", cc:"close"})
+                # si colonnes manquantes → on essaie fallback numpy
+            # dict-like
+            if isinstance(x, dict):
+                try:
+                    return pd.DataFrame(
+                        {
+                            "open":  np.asarray(x.get("open",  x.get("o")) , dtype=float),
+                            "high":  np.asarray(x.get("high",  x.get("h")), dtype=float),
+                            "low":   np.asarray(x.get("low",   x.get("l")), dtype=float),
+                            "close": np.asarray(x.get("close", x.get("c")), dtype=float),
+                        }
+                    )
+                except Exception:
+                    pass
+            # ndarray : on suppose OHLC en colonnes
+            arr = np.asarray(x)
+            if arr.ndim == 2 and arr.shape[1] >= 4:
+                return pd.DataFrame(arr[:, :4], columns=["open","high","low","close"])
+            raise ValueError("ATR: format de df/array non reconnu (attendu DF OHLC, dict, ou ndarray Nx4).")
+
+        df_ohlc = _to_df_ohlc(df)
+        if len(df_ohlc) < max(2, int(period)):
             return float("nan")
-        h = df["high"].astype(float)
-        l = df["low"].astype(float)
-        c = df["close"].astype(float)
-        pc = c.shift(1)
-        tr = np.maximum.reduce([(h - l).abs(), (h - pc).abs(), (l - pc).abs()])
-        atr = tr.rolling(window=period, min_periods=period).mean().iloc[-1]
-        return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
+
+        high  = pd.to_numeric(df_ohlc["high"], errors="coerce")
+        low   = pd.to_numeric(df_ohlc["low"], errors="coerce")
+        close = pd.to_numeric(df_ohlc["close"], errors="coerce")
+
+        # True Range (vectorisé)
+        prev_close = close.shift(1)
+        h_l  = (high - low).abs()
+        h_pc = (high - prev_close).abs()
+        l_pc = (low - prev_close).abs()
+        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+
+        atr_series = tr.rolling(window=int(period), min_periods=int(period)).mean()
+        return float(atr_series.iloc[-1])
 
   

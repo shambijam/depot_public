@@ -172,7 +172,10 @@ def _exhaustion_events(
     rng = np.maximum(h - l, 0.0)
     body = np.abs(c - o)
 
-    small_body = np.where(rng > 0.0, (body / rng) <= max_body_frac, False)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.divide(body, rng, out=np.zeros_like(rng, dtype=float), where=(rng > 0.0))
+    small_body = ratio <= float(max_body_frac)
+
     is_climax = (total >= qv) & small_body
 
     if "time" in df.columns:
