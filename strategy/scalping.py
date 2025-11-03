@@ -98,12 +98,14 @@ class ScalpingStrategy(BaseStrategy):
         try:
             # --- 0) Données & config ---
             ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-            df_m1 = (
-                ctx_md.get("annotated_rates_df_m1")
-                or ctx_md.get("annotated_rates_df")
-                or ctx_md.get("df_m1")
-                or ctx_md.get("df")
-            )
+            
+            # ✅ Résolution sûre (pas d'évaluation booléenne de DataFrame)
+            df_m1 = None
+            for __k in ("annotated_rates_df_m1", "annotated_rates_df", "df_m1", "df"):
+                __v = ctx_md.get(__k)
+                if isinstance(__v, pd.DataFrame):
+                    df_m1 = __v
+                    break
 
             df_work = (
                 df_m1.copy()
