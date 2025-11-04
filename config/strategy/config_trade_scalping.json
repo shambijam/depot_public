@@ -1,7 +1,7 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst — Fusion Manager only (Orderflow+Footprint+Trigger). SL structurel large (SWING), trailing PIPS-only, BE off, fermeture panier au profit.",
-  "version": "4.3-fusion-only",
+  "description": "DEMO EASY — Scalping Burst géré par Fusion (Orderflow + Footprint + Trigger). TP désactivé, sorties uniquement au trailing. Aucune barrière bloquante.",
+  "version": "4.3-demo-easy",
   "tradeable_assets": [
     "XAUUSD"
   ],
@@ -11,7 +11,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.40
+        "min_confidence": 0.05
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -81,33 +81,51 @@
       },
       "closure_rules": {
         "enabled": true,
-        "enable_profit_close": true,
+        "enable_profit_close": false,
         "enable_loss_guard": false,
-        "require_full_count_for_profit_close": true,
-        "require_all_seen_green_once": true,
-        "all_seen_green_pips": 4.0,
-        "min_green_pnl_pips": 10.0,
+        "require_full_count_for_profit_close": false,
+        "require_all_seen_green_once": false,
+        "all_seen_green_pips": 0.0,
+        "min_green_pnl_pips": 0.0,
         "rt_fast_window_ms": 0,
         "rt_poll_interval_ms": 150,
-        "loss_guard_arming_ms": 3000,
-        "min_age_ms_for_any_close": 5000
+        "loss_guard_arming_ms": 0,
+        "min_age_ms_for_any_close": 0
       },
       "footprint": {
-        "m1_min_ticks": 1,
+        "enabled": true,
+        "m1_min_ticks": 3,
         "m1_min_coverage_s": 1,
-        "tickrate_min": 0.1
+        "tickrate_min": 0.1,
+        "veto_absorption": false,
+        "warn_absorption": true,
+        "absorption_penalty": 0.10
       },
       "orderflow": {
-        "delta_abs_min": 10.0
+        "enabled": true,
+        "delta_abs_min": 5.0
+      },
+      "triggers": {
+        "enabled": true,
+        "require_trigger": false,
+        "min_strength": 0.0,
+        "allow_opposite_trigger": true
       },
       "fusion": {
         "enabled": true,
-        "ttl_ms": 1500,
-        "max_slippage_points": 20,
+        "enabled_assets": [
+          "XAUUSD"
+        ],
+        "ttl_ms": 2500,
+        "max_slippage_points": 150,
         "allow_degraded_vote": true,
+        "require_phase_alignment": false,
+        "require_footprint": false,
+        "min_score_to_fire": 0.15,
+        "of_score_scale": "0_1",
         "degraded_vote_conditions": {
-          "min_of_delta_abs": 10.0,
-          "min_of_score": 0.25
+          "min_of_delta_abs": 5.0,
+          "min_of_score": 0.10
         }
       }
     }
@@ -117,12 +135,14 @@
     "use_trailing_stop": true
   },
   "phase_detection": {
-    "use_phase_observer": true,
+    "use_phase_observer": false,
     "allowed_phases": [
       "trending_retail_bull",
       "trending_retail_bear",
       "liquidity_eqh_eql",
-      "transitional"
+      "transitional",
+      "range_distribution",
+      "range_retail"
     ],
     "lookback_window": 12,
     "volatility_threshold": 0.0,
@@ -136,6 +156,15 @@
     "max_positions_per_symbol": 1,
     "stop_distance_pips": 150
   },
+  "execution": {
+    "position_sizing": {
+      "mode": "risk_based",
+      "fixed_lot": 0.01,
+      "bump_to_min_lot": true,
+      "min_order_volume": 0.01,
+      "forbid_zero_volume": true
+    }
+  },
   "trade_executor_settings": {
     "version": "3.0",
     "fat_finger_check": {
@@ -147,12 +176,23 @@
     },
     "halt_on_major_news": false
   },
+  "guardrails": {
+    "sessions": {
+      "news_blackout": false
+    },
+    "vol": {
+      "min_atr_m1": 0.0
+    },
+    "spread": {
+      "max": 999.0
+    }
+  },
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.11,
-      "min_orderflow_score": 0.15,
-      "max_spread_pts": 15
+      "min_confidence": 0.05,
+      "min_orderflow_score": 0.05,
+      "max_spread_pts": 60
     },
     "scoring_weights": {
       "context": 0.30,
@@ -161,8 +201,8 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "direct": 0.35,
-      "conditional": 0.20
+      "direct": 0.15,
+      "conditional": 0.05
     },
     "momentum": {
       "breakout": {
@@ -196,9 +236,9 @@
   },
   "regles_metier": {
     "veto_absorption": false,
-    "never_against_strong_orderflow": true,
+    "never_against_strong_orderflow": false,
     "triple_confirmation_bonus": true,
-    "weak_footprint_score_th": 0.15
+    "weak_footprint_score_th": 0.05
   },
   "base_trail_steps": 20,
   "smart_sl_tp_settings": {
