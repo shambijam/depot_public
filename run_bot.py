@@ -1363,6 +1363,17 @@ def run_single_pipeline_cycle(
                                 strategy_config=strat_cfg,
                                 context=ctx,
                             )
+                            try:
+                                logger.info(
+                                    "[TRACE] FUSION used th=%s | fused=%.3f | gate=%s | veto=%s | action=%s",
+                                    out.get("thresholds_used"),
+                                    float(out.get("fused_confidence") or 0.0),
+                                    out.get("decision_gate"),
+                                    out.get("veto"),
+                                    out.get("action"),
+                                )
+                            except Exception:
+                                pass
 
                             # TTL & slippage depuis la conf
                             _fusion_cfg = (

@@ -6,6 +6,27 @@ import time, logging, ast
 DirectionInt = int  # -1 SELL, 0 NEUTRAL, +1 BUY
 LOG = logging.getLogger(__name__)
 
+# --- DEBUG PROBE (active par défaut, coupe avec env FUSION_PROBE=0) ---
+import os
+FUSION_PROBE = os.getenv("FUSION_PROBE", "1") == "1"
+
+def _probe(logger, msg, *args):
+    try:
+        if FUSION_PROBE and logger:
+            logger.info(msg, *args)
+    except Exception:
+        pass
+
+def _get_thresholds(cfg: dict):
+    cfg = cfg or {}
+    th = (cfg.get("scoring_thresholds") or {}) if isinstance(cfg, dict) else {}
+    return {
+        "cautious": float(th.get("cautious", th.get("direct", 0.55))),
+        "moderate": float(th.get("moderate", 0.65)),
+        "high": float(th.get("high", 0.80)),
+        "conditional": float(th.get("conditional", 0.35)),
+        "allow_conditional": bool(cfg.get("allow_conditional_entries", True)),
+    }
 
 def _to_float(x, default=None):
     try:
@@ -234,7 +255,30 @@ class FusionManager:
         )
         degraded = self._degraded_mode_decision(n_of, n_fp, n_tr)
         if degraded["is_degraded"]:
-            quality["warnings"].append("degraded_mode_no_triggers")
+            quality["warnings"].append("degraded_mode_no_triggers") 
+            
+        # === DEBUG 1C: DUMP normalized inputs ===
+        try:
+            of_sum = (n_of.get("summary") or {}) if isinstance(n_of, dict) else {}
+            fp_sum = (n_fp.get("summary") or {}) if isinstance(n_fp, dict) else {}
+            _probe(
+                self.logger,
+                "[FUSION/DUMP] OF(score=%.2f, |Δ|=%.1f, bias=%s) | FP(score=%.2f, tickrate=%.2f/s, cov=%.2fs) | TR(dir=%s, conf=%.2f) | coherence=%.3f | fused=%.3f | quality=%s",
+                float((n_of.get("score") if isinstance(n_of, dict) else 0.0) or 0.0),
+                float(abs((of_sum.get("delta_total") or 0.0))),
+                str(n_of.get("bias") if isinstance(n_of, dict) else None),
+                float((n_fp.get("score") if isinstance(n_fp, dict) else 0.0) or 0.0),
+                float((fp_sum.get("tick_rate") or 0.0)),
+                float((fp_sum.get("coverage_s") or 0.0)),
+                str((n_tr.get("direction") if isinstance(n_tr, dict) else None)),
+                float((n_tr.get("confidence") if isinstance(n_tr, dict) else 0.0) or 0.0),
+                float((coherence or 0.0)),
+                float((fused or 0.0)),
+                str(quality),
+            )
+        except Exception:
+            pass
+        
 
         # 4) Règles métier (scalping trailing-only)
         rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
@@ -251,6 +295,61 @@ class FusionManager:
             rationale = self._rationale(
                 decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
             )
+            # debug: afficher l'état du veto et ses raisons (safe)
+            try:
+                veto_abs = bool(((cfg or {}).get("regles_metier") or {}).get("veto_absorption", False))
+                reasons_list = veto.get("reasons") or veto.get("reason") or []
+                if isinstance(reasons_list, (str, bytes)):
+                    reasons_list = [str(reasons_list)]
+                _probe(self.logger, "[FUSION/VETO] veto_absorption=%s | reasons=%s", veto_abs, reasons_list)
+            except Exception:
+                pass
+            try:
+                _probe(
+                    self.logger,
+                    "[FUSION/TRACE] HOLD (critical veto) | fused=%.3f | dir=%s | reasons=%s",
+                    float(fused or 0.0),
+                    str(n_tr.get("direction") if isinstance(n_tr, dict) else None),
+                    (veto.get("reasons") or veto.get("reason"))
+                )
+            except Exception:
+                pass
+            # === DEBUG 1D: VETO REASONS + THRESHOLDS ===
+            try:
+                # Seuils consultés dans la conf (on prend ce qui existe, sinon {})
+                scalping_cfg = (((cfg or {}).get("entry_rules") or {}).get("scalping") or {})
+                th_fp = (scalping_cfg.get("footprint") or {})
+                th_of = (scalping_cfg.get("orderflow") or {})
+                th_fu = (scalping_cfg.get("fusion") or {})
+
+                # On affiche les minimas/paramètres les plus courants
+                fp_th = {
+                    "m1_min_ticks": th_fp.get("m1_min_ticks"),
+                    "m1_min_coverage_s": th_fp.get("m1_min_coverage_s"),
+                    "tickrate_min": th_fp.get("tickrate_min"),
+                }
+                of_th = {
+                    "delta_abs_min": th_of.get("delta_abs_min"),
+                }
+                fu_th = {
+                    "ttl_ms": th_fu.get("ttl_ms"),
+                    "max_slippage_points": th_fu.get("max_slippage_points"),
+                    "allow_degraded_vote": th_fu.get("allow_degraded_vote"),
+                    "degraded_min_of_abs": ((th_fu.get("degraded_vote_conditions") or {}).get("min_of_delta_abs")),
+                    "degraded_min_of_score": ((th_fu.get("degraded_vote_conditions") or {}).get("min_of_score")),
+                }
+
+                _probe(
+                    self.logger,
+                    "[FUSION/VETO-DUMP] reasons=%s | fp.th=%s | of.th=%s | fusion.th=%s",
+                    (veto.get("reasons") or veto.get("reason")),
+                    fp_th,
+                    of_th,
+                    fu_th,
+                )
+            except Exception:
+                pass
+
             return self._mk_hold(
                 signal_type="STRONG_VETO",
                 rationale=rationale,
@@ -692,6 +791,7 @@ class FusionManager:
     # -------------- 6) Decision Generator --------------
     def _final_decision(
         self, mode: str, fused: float, n_tr, coherence, cfg
+        
     ) -> Dict[str, Any]:
         # direction finale: majorité pondérée; sinon direction du trigger; sinon NEUTRAL
         maj = coherence["majority"]
