@@ -11,7 +11,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.80
+        "min_confidence": 0.40
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -93,12 +93,12 @@
         "min_age_ms_for_any_close": 5000
       },
       "footprint": {
-        "m1_min_ticks": 12,
-        "m1_min_coverage_s": 5,
-        "tickrate_min": 1.0
+        "m1_min_ticks": 1,
+        "m1_min_coverage_s": 1,
+        "tickrate_min": 0.1
       },
       "orderflow": {
-        "delta_abs_min": 60.0
+        "delta_abs_min": 10.0
       },
       "fusion": {
         "enabled": true,
@@ -106,8 +106,8 @@
         "max_slippage_points": 20,
         "allow_degraded_vote": true,
         "degraded_vote_conditions": {
-          "min_of_delta_abs": 150.0,
-          "min_of_score": 15.0
+          "min_of_delta_abs": 10.0,
+          "min_of_score": 0.25
         }
       }
     }
@@ -150,9 +150,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.61,
-      "min_orderflow_score": 0.55,
-      "max_spread_pts": 12
+      "min_confidence": 0.11,
+      "min_orderflow_score": 0.15,
+      "max_spread_pts": 15
     },
     "scoring_weights": {
       "context": 0.30,
@@ -161,8 +161,8 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "direct": 0.70,
-      "conditional": 0.50
+      "direct": 0.35,
+      "conditional": 0.20
     },
     "momentum": {
       "breakout": {
@@ -195,10 +195,10 @@
     }
   },
   "regles_metier": {
-    "veto_absorption": true,
+    "veto_absorption": false,
     "never_against_strong_orderflow": true,
     "triple_confirmation_bonus": true,
-    "weak_footprint_score_th": 0.65
+    "weak_footprint_score_th": 0.15
   },
   "base_trail_steps": 20,
   "smart_sl_tp_settings": {
