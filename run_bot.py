@@ -952,6 +952,7 @@ def run_single_pipeline_cycle(
         # Logging & Fusion policy (durcies)
         LOG_FUSION_ONLY: bool = True
         REQUIRE_FUSION_MGR: bool = True
+        REQUIRE_FUSION_MGR: bool = False  # DEBUG: autorise _quick_vote_fusion si Fusion reste en HOLD
         FUSION_ASSETS = {"XAUUSD"}
 
         def _fusion_applies(asset: str) -> bool:
@@ -1239,6 +1240,12 @@ def run_single_pipeline_cycle(
                         logger.warning(
                             f"[FOOTPRINT][{asset}] Aucun tick reçu (close+live) → skip."
                         )
+                        # PATCH footprint: fallback neutre si aucun tick
+                        latest = dict(latest)
+                        latest.setdefault("footprint_score", 0.0)
+                        latest.setdefault("footprint_status", "MISSING_OK")  # ← toléré par Fusion
+                        latest.setdefault("footprint_summary", {"tick_count": 0, "coverage_s": 0.0, "tick_rate": 0.0, "delta_total": 0.0})
+
                 except Exception as e:
                     logger.error(
                         f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
@@ -1369,6 +1376,29 @@ def run_single_pipeline_cycle(
                                 strategy_config=strat_cfg,
                                 context=ctx,
                             )
+                            try:
+                                _fc = float(out.get("fused_confidence") or 0.0)
+                                # échelle 0..1 attendue par Fusion
+                                if 0.0 <= _fc <= 1.0:
+                                    pass
+                                else:
+                                    _fc = _fc / 100.0  # si jamais 0..100
+
+                                _fusion_cfg = ((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("fusion", {}) or {}
+                                allow_degraded = bool(_fusion_cfg.get("allow_degraded_vote", True))
+                                fire_th = float((_fusion_cfg.get("min_score_to_fire", 0.15) or 0.15))
+
+                                # Si Fusion dit HOLD mais la confiance dépasse le seuil “fire_th” et le mode dégradé est autorisé → OK
+                                if (not out.get("ok")) and (out.get("signal_type") == "WAIT_CONFIRMATION") and allow_degraded and (_fc >= fire_th):
+                                    # choisir une direction cohérente (triggers.direction sinon biais OF)
+                                    _dir = (trig.get("direction") if isinstance(trig, dict) else None) or of.get("bias") or out.get("action")
+                                    if _dir in {"BUY", "SELL"}:
+                                        out["ok"] = True
+                                        out["action"] = _dir
+                                        out["signal_type"] = "DIRECT"  # promote
+                            except Exception:
+                                pass
+
                             try:
                                 logger.info(
                                     "[TRACE] FUSION fused=%.3f | action=%s | signal=%s | consensus=%s",

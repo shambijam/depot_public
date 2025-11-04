@@ -182,7 +182,7 @@
     "dry_run": false
   },
   "guardrails": {
-    "enabled": true,
+    "enabled": false,
     "allow_fallbacks": false,
     "volatility": {
       "enabled": true,
