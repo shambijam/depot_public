@@ -614,35 +614,13 @@ def run_single_pipeline_cycle(
             dlt   = _safe_float(of.get("delta_total"), 0.0)
             of_sc = _safe_float(latest.get("orderflow_score"), 0.0)
 
-            # --- Garde spread (seulement si mesurable/finie) ---
-            if math.isfinite(spread) and (spread > sym_spread_max):
-                return {
-                    "ok": False,
-                    "reason": f"spread_wide({spread}>{sym_spread_max})",
-                    "meta": {"spread": spread},
-                }
+            # --- JAM PATCH: SOFT VOTE (aucun veto hard) --------------------------
+            # 1) plus de garde spread
+            # 2) plus de gate footprints (m1_min_ticks / coverage / tickrate)
+            # 3) plus de gate delta OF minimal
+            # 4) plus de règle 2-sur-3 bloquante
 
-            # --- Gate Footprint : passe si (ticks & coverage) OU (tickrate & coverage), sinon dégradé si OF fort ---
-            fp_ok = ((ticks >= m1_min_ticks and cov >= m1_min_cov_s) or
-                    (tr >= tickrate_min and cov >= max(5.0, m1_min_cov_s - 4)))
-            of_strong = (abs(dlt) >= of_delta_min) or (of_sc >= degr_min_of_sc) or (abs(dlt) >= degr_min_of_abs)
-
-            if not fp_ok and not (allow_degraded and of_strong):
-                return {
-                    "ok": False,
-                    "reason": f"footprint_weak(ticks={ticks},cov={cov},tr={tr})",
-                    "meta": {"ticks": ticks, "cov": cov, "tickrate": tr, "of_abs_delta": abs(dlt), "of_score": of_sc},
-                }
-
-            # --- Gate Orderflow (si pas déjà couvert par of_strong en dégradé) ---
-            if not of_strong and (abs(dlt) < of_delta_min):
-                return {
-                    "ok": False,
-                    "reason": f"orderflow_delta_low(|Δ|={abs(dlt)}<{of_delta_min})",
-                    "meta": {"delta_total": dlt, "of_score": of_sc},
-                }
-
-            # --- Directions élémentaires ---
+            # Directions élémentaires (inchangé pour détection de sens)
             vote, trig_dir = 0, "NEUTRAL"
             if ("bull" in phase) or ("up" in phase):
                 vote += 1; trig_dir = "BUY"
@@ -661,21 +639,35 @@ def run_single_pipeline_cycle(
                 else:
                     fp_dir = "BUY" if _safe_float(fp.get("delta_total"), 0.0) > 0 else ("SELL" if _safe_float(fp.get("delta_total"), 0.0) < 0 else "NEUTRAL")
 
-            vote += (1 if fp_dir == "BUY" else (-1 if fp_dir == "SELL" else 0))
-            fp_dir_raw = _safe_float(fp.get("delta_total"), 0.0)  # pour le fp_strength
-
+            dlt   = _safe_float(of.get("delta_total"), 0.0)
             of_dir = "BUY" if dlt > 0 else ("SELL" if dlt < 0 else "NEUTRAL")
-            vote += (1 if of_dir == "BUY" else (-1 if of_dir == "SELL" else 0))
 
-            # Règle 2-sur-3 (assouplie si dégradé + OF fort)
-            if abs(vote) < 2 and not (allow_degraded and of_strong and (of_dir in {"BUY","SELL"})):
-                return {
-                    "ok": False,
-                    "reason": "dir_unclear(need_2_of_3)",
-                    "meta": {"trig": trig_dir, "fp": fp_dir, "of": of_dir, "vote": vote},
-                }
+            # Résolution d'action **sans veto** (priorité OF > FP > phase > coin toss conf)
+            if of_dir in {"BUY", "SELL"}:
+                action = of_dir
+            elif fp_dir in {"BUY", "SELL"}:
+                action = fp_dir
+            elif trig_dir in {"BUY", "SELL"}:
+                action = trig_dir
+            else:
+                action = "BUY" if conf >= 0.5 else "SELL"
 
-            action = "BUY" if (vote > 0 or (vote == 0 and of_dir == "BUY")) else "SELL"
+            # Prix d'ancrage pour la fast-lane (inchangé)
+            price = None
+            try:
+                tkfun = getattr(mt5c, "get_symbol_tick", None)
+                if callable(tkfun):
+                    t = tkfun(sym)
+                    ask = (t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None))
+                    bid = (t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None))
+                else:
+                    t = getattr(getattr(mt5c, "mt5", None), "symbol_info_tick", None)
+                    t = t(sym) if callable(t) else None
+                    ask = getattr(t, "ask", None); bid = getattr(t, "bid", None)
+                price = float(ask if action == "BUY" else bid) if (ask and bid) else None
+            except Exception:
+                price = None
+            # ----------------------------------------------------------------------
 
             # --- Scoring (0..1) ---
             # Force FP : combine Δ(M1) relatif et tickrate relatif
