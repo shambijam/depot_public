@@ -1053,6 +1053,7 @@ def run_single_pipeline_cycle(
                     )
 
                     # Fallback live (si l'historique close est vide)
+                    use_idx = -1
                     if ticks_df is None or ticks_df.empty:
                         last_candle = annotated_rates_df.iloc[-1]
                         if "time" in annotated_rates_df.columns:
@@ -1078,10 +1079,17 @@ def run_single_pipeline_cycle(
                         fp_res = footprint_validator(
                             annotated_rates_df,
                             ticks_df,
-                            candle_index=None,
-                            price_step=None,
-                            imbalance_threshold=0.7,
+                            candle_index=use_idx,
+                            price_step=(getattr(symbol_info_mt5, "point", None) or None),
+                            imbalance_threshold=float(
+                                ((base_config.get("phase_detection_defaults", {}) or {})
+                                .get("footprint_settings", {}) or {})
+                                .get("imbalance_threshold", 0.7)
+                            ),
+                            fp_conf=base_config,               # ← branche les seuils existants (min_ticks, coverage, tickrate, POC, delta, burst…)
+                            asset=asset                        # ← applique les overrides XAUUSD
                         )
+
                         latest = dict(latest)
                         latest["footprint_score"] = fp_res.get("score", 0)
                         latest["footprint_status"] = fp_res.get("status", "N/A")
