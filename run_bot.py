@@ -582,36 +582,115 @@ def run_single_pipeline_cycle(
                     return default
 
             # --- Inputs ---
-            spread = _safe_float(signals.get("current_spread_points"), default=float("nan"))
-            phase  = str(signals.get("phase", "neutral") or "neutral").lower()
-            conf   = _safe_float(signals.get("confidence_score"), default=0.0)
+            spread = _safe_float(
+                signals.get("current_spread_points"), default=float("nan")
+            )
+            phase = str(signals.get("phase", "neutral") or "neutral").lower()
+            conf = _safe_float(signals.get("confidence_score"), default=0.0)
 
             # Résumés (signals prioritaire, sinon latest)
-            fp = (signals.get("footprint_summary") or latest.get("footprint_summary") or {}) or {}
-            of = (signals.get("orderflow_summary")  or latest.get("orderflow_summary")  or {}) or {}
+            fp = (
+                signals.get("footprint_summary")
+                or latest.get("footprint_summary")
+                or {}
+            ) or {}
+            of = (
+                signals.get("orderflow_summary")
+                or latest.get("orderflow_summary")
+                or {}
+            ) or {}
 
             # --- Seuils depuis conf (avec défauts prudents) ---
-            sym_spread_max = {"EURUSD": 12.0, "GBPUSD": 18.0, "XAUUSD": 40.0}.get(str(sym).upper(), 999.0)
+            sym_spread_max = {"EURUSD": 12.0, "GBPUSD": 18.0, "XAUUSD": 40.0}.get(
+                str(sym).upper(), 999.0
+            )
 
-            m1_min_ticks = int(_dig(base_cfg, ["entry_rules","scalping","footprint","m1_min_ticks"],        30))
-            m1_min_cov_s = int(_dig(base_cfg, ["entry_rules","scalping","footprint","m1_min_coverage_s"],   8))
-            tickrate_min = _safe_float(_dig(base_cfg, ["entry_rules","scalping","footprint","tickrate_min"], 1.5), 1.5)
+            m1_min_ticks = int(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "footprint", "m1_min_ticks"],
+                    30,
+                )
+            )
+            m1_min_cov_s = int(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "footprint", "m1_min_coverage_s"],
+                    8,
+                )
+            )
+            tickrate_min = _safe_float(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "footprint", "tickrate_min"],
+                    1.5,
+                ),
+                1.5,
+            )
 
-            of_delta_min = _safe_float(_dig(base_cfg, ["entry_rules","scalping","orderflow","delta_abs_min"], 30.0), 30.0)
+            of_delta_min = _safe_float(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "orderflow", "delta_abs_min"],
+                    30.0,
+                ),
+                30.0,
+            )
 
-            ttl_ms       = int(_dig(base_cfg, ["entry_rules","scalping","fusion","ttl_ms"],                1500))
-            slippage_pts = _safe_float(_dig(base_cfg, ["entry_rules","scalping","fusion","max_slippage_points"], 20.0), 20.0)
+            ttl_ms = int(
+                _dig(base_cfg, ["entry_rules", "scalping", "fusion", "ttl_ms"], 1500)
+            )
+            slippage_pts = _safe_float(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "fusion", "max_slippage_points"],
+                    20.0,
+                ),
+                20.0,
+            )
 
-            allow_degraded = bool(_dig(base_cfg, ["entry_rules","scalping","fusion","allow_degraded_vote"], True))
-            degr_min_of_abs = _safe_float(_dig(base_cfg, ["entry_rules","scalping","fusion","degraded_vote_conditions","min_of_delta_abs"], 150.0), 150.0)
-            degr_min_of_sc  = _safe_float(_dig(base_cfg, ["entry_rules","scalping","fusion","degraded_vote_conditions","min_of_score"],     15.0), 15.0)
+            allow_degraded = bool(
+                _dig(
+                    base_cfg,
+                    ["entry_rules", "scalping", "fusion", "allow_degraded_vote"],
+                    True,
+                )
+            )
+            degr_min_of_abs = _safe_float(
+                _dig(
+                    base_cfg,
+                    [
+                        "entry_rules",
+                        "scalping",
+                        "fusion",
+                        "degraded_vote_conditions",
+                        "min_of_delta_abs",
+                    ],
+                    150.0,
+                ),
+                150.0,
+            )
+            degr_min_of_sc = _safe_float(
+                _dig(
+                    base_cfg,
+                    [
+                        "entry_rules",
+                        "scalping",
+                        "fusion",
+                        "degraded_vote_conditions",
+                        "min_of_score",
+                    ],
+                    15.0,
+                ),
+                15.0,
+            )
 
             # --- Mesures FP/OF ---
             ticks = int(_safe_float(fp.get("tick_count"), 0))
-            cov   = _safe_float(fp.get("coverage_s"), 0.0)
-            tr    = _safe_float(fp.get("tick_rate"),  0.0)
+            cov = _safe_float(fp.get("coverage_s"), 0.0)
+            tr = _safe_float(fp.get("tick_rate"), 0.0)
 
-            dlt   = _safe_float(of.get("delta_total"), 0.0)
+            dlt = _safe_float(of.get("delta_total"), 0.0)
             of_sc = _safe_float(latest.get("orderflow_score"), 0.0)
 
             # --- JAM PATCH: SOFT VOTE (aucun veto hard) --------------------------
@@ -623,9 +702,11 @@ def run_single_pipeline_cycle(
             # Directions élémentaires (inchangé pour détection de sens)
             vote, trig_dir = 0, "NEUTRAL"
             if ("bull" in phase) or ("up" in phase):
-                vote += 1; trig_dir = "BUY"
+                vote += 1
+                trig_dir = "BUY"
             elif ("bear" in phase) or ("down" in phase):
-                vote -= 1; trig_dir = "SELL"
+                vote -= 1
+                trig_dir = "SELL"
 
             # Direction FP priorisée: aggressor_ratio -> counts -> delta_total
             ar = fp.get("aggressor_ratio", None)
@@ -637,9 +718,17 @@ def run_single_pipeline_cycle(
                 if isinstance(bt, (int, float)) and isinstance(st, (int, float)):
                     fp_dir = "BUY" if bt > st else ("SELL" if st > bt else "NEUTRAL")
                 else:
-                    fp_dir = "BUY" if _safe_float(fp.get("delta_total"), 0.0) > 0 else ("SELL" if _safe_float(fp.get("delta_total"), 0.0) < 0 else "NEUTRAL")
+                    fp_dir = (
+                        "BUY"
+                        if _safe_float(fp.get("delta_total"), 0.0) > 0
+                        else (
+                            "SELL"
+                            if _safe_float(fp.get("delta_total"), 0.0) < 0
+                            else "NEUTRAL"
+                        )
+                    )
 
-            dlt   = _safe_float(of.get("delta_total"), 0.0)
+            dlt = _safe_float(of.get("delta_total"), 0.0)
             of_dir = "BUY" if dlt > 0 else ("SELL" if dlt < 0 else "NEUTRAL")
 
             # Résolution d'action **sans veto** (priorité OF > FP > phase > coin toss conf)
@@ -658,13 +747,20 @@ def run_single_pipeline_cycle(
                 tkfun = getattr(mt5c, "get_symbol_tick", None)
                 if callable(tkfun):
                     t = tkfun(sym)
-                    ask = (t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None))
-                    bid = (t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None))
+                    ask = (
+                        t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None)
+                    )
+                    bid = (
+                        t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None)
+                    )
                 else:
                     t = getattr(getattr(mt5c, "mt5", None), "symbol_info_tick", None)
                     t = t(sym) if callable(t) else None
-                    ask = getattr(t, "ask", None); bid = getattr(t, "bid", None)
-                price = float(ask if action == "BUY" else bid) if (ask and bid) else None
+                    ask = getattr(t, "ask", None)
+                    bid = getattr(t, "bid", None)
+                price = (
+                    float(ask if action == "BUY" else bid) if (ask and bid) else None
+                )
             except Exception:
                 price = None
             # ----------------------------------------------------------------------
@@ -674,9 +770,14 @@ def run_single_pipeline_cycle(
             denom_delta = max(of_delta_min, 1.0)
             fp_strength = 0.0
             try:
-                fp_strength = min(1.0, max(0.0,
-                    (abs(fp_dir_raw) / denom_delta) * 0.75 + (tr / max(tickrate_min, 0.1)) * 0.25
-                ))
+                fp_strength = min(
+                    1.0,
+                    max(
+                        0.0,
+                        (abs(fp_dir_raw) / denom_delta) * 0.75
+                        + (tr / max(tickrate_min, 0.1)) * 0.25,
+                    ),
+                )
             except Exception:
                 fp_strength = 0.0
 
@@ -685,9 +786,15 @@ def run_single_pipeline_cycle(
             of_strength = min(1.0, max(0.0, abs(dlt) / denom_of))
 
             # Bonus d’alignement strict (phase, FP, OF convergent)
-            align_bonus = 0.1 if (trig_dir == fp_dir == of_dir and trig_dir in {"BUY","SELL"}) else 0.0
+            align_bonus = (
+                0.1
+                if (trig_dir == fp_dir == of_dir and trig_dir in {"BUY", "SELL"})
+                else 0.0
+            )
 
-            score = min(1.0, 0.25 * conf + 0.35 * fp_strength + 0.40 * of_strength + align_bonus)
+            score = min(
+                1.0, 0.25 * conf + 0.35 * fp_strength + 0.40 * of_strength + align_bonus
+            )
 
             # --- Prix d’ancrage pour la fast-lane ---
             price = None
@@ -695,13 +802,20 @@ def run_single_pipeline_cycle(
                 tkfun = getattr(mt5c, "get_symbol_tick", None)
                 if callable(tkfun):
                     t = tkfun(sym)
-                    ask = (t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None))
-                    bid = (t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None))
+                    ask = (
+                        t.get("ask") if isinstance(t, dict) else getattr(t, "ask", None)
+                    )
+                    bid = (
+                        t.get("bid") if isinstance(t, dict) else getattr(t, "bid", None)
+                    )
                 else:
                     t = getattr(getattr(mt5c, "mt5", None), "symbol_info_tick", None)
                     t = t(sym) if callable(t) else None
-                    ask = getattr(t, "ask", None); bid = getattr(t, "bid", None)
-                price = float(ask if action == "BUY" else bid) if (ask and bid) else None
+                    ask = getattr(t, "ask", None)
+                    bid = getattr(t, "bid", None)
+                price = (
+                    float(ask if action == "BUY" else bid) if (ask and bid) else None
+                )
             except Exception:
                 price = None
 
@@ -716,21 +830,35 @@ def run_single_pipeline_cycle(
                 "no_fallback": True,
                 "no_tp": True,
                 "meta": {
-                    "triggers_dir": "BUY" if ("bull" in phase or "up" in phase) else ("SELL" if ("bear" in phase or "down" in phase) else "NEUTRAL"),
+                    "triggers_dir": (
+                        "BUY"
+                        if ("bull" in phase or "up" in phase)
+                        else (
+                            "SELL"
+                            if ("bear" in phase or "down" in phase)
+                            else "NEUTRAL"
+                        )
+                    ),
                     "fp_dir": fp_dir,
                     "of_dir": of_dir,
-                    "fp": {"ticks": ticks, "cov_s": cov, "tickrate": tr, "delta_total": fp_dir_raw},
+                    "fp": {
+                        "ticks": ticks,
+                        "cov_s": cov,
+                        "tickrate": tr,
+                        "delta_total": fp_dir_raw,
+                    },
                     "of": {"delta_total": dlt, "score": of_sc},
                     "footprint_ok": bool(fp_ok),
                     "degraded_used": bool(allow_degraded and (not fp_ok) and of_strong),
                 },
                 "slippage_guard_points": float(slippage_pts),
-                "ts_created": __import__("pandas").Timestamp.utcnow().value // 1_000_000,
+                "ts_created": __import__("pandas").Timestamp.utcnow().value
+                // 1_000_000,
             }
 
         except Exception as e:
             return {"ok": False, "reason": f"fusion_error:{e}"}
-             
+
     # --- Helper: normaliser les inputs pour FusionManager ---
     def _scale100(x):
         try:
@@ -1025,7 +1153,7 @@ def run_single_pipeline_cycle(
                         logger.warning(f"[{asset}] Résumé 200 bougies impossible: {e}")
                 else:
                     logger.debug(f"[{asset}] Skip résumé 200 (candles disabled).")
-                    
+
                 # === FOOTPRINT ANALYSE (bougie M1 clôturée, + option live si indispo) ===
                 try:
                     # 1) Bougie clôturée prioritaire (évite coverage partiel ~5s)
@@ -1033,9 +1161,13 @@ def run_single_pipeline_cycle(
                     candle_row = annotated_rates_df.iloc[use_idx]
 
                     if "time" in annotated_rates_df.columns:
-                        start_ts = pd.to_datetime(candle_row["time"], utc=True, errors="coerce")
+                        start_ts = pd.to_datetime(
+                            candle_row["time"], utc=True, errors="coerce"
+                        )
                     else:
-                        start_ts = pd.to_datetime(candle_row.name, utc=True, errors="coerce")
+                        start_ts = pd.to_datetime(
+                            candle_row.name, utc=True, errors="coerce"
+                        )
                     if pd.isna(start_ts):
                         start_ts = pd.Timestamp.utcnow()
                     end_ts = start_ts + pd.Timedelta(minutes=1)
@@ -1049,9 +1181,13 @@ def run_single_pipeline_cycle(
                     if ticks_df is None or ticks_df.empty:
                         last_candle = annotated_rates_df.iloc[-1]
                         if "time" in annotated_rates_df.columns:
-                            live_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                            live_start = pd.to_datetime(
+                                last_candle["time"], utc=True, errors="coerce"
+                            )
                         else:
-                            live_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+                            live_start = pd.to_datetime(
+                                last_candle.name, utc=True, errors="coerce"
+                            )
                         if pd.isna(live_start):
                             live_start = pd.Timestamp.utcnow()
                         live_end = live_start + pd.Timedelta(minutes=1)
@@ -1072,14 +1208,20 @@ def run_single_pipeline_cycle(
                             annotated_rates_df,
                             ticks_df,
                             candle_index=use_idx,
-                            price_step=(getattr(symbol_info_mt5, "point", None) or None),
-                            imbalance_threshold=float(
-                                ((base_config.get("phase_detection_defaults", {}) or {})
-                                .get("footprint_settings", {}) or {})
-                                .get("imbalance_threshold", 0.7)
+                            price_step=(
+                                getattr(symbol_info_mt5, "point", None) or None
                             ),
-                            fp_conf=base_config,               # ← branche les seuils existants (min_ticks, coverage, tickrate, POC, delta, burst…)
-                            asset=asset                        # ← applique les overrides XAUUSD
+                            imbalance_threshold=float(
+                                (
+                                    (
+                                        base_config.get("phase_detection_defaults", {})
+                                        or {}
+                                    ).get("footprint_settings", {})
+                                    or {}
+                                ).get("imbalance_threshold", 0.7)
+                            ),
+                            fp_conf=base_config,  # ← branche les seuils existants (min_ticks, coverage, tickrate, POC, delta, burst…)
+                            asset=asset,  # ← applique les overrides XAUUSD
                         )
 
                         latest = dict(latest)
@@ -1087,9 +1229,13 @@ def run_single_pipeline_cycle(
                         latest["footprint_status"] = fp_res.get("status", "N/A")
                         latest["footprint_summary"] = fp_res.get("summary", {})
                     else:
-                        logger.warning(f"[FOOTPRINT][{asset}] Aucun tick reçu (close+live) → skip.")
+                        logger.warning(
+                            f"[FOOTPRINT][{asset}] Aucun tick reçu (close+live) → skip."
+                        )
                 except Exception as e:
-                    logger.error(f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True)
+                    logger.error(
+                        f"[FOOTPRINT][{asset}] Erreur analyse ticks: {e}", exc_info=True
+                    )
 
                 # === ORDERFLOW v6 ANALYSE (5 dernières bougies) ===
                 try:
@@ -1156,14 +1302,30 @@ def run_single_pipeline_cycle(
                 )
                 signals["structure"] = market_results.get("structure", {})
 
-                spread_pts = getattr(symbol_info_mt5, "spread", None) if symbol_info_mt5 else None
+                spread_pts = (
+                    getattr(symbol_info_mt5, "spread", None)
+                    if symbol_info_mt5
+                    else None
+                )
                 if not spread_pts or spread_pts <= 0:
                     # Fallback robuste depuis le tick live
                     try:
                         tk = mt5_connector.get_symbol_tick(asset)
-                        ask = tk.get("ask") if isinstance(tk, dict) else getattr(tk, "ask", None)
-                        bid = tk.get("bid") if isinstance(tk, dict) else getattr(tk, "bid", None)
-                        pt  = getattr(symbol_info_mt5, "point", 0.0) if symbol_info_mt5 else 0.0
+                        ask = (
+                            tk.get("ask")
+                            if isinstance(tk, dict)
+                            else getattr(tk, "ask", None)
+                        )
+                        bid = (
+                            tk.get("bid")
+                            if isinstance(tk, dict)
+                            else getattr(tk, "bid", None)
+                        )
+                        pt = (
+                            getattr(symbol_info_mt5, "point", 0.0)
+                            if symbol_info_mt5
+                            else 0.0
+                        )
                         if ask and bid and pt:
                             spread_pts = abs(float(ask) - float(bid)) / float(pt)
                         else:
@@ -1171,7 +1333,9 @@ def run_single_pipeline_cycle(
                     except Exception:
                         spread_pts = None
                 signals["current_spread_points"] = (
-                    float(spread_pts) if isinstance(spread_pts, (int, float)) else float("nan")
+                    float(spread_pts)
+                    if isinstance(spread_pts, (int, float))
+                    else float("nan")
                 )
 
                 # exposer FP/OF
@@ -1322,7 +1486,6 @@ def run_single_pipeline_cycle(
                 # Récupération robuste du 'latest' (clé normalisée)
                 _latest = sig.get("__latest__") or {}
 
-
                 # 1) Snapshot "maintenant" (recompute)
                 if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                     _syminfo = mt5_connector.get_symbol_info(asset)
@@ -1390,59 +1553,223 @@ def run_single_pipeline_cycle(
 
         # === GATECHECK XAUUSD (diagnostic) ===
         try:
+
             sig = (all_assets_trading_signals or {}).get("XAUUSD", {})
             if sig:
+                # helpers
+                def _dig(d, path, default=None):
+                    cur = d or {}
+                    for k in path:
+                        if not isinstance(cur, dict):
+                            return default
+                        cur = cur.get(k)
+                    return cur if cur is not None else default
+
+                latest = sig.get("__latest__") or {}
                 fp = sig.get("footprint_summary") or {}
                 of = sig.get("orderflow_summary") or {}
+
+                # métriques mesurées
+                ticks = fp.get("tick_count", None)
+                cov = fp.get("coverage_s", None)
+                trate = fp.get("tick_rate", None)
+                dlt = of.get("delta_total", None)
+                of_sc = latest.get("orderflow_score", None)
+                spread = sig.get("current_spread_points", float("nan"))
+
+                # seuils depuis conf (priorité: asset overrides -> global)
+                xcfg = config_manager.load_asset_config("XAUUSD") or {}
+                base = base_config
+
+                # Footprint M1
+                m1_min_ticks = int(
+                    _dig(
+                        xcfg,
+                        ["overrides", "scalping", "footprint", "m1_min_ticks"],
+                        _dig(
+                            base,
+                            ["entry_rules", "scalping", "footprint", "m1_min_ticks"],
+                            30,
+                        ),
+                    )
+                )
+                m1_min_cov_s = float(
+                    _dig(
+                        xcfg,
+                        ["overrides", "scalping", "footprint", "m1_min_coverage_s"],
+                        _dig(
+                            base,
+                            [
+                                "entry_rules",
+                                "scalping",
+                                "footprint",
+                                "m1_min_coverage_s",
+                            ],
+                            8,
+                        ),
+                    )
+                )
+                tickrate_min = float(
+                    _dig(
+                        xcfg,
+                        ["overrides", "scalping", "footprint", "tickrate_min"],
+                        _dig(
+                            base,
+                            ["entry_rules", "scalping", "footprint", "tickrate_min"],
+                            1.5,
+                        ),
+                    )
+                )
+                cov_burst_min = float(
+                    _dig(
+                        xcfg,
+                        ["overrides", "scalping", "footprint", "coverage_s_min_burst"],
+                        _dig(
+                            base,
+                            [
+                                "entry_rules",
+                                "scalping",
+                                "footprint",
+                                "coverage_s_min_burst",
+                            ],
+                            5.0,
+                        ),
+                    )
+                )
+
+                # Orderflow
+                of_delta_min = float(
+                    _dig(
+                        xcfg,
+                        ["overrides", "scalping", "orderflow", "delta_abs_min"],
+                        _dig(
+                            base,
+                            ["entry_rules", "scalping", "orderflow", "delta_abs_min"],
+                            30.0,
+                        ),
+                    )
+                )
+                degr_min_of_sc = float(
+                    _dig(
+                        base,
+                        [
+                            "entry_rules",
+                            "scalping",
+                            "fusion",
+                            "degraded_vote_conditions",
+                            "min_of_score",
+                        ],
+                        15.0,
+                    )
+                )
+
+                # Spread (si tu as un max en conf, sinon on ignore)
+                spread_max = float(
+                    _dig(
+                        base,
+                        ["entry_rules", "scalping", "fusion", "max_spread_points"],
+                        float("inf"),
+                    )
+                )
+
+                # News blackout
+                news_blackout = bool(
+                    _dig(base, ["guardrails", "sessions", "news_blackout"], False)
+                )
+
+                # Évaluation des portes (sans bloquer l’exécution ; juste diag)
+                blocks = []
+
+                # 1) news blackout
+                if news_blackout:
+                    blocks.append("news_blackout=True")
+
+                # 2) spread
+                if (
+                    math.isfinite(float(spread))
+                    and math.isfinite(float(spread_max))
+                    and spread_max != float("inf")
+                ):
+                    if float(spread) > float(spread_max):
+                        blocks.append(f"spread {spread:.1f}>{spread_max:.1f}")
+
+                # 3) footprint M1
                 try:
-                    _xau_cfg_full = config_manager.load_asset_config("XAUUSD") or {}
+                    fp_ticks_ok = (ticks is not None) and (
+                        int(ticks) >= int(m1_min_ticks)
+                    )
+                    fp_cov_ok = (cov is not None) and (
+                        float(cov) >= float(m1_min_cov_s)
+                    )
+                    fp_burst_ok = (
+                        (trate is not None)
+                        and (float(trate) >= float(tickrate_min))
+                        and (float(cov or 0) >= float(cov_burst_min))
+                    )
+                    fp_gate_ok = (fp_ticks_ok and fp_cov_ok) or fp_burst_ok
+                    if not fp_gate_ok:
+                        blocks.append(
+                            f"footprint_m1: ticks={ticks}/{m1_min_ticks} cov={cov}/{m1_min_cov_s}s rate={trate}/{tickrate_min}/s"
+                        )
                 except Exception:
-                    _xau_cfg_full = {}
-                xcfg = (_xau_cfg_full.get("overrides", {}) or {}).get(
-                    "scalping", {}
-                ) or {}
-                fpc = xcfg.get("footprint", {}) or {}
-                bt = fpc.get("burst_tolerance", {}) or {}
-                ncp = (xcfg.get("phase_detection", {}) or {}).get(
-                    "allow_no_clear_phase_if_strong", {}
-                ) or {}
+                    pass
 
-                phase = sig.get("phase")
-                conf = sig.get("confidence_score")
-                spread = sig.get("current_spread_points")
-                ticks = fp.get("tick_count")
-                cov = fp.get("coverage_s")
-                trate = fp.get("tick_rate")
-                dlt = (
-                    of.get("delta_total")
-                    if isinstance(of.get("delta_total"), (int, float))
-                    else None
-                )
-                imb = (
-                    of.get("mean_imbalance")
-                    if isinstance(of.get("mean_imbalance"), (int, float))
-                    else None
-                )
-                conf_txt = (
-                    f"{conf:.3f}" if isinstance(conf, (int, float)) else str(conf)
-                )
-                rate_txt = (
-                    f"{trate:.2f}/s"
-                    if isinstance(trate, (int, float))
-                    else f"{trate}/s"
-                )
-                imb_txt = f"{imb:.2f}" if isinstance(imb, (int, float)) else str(imb)
+                # 4) orderflow
+                try:
+                    of_ok = (
+                        dlt is not None and abs(float(dlt)) >= float(of_delta_min)
+                    ) or (of_sc is not None and float(of_sc) >= float(degr_min_of_sc))
+                    if not of_ok:
+                        blocks.append(
+                            f"orderflow: |Δ|={abs(dlt) if dlt is not None else 'NA'} < {of_delta_min} & of_score={of_sc} < {degr_min_of_sc}"
+                        )
+                except Exception:
+                    pass
 
-                print(
-                    "[GATECHECK][XAUUSD] "
-                    f"phase={phase} conf={conf_txt} spread={spread} | "
-                    f"FP ticks={ticks} cov={cov}s rate={rate_txt} "
-                    f"(TH: ticks≥{fpc.get('m1_min_ticks','?')}, cov≥{fpc.get('m1_min_coverage_s','?')}s "
-                    f"OR burst≥{bt.get('tickrate_min','?')}/s & ≥{bt.get('coverage_s_min_burst','?')}s) | "
-                    f"OF Δ={dlt} imb={imb_txt} "
-                    f"(NCP-strong: Δ≥{ncp.get('of_delta_abs_min','?')} & rate≥{ncp.get('tickrate_min','?')}/s)"
-                )
+                # 5) FusionManager veto explicite (on refait une fusion rapide juste pour la raison)
+                try:
+                    if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
+                        _syminfo = mt5_connector.get_symbol_info("XAUUSD")
+                        of_i, fp_i, trig_i, strat_cfg_i, ctx_i = _mk_fusion_inputs(
+                            sig, latest, _syminfo, mt5_connector, "XAUUSD"
+                        )
+                        fdec_diag = _fusion_mgr.fuse(
+                            orderflow=of_i,
+                            footprint=fp_i,
+                            triggers=trig_i,
+                            strategy_config=strat_cfg_i,
+                            context=ctx_i,
+                        )
+                        if not fdec_diag.get("ok"):
+                            blocks.append(
+                                f"fusion_veto={fdec_diag.get('reason','no_decision')}"
+                            )
+                except Exception:
+                    pass
 
+                # 6) Burst guard global (panier existant) déjà checké plus bas, mais on log ici aussi
+                try:
+                    burst_cfg = (
+                        base.get("entry_rules", {})
+                        .get("scalping", {})
+                        .get("burst_scalping", {})
+                        or {}
+                    )
+                    g = burst_cfg.get("burst_guardrails", {}) or {}
+                    if bool(g.get("enforce_burst_closure", True)) and bool(
+                        g.get("single_burst_global", True)
+                    ):
+                        # s’il existe un panier ouvert, c’est bloquant
+                        if "_open_burst_ids" in locals():
+                            if _open_burst_ids():  # défini plus haut dans la fast-lane
+                                blocks.append("burst_guard: open_basket_present")
+                except Exception:
+                    pass
+
+                if blocks:
+                    print("[BLOCKERS][XAUUSD] " + " | ".join(blocks))
+                else:
+                    print("[BLOCKERS][XAUUSD] none")
         except Exception as _e:
             logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
 
