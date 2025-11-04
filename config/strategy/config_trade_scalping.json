@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst — Fusion Manager only (Orderflow+Footprint+Trigger). SL structurel (SWING) large, trailing PIPS-only, BE off, close panier au profit.",
+  "description": "Scalping Burst — Fusion Manager only (Orderflow+Footprint+Trigger). SL structurel large (SWING), trailing PIPS-only, BE off, fermeture panier au profit.",
   "version": "4.3-fusion-only",
   "tradeable_assets": [
     "XAUUSD"
@@ -11,7 +11,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.75
+        "min_confidence": 0.80
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -92,7 +92,16 @@
         "loss_guard_arming_ms": 3000,
         "min_age_ms_for_any_close": 5000
       },
+      "footprint": {
+        "m1_min_ticks": 12,
+        "m1_min_coverage_s": 5,
+        "tickrate_min": 1.0
+      },
+      "orderflow": {
+        "delta_abs_min": 60.0
+      },
       "fusion": {
+        "enabled": true,
         "ttl_ms": 1500,
         "max_slippage_points": 20,
         "allow_degraded_vote": true,
