@@ -8,7 +8,9 @@ LOG = logging.getLogger(__name__)
 
 # --- DEBUG PROBE (active par défaut, coupe avec env FUSION_PROBE=0) ---
 import os
+
 FUSION_PROBE = os.getenv("FUSION_PROBE", "1") == "1"
+
 
 def _probe(logger, msg, *args):
     try:
@@ -16,6 +18,7 @@ def _probe(logger, msg, *args):
             logger.info(msg, *args)
     except Exception:
         pass
+
 
 def _get_thresholds(cfg: dict):
     cfg = cfg or {}
@@ -27,6 +30,7 @@ def _get_thresholds(cfg: dict):
         "conditional": float(th.get("conditional", 0.35)),
         "allow_conditional": bool(cfg.get("allow_conditional_entries", True)),
     }
+
 
 def _to_float(x, default=None):
     try:
@@ -159,15 +163,13 @@ def _adaptive_weights(
 
 
 # ---------- Maj métriques ----------
-def _update_metrics(self, dt: float, decision: str, veto: Dict[str, Any], fused: float):
+def _update_metrics(self, dt: float, decision: str, fused: float):
     try:
         m = self.metrics
         n = m["decisions_taken"] + 1
         m["decisions_taken"] = n
         # moyenne glissante simple
         m["avg_processing_time"] = ((n - 1) * m["avg_processing_time"] + dt) / n
-        if veto.get("critical"):
-            m["vetos_applied"] += 1
         m["confidence_distribution"].append(float(fused))
         # cap distribution à 500
         if len(m["confidence_distribution"]) > 500:
@@ -183,7 +185,7 @@ class FusionManager:
       {
         "ok": bool,
         "action": "BUY"|"SELL"|"HOLD",
-        "signal_type": "HIGH_CONVICTION_*" | "MODERATE_*" | "CAUTIOUS_*" | "WAIT_CONFIRMATION" | "STRONG_VETO" | "INSUFFICIENT_DATA",
+        "signal_type": "HIGH_CONVICTION_*" | "MODERATE_*" | "CAUTIOUS_*" | "WAIT_CONFIRMATION" | "INSUFFICIENT_DATA",
         "direction": "BUY"|"SELL"|"NEUTRAL",
         "fused_confidence": float(0..1),
         "anchor_price": float|None,
@@ -191,7 +193,6 @@ class FusionManager:
         "components": {"orderflow":..., "validator":..., "trigger":...},
         "consensus": {"maj": "BUY/SELL/TIE", "agreement": float, "votes":[...]},
         "quality": {"is_valid": bool, "quality_score": float, "missing":[], "warnings":[]},
-        "veto": {"critical": bool, "reasons": [], "warnings": []},
         "suggested_trailing": {"distance": float, "unit": "price", "note": str}
       }
     """
@@ -201,7 +202,6 @@ class FusionManager:
         # Metrics runtime
         self.metrics = {
             "decisions_taken": 0,
-            "vetos_applied": 0,
             "avg_processing_time": 0.0,
             "confidence_distribution": [],
         }
@@ -255,8 +255,8 @@ class FusionManager:
         )
         degraded = self._degraded_mode_decision(n_of, n_fp, n_tr)
         if degraded["is_degraded"]:
-            quality["warnings"].append("degraded_mode_no_triggers") 
-            
+            quality["warnings"].append("degraded_mode_no_triggers")
+
         # === DEBUG 1C: DUMP normalized inputs ===
         try:
             of_sum = (n_of.get("summary") or {}) if isinstance(n_of, dict) else {}
@@ -271,14 +271,15 @@ class FusionManager:
                 float((fp_sum.get("tick_rate") or 0.0)),
                 float((fp_sum.get("coverage_s") or 0.0)),
                 str((n_tr.get("direction") if isinstance(n_tr, dict) else None)),
-                float((n_tr.get("confidence") if isinstance(n_tr, dict) else 0.0) or 0.0),
+                float(
+                    (n_tr.get("confidence") if isinstance(n_tr, dict) else 0.0) or 0.0
+                ),
                 float((coherence or 0.0)),
                 float((fused or 0.0)),
                 str(quality),
             )
         except Exception:
             pass
-        
 
         # 4) Règles métier (scalping trailing-only)
         rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
@@ -288,81 +289,6 @@ class FusionManager:
             n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
         )
 
-        # 6) Veto Manager (critical/warning)
-        veto = self._veto_manager(n_of, n_fp, n_tr, coherence, fused, quality, cfg, ctx)
-        if veto["critical"]:
-            decision = self._final_decision("HOLD", 0.0, n_tr, coherence, cfg)
-            rationale = self._rationale(
-                decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
-            )
-            # debug: afficher l'état du veto et ses raisons (safe)
-            try:
-                veto_abs = bool(((cfg or {}).get("regles_metier") or {}).get("veto_absorption", False))
-                reasons_list = veto.get("reasons") or veto.get("reason") or []
-                if isinstance(reasons_list, (str, bytes)):
-                    reasons_list = [str(reasons_list)]
-                _probe(self.logger, "[FUSION/VETO] veto_absorption=%s | reasons=%s", veto_abs, reasons_list)
-            except Exception:
-                pass
-            try:
-                _probe(
-                    self.logger,
-                    "[FUSION/TRACE] HOLD (critical veto) | fused=%.3f | dir=%s | reasons=%s",
-                    float(fused or 0.0),
-                    str(n_tr.get("direction") if isinstance(n_tr, dict) else None),
-                    (veto.get("reasons") or veto.get("reason"))
-                )
-            except Exception:
-                pass
-            # === DEBUG 1D: VETO REASONS + THRESHOLDS ===
-            try:
-                # Seuils consultés dans la conf (on prend ce qui existe, sinon {})
-                scalping_cfg = (((cfg or {}).get("entry_rules") or {}).get("scalping") or {})
-                th_fp = (scalping_cfg.get("footprint") or {})
-                th_of = (scalping_cfg.get("orderflow") or {})
-                th_fu = (scalping_cfg.get("fusion") or {})
-
-                # On affiche les minimas/paramètres les plus courants
-                fp_th = {
-                    "m1_min_ticks": th_fp.get("m1_min_ticks"),
-                    "m1_min_coverage_s": th_fp.get("m1_min_coverage_s"),
-                    "tickrate_min": th_fp.get("tickrate_min"),
-                }
-                of_th = {
-                    "delta_abs_min": th_of.get("delta_abs_min"),
-                }
-                fu_th = {
-                    "ttl_ms": th_fu.get("ttl_ms"),
-                    "max_slippage_points": th_fu.get("max_slippage_points"),
-                    "allow_degraded_vote": th_fu.get("allow_degraded_vote"),
-                    "degraded_min_of_abs": ((th_fu.get("degraded_vote_conditions") or {}).get("min_of_delta_abs")),
-                    "degraded_min_of_score": ((th_fu.get("degraded_vote_conditions") or {}).get("min_of_score")),
-                }
-
-                _probe(
-                    self.logger,
-                    "[FUSION/VETO-DUMP] reasons=%s | fp.th=%s | of.th=%s | fusion.th=%s",
-                    (veto.get("reasons") or veto.get("reason")),
-                    fp_th,
-                    of_th,
-                    fu_th,
-                )
-            except Exception:
-                pass
-
-            return self._mk_hold(
-                signal_type="STRONG_VETO",
-                rationale=rationale,
-                quality=quality,
-                n_of=n_of,
-                n_fp=n_fp,
-                n_tr=n_tr,
-                coherence=coherence,
-                veto=veto,
-                fused=fused,
-                cfg=cfg,
-            )
-
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
         decision = self._final_decision("AUTO", fused, n_tr, coherence, cfg)
 
@@ -370,13 +296,10 @@ class FusionManager:
         trail = self._suggest_trailing(fused, cfg, strategy_config)
 
         # 9) Rationale
-        rationale = self._rationale(
-            decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
-        )
-
+        rationale = self._rationale(decision, n_of, n_fp, n_tr, coherence, rules_eval)
         # metrics update
         self._update_metrics(
-            dt=_now_ts() - t0, decision=decision["action"], veto=veto, fused=fused
+            dt=_now_ts() - t0, decision=decision["action"], fused=fused
         )
 
         # consensus texte BUY/SELL/TIE
@@ -398,7 +321,6 @@ class FusionManager:
                 "votes": coherence["votes"],
             },
             "quality": quality,
-            "veto": veto,
             "suggested_trailing": trail,
         }
 
@@ -739,59 +661,9 @@ class FusionManager:
 
         return max(0.0, min(0.99, float(base)))
 
-    # -------------- 5) Veto Manager --------------
-    def _veto_manager(
-        self, n_of, n_fp, n_tr, coherence, fused, quality, cfg, ctx
-    ) -> Dict[str, Any]:
-        th = cfg.get("seuils_entree", {}) or {}
-        min_of = _to_float(th.get("min_orderflow_score"), 0.60)
-        max_spread = _to_float(th.get("max_spread_pts"), 15.0)
-        min_conf = _to_float(th.get("min_confidence"), 0.65)
-
-        spread = _to_float(ctx.get("spread_points"), None)
-        now_ts = ctx.get("now_ts") or _now_ts()
-
-        critical, reasons, warns = False, [], []
-
-        # CRITICAL
-        if n_of["score"] < (min_of - 0.20):  # < 0.40
-            critical = True
-            reasons.append("ORDERFLOW_TOO_WEAK")
-        if n_fp["absorption"] and n_tr["dir"] != 0 and (n_tr["dir"] != n_fp["dir"]):
-            critical = True
-            reasons.append("ABSORPTION_CONFLICT")
-        if spread is not None and spread > max_spread:
-            critical = True
-            reasons.append("SPREAD_TOO_WIDE")
-        if (
-            coherence["matrix"]["trigger_vs_of"] == "conflict"
-            and coherence["matrix"]["of_vs_fp"] == "conflict"
-        ):
-            critical = True
-            reasons.append("MAJOR_CONFLICT_2V1")
-
-        # WARNING
-        if n_of["dir"] == 0:
-            warns.append("ORDERFLOW_NEUTRAL")
-        if n_tr["score"] < 0.55:
-            warns.append("LOW_TRIGGER_CONFIDENCE")
-        # fraîcheur des données
-        for lbl, n in (("TRIGGER_AGE", n_tr), ("OF_AGE", n_of), ("FP_AGE", n_fp)):
-            ts = n.get("ts")
-            if ts is not None:
-                age = max(0.0, now_ts - float(ts))
-                if age > 10.0:
-                    warns.append(f"{lbl}_>10S")
-
-        if fused < min_conf and not critical:
-            warns.append("CONFIDENCE_BELOW_MIN")
-
-        return {"critical": bool(critical), "reasons": reasons, "warnings": warns}
-
     # -------------- 6) Decision Generator --------------
     def _final_decision(
         self, mode: str, fused: float, n_tr, coherence, cfg
-        
     ) -> Dict[str, Any]:
         # direction finale: majorité pondérée; sinon direction du trigger; sinon NEUTRAL
         maj = coherence["majority"]
@@ -815,7 +687,7 @@ class FusionManager:
         if mode == "HOLD":
             return {
                 "action": "HOLD",
-                "signal_type": "STRONG_VETO",
+                "signal_type": "WAIT_CONFIRMATION",
                 "direction": "NEUTRAL",
                 "anchor_price": anchor_price,
             }
@@ -850,9 +722,8 @@ class FusionManager:
         }
 
     # -------------- 7) Rationale Builder --------------
-    def _rationale(
-        self, decision, n_of, n_fp, n_tr, coherence, rules_eval, veto
-    ) -> str:
+    def _rationale(self, decision, n_of, n_fp, n_tr, coherence, rules_eval) -> str:
+
         parts = []
         st = decision["signal_type"]
         if decision["action"] == "HOLD":
@@ -884,8 +755,7 @@ class FusionManager:
         ]
         if rules_eval["reasons"]:
             parts.append("règles=" + ",".join(rules_eval["reasons"]))
-        if veto["reasons"] or veto["warnings"]:
-            parts.append("veto=" + ",".join(veto["reasons"] + veto["warnings"]))
+
         return " | ".join(parts)
 
     # -------------- Trailing-only (scalping) --------------
@@ -926,7 +796,6 @@ class FusionManager:
                 "coherence", {"maj": "TIE", "agreement": 0.0, "votes": []}
             ),
             "quality": quality,
-            "veto": kw.get("veto", {"critical": False, "reasons": [], "warnings": []}),
             "suggested_trailing": {
                 "distance": 0.0,
                 "unit": "price",

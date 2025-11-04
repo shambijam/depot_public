@@ -693,6 +693,12 @@ def run_single_pipeline_cycle(
 
             dlt = _safe_float(of.get("delta_total"), 0.0)
             of_sc = _safe_float(latest.get("orderflow_score"), 0.0)
+            # Normalisations pour le scoring/meta (évite les NameError)
+            fp_dir_raw = _safe_float(fp.get("delta_total"), 0.0)
+
+            # Plus de gates hard → fp_ok = True ; on conserve of_strong pour diag
+            fp_ok = True
+            of_strong = (abs(dlt) >= degr_min_of_abs) or (of_sc >= degr_min_of_sc)
 
             # --- JAM PATCH: SOFT VOTE (aucun veto hard) --------------------------
             # 1) plus de garde spread
@@ -1365,13 +1371,13 @@ def run_single_pipeline_cycle(
                             )
                             try:
                                 logger.info(
-                                    "[TRACE] FUSION used th=%s | fused=%.3f | gate=%s | veto=%s | action=%s",
-                                    out.get("thresholds_used"),
+                                    "[TRACE] FUSION fused=%.3f | action=%s | signal=%s | consensus=%s",
                                     float(out.get("fused_confidence") or 0.0),
-                                    out.get("decision_gate"),
-                                    out.get("veto"),
                                     out.get("action"),
+                                    out.get("signal_type"),
+                                    (out.get("consensus") or {}).get("maj"),
                                 )
+
                             except Exception:
                                 pass
 
@@ -1412,7 +1418,6 @@ def run_single_pipeline_cycle(
                                 "meta": {
                                     "signal_type": out.get("signal_type"),
                                     "consensus": out.get("consensus"),
-                                    "veto": out.get("veto"),
                                     "trail": out.get("suggested_trailing"),
                                     "quality": out.get("quality"),
                                 },
@@ -1462,10 +1467,14 @@ def run_single_pipeline_cycle(
                             )
                         else:
                             logger.info(
-                                "[FUSION][%s] veto: %s",
+                                "[FUSION][%s] hold: %s",
                                 asset,
-                                (fdec or {}).get("reason", "no_decision"),
+                                (out if isinstance(out, dict) else {}).get(
+                                    "signal_type",
+                                    (fdec or {}).get("reason", "WAIT_CONFIRMATION"),
+                                ),
                             )
+
                 except Exception as _e:
                     logger.warning(f"[FUSION] erreur: {_e}")
 
@@ -1539,8 +1548,10 @@ def run_single_pipeline_cycle(
                     sc_now = fdec_syn.get("score", None)  # fallback (quick_vote)
                 snap_line = f"snapshot: action={act_now:<4} score={_fmt_float(sc_now)}"
             else:
-                rz = (fdec_syn or {}).get("reason", "no_decision")
-                snap_line = f"snapshot: action=—   score=—   veto={rz}"
+                rz = (fdec_syn or {}).get("signal_type") or (fdec_syn or {}).get(
+                    "reason", "WAIT_CONFIRMATION"
+                )
+                snap_line = f"snapshot: action=—   score=—   hold={rz}"
 
             # 2) Dernière décision effectivement retenue dans ce cycle (si présente)
             lasts = [
@@ -1738,7 +1749,7 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-                # 5) FusionManager veto explicite (on refait une fusion rapide juste pour la raison)
+                # 5) FusionManager diagnostic (pas de veto : on log l’état HOLD/SIGNAL)
                 try:
                     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                         _syminfo = mt5_connector.get_symbol_info("XAUUSD")
@@ -1754,7 +1765,7 @@ def run_single_pipeline_cycle(
                         )
                         if not fdec_diag.get("ok"):
                             blocks.append(
-                                f"fusion_veto={fdec_diag.get('reason','no_decision')}"
+                                f"fusion={fdec_diag.get('signal_type','WAIT_CONFIRMATION')}"
                             )
                 except Exception:
                     pass
@@ -2257,13 +2268,12 @@ def run_single_pipeline_cycle(
                         fdec_diag = {"ok": False, "reason": "fusion_manager_missing"}
 
                     if fdec_diag and fdec_diag.get("ok"):
-                        logger.info(
-                            f"[WHY_NO_TRADE][{asset}] fusion_ok_but_veto_upstream"
-                        )
+                        logger.info(f"[WHY_NO_TRADE][{asset}] fusion_ok")
                     else:
                         logger.info(
-                            f"[WHY_NO_TRADE][{asset}] veto={(fdec_diag or {}).get('reason','no_decision')}"
+                            f"[WHY_NO_TRADE][{asset}] hold={(fdec_diag or {}).get('signal_type','WAIT_CONFIRMATION')}"
                         )
+
             except Exception as _e:
                 logger.debug(f"[WHY_NO_TRADE] diagnostic skip: {_e}")
 

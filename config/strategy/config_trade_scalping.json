@@ -24,11 +24,15 @@
     "scalping": {
       "burst_scalping": {
         "enabled": true,
-        "entry_mode": "MARKET",
         "burst_size": 5,
-        "enforce_single_basket": true,
         "per_leg_virtual": false,
+        "prefer_asset_overrides": false,
+        "burst_guardrails": {
+          "enforce_burst_closure": true,
+          "single_burst_global": true
+        },
         "sltp": {
+          "dynamic": true,
           "sl_method": "SWING",
           "rr_base": 1.8,
           "rr_floor": 1.2,
@@ -49,6 +53,9 @@
               "min_sl_tp_distance_pips": 10
             }
           }
+        },
+        "closure_rules": {
+          "max_loss_pips": 20.0
         }
       },
       "trailing": {
@@ -78,19 +85,6 @@
           "spread_multiplier": 2.5,
           "extra_buffer_pips": 1.0
         }
-      },
-      "closure_rules": {
-        "enabled": true,
-        "enable_profit_close": false,
-        "enable_loss_guard": false,
-        "require_full_count_for_profit_close": false,
-        "require_all_seen_green_once": false,
-        "all_seen_green_pips": 0.0,
-        "min_green_pnl_pips": 0.0,
-        "rt_fast_window_ms": 0,
-        "rt_poll_interval_ms": 150,
-        "loss_guard_arming_ms": 0,
-        "min_age_ms_for_any_close": 0
       },
       "footprint": {
         "enabled": true,
@@ -240,40 +234,5 @@
     "triple_confirmation_bonus": true,
     "weak_footprint_score_th": 0.05
   },
-  "base_trail_steps": 20,
-  "smart_sl_tp_settings": {
-    "DEPRECATION_NOTE": "Legacy fallback – kept for compatibility; dynamic block is authoritative.",
-    "sl_placement_method": "ATR",
-    "sl_atr_period": 14,
-    "sl_atr_multiplier": 2.2,
-    "sl_buffer_pips": 6,
-    "tp_placement_method": "PIPS",
-    "tp_rr_ratio": 1.6,
-    "tp_atr_period": 14,
-    "tp_atr_multiplier": 2.0,
-    "sl_swing_lookback_period": 10,
-    "stop_loss_pips": 250,
-    "take_profit_pips": 10000
-  },
-  "smart_targets": {
-    "risk_management": {
-      "default_equity": 10000
-    },
-    "stop_loss": {
-      "hard_min_points": 0,
-      "hard_max_points": 100000
-    },
-    "take_profit": {
-      "hard_max_points": 200000
-    },
-    "activation_loss": {
-      "mode": "PIPS",
-      "min_pips": 25.0
-    },
-    "step_loss": {
-      "mode": "PIPS",
-      "min_pips": 12.0,
-      "update_interval_sec": 2.0
-    }
-  }
+  "base_trail_steps": 20
 }
