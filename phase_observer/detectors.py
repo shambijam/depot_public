@@ -1458,12 +1458,16 @@ def reconstruct_tick_side_mt5(ticks: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def footprint_validator(
     candles: pd.DataFrame,
     ticks: pd.DataFrame,
     candle_index: Optional[int] = None,
     price_step: Optional[float] = None,
     imbalance_threshold: float = 0.7,
+    *,
+    fp_conf: Optional[Dict[str, Any]] = None,
+    asset: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     🏦 Footprint Validator (strict M1)
@@ -1473,8 +1477,57 @@ def footprint_validator(
     - side: utilise 'side' fourni ; si 'unknown' et 'flags' dispo → decode (1/16 buy, 2/32 sell)
     - Pas de fallback temporel
     """
-    import numpy as np
-    import pandas as pd
+    # ---------- 0bis) RÉSOLUTION CONF FOOTPRINT ----------
+    _conf = fp_conf or {}
+    _pdd = _conf.get("phase_detection_defaults") or {}
+    _entry = _pdd.get("entry_gates") or {}
+    _fp_req = _entry.get("footprint_requirements") or {}
+    _burst = _fp_req.get("burst_override") or {}
+    _fp_settings = _pdd.get("footprint_settings") or {}
+
+    # Defaults globaux
+    _min_ticks = int(
+        _fp_req.get("min_ticks", 10)
+    )  # conf: min_ticks :contentReference[oaicite:3]{index=3}
+    _min_cov_s = float(
+        _fp_req.get("min_coverage_seconds", 30.0)
+    )  # conf: min_coverage_seconds :contentReference[oaicite:4]{index=4}
+    _min_tick_rate = float(
+        _fp_req.get("min_tick_rate", 0.8)
+    )  # conf: min_tick_rate :contentReference[oaicite:5]{index=5}
+    _burst_enabled = bool(_burst.get("enabled", True))
+    _burst_rate = float(
+        _burst.get("tick_rate_threshold", 2.0)
+    )  # conf: burst_override.tick_rate_threshold :contentReference[oaicite:6]{index=6}
+    _burst_penalty = int(
+        _burst.get("apply_penalty_points", 10)
+    )  # conf: burst_override.apply_penalty_points :contentReference[oaicite:7]{index=7}
+
+    # Réglages qualité footprint (delta/POC)
+    _delta_thr = float(
+        _fp_settings.get("delta_threshold", 50)
+    )  # conf: footprint_settings.delta_threshold :contentReference[oaicite:8]{index=8}
+    _poc_min_vol = float(
+        _fp_settings.get("poc_min_volume", 10)
+    )  # conf: footprint_settings.poc_min_volume :contentReference[oaicite:9]{index=9}
+
+    # Overrides par asset (ex: XAUUSD)
+    try:
+        if asset:
+            _ovr = (_entry.get("asset_overrides") or {}).get(asset) or {}
+            _ovr_req = _ovr.get("footprint_requirements") or {}
+            _min_ticks = int(_ovr_req.get("min_ticks", _min_ticks))
+            _min_cov_s = float(_ovr_req.get("min_coverage_seconds", _min_cov_s))
+            _min_tick_rate = float(_ovr_req.get("min_tick_rate", _min_tick_rate))
+            _ovr_burst = _ovr_req.get("burst_override") or {}
+            if _ovr_burst:
+                _burst_enabled = bool(_ovr_burst.get("enabled", _burst_enabled))
+                _burst_rate = float(_ovr_burst.get("tick_rate_threshold", _burst_rate))
+                _burst_penalty = int(
+                    _ovr_burst.get("apply_penalty_points", _burst_penalty)
+                )
+    except Exception:
+        pass
 
     # ---------- 0) VALIDATIONS & COPIES ----------
     if candles is None or not isinstance(candles, pd.DataFrame) or candles.empty:
@@ -1727,24 +1780,30 @@ def footprint_validator(
 
     score = 100
     comments = []
-    # --- CONFIG QUALITÉ TICKS (paramétrable) ---
-    MIN_TICKS = 10  # ex. 10 ticks
-    MIN_COVERAGE_S = 30.0  # ex. 30 secondes
-    PEN_TICKS = 15  # -15 points si tick_count < MIN_TICKS
-    PEN_COVER = 10  # -10 points si coverage_s < MIN_COVERAGE_S
+
+    # --- CONFIG QUALITÉ TICKS (via conf) ---
+    MIN_TICKS = _min_ticks
+    MIN_COVERAGE_S = _min_cov_s
+    PEN_TICKS = 15
+    PEN_COVER = 10
 
     # --- PATCH 2.B: pénalités faible granularité (paramétrées) ---
     if tick_count < MIN_TICKS:
         score -= PEN_TICKS
         comments.append(f"Peu de ticks (<{MIN_TICKS}).")
-        # Atténuation si burst élevé (ticks/s)
-    HIGH_BURST_TICK_RATE = 2.0  # ex. ≥ 2 ticks/seconde
+
+    # Tick rate requis (malus si trop faible)
+    tick_rate = tick_count / max(coverage_s, 1.0)
+    if tick_rate < _min_tick_rate:
+        score -= 10
+        comments.append(f"Tick rate faible (<{_min_tick_rate:.2f} t/s).")
+
     if coverage_s < MIN_COVERAGE_S:
-        tick_rate = tick_count / max(coverage_s, 1.0)
-        if tick_count >= MIN_TICKS and tick_rate >= HIGH_BURST_TICK_RATE:
-            score -= max(PEN_COVER // 2, 1)
+        if _burst_enabled and tick_rate >= _burst_rate:
+            # Réduit le malus couverture en cas de burst; borne à ≥1
+            score -= max(PEN_COVER - _burst_penalty, 1)
             comments.append(
-                f"Couverture courte mais burst élevé (≥{HIGH_BURST_TICK_RATE:.1f} t/s) — malus réduit."
+                f"Couverture courte mais burst (≥{_burst_rate:.1f} t/s) — malus réduit."
             )
         else:
             score -= PEN_COVER
@@ -1770,6 +1829,21 @@ def footprint_validator(
 
     status = "VALID" if score >= 70 else "SUSPECT"
 
+    # --- CONTRÔLES QUALITÉ ISSUS DE LA CONF ---
+    try:
+        # POC doit porter un volume minimum
+        poc_row = agg.loc[agg["price_level"].eq(poc)]
+        if not poc_row.empty and float(poc_row["total"].iloc[0]) < _poc_min_vol:
+            score -= 10
+            comments.append(f"POC faiblement alimenté (<{_poc_min_vol}).")
+    except Exception:
+        pass
+
+    # Delta minimal absolu (avant la pénalité 'delta neutre' relative)
+    if abs(delta_total) < _delta_thr:
+        score -= 10
+        comments.append(f"Delta absolu faible (<{_delta_thr}).")
+
     return {
         "summary": {
             "delta_total": delta_total,
@@ -1783,7 +1857,15 @@ def footprint_validator(
             "window_end": pd.Timestamp(end_ts).isoformat(),
             "tick_count": int(tick_count),
             "coverage_s": float(coverage_s),
-            "tick_rate": float(tick_count / max(coverage_s, 1.0)),  # ticks par seconde
+            "tick_rate": float(tick_count / max(coverage_s, 1.0)),
+        },
+        "fp_thresholds": {
+            "min_ticks": MIN_TICKS,
+            "min_coverage_seconds": MIN_COVERAGE_S,
+            "min_tick_rate": _min_tick_rate,
+            "burst_tick_rate_threshold": _burst_rate,
+            "delta_threshold_abs": _delta_thr,
+            "poc_min_volume": _poc_min_vol,
         },
         "score": max(int(score), 0),
         "status": status,
@@ -1858,7 +1940,7 @@ class Detectors:
             ),
             "count": int(total_count),
         }
- 
+
     def validate_last_candle_footprint_safe(
         self, candles: pd.DataFrame, ticks: pd.DataFrame
     ) -> Dict[str, Any]:

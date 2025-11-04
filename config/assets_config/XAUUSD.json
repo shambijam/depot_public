@@ -3,7 +3,20 @@
   "symbol": "XAUUSD",
   "type": "metal",
   "profile": "institutionnel",
-  "last_updated": "2025-09-17",
+  "last_updated": "2025-11-04",
+  "symbol_info": {
+    "point": 0.01,
+    "digits": 2,
+    "trade_contract_size": 100,
+    "trade_tick_size": 0.01
+  },
+  "strategy_toggles": {
+    "scalping": true,
+    "liquidity": false
+  },
+  "strategy_whitelist": [
+    "scalping"
+  ],
   "volatility": {
     "expected_daily_range_percent": {
       "value": 1.5,
@@ -41,27 +54,14 @@
       "enabled": true
     }
   },
-  "symbol_info": {
-    "point": 0.01,
-    "digits": 2,
-    "trade_contract_size": 100,
-    "trade_tick_size": 0.01
-  },
-  "strategy_toggles": {
-    "scalping": true,
-    "liquidity": false
-  },
-  "strategy_whitelist": [
-    "scalping"
-  ],
   "overrides": {
     "scalping": {
       "footprint": {
-        "m1_min_ticks": 80,
-        "m1_min_coverage_s": 12,
+        "m1_min_ticks": 30,
+        "m1_min_coverage_s": 8,
         "burst_tolerance": {
-          "tickrate_min": 6.0,
-          "coverage_s_min_burst": 6
+          "tickrate_min": 2.0,
+          "coverage_s_min_burst": 4
         }
       },
       "phase_detection": {
@@ -74,15 +74,97 @@
         "ttl_ms": 1200,
         "max_slippage_points": 10.0
       },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 200,
+        "features": {
+          "delta": {
+            "abs_strong": 120.0,
+            "abs_extreme": 300.0
+          },
+          "imbalance": {
+            "min": 0.52,
+            "extreme": 0.65
+          },
+          "tickrate": {
+            "min": 2.5,
+            "burst_min": 6.0,
+            "coverage_s_min": 6
+          },
+          "vpoc": {
+            "drift_max_points": 50.0
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "pivot_window": 3,
+          "confirm_window": 10,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.60,
+          "veto": {
+            "no_decision_if": [
+              "low_volatility",
+              "conflict_signals"
+            ]
+          }
+        },
+        "ncp_strong": {
+          "delta_abs_min": 120.0,
+          "tickrate_min": 6.0
+        }
+      },
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
             "enabled": true,
             "entry_mode": "MARKET",
             "burst_size": 8,
-            "dir_gate": {
-              "min_slope": 0.10,
-              "min_bias": 0.51
+            "use_orderflow_v6": true,
+            "of_v6_gate": {
+              "min_score": 0.60,
+              "require_ncp_strong": false,
+              "min_delta_abs": 120.0,
+              "min_imbalance": 0.52,
+              "min_tickrate": 2.5
+            },
+            "sltp": {
+              "exit_mode": "trailing_only",
+              "rr_base": 1.5,
+              "rr_floor": 1.0,
+              "rr_cap": 3.0,
+              "trailing": {
+                "kind": "atr",
+                "atr_period": 14,
+                "atr_mult": 1.2,
+                "step_pips_min": 2
+              }
             },
             "flow_vol_gate": {
               "enabled": true,
@@ -125,7 +207,9 @@
                 "min_ticks": 8,
                 "allow_short_coverage": true,
                 "min_score": 65
-              }
+              },
+              "sl_pips": 30,
+              "tp_pips": 0
             },
             "of_micro_burst": {
               "enabled": true,
