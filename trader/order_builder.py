@@ -597,6 +597,73 @@ def prepare_order(self, decision_package: dict) -> dict:
         trade_decision["final_action"] = side
         self.logger.debug(f"[ORDER_BUILDER] Action normalisée pour SL/TP: {side}")
         
+        # ---------- 7a) Contexte panier (optionnel, pour burst) ----------
+        basket_ctx = None
+        if is_burst:
+            try:
+                basket_ctx = _resolve_basket_context_for_sltp(
+                    self,
+                    trade_decision=trade_decision,
+                    basket_context=None,
+                    burst_manager=getattr(self, "burst_manager", None),
+                    ttl_sec=2.0,
+                )
+            except Exception as e:
+                try:
+                    self.logger.debug(f"[ORDER_BUILDER] basket_ctx resolve failed: {e}")
+                except Exception:
+                    pass
+                basket_ctx = None
+
+        # ---------- 7b) SL/TP depuis la strategy JSON (PIPS fixes) ----------
+        use_fixed = False
+        try:
+            # entry_rules.scalping.burst_scalping.sltp.sl.pips / tp.pips
+            bs_cfg   = (((active_config.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {})
+            sltp_cfg = (bs_cfg.get("sltp") or {})
+            sl_pips  = float(((sltp_cfg.get("sl") or {}).get("pips", 0)) or 0)
+            tp_pips  = float(((sltp_cfg.get("tp") or {}).get("pips", 0)) or 0)
+
+            # On traite "fixe" si les 2 sont présents (>0)
+            if sl_pips > 0 and tp_pips > 0:
+                point    = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
+                pip_size = 10.0 * point  # pip = 10 * point (XAUUSD: 0.1 si point=0.01)
+                digits   = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
+
+                sl_dist = sl_pips * pip_size
+                tp_dist = tp_pips * pip_size
+
+                if action == "BUY":
+                    sl_price = round(entry_price_market - sl_dist, digits)
+                    tp_price = round(entry_price_market + tp_dist, digits)
+                else:  # SELL
+                    sl_price = round(entry_price_market + sl_dist, digits)
+                    tp_price = round(entry_price_market - tp_dist, digits)
+
+                trade_decision["sl_price"] = float(sl_price)
+                trade_decision["tp_price"] = float(tp_price)
+                sltp_action = "SET"
+                use_fixed = True
+        except Exception as _e:
+            self.logger.warning(f"[SLTP-FIXED] lecture/compute échoué: {_e}")
+
+        # ---------- 7c) Calcul auto si non-fixe ----------
+        if not use_fixed:
+            try:
+                sl_price, tp_price = _calculate_sl_tp_prices(
+                    self,
+                    trade_decision=trade_decision,
+                    config=active_config,
+                    symbol_info=symbol_info,
+                    entry_price=entry_price_market,
+                    market_context=market_context,
+                    basket_context=basket_ctx,
+                )
+            except Exception as e:
+                self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
+                raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
+
+                
         # --- PATCH SLTP-FIXED 400/400 AVANT 7bis ---
         use_fixed = False
         try:
@@ -664,22 +731,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             # déjà posés par le patch fixed
             sl_price = float(trade_decision["sl_price"])
             tp_price = float(trade_decision["tp_price"])
-
-        # Calcul desk-grade des niveaux (respect bid/ask, stops_level, RR dynamique…)
-        try:
-            sl_price, tp_price = _calculate_sl_tp_prices(
-                self,
-                trade_decision=trade_decision,
-                config=active_config,
-                symbol_info=symbol_info,
-                entry_price=entry_price_market,
-                market_context=market_context,
-                basket_context=basket_ctx,  # important pour le burst
-            )
-        except Exception as e:
-            self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
-            raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
-
+     
         # Validation stricte du SL (obligatoire)
         if not (isinstance(sl_price, (int, float)) and sl_price > 0):
             raise TradeExecutionError("SL requis mais introuvable (calcul SL/TP).")
@@ -1097,12 +1149,11 @@ def prepare_order(self, decision_package: dict) -> dict:
                 f"Volume final invalide après normalisation: {volume_final}"
             )
 
-        # ---------- 9b) Sécurités volume (fat-finger / caps) ----------
+        # ---------- 9b) Normalisation volume côté compte (sans veto) ----------
         try:
-            tes = self.config_manager.get("trade_executor_settings", {}) or {}
-            ff = tes.get("fat_finger_check", {}) or {}
-            ff_enabled = bool(ff.get("enabled", False))
-            vol_safety_enabled = bool(tes.get("volume_safety_enabled", False))
+            account_trade_settings_ctx = (
+                market_context.get("active_broker_account", {}).get("trade_settings", {}) or {}
+            )
 
             def _to_pos_float(x):
                 try:
@@ -1113,71 +1164,27 @@ def prepare_order(self, decision_package: dict) -> dict:
                 except Exception:
                     return None
 
-            # Contraintes compte (en plus des contraintes broker déjà appliquées)
-            account_trade_settings_ctx = (
-                market_context.get("active_broker_account", {}).get(
-                    "trade_settings", {}
-                )
-                or {}
-            )
-            acc_min = _to_pos_float(account_trade_settings_ctx.get("min_lot"))
             acc_step = _to_pos_float(account_trade_settings_ctx.get("lot_step"))
-            acc_max = _to_pos_float(account_trade_settings_ctx.get("max_lot"))
-            self.logger.info(
-                f"[VOLUME] constraints compte: min={acc_min}, step={acc_step}, max={acc_max}"
-            )
+            acc_max  = _to_pos_float(account_trade_settings_ctx.get("max_lot"))
+            acc_min  = _to_pos_float(account_trade_settings_ctx.get("min_lot"))
 
-            # Re-normalisation éventuelle au pas COMPTE (FLOOR uniquement — jamais d'augmentation)
+            # Re-normalisation au pas COMPTE (FLOOR — jamais d'augmentation)
             if acc_step and acc_step > 0:
                 steps = math.floor(volume_final / acc_step + 1e-12)
                 volume_final = round(steps * acc_step, 8)
 
-            # utilitaire: floor au pas broker sans jamais augmenter (retourne None si < vmin)
-            def _floor_broker(vol: float):
-                try:
-                    bmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-                    bmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
-                    bstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
-                except Exception:
-                    bmin, bmax, bstep = 0.01, 100.0, 0.01
-                if vol < bmin:
-                    return None
-                steps = math.floor((vol - bmin) / bstep + 1e-12)
-                v = bmin + steps * bstep
-                if v > bmax:
-                    v = bmax
-                return round(v, 8)
-
-            # Politique de fat-finger: "REJECT" (défaut) ou "FLOOR" (réduction auto au cap)
-            cap_policy = (
-                (ff.get("policy") or tes.get("fat_finger_policy") or "REJECT")
-                if isinstance(ff, dict)
-                else "REJECT"
-            )
-            cap_policy = str(cap_policy).strip().upper()
-           
-            # Cap global de sécurité
-            cap_global = _to_pos_float(tes.get("max_absolute_volume_safety"))
-            if (
-                vol_safety_enabled
-                and cap_global is not None
-                and volume_final > cap_global
-            ):
-                raise TradeExecutionError(
-                    f"Safety cap (global): volume {volume_final} > cap sécurité {cap_global}."
-                )
-
-            # Cap compte (max)
+            # Clamp "down" sur max compte (pas de rejet)
             if acc_max is not None and volume_final > acc_max:
-                raise TradeExecutionError(
-                    f"Volume {volume_final} > max lot compte {acc_max}."
-                )
+                self.logger.warning(f"[VOLUME] clamp account max: {volume_final} → {acc_max}")
+                volume_final = float(acc_max)
 
-            # Min compte (politique: on n'augmente JAMAIS → on stoppe si en dessous)
+            # NOTE: pas d'augmentation si < min compte (on garde volume_final tel quel et on trace)
             if acc_min is not None and volume_final < acc_min:
-                raise TradeExecutionError(
-                    f"Volume {volume_final} < min lot compte {acc_min} (politique: pas d’augmentation)."
-                )
+                self.logger.warning(f"[VOLUME] sous min compte: {volume_final} < {acc_min} (pas d’auto-augmentation)")
+
+        except Exception as e:
+            self.logger.warning(f"[VOLUME] normalisation compte partielle échouée: {e}")
+
 
         except TradeExecutionError:
             raise
