@@ -245,12 +245,12 @@
     "absolute_volume_failsafe": 1.50,
     "abort_on_excess_volume": true,
     "fat_finger_check": {
-      "enabled": true,
+      "enabled": false,
       "enable_dynamic_check": true,
       "avg_volume_lookback": 20,
       "max_volume_multiplier_from_avg": 5.0,
       "max_absolute_volume_for_asset": {
-        "XAUUSD": 1.5
+        "XAUUSD": 1.1
       },
       "execution": {
         "allow_demo_send": true
