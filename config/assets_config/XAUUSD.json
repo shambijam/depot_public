@@ -1,5 +1,5 @@
 {
-  "description": "Configuration DEMO-EASY pour XAUUSD (scalping fusion, sans veto ni hard-gates, trailing-only).",
+  "description": "Configuration institutionnelle pour XAUUSD (or) — SL/TP 400, trailing à +28 pips.",
   "symbol": "XAUUSD",
   "type": "metal",
   "profile": "institutionnel",
@@ -27,18 +27,18 @@
       }
     },
     "max_allowed_spread_points": {
-      "base": 999,
+      "base": 60,
       "session_multipliers": {
-        "asia": 1.0,
+        "asia": 1.4,
         "london": 1.0,
-        "new_york": 1.0
+        "new_york": 1.2
       },
-      "news_spike_tolerance": 999,
-      "volatility_adjustment": false
+      "news_spike_tolerance": 5,
+      "volatility_adjustment": true
     },
     "min_tradable_range_points": {
-      "value": 0,
-      "dynamic_adjustment": false
+      "value": 25,
+      "dynamic_adjustment": true
     }
   },
   "risk_management": {
@@ -59,28 +59,14 @@
       "footprint": {
         "m1_min_ticks": 3,
         "m1_min_coverage_s": 1.0,
-        "tickrate_min": 0.1,
         "burst_tolerance": {
           "tickrate_min": 0.1,
-          "coverage_s_min_burst": 2
+          "coverage_s_min_burst": 4
         }
-      },
-      "orderflow": {
-        "enabled": true,
-        "delta_abs_min": 5.0
       },
       "fusion": {
-        "ttl_ms": 2500,
-        "max_slippage_points": 150,
-        "allow_degraded_vote": true,
-        "require_phase_alignment": false,
-        "require_footprint": false,
-        "min_score_to_fire": 0.15,
-        "of_score_scale": "0_1",
-        "degraded_vote_conditions": {
-          "min_of_delta_abs": 5.0,
-          "min_of_score": 0.10
-        }
+        "ttl_ms": 800,
+        "max_slippage_points": 150
       },
       "orderflow_v6": {
         "enabled": true,
@@ -95,27 +81,27 @@
         "lookback_bars": 200,
         "features": {
           "delta": {
-            "abs_strong": 50.0,
-            "abs_extreme": 120.0
+            "abs_strong": 120.0,
+            "abs_extreme": 300.0
           },
           "imbalance": {
-            "min": 0.00,
-            "extreme": 0.50
+            "min": 0.52,
+            "extreme": 0.65
           },
           "tickrate": {
-            "min": 0.1,
-            "burst_min": 0.5,
-            "coverage_s_min": 1
+            "min": 2.5,
+            "burst_min": 6.0,
+            "coverage_s_min": 6
           },
           "vpoc": {
-            "drift_max_points": 9999.0
+            "drift_max_points": 50.0
           },
           "cvd": {
             "slope_window": 10,
-            "slope_min": -9999.0
+            "slope_min": 0.0
           },
           "vwap": {
-            "confirm_window": 5
+            "confirm_window": 10
           }
         },
         "divergence": {
@@ -135,15 +121,11 @@
             "divergence": 0.10,
             "vpoc": 0.05
           },
-          "entry_threshold": 0.15,
-          "penalties": {
-            "low_volatility": -0.10,
-            "conflict_signals": -0.15
-          }
+          "entry_threshold": 0.60
         },
         "ncp_strong": {
-          "delta_abs_min": 60.0,
-          "tickrate_min": 1.0
+          "delta_abs_min": 120.0,
+          "tickrate_min": 6.0
         }
       },
       "entry_rules": {
@@ -152,128 +134,50 @@
             "enabled": true,
             "entry_mode": "MARKET",
             "burst_size": 8,
-            "use_orderflow_v6": true,
-            "of_v6_gate": {
-              "min_score": 0.10,
-              "require_ncp_strong": false,
-              "min_delta_abs": 5.0,
-              "min_imbalance": 0.00,
-              "min_tickrate": 0.10
-            },
             "sltp": {
-              "exit_mode": "trailing_only",
+              "exit_mode": "sl_tp_then_trail",
+              "sl_method": "PIPS",
               "rr_base": 1.5,
               "rr_floor": 1.0,
               "rr_cap": 3.0,
-              "trailing": {
-                "kind": "atr",
+              "sl": {
+                "pips": 400,
+                "buffer_pips": 2,
                 "atr_period": 14,
-                "atr_mult": 1.2,
-                "step_pips_min": 2,
-                "activation": {
-                  "mode": "PIPS",
-                  "min_pips": 23.0
-                },
-                "broker_floors": {
-                  "min_sl_distance_pips": 6.0,
-                  "spread_multiplier": 2.5,
-                  "extra_buffer_pips": 1.0
-                }
+                "atr_multiplier": 0.0,
+                "swing_lookback": 0
+              },
+              "tp": {
+                "tp_method": "PIPS",
+                "pips": 400,
+                "atr_period": 14,
+                "atr_multiplier": 0.0
               }
+            },
+            "trailing": {
+              "activation": {
+                "mode": "PIPS",
+                "min_pips": 28.0
+              },
+              "step": {
+                "mode": "PIPS",
+                "min_pips": 8.0,
+                "update_interval_sec": 2.0
+              },
+              "break_even": {
+                "enabled": false
+              }
+            },
+            "use_orderflow_v6": true,
+            "of_v6_gate": {
+              "min_score": 0.60,
+              "require_ncp_strong": false,
+              "min_delta_abs": 120.0,
+              "min_imbalance": 0.52,
+              "min_tickrate": 2.5
             },
             "flow_vol_gate": {
-              "enabled": true,
-              "mode": "soft",
-              "min_tick_rate": 0.10,
-              "min_footprint_score": 0.0,
-              "min_orderflow_score": 0.0,
-              "min_atr_m1_pips": 0.0,
-              "dir_filter": false,
-              "dir_strength_ratio": 0.0,
-              "dir_strength_abs": 0.0,
-              "min_fails_to_block": 999,
-              "per_asset": {
-                "XAUUSD": {
-                  "min_tick_rate": 0.10
-                }
-              },
-              "orderflow_gate": {
-                "min_ticks": 1,
-                "min_tick_rate": 0.10,
-                "min_imbalance": 0.00
-              },
-              "fp_gate": {
-                "min_ticks": 1,
-                "allow_short_coverage": true,
-                "min_score": 0.0
-              }
-            },
-            "range_accumulation": {
-              "dir_gate": {
-                "min_slope": 0.00,
-                "min_bias": 0.00
-              },
-              "orderflow_gate": {
-                "min_ticks": 1,
-                "min_tick_rate": 0.10,
-                "min_imbalance": 0.00
-              },
-              "fp_gate": {
-                "min_ticks": 1,
-                "allow_short_coverage": true,
-                "min_score": 0.0
-              },
-              "sl_pips": 30,
-              "tp_pips": 0
-            },
-            "of_micro_burst": {
-              "enabled": true,
-              "when": {
-                "phase": [
-                  "liquidity_eqh_eql",
-                  "range_retail",
-                  "transitional"
-                ]
-              },
-              "dir_gate": {
-                "use_of_fallback": true,
-                "cvd_min_delta": 10,
-                "imbalance_min": 0.00
-              },
-              "orderflow_gate": {
-                "min_ticks": 1,
-                "min_tick_rate": 0.10
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  "entry_rules": {
-    "scalping": {
-      "burst_scalping": {
-        "enabled": true,
-        "entry_mode": "MARKET",
-        "burst_size": 8,
-        "sltp": {
-          "exit_mode": "trailing_only",
-          "rr_base": 1.5,
-          "rr_floor": 1.0,
-          "rr_cap": 3.0,
-          "trailing": {
-            "kind": "atr",
-            "atr_period": 14,
-            "atr_mult": 1.2,
-            "step_pips_min": 2,
-            "activation": {
-              "mode": "PIPS",
-              "min_pips": 23.0
-            },
-            "broker_floors": {
-              "min_sl_distance_pips": 6.0,
-              "spread_multiplier": 2.5,
-              "extra_buffer_pips": 1.0
+              "enabled": false
             }
           }
         }

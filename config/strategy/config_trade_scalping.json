@@ -1,9 +1,11 @@
 {
   "strategy_name": "scalping",
-  "description": "DEMO EASY — Scalping Burst géré par Fusion (Orderflow + Footprint + Trigger). TP désactivé, sorties uniquement au trailing. Aucune barrière bloquante.",
-  "version": "4.3-demo-easy",
+  "description": "Scalping Burst institutionnel — SL/TP 400 pips puis trailing à +28 pips. Pas de veto, pas de gates bloquants.",
+  "version": "4.4-unblocked",
   "tradeable_assets": [
-    "XAUUSD"
+    "XAUUSD",
+    "EURUSD",
+    "GBPUSD"
   ],
   "magic_number": 52001,
   "decision_rules": [
@@ -24,61 +26,47 @@
     "scalping": {
       "burst_scalping": {
         "enabled": true,
-        "burst_size": 5,
+        "entry_mode": "MARKET",
+        "burst_size": 8,
+        "enforce_single_basket": true,
         "per_leg_virtual": false,
-        "prefer_asset_overrides": false,
-        "burst_guardrails": {
-          "enforce_burst_closure": true,
-          "single_burst_global": true
-        },
         "sltp": {
-          "dynamic": true,
-          "sl_method": "SWING",
-          "rr_base": 1.8,
-          "rr_floor": 1.2,
+          "exit_mode": "sl_tp_then_trail",
+          "sl_method": "PIPS",
+          "rr_base": 1.5,
+          "rr_floor": 1.0,
           "rr_cap": 3.0,
           "sl": {
-            "atr_period": 14,
-            "atr_multiplier": 3.0,
-            "swing_lookback": 25,
             "pips": 400,
-            "buffer_pips": 2
+            "buffer_pips": 2,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
+            "swing_lookback": 0
           },
           "tp": {
-            "tp_method": "NONE",
-            "atr_period": 14,
-            "atr_multiplier": 3.0,
+            "tp_method": "PIPS",
             "pips": 400,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
             "execution": {
               "min_sl_tp_distance_pips": 10
             }
           }
-        },
-        "closure_rules": {
-          "max_loss_pips": 20.0
         }
       },
       "trailing": {
         "enabled": true,
         "activation": {
           "mode": "PIPS",
-          "min_pips": 23.0,
-          "atr_period": 14,
-          "atr_multiple": 6.0
+          "min_pips": 28.0
         },
         "step": {
           "mode": "PIPS",
           "min_pips": 8.0,
-          "atr_multiple": 1.10,
           "update_interval_sec": 2.0
         },
         "break_even": {
-          "enabled": false,
-          "trigger": {
-            "mode": "PIPS",
-            "min_pips": 9999.0
-          },
-          "offset_pips": 0.0
+          "enabled": false
         },
         "broker_floors": {
           "min_sl_distance_pips": 6.0,
@@ -92,8 +80,8 @@
         "m1_min_coverage_s": 1,
         "tickrate_min": 0.1,
         "veto_absorption": false,
-        "warn_absorption": true,
-        "absorption_penalty": 0.10
+        "warn_absorption": false,
+        "absorption_penalty": 0.0
       },
       "orderflow": {
         "enabled": true,
@@ -108,9 +96,11 @@
       "fusion": {
         "enabled": true,
         "enabled_assets": [
-          "XAUUSD"
+          "XAUUSD",
+          "EURUSD",
+          "GBPUSD"
         ],
-        "ttl_ms": 2500,
+        "ttl_ms": 800,
         "max_slippage_points": 150,
         "allow_degraded_vote": true,
         "require_phase_alignment": false,
@@ -118,8 +108,8 @@
         "min_score_to_fire": 0.15,
         "of_score_scale": "0_1",
         "degraded_vote_conditions": {
-          "min_of_delta_abs": 5.0,
-          "min_of_score": 0.10
+          "min_of_delta_abs": 0.0,
+          "min_of_score": 0.0
         }
       }
     }
@@ -163,14 +153,17 @@
     "version": "3.0",
     "fat_finger_check": {
       "enabled": true,
-      "policy": "FLOOR",
+      "policy": "WARN",
       "max_absolute_volume_for_asset": {
-        "XAUUSD": 1.5
+        "XAUUSD": 3.5,
+        "EURUSD": 10.0,
+        "GBPUSD": 8.0
       }
     },
     "halt_on_major_news": false
   },
   "guardrails": {
+    "enabled": false,
     "sessions": {
       "news_blackout": false
     },
@@ -185,8 +178,8 @@
     "adaptive_weights": true,
     "seuils_entree": {
       "min_confidence": 0.05,
-      "min_orderflow_score": 0.05,
-      "max_spread_pts": 60
+      "min_orderflow_score": 0.00,
+      "max_spread_pts": 999
     },
     "scoring_weights": {
       "context": 0.30,
@@ -232,7 +225,16 @@
     "veto_absorption": false,
     "never_against_strong_orderflow": false,
     "triple_confirmation_bonus": true,
-    "weak_footprint_score_th": 0.05
+    "weak_footprint_score_th": 0.00
   },
-  "base_trail_steps": 20
+  "legacy": {
+    "smart_sl_tp_settings": {
+      "disabled": true,
+      "note": "DEPRECATED – ignoré"
+    },
+    "smart_targets": {
+      "disabled": true,
+      "note": "DEPRECATED – ignoré"
+    }
+  }
 }
