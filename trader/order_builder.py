@@ -596,25 +596,74 @@ def prepare_order(self, decision_package: dict) -> dict:
         trade_decision["action"] = side
         trade_decision["final_action"] = side
         self.logger.debug(f"[ORDER_BUILDER] Action normalisée pour SL/TP: {side}")
+        
+        # --- PATCH SLTP-FIXED 400/400 AVANT 7bis ---
+        use_fixed = False
+        try:
+            # lecture conf: entry_rules -> scalping -> burst_scalping -> sltp -> fixed
+            bs_cfg = (((active_config.get("entry_rules") or {}).get("scalping") or {})
+                    .get("burst_scalping") or {})
+            sltp_cfg = (bs_cfg.get("sltp") or {})
+            fixed_cfg = (sltp_cfg.get("fixed") or {})  # << ajoute ce nœud dans l'asset JSON
+
+            sl_pips = float(fixed_cfg.get("sl_pips", 0) or 0)
+            tp_pips = float(fixed_cfg.get("tp_pips", 0) or 0)
+
+            # on considère “fixe” si sl_pips>0 ET tp_pips>0
+            if sl_pips > 0 and tp_pips > 0:
+                point  = float(getattr(symbol_info, "point", 0.01) or 0.01)  # 1 pip = point (XAUUSD: 0.01)
+                digits = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
+
+                def pips_to_price(p):  # convertit pips -> distance en prix
+                    return float(p) * point
+
+                dist_sl = pips_to_price(sl_pips)
+                dist_tp = pips_to_price(tp_pips)
+
+                if action == "BUY":
+                    sl_price = round(entry_price_market - dist_sl, digits)
+                    tp_price = round(entry_price_market + dist_tp, digits)
+                else:  # SELL
+                    sl_price = round(entry_price_market + dist_sl, digits)
+                    tp_price = round(entry_price_market - dist_tp, digits)
+
+                # on marque pour court-circuiter le calcul auto
+                use_fixed = True
+                trade_decision["sl_price"] = float(sl_price)
+                trade_decision["tp_price"] = float(tp_price)
+                trade_decision["sltp_action"] = "SET"
+
+                # hint de trailing: activation après +25/30 pips
+                trailing_cfg = sltp_cfg.get("trailing", {}) or {}
+                act_after = float(trailing_cfg.get("activate_after_pips", 25) or 25)
+                trade_decision["trailing_hint"] = {
+                    "activate_after_pips": act_after,   # démarre le trailing après ce gain
+                    "mode": trailing_cfg.get("kind", "atr")  # ou "step" si tu préfères
+                }
+        except Exception as _e:
+            self.logger.warning(f"[PATCH SLTP-FIXED] lecture/compute échoué: {_e}")
+        # --- FIN PATCH SLTP-FIXED ---
 
         # ---------- 7bis) SL/TP ----------
-        # (Burst) Contexte panier frais pour guider le calcul (fill_ratio, PnL, phase, vol…)
-        basket_ctx = None
-        if is_burst:
+        if not use_fixed:
+            # chemin historique: calcul auto (ATR/RR/etc.)
             try:
-                basket_ctx = _resolve_basket_context_for_sltp(
+                sl_price, tp_price = _calculate_sl_tp_prices(
                     self,
                     trade_decision=trade_decision,
-                    basket_context=None,
-                    burst_manager=getattr(self, "burst_manager", None),
-                    ttl_sec=2.0,
+                    config=active_config,
+                    symbol_info=symbol_info,
+                    entry_price=entry_price_market,
+                    market_context=market_context,
+                    basket_context=basket_ctx,
                 )
             except Exception as e:
-                try:
-                    self.logger.debug(f"[ORDER_BUILDER] basket_ctx resolve failed: {e}")
-                except Exception:
-                    pass
-                basket_ctx = None
+                self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
+                raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
+        else:
+            # déjà posés par le patch fixed
+            sl_price = float(trade_decision["sl_price"])
+            tp_price = float(trade_decision["tp_price"])
 
         # Calcul desk-grade des niveaux (respect bid/ask, stops_level, RR dynamique…)
         try:

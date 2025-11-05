@@ -27,7 +27,7 @@
       "burst_scalping": {
         "enabled": true,
         "entry_mode": "MARKET",
-        "burst_size": 8,
+        "burst_size": 5,
         "enforce_single_basket": true,
         "per_leg_virtual": false,
         "sltp": {
