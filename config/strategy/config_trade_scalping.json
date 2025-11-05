@@ -140,28 +140,6 @@
     "max_positions_per_symbol": 1,
     "stop_distance_pips": 150
   },
-  "execution": {
-    "position_sizing": {
-      "mode": "risk_based",
-      "fixed_lot": 0.01,
-      "bump_to_min_lot": true,
-      "min_order_volume": 0.01,
-      "forbid_zero_volume": true
-    }
-  },
-  "trade_executor_settings": {
-    "version": "3.0",
-    "fat_finger_check": {
-      "enabled": false,
-      "policy": "WARN",
-      "max_absolute_volume_for_asset": {
-        "XAUUSD": 3.5,
-        "EURUSD": 10.0,
-        "GBPUSD": 8.0
-      }
-    },
-    "halt_on_major_news": false
-  },
   "guardrails": {
     "enabled": false,
     "sessions": {

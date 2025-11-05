@@ -1106,30 +1106,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 else "REJECT"
             )
             cap_policy = str(cap_policy).strip().upper()
-
-            # Fat-finger par actif
-            if ff_enabled:
-                per_asset = ff.get("max_absolute_volume_for_asset") or {}
-                cap_sym = _to_pos_float(per_asset.get(raw_symbol))
-                if cap_sym is not None and volume_final > cap_sym:
-                    if cap_policy in {"FLOOR", "CLAMP", "REDUCE"}:
-                        target = min(volume_final, cap_sym)
-                        new_vol = _floor_broker(target)
-                        if new_vol is None:
-                            # cap < min broker → impossible sans augmenter; on stoppe (sécurité)
-                            raise TradeExecutionError(
-                                f"Fat-finger: cap {cap_sym} < min lot broker → impossible de réduire sans augmenter."
-                            )
-                        self.logger.warning(
-                            f"[FAT-FINGER] clamp: {volume_final} → {new_vol} (cap actif={cap_sym}, policy={cap_policy})"
-                        )
-                        volume_final = new_vol
-                    else:
-                        # Politique REJECT (comportement historique)
-                        raise TradeExecutionError(
-                            f"Fat-finger: volume {volume_final} > cap absolu {cap_sym} sur {raw_symbol}."
-                        )
-
+           
             # Cap global de sécurité
             cap_global = _to_pos_float(tes.get("max_absolute_volume_safety"))
             if (

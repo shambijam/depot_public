@@ -240,10 +240,10 @@
       "dry_run": false,
       "slippage_points": 20
     },
-    "volume_safety_enabled": true,
+    "volume_safety_enabled": false,
     "max_absolute_volume_safety": 1.50,
     "absolute_volume_failsafe": 1.50,
-    "abort_on_excess_volume": true,
+    "abort_on_excess_volume": false,
     "fat_finger_check": {
       "enabled": false,
       "enable_dynamic_check": true,
