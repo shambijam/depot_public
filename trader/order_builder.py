@@ -615,124 +615,22 @@ def prepare_order(self, decision_package: dict) -> dict:
                     pass
                 basket_ctx = None
 
-        # ---------- 7b) SL/TP depuis la strategy JSON (PIPS fixes) ----------
-        use_fixed = False
+        # ---------- 7bis) SL/TP (DÉLÉGUÉ À sltp.py) ----------
         try:
-            # entry_rules.scalping.burst_scalping.sltp.sl.pips / tp.pips
-            bs_cfg   = (((active_config.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {})
-            sltp_cfg = (bs_cfg.get("sltp") or {})
-            sl_pips  = float(((sltp_cfg.get("sl") or {}).get("pips", 0)) or 0)
-            tp_pips  = float(((sltp_cfg.get("tp") or {}).get("pips", 0)) or 0)
+            sl_price, tp_price = _calculate_sl_tp_prices(
+                self,
+                trade_decision=trade_decision,
+                config=active_config,
+                symbol_info=symbol_info,
+                entry_price=entry_price_market,
+                market_context=market_context,
+                basket_context=basket_ctx,  # utile pour le burst
+            )
+        except Exception as e:
+            self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
+            raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
 
-            # On traite "fixe" si les 2 sont présents (>0)
-            if sl_pips > 0 and tp_pips > 0:
-                point    = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
-                pip_size = 10.0 * point  # pip = 10 * point (XAUUSD: 0.1 si point=0.01)
-                digits   = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
-
-                sl_dist = sl_pips * pip_size
-                tp_dist = tp_pips * pip_size
-
-                if action == "BUY":
-                    sl_price = round(entry_price_market - sl_dist, digits)
-                    tp_price = round(entry_price_market + tp_dist, digits)
-                else:  # SELL
-                    sl_price = round(entry_price_market + sl_dist, digits)
-                    tp_price = round(entry_price_market - tp_dist, digits)
-
-                trade_decision["sl_price"] = float(sl_price)
-                trade_decision["tp_price"] = float(tp_price)
-                sltp_action = "SET"
-                use_fixed = True
-        except Exception as _e:
-            self.logger.warning(f"[SLTP-FIXED] lecture/compute échoué: {_e}")
-
-        # ---------- 7c) Calcul auto si non-fixe ----------
-        if not use_fixed:
-            try:
-                sl_price, tp_price = _calculate_sl_tp_prices(
-                    self,
-                    trade_decision=trade_decision,
-                    config=active_config,
-                    symbol_info=symbol_info,
-                    entry_price=entry_price_market,
-                    market_context=market_context,
-                    basket_context=basket_ctx,
-                )
-            except Exception as e:
-                self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
-                raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
-
-                
-        # --- PATCH SLTP-FIXED 400/400 AVANT 7bis ---
-        use_fixed = False
-        try:
-            # lecture conf: entry_rules -> scalping -> burst_scalping -> sltp -> fixed
-            bs_cfg = (((active_config.get("entry_rules") or {}).get("scalping") or {})
-                    .get("burst_scalping") or {})
-            sltp_cfg = (bs_cfg.get("sltp") or {})
-            fixed_cfg = (sltp_cfg.get("fixed") or {})  # << ajoute ce nœud dans l'asset JSON
-
-            sl_pips = float(fixed_cfg.get("sl_pips", 0) or 0)
-            tp_pips = float(fixed_cfg.get("tp_pips", 0) or 0)
-
-            # on considère “fixe” si sl_pips>0 ET tp_pips>0
-            if sl_pips > 0 and tp_pips > 0:
-                point  = float(getattr(symbol_info, "point", 0.01) or 0.01)  # 1 pip = point (XAUUSD: 0.01)
-                digits = int(getattr(symbol_info, "digits", max(0, round(-math.log10(point)))))
-
-                def pips_to_price(p):  # convertit pips -> distance en prix
-                    return float(p) * point
-
-                dist_sl = pips_to_price(sl_pips)
-                dist_tp = pips_to_price(tp_pips)
-
-                if action == "BUY":
-                    sl_price = round(entry_price_market - dist_sl, digits)
-                    tp_price = round(entry_price_market + dist_tp, digits)
-                else:  # SELL
-                    sl_price = round(entry_price_market + dist_sl, digits)
-                    tp_price = round(entry_price_market - dist_tp, digits)
-
-                # on marque pour court-circuiter le calcul auto
-                use_fixed = True
-                trade_decision["sl_price"] = float(sl_price)
-                trade_decision["tp_price"] = float(tp_price)
-                trade_decision["sltp_action"] = "SET"
-
-                # hint de trailing: activation après +25/30 pips
-                trailing_cfg = sltp_cfg.get("trailing", {}) or {}
-                act_after = float(trailing_cfg.get("activate_after_pips", 25) or 25)
-                trade_decision["trailing_hint"] = {
-                    "activate_after_pips": act_after,   # démarre le trailing après ce gain
-                    "mode": trailing_cfg.get("kind", "atr")  # ou "step" si tu préfères
-                }
-        except Exception as _e:
-            self.logger.warning(f"[PATCH SLTP-FIXED] lecture/compute échoué: {_e}")
-        # --- FIN PATCH SLTP-FIXED ---
-
-        # ---------- 7bis) SL/TP ----------
-        if not use_fixed:
-            # chemin historique: calcul auto (ATR/RR/etc.)
-            try:
-                sl_price, tp_price = _calculate_sl_tp_prices(
-                    self,
-                    trade_decision=trade_decision,
-                    config=active_config,
-                    symbol_info=symbol_info,
-                    entry_price=entry_price_market,
-                    market_context=market_context,
-                    basket_context=basket_ctx,
-                )
-            except Exception as e:
-                self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
-                raise TradeExecutionError(f"Échec calcul SL/TP: {e}")
-        else:
-            # déjà posés par le patch fixed
-            sl_price = float(trade_decision["sl_price"])
-            tp_price = float(trade_decision["tp_price"])
-     
-        # Validation stricte du SL (obligatoire)
+        # Validation stricte du SL (obligatoire) – pas de normalisation ici
         if not (isinstance(sl_price, (int, float)) and sl_price > 0):
             raise TradeExecutionError("SL requis mais introuvable (calcul SL/TP).")
 
@@ -743,89 +641,7 @@ def prepare_order(self, decision_package: dict) -> dict:
                 trade_decision["tp_price"] = float(tp_price)
         except Exception:
             pass
-
-        # ---------- 8a) Sécurité broker & normalisation prix ----------
-        try:
-            point = float(getattr(symbol_info, "point", 0.0001) or 0.0001)
-            tick = float(getattr(symbol_info, "trade_tick_size", point) or point)
-            digits = int(
-                getattr(symbol_info, "digits", max(0, round(-math.log10(point))))
-            )
-
-            stops_level_pts = int(getattr(symbol_info, "stops_level", 0) or 0)
-            freeze_level_pts = int(getattr(symbol_info, "freeze_level", 0) or 0)
-            broker_min = max(stops_level_pts, freeze_level_pts) * point  # en prix
-
-            cfg_min_pips = None
-            try:
-                cfg_min_pips = (active_config.get("execution", {}) or {}).get(
-                    "min_sl_tp_distance_pips", None
-                ) or (active_config.get("scalping", {}) or {}).get(
-                    "min_sl_tp_distance_pips", None
-                )
-            except Exception:
-                cfg_min_pips = None
-
-            pip_size = 10.0 * point
-            cfg_min_price = (
-                float(cfg_min_pips) * pip_size
-                if isinstance(cfg_min_pips, (int, float))
-                else 0.0
-            )
-            min_gap_price = max(3.0 * point, broker_min, cfg_min_price)
-
-            def _ceil_to_tick(x: float) -> float:
-                return round(math.ceil(x / tick) * tick, digits)
-
-            def _floor_to_tick(x: float) -> float:
-                return round(math.floor(x / tick) * tick, digits)
-
-            has_tp = tp_price is not None
-
-            if action == "BUY":
-                if (entry_price_market - sl_price) < min_gap_price:
-                    sl_price = entry_price_market - min_gap_price
-                if has_tp and (tp_price - entry_price_market) < min_gap_price:
-                    tp_price = entry_price_market + min_gap_price
-                sl_price = _floor_to_tick(sl_price)
-                if has_tp:
-                    tp_price = _ceil_to_tick(tp_price)
-                if not (sl_price < entry_price_market):
-                    sl_price = _floor_to_tick(entry_price_market - min_gap_price)
-                if has_tp and not (entry_price_market < tp_price):
-                    tp_price = _ceil_to_tick(entry_price_market + min_gap_price)
-
-            elif action == "SELL":
-                if (sl_price - entry_price_market) < min_gap_price:
-                    sl_price = entry_price_market + min_gap_price
-                if has_tp and (entry_price_market - tp_price) < min_gap_price:
-                    tp_price = entry_price_market - min_gap_price
-                sl_price = _ceil_to_tick(sl_price)
-                if has_tp:
-                    tp_price = _floor_to_tick(tp_price)
-                if not (entry_price_market < sl_price):
-                    sl_price = _ceil_to_tick(entry_price_market + min_gap_price)
-                if has_tp and not (tp_price < entry_price_market):
-                    tp_price = _floor_to_tick(entry_price_market - min_gap_price)
-
-            def _fmt(v):
-                return (
-                    f"{float(v):.{digits}f}" if isinstance(v, (int, float)) else "None"
-                )
-
-            self.logger.info(
-                "[SAFETY] SL/TP normalisés | symbol=%s, entry=%s, SL=%s, TP=%s, min_gap=%s, stops_level=%s, freeze_level=%s",
-                broker_symbol,
-                _fmt(entry_price_market),
-                _fmt(sl_price),
-                _fmt(tp_price),
-                _fmt(min_gap_price),
-                str(stops_level_pts),
-                str(freeze_level_pts),
-            )
-        except Exception as e:
-            self.logger.warning(f"[SAFETY] Normalisation SL/TP échouée: {e}")
-
+       
         # ---------- 8bis) RR minimum (soft, si TP présent) ----------
         try:
             rm_cfg = self.config_manager.get("risk_management") or {}
@@ -1184,15 +1000,7 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         except Exception as e:
             self.logger.warning(f"[VOLUME] normalisation compte partielle échouée: {e}")
-
-
-        except TradeExecutionError:
-            raise
-        except Exception as e:
-            self.logger.warning(
-                f"Vérif volume (fat-finger/caps) partielle échouée: {e}"
-            )
-
+       
         # ---------- 10) Construction requête ----------
         return self._build_mt5_request(
             {

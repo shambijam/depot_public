@@ -193,8 +193,8 @@ def build_final_sl_tp(
     """
     if not action:
         raise SLTPError("Action manquante pour SL/TP.")
-    act = action.upper()
-    side = resolve_side(act)
+    act = str(action).strip().upper()
+    side = 1 if act == "BUY" else -1
 
     point = float(_get(symbol_info, "point", "tick_size", default=0.0001))
     digits = int(_get(symbol_info, "digits", "precision", default=5))
