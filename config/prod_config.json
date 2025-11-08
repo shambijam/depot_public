@@ -358,7 +358,7 @@
       "blacklist_duration_minutes": 60
     },
     "risk_management": {
-      "risk_per_trade_pct": 0.73,
+      "risk_per_trade_pct": 0.30,
       "min_rr": 1.8,
       "max_tp_to_sl_ratio": 3.5,
       "default_sl_pips": 8.0,
@@ -368,54 +368,6 @@
       "min_factor": 0.9,
       "min_sizing_stop_pts": 100,
       "min_sizing_stop_atr_mult": 0.5
-    },
-    "entry_rules": {
-      "scalping": {
-        "burst_scalping": {
-          "enabled": true,
-          "entry_mode": "MARKET",
-          "burst_size": 5,
-          "prefer_asset_overrides": true,
-          "sltp": {
-            "exit_mode": "sl_tp_then_trail",
-            "sl_method": "PIPS",
-            "rr_base": 1.5,
-            "rr_floor": 1.0,
-            "rr_cap": 3.0,
-            "sl": {
-              "pips": 400,
-              "buffer_pips": 2,
-              "atr_period": 14,
-              "atr_multiplier": 0.0,
-              "swing_lookback": 0
-            },
-            "tp": {
-              "tp_method": "PIPS",
-              "pips": 400,
-              "atr_period": 14,
-              "atr_multiplier": 0.0,
-              "execution": {
-                "min_sl_tp_distance_pips": 10
-              }
-            }
-          },
-          "trailing": {
-            "enabled": true,
-            "activation": {
-              "mode": "PIPS",
-              "min_pips": 28.0
-            },
-            "step": {
-              "mode": "PIPS",
-              "min_pips": 8.0,
-              "update_interval_sec": 2.0
-            },
-            "break_even": {
-              "enabled": false
-            }
-          }
-        }
-      }
     }
   }
 }

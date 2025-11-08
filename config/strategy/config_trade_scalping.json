@@ -52,26 +52,26 @@
               "min_sl_tp_distance_pips": 10
             }
           }
-        }
-      },
-      "trailing": {
-        "enabled": true,
-        "activation": {
-          "mode": "PIPS",
-          "min_pips": 28.0
         },
-        "step": {
-          "mode": "PIPS",
-          "min_pips": 8.0,
-          "update_interval_sec": 2.0
-        },
-        "break_even": {
-          "enabled": false
-        },
-        "broker_floors": {
-          "min_sl_distance_pips": 6.0,
-          "spread_multiplier": 2.5,
-          "extra_buffer_pips": 1.0
+        "trailing": {
+          "enabled": true,
+          "activation": {
+            "mode": "PIPS",
+            "min_pips": 28.0
+          },
+          "step": {
+            "mode": "PIPS",
+            "min_pips": 8.0,
+            "update_interval_sec": 2.0
+          },
+          "break_even": {
+            "enabled": false
+          },
+          "broker_floors": {
+            "min_sl_distance_pips": 6.0,
+            "spread_multiplier": 0.0,
+            "extra_buffer_pips": 0.0
+          }
         }
       },
       "footprint": {

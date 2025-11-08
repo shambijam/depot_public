@@ -42,7 +42,7 @@
     }
   },
   "risk_management": {
-    "risk_per_trade_percent": 0.73,
+    "risk_per_trade_percent": 0.30,
     "base_lot_size": 0.05,
     "daily_loss_limit_percent": {
       "value": 2.5
@@ -131,43 +131,7 @@
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
-            "enabled": true,
-            "entry_mode": "MARKET",
-            "burst_size": 8,
-            "sltp": {
-              "exit_mode": "sl_tp_then_trail",
-              "sl_method": "PIPS",
-              "rr_base": 1.5,
-              "rr_floor": 1.0,
-              "rr_cap": 3.0,
-              "sl": {
-                "pips": 400,
-                "buffer_pips": 2,
-                "atr_period": 14,
-                "atr_multiplier": 0.0,
-                "swing_lookback": 0
-              },
-              "tp": {
-                "tp_method": "PIPS",
-                "pips": 400,
-                "atr_period": 14,
-                "atr_multiplier": 0.0
-              }
-            },
-            "trailing": {
-              "activation": {
-                "mode": "PIPS",
-                "min_pips": 28.0
-              },
-              "step": {
-                "mode": "PIPS",
-                "min_pips": 8.0,
-                "update_interval_sec": 2.0
-              },
-              "break_even": {
-                "enabled": false
-              }
-            },
+            "burst_size": 5,
             "use_orderflow_v6": true,
             "of_v6_gate": {
               "min_score": 0.60,
