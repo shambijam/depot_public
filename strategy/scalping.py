@@ -309,9 +309,9 @@ class ScalpingStrategy(BaseStrategy):
             except Exception:
                 guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
 
-            # Config single_master
+            # Config burst_scalping
             sm_cfg = ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
-                "burst_single_master", {}
+                "burst_scalping", {}
             ) or {}
             if not bool(sm_cfg.get("enabled", True)):
                 self.logger.info(f"[{asset}] single_master désactivé en config.")

@@ -170,6 +170,7 @@
       "conditional": 0.05
     },
     "momentum": {
+      "enabled": false,
       "breakout": {
         "lookback_bars": 30,
         "atr_period": 14,
@@ -188,9 +189,16 @@
       }
     },
     "patterns": {
+      "enabled": false,
       "inside_bar": {
         "breakout_buffer_pips": 1.2
       }
+    },
+    "range_accumulation": {
+      "enabled": false
+    },
+    "range_accumulation_mtf": {
+      "enabled": false
     },
     "ponderations": {
       "trigger_weight": 0.40,

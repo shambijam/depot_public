@@ -131,7 +131,7 @@
       "entry_rules": {
         "scalping": {
           "burst_scalping": {
-            "burst_size": 5,
+            "burst_size": 8,
             "use_orderflow_v6": true,
             "of_v6_gate": {
               "min_score": 0.60,
