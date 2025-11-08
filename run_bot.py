@@ -182,7 +182,7 @@ def _get_merged_config_for_asset(
     if "strategy_name" in active_config:
         merged_config["strategy_name"] = active_config["strategy_name"]
 
-    # Sections à merger (tu peux en ajouter/retirer selon tes fichiers d’assets)
+    # Sections à merger (tu peux en ajouter/retirer selon tes fichiers d'assets)
     sections_to_merge = [
         "phase_detection",
         "volatility",
@@ -197,6 +197,7 @@ def _get_merged_config_for_asset(
         "data_collection",
         "broker_overrides",
         "position_management",
+        "entry_rules",  # <-- CRITIQUE: permet de fusionner les overrides SL/TP par asset
     ]
 
     for section in sections_to_merge:
