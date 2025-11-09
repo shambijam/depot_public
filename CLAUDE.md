@@ -1,6 +1,114 @@
 # CLAUDE.md - Historique des Modifications
 
-## Session du 9 Novembre 2025
+## Session du 9 Novembre 2025 (Suite)
+
+### 🎯 Objectif : Nettoyage Code Legacy - Gestion des Heures de Trading
+
+#### Problème Identifié
+Deux systèmes redondants et incompatibles de gestion des heures de trading :
+1. **Système ACTIF** (core/config_manager.py) : Utilise `bot_behavior.trading_hours_local` avec timezone
+2. **Système LEGACY** (trader/validators.py) : Cherchait des paramètres inexistants `trading_start_hour_utc` / `trading_end_hour_utc`
+
+**Impact** :
+- Code mort (~300 lignes) jamais utilisé
+- Confusion sur le système réellement actif
+- Risque de bugs si quelqu'un essayait d'utiliser le legacy
+
+---
+
+#### ✅ Solution Appliquée : Suppression Complète du Code Legacy
+
+**Fichier** : `trader/validators.py`
+
+**1. Fonction `_check_trading_window()` supprimée (lignes 14-54)**
+- ❌ Cherchait `trade_executor_settings.trading_start_hour_utc`
+- ❌ Cherchait `trade_executor_settings.trading_end_hour_utc`
+- ❌ Jamais appelée nulle part
+- **Résultat** : -41 lignes
+
+**2. Fonction `pre_trade_checks()` supprimée (lignes 162-425)**
+- ❌ Contenait une vérification horaire legacy identique (lignes 309-331)
+- ❌ Jamais appelée nulle part (code mort)
+- ❌ ~263 lignes de logique inutilisée
+- **Résultat** : -263 lignes
+
+**Total supprimé** : **~304 lignes de code mort**
+
+---
+
+#### 📊 Système ACTIF et UNIQUE
+
+**Configuration** : `config/prod_config.json` (lignes 340-351)
+
+```json
+{
+  "bot_behavior": {
+    "trading_timezone": "Europe/Paris",
+    "trading_hours_local": {
+      "start": "10:00",
+      "end": "22:00"
+    },
+    "allowed_weekdays": [0, 1, 2, 3, 4]
+  }
+}
+```
+
+**Code** : `core/config_manager.py` (fonction `analyze_context()`, lignes 539-629)
+- Utilise `zoneinfo.ZoneInfo` pour gestion timezone
+- Calcule `is_trading_hours`, `is_trading_day`, `is_market_open`
+- Gère les fenêtres traversant minuit (ex: 22h→7h)
+
+**Vérification** : `core/decision_pipeline.py` (ligne 197)
+```python
+if not analyzed_context.get("is_market_open", True):
+    # Bloque les nouvelles entrées hors horaires
+```
+
+---
+
+#### 🎯 Configuration Finale
+
+**Timezone** : `Europe/Paris` (modifiable selon besoin)
+**Heures** : `10:00 → 22:00` (heure locale Paris)
+**Jours** : Lundi-Vendredi (0-4)
+
+**Exemples de modification** :
+
+```json
+// Trading 24/7
+"trading_timezone": "UTC",
+"trading_hours_local": { "start": "00:00", "end": "23:59" },
+"allowed_weekdays": [0, 1, 2, 3, 4, 5, 6]
+
+// Session US uniquement
+"trading_timezone": "America/New_York",
+"trading_hours_local": { "start": "09:00", "end": "17:00" },
+"allowed_weekdays": [0, 1, 2, 3, 4]
+
+// Session de nuit Paris
+"trading_timezone": "Europe/Paris",
+"trading_hours_local": { "start": "22:00", "end": "07:00" },
+"allowed_weekdays": [0, 1, 2, 3, 4]
+```
+
+---
+
+#### 🔍 Bénéfices
+
+1. ✅ **Code simplifié** : -304 lignes de code mort supprimées
+2. ✅ **Un seul système** : Plus de confusion possible
+3. ✅ **Configuration centralisée** : `prod_config.json` uniquement
+4. ✅ **Même heures pour tous** : Assets et stratégies partagent la config
+5. ✅ **Timezone-aware** : Supporte tous les fuseaux horaires
+6. ✅ **Gère les fenêtres de nuit** : Correctement (ex: 22h→7h)
+
+---
+
+*Dernière mise à jour : 9 Novembre 2025*
+
+---
+
+## Session du 9 Novembre 2025 (Début)
 
 ### 🎯 Objectif Principal
 Unifier complètement la nomenclature `burst_single_master` → `burst_scalping` pour éliminer toute ambiguïté dans le code et les configurations.
