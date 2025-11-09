@@ -372,7 +372,7 @@ class ScalpingStrategy(BaseStrategy):
 
             sm_decision = {
                 "strategy_type": "scalping",
-                "rule_name": "burst_single_master",
+                "rule_name": "burst_scalping",
                 "execution_status": "ready",
                 "action": action,
                 "asset": asset,
@@ -721,7 +721,7 @@ class ScalpingStrategy(BaseStrategy):
     # Tes règles scalping/liquidity existantes commencent ici
     # =====================================================
 
-    def _rule_burst_single_master(
+    def _rule_burst_scalping(
         self,
         asset: str,
         action: str,
@@ -731,7 +731,7 @@ class ScalpingStrategy(BaseStrategy):
         context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """
-        Single-Master:
+        Burst Scalping:
         - 1 seule position broker (volume unique calculé plus tard)
         - Pas de TP (trailing global)
         - burst_size est virtuel (logique interne)
@@ -747,7 +747,7 @@ class ScalpingStrategy(BaseStrategy):
 
         return {
             "strategy_type": "scalping",
-            "rule_name": "burst_single_master",
+            "rule_name": "burst_scalping",
             "execution_status": "ready",
             "action": action,
             "asset": asset,

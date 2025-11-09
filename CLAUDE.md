@@ -1,5 +1,80 @@
 # CLAUDE.md - Historique des Modifications
 
+## Session du 9 Novembre 2025
+
+### 🎯 Objectif Principal
+Unifier complètement la nomenclature `burst_single_master` → `burst_scalping` pour éliminer toute ambiguïté dans le code et les configurations.
+
+---
+
+## 📋 Problème Identifié
+
+### **Incohérence de Nommage Legacy**
+Deux noms différents utilisés pour la même fonctionnalité :
+- **Code legacy** : `burst_single_master` (strategy/scalping.py)
+- **Configuration moderne** : `burst_scalping` (toutes les configs)
+
+**Impact** :
+- Confusion dans la compréhension du code
+- Normalisation nécessaire dans run_bot.py pour gérer les alias
+- Risque de bugs si la normalisation est oubliée quelque part
+- Documentation incohérente
+
+---
+
+## ✅ Solution Appliquée : Unification Complète vers `burst_scalping`
+
+### Fichiers Modifiés
+
+**1. `strategy/scalping.py`**
+- Ligne 375 : `"rule_name": "burst_single_master"` → `"burst_scalping"`
+- Ligne 750 : `"rule_name": "burst_single_master"` → `"burst_scalping"`
+- Ligne 724 : Méthode `_rule_burst_single_master()` → `_rule_burst_scalping()`
+
+**2. `trader/sizing.py`**
+- Lignes 339, 345 : Simplifié `rule_name in {"burst_scalping", "burst_single_master"}` → `rule_name == "burst_scalping"`
+
+**3. `trader/order_builder.py`**
+- Ligne 568 : Retiré `"burst_single_master"` de la liste des alias
+
+**4. `run_bot.py`**
+- Ligne 417 : Retiré `"burst_single_master"` de la liste des alias (2 occurrences)
+- Ligne 2530 : Retiré `"burst_single_master"` de la liste des alias
+
+**5. `CLAUDE.md`**
+- Remplacement global de `burst_single_master` → `burst_scalping`
+
+---
+
+## 📊 Résultat Final
+
+**Nomenclature unifiée** : `burst_scalping` partout
+- ✅ Code source (strategy/scalping.py)
+- ✅ Configuration (config_trade_scalping.json, XAUUSD.json)
+- ✅ Pipeline d'exécution (run_bot.py, order_builder.py, sizing.py)
+- ✅ Documentation (CLAUDE.md)
+
+**Alias historiques conservés** (pour rétrocompatibilité) :
+- `"burst"`, `"burst_master"`, `"scalping_burst"`, `"burst_single"`, `""`
+
+→ **Plus aucune référence à `burst_single_master` dans le code**
+
+---
+
+## 🎯 Avantages
+
+1. ✅ **Cohérence totale** code/config
+2. ✅ **Meilleure lisibilité** et maintenance
+3. ✅ **Moins de risques de bugs** futurs
+4. ✅ **Documentation claire** et non ambiguë
+5. ✅ **Compréhension immédiate** de la stratégie (burst + scalping)
+
+---
+
+*Dernière mise à jour : 9 Novembre 2025*
+
+---
+
 ## Session du 8 Novembre 2025
 
 ### 🎯 Objectif Principal
@@ -32,13 +107,13 @@ Ordre d'évaluation dans `strategy/scalping.py` :
    - inside_bar_breakout
    - momentum_ignition
 3. range_accumulation simple     → 30 pips
-4. burst_single_master          → 400 pips (JAMAIS ATTEINT si patterns matchent avant)
+4. burst_scalping          → 400 pips (JAMAIS ATTEINT si patterns matchent avant)
 ```
 
-**Impact** : Si un pattern matchait, il retournait sa propre décision avec `target_sl_pips` (souvent 30 pips) et court-circuitait le burst_single_master configuré à 400 pips.
+**Impact** : Si un pattern matchait, il retournait sa propre décision avec `target_sl_pips` (souvent 30 pips) et court-circuitait le burst_scalping configuré à 400 pips.
 
 ### 4. **Problème burst_size (Historique Critique)**
-- Code cherchait `burst_single_master` au lieu de `burst_scalping`
+- Code cherchait `burst_scalping` au lieu de `burst_scalping`
 - XAUUSD configuré à 8 positions utilisait toujours 5 (default codé en dur)
 - Perte d'override lors du nettoyage (8 → 5 accidentellement)
 
@@ -146,7 +221,7 @@ ACTIVATION_PIPS = max(28.0, 0.0) = 28.0  // ✅ TOUJOURS 28 pips
 }
 ```
 
-**Impact** : SEUL `burst_single_master` est maintenant évalué dans `strategy/scalping.py`
+**Impact** : SEUL `burst_scalping` est maintenant évalué dans `strategy/scalping.py`
 
 ---
 
@@ -159,7 +234,7 @@ ACTIVATION_PIPS = max(28.0, 0.0) = 28.0  // ✅ TOUJOURS 28 pips
 **Avant** :
 ```python
 sm_cfg = ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
-    "burst_single_master", {}  # ❌ MAUVAISE CLÉ
+    "burst_scalping", {}  # ❌ MAUVAISE CLÉ
 ) or {}
 burst_sz = sm_cfg.get("burst_size", 5)  # Retourne TOUJOURS 5
 ```
@@ -209,7 +284,7 @@ burst_sz = sm_cfg.get("burst_size", 5)  # Lit la vraie config
 │    - range_accumulation_mtf → SKIP                          │
 │    - momentum patterns → SKIP                                │
 │    - range_accumulation → SKIP                               │
-│    → Arrive à burst_single_master                            │
+│    → Arrive à burst_scalping                            │
 │                                                              │
 │    Lecture burst_size (CORRIGÉE) ✅                          │
 │    - XAUUSD: lit 8 (depuis config merged)                   │
@@ -217,7 +292,7 @@ burst_sz = sm_cfg.get("burst_size", 5)  # Lit la vraie config
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. burst_single_master                                       │
+│ 3. burst_scalping                                       │
 │    - Retourne décision SANS target_sl_pips                  │
 │    - Burst size : 5 (EURUSD) ou 8 (XAUUSD)                  │
 └────────────────────────┬────────────────────────────────────┘
@@ -335,7 +410,7 @@ order_builder.py résout: 8
 ## ⚠️ Points d'Attention Identifiés
 
 ### 1. ~~Incohérence de Nommage~~ ✅ CORRIGÉ
-- ~~Code cherchait : `entry_rules.scalping.burst_single_master`~~
+- ~~Code cherchait : `entry_rules.scalping.burst_scalping`~~
 - ~~Config avait : `entry_rules.scalping.burst_scalping`~~
 - **✅ RÉSOLU** : Code corrigé pour lire `burst_scalping`
 
@@ -444,7 +519,7 @@ Après les corrections appliquées :
 ## 📅 Prochaines Sessions (Suggestions)
 
 ### Points à Vérifier
-1. ~~Harmoniser nommage `burst_single_master` vs `burst_scalping`~~ ✅ FAIT
+1. ~~Harmoniser nommage `burst_scalping` vs `burst_scalping`~~ ✅ FAIT
 2. Tester en conditions réelles (spread élevé, news)
 3. Analyser les logs de trades pour confirmer les 400 pips et burst_size correct
 

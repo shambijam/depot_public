@@ -561,11 +561,11 @@ def prepare_order(self, decision_package: dict) -> dict:
 
         trade_decision["burst_size"] = resolved_burst  # propagation utile au sizing
         _alias = str(trade_decision.get("rule_name", "")).lower().strip()
+        # Normalisation des anciens alias historiques vers burst_scalping
         if _alias in {
             "burst",
             "burst_master",
             "scalping_burst",
-            "burst_single_master",
             "burst_single",
             "",
         }:

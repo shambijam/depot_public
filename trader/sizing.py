@@ -332,17 +332,17 @@ def _calculate_risk_based_volume(
     if burst_size < 1:
         burst_size = 1
 
-    # Force BASKET pour single_master/burst_scalping (pour bien DIVISER le risque)
+    # Force BASKET pour burst_scalping (pour bien DIVISER le risque)
     if not sizing_scope:
         sizing_scope = (
             "BASKET"
-            if rule_name in {"burst_scalping", "burst_single_master"}
+            if rule_name == "burst_scalping"
             else ("BASKET" if strategy == "scalping" else "SINGLE")
         )
     elif sizing_scope not in {"SINGLE", "BASKET"}:
         sizing_scope = (
             "BASKET"
-            if rule_name in {"burst_scalping", "burst_single_master"}
+            if rule_name == "burst_scalping"
             else "SINGLE"
         )
 

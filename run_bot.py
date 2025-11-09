@@ -409,12 +409,12 @@ def _execute_single_decision(
 
         # --- Détection (et normalisation d'alias) du mode burst ---
         rn = str(td.get("rule_name", "")).lower().strip()
+        # Normalisation des anciens alias historiques vers burst_scalping
         if rn in {
             "burst",
             "burst_master",
             "scalping_burst",
             "burst_single",
-            "burst_single_master",
             "",
         }:
             rn = "burst_scalping"
@@ -2523,11 +2523,11 @@ def run_single_pipeline_cycle(
                     td["symbol"] = sym
 
                     _alias = str(td.get("rule_name", "")).lower().strip()
+                    # Normalisation des anciens alias historiques vers burst_scalping
                     if _alias in {
                         "burst",
                         "burst_master",
                         "scalping_burst",
-                        "burst_single_master",
                         "burst_single",
                         "",
                     }:
