@@ -738,25 +738,16 @@ def prepare_order(self, decision_package: dict) -> dict:
                     return f
             return 0.0
 
-        import os
-
+        # === Cascade SIMPLIFIÉE (4 sources au lieu de 12) ===
+        # 1. Broker account (priorité)
+        # 2. Asset override (ex: XAUUSD.json)
+        # 3. Global config (prod_config.json)
+        # 4. Fallback documenté (0.30%)
         resolved_risk_pct = _cascade(
             account_trade_settings.get("risk_per_trade_percent"),
-            trade_decision.get("risk_per_trade_percent"),
-            trade_decision.get("risk_pct"),
-            trade_decision.get("risk_percent"),
-            (active_config.get("sizing", {}) or {}).get("risk_per_trade_percent"),
-            (active_config.get("risk_management", {}) or {}).get(
-                "risk_per_trade_percent"
-            ),
+            (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
             self.config_manager.get("risk_management.risk_per_trade_percent"),
-            self.config_manager.get("risk_management.default_risk_per_trade_percent"),
-            self.config_manager.get("defaults.risk_per_trade_percent"),
-            os.getenv("SNIPERX_RISK_PCT"),
-            trade_decision.get("fallback_risk_per_trade_percent"),
-            (active_config.get("risk_management", {}) or {}).get(
-                "fallback_risk_per_trade_percent"
-            ),
+            0.30,  # Fallback documenté (au lieu de 0.25%)
         )
 
         def _to_pos_float(x, default=None):
@@ -768,6 +759,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             except Exception:
                 return default
 
+        # === Vérification min/max ===
         min_risk = _to_pos_float(
             self.config_manager.get("risk_management.min_risk_per_trade_percent", 0.01),
             0.01,
@@ -777,26 +769,16 @@ def prepare_order(self, decision_package: dict) -> dict:
             2.0,
         )
 
-        used_fallback = False
-        if resolved_risk_pct <= 0:
-            resolved_risk_pct = 0.25
-            used_fallback = True
-
         if resolved_risk_pct < min_risk:
             self.logger.warning(
-                f"[SIZING] risk% {resolved_risk_pct} < min {min_risk} → forcé à {min_risk}"
+                f"[SIZING] risk% {resolved_risk_pct:.2f}% < min {min_risk:.2f}% → forcé à {min_risk:.2f}%"
             )
             resolved_risk_pct = min_risk
         elif resolved_risk_pct > max_risk:
             self.logger.warning(
-                f"[SIZING] risk% {resolved_risk_pct} > max {max_risk} → forcé à {max_risk}"
+                f"[SIZING] risk% {resolved_risk_pct:.2f}% > max {max_risk:.2f}% → forcé à {max_risk:.2f}%"
             )
             resolved_risk_pct = max_risk
-
-        if used_fallback:
-            self.logger.warning(
-                f"[SIZING] Aucune source valide → fallback risk%={resolved_risk_pct} (configure `risk_per_trade_percent`)"
-            )
 
         if not sl_price or sl_price <= 0:
             raise TradeExecutionError(

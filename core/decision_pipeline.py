@@ -2214,7 +2214,7 @@ class DecisionPipeline:
         # --- 3) Risque (config) ---
         rm_cfg = (current_config or {}).get("risk_management", {}) or {}
 
-        risk_pct = float(rm_cfg.get("risk_per_trade_pct", 0.0))  # sizing délégué
+        risk_pct = float(rm_cfg.get("risk_per_trade_percent", 0.0))  # sizing délégué
         min_rr = float(rm_cfg.get("min_rr", 0.0))  # neutre si absent
         max_tp_sl_ratio = float(
             rm_cfg.get("max_tp_to_sl_ratio", 999.0)

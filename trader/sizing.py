@@ -9,125 +9,8 @@ from trader.errors import TradeExecutionError
 
 
 # ==============================
-# === Helpers Trading Utils ====
+# === Utilitaires internes =====
 # ==============================
-
-
-def compute_lot_from_risk(
-    symbol_info,
-    account_info,
-    entry,
-    sl,
-    risk_pct,
-    confidence=1.0,  # ignoré (compat)
-    burst_size=1,
-    atr=None,  # ignoré (compat)
-    atr_ref=10.0,  # ignoré (compat)
-) -> float:
-    """
-    Sizing STRICT basé uniquement sur risk_per_trade_percent.
-    - Aucun impact des paramètres 'confidence', 'atr', 'atr_ref' (ignorés).
-    - Division du budget si 'burst_size' > 1 (budget PAR TICKET).
-    - Floor au pas broker (jamais au-dessus du budget).
-    - Cap par marge si infos dispo ; si le budget ne permet pas d'atteindre vmin → 0.0.
-    """
-
-    # ----- 0) Entrées -----
-    try:
-        entry = float(entry)
-        sl = float(sl)
-        risk_pct = float(risk_pct)
-    except Exception:
-        return 0.0
-    if risk_pct <= 0 or entry <= 0 or sl <= 0:
-        return 0.0
-
-    balance = float(getattr(account_info, "balance", 0.0) or 0.0)
-    if balance <= 0:
-        return 0.0
-
-    # ----- 1) Budget strict (uniquement risk%) -----
-    risk_usd = balance * (risk_pct / 100.0)
-    try:
-        burst_size = int(burst_size or 1)
-    except Exception:
-        burst_size = 1
-    if burst_size > 1:
-        risk_usd /= float(burst_size)
-    if risk_usd <= 0:
-        return 0.0
-
-    # ----- 2) Perte/lot (USD) selon distance Entry–SL -----
-    distance = abs(entry - sl)
-    if distance <= 0:
-        return 0.0
-
-    # tick_value/tick_size si dispo, sinon fallback contract_size
-    tv = getattr(symbol_info, "trade_tick_value", None) or getattr(
-        symbol_info, "tick_value", None
-    )
-    ts = getattr(symbol_info, "trade_tick_size", None) or getattr(
-        symbol_info, "tick_size", None
-    )
-    contract_size = float(getattr(symbol_info, "trade_contract_size", 100.0) or 100.0)
-
-    per_lot_loss = None
-    try:
-        tv = float(tv) if tv is not None else None
-        ts = float(ts) if ts is not None else None
-        if tv is not None and ts and ts > 0:
-            per_lot_loss = (distance / ts) * tv
-    except Exception:
-        per_lot_loss = None
-
-    if per_lot_loss is None:
-        per_lot_loss = distance * contract_size
-
-    if not math.isfinite(per_lot_loss) or per_lot_loss <= 0:
-        return 0.0
-
-    # ----- 3) Volume brut -----
-    lots_raw = risk_usd / per_lot_loss
-    if not math.isfinite(lots_raw) or lots_raw <= 0:
-        return 0.0
-
-    # ----- 4) Contraintes broker + quantification FLOOR -----
-    vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-    vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
-    vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
-    if vmin <= 0 or vstep <= 0 or vmax <= 0 or vmax < vmin:
-        vmin, vstep, vmax = 0.01, 0.01, 100.0
-
-    try:
-        decimals = max(0, int(round(-math.log10(vstep)))) if vstep > 0 else 2
-    except Exception:
-        decimals = 2
-
-    def _qdown(val: float, step: float) -> float:
-        return max(0.0, math.floor((val + 1e-12) / step) * step)
-
-    lots_cap = min(lots_raw, vmax)
-    lots_q = _qdown(lots_cap, vstep)
-    if lots_q < vmin:
-        # budget trop faible pour le min lot — on ne force JAMAIS vers le haut
-        return 0.0
-
-    # ----- 5) Cap marge (si infos dispo) -----
-    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
-    leverage = float(getattr(account_info, "leverage", 0.0) or 0.0)
-    if free_margin > 0 and leverage > 0 and entry > 0:
-        margin_per_lot = (entry * contract_size) / max(leverage, 1.0)
-        if margin_per_lot > 0:
-            max_by_margin = free_margin / margin_per_lot
-            lots_q = _qdown(min(lots_q, max_by_margin), vstep)
-            if lots_q < vmin:
-                return 0.0
-
-    return round(min(max(lots_q, vmin), vmax), decimals)
-
-# ------------------------------------------------------------
-# Utilitaires internes
-# ------------------------------------------------------------
 
 
 def _qdown(val: float, step: float) -> float:
@@ -145,14 +28,14 @@ def _as_float(x, name: str) -> float:
                 # Pas de logger ici, on utilise print ou on laisse silencieux
                 print(f"⚠️ [SIZING] {name} manquante → fallback à {fallback}")
                 return fallback
-        
+
         v = float(x)
         if not math.isfinite(v):
             raise ValueError
         return v
     except Exception:
         raise TradeExecutionError(f"{name} invalide")
-    
+
 def _sget(obj, *names, default=None):
     """getattr/[] tolérant sur dict/obj."""
     for n in names:
@@ -163,117 +46,6 @@ def _sget(obj, *names, default=None):
         if isinstance(obj, dict) and obj.get(n) is not None:
             return obj[n]
     return default
-
-
-# ------------------------------------------------------------
-# Sizing compact (utilitaire)
-# ------------------------------------------------------------
-
-
-def compute_lot_from_risk(
-    symbol_info: Any,
-    account_info: Any,
-    entry: float,
-    sl: float,
-    risk_pct: float,
-    confidence: float = 1.0,  # ignoré (compat)
-    burst_size: int = 1,
-    atr: Optional[float] = None,  # ignoré (compat)
-    atr_ref: Optional[float] = 10.0,  # ignoré (compat)
-) -> float:
-    """
-    Sizing STRICT basé uniquement sur risk_per_trade_percent.
-    - Division du budget si 'burst_size' > 1 (budget PAR TICKET).
-    - FLOOR au pas broker (jamais au-dessus du budget).
-    - Cap par marge si infos dispo ; si le budget ne permet pas d'atteindre vmin → 0.0.
-    """
-    # 0) Entrées
-    try:
-        entry = float(entry)
-        sl = float(sl)
-        risk_pct = float(risk_pct)
-    except Exception:
-        return 0.0
-    if risk_pct <= 0 or entry <= 0 or sl <= 0:
-        return 0.0
-
-    balance = float(getattr(account_info, "balance", 0.0) or 0.0)
-    if balance <= 0:
-        return 0.0
-
-    # 1) Budget strict
-    risk_amt = balance * (risk_pct / 100.0)
-    try:
-        burst_size = int(burst_size or 1)
-    except Exception:
-        burst_size = 1
-    if burst_size > 1:
-        risk_amt /= float(burst_size)
-    if risk_amt <= 0:
-        return 0.0
-
-    # 2) Perte/lot (devise compte) par distance Entry–SL
-    distance = abs(entry - sl)
-    if distance <= 0:
-        return 0.0
-
-    tv = getattr(symbol_info, "trade_tick_value", None) or getattr(
-        symbol_info, "tick_value", None
-    )
-    ts = getattr(symbol_info, "trade_tick_size", None) or getattr(
-        symbol_info, "tick_size", None
-    )
-    contract_size = float(getattr(symbol_info, "trade_contract_size", 100.0) or 100.0)
-
-    per_lot_loss = None
-    try:
-        tv = float(tv) if tv is not None else None
-        ts = float(ts) if ts is not None else None
-        if tv is not None and ts and ts > 0:
-            per_lot_loss = (distance / ts) * tv
-    except Exception:
-        per_lot_loss = None
-
-    if per_lot_loss is None:
-        per_lot_loss = distance * contract_size
-
-    if not math.isfinite(per_lot_loss) or per_lot_loss <= 0:
-        return 0.0
-
-    # 3) Volume brut
-    lots_raw = risk_amt / per_lot_loss
-    if not math.isfinite(lots_raw) or lots_raw <= 0:
-        return 0.0
-
-    # 4) Contraintes broker + FLOOR
-    vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
-    vstep = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
-    vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
-    if vmin <= 0 or vstep <= 0 or vmax <= 0 or vmax < vmin:
-        vmin, vstep, vmax = 0.01, 0.01, 100.0
-
-    try:
-        decimals = max(0, int(round(-math.log10(vstep)))) if vstep > 0 else 2
-    except Exception:
-        decimals = 2
-
-    lots_cap = min(lots_raw, vmax)
-    lots_q = _qdown(lots_cap, vstep)
-    if lots_q < vmin:
-        return 0.0
-
-    # 5) Cap marge (si dispo)
-    free_margin = float(getattr(account_info, "margin_free", 0.0) or 0.0)
-    leverage = float(getattr(account_info, "leverage", 0.0) or 0.0)
-    if free_margin > 0 and leverage > 0 and entry > 0:
-        margin_per_lot = (entry * contract_size) / max(leverage, 1.0)
-        if margin_per_lot > 0:
-            max_by_margin = free_margin / margin_per_lot
-            lots_q = _qdown(min(lots_q, max_by_margin), vstep)
-            if lots_q < vmin:
-                return 0.0
-
-    return round(min(max(lots_q, vmin), vmax), decimals)
 
 
 # ------------------------------------------------------------

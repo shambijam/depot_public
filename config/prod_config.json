@@ -358,7 +358,7 @@
       "blacklist_duration_minutes": 60
     },
     "risk_management": {
-      "risk_per_trade_pct": 0.30,
+      "risk_per_trade_percent": 0.30,
       "min_rr": 1.8,
       "max_tp_to_sl_ratio": 3.5,
       "default_sl_pips": 8.0,
