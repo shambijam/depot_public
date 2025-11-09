@@ -27,6 +27,23 @@ Footprint Trigger Analysis — Fixed & Enhanced
 """
 
 
+# ========================= constantes de confidence =========================
+
+# Early exit optimization
+CONFIDENCE_HIGH_THRESHOLD = 0.85  # Skip remaining windows if confidence >= this
+
+# Micro-burst detection
+MICRO_BURST_CONF_MIN = 0.58  # Floor confidence for micro-burst
+MICRO_BURST_CONF_MAX = 0.88  # Ceiling confidence for micro-burst
+MICRO_BURST_BONUS_INTENSITY = 0.08  # Bonus for aggregate intensity
+MICRO_BURST_PENALTY_LONG_COVERAGE = 0.03  # Penalty if coverage > 25s
+MICRO_BURST_PENALTY_ABSORPTION = 0.04  # Penalty if absorption detected opposite side
+
+# Multi-window voting
+MULTI_VOTE_CONF_BOOST = 0.04  # Boost when min_votes satisfied
+MULTI_VOTE_CONF_MAX = 0.99  # Max confidence after boost
+
+
 # ========================= enums / dataclasses =========================
 
 
@@ -45,6 +62,7 @@ class TriggerType(Enum):
     ABSORPTION = "absorption_reject"
     MICRO_STACK = "stacking_inline"
     MICRO_ABSORPTION = "absorption_inline"
+    MICRO_BURST = "micro_burst"
 
 
 @dataclass
@@ -650,6 +668,13 @@ class FootprintAnalyzer:
                                     meta,
                                     used_win,
                                 )
+                                # Early exit sur haute confiance (évite calculs inutiles)
+                                if float(best_decision.get("confidence", 0)) >= CONFIDENCE_HIGH_THRESHOLD:
+                                    break
+
+                # Early exit propagation (sort de la boucle externe si high confidence)
+                if best_decision and float(best_decision.get("confidence", 0)) >= CONFIDENCE_HIGH_THRESHOLD:
+                    break
 
                 # confirmation par votes multi-fenêtres (optionnelle)
                 if (
@@ -674,7 +699,7 @@ class FootprintAnalyzer:
                             )
                             chosen_rec = recs[0]
                             chosen_rec["decision"]["confidence"] = min(
-                                0.99, float(chosen_rec["decision"]["confidence"]) + 0.04
+                                MULTI_VOTE_CONF_MAX, float(chosen_rec["decision"]["confidence"]) + MULTI_VOTE_CONF_BOOST
                             )
                             break
 
@@ -807,22 +832,27 @@ class FootprintAnalyzer:
                 else:
                     df_levels["zscore_vol"] = 0.0
 
-            # 5) LOG instantané (visible seulement en verbose sur actifs autorisés)
+            # 5) Cache métriques snapshot (évite recalcul)
+            zmax_cached = float(
+                df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
+            )
+            dr_p95_cached = float(
+                df_levels["delta_ratio"].quantile(0.95)
+                if "delta_ratio" in df_levels
+                else 0.0
+            )
+            dsum_cached = float(df_levels["delta"].sum() if "delta" in df_levels else 0.0)
+
+            # LOG instantané (visible seulement en verbose sur actifs autorisés)
             self._fp_log(
                 "SNAPSHOT",
                 "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
                 int(window_s),
                 int(len(df_levels)),
                 float(df_levels["vol"].median() if "vol" in df_levels else 0.0),
-                float(
-                    df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
-                ),
-                float(
-                    df_levels["delta_ratio"].quantile(0.95)
-                    if "delta_ratio" in df_levels
-                    else 0.0
-                ),
-                float(df_levels["delta"].sum() if "delta" in df_levels else 0.0),
+                zmax_cached,
+                dr_p95_cached,
+                dsum_cached,
                 level="debug",
             )
 
@@ -854,14 +884,9 @@ class FootprintAnalyzer:
         #    - Sans effet quand snapshot déjà fort
         dyn_params = dict(params)
         try:
-            zmax = float(
-                df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
-            )
-            dr_p95 = float(
-                df_levels["delta_ratio"].quantile(0.95)
-                if "delta_ratio" in df_levels
-                else 0.0
-            )
+            # Réutilisation des métriques cachées (évite recalcul)
+            zmax = zmax_cached
+            dr_p95 = dr_p95_cached
 
             # Volume anémique → absorption un peu plus permissive
             if zmax < 1.0:
@@ -896,12 +921,10 @@ class FootprintAnalyzer:
         except Exception:
             dyn_params = dict(params)
 
-        # Booster méta : delta total (si absent)
+        # Booster méta : delta total (si absent) - réutilise cache
         try:
             if meta is not None and "delta_total" not in meta:
-                meta["delta_total"] = float(
-                    df_levels["delta"].sum() if "delta" in df_levels else 0.0
-                )
+                meta["delta_total"] = dsum_cached
         except Exception:
             pass
 
@@ -1086,18 +1109,20 @@ class FootprintAnalyzer:
         # enrichit meta + retourne
         try:
             best["meta"] = {**(best.get("meta") or {}), "used_window_s": int(window_s)}
-            # MàJ état hysteresis
+        except Exception:
+            pass
+
+        # MàJ état hysteresis APRÈS succès (évite corruption si exception)
+        try:
             self._last_signal[self._asset_upper] = {
                 "ts": time.time(),
                 "dir": str(best.get("direction", "")).upper(),
                 "conf": float(best.get("confidence", 0)),
             }
-            return best, meta, window_s
-        except Exception:
-            return best, meta, window_s
-
         except Exception:
             pass
+
+        return best, meta, window_s
 
     def _build_trigger_response(
         self,
@@ -1645,7 +1670,7 @@ class FootprintAnalyzer:
 
             # --- calcul de la confiance ---
             # Base
-            conf = 0.58
+            conf = MICRO_BURST_CONF_MIN
 
             # + bonus tick_rate (max vers ~8/s)
             conf += 0.10 * float(
@@ -1654,26 +1679,20 @@ class FootprintAnalyzer:
             # + bonus zmax (au-delà de 1.2)
             conf += 0.07 * float(np.clip((zmax - 1.2) / 1.0, 0.0, 1.5))
             # + bonus cohérence directionnelle (>=0.5 neutre)
-            conf += 0.08 * float(np.clip(ratio_dir - 0.5, 0.0, 0.5) * 2.0)
+            conf += MICRO_BURST_BONUS_INTENSITY * float(np.clip(ratio_dir - 0.5, 0.0, 0.5) * 2.0)
             # + bonus intensité agrégée
-            conf += 0.08 * float(np.clip(dtot_ratio, 0.0, 1.0))
+            conf += MICRO_BURST_BONUS_INTENSITY * float(np.clip(dtot_ratio, 0.0, 1.0))
 
             # Pénalités: couverture trop longue ou absorption détectée côté opposé
             if coverage_s > 25.0:
-                conf -= 0.03
+                conf -= MICRO_BURST_PENALTY_LONG_COVERAGE
             if bool(meta.get("absorption_flag", False)):
-                conf -= 0.04
+                conf -= MICRO_BURST_PENALTY_ABSORPTION
 
-            conf = float(np.clip(conf, 0.58, 0.88))
+            conf = float(np.clip(conf, MICRO_BURST_CONF_MIN, MICRO_BURST_CONF_MAX))
 
-            # Trigger type robuste
-            try:
-                trig = TriggerType.MICRO_BURST.value
-            except Exception:
-                try:
-                    trig = TriggerType.MICRO_STACK.value
-                except Exception:
-                    trig = "MICRO_BURST"
+            # Trigger type
+            trig = TriggerType.MICRO_BURST.value
 
             # Log diag
             if hasattr(self, "_fp_log"):
