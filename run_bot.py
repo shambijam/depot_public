@@ -2143,8 +2143,9 @@ def run_single_pipeline_cycle(
                             res = run_trade_execution_pipeline(
                                 trade_executor, decision_pkg, is_dry_run=is_dry_run
                             )
-                            if (res or {}).get("status") not in {"failed", ""}:
-                                return True
+                            # ✅ FIX: Ne pas return pour permettre la maintenance SLTP
+                            # if (res or {}).get("status") not in {"failed", ""}:
+                            #     return True
         except Exception as e:
             logger.warning(f"[FUSION][FAST-LANE] erreur: {e}")
 
