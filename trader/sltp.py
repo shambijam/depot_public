@@ -1969,6 +1969,14 @@ def update_basket_sltp_dynamically(
         fill_ratio = float(local_ctx.get("fill_ratio") or 0.0)
         vol_pips = local_ctx.get("volatility_pips", local_ctx.get("volatility_atr"))
 
+        # Lecture seuils trailing AVANT le check (nécessaire pour perf_trigger)
+        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("trailing") or {}) or {}
+        act_cfg    = trail_cfg.get("activation", {}) or {}
+        act_loss_cfg = trail_cfg.get("activation_loss", {}) or {}
+
+        act_min_pips   = float((act_cfg.get("min_pips", 28.0) or 28.0))      # Défaut 28 pips
+        loss_min_pips  = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))   # Défense
+
         # Time-based trigger (≥2s pour trailing rapide)
         last_update = (
             float(getattr(self, "_basket_last_update_ts", {}).get(basket_id, 0.0))
@@ -2004,7 +2012,8 @@ def update_basket_sltp_dynamically(
             if pip_size:
                 price_moved = (abs(mid - last_mid) / pip_size) >= float(vol_pips)
 
-        perf_trigger = (pnl_pips >= 5.0) or (pnl_pips <= -5.0)
+        # FIX BUG #8: Utiliser seuil configuré (28 pips) au lieu de 5 pips codé en dur
+        perf_trigger = (pnl_pips >= act_min_pips) or (pnl_pips <= -loss_min_pips)
         should_update = (
             force_refresh or perf_trigger or time_ok or phase_changed or price_moved
         )
