@@ -976,6 +976,74 @@ def _resolve_basket_context_for_sltp(
                     pass
                 ctx = None
 
+    # 2.2.1) Fallback: construire contexte minimal depuis MT5 si burst_manager absent
+    if ctx is None:
+        try:
+            conn = getattr(self, "mt5_connector", None)
+            if conn:
+                positions = []
+                for mname in ("get_open_positions", "positions", "list_positions", "get_positions"):
+                    meth = getattr(conn, mname, None)
+                    if callable(meth):
+                        try:
+                            positions = meth() or []
+                            break
+                        except Exception:
+                            positions = []
+
+                # Filtrer positions par basket_id dans le commentaire
+                basket_positions = []
+                for p in positions:
+                    cmt = (p.get("comment") if isinstance(p, dict) else getattr(p, "comment", "")) or ""
+                    if basket_id in str(cmt):
+                        basket_positions.append(p)
+
+                if basket_positions:
+                    # Extraire info du premier ticket
+                    first = basket_positions[0]
+                    symbol = (first.get("symbol") if isinstance(first, dict) else getattr(first, "symbol", "")).upper()
+                    direction = "BUY" if (first.get("type") if isinstance(first, dict) else getattr(first, "type", 0)) == 0 else "SELL"
+
+                    # Calculer PnL total en pips
+                    total_pnl_pips = 0.0
+                    for p in basket_positions:
+                        profit = float(p.get("profit") if isinstance(p, dict) else getattr(p, "profit", 0.0) or 0.0)
+                        volume = float(p.get("volume") if isinstance(p, dict) else getattr(p, "volume", 0.0) or 0.0)
+                        # Approximation: 1 pip = 10$ pour 1 lot (à ajuster selon le symbole)
+                        pip_value = 10.0 * volume if symbol == "XAUUSD" else 10.0 * volume
+                        pnl_pips = profit / pip_value if pip_value > 0 else 0.0
+                        total_pnl_pips += pnl_pips
+
+                    # Construire contexte minimal
+                    ctx = {
+                        "basket_id": basket_id,
+                        "symbol": symbol,
+                        "direction": direction,
+                        "current_positions": len(basket_positions),
+                        "target_burst_size": len(basket_positions),  # Assume all positions are filled
+                        "basket_pnl_pips": total_pnl_pips,
+                        "positions_details": [
+                            {
+                                "ticket": p.get("ticket") if isinstance(p, dict) else getattr(p, "ticket", None),
+                                "entry_price": p.get("price_open") if isinstance(p, dict) else getattr(p, "price_open", None),
+                                "sl": p.get("sl") if isinstance(p, dict) else getattr(p, "sl", None),
+                                "tp": p.get("tp") if isinstance(p, dict) else getattr(p, "tp", None),
+                                "volume": p.get("volume") if isinstance(p, dict) else getattr(p, "volume", None),
+                            }
+                            for p in basket_positions
+                        ],
+                        "_source": "mt5_fallback"
+                    }
+                    try:
+                        self.logger.debug(f"[BASKET_CTX] MT5_FALLBACK | {basket_id} | {symbol} {direction} | {len(basket_positions)} pos | {total_pnl_pips:.1f} pips")
+                    except Exception:
+                        pass
+        except Exception as e:
+            try:
+                self.logger.debug(f"[BASKET_CTX] MT5_FALLBACK error: {e}")
+            except Exception:
+                pass
+
     # 2.3) Enrichissement, cache & logs
     if isinstance(ctx, dict) and ctx:
         ctx = _derive_phase(ctx)
