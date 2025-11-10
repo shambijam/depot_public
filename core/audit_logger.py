@@ -150,18 +150,46 @@ class AuditLogger:
         import json
 
         try:
-            # Champs de base (ordre)
-            symbol = order_info.get("symbol") or order_info.get("asset")
-            action = order_info.get("action")
-            volume = order_info.get("volume")
-            entry  = order_info.get("entry_price")
-            sl     = order_info.get("sl_price")
-            tp     = order_info.get("tp_price")
-            rr     = order_info.get("rr_projected")
+            # ✅ FIX: Extraction depuis request/result si payload structuré
+            req = order_info.get("request") or {}
+            res = order_info.get("result") or {}
+
+            # Champs de base (ordre) - cherche dans request, result, puis racine
+            symbol = (
+                req.get("symbol") or req.get("asset") or
+                order_info.get("symbol") or order_info.get("asset")
+            )
+            action = (
+                req.get("action") or req.get("type") or
+                order_info.get("action")
+            )
+            volume = (
+                res.get("volume") or req.get("volume") or
+                order_info.get("volume")
+            )
+            entry = (
+                res.get("price") or req.get("price") or
+                order_info.get("entry_price")
+            )
+            sl = (
+                req.get("sl") or
+                order_info.get("sl_price") or order_info.get("sl")
+            )
+            tp = (
+                req.get("tp") or
+                order_info.get("tp_price") or order_info.get("tp")
+            )
+            rr = order_info.get("rr_projected")
             spread = order_info.get("spread_pips")
-            order_type = order_info.get("order_type")
-            ticket = order_info.get("ticket") or order_info.get("order_id")
-            status = order_info.get("status")  # "SENT", "FILLED", "REJECTED", etc.
+            order_type = req.get("type") or order_info.get("order_type")
+            ticket = (
+                res.get("order") or res.get("deal") or res.get("ticket") or
+                order_info.get("ticket") or order_info.get("order_id")
+            )
+            status = (
+                res.get("status") or
+                order_info.get("status")
+            )
             error_code = order_info.get("error_code")
 
             # Contextes (signaux / katana / marché)
