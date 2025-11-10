@@ -2170,7 +2170,7 @@ def run_single_pipeline_cycle(
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
-        # === Maintenance périodique SLTP dynamique (toutes les 30s) ===
+        # === Maintenance périodique SLTP dynamique (toutes les 2s pour trailing rapide) ===
         try:
             import time, re
 
@@ -2181,7 +2181,7 @@ def run_single_pipeline_cycle(
                     getattr(sltp_owner, "_last_periodic_maintenance_ts", 0.0) or 0.0
                 )
                 now_ts = time.time()
-                if (now_ts - last_ts) >= 30.0:
+                if (now_ts - last_ts) >= 2.0:
                     basket_ids = set()
                     bm = getattr(trade_executor, "burst_manager", None)
                     get_active = getattr(bm, "get_active_baskets", None) if bm else None

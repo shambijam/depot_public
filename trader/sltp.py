@@ -1671,14 +1671,14 @@ def update_basket_sltp_dynamically(
     if not isinstance(basket_id, str) or not basket_id.strip():
         return {"status": "error", "reason": "invalid_basket_id"}
 
-    # Anti-spam global par panier (min 15s), bypass si force_refresh
+    # Anti-spam global par panier (min 2s pour trailing rapide), bypass si force_refresh
     try:
         last_map = getattr(self, "_last_sltp_update", None)
         if last_map is None:
             last_map = {}
             setattr(self, "_last_sltp_update", last_map)
         last_ts = float(last_map.get(basket_id, 0.0))
-        if (now - last_ts) < 15.0 and not force_refresh:
+        if (now - last_ts) < 2.0 and not force_refresh:
             return {"status": "skipped", "reason": "too_soon"}
     except Exception:
         pass
@@ -1901,13 +1901,13 @@ def update_basket_sltp_dynamically(
         fill_ratio = float(local_ctx.get("fill_ratio") or 0.0)
         vol_pips = local_ctx.get("volatility_pips", local_ctx.get("volatility_atr"))
 
-        # Time-based trigger (≥30s par défaut)
+        # Time-based trigger (≥2s pour trailing rapide)
         last_update = (
             float(getattr(self, "_basket_last_update_ts", {}).get(basket_id, 0.0))
             if isinstance(getattr(self, "_basket_last_update_ts", {}), dict)
             else 0.0
         )
-        time_ok = (now - last_update) >= 30.0
+        time_ok = (now - last_update) >= 2.0
 
         # Phase change trigger
         last_phase_map = getattr(self, "_basket_last_phase", None) or {}
