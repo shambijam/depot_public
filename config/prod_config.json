@@ -339,7 +339,7 @@
       "closed_market_check_bars": 15,
       "trading_timezone": "Europe/Paris",
       "trading_hours_local": {
-        "start": "04:00",
+        "start": "00:00",
         "end": "22:00"
       },
       "allowed_weekdays": [
