@@ -1,7 +1,7 @@
 {
   "project": "SNIPER_X",
   "mode_execution": "DEMO",
-  "log_level": "DEBUG",
+  "log_level": "INFO",
   "paths": {
     "logs": "logs/",
     "models": "models/",
