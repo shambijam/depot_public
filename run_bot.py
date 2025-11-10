@@ -1970,7 +1970,6 @@ def run_single_pipeline_cycle(
                                             aconf,
                                             [
                                                 "overrides",
-                                                "scalping",
                                                 "entry_rules",
                                                 "scalping",
                                                 "burst_scalping",
@@ -2030,7 +2029,6 @@ def run_single_pipeline_cycle(
                                             aconf,
                                             [
                                                 "overrides",
-                                                "scalping",
                                                 "entry_rules",
                                                 "scalping",
                                                 "burst_scalping",

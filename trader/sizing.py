@@ -143,13 +143,23 @@ def _calculate_risk_based_volume(
     # 1) tick_value/tick_size (MT5 exprime le tick_value en devise compte)
     tv = _sget(symbol_info, "trade_tick_value", "tick_value", default=None)
     ts = _sget(symbol_info, "trade_tick_size", "tick_size", default=None)
+
+    # DEBUG LOG
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.critical(f"🔍 [SIZING] {sym_name} | distance={distance:.6f} | entry={entry_price:.6f} | sl={sl_price:.6f}")
+    logger.critical(f"🔍 [SIZING] tick_value={tv} | tick_size={ts} | burst_size={burst_size} | scope={sizing_scope}")
+    logger.critical(f"🔍 [SIZING] equity={equity:.2f} | risk%={risk_pct} | max_risk_amount={max_risk_amount:.2f} | per_ticket_risk={per_ticket_risk:.2f}")
+
     try:
         if tv is not None and ts is not None:
             tv = _as_float(tv, "tick_value")
             ts = _as_float(ts, "tick_size")
             if ts > 0:
                 per_lot_loss = (distance / ts) * tv
-    except Exception:
+                logger.critical(f"✅ [SIZING] Méthode 1 (tick): per_lot_loss={per_lot_loss:.2f} $")
+    except Exception as e:
+        logger.critical(f"❌ [SIZING] Méthode 1 exception: {e}")
         per_lot_loss = None
 
     # 2) fallback contract_size si besoin
@@ -159,12 +169,14 @@ def _calculate_risk_based_volume(
             or 100.0
         )
         per_lot_loss = distance * contract_size
+        logger.critical(f"⚠️ [SIZING] Méthode 2 (FALLBACK contract_size={contract_size}): per_lot_loss={per_lot_loss:.2f} $")
 
     if per_lot_loss is None or per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
         raise TradeExecutionError("Perte/lot invalide")
 
     # ===================== Volume brut (par ticket si basket) =====================
     raw_volume = per_ticket_risk / per_lot_loss
+    logger.critical(f"📊 [SIZING] CALCUL: {per_ticket_risk:.2f} $ / {per_lot_loss:.2f} $ = {raw_volume:.6f} lots (brut)")
     if raw_volume <= 0 or not math.isfinite(raw_volume):
         raise TradeExecutionError("Volume brut nul")
 
@@ -197,6 +209,7 @@ def _calculate_risk_based_volume(
 
     volume_floor = math.floor((raw_volume + EPS) / step) * step
     min_required = max(vol_min_sym, min_lot_account)
+    logger.critical(f"🔧 [SIZING] volume_floor={volume_floor:.6f} | min_required={min_required} | step={step}")
 
     # Si basket et qu'on ne peut pas atteindre le min lot PAR TICKET → on échoue clairement
     if volume_floor + EPS < min_required:
@@ -208,5 +221,6 @@ def _calculate_risk_based_volume(
         raise TradeExecutionError("Budget risque trop faible pour le lot minimum")
 
     volume = min(volume_floor, vol_max_sym, max_lot_account)
+    logger.critical(f"✅ [SIZING] FINAL: volume={volume:.6f} lots (decimals={decimals})")
 
     return round(volume, decimals)
