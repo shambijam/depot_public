@@ -1862,7 +1862,7 @@ def run_single_pipeline_cycle(
                                 else getattr(p, "comment", "")
                             ) or ""
                             m = re.search(
-                                r"burst_scalping\|basket=([A-Za-z0-9_]+)", str(c)
+                                r"bs_([a-f0-9]{8})", str(c)
                             )
                             if m:
                                 ids.add(m.group(1))
@@ -2213,7 +2213,7 @@ def run_single_pipeline_cycle(
                                 ) or ""
                                 logger.info(f"🔧 [SLTP][PERIODIC] Position comment: '{cmt}'")
                                 m = re.search(
-                                    r"burst_scalping\|basket=([A-Za-z0-9_]+)", str(cmt)
+                                    r"bs_([a-f0-9]{8})", str(cmt)
                                 )
                                 if m:
                                     basket_ids.add(m.group(1))
@@ -2515,7 +2515,7 @@ def run_single_pipeline_cycle(
                         ids = set()
                         for p in positions or []:
                             c = str(_field(p, "comment", "") or "")
-                            m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                            m = re.search(r"bs_([a-f0-9]{8})", c)
                             if m:
                                 ids.add(m.group(1))
                         return ids

@@ -410,7 +410,7 @@ def prepare_order(self, decision_package: dict) -> dict:
             open_burst_ids = set()
             for p in all_open:
                 c = str(_field(p, "comment", "") or "")
-                m = re.search(r"burst_scalping\|basket=([A-Za-z0-9_]+)", c)
+                m = re.search(r"bs_([a-f0-9]{8})", c)
                 if m:
                     open_burst_ids.add(m.group(1))
 

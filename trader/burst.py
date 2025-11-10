@@ -32,7 +32,7 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     """
     Ouvre un panier de 'burst_size' tickets avec le MÊME SL/TP et le MÊME basket_id.
     - Conserve le mode single-basket (guardrails effectués en amont).
-    - Comment compact ≤31 chars: 'burst_scalping|basket=<id8hex>'
+    - Comment ultra-compact ≤16 chars: 'bs_<id8hex>' (ex: bs_abc12345 = 11 chars)
       (on n’ajoute PAS 'i/n' pour rester sous 31 chars).
     - Met à jour self._last_burst_time pour le cooldown.
     """
@@ -45,10 +45,10 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     if burst_size < 1:
         burst_size = 1
 
-    # Génère un basket_id compact (8 hex) pour respecter 31 chars dans le comment
+    # Génère un basket_id compact (8 hex) pour respecter limite broker (souvent 16-17 chars)
     basket_id = f"{uuid.uuid4().hex[:8]}"
-    # Comment MT5 ≤31 (14 + 1 + 7 + 8 = 30)
-    comment = f"burst_scalping|basket={basket_id}"
+    # Comment MT5 ultra-compact ≤16 chars: bs_abc12345 (11 chars)
+    comment = f"bs_{basket_id}"
 
     # Prépare requête type (copie défensive)
     def _base_req_copy():
@@ -145,14 +145,14 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
 
     def _extract_basket_id_strict(pos) -> Optional[str]:
         """
-        Retourne le basket_id UNIQUEMENT si le comment contient 'burst_scalping|basket=<id>'.
+        Retourne le basket_id UNIQUEMENT si le comment contient 'bs_<id>'.
         Aucune heuristique 'synthetic|...' ici (trop dangereux pour CLOSE).
         """
         try:
             c = str(getattr(pos, "comment", "") or "")
         except Exception:
             c = ""
-        m = re.search(r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)", c)
+        m = re.search(r"bs_([a-f0-9]{8})", c)
         return m.group(1) if m else None
 
     # ---------- Fenêtre de temps optionnelle ----------
@@ -202,7 +202,7 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
         if bid:
             return str(bid)
         c = str(_v(pos, "comment", "") or "")
-        m = re.search(r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)", c)
+        m = re.search(r"bs_([a-f0-9]{8})", c)
         if m:
             return m.group(1)
         m = re.search(r"(burst_[A-Z]{3,6}_[a-f0-9]{6,})", c, re.IGNORECASE)
@@ -245,15 +245,15 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
 
     def _cancel_pending_orders_for_basket(bid: str) -> int:
         """Annule SEULEMENT les ordres en attente du bot dont le commentaire contient
-        explicitement le tag 'burst_scalping|basket=<bid>'. Filtrage strict + budget latence.
+        explicitement le tag 'bs_<bid>'. Filtrage strict + budget latence.
         """
         pend = _list_pending_orders()
         if not pend or not bid:
             return 0
 
         cancelled = 0
-        # motif strict (≤ quelques segments avant basket=... pour rester tolérant mais sûr)
-        pat = re.compile(rf"burst_scalping\|(?:[^|]*\|){{0,5}}?basket={re.escape(bid)}")
+        # motif strict pour nouveau format compact
+        pat = re.compile(rf"bs_{re.escape(bid)}")
 
         # (optionnel) limite de sécurité pour éviter de balayer trop d’ordres
         try:
@@ -607,7 +607,7 @@ def monitor_burst_baskets(
 ):
     """
     Watchdog de paniers, SANS trailing.
-    Ne touche qu'aux positions du bot taguées 'burst_scalping|basket=<id>' ET magic==BOT_MAGIC.
+    Ne touche qu'aux positions du bot taguées 'bs_<id>' ET magic==BOT_MAGIC.
     Fermetures auto désactivées par défaut (closure_rules.enabled=false).
     """
 
@@ -661,7 +661,7 @@ def monitor_burst_baskets(
 
     # ---------- Helpers ----------
     BASKET_TAG_RE = re.compile(
-        r"burst_scalping\|(?:[^|]*\|){0,5}?basket=([A-Za-z0-9_]+)"
+        r"bs_([a-f0-9]{8})"
     )
 
     def _v(pos, key, default=None):
