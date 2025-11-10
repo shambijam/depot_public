@@ -60,6 +60,12 @@ class TradeExecutor:
         self.logger = logging.getLogger(__name__)
         self.mode = (mode or config_manager.get("mode_execution", "DEMO")).upper()
 
+        # Config dynamique (pour sltp.py qui accède à self.config)
+        try:
+            self.config = config_manager.get_current_dynamic_config()
+        except Exception:
+            self.config = {}
+
         # Quelques paramètres MT5 utiles (fallback robustes)
         self.mt5_max_retries = int(
             config_manager.get("trade_executor_settings.order_send_max_retries", 2) or 2
