@@ -2085,8 +2085,11 @@ def update_basket_sltp_dynamically(
 
         spread_mult        = float((floors_cfg.get("spread_multiplier", 0.0) or 0.0))
         extra_buffer_pips  = float((floors_cfg.get("extra_buffer_pips", 0.0) or 0.0))
-             
-        # seuil d’activation réel et distance minimale réelle pour le trailing
+
+        # Initialisation de spread_floor_pips (sera recalculé plus tard avec le spread actuel)
+        spread_floor_pips = 0.0
+
+        # seuil d'activation réel et distance minimale réelle pour le trailing
         ACTIVATION_PIPS   = max(act_min_pips, spread_floor_pips)
         MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
 
