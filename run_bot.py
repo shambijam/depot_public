@@ -2176,53 +2176,69 @@ def run_single_pipeline_cycle(
 
             sltp_owner = getattr(trade_executor, "sltp", None) or trade_executor
             fn = getattr(sltp_owner, "update_basket_sltp_dynamically", None)
+            logger.info(f"🔧 [SLTP][PERIODIC] sltp_owner={sltp_owner.__class__.__name__ if sltp_owner else None}, fn_exists={callable(fn)}")
+
             if callable(fn):
                 last_ts = float(
                     getattr(sltp_owner, "_last_periodic_maintenance_ts", 0.0) or 0.0
                 )
                 now_ts = time.time()
-                if (now_ts - last_ts) >= 2.0:
+                elapsed = now_ts - last_ts
+                logger.info(f"🔧 [SLTP][PERIODIC] elapsed={elapsed:.1f}s (need ≥2.0s)")
+
+                if elapsed >= 2.0:
                     basket_ids = set()
                     bm = getattr(trade_executor, "burst_manager", None)
                     get_active = getattr(bm, "get_active_baskets", None) if bm else None
+                    logger.info(f"🔧 [SLTP][PERIODIC] burst_manager={bm is not None}, get_active={callable(get_active)}")
+
                     if callable(get_active):
                         try:
                             for bid in get_active() or []:
                                 if isinstance(bid, str) and bid:
                                     basket_ids.add(bid)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"[SLTP][PERIODIC] get_active error: {e}")
+
                     if not basket_ids:
                         try:
                             positions = mt5_connector.get_positions() or []
+                            logger.info(f"🔧 [SLTP][PERIODIC] Scanning {len(positions)} positions for baskets...")
                             for p in positions:
                                 cmt = (
                                     p.get("comment")
                                     if isinstance(p, dict)
                                     else getattr(p, "comment", "")
                                 ) or ""
+                                logger.info(f"🔧 [SLTP][PERIODIC] Position comment: '{cmt}'")
                                 m = re.search(
                                     r"burst_scalping\|basket=([A-Za-z0-9_]+)", str(cmt)
                                 )
                                 if m:
                                     basket_ids.add(m.group(1))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"[SLTP][PERIODIC] position scan error: {e}")
+
+                    logger.info(f"🔧 [SLTP][PERIODIC] Found {len(basket_ids)} baskets: {basket_ids}")
+
                     for bid in basket_ids:
                         try:
-                            fn(
+                            logger.info(f"🔧 [SLTP][PERIODIC] Updating basket {bid}...")
+                            result = fn(
                                 basket_id=bid,
                                 reason="periodic_maintenance",
                                 force_refresh=False,
                             )
-                        except Exception:
+                            logger.info(f"🔧 [SLTP][PERIODIC] Basket {bid} result: {result.get('status', 'unknown')}")
+                        except Exception as e:
+                            logger.error(f"[SLTP][PERIODIC] Basket {bid} update error: {e}")
                             continue
                     try:
                         setattr(sltp_owner, "_last_periodic_maintenance_ts", now_ts)
                     except Exception:
                         pass
         except Exception as e:
-            logger.debug(f"[SLTP][PERIODIC] maintenance skip: {e}")
+            logger.error(f"[SLTP][PERIODIC] maintenance error: {e}", exc_info=True)
 
         # === Intégrer les décisions Fusion dans le package ===
         try:
