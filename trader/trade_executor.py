@@ -24,6 +24,7 @@ from trader.sltp import (
     _calculate_sl_tp_prices,
     _split_multi_tp_orders,
     update_basket_sltp_dynamically,
+    _resolve_basket_context_for_sltp,
 )
 from trader.burst import monitor_burst_baskets, open_burst_basket
 from trader.reconcile import (
@@ -425,3 +426,4 @@ TradeExecutor._mark_trade_sent = _mark_trade_sent
 TradeExecutor.generate_report = generate_report
 TradeExecutor.open_burst_basket = open_burst_basket
 TradeExecutor.update_basket_sltp_dynamically = update_basket_sltp_dynamically
+TradeExecutor._resolve_basket_context_for_sltp = _resolve_basket_context_for_sltp
