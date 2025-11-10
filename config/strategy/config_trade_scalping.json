@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.05
+        "min_confidence": 0.25
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -155,8 +155,8 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.05,
-      "min_orderflow_score": 0.00,
+      "min_confidence": 0.25,
+      "min_orderflow_score": 0.23,
       "max_spread_pts": 999
     },
     "scoring_weights": {
