@@ -866,6 +866,11 @@ def prepare_order(self, decision_package: dict) -> dict:
         account_ctx["account_info"] = ai
         market_context["active_broker_account"] = account_ctx
 
+        # FIX: sizing.py cherche dans context["account_info"] directement
+        mc_ai = market_context.get("account_info") or {}
+        mc_ai["equity"] = equity_val
+        market_context["account_info"] = mc_ai
+
         self.logger.info(f"✅ [SIZING] Équité résolue et validée → {equity_val}")
 
         # --- Préparation du payload pour sizing.py ---
