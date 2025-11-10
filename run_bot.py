@@ -2681,10 +2681,24 @@ def run_single_pipeline_cycle(
                         f"[SLTP-ACTION-CHECK] top.action={td.get('action')} | order.action={td.get('order',{}).get('action')}"
                     )
 
+                    # FIX: Fusionner la config de stratégie scalping avec base_config
+                    # pour que sltp.py et sizing.py trouvent les paramètres SL/TP (400 pips)
+                    try:
+                        scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
+                        merged_config = dict(base_config)  # Copie
+                        # Fusionner entry_rules de la stratégie scalping
+                        if "entry_rules" in scalping_strategy_config:
+                            merged_config.setdefault("entry_rules", {}).update(
+                                scalping_strategy_config["entry_rules"]
+                            )
+                    except Exception as e:
+                        logger.warning(f"[SCALPING][PIPELINE] Fusion config échouée: {e}")
+                        merged_config = base_config
+
                     decision_pkg = {
                         "final_decision": td,
                         "context": global_context,
-                        "active_config": base_config,
+                        "active_config": merged_config,
                     }
                     decision_pkg.setdefault("audit_context", {}).update(
                         {
