@@ -2112,10 +2112,25 @@ def run_single_pipeline_cycle(
                             logger.info(
                                 f"[FUSION][FAST-LANE] {side} {sym} burst={resolved_burst} (market, trailing-only)"
                             )
+
+                            # FIX: Fusionner la config de stratégie scalping avec base_config
+                            # pour que sltp.py trouve les paramètres SL/TP (400 pips)
+                            try:
+                                scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
+                                merged_config = dict(base_config)  # Copie
+                                # Fusionner entry_rules de la stratégie scalping
+                                if "entry_rules" in scalping_strategy_config:
+                                    merged_config.setdefault("entry_rules", {}).update(
+                                        scalping_strategy_config["entry_rules"]
+                                    )
+                            except Exception as e:
+                                logger.warning(f"[FUSION][FAST-LANE] Fusion config échouée: {e}")
+                                merged_config = base_config
+
                             decision_pkg = {
                                 "final_decision": td,
                                 "context": global_context,
-                                "active_config": base_config,
+                                "active_config": merged_config,
                             }
                             decision_pkg.setdefault("audit_context", {}).update(
                                 {
