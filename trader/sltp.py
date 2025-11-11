@@ -2299,7 +2299,9 @@ def update_basket_sltp_dynamically(
             except Exception:
                 pass
 
-            if not ticket or entry <= 0 or cur_sl is None:
+            # Skip si données invalides (sl=0.0 signifie "pas de SL" dans MT5)
+            if not ticket or entry <= 0 or not cur_sl or cur_sl <= 0:
+                print(f"⚠️ [SLTP_SKIP] Basket {basket_id} ticket #{ticket}: SKIP (entry={entry}, cur_sl={cur_sl}) - Tentative enrichissement MT5...", flush=True)
                 # on tente d'enrichir via le connecteur (si disponible)
                 ok = False
                 try:
