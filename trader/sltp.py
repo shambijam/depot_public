@@ -2285,12 +2285,15 @@ def update_basket_sltp_dynamically(
         self.logger.info(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context")
 
         for p in positions:
+            print(f"🔍 [SLTP_POS_START] Basket {basket_id}: Processing position {p}", flush=True)
+
             ticket = p.get("ticket")
             entry = float(p.get("entry_price") or 0.0)
             cur_sl = p.get("sl")
             cur_tp = p.get("tp")
 
             # Log position data
+            print(f"🔍 [SLTP_POS] Basket {basket_id} ticket #{ticket}: entry={entry}, cur_sl={cur_sl}, cur_tp={cur_tp}", flush=True)
             try:
                 self.logger.info(f"🔍 [SLTP_POS] Basket {basket_id} ticket #{ticket}: entry={entry}, cur_sl={cur_sl}, cur_tp={cur_tp}")
             except Exception:
