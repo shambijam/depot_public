@@ -2273,16 +2273,6 @@ def update_basket_sltp_dynamically(
                 except Exception:
                     pass
 
-                
-            except Exception as e:
-                new_sl = None
-                try:
-                    self.logger.debug(
-                        f"[SLTP][BasketUpdate] apply_dynamic_trailing error (ticket={ticket}): {e}"
-                    )
-                except Exception:
-                    pass
-
             # TP dynamique prudent: seulement si TP courant existe (évite TP fantôme)
             new_tp = None
             try:
