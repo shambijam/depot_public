@@ -2136,6 +2136,12 @@ def update_basket_sltp_dynamically(
             force_refresh or perf_trigger or time_ok or phase_changed or price_moved
         )
 
+        # DIAGNOSTIC: Afficher TOUTES les valeurs du check
+        print(f"🔍 [SLTP_DIAGNOSTIC] Basket {basket_id}:", flush=True)
+        print(f"  pnl_pips={pnl_pips:.2f} | act_min_pips={act_min_pips:.2f} | loss_min_pips={loss_min_pips:.2f}", flush=True)
+        print(f"  perf_trigger={perf_trigger} | time_ok={time_ok} | phase_changed={phase_changed} | price_moved={price_moved}", flush=True)
+        print(f"  force_refresh={force_refresh} | should_update={should_update}", flush=True)
+
         if not should_update:
             return {
                 "status": "skipped",
@@ -2146,11 +2152,9 @@ def update_basket_sltp_dynamically(
                 "fill": fill_ratio,
             }
 
-        # Log: should_update passed
-        try:
-            self.logger.info(f"🔍 [SLTP_CHECK] Basket {basket_id}: should_update=True (force={force_refresh}, perf={perf_trigger}, time={time_ok}, phase={phase_changed}, price={price_moved}) | pnl={pnl_pips:.2f}p")
-        except Exception:
-            pass
+        # Log: should_update passed (SANS try-except pour voir l'exception si logger fail)
+        print(f"🔍 [SLTP_CHECK] Basket {basket_id}: should_update=True (force={force_refresh}, perf={perf_trigger}, time={time_ok}, phase={phase_changed}, price={price_moved}) | pnl={pnl_pips:.2f}p", flush=True)
+        self.logger.info(f"🔍 [SLTP_CHECK] Basket {basket_id}: should_update=True (force={force_refresh}, perf={perf_trigger}, time={time_ok}, phase={phase_changed}, price={price_moved}) | pnl={pnl_pips:.2f}p")
 
         # --- 3) Recalcul des cibles optimales (SL/TP virtuels) ---------------------
         symbol_info = _get_symbol_info(symbol)
@@ -2277,10 +2281,8 @@ def update_basket_sltp_dynamically(
 
 
         # Appliquer SL dynamique par position (plus fiable que sl_opt agrégé)
-        try:
-            self.logger.info(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context")
-        except Exception:
-            pass
+        print(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context", flush=True)
+        self.logger.info(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context")
 
         for p in positions:
             ticket = p.get("ticket")
