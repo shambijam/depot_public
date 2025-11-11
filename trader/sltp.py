@@ -1137,6 +1137,10 @@ def _calculate_dynamic_trailing(
 
         # Vérifier activation
         if pnl_pips < activation_pips:
+            try:
+                self.logger.debug(f"[TRAILING_CALC] Basket {basket_context.get('basket_id', 'unknown') if basket_context else 'unknown'}: PnL {pnl_pips:.1f} < activation {activation_pips:.1f} → SKIP")
+            except Exception:
+                pass
             return None
 
         # 2. Vérifier intervalle temps (anti-spam)
@@ -1150,6 +1154,10 @@ def _calculate_dynamic_trailing(
         last_ts = last_map.get(basket_id, 0.0)
 
         if (now - last_ts) < min_update_interval_sec:
+            try:
+                self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: Throttled (last update {now - last_ts:.1f}s ago < {min_update_interval_sec}s) → SKIP")
+            except Exception:
+                pass
             return None
 
         # 3. Calculer nouveau SL
@@ -1172,10 +1180,21 @@ def _calculate_dynamic_trailing(
 
         # Vérifier qu'il y a un changement significatif
         if abs(new_sl - current_sl) < pip_size * 0.5:
+            try:
+                self.logger.info(f"🔧 [TRAILING_CALC] Basket {basket_id}: PnL={pnl_pips:.1f}p | new_SL={new_sl:.5f} ≈ current_SL={current_sl:.5f} (diff={abs(new_sl - current_sl) / pip_size:.2f}p < 0.5p) → NO CHANGE")
+            except Exception:
+                pass
             return None
 
         # Mettre à jour le timestamp
         last_map[basket_id] = now
+
+        # Log succès
+        try:
+            direction_str = "BUY" if is_buy else "SELL"
+            self.logger.info(f"✅ [TRAILING_CALC] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | SL: {current_sl:.5f} → {new_sl:.5f} (move={abs(new_sl - current_sl) / pip_size:.2f}p)")
+        except Exception:
+            pass
 
         return new_sl
 
