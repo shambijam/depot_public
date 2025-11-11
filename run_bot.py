@@ -11,6 +11,8 @@ import sys
 import json
 import time
 import math
+import threading
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from datetime import UTC
@@ -2171,79 +2173,12 @@ def run_single_pipeline_cycle(
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
 
-        # === Maintenance périodique SLTP dynamique (toutes les 2s pour trailing rapide) ===
-        try:
-            import time, re
-
-            sltp_owner = getattr(trade_executor, "sltp", None) or trade_executor
-            fn = getattr(sltp_owner, "update_basket_sltp_dynamically", None)
-            logger.info(f"🔧 [SLTP][PERIODIC] sltp_owner={sltp_owner.__class__.__name__ if sltp_owner else None}, fn_exists={callable(fn)}")
-
-            if callable(fn):
-                last_ts = float(
-                    getattr(sltp_owner, "_last_periodic_maintenance_ts", 0.0) or 0.0
-                )
-                now_ts = time.time()
-                elapsed = now_ts - last_ts
-                logger.info(f"🔧 [SLTP][PERIODIC] elapsed={elapsed:.1f}s (need ≥2.0s)")
-
-                if elapsed >= 2.0:
-                    basket_ids = set()
-                    bm = getattr(trade_executor, "burst_manager", None)
-                    get_active = getattr(bm, "get_active_baskets", None) if bm else None
-                    logger.info(f"🔧 [SLTP][PERIODIC] burst_manager={bm is not None}, get_active={callable(get_active)}")
-
-                    if callable(get_active):
-                        try:
-                            for bid in get_active() or []:
-                                if isinstance(bid, str) and bid:
-                                    basket_ids.add(bid)
-                        except Exception as e:
-                            logger.warning(f"[SLTP][PERIODIC] get_active error: {e}")
-
-                    if not basket_ids:
-                        try:
-                            positions = mt5_connector.get_positions() or []
-                            logger.info(f"🔧 [SLTP][PERIODIC] Scanning {len(positions)} positions for baskets...")
-                            for p in positions:
-                                cmt = (
-                                    p.get("comment")
-                                    if isinstance(p, dict)
-                                    else getattr(p, "comment", "")
-                                ) or ""
-                                logger.info(f"🔧 [SLTP][PERIODIC] Position comment: '{cmt}'")
-                                m = re.search(
-                                    r"bs_([a-f0-9]{8})", str(cmt)
-                                )
-                                if m:
-                                    basket_ids.add(m.group(1))
-                        except Exception as e:
-                            logger.warning(f"[SLTP][PERIODIC] position scan error: {e}")
-
-                    logger.info(f"🔧 [SLTP][PERIODIC] Found {len(basket_ids)} baskets: {basket_ids}")
-
-                    for bid in basket_ids:
-                        try:
-                            logger.info(f"🔧 [SLTP][PERIODIC] Updating basket {bid}...")
-                            result = fn(
-                                basket_id=bid,
-                                reason="periodic_maintenance",
-                                force_refresh=False,
-                            )
-                            # Log détaillé avec raison et PnL
-                            status = result.get('status', 'unknown')
-                            reason = result.get('reason', 'no_reason')
-                            pnl = result.get('pnl_pips', 'N/A')
-                            logger.info(f"🔧 [SLTP][PERIODIC] Basket {bid} result: {status} | reason={reason} | pnl={pnl} pips")
-                        except Exception as e:
-                            logger.error(f"[SLTP][PERIODIC] Basket {bid} update error: {e}")
-                            continue
-                    try:
-                        setattr(sltp_owner, "_last_periodic_maintenance_ts", now_ts)
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.error(f"[SLTP][PERIODIC] maintenance error: {e}", exc_info=True)
+        # === Maintenance périodique SLTP dynamique ===
+        # ⚠️ DÉSACTIVÉ : Remplacé par le thread dédié trailing_stop_monitor_thread (toutes les 2s en temps réel)
+        # Ce code tournait dans le cycle principal (toutes les 23-60s) et ratait les activations.
+        # Le nouveau thread surveille en continu et active le trailing dès que PnL >= 28 pips.
+        # Voir section "# 8. Démarrage du Thread de Surveillance Trailing Stop" dans main()
+        pass
 
         # === Intégrer les décisions Fusion dans le package ===
         try:
@@ -2800,6 +2735,98 @@ def run_single_pipeline_cycle(
         return trade_executed_successfully
 
 
+def trailing_stop_monitor_thread(
+    trade_executor,
+    mt5_connector,
+    stop_event: threading.Event,
+    update_interval_sec: float = 2.0,
+    logger=None
+):
+    """
+    Thread dédié à la surveillance en temps réel des trailing stops.
+
+    S'exécute toutes les `update_interval_sec` secondes (défaut: 2s) pour :
+    - Récupérer les baskets actifs depuis MT5
+    - Vérifier leur PnL
+    - Activer le trailing stop si PnL >= 28 pips
+    - Mettre à jour les SL dynamiquement
+
+    Args:
+        trade_executor: Instance de TradeExecutor avec la fonction update_basket_sltp_dynamically
+        mt5_connector: Connexion MT5 pour récupérer les positions
+        stop_event: Event pour arrêter proprement le thread
+        update_interval_sec: Intervalle de surveillance (défaut 2s)
+        logger: Logger pour les messages
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    logger.info(f"🚀 [TRAILING_MONITOR] Thread de surveillance démarré (interval={update_interval_sec}s)")
+
+    # Pattern pour extraire basket_id du commentaire MT5
+    BASKET_PATTERN = re.compile(r"bs_([a-f0-9]{8})")
+
+    while not stop_event.is_set():
+        try:
+            # Récupérer toutes les positions ouvertes
+            try:
+                positions = mt5_connector.get_open_positions()
+            except Exception as e:
+                logger.debug(f"[TRAILING_MONITOR] Erreur get_open_positions: {e}")
+                positions = []
+
+            if not positions:
+                # Pas de positions ouvertes, attendre
+                stop_event.wait(update_interval_sec)
+                continue
+
+            # Extraire les basket_ids uniques des commentaires
+            basket_ids = set()
+            for pos in positions:
+                try:
+                    comment = pos.get("comment", "") if isinstance(pos, dict) else getattr(pos, "comment", "")
+                    match = BASKET_PATTERN.search(str(comment))
+                    if match:
+                        basket_ids.add(match.group(1))
+                except Exception:
+                    continue
+
+            if not basket_ids:
+                # Aucun basket trouvé
+                stop_event.wait(update_interval_sec)
+                continue
+
+            # Mettre à jour chaque basket
+            for basket_id in basket_ids:
+                if stop_event.is_set():
+                    break
+
+                try:
+                    # Appeler la fonction de mise à jour du trailing
+                    result = trade_executor.update_basket_sltp_dynamically(
+                        basket_id=basket_id,
+                        reason="realtime_monitor",
+                        force_refresh=False,
+                    )
+
+                    # Logger si activation ou succès
+                    status = result.get("status", "unknown")
+                    if status == "success":
+                        pnl = result.get("pnl_pips", 0)
+                        logger.info(f"✅ [TRAILING_MONITOR] Basket {basket_id}: trailing mis à jour (PnL={pnl:.1f}p)")
+
+                except Exception as e:
+                    logger.debug(f"[TRAILING_MONITOR] Erreur update basket {basket_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"[TRAILING_MONITOR] Erreur dans la boucle: {e}", exc_info=True)
+
+        # Attendre avant le prochain cycle
+        stop_event.wait(update_interval_sec)
+
+    logger.info("🛑 [TRAILING_MONITOR] Thread de surveillance arrêté")
+
+
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
@@ -2977,6 +3004,21 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
 
+    # 8. Démarrage du Thread de Surveillance Trailing Stop
+    trailing_stop_event = threading.Event()
+    trailing_monitor_interval = config_manager.get(
+        "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
+    )
+
+    trailing_thread = threading.Thread(
+        target=trailing_stop_monitor_thread,
+        args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
+        daemon=True,
+        name="TrailingStopMonitor"
+    )
+    trailing_thread.start()
+    logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
+
     # 9. Boucle Principale
     try:
         while True:
@@ -3055,6 +3097,18 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
     finally:
+        # Arrêt propre du thread de surveillance trailing stop
+        try:
+            logger.info("🛑 Arrêt du thread de surveillance trailing stop...")
+            trailing_stop_event.set()
+            trailing_thread.join(timeout=5.0)
+            if trailing_thread.is_alive():
+                logger.warning("⚠️ Thread trailing stop n'a pas terminé dans les 5s")
+            else:
+                logger.info("✅ Thread trailing stop arrêté proprement")
+        except Exception as e:
+            logger.error(f"Erreur arrêt thread trailing: {e}")
+
         if "ai_decision" in locals() and ai_decision:
             logger.info("Sauvegarde historique IA avant arrêt...")
             ai_decision._save_suggestion_history()
