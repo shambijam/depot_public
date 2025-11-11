@@ -2230,7 +2230,11 @@ def run_single_pipeline_cycle(
                                 reason="periodic_maintenance",
                                 force_refresh=False,
                             )
-                            logger.info(f"🔧 [SLTP][PERIODIC] Basket {bid} result: {result.get('status', 'unknown')}")
+                            # Log détaillé avec raison et PnL
+                            status = result.get('status', 'unknown')
+                            reason = result.get('reason', 'no_reason')
+                            pnl = result.get('pnl_pips', 'N/A')
+                            logger.info(f"🔧 [SLTP][PERIODIC] Basket {bid} result: {status} | reason={reason} | pnl={pnl} pips")
                         except Exception as e:
                             logger.error(f"[SLTP][PERIODIC] Basket {bid} update error: {e}")
                             continue
