@@ -2761,17 +2761,24 @@ def trailing_stop_monitor_thread(
     if logger is None:
         logger = logging.getLogger(__name__)
 
+    # Logs forcés au démarrage (print + logger)
+    print(f"🚀 [TRAILING_MONITOR] Thread démarré ! interval={update_interval_sec}s", flush=True)
     logger.info(f"🚀 [TRAILING_MONITOR] Thread de surveillance démarré (interval={update_interval_sec}s)")
 
     # Pattern pour extraire basket_id du commentaire MT5
     BASKET_PATTERN = re.compile(r"bs_([a-f0-9]{8})")
 
+    print(f"🔍 [TRAILING_MONITOR] Entrée dans la boucle while...", flush=True)
+
     while not stop_event.is_set():
+        print(f"🔄 [TRAILING_MONITOR] Début d'itération...", flush=True)
         try:
             # Récupérer toutes les positions ouvertes
             try:
                 positions = mt5_connector.get_open_positions()
+                print(f"📊 [TRAILING_MONITOR] Positions récupérées: {len(positions) if positions else 0}", flush=True)
             except Exception as e:
+                print(f"❌ [TRAILING_MONITOR] Erreur get_open_positions: {e}", flush=True)
                 logger.debug(f"[TRAILING_MONITOR] Erreur get_open_positions: {e}")
                 positions = []
 
@@ -2791,8 +2798,11 @@ def trailing_stop_monitor_thread(
                 except Exception:
                     continue
 
+            print(f"🎯 [TRAILING_MONITOR] Baskets détectés: {basket_ids}", flush=True)
+
             if not basket_ids:
                 # Aucun basket trouvé
+                print(f"⏸️ [TRAILING_MONITOR] Aucun basket, attente {update_interval_sec}s...", flush=True)
                 stop_event.wait(update_interval_sec)
                 continue
 
@@ -3005,19 +3015,40 @@ def main(args: argparse.Namespace) -> None:
         )
 
     # 8. Démarrage du Thread de Surveillance Trailing Stop
-    trailing_stop_event = threading.Event()
-    trailing_monitor_interval = config_manager.get(
-        "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
-    )
+    print("=" * 80, flush=True)
+    print("🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP", flush=True)
+    print("=" * 80, flush=True)
 
-    trailing_thread = threading.Thread(
-        target=trailing_stop_monitor_thread,
-        args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
-        daemon=True,
-        name="TrailingStopMonitor"
-    )
-    trailing_thread.start()
-    logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
+    try:
+        trailing_stop_event = threading.Event()
+        trailing_monitor_interval = config_manager.get(
+            "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
+        )
+
+        print(f"📋 Configuration: interval={trailing_monitor_interval}s", flush=True)
+        print(f"📋 trade_executor: {trade_executor}", flush=True)
+        print(f"📋 mt5_connector: {mt5_connector}", flush=True)
+
+        trailing_thread = threading.Thread(
+            target=trailing_stop_monitor_thread,
+            args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
+            daemon=True,
+            name="TrailingStopMonitor"
+        )
+
+        print(f"📋 Thread créé: {trailing_thread}", flush=True)
+        trailing_thread.start()
+        print(f"✅ Thread.start() appelé", flush=True)
+
+        logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
+        print(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)", flush=True)
+        print("=" * 80, flush=True)
+
+    except Exception as e:
+        print(f"❌ ERREUR CRITIQUE: Impossible de démarrer le thread trailing: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        logger.error(f"ERREUR CRITIQUE: Thread trailing non démarré: {e}", exc_info=True)
 
     # 9. Boucle Principale
     try:
