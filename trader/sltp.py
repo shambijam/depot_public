@@ -2050,6 +2050,14 @@ def update_basket_sltp_dynamically(
         locked = False
 
     try:
+        # === LOG DEBUG #1 : DÉBUT DE LA FONCTION ===
+        print(f"\n{'='*80}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] DÉBUT update_basket_sltp_dynamically", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Basket ID: {basket_id}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Reason: {reason}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Force refresh: {force_refresh}", flush=True)
+        print(f"{'='*80}\n", flush=True)
+
         # Contexte frais (TTL court si pas force_refresh)
         local_ctx = self._resolve_basket_context_for_sltp(
             trade_decision={"basket_id": basket_id},
@@ -2057,6 +2065,16 @@ def update_basket_sltp_dynamically(
             burst_manager=getattr(self, "burst_manager", None),
             ttl_sec=0.0 if force_refresh else 2.0,
         )
+
+        # === LOG DEBUG #2 : CONTEXTE RÉCUPÉRÉ ===
+        print(f"🔥 [DEBUG_TRAILING] Contexte récupéré: {local_ctx is not None and isinstance(local_ctx, dict)}", flush=True)
+        if local_ctx and isinstance(local_ctx, dict):
+            print(f"🔥 [DEBUG_TRAILING] Symbol: {local_ctx.get('symbol')}", flush=True)
+            print(f"🔥 [DEBUG_TRAILING] Direction: {local_ctx.get('direction')}", flush=True)
+            print(f"🔥 [DEBUG_TRAILING] PnL pips: {local_ctx.get('basket_pnl_pips', 'N/A')}", flush=True)
+            print(f"🔥 [DEBUG_TRAILING] Positions: {local_ctx.get('current_positions', 'N/A')}", flush=True)
+        print(f"", flush=True)
+
         if not isinstance(local_ctx, dict) or not local_ctx:
             return {
                 "status": "error",
@@ -2385,6 +2403,12 @@ def update_basket_sltp_dynamically(
                     )
                     MIN_UPDATE_SEC = max(1.0, MIN_UPDATE_SEC)
 
+                    # === LOG DEBUG #3 : AVANT APPEL TRAILING ===
+                    print(f"🔥 [DEBUG_TRAILING] MODE PROFIT activé pour ticket {ticket}", flush=True)
+                    print(f"🔥 [DEBUG_TRAILING] PnL={pnl_pips:.2f}p >= ACTIVATION={ACTIVATION_PIPS:.2f}p", flush=True)
+                    print(f"🔥 [DEBUG_TRAILING] Appel apply_dynamic_trailing...", flush=True)
+                    print(f"🔥 [DEBUG_TRAILING] Params: activation={ACTIVATION_PIPS:.2f}p, min_distance={MIN_DISTANCE_PIPS:.2f}p, interval={MIN_UPDATE_SEC:.1f}s", flush=True)
+
                     new_sl = self.apply_dynamic_trailing(
                         trade_decision=virtual_decision,
                         position_ticket=ticket,
@@ -2405,8 +2429,17 @@ def update_basket_sltp_dynamically(
                         market_context=current_market_data,
                         burst_manager=getattr(self, "burst_manager", None),
                     )
+
+                    # === LOG DEBUG #4 : APRÈS APPEL TRAILING ===
+                    print(f"🔥 [DEBUG_TRAILING] apply_dynamic_trailing returned: {new_sl}", flush=True)
+                    if new_sl is not None:
+                        print(f"🔥 [DEBUG_TRAILING] ✅ NOUVEAU SL CALCULÉ: {new_sl:.5f} (ancien: {cur_sl:.5f})", flush=True)
+                    else:
+                        print(f"🔥 [DEBUG_TRAILING] ❌ Pas de changement SL (retour None)", flush=True)
+
                 else:
                     new_sl = None
+                    print(f"🔥 [DEBUG_TRAILING] ⚠️ PAS de trigger (do_profit={do_profit}, do_defense={do_defense})", flush=True)
             except Exception as e:
                 new_sl = None
                 try:
@@ -2666,6 +2699,23 @@ def update_basket_sltp_dynamically(
             pass
 
         status = "success" if success else "skipped"
+
+        # === LOG DEBUG #5 : RÉSULTAT FINAL ===
+        print(f"\n{'='*80}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] RÉSULTAT FINAL", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Basket ID: {basket_id}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Status: {status}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Updates applied: {len(updates_applied)}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] Updates failed: {len(updates_failed)}", flush=True)
+        print(f"🔥 [DEBUG_TRAILING] PnL: {pnl_pips:.2f} pips", flush=True)
+        if updates_applied:
+            for upd in updates_applied:
+                print(f"🔥 [DEBUG_TRAILING]   ✅ Ticket {upd['ticket']}: SL={upd.get('new_sl', 'N/A')}, TP={upd.get('new_tp', 'N/A')}", flush=True)
+        if updates_failed:
+            for fail in updates_failed:
+                print(f"🔥 [DEBUG_TRAILING]   ❌ Ticket {fail['ticket']}: reason={fail['reason']}", flush=True)
+        print(f"{'='*80}\n", flush=True)
+
         return {
             "status": status,
             "basket_id": basket_id,
