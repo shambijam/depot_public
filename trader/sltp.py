@@ -2276,6 +2276,13 @@ def update_basket_sltp_dynamically(
             entry = float(p.get("entry_price") or 0.0)
             cur_sl = p.get("sl")
             cur_tp = p.get("tp")
+
+            # Log position data
+            try:
+                self.logger.info(f"🔍 [SLTP_POS] Basket {basket_id} ticket #{ticket}: entry={entry}, cur_sl={cur_sl}, cur_tp={cur_tp}")
+            except Exception:
+                pass
+
             if not ticket or entry <= 0 or cur_sl is None:
                 # on tente d'enrichir via le connecteur (si disponible)
                 ok = False
