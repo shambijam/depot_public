@@ -1088,6 +1088,105 @@ def _resolve_basket_context_for_sltp(
 # (B) <<< PATCH
 
 
+def _calculate_dynamic_trailing(
+    self,
+    current_price: float,
+    entry_price: float,
+    current_sl: float,
+    basket_context: Optional[dict],
+    volatility: Optional[float],
+    symbol_info: Any,
+    min_distance_pips: float = 8.0,
+    activation_pips: float = 28.0,
+    min_update_interval_sec: int = 2,
+) -> Optional[float]:
+    """
+    Calcule le nouveau SL pour le trailing stop.
+
+    Logique:
+    1. Vérifie que PnL >= activation_pips
+    2. Vérifie l'intervalle depuis dernière update
+    3. Calcule nouveau SL en suivant le prix (distance = min_distance_pips)
+    4. Ne jamais détériorer le SL
+
+    Retourne:
+        - float: Nouveau SL
+        - None: Pas de changement nécessaire
+    """
+    import time
+
+    try:
+        # Récupération des infos symbole
+        point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
+        points_per_pip = 10.0 if digits in (3, 5) else 1.0
+        pip_size = point * points_per_pip if point > 0 else 0.0001
+
+        # Déterminer la direction
+        is_buy = current_sl < entry_price
+
+        # 1. Vérifier le PnL dans basket_context
+        if basket_context:
+            pnl_pips = float(basket_context.get("basket_pnl_pips", 0.0))
+        else:
+            # Calcul PnL approximatif si pas de contexte
+            if is_buy:
+                pnl_pips = (current_price - entry_price) / pip_size
+            else:
+                pnl_pips = (entry_price - current_price) / pip_size
+
+        # Vérifier activation
+        if pnl_pips < activation_pips:
+            return None
+
+        # 2. Vérifier intervalle temps (anti-spam)
+        now = time.time()
+        last_map = getattr(self, "_last_trailing_sl_update", None)
+        if last_map is None:
+            last_map = {}
+            setattr(self, "_last_trailing_sl_update", last_map)
+
+        basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+        last_ts = last_map.get(basket_id, 0.0)
+
+        if (now - last_ts) < min_update_interval_sec:
+            return None
+
+        # 3. Calculer nouveau SL
+        # Distance minimale depuis prix actuel
+        min_distance_price = min_distance_pips * pip_size
+
+        if is_buy:
+            # BUY: SL suit le prix en montant, distance min_distance_pips en dessous du prix
+            new_sl = current_price - min_distance_price
+            # Ne jamais baisser le SL (détérioration)
+            new_sl = max(new_sl, current_sl)
+        else:
+            # SELL: SL suit le prix en descendant, distance min_distance_pips au-dessus du prix
+            new_sl = current_price + min_distance_price
+            # Ne jamais monter le SL (détérioration)
+            new_sl = min(new_sl, current_sl)
+
+        # Arrondir au bon nombre de décimales
+        new_sl = round(new_sl, digits)
+
+        # Vérifier qu'il y a un changement significatif
+        if abs(new_sl - current_sl) < pip_size * 0.5:
+            return None
+
+        # Mettre à jour le timestamp
+        last_map[basket_id] = now
+
+        return new_sl
+
+    except Exception as e:
+        try:
+            self.logger.debug(f"[_calculate_dynamic_trailing] Error: {e}")
+        except Exception:
+            pass
+        return None
+
+
 def apply_dynamic_trailing(
     self,
     trade_decision: dict,

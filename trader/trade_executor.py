@@ -25,6 +25,8 @@ from trader.sltp import (
     _split_multi_tp_orders,
     update_basket_sltp_dynamically,
     _resolve_basket_context_for_sltp,
+    _calculate_dynamic_trailing,
+    apply_dynamic_trailing,
 )
 from trader.burst import monitor_burst_baskets, open_burst_basket
 from trader.reconcile import (
@@ -433,3 +435,5 @@ TradeExecutor.generate_report = generate_report
 TradeExecutor.open_burst_basket = open_burst_basket
 TradeExecutor.update_basket_sltp_dynamically = update_basket_sltp_dynamically
 TradeExecutor._resolve_basket_context_for_sltp = _resolve_basket_context_for_sltp
+TradeExecutor._calculate_dynamic_trailing = _calculate_dynamic_trailing
+TradeExecutor.apply_dynamic_trailing = apply_dynamic_trailing
