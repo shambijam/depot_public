@@ -76,22 +76,22 @@
       },
       "footprint": {
         "enabled": true,
-        "m1_min_ticks": 3,
-        "m1_min_coverage_s": 1,
-        "tickrate_min": 0.1,
-        "veto_absorption": false,
+        "m1_min_ticks": 8,
+        "m1_min_coverage_s": 3,
+        "tickrate_min": 2.5,
+        "veto_absorption": true,
         "warn_absorption": false,
-        "absorption_penalty": 0.0
+        "absorption_penalty": 0.15
       },
       "orderflow": {
         "enabled": true,
-        "delta_abs_min": 5.0
+        "delta_abs_min": 15.0
       },
       "triggers": {
         "enabled": true,
-        "require_trigger": false,
-        "min_strength": 0.0,
-        "allow_opposite_trigger": true
+        "require_trigger": true,
+        "min_strength": 0.50,
+        "allow_opposite_trigger": false
       },
       "fusion": {
         "enabled": true,
@@ -102,14 +102,14 @@
         ],
         "ttl_ms": 800,
         "max_slippage_points": 150,
-        "allow_degraded_vote": true,
-        "require_phase_alignment": false,
-        "require_footprint": false,
-        "min_score_to_fire": 0.15,
+        "allow_degraded_vote": false,
+        "require_phase_alignment": true,
+        "require_footprint": true,
+        "min_score_to_fire": 0.40,
         "of_score_scale": "0_1",
         "degraded_vote_conditions": {
-          "min_of_delta_abs": 0.0,
-          "min_of_score": 0.0
+          "min_of_delta_abs": 80.0,
+          "min_of_score": 0.55
         }
       }
     }
@@ -155,9 +155,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.25,
-      "min_orderflow_score": 0.23,
-      "max_spread_pts": 999
+      "min_confidence": 0.45,
+      "min_orderflow_score": 0.55,
+      "max_spread_pts": 80
     },
     "scoring_weights": {
       "context": 0.30,
@@ -166,8 +166,8 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "direct": 0.15,
-      "conditional": 0.05
+      "direct": 0.40,
+      "conditional": 0.25
     },
     "momentum": {
       "enabled": false,
@@ -201,17 +201,17 @@
       "enabled": false
     },
     "ponderations": {
-      "trigger_weight": 0.40,
-      "orderflow_weight": 0.40,
+      "trigger_weight": 0.35,
+      "orderflow_weight": 0.45,
       "footprint_weight": 0.20,
       "coherence_bonus_max": 0.10
     }
   },
   "regles_metier": {
-    "veto_absorption": false,
-    "never_against_strong_orderflow": false,
+    "veto_absorption": true,
+    "never_against_strong_orderflow": true,
     "triple_confirmation_bonus": true,
-    "weak_footprint_score_th": 0.00
+    "weak_footprint_score_th": 0.45
   },
   "legacy": {
     "smart_sl_tp_settings": {

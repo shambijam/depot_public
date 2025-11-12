@@ -985,6 +985,9 @@ def _resolve_basket_context_for_sltp(
 
     # 2.2.1) Fallback: construire contexte minimal depuis MT5 si burst_manager absent
     if ctx is None:
+        # DEBUG: Fallback MT5 activé
+        print(f"🔄 [BASKET_CTX][FALLBACK] Tentative récupération basket {basket_id} depuis MT5...", flush=True)
+
         try:
             conn = getattr(self, "mt5_connector", None)
             if conn:
@@ -1004,6 +1007,9 @@ def _resolve_basket_context_for_sltp(
                     cmt = (p.get("comment") if isinstance(p, dict) else getattr(p, "comment", "")) or ""
                     if basket_id in str(cmt):
                         basket_positions.append(p)
+
+                # DEBUG: Positions trouvées
+                print(f"🔍 [BASKET_CTX][FALLBACK] {len(basket_positions)} positions trouvées pour basket {basket_id}", flush=True)
 
                 if basket_positions:
                     # Extraire info du premier ticket
@@ -1041,6 +1047,10 @@ def _resolve_basket_context_for_sltp(
                         ],
                         "_source": "mt5_fallback"
                     }
+
+                    # DEBUG: Contexte créé avec PnL
+                    print(f"✅ [BASKET_CTX][FALLBACK] Contexte créé | {symbol} {direction} | {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips", flush=True)
+
                     try:
                         self.logger.debug(f"[BASKET_CTX] MT5_FALLBACK | {basket_id} | {symbol} {direction} | {len(basket_positions)} pos | {total_pnl_pips:.1f} pips")
                     except Exception:
@@ -2112,6 +2122,9 @@ def update_basket_sltp_dynamically(
         fill_ratio = float(local_ctx.get("fill_ratio") or 0.0)
         vol_pips = local_ctx.get("volatility_pips", local_ctx.get("volatility_atr"))
 
+        # DEBUG: PnL basket calculé
+        print(f"🔥 [DEBUG_TRAILING][PNL] basket={basket_id} | PnL={pnl_pips:.2f} pips | fill_ratio={fill_ratio:.2f}", flush=True)
+
         # Lecture seuils trailing AVANT le check (nécessaire pour perf_trigger)
         trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("trailing") or {}) or {}
         act_cfg    = trail_cfg.get("activation", {}) or {}
@@ -2119,6 +2132,9 @@ def update_basket_sltp_dynamically(
 
         act_min_pips   = float((act_cfg.get("min_pips", 28.0) or 28.0))      # Défaut 28 pips
         loss_min_pips  = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))   # Défense
+
+        # DEBUG: Seuils activation
+        print(f"🔥 [DEBUG_TRAILING][SEUILS] act_min_pips={act_min_pips:.2f} | loss_min_pips={loss_min_pips:.2f}", flush=True)
 
         # Time-based trigger (≥2s pour trailing rapide)
         last_update = (

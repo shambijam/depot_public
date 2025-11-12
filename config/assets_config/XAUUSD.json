@@ -135,10 +135,10 @@
             "use_orderflow_v6": true,
             "of_v6_gate": {
               "min_score": 0.60,
-              "require_ncp_strong": false,
+              "require_ncp_strong": true,
               "min_delta_abs": 120.0,
-              "min_imbalance": 0.52,
-              "min_tickrate": 2.5
+              "min_imbalance": 0.55,
+              "min_tickrate": 3.5
             },
             "flow_vol_gate": {
               "enabled": false
