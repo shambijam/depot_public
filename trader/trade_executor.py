@@ -68,6 +68,12 @@ class TradeExecutor:
         except Exception:
             self.config = {}
 
+        # Config stratégie scalping (pour trailing stop)
+        try:
+            self.strategy_config = config_manager.strategy_manager.get_strategy_config("scalping") or {}
+        except Exception:
+            self.strategy_config = {}
+
         # Quelques paramètres MT5 utiles (fallback robustes)
         self.mt5_max_retries = int(
             config_manager.get("trade_executor_settings.order_send_max_retries", 2) or 2

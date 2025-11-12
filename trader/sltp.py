@@ -2126,10 +2126,20 @@ def update_basket_sltp_dynamically(
         print(f"🔥 [DEBUG_TRAILING][PNL] basket={basket_id} | PnL={pnl_pips:.2f} pips | fill_ratio={fill_ratio:.2f}", flush=True)
 
         # Lecture seuils trailing AVANT le check (nécessaire pour perf_trigger)
-        # FIX: Ajouter niveau "burst_scalping" manquant dans le chemin config
-        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
-        act_cfg    = trail_cfg.get("activation", {}) or {}
-        act_loss_cfg = trail_cfg.get("activation_loss", {}) or {}
+        # Lecture depuis strategy_config (config_trade_scalping.json) avec fallback vers config (prod_config.json)
+        trail_cfg_early = None
+
+        if hasattr(self, 'strategy_config') and self.strategy_config:
+            trail_cfg_early = ((((self.strategy_config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
+
+        if not trail_cfg_early:
+            trail_cfg_early = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
+
+        if not trail_cfg_early:
+            trail_cfg_early = {}
+
+        act_cfg    = trail_cfg_early.get("activation", {}) or {}
+        act_loss_cfg = trail_cfg_early.get("activation_loss", {}) or {}
 
         act_min_pips   = float((act_cfg.get("min_pips", 28.0) or 28.0))      # Défaut 28 pips
         loss_min_pips  = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))   # Défense
@@ -2253,23 +2263,29 @@ def update_basket_sltp_dynamically(
             pass
 
         # === distances issues de la conf + planchers spread/broker ===
-        # FIX: Ajouter niveau "burst_scalping" manquant dans le chemin config
+        # Lecture depuis strategy_config (config_trade_scalping.json) avec fallback vers config (prod_config.json)
 
-        # DEBUG: Vérifier contenu self.config
-        print(f"🔍 [DEBUG_CONFIG] self.config présent: {self.config is not None}", flush=True)
-        if self.config:
-            print(f"🔍 [DEBUG_CONFIG] entry_rules présent: {'entry_rules' in self.config}", flush=True)
-            if 'entry_rules' in self.config:
-                print(f"🔍 [DEBUG_CONFIG] scalping présent: {'scalping' in self.config['entry_rules']}", flush=True)
-                if 'scalping' in self.config.get('entry_rules', {}):
-                    scalping = self.config['entry_rules']['scalping']
-                    print(f"🔍 [DEBUG_CONFIG] burst_scalping présent: {'burst_scalping' in scalping}", flush=True)
-                    if 'burst_scalping' in scalping:
-                        print(f"🔍 [DEBUG_CONFIG] trailing présent: {'trailing' in scalping['burst_scalping']}", flush=True)
+        # Essai 1: Charger depuis self.strategy_config (config stratégie scalping)
+        trail_cfg = None
+        config_source = "none"
 
-        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
-        print(f"🔍 [DEBUG_CONFIG] trail_cfg trouvé: {trail_cfg != {}}", flush=True)
-        print(f"🔍 [DEBUG_CONFIG] trail_cfg contenu: {trail_cfg}", flush=True)
+        if hasattr(self, 'strategy_config') and self.strategy_config:
+            trail_cfg = ((((self.strategy_config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
+            if trail_cfg:
+                config_source = "strategy_config"
+
+        # Essai 2: Fallback vers self.config si strategy_config vide
+        if not trail_cfg:
+            trail_cfg = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
+            if trail_cfg:
+                config_source = "self.config"
+
+        # Essai 3: Fallback final vide
+        if not trail_cfg:
+            trail_cfg = {}
+            config_source = "empty_fallback"
+
+        print(f"🔍 [CONFIG_SOURCE] Trailing config chargée depuis: {config_source} | trail_cfg trouvé: {trail_cfg != {}}", flush=True)
 
         act_cfg    = trail_cfg.get("activation", {}) or {}
         step_cfg   = trail_cfg.get("step", {}) or {}

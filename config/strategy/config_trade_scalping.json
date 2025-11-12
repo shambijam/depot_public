@@ -76,21 +76,21 @@
       },
       "footprint": {
         "enabled": true,
-        "m1_min_ticks": 8,
-        "m1_min_coverage_s": 3,
-        "tickrate_min": 2.5,
+        "m1_min_ticks": 12,
+        "m1_min_coverage_s": 5,
+        "tickrate_min": 3.5,
         "veto_absorption": true,
         "warn_absorption": false,
-        "absorption_penalty": 0.15
+        "absorption_penalty": 0.20
       },
       "orderflow": {
         "enabled": true,
-        "delta_abs_min": 15.0
+        "delta_abs_min": 25.0
       },
       "triggers": {
         "enabled": true,
         "require_trigger": true,
-        "min_strength": 0.50,
+        "min_strength": 0.60,
         "allow_opposite_trigger": false
       },
       "fusion": {
@@ -105,7 +105,7 @@
         "allow_degraded_vote": false,
         "require_phase_alignment": true,
         "require_footprint": true,
-        "min_score_to_fire": 0.40,
+        "min_score_to_fire": 0.50,
         "of_score_scale": "0_1",
         "degraded_vote_conditions": {
           "min_of_delta_abs": 80.0,
@@ -155,9 +155,9 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.45,
-      "min_orderflow_score": 0.55,
-      "max_spread_pts": 80
+      "min_confidence": 0.55,
+      "min_orderflow_score": 0.65,
+      "max_spread_pts": 50
     },
     "scoring_weights": {
       "context": 0.30,
@@ -166,8 +166,8 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "direct": 0.40,
-      "conditional": 0.25
+      "direct": 0.50,
+      "conditional": 0.35
     },
     "momentum": {
       "enabled": false,
@@ -201,8 +201,8 @@
       "enabled": false
     },
     "ponderations": {
-      "trigger_weight": 0.35,
-      "orderflow_weight": 0.45,
+      "trigger_weight": 0.30,
+      "orderflow_weight": 0.50,
       "footprint_weight": 0.20,
       "coherence_bonus_max": 0.10
     }
@@ -211,7 +211,7 @@
     "veto_absorption": true,
     "never_against_strong_orderflow": true,
     "triple_confirmation_bonus": true,
-    "weak_footprint_score_th": 0.45
+    "weak_footprint_score_th": 0.55
   },
   "legacy": {
     "smart_sl_tp_settings": {
