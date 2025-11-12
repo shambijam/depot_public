@@ -2126,7 +2126,8 @@ def update_basket_sltp_dynamically(
         print(f"🔥 [DEBUG_TRAILING][PNL] basket={basket_id} | PnL={pnl_pips:.2f} pips | fill_ratio={fill_ratio:.2f}", flush=True)
 
         # Lecture seuils trailing AVANT le check (nécessaire pour perf_trigger)
-        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("trailing") or {}) or {}
+        # FIX: Ajouter niveau "burst_scalping" manquant dans le chemin config
+        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
         act_cfg    = trail_cfg.get("activation", {}) or {}
         act_loss_cfg = trail_cfg.get("activation_loss", {}) or {}
 
@@ -2252,7 +2253,8 @@ def update_basket_sltp_dynamically(
             pass
 
         # === distances issues de la conf + planchers spread/broker ===
-        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("trailing") or {}) or {}
+        # FIX: Ajouter niveau "burst_scalping" manquant dans le chemin config
+        trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
         act_cfg    = trail_cfg.get("activation", {}) or {}
         step_cfg   = trail_cfg.get("step", {}) or {}
         floors_cfg = trail_cfg.get("broker_floors", {}) or {}
