@@ -38,6 +38,7 @@ try:
     from mecanique_generale.mecano import Mecano
     from run_bot import (
         run_single_pipeline_cycle,
+        trailing_stop_monitor_thread,  # ✅ AJOUTÉ pour surveillance trailing
     )  # ← on garde uniquement la fonction de run
     from utils.logger_setup import (
         setup_production_logging,
@@ -552,9 +553,52 @@ def main(args: argparse.Namespace) -> None:
         readiness_symbols = ["EURUSD", "GBPUSD", "XAUUSD", "NAS100"]  # fallback ultime
 
     try:
-    
+
         # 🔔 Calage initial : premier cycle à la minute exacte
         sleep_until_next_minute()
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # 🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP
+        # ═══════════════════════════════════════════════════════════════════════
+        print("=" * 80, flush=True)
+        print("🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP", flush=True)
+        print("=" * 80, flush=True)
+
+        try:
+            import threading
+            trailing_stop_event = threading.Event()
+
+            # Lire intervalle depuis config
+            trailing_monitor_interval = config_manager.get(
+                "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
+            )
+
+            print(f"📋 Configuration: interval={trailing_monitor_interval}s", flush=True)
+            print(f"📋 trade_executor: {trade_executor}", flush=True)
+            print(f"📋 mt5_connector: {mt5_connector}", flush=True)
+
+            trailing_thread = threading.Thread(
+                target=trailing_stop_monitor_thread,
+                args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
+                daemon=True,
+                name="TrailingStopMonitor"
+            )
+
+            print(f"📋 Thread créé: {trailing_thread}", flush=True)
+            trailing_thread.start()
+            print(f"✅ Thread.start() appelé", flush=True)
+
+            logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
+            print(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)", flush=True)
+            print("=" * 80, flush=True)
+
+        except Exception as e:
+            print(f"❌ ERREUR CRITIQUE: Impossible de démarrer le thread trailing: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            logger.error(f"ERREUR CRITIQUE: Thread trailing non démarré: {e}", exc_info=True)
+
+        # ═══════════════════════════════════════════════════════════════════════
 
         while True:
             cycle_count += 1
