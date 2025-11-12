@@ -626,6 +626,10 @@ def prepare_order(self, decision_package: dict) -> dict:
                 market_context=market_context,
                 basket_context=basket_ctx,  # utile pour le burst
             )
+
+            # DEBUG: Traçage après calcul SL/TP dans order_builder
+            print(f"🔍 [SL_TRACE][ORDER_BUILDER] Après calcul SL/TP | SL={sl_price} | TP={tp_price} | entry={entry_price_market} | symbol={symbol_info.name}", flush=True)
+
         except Exception as e:
             self.logger.error(f"[ORDER_BUILDER] _calculate_sl_tp_prices error: {e}")
             raise TradeExecutionError(f"Échec calcul SL/TP: {e}")

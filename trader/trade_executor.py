@@ -151,6 +151,10 @@ class TradeExecutor:
 
         # Envoi
         result = None
+
+        # DEBUG: Traçage envoi MT5
+        print(f"🔍 [SL_TRACE][MT5_SEND] Envoi ordre | symbol={request.get('symbol')} | SL={request.get('sl')} | TP={request.get('tp')} | type={request.get('type')} | volume={request.get('volume')}", flush=True)
+
         try:
             result = self.mt5_connector.order_send(request)
         except Exception as e:
@@ -194,27 +198,32 @@ class TradeExecutor:
             "message": retcode_str,
         }
 
-        # Si SL/TP invalides à l’envoi mais ordre rempli, tenter l’attache post-fill
+        # Si SL/TP invalides à l'envoi, tenter l'attache post-fill
         try_attach = (
-            retcode in (RET_DONE, RET_DONE_PARTIAL)
+            retcode == RET_INVALID_STOPS
             and (request.get("sl") or request.get("tp"))
-            and retcode
-            == RET_INVALID_STOPS  # certains brokers renvoient INVALID_STOPS même si exécuté
         )
+
+        # DEBUG: Traçage post-fill
+        print(f"🔍 [SL_TRACE][POST_FILL] retcode={retcode} | RET_INVALID_STOPS={RET_INVALID_STOPS} | try_attach={try_attach} | SL={request.get('sl')} | TP={request.get('tp')}", flush=True)
+
         if try_attach:
             try:
                 pos_id = deal or order
                 if pos_id:
+                    print(f"🔍 [SL_TRACE][POST_FILL] Attache SL/TP | pos_id={pos_id} | SL={request.get('sl')} | TP={request.get('tp')}", flush=True)
                     self.logger.info("[POST-FILL] tentative attache SL/TP.")
-                    self.mt5_connector.modify_position_stops(
-                        position=pos_id,
+                    self.mt5_connector.modify_position_sltp(
+                        ticket=pos_id,
                         sl=request.get("sl") or 0.0,
                         tp=request.get("tp") or 0.0,
                     )
                     summary["status"] = "filled"
                     summary["message"] = f"{retcode_str} + post-fill SL/TP attach"
+                    print(f"🔍 [SL_TRACE][POST_FILL] ✅ Attache réussie | pos_id={pos_id}", flush=True)
             except Exception as e:
                 self.logger.warning(f"[POST-FILL] échec attache SL/TP: {e}")
+                print(f"🔍 [SL_TRACE][POST_FILL] ❌ Attache échouée | error={e}", flush=True)
 
         # Marquage throttle (anti-spam symbol)
         try:

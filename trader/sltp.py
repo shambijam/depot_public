@@ -268,7 +268,10 @@ def _calculate_sl_tp_prices(
     - Contexte panier lu pour logging/metadata, SANS impacter les prix
     Retour: (stop_loss_price, take_profit_price|None)
     """
-  
+
+    # DEBUG: Traçage appel fonction calcul SL/TP
+    print(f"🔍 [SL_TRACE][CALC_START] _calculate_sl_tp_prices() appelée | entry_price={entry_price}", flush=True)
+
     # ---------- 0) Direction & entrées ----------
     try:
         action = resolve_side(trade_decision)  # "BUY" / "SELL"
@@ -773,6 +776,10 @@ def _calculate_sl_tp_prices(
     take_profit_price = (
         None if take_profit_price is None else round(float(take_profit_price), digits)
     )
+
+    # DEBUG: Traçage résultat calcul SL/TP
+    print(f"🔍 [SL_TRACE][CALC_END] SL={stop_loss_price} | TP={take_profit_price} | entry={entry_price} | action={action}", flush=True)
+
     return float(stop_loss_price), take_profit_price
 
 
@@ -2449,174 +2456,9 @@ def update_basket_sltp_dynamically(
                 except Exception:
                     pass
 
-            # TP dynamique prudent: seulement si TP courant existe (évite TP fantôme)
+            # TP reste fixe à 400 pips (pas de modification dynamique)
+            # Seul le trailing SL à +28 pips est actif
             new_tp = None
-            try:
-                if cur_tp is not None:
-                    # calcule une distance 'base' depuis le TP actuel (ou RR base si manquant), puis applique multiplicateurs
-                    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
-                    digits = int(getattr(symbol_info, "digits", 0) or 0)
-                    points_per_pip = 10.0 if digits in (3, 5) else 1.0
-                    pip_size = point * points_per_pip if point > 0 else 0.0001
-
-                    risk = abs(entry - float(cur_sl if new_sl is None else new_sl))
-                    base_dist = (
-                        abs(float(cur_tp) - entry)
-                        if cur_tp is not None
-                        else (1.5 * risk if risk > 0 else 20.0 * pip_size)
-                    )
-
-                    # multipliers (mêmes lignes directrices que _split_multi_tp_orders)
-                    perf_mult = 1.0
-                    if pnl_pips > 10.0:
-                        perf_mult = 1.30
-                    elif pnl_pips > 5.0:
-                        perf_mult = 1.15
-                    elif pnl_pips > 0.0:
-                        perf_mult = 1.05
-                    else:
-                        perf_mult = 0.90
-
-                    fill_mult = 1.0
-                    if fill_ratio >= 0.75:
-                        fill_mult = 1.20
-                    elif fill_ratio >= 0.25:
-                        fill_mult = 1.10
-                    else:
-                        fill_mult = 1.00
-
-                    vol_mult = 1.0
-                    if isinstance(vol_pips, (int, float)):
-                        vp = float(vol_pips)
-                        if vp >= 12.0:
-                            vol_mult = 0.90
-                        elif vp <= 4.0:
-                            vol_mult = 1.10
-                        else:
-                            vol_mult = 1.00
-
-                    dyn_dist = base_dist * perf_mult * fill_mult * vol_mult
-                    # bornes RR (0.5..3.0)
-                    if risk > 0:
-                        rr = dyn_dist / risk
-                        rr = max(0.5, min(3.0, rr))
-                        dyn_dist = rr * risk
-
-                    if direction == "BUY":
-                        candidate_tp = entry + dyn_dist
-                        if (
-                            cur_tp is None
-                            or candidate_tp > float(cur_tp) + 0.5 * pip_size
-                        ):
-                            new_tp = candidate_tp
-                    else:
-                        candidate_tp = entry - dyn_dist
-                        if (
-                            cur_tp is None
-                            or candidate_tp < float(cur_tp) - 0.5 * pip_size
-                        ):
-                            new_tp = candidate_tp
-
-                    # Application du nouveau TP (si on en a un et si le connecteur le permet)
-                    if new_tp is not None:
-                        # selon la méthode dispo, on tente d'abord un update couplé SL/TP si new_sl a bougé, sinon TP seul
-                        conn = getattr(self, "mt5_connector", None)
-                        ret = None
-                        if conn is not None:
-                            # préférer une méthode couplée si new_sl a bougé
-                            if new_sl is not None:
-                                candidates = [
-                                    (
-                                        "modify_position_sl_tp",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(new_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                    (
-                                        "update_position_sl_tp",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(new_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                    (
-                                        "position_modify",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(new_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                ]
-                            else:
-                                candidates = [
-                                    (
-                                        "modify_position_sl_tp",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(cur_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                    (
-                                        "update_position_sl_tp",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(cur_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                    (
-                                        "position_modify",
-                                        dict(
-                                            ticket=ticket,
-                                            sl=float(cur_sl),
-                                            tp=float(new_tp),
-                                        ),
-                                    ),
-                                ]
-                            for mname, kwargs in candidates:
-                                meth = getattr(conn, mname, None)
-                                if callable(meth):
-                                    try:
-                                        ret = meth(**kwargs)
-                                        break
-                                    except Exception:
-                                        ret = None
-                        # succès TP ?
-                        ok_tp = False
-                        try:
-                            if isinstance(ret, bool):
-                                ok_tp = ret
-                            rc = getattr(ret, "retcode", None)
-                            if isinstance(rc, int) and rc in (0, 10008, 10009, 10024):
-                                ok_tp = True
-                            if isinstance(ret, dict):
-                                rc = ret.get("retcode")
-                                ok_tp = (
-                                    ok_tp
-                                    or (
-                                        isinstance(rc, int)
-                                        and rc in (0, 10008, 10009, 10024)
-                                    )
-                                    or bool(ret.get("ok"))
-                                )
-                        except Exception:
-                            pass
-                        if not ok_tp:
-                            new_tp = None  # on n’impose pas si échec d’update
-                # fin TP
-            except Exception as e:
-                try:
-                    self.logger.debug(
-                        f"[SLTP][BasketUpdate] dynamic TP error (ticket={ticket}): {e}"
-                    )
-                except Exception:
-                    pass
-                new_tp = None
 
             # Rapport par position
             if new_sl is not None or new_tp is not None:

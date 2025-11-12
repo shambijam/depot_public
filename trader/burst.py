@@ -61,14 +61,20 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
         return r
 
     tickets, errors = [], []
-    for _ in range(burst_size):
+    for idx in range(burst_size):
         req = _base_req_copy()
+
+        # DEBUG: Traçage position burst
+        burst_num = idx + 1
+        print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Avant envoi | SL={req.get('sl')} | TP={req.get('tp')} | symbol={req.get('symbol')} | basket_id={basket_id}", flush=True)
+
         try:
             res = self.execute_order(req)
             if res and res.get("status") in {"sent", "placed", "filled"}:
                 tk = res.get("order") or res.get("deal") or res.get("ticket")
                 if tk:
                     tickets.append(int(tk))
+                    print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Ordre envoyé | ticket={tk} | status={res.get('status')}", flush=True)
             else:
                 errors.append(res)
         except Exception as e:
