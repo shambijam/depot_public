@@ -2254,7 +2254,23 @@ def update_basket_sltp_dynamically(
 
         # === distances issues de la conf + planchers spread/broker ===
         # FIX: Ajouter niveau "burst_scalping" manquant dans le chemin config
+
+        # DEBUG: Vérifier contenu self.config
+        print(f"🔍 [DEBUG_CONFIG] self.config présent: {self.config is not None}", flush=True)
+        if self.config:
+            print(f"🔍 [DEBUG_CONFIG] entry_rules présent: {'entry_rules' in self.config}", flush=True)
+            if 'entry_rules' in self.config:
+                print(f"🔍 [DEBUG_CONFIG] scalping présent: {'scalping' in self.config['entry_rules']}", flush=True)
+                if 'scalping' in self.config.get('entry_rules', {}):
+                    scalping = self.config['entry_rules']['scalping']
+                    print(f"🔍 [DEBUG_CONFIG] burst_scalping présent: {'burst_scalping' in scalping}", flush=True)
+                    if 'burst_scalping' in scalping:
+                        print(f"🔍 [DEBUG_CONFIG] trailing présent: {'trailing' in scalping['burst_scalping']}", flush=True)
+
         trail_cfg  = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
+        print(f"🔍 [DEBUG_CONFIG] trail_cfg trouvé: {trail_cfg != {}}", flush=True)
+        print(f"🔍 [DEBUG_CONFIG] trail_cfg contenu: {trail_cfg}", flush=True)
+
         act_cfg    = trail_cfg.get("activation", {}) or {}
         step_cfg   = trail_cfg.get("step", {}) or {}
         floors_cfg = trail_cfg.get("broker_floors", {}) or {}
