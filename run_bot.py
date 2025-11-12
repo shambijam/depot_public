@@ -2812,6 +2812,24 @@ def trailing_stop_monitor_thread(
                     break
 
                 try:
+                    # === CALCUL PNL DU BASKET AVANT UPDATE (pour suivi évolution) ===
+                    basket_positions = [p for p in positions if basket_id in str(p.get("comment", "") if isinstance(p, dict) else getattr(p, "comment", ""))]
+                    total_profit_usd = 0.0
+                    total_pnl_pips = 0.0
+
+                    for p in basket_positions:
+                        profit = float(p.get("profit", 0.0) if isinstance(p, dict) else getattr(p, "profit", 0.0))
+                        volume = float(p.get("volume", 0.0) if isinstance(p, dict) else getattr(p, "volume", 0.0))
+                        total_profit_usd += profit
+
+                        # Conversion pips (XAUUSD: 1 pip = 10$ par lot)
+                        pip_value = 10.0 * volume
+                        if pip_value > 0:
+                            total_pnl_pips += profit / pip_value
+
+                    print(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f}) | Seuil activation=28.00p", flush=True)
+                    logger.info(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f})")
+
                     # Appeler la fonction de mise à jour du trailing
                     result = trade_executor.update_basket_sltp_dynamically(
                         basket_id=basket_id,
