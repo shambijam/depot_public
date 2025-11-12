@@ -69,9 +69,23 @@ class TradeExecutor:
             self.config = {}
 
         # Config stratégie scalping (pour trailing stop)
+        # Charger directement depuis le fichier car strategy_manager.get_strategy_config() ne fonctionne pas
+        self.strategy_config = {}
         try:
-            self.strategy_config = config_manager.strategy_manager.get_strategy_config("scalping") or {}
-        except Exception:
+            import json
+            import os
+            strategy_config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config", "strategy", "config_trade_scalping.json"
+            )
+            if os.path.exists(strategy_config_path):
+                with open(strategy_config_path, 'r', encoding='utf-8') as f:
+                    self.strategy_config = json.load(f)
+                self.logger.info(f"✅ Config stratégie scalping chargée depuis {strategy_config_path}")
+            else:
+                self.logger.warning(f"⚠️ Fichier config stratégie introuvable: {strategy_config_path}")
+        except Exception as e:
+            self.logger.error(f"❌ Erreur chargement config stratégie: {e}")
             self.strategy_config = {}
 
         # Quelques paramètres MT5 utiles (fallback robustes)
