@@ -2405,6 +2405,14 @@ def update_basket_sltp_dynamically(
                 do_defense = (pnl_pips <= -float(LOSS_ACTIVATION_PIPS))
                 do_profit  = (pnl_pips >= float(ACTIVATION_PIPS))
 
+                # 🔍 DEBUG: Vérifier pourquoi le trailing ne s'active pas
+                try:
+                    print(f"🔍 [TRAILING_CHECK] Basket {basket_id} | Ticket #{ticket}", flush=True)
+                    print(f"   PnL: {pnl_pips:.2f}p | ACTIVATION_PIPS: {ACTIVATION_PIPS:.2f}p | do_profit: {do_profit}", flush=True)
+                    print(f"   LOSS_ACTIVATION_PIPS: {LOSS_ACTIVATION_PIPS:.2f}p | do_defense: {do_defense}", flush=True)
+                except Exception:
+                    pass
+
                 if do_defense:
                     # --- MODE DÉFENSE : on resserre le SL pour limiter la perte ---
                     new_sl = self.apply_dynamic_trailing(
