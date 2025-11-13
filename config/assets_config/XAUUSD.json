@@ -81,16 +81,16 @@
         "lookback_bars": 200,
         "features": {
           "delta": {
-            "abs_strong": 150.0,
-            "abs_extreme": 300.0
+            "abs_strong": 180.0,
+            "abs_extreme": 350.0
           },
           "imbalance": {
-            "min": 0.55,
-            "extreme": 0.70
+            "min": 0.58,
+            "extreme": 0.75
           },
           "tickrate": {
-            "min": 3.5,
-            "burst_min": 7.0,
+            "min": 4.0,
+            "burst_min": 8.0,
             "coverage_s_min": 6
           },
           "vpoc": {
@@ -121,11 +121,11 @@
             "divergence": 0.10,
             "vpoc": 0.05
           },
-          "entry_threshold": 0.65
+          "entry_threshold": 0.70
         },
         "ncp_strong": {
-          "delta_abs_min": 150.0,
-          "tickrate_min": 7.0
+          "delta_abs_min": 180.0,
+          "tickrate_min": 8.0
         }
       },
       "entry_rules": {
@@ -134,11 +134,11 @@
             "burst_size": 8,
             "use_orderflow_v6": true,
             "of_v6_gate": {
-              "min_score": 0.65,
+              "min_score": 0.70,
               "require_ncp_strong": true,
-              "min_delta_abs": 150.0,
-              "min_imbalance": 0.60,
-              "min_tickrate": 4.0
+              "min_delta_abs": 180.0,
+              "min_imbalance": 0.65,
+              "min_tickrate": 4.5
             },
             "flow_vol_gate": {
               "enabled": false
