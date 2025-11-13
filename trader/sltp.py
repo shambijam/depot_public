@@ -1136,23 +1136,36 @@ def _calculate_dynamic_trailing(
         # Déterminer la direction
         is_buy = current_sl < entry_price
 
-        # 1. Vérifier le PnL dans basket_context
+        # 1. Vérifier le PnL BASKET (pas la position individuelle !)
+        # Cette fonction est appelée par position, mais la décision d'activation
+        # doit se baser sur le PnL TOTAL du basket, pas le PnL de cette position seule.
         if basket_context:
             pnl_pips = float(basket_context.get("basket_pnl_pips", 0.0))
         else:
-            # Calcul PnL approximatif si pas de contexte
-            if is_buy:
-                pnl_pips = (current_price - entry_price) / pip_size
-            else:
-                pnl_pips = (entry_price - current_price) / pip_size
-
-        # Vérifier activation
-        if pnl_pips < activation_pips:
+            # FALLBACK: Si pas de contexte basket, on ne peut pas activer le trailing
+            # (on ne peut pas savoir si le basket entier a atteint +28 pips)
             try:
-                self.logger.debug(f"[TRAILING_CALC] Basket {basket_context.get('basket_id', 'unknown') if basket_context else 'unknown'}: PnL {pnl_pips:.1f} < activation {activation_pips:.1f} → SKIP")
+                basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+                self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: NO basket_context → SKIP (cannot verify basket PnL)")
             except Exception:
                 pass
             return None
+
+        # Vérifier activation BASKET (ex: +28 pips sur l'ensemble du basket)
+        if pnl_pips < activation_pips:
+            try:
+                basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+                self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: PnL {pnl_pips:.1f}p < activation {activation_pips:.1f}p → SKIP")
+            except Exception:
+                pass
+            return None
+
+        # 🎯 ACTIVATION TRAILING DÉTECTÉE !
+        try:
+            basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+            self.logger.info(f"🔥 [TRAILING_ACTIVATE] Basket {basket_id}: PnL={pnl_pips:.1f}p >= {activation_pips:.1f}p → TRAILING ACTIVÉ !")
+        except Exception:
+            pass
 
         # 2. Vérifier intervalle temps (anti-spam)
         now = time.time()
@@ -1496,6 +1509,23 @@ def apply_dynamic_trailing(
                 basket_context["last_trailing_update_ts"] = now_ts
         except Exception:
             pass
+
+        # 🎉 LOG VISIBLE : SL modifié avec succès !
+        try:
+            basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+            pnl_pips = basket_context.get("basket_pnl_pips", 0.0) if basket_context else 0.0
+            move_pips = abs(cand - csl) / pip_size if pip_size > 0 else 0.0
+            print(f"", flush=True)
+            print(f"{'='*100}", flush=True)
+            print(f"✅ [TRAILING_APPLIED] Basket {basket_id} | Ticket #{position_ticket}", flush=True)
+            print(f"   💰 PnL basket: {pnl_pips:+.2f} pips (seuil: {activation_pips:.1f}p)", flush=True)
+            print(f"   🔧 SL modifié: {csl:.5f} → {cand:.5f} (déplacement: {move_pips:.2f} pips)", flush=True)
+            print(f"   📊 Direction: {side} | Distance min: {min_distance_pips:.1f} pips", flush=True)
+            print(f"{'='*100}", flush=True)
+            print(f"", flush=True)
+        except Exception:
+            pass
+
         try:
             self.logger.debug(
                 "[SLTP][TrailDyn] OK side=%s ticket=%s curSL=%.6f -> newSL=%.6f (atr_pips=%s, act_pips=%.2f, min_pips=%.2f)",
