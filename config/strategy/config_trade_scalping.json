@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.60
+        "min_confidence": 0.80
       },
       "order_type": "MARKET",
       "action_logic": {

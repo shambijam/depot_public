@@ -367,7 +367,7 @@
                     ]
                 },
                 "logging": {
-                    "footprint_mode": "soft"
+                    "footprint_mode": "hard"
                 }
             }
         }
