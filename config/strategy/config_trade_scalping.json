@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.25
+        "min_confidence": 0.50
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -136,7 +136,7 @@
   },
   "risk": {
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.30,
+    "risk_per_trade_percent": 0.73,
     "max_positions_per_symbol": 1,
     "stop_distance_pips": 150
   },

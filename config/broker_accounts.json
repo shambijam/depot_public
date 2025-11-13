@@ -19,7 +19,7 @@
                 "max_lot": 10.0,
                 "min_lot": 0.01,
                 "lot_step": 0.01,
-                "risk_per_trade_percent": 0.50
+                "risk_per_trade_percent": 0.73
             }
         },
         {
