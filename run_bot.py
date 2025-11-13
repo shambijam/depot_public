@@ -2837,11 +2837,23 @@ def trailing_stop_monitor_thread(
                         force_refresh=False,
                     )
 
-                    # Logger si activation ou succès
+                    # Logger TOUS les résultats (pas seulement success)
                     status = result.get("status", "unknown")
+                    reason = result.get("reason", "N/A")
+                    pnl = result.get("pnl_pips", total_pnl_pips)
+
                     if status == "success":
-                        pnl = result.get("pnl_pips", 0)
+                        print(f"✅ [TRAILING_MONITOR] Basket {basket_id}: trailing mis à jour | PnL={pnl:.1f}p", flush=True)
                         logger.info(f"✅ [TRAILING_MONITOR] Basket {basket_id}: trailing mis à jour (PnL={pnl:.1f}p)")
+                    elif status == "skipped":
+                        print(f"⏭️ [TRAILING_MONITOR] Basket {basket_id}: SKIPPED | reason={reason} | PnL={pnl:.1f}p", flush=True)
+                        logger.debug(f"⏭️ [TRAILING_MONITOR] Basket {basket_id}: skipped (reason={reason})")
+                    elif status == "error":
+                        print(f"❌ [TRAILING_MONITOR] Basket {basket_id}: ERROR | reason={reason} | PnL={pnl:.1f}p", flush=True)
+                        logger.warning(f"❌ [TRAILING_MONITOR] Basket {basket_id}: error (reason={reason})")
+                    else:
+                        print(f"❓ [TRAILING_MONITOR] Basket {basket_id}: UNKNOWN | status={status} | reason={reason} | PnL={pnl:.1f}p", flush=True)
+                        logger.debug(f"❓ [TRAILING_MONITOR] Basket {basket_id}: unknown status={status} reason={reason}")
 
                 except Exception as e:
                     logger.debug(f"[TRAILING_MONITOR] Erreur update basket {basket_id}: {e}")
