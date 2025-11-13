@@ -564,11 +564,35 @@ def main(args: argparse.Namespace) -> None:
         print("🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP", flush=True)
         print("=" * 80, flush=True)
 
-        # ❌ ANCIEN CODE - Thread trailing désactivé (maintenant dans main loop)
-        # Le trailing stop est maintenant intégré DANS le main loop après l'exécution des trades
-        # Plus besoin de thread séparé → Élimine les race conditions et problèmes de timing
-        logger.info("ℹ️ Trailing stop intégré dans le main loop (pas de thread séparé)")
-        print("ℹ️ Trailing stop géré dans le main loop", flush=True)
+        # ═══════════════════════════════════════════════════════════════════════
+        # 🧪 TEST: Thread trailing (2s) + Main loop trailing (60s) EN PARALLÈLE
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            import threading
+            trailing_stop_event = threading.Event()
+
+            # Lire intervalle depuis config
+            trailing_monitor_interval = config_manager.get(
+                "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
+            )
+
+            print(f"📋 Configuration thread: interval={trailing_monitor_interval}s", flush=True)
+
+            trailing_thread = threading.Thread(
+                target=trailing_stop_monitor_thread,
+                args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
+                daemon=True,
+                name="TrailingStopMonitor"
+            )
+
+            trailing_thread.start()
+            logger.info(f"✅ Thread trailing démarré (2s) + Main loop trailing (60s) - TEST PARALLÈLE")
+            print(f"✅ Thread trailing (2s) + Main loop (60s) - MODE TEST", flush=True)
+            print("=" * 80, flush=True)
+
+        except Exception as e:
+            print(f"❌ ERREUR: Thread trailing non démarré: {e}", flush=True)
+            logger.error(f"ERREUR: Thread trailing non démarré: {e}", exc_info=True)
 
         # ═══════════════════════════════════════════════════════════════════════
 

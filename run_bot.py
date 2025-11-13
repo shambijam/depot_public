@@ -2831,10 +2831,11 @@ def trailing_stop_monitor_thread(
                     logger.info(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f})")
 
                     # Appeler la fonction de mise à jour du trailing
+                    # force_refresh=True pour éviter le skip "too_soon"
                     result = trade_executor.update_basket_sltp_dynamically(
                         basket_id=basket_id,
                         reason="realtime_monitor",
-                        force_refresh=False,
+                        force_refresh=True,  # ✅ FIX: Bypass "too_soon" check
                     )
 
                     # Logger TOUS les résultats (pas seulement success)
