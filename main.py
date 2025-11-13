@@ -564,39 +564,11 @@ def main(args: argparse.Namespace) -> None:
         print("🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP", flush=True)
         print("=" * 80, flush=True)
 
-        try:
-            import threading
-            trailing_stop_event = threading.Event()
-
-            # Lire intervalle depuis config
-            trailing_monitor_interval = config_manager.get(
-                "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
-            )
-
-            print(f"📋 Configuration: interval={trailing_monitor_interval}s", flush=True)
-            print(f"📋 trade_executor: {trade_executor}", flush=True)
-            print(f"📋 mt5_connector: {mt5_connector}", flush=True)
-
-            trailing_thread = threading.Thread(
-                target=trailing_stop_monitor_thread,
-                args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
-                daemon=True,
-                name="TrailingStopMonitor"
-            )
-
-            print(f"📋 Thread créé: {trailing_thread}", flush=True)
-            trailing_thread.start()
-            print(f"✅ Thread.start() appelé", flush=True)
-
-            logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
-            print(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)", flush=True)
-            print("=" * 80, flush=True)
-
-        except Exception as e:
-            print(f"❌ ERREUR CRITIQUE: Impossible de démarrer le thread trailing: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            logger.error(f"ERREUR CRITIQUE: Thread trailing non démarré: {e}", exc_info=True)
+        # ❌ ANCIEN CODE - Thread trailing désactivé (maintenant dans main loop)
+        # Le trailing stop est maintenant intégré DANS le main loop après l'exécution des trades
+        # Plus besoin de thread séparé → Élimine les race conditions et problèmes de timing
+        logger.info("ℹ️ Trailing stop intégré dans le main loop (pas de thread séparé)")
+        print("ℹ️ Trailing stop géré dans le main loop", flush=True)
 
         # ═══════════════════════════════════════════════════════════════════════
 
@@ -632,6 +604,73 @@ def main(args: argparse.Namespace) -> None:
 
             if trade_executed_in_cycle:
                 daily_trade_count += 1
+
+            # ═══════════════════════════════════════════════════════════════════════
+            # 🔄 TRAILING STOP - Intégré dans le main loop (plus de thread séparé)
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                import re
+                BASKET_PATTERN = re.compile(r"bs_([a-f0-9]{8})")
+
+                # Récupérer toutes les positions ouvertes
+                positions = mt5_connector.get_open_positions() if mt5_connector else []
+
+                if positions:
+                    # Extraire les basket_ids uniques
+                    basket_ids = set()
+                    for pos in positions:
+                        try:
+                            comment = pos.get("comment", "") if isinstance(pos, dict) else getattr(pos, "comment", "")
+                            match = BASKET_PATTERN.search(str(comment))
+                            if match:
+                                basket_ids.add(match.group(1))
+                        except Exception:
+                            continue
+
+                    # Mettre à jour chaque basket
+                    for basket_id in basket_ids:
+                        try:
+                            # Calcul PnL du basket (pour logs)
+                            basket_positions = [p for p in positions if basket_id in str(p.get("comment", "") if isinstance(p, dict) else getattr(p, "comment", ""))]
+                            total_profit_usd = sum(float(p.get("profit", 0.0) if isinstance(p, dict) else getattr(p, "profit", 0.0)) for p in basket_positions)
+                            total_pnl_pips = 0.0
+                            for p in basket_positions:
+                                profit = float(p.get("profit", 0.0) if isinstance(p, dict) else getattr(p, "profit", 0.0))
+                                volume = float(p.get("volume", 0.0) if isinstance(p, dict) else getattr(p, "volume", 0.0))
+                                pip_value = 10.0 * volume  # XAUUSD: 1 pip = 10$ par lot
+                                if pip_value > 0:
+                                    total_pnl_pips += profit / pip_value
+
+                            print(f"📊 [TRAILING_MAINLOOP] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f})", flush=True)
+
+                            # Appeler la fonction de mise à jour (force_refresh=True car une fois par cycle)
+                            result = trade_executor.update_basket_sltp_dynamically(
+                                basket_id=basket_id,
+                                reason="mainloop_cycle",
+                                force_refresh=True,  # ← Force car une seule fois par cycle
+                            )
+
+                            # Logger le résultat
+                            status = result.get("status", "unknown")
+                            reason = result.get("reason", "N/A")
+                            pnl = result.get("pnl_pips", total_pnl_pips)
+
+                            if status == "success":
+                                print(f"✅ [TRAILING_MAINLOOP] Basket {basket_id}: SL/TP mis à jour | PnL={pnl:.1f}p", flush=True)
+                                logger.info(f"✅ [TRAILING_MAINLOOP] Basket {basket_id}: trailing appliqué (PnL={pnl:.1f}p)")
+                            elif status == "skipped":
+                                logger.debug(f"⏭️ [TRAILING_MAINLOOP] Basket {basket_id}: skipped (reason={reason})")
+                            elif status == "error":
+                                print(f"❌ [TRAILING_MAINLOOP] Basket {basket_id}: ERROR | reason={reason}", flush=True)
+                                logger.warning(f"❌ [TRAILING_MAINLOOP] Basket {basket_id}: error (reason={reason})")
+
+                        except Exception as e:
+                            logger.debug(f"[TRAILING_MAINLOOP] Erreur basket {basket_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"[TRAILING_MAINLOOP] Erreur générale: {e}", exc_info=True)
+
+            # ═══════════════════════════════════════════════════════════════════════
 
             cycle_duration = time.time() - cycle_start_time
             logger.info(
