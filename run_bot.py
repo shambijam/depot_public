@@ -2768,6 +2768,10 @@ def trailing_stop_monitor_thread(
     # Pattern pour extraire basket_id du commentaire MT5
     BASKET_PATTERN = re.compile(r"bs_([a-f0-9]{8})")
 
+    # 📊 HISTORIQUE PnL: Dictionnaire pour tracker l'évolution du PnL de chaque basket
+    # Format: { basket_id: { "history": [pnl1, pnl2, ...], "max": float, "min": float } }
+    pnl_history = {}
+
     print(f"🔍 [TRAILING_MONITOR] Entrée dans la boucle while...", flush=True)
 
     while not stop_event.is_set():
@@ -2806,6 +2810,13 @@ def trailing_stop_monitor_thread(
                 stop_event.wait(update_interval_sec)
                 continue
 
+            # === 🧹 NETTOYAGE: Supprimer l'historique des baskets fermés ===
+            closed_baskets = set(pnl_history.keys()) - basket_ids
+            if closed_baskets:
+                for closed_id in closed_baskets:
+                    print(f"🔚 [TRAILING_MONITOR] Basket {closed_id} fermé → Suppression historique", flush=True)
+                    del pnl_history[closed_id]
+
             # Mettre à jour chaque basket
             for basket_id in basket_ids:
                 if stop_event.is_set():
@@ -2827,8 +2838,67 @@ def trailing_stop_monitor_thread(
                         if pip_value > 0:
                             total_pnl_pips += profit / pip_value
 
-                    print(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f}) | Seuil activation=28.00p", flush=True)
-                    logger.info(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f})")
+                    # === 📊 HISTORIQUE PnL: Tracker l'évolution ===
+                    if basket_id not in pnl_history:
+                        # Nouveau basket: initialiser l'historique
+                        pnl_history[basket_id] = {
+                            "history": [total_pnl_pips],
+                            "max": total_pnl_pips,
+                            "min": total_pnl_pips
+                        }
+                        variation_str = "🆕 NEW"
+                        trend_emoji = "➡️"
+                    else:
+                        # Basket existant: mettre à jour l'historique
+                        hist = pnl_history[basket_id]["history"]
+                        previous_pnl = hist[-1] if hist else total_pnl_pips
+
+                        # Ajouter le nouveau PnL (garder les 10 dernières valeurs)
+                        hist.append(total_pnl_pips)
+                        if len(hist) > 10:
+                            hist.pop(0)
+
+                        # Mettre à jour min/max
+                        pnl_history[basket_id]["max"] = max(pnl_history[basket_id]["max"], total_pnl_pips)
+                        pnl_history[basket_id]["min"] = min(pnl_history[basket_id]["min"], total_pnl_pips)
+
+                        # Calculer la variation depuis le dernier check (2s)
+                        variation = total_pnl_pips - previous_pnl
+
+                        # Déterminer la tendance (emoji)
+                        if variation > 0.1:
+                            trend_emoji = "📈"  # En hausse
+                            variation_str = f"+{variation:.2f}p"
+                        elif variation < -0.1:
+                            trend_emoji = "📉"  # En baisse
+                            variation_str = f"{variation:.2f}p"
+                        else:
+                            trend_emoji = "➡️"  # Stable
+                            variation_str = "~0.00p"
+
+                    # Récupérer min/max pour affichage
+                    pnl_max = pnl_history[basket_id]["max"]
+                    pnl_min = pnl_history[basket_id]["min"]
+
+                    # === 📊 AFFICHAGE ENRICHI AVEC HISTORIQUE ===
+                    print(f"", flush=True)  # Ligne vide pour la lisibilité
+                    print(f"{'='*100}", flush=True)
+                    print(f"📊 [TRAILING_MONITOR] Basket {basket_id} | {len(basket_positions)} positions", flush=True)
+                    print(f"   💰 PnL actuel: {total_pnl_pips:+.2f} pips (${total_profit_usd:+.2f}) {trend_emoji}", flush=True)
+                    print(f"   📈 Variation 2s: {variation_str}", flush=True)
+                    print(f"   📊 Range session: [{pnl_min:.2f}p → {pnl_max:.2f}p] (amplitude: {pnl_max - pnl_min:.2f}p)", flush=True)
+                    print(f"   🎯 Seuil activation trailing: 28.00 pips", flush=True)
+
+                    # Afficher l'historique des 5 dernières valeurs
+                    if len(pnl_history[basket_id]["history"]) >= 2:
+                        recent_history = pnl_history[basket_id]["history"][-5:]
+                        history_str = " → ".join([f"{pnl:.1f}p" for pnl in recent_history])
+                        print(f"   📜 Historique 10s: {history_str}", flush=True)
+
+                    print(f"{'='*100}", flush=True)
+                    print(f"", flush=True)
+
+                    logger.info(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f}) | Variation={variation_str} {trend_emoji}")
 
                     # Appeler la fonction de mise à jour du trailing
                     # force_refresh=True pour éviter le skip "too_soon"
