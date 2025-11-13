@@ -269,9 +269,6 @@ def _calculate_sl_tp_prices(
     Retour: (stop_loss_price, take_profit_price|None)
     """
 
-    # DEBUG: Traçage appel fonction calcul SL/TP
-    print(f"🔍 [SL_TRACE][CALC_START] _calculate_sl_tp_prices() appelée | entry_price={entry_price}", flush=True)
-
     # ---------- 0) Direction & entrées ----------
     try:
         action = resolve_side(trade_decision)  # "BUY" / "SELL"
@@ -776,9 +773,6 @@ def _calculate_sl_tp_prices(
     take_profit_price = (
         None if take_profit_price is None else round(float(take_profit_price), digits)
     )
-
-    # DEBUG: Traçage résultat calcul SL/TP
-    print(f"🔍 [SL_TRACE][CALC_END] SL={stop_loss_price} | TP={take_profit_price} | entry={entry_price} | action={action}", flush=True)
 
     return float(stop_loss_price), take_profit_price
 
@@ -2067,14 +2061,6 @@ def update_basket_sltp_dynamically(
         locked = False
 
     try:
-        # === LOG DEBUG #1 : DÉBUT DE LA FONCTION ===
-        print(f"\n{'='*80}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] DÉBUT update_basket_sltp_dynamically", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Basket ID: {basket_id}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Reason: {reason}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Force refresh: {force_refresh}", flush=True)
-        print(f"{'='*80}\n", flush=True)
-
         # Contexte frais (TTL court si pas force_refresh)
         local_ctx = self._resolve_basket_context_for_sltp(
             trade_decision={"basket_id": basket_id},
@@ -2082,15 +2068,6 @@ def update_basket_sltp_dynamically(
             burst_manager=getattr(self, "burst_manager", None),
             ttl_sec=0.0 if force_refresh else 2.0,
         )
-
-        # === LOG DEBUG #2 : CONTEXTE RÉCUPÉRÉ ===
-        print(f"🔥 [DEBUG_TRAILING] Contexte récupéré: {local_ctx is not None and isinstance(local_ctx, dict)}", flush=True)
-        if local_ctx and isinstance(local_ctx, dict):
-            print(f"🔥 [DEBUG_TRAILING] Symbol: {local_ctx.get('symbol')}", flush=True)
-            print(f"🔥 [DEBUG_TRAILING] Direction: {local_ctx.get('direction')}", flush=True)
-            print(f"🔥 [DEBUG_TRAILING] PnL pips: {local_ctx.get('basket_pnl_pips', 'N/A')}", flush=True)
-            print(f"🔥 [DEBUG_TRAILING] Positions: {local_ctx.get('current_positions', 'N/A')}", flush=True)
-        print(f"", flush=True)
 
         if not isinstance(local_ctx, dict) or not local_ctx:
             return {
@@ -2122,9 +2099,6 @@ def update_basket_sltp_dynamically(
         fill_ratio = float(local_ctx.get("fill_ratio") or 0.0)
         vol_pips = local_ctx.get("volatility_pips", local_ctx.get("volatility_atr"))
 
-        # DEBUG: PnL basket calculé
-        print(f"🔥 [DEBUG_TRAILING][PNL] basket={basket_id} | PnL={pnl_pips:.2f} pips | fill_ratio={fill_ratio:.2f}", flush=True)
-
         # Lecture seuils trailing AVANT le check (nécessaire pour perf_trigger)
         # Lecture depuis strategy_config (config_trade_scalping.json) avec fallback vers config (prod_config.json)
         trail_cfg_early = None
@@ -2143,9 +2117,6 @@ def update_basket_sltp_dynamically(
 
         act_min_pips   = float((act_cfg.get("min_pips", 28.0) or 28.0))      # Défaut 28 pips
         loss_min_pips  = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))   # Défense
-
-        # DEBUG: Seuils activation
-        print(f"🔥 [DEBUG_TRAILING][SEUILS] act_min_pips={act_min_pips:.2f} | loss_min_pips={loss_min_pips:.2f}", flush=True)
 
         # Time-based trigger (≥2s pour trailing rapide)
         last_update = (
@@ -2188,12 +2159,6 @@ def update_basket_sltp_dynamically(
             force_refresh or perf_trigger or time_ok or phase_changed or price_moved
         )
 
-        # DIAGNOSTIC: Afficher TOUTES les valeurs du check
-        print(f"🔍 [SLTP_DIAGNOSTIC] Basket {basket_id}:", flush=True)
-        print(f"  pnl_pips={pnl_pips:.2f} | act_min_pips={act_min_pips:.2f} | loss_min_pips={loss_min_pips:.2f}", flush=True)
-        print(f"  perf_trigger={perf_trigger} | time_ok={time_ok} | phase_changed={phase_changed} | price_moved={price_moved}", flush=True)
-        print(f"  force_refresh={force_refresh} | should_update={should_update}", flush=True)
-
         if not should_update:
             return {
                 "status": "skipped",
@@ -2203,10 +2168,6 @@ def update_basket_sltp_dynamically(
                 "phase": phase,
                 "fill": fill_ratio,
             }
-
-        # Log: should_update passed (SANS try-except pour voir l'exception si logger fail)
-        print(f"🔍 [SLTP_CHECK] Basket {basket_id}: should_update=True (force={force_refresh}, perf={perf_trigger}, time={time_ok}, phase={phase_changed}, price={price_moved}) | pnl={pnl_pips:.2f}p", flush=True)
-        self.logger.info(f"🔍 [SLTP_CHECK] Basket {basket_id}: should_update=True (force={force_refresh}, perf={perf_trigger}, time={time_ok}, phase={phase_changed}, price={price_moved}) | pnl={pnl_pips:.2f}p")
 
         # --- 3) Recalcul des cibles optimales (SL/TP virtuels) ---------------------
         symbol_info = _get_symbol_info(symbol)
@@ -2285,8 +2246,6 @@ def update_basket_sltp_dynamically(
             trail_cfg = {}
             config_source = "empty_fallback"
 
-        print(f"🔍 [CONFIG_SOURCE] Trailing config chargée depuis: {config_source} | trail_cfg trouvé: {trail_cfg != {}}", flush=True)
-
         act_cfg    = trail_cfg.get("activation", {}) or {}
         step_cfg   = trail_cfg.get("step", {}) or {}
         floors_cfg = trail_cfg.get("broker_floors", {}) or {}
@@ -2356,23 +2315,11 @@ def update_basket_sltp_dynamically(
 
 
         # Appliquer SL dynamique par position (plus fiable que sl_opt agrégé)
-        print(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context", flush=True)
-        self.logger.info(f"🔍 [SLTP_LOOP] Basket {basket_id}: Processing {len(positions)} positions from context")
-
         for p in positions:
-            print(f"🔍 [SLTP_POS_START] Basket {basket_id}: Processing position {p}", flush=True)
-
             ticket = p.get("ticket")
             entry = float(p.get("entry_price") or 0.0)
             cur_sl = p.get("sl")
             cur_tp = p.get("tp")
-
-            # Log position data
-            print(f"🔍 [SLTP_POS] Basket {basket_id} ticket #{ticket}: entry={entry}, cur_sl={cur_sl}, cur_tp={cur_tp}", flush=True)
-            try:
-                self.logger.info(f"🔍 [SLTP_POS] Basket {basket_id} ticket #{ticket}: entry={entry}, cur_sl={cur_sl}, cur_tp={cur_tp}")
-            except Exception:
-                pass
 
             # Skip si données invalides (sl=0.0 signifie "pas de SL" dans MT5)
             if not ticket or entry <= 0 or not cur_sl or cur_sl <= 0:
@@ -2460,12 +2407,6 @@ def update_basket_sltp_dynamically(
                     )
                     MIN_UPDATE_SEC = max(1.0, MIN_UPDATE_SEC)
 
-                    # === LOG DEBUG #3 : AVANT APPEL TRAILING ===
-                    print(f"🔥 [DEBUG_TRAILING] MODE PROFIT activé pour ticket {ticket}", flush=True)
-                    print(f"🔥 [DEBUG_TRAILING] PnL={pnl_pips:.2f}p >= ACTIVATION={ACTIVATION_PIPS:.2f}p", flush=True)
-                    print(f"🔥 [DEBUG_TRAILING] Appel apply_dynamic_trailing...", flush=True)
-                    print(f"🔥 [DEBUG_TRAILING] Params: activation={ACTIVATION_PIPS:.2f}p, min_distance={MIN_DISTANCE_PIPS:.2f}p, interval={MIN_UPDATE_SEC:.1f}s", flush=True)
-
                     new_sl = self.apply_dynamic_trailing(
                         trade_decision=virtual_decision,
                         position_ticket=ticket,
@@ -2487,16 +2428,8 @@ def update_basket_sltp_dynamically(
                         burst_manager=getattr(self, "burst_manager", None),
                     )
 
-                    # === LOG DEBUG #4 : APRÈS APPEL TRAILING ===
-                    print(f"🔥 [DEBUG_TRAILING] apply_dynamic_trailing returned: {new_sl}", flush=True)
-                    if new_sl is not None:
-                        print(f"🔥 [DEBUG_TRAILING] ✅ NOUVEAU SL CALCULÉ: {new_sl:.5f} (ancien: {cur_sl:.5f})", flush=True)
-                    else:
-                        print(f"🔥 [DEBUG_TRAILING] ❌ Pas de changement SL (retour None)", flush=True)
-
                 else:
                     new_sl = None
-                    print(f"🔥 [DEBUG_TRAILING] ⚠️ PAS de trigger (do_profit={do_profit}, do_defense={do_defense})", flush=True)
             except Exception as e:
                 new_sl = None
                 try:
@@ -2591,22 +2524,6 @@ def update_basket_sltp_dynamically(
             pass
 
         status = "success" if success else "skipped"
-
-        # === LOG DEBUG #5 : RÉSULTAT FINAL ===
-        print(f"\n{'='*80}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] RÉSULTAT FINAL", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Basket ID: {basket_id}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Status: {status}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Updates applied: {len(updates_applied)}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] Updates failed: {len(updates_failed)}", flush=True)
-        print(f"🔥 [DEBUG_TRAILING] PnL: {pnl_pips:.2f} pips", flush=True)
-        if updates_applied:
-            for upd in updates_applied:
-                print(f"🔥 [DEBUG_TRAILING]   ✅ Ticket {upd['ticket']}: SL={upd.get('new_sl', 'N/A')}, TP={upd.get('new_tp', 'N/A')}", flush=True)
-        if updates_failed:
-            for fail in updates_failed:
-                print(f"🔥 [DEBUG_TRAILING]   ❌ Ticket {fail['ticket']}: reason={fail['reason']}", flush=True)
-        print(f"{'='*80}\n", flush=True)
 
         return {
             "status": status,
