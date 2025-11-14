@@ -2252,11 +2252,9 @@ def update_basket_sltp_dynamically(
                 volatility_pips = float(vol_pips)
         except Exception:
             pass
-
-        # === distances issues de la conf + planchers spread/broker ===
-        # Lecture depuis strategy_config (config_trade_scalping.json) avec fallback vers config (prod_config.json)
-
-        # Essai 1: Charger depuis self.strategy_config (config stratégie scalping)
+        
+        # === CORRECTION: Calcul IMMÉDIAT du spread pour avoir les bonnes valeurs ===
+        # Lecture configuration
         trail_cfg = None
         config_source = "none"
 
@@ -2265,13 +2263,11 @@ def update_basket_sltp_dynamically(
             if trail_cfg:
                 config_source = "strategy_config"
 
-        # Essai 2: Fallback vers self.config si strategy_config vide
         if not trail_cfg:
             trail_cfg = ((((self.config or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("trailing") or {}
             if trail_cfg:
                 config_source = "self.config"
 
-        # Essai 3: Fallback final vide
         if not trail_cfg:
             trail_cfg = {}
             config_source = "empty_fallback"
@@ -2280,19 +2276,49 @@ def update_basket_sltp_dynamically(
         step_cfg   = trail_cfg.get("step", {}) or {}
         floors_cfg = trail_cfg.get("broker_floors", {}) or {}
 
-        act_min_pips   = float((act_cfg.get("min_pips", 0.0) or 0.0))
-        step_min_pips  = float((step_cfg.get("min_pips", 0.0) or 0.0))
-        floor_min_pips = float((floors_cfg.get("min_sl_distance_pips", 0.0) or 0.0))
+        # 🎯 VALEURS PAR DÉFAUT CRITIQUES POUR LE TRAILING
+        act_min_pips   = float((act_cfg.get("min_pips", 28.0) or 28.0))      # 28 pips par défaut
+        step_min_pips  = float((step_cfg.get("min_pips", 8.0) or 8.0))       # 8 pips par défaut
+        floor_min_pips = float((floors_cfg.get("min_sl_distance_pips", 5.0) or 5.0))
 
-        spread_mult        = float((floors_cfg.get("spread_multiplier", 0.0) or 0.0))
-        extra_buffer_pips  = float((floors_cfg.get("extra_buffer_pips", 0.0) or 0.0))
+        spread_mult        = float((floors_cfg.get("spread_multiplier", 2.0) or 2.0))
+        extra_buffer_pips  = float((floors_cfg.get("extra_buffer_pips", 2.0) or 2.0))
 
-        # Initialisation de spread_floor_pips (sera recalculé plus tard avec le spread actuel)
-        spread_floor_pips = 0.0
+        # 🚨 CALCUL IMMÉDIAT DU SPREAD (ne pas attendre plus tard)
+        cur_spread_pips = 0.0
+        try:
+            bid, ask, mid = _get_last_price(symbol)
+            if bid and ask and bid > 0 and ask > bid:
+                point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+                digits = int(getattr(symbol_info, "digits", 0) or 0)
+                ppp = 10.0 if digits in (3, 5) else 1.0
+                pip_size = point * ppp if point > 0 else 0.0001
+                cur_spread_pips = (ask - bid) / pip_size
+                print(f"📊 [SPREAD_CALC] {symbol}: spread={cur_spread_pips:.2f}pips", flush=True)
+        except Exception as e:
+            print(f"⚠️ [SPREAD_CALC] Erreur calcul spread: {e}", flush=True)
+            cur_spread_pips = 2.0  # fallback conservateur
 
-        # seuil d'activation réel et distance minimale réelle pour le trailing
-        ACTIVATION_PIPS   = max(act_min_pips, spread_floor_pips)
+        # 🎯 CALCUL DES SEUILS AVEC LE SPREAD RÉEL
+        spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buffer_pips)
+        ACTIVATION_PIPS = max(act_min_pips, spread_floor_pips)
         MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
+
+        # Configuration défense (perte)
+        act_loss_cfg  = trail_cfg.get("activation_loss", {}) or {}
+        step_loss_cfg = trail_cfg.get("step_loss", {}) or {}
+
+        loss_min_pips       = float((act_loss_cfg.get("min_pips", 0.0) or 0.0))
+        step_loss_min_pips  = float((step_loss_cfg.get("min_pips", 0.0) or 0.0))
+
+        LOSS_ACTIVATION_PIPS   = max(loss_min_pips, spread_floor_pips)
+        MIN_DISTANCE_PIPS_LOSS = max(step_loss_min_pips, floor_min_pips, spread_floor_pips)
+
+        # 🔍 DEBUG: Afficher les valeurs calculées
+        print(f"🎯 [TRAILING_CONFIG] Source: {config_source}", flush=True)
+        print(f"   ACTIVATION_PIPS: {ACTIVATION_PIPS:.1f}p (min: {act_min_pips:.1f}p, spread_floor: {spread_floor_pips:.1f}p)", flush=True)
+        print(f"   MIN_DISTANCE_PIPS: {MIN_DISTANCE_PIPS:.1f}p", flush=True)
+        print(f"   LOSS_ACTIVATION_PIPS: {LOSS_ACTIVATION_PIPS:.1f}p", flush=True)
 
         # intervalle d’update en secondes (supporte 'update_interval_sec' ou fallback depuis 'update_interval_ms')
         MIN_UPDATE_SEC = float(
