@@ -27,7 +27,7 @@
       "burst_scalping": {
         "enabled": true,
         "entry_mode": "MARKET",
-        "burst_size": 5,
+        "burst_size": 8,
         "enforce_single_basket": true,
         "per_leg_virtual": false,
         "sltp": {
@@ -101,12 +101,16 @@
           "GBPUSD"
         ],
         "ttl_ms": 800,
-        "max_slippage_points": 150,
+        "max_slippage_points": 100,
         "allow_degraded_vote": false,
-        "require_phase_alignment": true,
+        "require_phase_alignment": false,
         "require_footprint": true,
-        "min_score_to_fire": 0.55,
         "of_score_scale": "0_1",
+        "ponderations": {
+          "trigger_weight": 0.50,
+          "orderflow_weight": 0.25,
+          "footprint_weight": 0.25
+        },
         "degraded_vote_conditions": {
           "min_of_delta_abs": 80.0,
           "min_of_score": 0.55
@@ -136,7 +140,6 @@
   },
   "risk": {
     "position_size": "risk_based",
-    "risk_per_trade_percent": 0.73,
     "max_positions_per_symbol": 1,
     "stop_distance_pips": 150
   },

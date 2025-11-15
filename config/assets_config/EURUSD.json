@@ -29,7 +29,6 @@
     }
   },
   "risk_management": {
-    "risk_per_trade_percent": 3.0,
     "base_lot_size": 0.1,
     "daily_loss_limit_percent": {
       "value": 2.0

@@ -615,8 +615,8 @@ class FusionManager:
     ) -> float:
         p = cfg.get("ponderations", {}) or {}
         w_tr = _to_float(p.get("trigger_weight"), 0.50)
-        w_of = _to_float(p.get("orderflow_weight"), 0.30)
-        w_fp = _to_float(p.get("footprint_weight"), 0.20)
+        w_of = _to_float(p.get("orderflow_weight"), 0.25)
+        w_fp = _to_float(p.get("footprint_weight"), 0.25)
 
         # Override adaptatif (si activé) basé sur contexte (regime/volatility/session)
         aw_enabled = bool((cfg.get("adaptive_weights", True)))
@@ -630,7 +630,7 @@ class FusionManager:
         # Normalisation des poids
         total = (w_tr or 0) + (w_of or 0) + (w_fp or 0)
         if total <= 0:
-            w_tr, w_of, w_fp = 0.5, 0.3, 0.2
+            w_tr, w_of, w_fp = 0.5, 0.25, 0.25
         else:
             w_tr, w_of, w_fp = w_tr / total, w_of / total, w_fp / total
 
@@ -699,7 +699,7 @@ class FusionManager:
                 "direction": direction,
                 "anchor_price": anchor_price,
             }
-        if fused >= 0.65 and direction in ("BUY", "SELL"):
+        if fused >= 0.70 and direction in ("BUY", "SELL"):
             return {
                 "action": direction,
                 "signal_type": f"MODERATE_{direction}",
