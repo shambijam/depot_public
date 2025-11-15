@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, UTC
 # Wrapper fallback (comme un NamedTuple)
 SymbolInfoFallback = namedtuple(
     "SymbolInfoFallback",
-    ["symbol", "spread", "point", "digits", "trade_contract_size", "trade_tick_size"],
+    ["symbol", "spread", "point", "digits", "trade_contract_size", "trade_tick_size", "trade_tick_value"],
 )
 # Alias .name pour compatibilité avec du code qui s'attend à 'name' (ex: build_burst_trailing_request)
 SymbolInfoFallback.name = property(lambda self: self.symbol)
@@ -1865,6 +1865,17 @@ class MT5Connector:
                 if not point_val or point_val <= 0:
                     point_val = 10 ** (-getattr(info, "digits", 5))
 
+                # trade_tick_value (valeur monétaire d'un tick)
+                tick_value = getattr(info, "trade_tick_value", None)
+                if not tick_value or tick_value <= 0:
+                    # Fallback calculé : tick_value ≈ (tick_size / point) * (point_value * contract_size)
+                    # Pour XAUUSD: tick_value = 1.0 (1 tick = 0.01$ = 1$ par lot standard)
+                    # Pour EURUSD: tick_value = 0.1 (1 pip = 10$ par lot standard)
+                    tick_value = contract_size * point_val
+                    self.logger.warning(
+                        f"[FALLBACK] tick_value calculé = {tick_value} pour {symbol_norm}"
+                    )
+
                 # Retour fallback toujours complet
                 wrapped = SymbolInfoFallback(
                     symbol=symbol_norm,
@@ -1873,11 +1884,13 @@ class MT5Connector:
                     digits=getattr(info, "digits", 5),
                     trade_contract_size=contract_size,
                     trade_tick_size=tick_size,
+                    trade_tick_value=tick_value,
                 )
 
                 self.logger.info(
                     f"[MT5C] Infos '{symbol_norm}' récupérées. Spread={wrapped.spread}, "
-                    f"Point={wrapped.point}, Contract={wrapped.trade_contract_size}, TickSize={wrapped.trade_tick_size}"
+                    f"Point={wrapped.point}, Contract={wrapped.trade_contract_size}, "
+                    f"TickSize={wrapped.trade_tick_size}, TickValue={wrapped.trade_tick_value}"
                 )
                 return wrapped
 

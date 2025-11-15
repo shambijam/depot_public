@@ -151,28 +151,29 @@ def _calculate_risk_based_volume(
     logger.critical(f"🔍 [SIZING] tick_value={tv} | tick_size={ts} | burst_size={burst_size} | scope={sizing_scope}")
     logger.critical(f"🔍 [SIZING] equity={equity:.2f} | risk%={risk_pct} | max_risk_amount={max_risk_amount:.2f} | per_ticket_risk={per_ticket_risk:.2f}")
 
-    try:
-        if tv is not None and ts is not None:
-            tv = _as_float(tv, "tick_value")
-            ts = _as_float(ts, "tick_size")
-            if ts > 0:
-                per_lot_loss = (distance / ts) * tv
-                logger.critical(f"✅ [SIZING] Méthode 1 (tick): per_lot_loss={per_lot_loss:.2f} $")
-    except Exception as e:
-        logger.critical(f"❌ [SIZING] Méthode 1 exception: {e}")
-        per_lot_loss = None
-
-    # 2) fallback contract_size si besoin
-    if per_lot_loss is None:
-        contract_size = float(
-            _sget(symbol_info, "trade_contract_size", "contract_size", default=100.0)
-            or 100.0
+    # Méthode UNIQUE : tick_value / tick_size (pas de fallback toxique)
+    if tv is None or ts is None:
+        raise TradeExecutionError(
+            f"[SIZING] tick_value ou tick_size manquant pour {sym_name}. "
+            f"tick_value={tv}, tick_size={ts}. "
+            f"Vérifiez mt5_connector.get_symbol_info() - le SymbolInfoFallback doit contenir trade_tick_value."
         )
-        per_lot_loss = distance * contract_size
-        logger.critical(f"⚠️ [SIZING] Méthode 2 (FALLBACK contract_size={contract_size}): per_lot_loss={per_lot_loss:.2f} $")
 
-    if per_lot_loss is None or per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
-        raise TradeExecutionError("Perte/lot invalide")
+    try:
+        tv = _as_float(tv, "tick_value")
+        ts = _as_float(ts, "tick_size")
+        if ts <= 0:
+            raise TradeExecutionError(f"[SIZING] tick_size invalide: {ts}")
+
+        per_lot_loss = (distance / ts) * tv
+        logger.critical(f"✅ [SIZING] MÉTHODE UNIQUE (tick): per_lot_loss={per_lot_loss:.2f} $")
+
+    except Exception as e:
+        logger.critical(f"❌ [SIZING] Erreur calcul per_lot_loss: {e}")
+        raise TradeExecutionError(f"[SIZING] Erreur calcul per_lot_loss: {e}")
+
+    if per_lot_loss <= 0 or not math.isfinite(per_lot_loss):
+        raise TradeExecutionError(f"[SIZING] Perte/lot invalide: {per_lot_loss}")
 
     # ===================== Volume brut (par ticket si basket) =====================
     raw_volume = per_ticket_risk / per_lot_loss

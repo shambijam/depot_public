@@ -1959,6 +1959,7 @@ def run_single_pipeline_cycle(
                                     aconf = {}
                                 if prefer_asset:
                                     reads = [
+                                        # 1. Asset override (XAUUSD.json)
                                         _dig(
                                             aconf,
                                             [
@@ -1983,7 +1984,9 @@ def run_single_pipeline_cycle(
                                             [
                                                 "overrides",
                                                 "scalping",
-                                                "burst",
+                                                "entry_rules",
+                                                "scalping",
+                                                "burst_scalping",
                                                 "burst_size",
                                             ],
                                         ),
@@ -2008,7 +2011,20 @@ def run_single_pipeline_cycle(
                                         ),
                                     ]
                                 else:
+                                    # Lire depuis la stratégie scalping (config_trade_scalping.json)
+                                    scalping_strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
                                     reads = [
+                                        # 1. Stratégie scalping (config_trade_scalping.json) - SOURCE PRINCIPALE
+                                        _dig(
+                                            scalping_strat_cfg,
+                                            [
+                                                "entry_rules",
+                                                "scalping",
+                                                "burst_scalping",
+                                                "burst_size",
+                                            ],
+                                        ),
+                                        # 2. Base config (prod_config.json) - DEPRECATED, n'a plus entry_rules
                                         _dig(
                                             base_config,
                                             [
@@ -2042,7 +2058,9 @@ def run_single_pipeline_cycle(
                                             [
                                                 "overrides",
                                                 "scalping",
-                                                "burst",
+                                                "entry_rules",
+                                                "scalping",
+                                                "burst_scalping",
                                                 "burst_size",
                                             ],
                                         ),
