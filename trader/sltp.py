@@ -1127,23 +1127,44 @@ def _calculate_dynamic_trailing(
     import time
 
     try:
+        # 🎯 DEBUG ULTIME - Afficher tous les paramètres d'entrée
+        print(f"", flush=True)
+        print(f"🔍 [TRAILING_DEBUG_ENTRY] Paramètres reçus:", flush=True)
+        print(f"   current_price: {current_price}", flush=True)
+        print(f"   entry_price: {entry_price}", flush=True)
+        print(f"   current_sl: {current_sl}", flush=True)
+        print(f"   min_distance_pips: {min_distance_pips}", flush=True)
+        print(f"   activation_pips: {activation_pips}", flush=True)
+        if basket_context:
+            print(f"   basket_pnl_pips: {basket_context.get('basket_pnl_pips', 'N/A')}", flush=True)
+            print(f"   basket_direction: {basket_context.get('direction', 'N/A')}", flush=True)
+            print(f"   basket_id: {basket_context.get('basket_id', 'N/A')}", flush=True)
+        print(f"", flush=True)
+
         # Récupération des infos symbole
         point = float(getattr(symbol_info, "point", 0.0) or 0.0)
         digits = int(getattr(symbol_info, "digits", 0) or 0)
         points_per_pip = 10.0 if digits in (3, 5) else 1.0
         pip_size = point * points_per_pip if point > 0 else 0.0001
 
-        # Déterminer la direction
-        is_buy = current_sl < entry_price
+        # 🎯 CORRECTION: Déterminer la direction BASÉE SUR LE CONTEXTE
+        if basket_context and "direction" in basket_context:
+            is_buy = basket_context["direction"].upper() == "BUY"
+            direction_source = "basket_context"
+        else:
+            # Fallback: si SL < entry, c'est un BUY, sinon SELL
+            is_buy = current_sl < entry_price
+            direction_source = "sl_vs_entry_fallback"
+
+        print(f"🎯 [TRAILING_DEBUG_DIRECTION] is_buy={is_buy} (source: {direction_source})", flush=True)
+        print(f"🎯 [TRAILING_DEBUG_DIRECTION] SL={current_sl} vs Entry={entry_price} → SL<Entry={current_sl < entry_price}", flush=True)
 
         # 1. Vérifier le PnL BASKET (pas la position individuelle !)
-        # Cette fonction est appelée par position, mais la décision d'activation
-        # doit se baser sur le PnL TOTAL du basket, pas le PnL de cette position seule.
         if basket_context:
             pnl_pips = float(basket_context.get("basket_pnl_pips", 0.0))
+            pnl_source = "basket_context"
         else:
             # FALLBACK: Si pas de contexte basket, on ne peut pas activer le trailing
-            # (on ne peut pas savoir si le basket entier a atteint +28 pips)
             try:
                 basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
                 self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: NO basket_context → SKIP (cannot verify basket PnL)")
@@ -1151,10 +1172,13 @@ def _calculate_dynamic_trailing(
                 pass
             return None
 
+        print(f"📊 [TRAILING_DEBUG_PNL] PnL={pnl_pips:.1f}p (source: {pnl_source}) | Seuil={activation_pips:.1f}p", flush=True)
+
         # Vérifier activation BASKET (ex: +28 pips sur l'ensemble du basket)
         if pnl_pips < activation_pips:
             try:
                 basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+                print(f"⏭️ [TRAILING_DEBUG] Basket {basket_id}: PnL {pnl_pips:.1f}p < activation {activation_pips:.1f}p → SKIP", flush=True)
                 self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: PnL {pnl_pips:.1f}p < activation {activation_pips:.1f}p → SKIP")
             except Exception:
                 pass
@@ -1163,6 +1187,9 @@ def _calculate_dynamic_trailing(
         # 🎯 ACTIVATION TRAILING DÉTECTÉE !
         try:
             basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+            print(f"", flush=True)
+            print(f"🔥 [TRAILING_ACTIVATE] Basket {basket_id}: PnL={pnl_pips:.1f}p >= {activation_pips:.1f}p → TRAILING ACTIVÉ !", flush=True)
+            print(f"", flush=True)
             self.logger.info(f"🔥 [TRAILING_ACTIVATE] Basket {basket_id}: PnL={pnl_pips:.1f}p >= {activation_pips:.1f}p → TRAILING ACTIVÉ !")
         except Exception:
             pass
@@ -1176,10 +1203,14 @@ def _calculate_dynamic_trailing(
 
         basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
         last_ts = last_map.get(basket_id, 0.0)
+        time_since_last = now - last_ts
 
-        if (now - last_ts) < min_update_interval_sec:
+        print(f"⏰ [TRAILING_DEBUG_TIME] Dernière update: {time_since_last:.1f}s ago | Intervalle min: {min_update_interval_sec}s", flush=True)
+
+        if time_since_last < min_update_interval_sec:
             try:
-                self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: Throttled (last update {now - last_ts:.1f}s ago < {min_update_interval_sec}s) → SKIP")
+                print(f"⏭️ [TRAILING_DEBUG] Basket {basket_id}: Throttled (last update {time_since_last:.1f}s ago < {min_update_interval_sec}s) → SKIP", flush=True)
+                self.logger.debug(f"[TRAILING_CALC] Basket {basket_id}: Throttled (last update {time_since_last:.1f}s ago < {min_update_interval_sec}s) → SKIP")
             except Exception:
                 pass
             return None
@@ -1188,24 +1219,39 @@ def _calculate_dynamic_trailing(
         # Distance minimale depuis prix actuel
         min_distance_price = min_distance_pips * pip_size
 
+        print(f"📐 [TRAILING_DEBUG_CALC] min_distance_pips={min_distance_pips} → min_distance_price={min_distance_price}", flush=True)
+        print(f"📐 [TRAILING_DEBUG_CALC] pip_size={pip_size} | point={point} | digits={digits}", flush=True)
+
         if is_buy:
             # BUY: SL suit le prix en montant, distance min_distance_pips en dessous du prix
             new_sl = current_price - min_distance_price
             # Ne jamais baisser le SL (détérioration)
             new_sl = max(new_sl, current_sl)
+            direction_str = "BUY"
+            calc_str = f"{current_price} - {min_distance_price} = {new_sl}"
         else:
             # SELL: SL suit le prix en descendant, distance min_distance_pips au-dessus du prix
             new_sl = current_price + min_distance_price
             # Ne jamais monter le SL (détérioration)
             new_sl = min(new_sl, current_sl)
+            direction_str = "SELL"
+            calc_str = f"{current_price} + {min_distance_price} = {new_sl}"
+
+        print(f"🧮 [TRAILING_DEBUG_CALC] {direction_str}: {calc_str}", flush=True)
+        print(f"🧮 [TRAILING_DEBUG_CALC] Après protection: {current_sl} → {new_sl}", flush=True)
 
         # Arrondir au bon nombre de décimales
         new_sl = round(new_sl, digits)
+        print(f"🔢 [TRAILING_DEBUG_CALC] Après arrondi: {new_sl}", flush=True)
 
         # Vérifier qu'il y a un changement significatif
-        if abs(new_sl - current_sl) < pip_size * 0.5:
+        change_pips = abs(new_sl - current_sl) / pip_size if pip_size > 0 else 0
+        print(f"📏 [TRAILING_DEBUG_CHANGE] Changement: {change_pips:.2f}p (seuil: 0.5p)", flush=True)
+
+        if change_pips < 0.5:
             try:
-                self.logger.info(f"🔧 [TRAILING_CALC] Basket {basket_id}: PnL={pnl_pips:.1f}p | new_SL={new_sl:.5f} ≈ current_SL={current_sl:.5f} (diff={abs(new_sl - current_sl) / pip_size:.2f}p < 0.5p) → NO CHANGE")
+                print(f"⏭️ [TRAILING_DEBUG] Basket {basket_id}: Changement trop petit {change_pips:.2f}p < 0.5p → SKIP", flush=True)
+                self.logger.info(f"🔧 [TRAILING_CALC] Basket {basket_id}: PnL={pnl_pips:.1f}p | new_SL={new_sl:.5f} ≈ current_SL={current_sl:.5f} (diff={change_pips:.2f}p < 0.5p) → NO CHANGE")
             except Exception:
                 pass
             return None
@@ -1215,8 +1261,13 @@ def _calculate_dynamic_trailing(
 
         # Log succès
         try:
-            direction_str = "BUY" if is_buy else "SELL"
-            self.logger.info(f"✅ [TRAILING_CALC] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | SL: {current_sl:.5f} → {new_sl:.5f} (move={abs(new_sl - current_sl) / pip_size:.2f}p)")
+            print(f"", flush=True)
+            print(f"✅ [TRAILING_SUCCESS] Basket {basket_id} ({direction_str}):", flush=True)
+            print(f"   PnL: {pnl_pips:.1f}p", flush=True)
+            print(f"   SL: {current_sl:.5f} → {new_sl:.5f}", flush=True)
+            print(f"   Déplacement: {change_pips:.2f} pips", flush=True)
+            print(f"", flush=True)
+            self.logger.info(f"✅ [TRAILING_CALC] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | SL: {current_sl:.5f} → {new_sl:.5f} (move={change_pips:.2f}p)")
         except Exception:
             pass
 
@@ -1224,11 +1275,11 @@ def _calculate_dynamic_trailing(
 
     except Exception as e:
         try:
-            self.logger.debug(f"[_calculate_dynamic_trailing] Error: {e}")
+            print(f"💥 [TRAILING_DEBUG_ERROR] Exception: {e}", flush=True)
+            self.logger.error(f"[_calculate_dynamic_trailing] Error: {e}", exc_info=True)
         except Exception:
             pass
         return None
-
 
 def apply_dynamic_trailing(
     self,
@@ -1251,6 +1302,7 @@ def apply_dynamic_trailing(
     market_context: Optional[dict] = None,
     burst_manager: Optional[Any] = None,  # ← NOUVEAU
 ) -> Optional[float]:
+      
     """
     Orchestrateur CENTRALISE du trailing dynamique :
       1) calcule un SL candidat via _calculate_dynamic_trailing(...)
@@ -2299,10 +2351,13 @@ def update_basket_sltp_dynamically(
             print(f"⚠️ [SPREAD_CALC] Erreur calcul spread: {e}", flush=True)
             cur_spread_pips = 2.0  # fallback conservateur
 
-        # 🎯 CALCUL DES SEUILS AVEC LE SPREAD RÉEL
-        spread_floor_pips = max(0.0, (spread_mult * cur_spread_pips) + extra_buffer_pips)
-        ACTIVATION_PIPS = max(act_min_pips, spread_floor_pips)
-        MIN_DISTANCE_PIPS = max(step_min_pips, floor_min_pips, spread_floor_pips)
+        # 🎯 TEST: Forcer les valeurs pour le trailing
+        ACTIVATION_PIPS = 28.0
+        MIN_DISTANCE_PIPS = 8.0
+
+        # Log de test
+        print(f"🎯 [TEST_TRAILING] ACTIVATION_PIPS forcé à: {ACTIVATION_PIPS}", flush=True)
+        print(f"🎯 [TEST_TRAILING] MIN_DISTANCE_PIPS forcé à: {MIN_DISTANCE_PIPS}", flush=True)
 
         # Configuration défense (perte)
         act_loss_cfg  = trail_cfg.get("activation_loss", {}) or {}
