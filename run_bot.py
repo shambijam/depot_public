@@ -2841,24 +2841,51 @@ def scalping_fast_thread(
 
                     # Construction trade decision
                     try:
+                        # Obtenir base_config
+                        base_config = config_manager.get_current_dynamic_config()
+
                         # Résoudre burst_size
                         strat_cfg_entry = strat_cfg.get("entry_rules", {})
                         scalping_cfg = strat_cfg_entry.get("scalping", {})
                         burst_cfg = scalping_cfg.get("burst_scalping", {})
                         resolved_burst = burst_cfg.get("burst_size", 5)
 
+                        # Construction td IDENTIQUE à FAST-LANE
                         td = {
                             "symbol": "XAUUSD",
+                            "action": side,  # ✅ AJOUTÉ - requis par trade_executor
                             "side": side,
                             "rule_name": "burst_scalping",
                             "confidence": conf,
                             "burst_size": resolved_burst,
+                            "burst_enabled": True,  # ✅ AJOUTÉ - active le mode burst
                             "strategy": "scalping",
                             "context": ctx,
+                            # ✅ AJOUTÉ - Structure order/trade comme FAST-LANE
+                            "order": {
+                                "action": side,
+                                "side": side,
+                                "type": "MARKET",
+                                "symbol": "XAUUSD",
+                            },
+                            "trade": {"action": side, "side": side},
                         }
+
+                        # ✅ AJOUTÉ - Fat finger policy (comme FAST-LANE)
+                        safety = td.setdefault("safety", {})
+                        ff = safety.setdefault("fat_finger", {})
+                        ff.setdefault("policy", "FLOOR")
 
                         # Copier config SLTP
                         sltp_cfg = burst_cfg.get("sltp", {})
+                        if not sltp_cfg:
+                            # Fallback depuis base_config
+                            sltp_cfg = (
+                                base_config.get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("sltp", {})
+                            ) or {}
                         if sltp_cfg:
                             td["sltp"] = sltp_cfg
 
@@ -2874,10 +2901,13 @@ def scalping_fast_thread(
                             logger.warning(f"[SCALPING_THREAD] Fusion config échouée: {e}")
                             merged_config = base_config
 
-                        # Package décision
+                        # Package décision - ✅ UTILISER global_context au lieu de ctx
+                        with context_lock:
+                            global_ctx_copy = dict(global_context)  # Copie thread-safe
+
                         decision_pkg = {
                             "final_decision": td,
-                            "context": ctx,
+                            "context": global_ctx_copy,  # ✅ CORRIGÉ - global_context complet
                             "active_config": merged_config,
                         }
                         decision_pkg.setdefault("audit_context", {}).update({
@@ -2886,12 +2916,16 @@ def scalping_fast_thread(
                             "intent_burst": resolved_burst,
                         })
 
+                        logger.info(f"[SCALPING_THREAD] Exécution trade: {side} XAUUSD burst={resolved_burst}")
+
                         # Exécution
                         res = run_trade_execution_pipeline(
                             trade_executor, decision_pkg, is_dry_run=is_dry_run
                         )
                         if res:
                             logger.info(f"✅ [SCALPING_THREAD] Trade exécuté: {res.get('status')}")
+                        else:
+                            logger.warning(f"⚠️ [SCALPING_THREAD] Trade non exécuté (res=None)")
 
                     except Exception as e:
                         logger.error(f"[SCALPING_THREAD] Erreur exécution trade: {e}", exc_info=True)
