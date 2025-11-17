@@ -1235,12 +1235,26 @@ class MT5Connector:
     def is_connected(self) -> bool:
         """
         Retourne l'état actuel de la connexion à MetaTrader 5.
-        C'est une propriété en lecture seule.
+        Vérifie la connexion réelle via mt5.account_info() pour garantir que
+        le terminal est encore actif.
 
         Returns:
-            bool: True si connecté, False sinon.
+            bool: True si connecté ET terminal actif, False sinon.
         """
-        return self._is_connected
+        if not self._is_connected:
+            return False
+
+        # Vérifier que la connexion est toujours active via MT5
+        try:
+            account_info = mt5.account_info()
+            if account_info is None:
+                # Terminal déconnecté
+                self._is_connected = False
+                return False
+            return True
+        except Exception:
+            self._is_connected = False
+            return False
 
     def disconnect(self) -> None:
         """

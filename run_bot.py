@@ -2971,12 +2971,15 @@ def basket_monitor_thread(
                     merged_config.setdefault("entry_rules", {}).update(
                         scalping_config["entry_rules"]
                     )
+                logger.info("[BASKET_MONITOR_THREAD] Config fusionnée avec succès")
             except Exception as merge_err:
                 logger.warning(f"[BASKET_MONITOR_THREAD] Fusion config scalping échouée: {merge_err}")
                 merged_config = base_config
 
             # Appeler monitor_burst_baskets en mode continu avec config fusionnée
+            logger.info("[BASKET_MONITOR_THREAD] Appel monitor_burst_baskets...")
             trade_executor.monitor_burst_baskets(config=merged_config)
+            logger.info("[BASKET_MONITOR_THREAD] monitor_burst_baskets terminé")
 
         except Exception as e:
             logger.error(f"[BASKET_MONITOR_THREAD] Erreur: {e}", exc_info=True)
@@ -3222,7 +3225,7 @@ def main(args: argparse.Namespace) -> None:
     cycle_count = 0
     daily_trade_count = 0
 
-    # Réconciliation initiale TradeExecutor
+    # Réconciliation initiale TradeExecutor ET connexion persistante MT5
     try:
         account_details_for_reconciliation = config_manager.get_mt5_account_credentials(
             mode=bot_mode
@@ -3231,17 +3234,21 @@ def main(args: argparse.Namespace) -> None:
             if mt5_connector.connect(account_details_for_reconciliation):
                 trade_executor.reconcile_state_with_broker()
                 logger.info("Réconciliation TradeExecutor OK.")
-                mt5_connector.disconnect()
+                # ✅ NE PAS DÉCONNECTER - Garder la connexion persistante pour les threads !
+                logger.info(f"✅ MT5 connecté et prêt (is_connected={mt5_connector.is_connected})")
             else:
-                logger.warning("MT5 non connecté pour la réconciliation. Ignorée.")
+                logger.critical("MT5 non connecté pour la réconciliation - ARRÊT DU BOT")
+                sys.exit(1)
         else:
-            logger.warning("Aucun compte MT5 dispo pour la réconciliation.")
+            logger.critical("Aucun compte MT5 dispo pour la réconciliation - ARRÊT DU BOT")
+            sys.exit(1)
     except Exception as e:
-        logger.error(f"Échec réconciliation TradeExecutor: {e}", exc_info=True)
+        logger.critical(f"Échec réconciliation TradeExecutor: {e}", exc_info=True)
         config_manager.send_alert(
             f"ALERTE: Réconciliation TradeExecutor échouée: {e}",
             "telegram_critical",
         )
+        sys.exit(1)
 
 
     # 9. Lancement des Threads Séparés (Scalping 10s + Liquidity 60s + Basket Monitor)
