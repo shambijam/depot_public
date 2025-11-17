@@ -1525,6 +1525,17 @@ class MT5Connector:
             rates_frame["time"] = pd.to_datetime(
                 rates_frame["time"], unit="s", utc=True
             )
+
+            # Ajouter symbol_info (point, tick_size, contract_size)
+            try:
+                sym_info = self.get_symbol_info(symbol)
+                if sym_info:
+                    rates_frame["point"] = float(getattr(sym_info, "point", 0.00001))
+                    rates_frame["trade_tick_size"] = float(getattr(sym_info, "trade_tick_size", 0.00001))
+                    rates_frame["trade_contract_size"] = float(getattr(sym_info, "trade_contract_size", 100000.0))
+            except Exception as e_sym:
+                self.logger.debug(f"[{symbol}] Erreur ajout symbol_info aux barres: {e_sym}")
+
             self.logger.debug(
                 f"[{symbol}] {len(rates_frame)} barres récupérées (TF='{tf_key}')."
             )
