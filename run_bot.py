@@ -2945,6 +2945,7 @@ def scalping_fast_thread(
 def basket_monitor_thread(
     trade_executor,
     config_manager,
+    strategy_manager,
     stop_event: threading.Event,
     logger
 ):
@@ -2962,9 +2963,20 @@ def basket_monitor_thread(
         try:
             base_config = config_manager.get_current_dynamic_config()
 
-            # Appeler monitor_burst_baskets en mode continu
-            # (la fonction gère elle-même le polling 100ms)
-            trade_executor.monitor_burst_baskets(config=base_config)
+            # Fusionner la config de stratégie scalping pour avoir entry_rules
+            try:
+                scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                merged_config = dict(base_config)
+                if "entry_rules" in scalping_config:
+                    merged_config.setdefault("entry_rules", {}).update(
+                        scalping_config["entry_rules"]
+                    )
+            except Exception as merge_err:
+                logger.warning(f"[BASKET_MONITOR_THREAD] Fusion config scalping échouée: {merge_err}")
+                merged_config = base_config
+
+            # Appeler monitor_burst_baskets en mode continu avec config fusionnée
+            trade_executor.monitor_burst_baskets(config=merged_config)
 
         except Exception as e:
             logger.error(f"[BASKET_MONITOR_THREAD] Erreur: {e}", exc_info=True)
@@ -3294,6 +3306,7 @@ def main(args: argparse.Namespace) -> None:
         args=(
             trade_executor,
             config_manager,
+            strategy_manager,
             basket_monitor_stop_event,
             logger
         ),
