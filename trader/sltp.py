@@ -1201,14 +1201,17 @@ def _calculate_dynamic_trailing(
         # 3. Calculer nouveau SL
         min_distance_price = min_distance_pips * pip_size
 
+        # DEBUG: Log du calcul
+        self.logger.critical(f"🔍 [TRAILING_CALC] Basket {basket_id}: min_distance_pips={min_distance_pips:.1f} | pip_size={pip_size:.5f} | min_distance_price={min_distance_price:.5f} | current_price={current_price:.5f}")
+
         if is_buy:
-            # BUY: SL suit le prix en montant
+            # BUY: SL suit le prix en montant (prix monte, SL monte)
             new_sl = current_price - min_distance_price
             new_sl = max(new_sl, current_sl)  # Ne jamais baisser le SL
         else:
-            # SELL: SL suit le prix en descendant
+            # SELL: SL suit le prix en descendant (prix descend, SL descend)
             new_sl = current_price + min_distance_price
-            new_sl = min(new_sl, current_sl)  # Ne jamais monter le SL
+            new_sl = min(new_sl, current_sl)  # SL descend avec le prix
 
         # Arrondir
         new_sl = round(new_sl, digits)
@@ -2494,9 +2497,15 @@ def update_basket_sltp_dynamically(
                 except Exception:
                     pass
 
-            # TP reste fixe à 400 pips (pas de modification dynamique)
-            # Seul le trailing SL à +28 pips est actif
-            new_tp = None
+            # TP : Supprimer le TP fixe dès que le trailing s'active
+            # Le trade peut monter infiniment, le trailing protège le profit
+            if do_profit and new_sl is not None:
+                # Trailing activé : supprimer le TP pour laisser courir
+                new_tp = 0.0  # 0.0 = suppression du TP dans MT5
+                self.logger.info(f"🎯 [TRAILING_TP] Basket {basket_id} ticket #{ticket}: TP SUPPRIMÉ (trailing actif)")
+            else:
+                # Pas de trailing : garder le TP fixe
+                new_tp = None
 
             # Rapport par position
             if new_sl is not None or new_tp is not None:
