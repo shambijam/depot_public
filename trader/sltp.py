@@ -1394,9 +1394,28 @@ def apply_dynamic_trailing(
         activation_pips=act_pips,
         min_update_interval_sec=min_int,
     )
+
+    # 🎯 DEBUG: Tracer le SL calculé
+    try:
+        basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
+        print(f"", flush=True)
+        print(f"🔍 [APPLY_TRAILING_DEBUG] Basket {basket_id} | Ticket #{position_ticket}", flush=True)
+        print(f"   _calculate_dynamic_trailing retourné: {new_sl}", flush=True)
+        print(f"   current_sl: {csl}", flush=True)
+        print(f"   current_price: {cp}", flush=True)
+        if new_sl is not None:
+            print(f"   Changement: {abs(float(new_sl) - csl):.5f} (seuil: 0.00000000001)", flush=True)
+        print(f"", flush=True)
+    except Exception:
+        pass
+
     # Rien à faire si identique / None
     try:
         if new_sl is None or abs(float(new_sl) - csl) < 1e-12:
+            try:
+                print(f"❌ [APPLY_TRAILING] new_sl={new_sl} → AUCUN changement → return None", flush=True)
+            except Exception:
+                pass
             return None
     except Exception:
         return None
@@ -2270,7 +2289,25 @@ def update_basket_sltp_dynamically(
             force_refresh or perf_trigger or time_ok or phase_changed or price_moved
         )
 
+        # 🎯 DEBUG: Tracer les triggers
+        try:
+            print(f"", flush=True)
+            print(f"🔍 [TRIGGER_DEBUG] Basket {basket_id}", flush=True)
+            print(f"   force_refresh: {force_refresh}", flush=True)
+            print(f"   perf_trigger: {perf_trigger} (pnl={pnl_pips:.1f}p >= {act_min_pips:.1f}p ou <= {-loss_min_pips:.1f}p)", flush=True)
+            print(f"   time_ok: {time_ok} (now-last={now-last_update:.1f}s >= 2.0s)", flush=True)
+            print(f"   phase_changed: {phase_changed}", flush=True)
+            print(f"   price_moved: {price_moved}", flush=True)
+            print(f"   → should_update: {should_update}", flush=True)
+            print(f"", flush=True)
+        except Exception:
+            pass
+
         if not should_update:
+            try:
+                print(f"❌ [SKIP_TRIGGER] Basket {basket_id}: should_update=False → SKIP", flush=True)
+            except Exception:
+                pass
             return {
                 "status": "skipped",
                 "reason": "no_trigger",
