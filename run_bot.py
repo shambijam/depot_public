@@ -2834,10 +2834,67 @@ def scalping_fast_thread(
 
                 # Si signal valide → Exécution
                 if fusion_out.get("ok"):
-                    logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {fusion_out['action']} (conf={fusion_out['fused_confidence']:.2f})")
+                    side = fusion_out["action"]  # BUY ou SELL
+                    conf = fusion_out.get("fused_confidence", 0.0)
 
-                    # Exécuter trade (utiliser la fast-lane existante)
-                    # TODO: Appeler trade_executor directement ici
+                    logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {side} (conf={conf:.2f})")
+
+                    # Construction trade decision
+                    try:
+                        # Résoudre burst_size
+                        strat_cfg_entry = strat_cfg.get("entry_rules", {})
+                        scalping_cfg = strat_cfg_entry.get("scalping", {})
+                        burst_cfg = scalping_cfg.get("burst_scalping", {})
+                        resolved_burst = burst_cfg.get("burst_size", 5)
+
+                        td = {
+                            "symbol": "XAUUSD",
+                            "side": side,
+                            "rule_name": "burst_scalping",
+                            "confidence": conf,
+                            "burst_size": resolved_burst,
+                            "strategy": "scalping",
+                            "context": ctx,
+                        }
+
+                        # Copier config SLTP
+                        sltp_cfg = burst_cfg.get("sltp", {})
+                        if sltp_cfg:
+                            td["sltp"] = sltp_cfg
+
+                        # Fusionner config scalping avec base_config
+                        try:
+                            scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
+                            merged_config = dict(base_config)
+                            if "entry_rules" in scalping_strategy_config:
+                                merged_config.setdefault("entry_rules", {}).update(
+                                    scalping_strategy_config["entry_rules"]
+                                )
+                        except Exception as e:
+                            logger.warning(f"[SCALPING_THREAD] Fusion config échouée: {e}")
+                            merged_config = base_config
+
+                        # Package décision
+                        decision_pkg = {
+                            "final_decision": td,
+                            "context": ctx,
+                            "active_config": merged_config,
+                        }
+                        decision_pkg.setdefault("audit_context", {}).update({
+                            "intent_symbol": "XAUUSD",
+                            "intent_side": side,
+                            "intent_burst": resolved_burst,
+                        })
+
+                        # Exécution
+                        res = run_trade_execution_pipeline(
+                            trade_executor, decision_pkg, is_dry_run=is_dry_run
+                        )
+                        if res:
+                            logger.info(f"✅ [SCALPING_THREAD] Trade exécuté: {res.get('status')}")
+
+                    except Exception as e:
+                        logger.error(f"[SCALPING_THREAD] Erreur exécution trade: {e}", exc_info=True)
 
             # Surveillance baskets (fermeture +15 pips)
             try:
@@ -3104,67 +3161,73 @@ def main(args: argparse.Namespace) -> None:
         )
 
 
-    # 9. Boucle Principale
+    # 9. Lancement des Threads Séparés (Scalping 10s + Liquidity 60s)
+    logger.info("=" * 80)
+    logger.info("🚀 DÉMARRAGE DES THREADS SÉPARÉS")
+    logger.info("=" * 80)
+    logger.info("  • SCALPING Thread  : Cycle 10s (XAUUSD)")
+    logger.info("  • LIQUIDITY Thread : Cycle 60s (EURUSD, GBPUSD, XAUUSD)")
+    logger.info("=" * 80)
+
+    # Global context partagé avec lock
+    global_context_shared = {}
+    context_lock = threading.Lock()
+
+    # Events pour arrêt propre
+    scalping_stop_event = threading.Event()
+    liquidity_stop_event = threading.Event()
+
+    # Créer les threads
+    scalping_thread = threading.Thread(
+        target=scalping_fast_thread,
+        args=(
+            mt5_connector,
+            config_manager.decision_pipeline,
+            trade_executor,
+            config_manager,
+            mecano,
+            strategy_manager,
+            is_dry_run,
+            scalping_stop_event,
+            global_context_shared,
+            context_lock,
+            logger
+        ),
+        daemon=True,
+        name="ScalpingThread-10s"
+    )
+
+    liquidity_thread = threading.Thread(
+        target=liquidity_main_thread,
+        args=(
+            mt5_connector,
+            config_manager.decision_pipeline,
+            trade_executor,
+            config_manager,
+            mecano,
+            strategy_manager,
+            is_dry_run,
+            liquidity_stop_event,
+            global_context_shared,
+            context_lock,
+            logger
+        ),
+        daemon=True,
+        name="LiquidityThread-60s"
+    )
+
+    # Démarrer les threads
+    scalping_thread.start()
+    liquidity_thread.start()
+
+    logger.info("✅ Threads démarrés avec succès")
+    logger.info("   → Appuyez sur Ctrl+C pour arrêter proprement")
+    logger.info("=" * 80)
+
+    # Attendre interruption
     try:
         while True:
-            cycle_count += 1
-            cycle_start_time = time.time()
-
-            trade_executed_in_cycle = run_single_pipeline_cycle(
-                mt5_connector,
-                config_manager.decision_pipeline,
-                trade_executor,
-                config_manager,
-                mecano,
-                strategy_manager,  # ✅ ici tu passes l’instance
-                is_dry_run,
-                cycle_count,
-                daily_trade_count,
-            )
-
-            if trade_executed_in_cycle:
-                daily_trade_count += 1
-
-                # === Surveillance des ordres LIMIT Liquidity ===
-            try:
-                trade_executor.monitor_pending_orders()
-            except Exception as e:
-                logger.warning(
-                    f"[LIQUIDITY] Erreur lors du monitor_pending_orders: {e}"
-                )
-
-            cycle_duration = time.time() - cycle_start_time
-            logger.info(
-                f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f}s."
-            )
-
-            cycle_duration = time.time() - cycle_start_time
-            logger.info(
-                f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f}s."
-            )
-
-            config_manager.process_and_send_summary_alert(
-                context={
-                    "bot_mode": bot_mode,
-                    "bot_status": "Running",
-                    "current_market_regime": config_manager.get(
-                        "current_market_regime", "N/A"
-                    ),
-                    "account_info": (
-                        mt5_connector.get_account_info()._asdict()
-                        if mt5_connector.is_connected()
-                        and mt5_connector.get_account_info()
-                        else {}
-                    ),
-                    "daily_trade_count": daily_trade_count,
-                    "open_positions_count": len(trade_executor._open_positions),
-                }
-            )
-
-            sleep_time = max(0, cycle_interval - cycle_duration)
-            if sleep_time > 0:
-                logger.info(f"Prochain cycle dans {sleep_time:.2f}s...")
-                time.sleep(sleep_time)
+            time.sleep(1)
 
     except KeyboardInterrupt:
         logger.warning("Interruption manuelle détectée (Ctrl+C).")
@@ -3182,6 +3245,28 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
     finally:
+        # Arrêt propre des threads
+        logger.info("🛑 Arrêt des threads en cours...")
+
+        try:
+            scalping_stop_event.set()
+            liquidity_stop_event.set()
+
+            scalping_thread.join(timeout=5.0)
+            liquidity_thread.join(timeout=5.0)
+
+            if scalping_thread.is_alive():
+                logger.warning("⚠️ Thread scalping n'a pas terminé dans les 5s")
+            else:
+                logger.info("✅ Thread scalping arrêté proprement")
+
+            if liquidity_thread.is_alive():
+                logger.warning("⚠️ Thread liquidity n'a pas terminé dans les 5s")
+            else:
+                logger.info("✅ Thread liquidity arrêté proprement")
+        except Exception as e:
+            logger.error(f"Erreur arrêt threads: {e}")
+
         if "ai_decision" in locals() and ai_decision:
             logger.info("Sauvegarde historique IA avant arrêt...")
             ai_decision._save_suggestion_history()

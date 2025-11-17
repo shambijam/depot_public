@@ -65,14 +65,6 @@ def update_parameters_from_config(self, strategy_config: dict) -> None:
             "need_consolidation": True,
             "consolidation_max_atr_mult": 0.8,  # range/ATR < 0.8 sur N barres
         },
-        "trailing": {
-            "phase0_seconds": [2, 4],
-            "phase0_mult_micro_atr_10s": 1.7,
-            "phase1_mult_micro_atr_10s": 1.3,
-            "phase2_mult_micro_atr_10s": 1.0,
-            "clamp_min": 1.0,
-            "clamp_max": 3.5,
-        },
         "order": {
             "entry_style": "LIMIT_FOK",
             "burst_count": 5,  # à ajuster, compte démo

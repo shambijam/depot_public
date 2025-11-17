@@ -281,7 +281,7 @@ class FusionManager:
         except Exception:
             pass
 
-        # 4) Règles métier (scalping trailing-only)
+        # 4) Règles métier scalping
         rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
@@ -291,9 +291,6 @@ class FusionManager:
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
         decision = self._final_decision("AUTO", fused, n_tr, coherence, cfg)
-
-        # 8) Trailing-only (conforme à ta règle scalping)
-        trail = self._suggest_trailing(fused, cfg, strategy_config)
 
         # 9) Rationale
         rationale = self._rationale(decision, n_of, n_fp, n_tr, coherence, rules_eval)
