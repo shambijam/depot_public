@@ -2930,12 +2930,7 @@ def scalping_fast_thread(
                     except Exception as e:
                         logger.error(f"[SCALPING_THREAD] Erreur exécution trade: {e}", exc_info=True)
 
-            # Surveillance baskets (fermeture +15 pips)
-            try:
-                base_config = config_manager.get_current_dynamic_config()
-                trade_executor.monitor_burst_baskets(config=base_config)
-            except Exception as e:
-                logger.debug(f"[SCALPING_THREAD] monitor_burst_baskets error: {e}")
+            # Note: Surveillance baskets déléguée au basket_monitor_thread dédié
 
         except Exception as e:
             logger.error(f"[SCALPING_THREAD] Erreur cycle #{cycle_count}: {e}", exc_info=True)
@@ -2947,6 +2942,37 @@ def scalping_fast_thread(
             stop_event.wait(timeout=sleep_time)
 
     logger.info("🛑 [SCALPING_THREAD] Arrêté proprement")
+
+
+def basket_monitor_thread(
+    trade_executor,
+    config_manager,
+    stop_event: threading.Event,
+    logger
+):
+    """
+    Thread dédié à la SURVEILLANCE CONTINUE des baskets burst.
+
+    Responsabilités:
+    - Surveillance 24/7 avec polling 100ms
+    - Fermeture automatique à +15 pips (configurable)
+    - Pas de deadline → tourne en continu
+    """
+    logger.info("🚀 [BASKET_MONITOR_THREAD] Démarré (surveillance continue)")
+
+    while not stop_event.is_set():
+        try:
+            base_config = config_manager.get_current_dynamic_config()
+
+            # Appeler monitor_burst_baskets en mode continu
+            # (la fonction gère elle-même le polling 100ms)
+            trade_executor.monitor_burst_baskets(config=base_config)
+
+        except Exception as e:
+            logger.error(f"[BASKET_MONITOR_THREAD] Erreur: {e}", exc_info=True)
+            time.sleep(1)  # Éviter spam en cas d'erreur
+
+    logger.info("🛑 [BASKET_MONITOR_THREAD] Arrêté proprement")
 
 
 def liquidity_main_thread(
@@ -3195,12 +3221,13 @@ def main(args: argparse.Namespace) -> None:
         )
 
 
-    # 9. Lancement des Threads Séparés (Scalping 10s + Liquidity 60s)
+    # 9. Lancement des Threads Séparés (Scalping 10s + Liquidity 60s + Basket Monitor)
     logger.info("=" * 80)
     logger.info("🚀 DÉMARRAGE DES THREADS SÉPARÉS")
     logger.info("=" * 80)
-    logger.info("  • SCALPING Thread  : Cycle 10s (XAUUSD)")
-    logger.info("  • LIQUIDITY Thread : Cycle 60s (EURUSD, GBPUSD, XAUUSD)")
+    logger.info("  • SCALPING Thread       : Cycle 10s (XAUUSD)")
+    logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD, XAUUSD)")
+    logger.info("  • BASKET MONITOR Thread : Surveillance continue (polling 100ms)")
     logger.info("=" * 80)
 
     # Global context partagé avec lock
@@ -3210,6 +3237,7 @@ def main(args: argparse.Namespace) -> None:
     # Events pour arrêt propre
     scalping_stop_event = threading.Event()
     liquidity_stop_event = threading.Event()
+    basket_monitor_stop_event = threading.Event()
 
     # Créer les threads
     scalping_thread = threading.Thread(
@@ -3250,9 +3278,22 @@ def main(args: argparse.Namespace) -> None:
         name="LiquidityThread-60s"
     )
 
+    basket_monitor = threading.Thread(
+        target=basket_monitor_thread,
+        args=(
+            trade_executor,
+            config_manager,
+            basket_monitor_stop_event,
+            logger
+        ),
+        daemon=True,
+        name="BasketMonitorThread"
+    )
+
     # Démarrer les threads
     scalping_thread.start()
     liquidity_thread.start()
+    basket_monitor.start()
 
     logger.info("✅ Threads démarrés avec succès")
     logger.info("   → Appuyez sur Ctrl+C pour arrêter proprement")
@@ -3285,9 +3326,11 @@ def main(args: argparse.Namespace) -> None:
         try:
             scalping_stop_event.set()
             liquidity_stop_event.set()
+            basket_monitor_stop_event.set()
 
             scalping_thread.join(timeout=5.0)
             liquidity_thread.join(timeout=5.0)
+            basket_monitor.join(timeout=5.0)
 
             if scalping_thread.is_alive():
                 logger.warning("⚠️ Thread scalping n'a pas terminé dans les 5s")
@@ -3298,6 +3341,11 @@ def main(args: argparse.Namespace) -> None:
                 logger.warning("⚠️ Thread liquidity n'a pas terminé dans les 5s")
             else:
                 logger.info("✅ Thread liquidity arrêté proprement")
+
+            if basket_monitor.is_alive():
+                logger.warning("⚠️ Thread basket_monitor n'a pas terminé dans les 5s")
+            else:
+                logger.info("✅ Thread basket_monitor arrêté proprement")
         except Exception as e:
             logger.error(f"Erreur arrêt threads: {e}")
 
