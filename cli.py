@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 # Charger les variables d'environnement TÔT pour qu'elles soient disponibles partout
 load_dotenv()
 
-# Importer la fonction main depuis main.py pour lancer le bot
-# La logique principale du bot réside dans main.py
-from main import main as run_main_bot_logic 
+# Importer la fonction main depuis run_bot.py pour lancer le bot avec threading
+# Architecture multi-threads : scalping 10s + liquidity 60s + basket_monitor continu
+from run_bot import main as run_main_bot_logic 
 
 # TODO: Importer d'autres fonctions pour les sous-commandes (ex: backtest, report) depuis leurs modules respectifs
 # from trading_pipeline.backtester import run_backtest_cli_function

@@ -3135,6 +3135,21 @@ def main(args: argparse.Namespace) -> None:
         )
         strategy_manager.initialize_strategies()
 
+        # Instancier AIInterface
+        from core.ai_interface import AIInterface
+        ai_interface = AIInterface(
+            config_manager_instance=config_manager,
+            ai_decision_instance=ai_decision
+        )
+
+        # Instancier DecisionPipeline
+        decision_pipeline = DecisionPipeline(
+            config_manager_instance=config_manager,
+            ai_interface_instance=ai_interface,
+            strategy_manager_instance=strategy_manager,
+        )
+        decision_pipeline.extra_context = {}
+
     except Exception as e:
         logger.critical(
             f"FATAL: Erreur lors de l'initialisation des modules fondamentaux: {e}",
@@ -3244,7 +3259,7 @@ def main(args: argparse.Namespace) -> None:
         target=scalping_fast_thread,
         args=(
             mt5_connector,
-            config_manager.decision_pipeline,
+            decision_pipeline,
             trade_executor,
             config_manager,
             mecano,
@@ -3263,7 +3278,7 @@ def main(args: argparse.Namespace) -> None:
         target=liquidity_main_thread,
         args=(
             mt5_connector,
-            config_manager.decision_pipeline,
+            decision_pipeline,
             trade_executor,
             config_manager,
             mecano,
