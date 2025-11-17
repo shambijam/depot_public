@@ -925,36 +925,11 @@ def monitor_burst_baskets(
         )
         return False
 
-    def _update_basket_sltp(bid: str, reason: str, force: bool = False) -> dict:
-        """
-        Pont vers sltp.update_basket_sltp_dynamically, tolérant:
-            - self.sltp.update_basket_sltp_dynamically(...)
-            - ou self.update_basket_sltp_dynamically(...) si self.sltp absent
-        """
-        owner = getattr(self, "sltp", None) or self
-        fn = getattr(owner, "update_basket_sltp_dynamically", None)
-        if not callable(fn):
-            try:
-                self.logger.warning(
-                    f"[BURST] Pas de fonction update_basket_sltp_dynamically sur {type(owner).__name__}"
-                )
-            except Exception:
-                pass
-            return {"status": "error", "reason": "no_update_fn"}
-        try:
-            return fn(basket_id=bid, reason=reason, force_refresh=bool(force))
-        except Exception as e:
-            try:
-                self.logger.debug(
-                    f"[BURST] update_basket_sltp_dynamically exception: {e}"
-                )
-            except Exception:
-                pass
-            return {"status": "error", "reason": "exception"}
+    # =========================
+    # Phase A — FAST (profit target)
+    # =========================
+    target_profit = float(closure.get("target_profit_pips", 15.0))
 
-    # =========================
-    # Phase A — FAST (profit-only)
-    # =========================
     if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         while True:
@@ -967,7 +942,7 @@ def monitor_burst_baskets(
 
             any_action = False
             for basket_id, pos in baskets.items():
-                # init âge & mémoire
+                # init âge
                 if basket_id not in self._basket_first_seen_ts:
                     self._basket_first_seen_ts[basket_id] = time.time()
                 age_ms = int(
@@ -977,23 +952,27 @@ def monitor_burst_baskets(
                 if age_ms < min_age_ms_for_any_close:
                     continue
 
-                _update_seen_green(basket_id, pos, all_seen_green_pips)
-                all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
+                # Vérifier si panier plein (optionnel)
+                expected = _expected_count_from(pos) if require_full_count else None
+                if expected is not None and len(pos) < expected:
+                    continue  # Attendre panier complet
 
-                if _all_green_and_full(pos):
-                    if (
-                        require_all_seen
-                        and not all_seen_ok
-                        and age_ms < loss_guard_arming_ms
-                    ):
-                        pass  # attend l’armement
-                    else:
-                        self.logger.info(
-                            f"🎯 [FAST] {basket_id} PLEIN & TOUT VERT → CLOSE"
-                        )
-                        if _close_basket(basket_id, pos):
-                            any_action = True
-                            continue
+                # ✅ CALCUL PNL BASKET MATHÉMATIQUE
+                stats = _basket_stats(pos)
+                if not stats:
+                    continue
+                sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
+
+                # ✅ FERMETURE si PnL >= target_profit_pips
+                if pnl_pips >= target_profit:
+                    self.logger.info(
+                        f"🎯 [PROFIT_TARGET] {basket_id} ({sym} {direction}) | "
+                        f"PnL={pnl_pips:.1f}p >= {target_profit:.1f}p | "
+                        f"Age={age_ms}ms | Count={len(pos)}/{expected or len(pos)} → FERMETURE COMPLÈTE"
+                    )
+                    if _close_basket(basket_id, pos):
+                        any_action = True
+                        continue
 
             if time.monotonic() >= deadline:
                 break
@@ -1001,58 +980,9 @@ def monitor_burst_baskets(
                 time.sleep(rt_poll_interval_ms / 1000.0)
 
     # =========================
-    # Phase B — filet de perte (optionnel)
+    # Phase B — SUPPRIMÉE (loss guard désactivé, SL -300 pips suffit)
     # =========================
-    if not enable_loss_guard:
-        return
-
-    open_positions = _snapshot_positions()
-    if not open_positions:
-        return
-    baskets = _group_baskets(open_positions)
-    if not baskets:
-        return
-
-    for basket_id, pos in baskets.items():
-        if basket_id not in self._basket_first_seen_ts:
-            self._basket_first_seen_ts[basket_id] = time.time()
-        age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
-
-        _update_seen_green(basket_id, pos, all_seen_green_pips)
-        all_seen_ok = bool(self._basket_all_seen.get(basket_id, False))
-
-        # encore une passe profit-only
-        if (
-            enable_profit_close
-            and age_ms >= min_age_ms_for_any_close
-            and _all_green_and_full(pos)
-        ):
-            if require_all_seen and not all_seen_ok and age_ms < loss_guard_arming_ms:
-                pass
-            else:
-                self.logger.info(
-                    f"🔄 {basket_id} PLEIN & TOUT VERT → OPTIMISE SL/TP (profit_optimization)"
-                )
-                _update_basket_sltp(basket_id, reason="profit_optimization", force=True)
-                continue
-
-        stats = _basket_stats(pos)
-        if not stats:
-            continue
-        sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
-
-        # filet de perte
-        if age_ms >= min_age_ms_for_any_close and pnl_pips <= -abs(max_loss_pips):
-            if age_ms < loss_guard_arming_ms and (require_all_seen and not all_seen_ok):
-                self.logger.warning(
-                    f"⏸️ {basket_id} perte {pnl_pips:.1f}p mais guard non armé "
-                    f"(age={age_ms}ms<{loss_guard_arming_ms}ms)"
-                )
-            else:
-                self.logger.warning(
-                    f"🛡️ {basket_id} perte {pnl_pips:.1f}p ≤ -{abs(max_loss_pips):.1f}p → PROTECTION SL/TP"
-                )
-                _update_basket_sltp(basket_id, reason="loss_protection", force=True)
+    # Aucune action si enable_loss_guard = false (défaut)
 
 
 # ======================================================================================

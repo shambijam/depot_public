@@ -210,10 +210,6 @@
       "news_blackout_before_min": 15,
       "news_blackout_after_min": 15
     },
-    "trailing_stop": {
-      "enabled": true,
-      "distance_pips": 2.5
-    },
     "risk_caps": {
       "enabled": true,
       "max_trades_per_day": 20,

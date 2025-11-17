@@ -1,6 +1,6 @@
 {
   "strategy_name": "scalping",
-  "description": "Scalping Burst institutionnel — SL/TP 400 pips puis trailing à +28 pips. Pas de veto, pas de gates bloquants.",
+  "description": "Scalping Burst institutionnel — SL/TP 300 pips fixes. Pas de veto, pas de gates bloquants.",
   "version": "4.4-unblocked",
   "tradeable_assets": [
     "XAUUSD",
@@ -53,25 +53,16 @@
             }
           }
         },
-        "trailing": {
+        "closure_rules": {
           "enabled": true,
-          "activation": {
-            "mode": "PIPS",
-            "min_pips": 28.0
-          },
-          "step": {
-            "mode": "PIPS",
-            "min_pips": 8.0,
-            "update_interval_sec": 2.0
-          },
-          "break_even": {
-            "enabled": false
-          },
-          "broker_floors": {
-            "min_sl_distance_pips": 6.0,
-            "spread_multiplier": 0.0,
-            "extra_buffer_pips": 0.0
-          }
+          "enable_profit_close": true,
+          "target_profit_pips": 15.0,
+          "require_full_count_for_profit_close": true,
+          "rt_fast_window_ms": 120000,
+          "rt_poll_interval_ms": 100,
+          "min_age_ms_for_any_close": 2000,
+          "enable_loss_guard": false,
+          "max_loss_pips": 50.0
         }
       },
       "footprint": {
@@ -119,8 +110,7 @@
     }
   },
   "exit_rules": {
-    "managed_by": "sltp",
-    "use_trailing_stop": true
+    "managed_by": "sltp"
   },
   "phase_detection": {
     "use_phase_observer": false,

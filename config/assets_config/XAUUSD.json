@@ -1,5 +1,5 @@
 {
-  "description": "Configuration institutionnelle pour XAUUSD (or) — SL/TP 400, trailing à +28 pips.",
+  "description": "Configuration institutionnelle pour XAUUSD (or) — SL/TP 300 pips fixes.",
   "symbol": "XAUUSD",
   "type": "metal",
   "profile": "institutionnel",

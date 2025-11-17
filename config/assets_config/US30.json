@@ -60,10 +60,6 @@
             ],
             "volatility_threshold": 0.8
         },
-        "enable_trailing_stop": {
-            "value": true,
-            "minimum_profit_threshold": 0.3
-        },
         "enable_grid_in_range_only": true,
         "auto_blacklist_high_spread_assets": {
             "value": true,
@@ -83,18 +79,7 @@
             "trending_market": 1.8,
             "high_volatility": 2.2
         },
-        "stop_loss_multiplier": 1.0,
-        "trailing_stop_start_after_percent": {
-            "base": 0.4,
-            "adaptive": true,
-            "high_volatility": 0.6
-        },
-        "trailing_step_points": {
-            "base": 50,
-            "adaptive_to_atr": true,
-            "minimum": 20,
-            "maximum": 150
-        }
+        "stop_loss_multiplier": 1.0
     },
     "temporal_context": {
         "avoid_trading_hours": {
@@ -174,9 +159,7 @@
             "adjustment_frequency": "weekly",
             "parameters_to_adjust": [
                 "risk_per_trade",
-                "take_profit_multiplier",
-                "trailing_parameters"
-            ]
+                "take_profit_multiplier"]
         }
     },
     "weighting": {

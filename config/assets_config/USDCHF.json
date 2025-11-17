@@ -55,10 +55,6 @@
       ],
       "volatility_threshold": 0.6
     },
-    "enable_trailing_stop": {
-      "value": true,
-      "minimum_profit_threshold": 0.3
-    },
     "enable_grid_in_range_only": true,
     "auto_blacklist_high_spread_assets": {
       "value": true,
@@ -75,10 +71,6 @@
       },
       "liquidity_sweep": {
         "lookback_bars": 20
-      },
-      "trailing_stop": {
-        "enabled": true,
-        "distance_pips": 5.0
       },
       "execution": {
         "min_sl_tp_distance_pips": 8.0
@@ -108,18 +100,7 @@
             "hard_min_points": 8
           }
         },
-        "stop_loss_multiplier": 1.0,
-        "trailing_stop_start_after_percent": {
-          "base": 0.4,
-          "adaptive": true,
-          "high_volatility": 0.6
-        },
-        "trailing_step_points": {
-          "base": 5,
-          "adaptive_to_atr": true,
-          "minimum": 3,
-          "maximum": 12
-        }
+        "stop_loss_multiplier": 1.0
       },
       "trade_frequency": {
         "enabled": true,

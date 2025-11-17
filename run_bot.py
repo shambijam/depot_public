@@ -2192,11 +2192,14 @@ def run_single_pipeline_cycle(
         )
 
         # === Maintenance périodique SLTP dynamique ===
-        # ⚠️ DÉSACTIVÉ : Remplacé par le thread dédié trailing_stop_monitor_thread (toutes les 2s en temps réel)
-        # Ce code tournait dans le cycle principal (toutes les 23-60s) et ratait les activations.
-        # Le nouveau thread surveille en continu et active le trailing dès que PnL >= 28 pips.
-        # Voir section "# 8. Démarrage du Thread de Surveillance Trailing Stop" dans main()
-        pass
+        # 📊 Surveillance et fermeture automatique des baskets au profit cible
+        # Surveille en temps réel (100ms/check) et ferme dès que PnL >= target_profit_pips (défaut: 15 pips)
+        try:
+            trade_executor.monitor_burst_baskets(
+                config=base_config
+            )
+        except Exception as e:
+            logger.debug(f"[BURST_MONITOR] Erreur: {e}")
 
         # === Intégrer les décisions Fusion dans le package ===
         try:
@@ -2753,212 +2756,6 @@ def run_single_pipeline_cycle(
         return trade_executed_successfully
 
 
-def trailing_stop_monitor_thread(
-    trade_executor,
-    mt5_connector,
-    stop_event: threading.Event,
-    update_interval_sec: float = 2.0,
-    logger=None
-):
-    """
-    Thread dédié à la surveillance en temps réel des trailing stops.
-
-    S'exécute toutes les `update_interval_sec` secondes (défaut: 2s) pour :
-    - Récupérer les baskets actifs depuis MT5
-    - Vérifier leur PnL
-    - Activer le trailing stop si PnL >= 28 pips
-    - Mettre à jour les SL dynamiquement
-
-    Args:
-        trade_executor: Instance de TradeExecutor avec la fonction update_basket_sltp_dynamically
-        mt5_connector: Connexion MT5 pour récupérer les positions
-        stop_event: Event pour arrêter proprement le thread
-        update_interval_sec: Intervalle de surveillance (défaut 2s)
-        logger: Logger pour les messages
-    """
-    if logger is None:
-        logger = logging.getLogger(__name__)
-
-    # Logs forcés au démarrage (print + logger)
-    print(f"🚀 [TRAILING_MONITOR] Thread démarré ! interval={update_interval_sec}s", flush=True)
-    logger.info(f"🚀 [TRAILING_MONITOR] Thread de surveillance démarré (interval={update_interval_sec}s)")
-
-    # Pattern pour extraire basket_id du commentaire MT5
-    BASKET_PATTERN = re.compile(r"bs_([a-f0-9]{8})")
-
-    # 📊 HISTORIQUE PnL: Dictionnaire pour tracker l'évolution du PnL de chaque basket
-    # Format: { basket_id: { "history": [pnl1, pnl2, ...], "max": float, "min": float } }
-    pnl_history = {}
-
-    print(f"🔍 [TRAILING_MONITOR] Entrée dans la boucle while...", flush=True)
-
-    while not stop_event.is_set():
-        print(f"🔄 [TRAILING_MONITOR] Début d'itération...", flush=True)
-        try:
-            # Récupérer toutes les positions ouvertes
-            try:
-                positions = mt5_connector.get_open_positions()
-                print(f"📊 [TRAILING_MONITOR] Positions récupérées: {len(positions) if positions else 0}", flush=True)
-            except Exception as e:
-                print(f"❌ [TRAILING_MONITOR] Erreur get_open_positions: {e}", flush=True)
-                logger.debug(f"[TRAILING_MONITOR] Erreur get_open_positions: {e}")
-                positions = []
-
-            if not positions:
-                # Pas de positions ouvertes, attendre
-                stop_event.wait(update_interval_sec)
-                continue
-
-            # Extraire les basket_ids uniques des commentaires
-            basket_ids = set()
-            for pos in positions:
-                try:
-                    comment = pos.get("comment", "") if isinstance(pos, dict) else getattr(pos, "comment", "")
-                    match = BASKET_PATTERN.search(str(comment))
-                    if match:
-                        basket_ids.add(match.group(1))
-                except Exception:
-                    continue
-
-            print(f"🎯 [TRAILING_MONITOR] Baskets détectés: {basket_ids}", flush=True)
-
-            if not basket_ids:
-                # Aucun basket trouvé
-                print(f"⏸️ [TRAILING_MONITOR] Aucun basket, attente {update_interval_sec}s...", flush=True)
-                stop_event.wait(update_interval_sec)
-                continue
-
-            # === 🧹 NETTOYAGE: Supprimer l'historique des baskets fermés ===
-            closed_baskets = set(pnl_history.keys()) - basket_ids
-            if closed_baskets:
-                for closed_id in closed_baskets:
-                    print(f"🔚 [TRAILING_MONITOR] Basket {closed_id} fermé → Suppression historique", flush=True)
-                    del pnl_history[closed_id]
-
-            # Mettre à jour chaque basket
-            for basket_id in basket_ids:
-                if stop_event.is_set():
-                    break
-
-                try:
-                    # === CALCUL PNL DU BASKET AVANT UPDATE (pour suivi évolution) ===
-                    basket_positions = [p for p in positions if basket_id in str(p.get("comment", "") if isinstance(p, dict) else getattr(p, "comment", ""))]
-                    total_profit_usd = 0.0
-                    total_pnl_pips = 0.0
-
-                    for p in basket_positions:
-                        profit = float(p.get("profit", 0.0) if isinstance(p, dict) else getattr(p, "profit", 0.0))
-                        volume = float(p.get("volume", 0.0) if isinstance(p, dict) else getattr(p, "volume", 0.0))
-                        total_profit_usd += profit
-
-                        # Conversion pips (XAUUSD: 1 pip = 10$ par lot)
-                        pip_value = 10.0 * volume
-                        if pip_value > 0:
-                            total_pnl_pips += profit / pip_value
-
-                    # === 📊 HISTORIQUE PnL: Tracker l'évolution ===
-                    if basket_id not in pnl_history:
-                        # Nouveau basket: initialiser l'historique
-                        pnl_history[basket_id] = {
-                            "history": [total_pnl_pips],
-                            "max": total_pnl_pips,
-                            "min": total_pnl_pips
-                        }
-                        variation_str = "🆕 NEW"
-                        trend_emoji = "➡️"
-                    else:
-                        # Basket existant: mettre à jour l'historique
-                        hist = pnl_history[basket_id]["history"]
-                        previous_pnl = hist[-1] if hist else total_pnl_pips
-
-                        # Ajouter le nouveau PnL (garder les 10 dernières valeurs)
-                        hist.append(total_pnl_pips)
-                        if len(hist) > 10:
-                            hist.pop(0)
-
-                        # Mettre à jour min/max
-                        pnl_history[basket_id]["max"] = max(pnl_history[basket_id]["max"], total_pnl_pips)
-                        pnl_history[basket_id]["min"] = min(pnl_history[basket_id]["min"], total_pnl_pips)
-
-                        # Calculer la variation depuis le dernier check (2s)
-                        variation = total_pnl_pips - previous_pnl
-
-                        # Déterminer la tendance (emoji)
-                        if variation > 0.1:
-                            trend_emoji = "📈"  # En hausse
-                            variation_str = f"+{variation:.2f}p"
-                        elif variation < -0.1:
-                            trend_emoji = "📉"  # En baisse
-                            variation_str = f"{variation:.2f}p"
-                        else:
-                            trend_emoji = "➡️"  # Stable
-                            variation_str = "~0.00p"
-
-                    # Récupérer min/max pour affichage
-                    pnl_max = pnl_history[basket_id]["max"]
-                    pnl_min = pnl_history[basket_id]["min"]
-
-                    # === 📊 AFFICHAGE ENRICHI AVEC HISTORIQUE ===
-                    print(f"", flush=True)  # Ligne vide pour la lisibilité
-                    print(f"{'='*100}", flush=True)
-                    print(f"📊 [TRAILING_MONITOR] Basket {basket_id} | {len(basket_positions)} positions", flush=True)
-                    print(f"   💰 PnL actuel: {total_pnl_pips:+.2f} pips (${total_profit_usd:+.2f}) {trend_emoji}", flush=True)
-                    print(f"   📈 Variation 2s: {variation_str}", flush=True)
-                    print(f"   📊 Range session: [{pnl_min:.2f}p → {pnl_max:.2f}p] (amplitude: {pnl_max - pnl_min:.2f}p)", flush=True)
-                    print(f"   🎯 Seuil activation trailing: 28.00 pips", flush=True)
-
-                    # Afficher l'historique des 5 dernières valeurs
-                    if len(pnl_history[basket_id]["history"]) >= 2:
-                        recent_history = pnl_history[basket_id]["history"][-5:]
-                        history_str = " → ".join([f"{pnl:.1f}p" for pnl in recent_history])
-                        print(f"   📜 Historique 10s: {history_str}", flush=True)
-
-                    print(f"{'='*100}", flush=True)
-                    print(f"", flush=True)
-
-                    logger.info(f"📊 [TRAILING_MONITOR] Basket {basket_id}: {len(basket_positions)} pos | PnL={total_pnl_pips:.2f} pips (${total_profit_usd:.2f}) | Variation={variation_str} {trend_emoji}")
-
-                    # Appeler la fonction de mise à jour du trailing
-                    # force_refresh=True pour éviter le skip "too_soon"
-                    print(f"🔧 [DEBUG] Appel update_basket_sltp_dynamically pour basket {basket_id}...", flush=True)
-                    logger.critical(f"🔧 [DEBUG] Avant update_basket_sltp_dynamically | basket={basket_id} | PnL={total_pnl_pips:.2f} pips")
-                    result = trade_executor.update_basket_sltp_dynamically(
-                        basket_id=basket_id,
-                        reason="realtime_monitor",
-                        force_refresh=True,  # ✅ FIX: Bypass "too_soon" check
-                    )
-                    logger.critical(f"🔧 [DEBUG] Après update_basket_sltp_dynamically | result={result}")
-
-                    # Logger TOUS les résultats (pas seulement success)
-                    status = result.get("status", "unknown")
-                    reason = result.get("reason", "N/A")
-                    pnl = result.get("pnl_pips", total_pnl_pips)
-
-                    if status == "success":
-                        print(f"✅ [TRAILING_MONITOR] Basket {basket_id}: trailing mis à jour | PnL={pnl:.1f}p", flush=True)
-                        logger.info(f"✅ [TRAILING_MONITOR] Basket {basket_id}: trailing mis à jour (PnL={pnl:.1f}p)")
-                    elif status == "skipped":
-                        print(f"⏭️ [TRAILING_MONITOR] Basket {basket_id}: SKIPPED | reason={reason} | PnL={pnl:.1f}p", flush=True)
-                        logger.debug(f"⏭️ [TRAILING_MONITOR] Basket {basket_id}: skipped (reason={reason})")
-                    elif status == "error":
-                        print(f"❌ [TRAILING_MONITOR] Basket {basket_id}: ERROR | reason={reason} | PnL={pnl:.1f}p", flush=True)
-                        logger.warning(f"❌ [TRAILING_MONITOR] Basket {basket_id}: error (reason={reason})")
-                    else:
-                        print(f"❓ [TRAILING_MONITOR] Basket {basket_id}: UNKNOWN | status={status} | reason={reason} | PnL={pnl:.1f}p", flush=True)
-                        logger.debug(f"❓ [TRAILING_MONITOR] Basket {basket_id}: unknown status={status} reason={reason}")
-
-                except Exception as e:
-                    logger.debug(f"[TRAILING_MONITOR] Erreur update basket {basket_id}: {e}")
-
-        except Exception as e:
-            logger.error(f"[TRAILING_MONITOR] Erreur dans la boucle: {e}", exc_info=True)
-
-        # Attendre avant le prochain cycle
-        stop_event.wait(update_interval_sec)
-
-    logger.info("🛑 [TRAILING_MONITOR] Thread de surveillance arrêté")
-
-
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
@@ -3136,41 +2933,6 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
 
-    # 8. Démarrage du Thread de Surveillance Trailing Stop
-    print("=" * 80, flush=True)
-    print("🚀 DÉMARRAGE DU THREAD DE SURVEILLANCE TRAILING STOP", flush=True)
-    print("=" * 80, flush=True)
-
-    try:
-        trailing_stop_event = threading.Event()
-        trailing_monitor_interval = config_manager.get(
-            "entry_rules.scalping.burst_scalping.trailing.step.update_interval_sec", 2.0
-        )
-
-        print(f"📋 Configuration: interval={trailing_monitor_interval}s", flush=True)
-        print(f"📋 trade_executor: {trade_executor}", flush=True)
-        print(f"📋 mt5_connector: {mt5_connector}", flush=True)
-
-        trailing_thread = threading.Thread(
-            target=trailing_stop_monitor_thread,
-            args=(trade_executor, mt5_connector, trailing_stop_event, trailing_monitor_interval, logger),
-            daemon=True,
-            name="TrailingStopMonitor"
-        )
-
-        print(f"📋 Thread créé: {trailing_thread}", flush=True)
-        trailing_thread.start()
-        print(f"✅ Thread.start() appelé", flush=True)
-
-        logger.info(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)")
-        print(f"✅ Thread de surveillance trailing stop démarré (interval={trailing_monitor_interval}s)", flush=True)
-        print("=" * 80, flush=True)
-
-    except Exception as e:
-        print(f"❌ ERREUR CRITIQUE: Impossible de démarrer le thread trailing: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        logger.error(f"ERREUR CRITIQUE: Thread trailing non démarré: {e}", exc_info=True)
 
     # 9. Boucle Principale
     try:
@@ -3250,18 +3012,6 @@ def main(args: argparse.Namespace) -> None:
             "telegram_critical",
         )
     finally:
-        # Arrêt propre du thread de surveillance trailing stop
-        try:
-            logger.info("🛑 Arrêt du thread de surveillance trailing stop...")
-            trailing_stop_event.set()
-            trailing_thread.join(timeout=5.0)
-            if trailing_thread.is_alive():
-                logger.warning("⚠️ Thread trailing stop n'a pas terminé dans les 5s")
-            else:
-                logger.info("✅ Thread trailing stop arrêté proprement")
-        except Exception as e:
-            logger.error(f"Erreur arrêt thread trailing: {e}")
-
         if "ai_decision" in locals() and ai_decision:
             logger.info("Sauvegarde historique IA avant arrêt...")
             ai_decision._save_suggestion_history()
