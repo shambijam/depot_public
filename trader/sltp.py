@@ -1141,100 +1141,53 @@ def _calculate_dynamic_trailing(
     min_update_interval_sec: int = 2,
 ) -> Optional[float]:
     """
-    Calcule le nouveau SL pour le trailing stop.
-
-    Logique:
-    1. Vérifie que PnL >= activation_pips
-    2. Vérifie l'intervalle depuis dernière update
-    3. Calcule nouveau SL en suivant le prix (distance = min_distance_pips)
-    4. Ne jamais détériorer le SL
-
-    Retourne:
-        - float: Nouveau SL
-        - None: Pas de changement nécessaire
+    FONCTION ULTRA-SIMPLE : Trailing stop à 8 pips du prix actuel.
+    Si PnL >= 28 pips → Place le SL à 8 pips du prix, point final.
     """
     import time
 
     try:
-
-        # Récupération des infos symbole
-        point = float(getattr(symbol_info, "point", 0.0) or 0.0)
-        digits = int(getattr(symbol_info, "digits", 0) or 0)
-        points_per_pip = 10.0 if digits in (3, 5) else 1.0
-        pip_size = point * points_per_pip if point > 0 else 0.0001
-
-        # Déterminer la direction
-        if basket_context and "direction" in basket_context:
-            is_buy = basket_context["direction"].upper() == "BUY"
-        else:
-            # Fallback: si SL < entry, c'est un BUY, sinon SELL
-            is_buy = current_sl < entry_price
-
-        # 1. Vérifier le PnL BASKET
-        if basket_context:
-            pnl_pips = float(basket_context.get("basket_pnl_pips", 0.0))
-        else:
+        # 1. Vérifier PnL basket
+        if not basket_context:
             return None
 
-        # Vérifier activation BASKET (ex: +28 pips)
+        pnl_pips = float(basket_context.get("basket_pnl_pips", 0.0))
+        basket_id = basket_context.get("basket_id", "unknown")
+
+        # Si PnL < 28 pips, pas de trailing
         if pnl_pips < activation_pips:
             return None
 
-        # Activation trailing détectée
-        basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
-        self.logger.info(f"🔥 [TRAILING] Basket {basket_id}: PnL={pnl_pips:.1f}p → Activation trailing")
+        # 2. Direction du trade
+        direction = basket_context.get("direction", "").upper()
+        is_buy = (direction == "BUY")
 
-        # 2. Vérifier intervalle temps (anti-spam)
-        now = time.time()
-        last_map = getattr(self, "_last_trailing_sl_update", None)
-        if last_map is None:
-            last_map = {}
-            setattr(self, "_last_trailing_sl_update", last_map)
+        # 3. Calcul pip_size pour XAUUSD
+        point = float(getattr(symbol_info, "point", 0.01))
+        digits = int(getattr(symbol_info, "digits", 5))
+        points_per_pip = 10.0 if digits in (3, 5) else 1.0
+        pip_size = point * points_per_pip  # Pour XAUUSD: 0.01 * 10 = 0.10
 
-        basket_id = basket_context.get("basket_id", "unknown") if basket_context else "unknown"
-        last_ts = last_map.get(basket_id, 0.0)
-        time_since_last = now - last_ts
-
-        if time_since_last < min_update_interval_sec:
-            return None
-
-        # 3. Calculer nouveau SL
-        min_distance_price = min_distance_pips * pip_size
-
-        # DEBUG: Log du calcul
-        self.logger.critical(f"🔍 [TRAILING_CALC] Basket {basket_id}: min_distance_pips={min_distance_pips:.1f} | pip_size={pip_size:.5f} | min_distance_price={min_distance_price:.5f} | current_price={current_price:.5f}")
+        # 4. Calculer nouveau SL : 8 pips du prix actuel
+        distance_price = min_distance_pips * pip_size  # 8 * 0.10 = 0.80
 
         if is_buy:
-            # BUY: SL suit le prix en montant (prix monte, SL monte)
-            new_sl = current_price - min_distance_price
-            new_sl = max(new_sl, current_sl)  # Ne jamais baisser le SL
+            new_sl = current_price - distance_price  # Prix - 8 pips
+            new_sl = max(new_sl, current_sl)  # Ne jamais baisser
         else:
-            # SELL: SL suit le prix en descendant (prix descend, SL descend)
-            new_sl = current_price + min_distance_price
-            new_sl = min(new_sl, current_sl)  # SL descend avec le prix
+            new_sl = current_price + distance_price  # Prix + 8 pips
+            new_sl = min(new_sl, current_sl)  # Ne jamais monter
 
-        # Arrondir
         new_sl = round(new_sl, digits)
 
-        # Vérifier changement significatif
-        change_pips = abs(new_sl - current_sl) / pip_size if pip_size > 0 else 0
+        # 5. Log et retour
+        change_pips = abs(new_sl - current_sl) / pip_size
+        self.logger.warning(f"🚀 [TRAILING_SIMPLE] Basket {basket_id} ({direction}): PnL={pnl_pips:.1f}p | Prix={current_price:.5f} | SL: {current_sl:.5f} → {new_sl:.5f} | Change={change_pips:.1f}p | Distance={distance_price:.5f}")
 
-        if change_pips < 0.5:
-            direction_str = "BUY" if is_buy else "SELL"
-            self.logger.warning(f"⚠️ [TRAILING] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | Prix={current_price:.2f} | SL actuel={current_sl:.2f} | SL calculé={new_sl:.2f} | Distance={min_distance_pips:.1f}p → Changement trop petit ({change_pips:.2f}p < 0.5p)")
-            return None
-
-        # Mettre à jour le timestamp
-        last_map[basket_id] = now
-
-        # Log succès
-        direction_str = "BUY" if is_buy else "SELL"
-        self.logger.info(f"✅ [TRAILING] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | SL: {current_sl:.2f} → {new_sl:.2f} ({change_pips:+.1f}p)")
-
-        return new_sl
+        return new_sl if change_pips >= 0.5 else None
 
     except Exception as e:
-        self.logger.error(f"[TRAILING] Error: {e}", exc_info=True)
+        self.logger.error(f"[TRAILING_SIMPLE] Error: {e}", exc_info=True)
         return None
 
 def apply_dynamic_trailing(
