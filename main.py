@@ -593,7 +593,20 @@ def main(args: argparse.Namespace) -> None:
             # 🔍 Surveillance des baskets burst (fermeture à +15 pips)
             try:
                 base_config = config_manager.get_current_dynamic_config()
-                trade_executor.monitor_burst_baskets(config=base_config)
+
+                # Fusionner la config de stratégie scalping pour avoir entry_rules
+                try:
+                    scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                    merged_config = dict(base_config)
+                    if "entry_rules" in scalping_config:
+                        merged_config.setdefault("entry_rules", {}).update(
+                            scalping_config["entry_rules"]
+                        )
+                except Exception as merge_err:
+                    logger.warning(f"[BASKET_MONITOR] Fusion config scalping échouée: {merge_err}")
+                    merged_config = base_config
+
+                trade_executor.monitor_burst_baskets(config=merged_config)
             except Exception as e:
                 logger.debug(f"[BASKET_MONITOR] Erreur surveillance baskets: {e}")
 

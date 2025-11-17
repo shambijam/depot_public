@@ -617,6 +617,11 @@ def monitor_burst_baskets(
     Fermetures auto désactivées par défaut (closure_rules.enabled=false).
     """
 
+    # 🔍 DEBUG: Log entrée fonction
+    logger = getattr(self, "logger", None)
+    if logger:
+        logger.info("🚀 [BASKET_MONITOR] Fonction monitor_burst_baskets appelée")
+
     # ---- Conf / garde-fous ----
     burst_cfg = (
         config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
@@ -637,8 +642,17 @@ def monitor_burst_baskets(
     min_age_ms_for_any_close = int(
         closure.get("min_age_ms_for_any_close", 3000)
     )  # anti-fermeture trop précoce
+    target_profit_pips = float(closure.get("target_profit_pips", 15.0))
+
+    # 🔍 DEBUG: Logs détaillés de config
+    logger = getattr(self, "logger", None)
+    if logger:
+        logger.info(f"🔍 [BASKET_MONITOR] enabled={enabled} | enable_profit_close={enable_profit_close} | target_profit_pips={target_profit_pips}")
+        logger.info(f"🔍 [BASKET_MONITOR] rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}")
 
     if not enabled:
+        if logger:
+            logger.warning("⛔ [BASKET_MONITOR] closure_rules.enabled=False → surveillance désactivée")
         # totalement passif si non activé
         return
 
