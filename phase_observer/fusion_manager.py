@@ -257,6 +257,14 @@ class FusionManager:
         if degraded["is_degraded"]:
             quality["warnings"].append("degraded_mode_no_triggers")
 
+        # 4) Règles métier scalping
+        rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
+
+        # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
+        fused = self._calculate_fused_confidence(
+            n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
+        )
+
         # === DEBUG 1C: DUMP normalized inputs ===
         try:
             of_sum = (n_of.get("summary") or {}) if isinstance(n_of, dict) else {}
@@ -280,14 +288,6 @@ class FusionManager:
             )
         except Exception:
             pass
-
-        # 4) Règles métier scalping
-        rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
-
-        # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
-        fused = self._calculate_fused_confidence(
-            n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
-        )
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
         decision = self._final_decision("AUTO", fused, n_tr, coherence, cfg)
@@ -318,7 +318,6 @@ class FusionManager:
                 "votes": coherence["votes"],
             },
             "quality": quality,
-            "suggested_trailing": trail,
         }
 
     # -------------- 1) Input Validator --------------
