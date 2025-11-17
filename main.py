@@ -590,6 +590,13 @@ def main(args: argparse.Namespace) -> None:
             if trade_executed_in_cycle:
                 daily_trade_count += 1
 
+            # 🔍 Surveillance des baskets burst (fermeture à +15 pips)
+            try:
+                base_config = config_manager.get_current_dynamic_config()
+                trade_executor.monitor_burst_baskets(config=base_config)
+            except Exception as e:
+                logger.debug(f"[BASKET_MONITOR] Erreur surveillance baskets: {e}")
+
             cycle_duration = time.time() - cycle_start_time
             logger.info(
                 f"[PERF] Cycle #{cycle_count} exécuté en {cycle_duration:.2f} secondes."
