@@ -66,9 +66,7 @@ def load_and_verify_environment(
             raise ValueError(
                 "La configuration chargée est vide ou invalide après l'initialisation."
             )
-        logger.info(
-            f"Configuration principale déjà chargée : {config_manager.dynamic_config_path}."
-        )
+        logger.info("Configuration principale déjà chargée avec succès.")
     except Exception as e:
         logger.critical(
             f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}",
