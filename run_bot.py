@@ -2798,7 +2798,7 @@ def scalping_fast_thread(
                 continue
 
             # MarketAnalyzer (phase + patterns + features)
-            from core.market_analyzer import MarketAnalyzer
+            from phase_observer.market_analyzer import MarketAnalyzer
             market_analyzer = MarketAnalyzer(config_manager, mecano)
             market_results = market_analyzer.analyze(rates_df, "XAUUSD")
 
