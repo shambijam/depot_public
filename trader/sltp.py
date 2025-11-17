@@ -1217,6 +1217,8 @@ def _calculate_dynamic_trailing(
         change_pips = abs(new_sl - current_sl) / pip_size if pip_size > 0 else 0
 
         if change_pips < 0.5:
+            direction_str = "BUY" if is_buy else "SELL"
+            self.logger.warning(f"⚠️ [TRAILING] Basket {basket_id} ({direction_str}): PnL={pnl_pips:.1f}p | Prix={current_price:.2f} | SL actuel={current_sl:.2f} | SL calculé={new_sl:.2f} | Distance={min_distance_pips:.1f}p → Changement trop petit ({change_pips:.2f}p < 0.5p)")
             return None
 
         # Mettre à jour le timestamp
