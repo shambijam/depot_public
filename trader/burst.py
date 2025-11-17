@@ -617,11 +617,6 @@ def monitor_burst_baskets(
     Fermetures auto désactivées par défaut (closure_rules.enabled=false).
     """
 
-    # 🔍 DEBUG: Log entrée fonction
-    logger = getattr(self, "logger", None)
-    if logger:
-        logger.info("🚀 [BASKET_MONITOR] Fonction monitor_burst_baskets appelée")
-
     # ---- Conf / garde-fous ----
     burst_cfg = (
         config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {})
@@ -644,11 +639,7 @@ def monitor_burst_baskets(
     )  # anti-fermeture trop précoce
     target_profit_pips = float(closure.get("target_profit_pips", 15.0))
 
-    # 🔍 DEBUG: Logs détaillés de config
     logger = getattr(self, "logger", None)
-    if logger:
-        logger.info(f"🔍 [BASKET_MONITOR] enabled={enabled} | enable_profit_close={enable_profit_close} | target_profit_pips={target_profit_pips}")
-        logger.info(f"🔍 [BASKET_MONITOR] rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}")
 
     if not enabled:
         if logger:
@@ -945,7 +936,6 @@ def monitor_burst_baskets(
     target_profit = float(closure.get("target_profit_pips", 15.0))
 
     if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
-        logger.info(f"🔍 [BASKET_MONITOR] Entrée boucle de surveillance | deadline={rt_fast_window_ms}ms | poll={rt_poll_interval_ms}ms")
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         loop_count = 0
 
@@ -954,15 +944,11 @@ def monitor_burst_baskets(
             open_positions = _snapshot_positions()
 
             if not open_positions:
-                logger.info(f"🔍 [BASKET_MONITOR] Loop #{loop_count} | Aucune position ouverte → sortie")
-                break
+                break  # Aucun log : tourne en continu
 
             baskets = _group_baskets(open_positions)
             if not baskets:
-                logger.info(f"🔍 [BASKET_MONITOR] Loop #{loop_count} | {len(open_positions)} positions mais aucun basket détecté → sortie")
-                break
-
-            logger.info(f"🔍 [BASKET_MONITOR] Loop #{loop_count} | {len(baskets)} basket(s) trouvé(s): {list(baskets.keys())}")
+                break  # Aucun log : tourne en continu
 
             any_action = False
             for basket_id, pos in baskets.items():
@@ -976,28 +962,17 @@ def monitor_burst_baskets(
                 # Vérifier si panier plein (optionnel)
                 expected = _expected_count_from(pos) if require_full_count else None
 
-                logger.info(f"🔍 [BASKET_MONITOR] Basket {basket_id} | age={age_ms}ms | count={len(pos)}/{expected} | min_age={min_age_ms_for_any_close}ms")
-
                 if age_ms < min_age_ms_for_any_close:
-                    logger.info(f"⏳ [BASKET_MONITOR] Basket {basket_id} SKIP: trop jeune ({age_ms}ms < {min_age_ms_for_any_close}ms)")
-                    continue
+                    continue  # Trop jeune : skip silencieux
 
                 if expected is not None and len(pos) < expected:
-                    logger.warning(f"⏳ [BASKET_MONITOR] Basket {basket_id} SKIP: incomplet ({len(pos)}/{expected} positions)")
-                    continue  # Attendre panier complet
+                    continue  # Incomplet : skip silencieux
 
                 # ✅ CALCUL PNL BASKET MATHÉMATIQUE
                 stats = _basket_stats(pos)
                 if not stats:
-                    logger.warning(f"⚠️ [BASKET_MONITOR] Basket {basket_id} SKIP: impossible de calculer stats")
-                    continue
+                    continue  # Stats impossibles : skip silencieux
                 sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
-
-                logger.info(
-                    f"📊 [BASKET_MONITOR] Basket {basket_id} | {sym} {direction} | "
-                    f"entry={avg_entry:.5f} | current={avg_price:.5f} | "
-                    f"PnL={pnl_pips:.2f}p | target={target_profit:.1f}p"
-                )
 
                 # ✅ FERMETURE si PnL >= target_profit_pips
                 if pnl_pips >= target_profit:
@@ -1007,21 +982,16 @@ def monitor_burst_baskets(
                         f"Age={age_ms}ms | Count={len(pos)}/{expected or len(pos)} → FERMETURE COMPLÈTE"
                     )
                     if _close_basket(basket_id, pos):
-                        logger.info(f"✅ [BASKET_MONITOR] Basket {basket_id} FERMÉ avec succès")
+                        logger.info(f"✅ [BASKET_CLOSED] {basket_id} fermé avec succès à +{pnl_pips:.1f} pips")
                         any_action = True
                         continue
                     else:
-                        logger.error(f"❌ [BASKET_MONITOR] Basket {basket_id} échec fermeture")
-                else:
-                    logger.debug(f"⏳ [BASKET_MONITOR] Basket {basket_id} | PnL {pnl_pips:.2f}p < {target_profit:.1f}p (attente)")
+                        logger.error(f"❌ [BASKET_CLOSE_FAILED] {basket_id} échec fermeture")
 
             if time.monotonic() >= deadline:
-                logger.info(f"⏰ [BASKET_MONITOR] Deadline atteinte après {loop_count} loops → sortie")
-                break
+                break  # Deadline : sortie silencieuse
             if not any_action:
                 time.sleep(rt_poll_interval_ms / 1000.0)
-
-        logger.info(f"🔍 [BASKET_MONITOR] Sortie boucle surveillance après {loop_count} loops")
     else:
         logger.warning(f"⛔ [BASKET_MONITOR] Boucle de surveillance NON démarrée: enable_profit_close={enable_profit_close} | rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}")
 

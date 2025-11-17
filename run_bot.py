@@ -2959,30 +2959,27 @@ def basket_monitor_thread(
     """
     logger.info("🚀 [BASKET_MONITOR_THREAD] Démarré (surveillance continue)")
 
+    # Fusionner la config UNE SEULE FOIS au démarrage
+    try:
+        base_config = config_manager.get_current_dynamic_config()
+        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+        merged_config = dict(base_config)
+        if "entry_rules" in scalping_config:
+            merged_config.setdefault("entry_rules", {}).update(
+                scalping_config["entry_rules"]
+            )
+        logger.info("✅ [BASKET_MONITOR] Config fusionnée (unique au démarrage)")
+    except Exception as merge_err:
+        logger.warning(f"⚠️ [BASKET_MONITOR] Fusion config échouée: {merge_err}")
+        merged_config = config_manager.get_current_dynamic_config()
+
     while not stop_event.is_set():
         try:
-            base_config = config_manager.get_current_dynamic_config()
-
-            # Fusionner la config de stratégie scalping pour avoir entry_rules
-            try:
-                scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                merged_config = dict(base_config)
-                if "entry_rules" in scalping_config:
-                    merged_config.setdefault("entry_rules", {}).update(
-                        scalping_config["entry_rules"]
-                    )
-                logger.info("[BASKET_MONITOR_THREAD] Config fusionnée avec succès")
-            except Exception as merge_err:
-                logger.warning(f"[BASKET_MONITOR_THREAD] Fusion config scalping échouée: {merge_err}")
-                merged_config = base_config
-
-            # Appeler monitor_burst_baskets en mode continu avec config fusionnée
-            logger.info("[BASKET_MONITOR_THREAD] Appel monitor_burst_baskets...")
+            # Appeler monitor_burst_baskets en mode continu (SANS logging répétitif)
             trade_executor.monitor_burst_baskets(config=merged_config)
-            logger.info("[BASKET_MONITOR_THREAD] monitor_burst_baskets terminé")
 
         except Exception as e:
-            logger.error(f"[BASKET_MONITOR_THREAD] Erreur: {e}", exc_info=True)
+            logger.error(f"❌ [BASKET_MONITOR] Erreur: {e}", exc_info=True)
             time.sleep(1)  # Éviter spam en cas d'erreur
 
     logger.info("🛑 [BASKET_MONITOR_THREAD] Arrêté proprement")
