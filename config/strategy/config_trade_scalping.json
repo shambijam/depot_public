@@ -103,7 +103,7 @@
         "ttl_ms": 800,
         "max_slippage_points": 100,
         "allow_degraded_vote": false,
-        "require_phase_alignment": false,
+        "require_phase_alignment": true,
         "require_footprint": true,
         "of_score_scale": "0_1",
         "ponderations": {
@@ -128,9 +128,7 @@
       "trending_retail_bull",
       "trending_retail_bear",
       "liquidity_eqh_eql",
-      "transitional",
-      "range_distribution",
-      "range_retail"
+      "transitional"
     ],
     "lookback_window": 12,
     "volatility_threshold": 0.0,

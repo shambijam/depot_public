@@ -441,6 +441,16 @@ def _calculate_sl_tp_prices(
         .get("sltp", {})
     ) or {}
 
+    # DEBUG: Tracer config path
+    try:
+        self.logger.critical(
+            f"🔍 [CONFIG_DEBUG] sltp_cfg keys={list(sltp_cfg.keys()) if sltp_cfg else 'EMPTY'} | "
+            f"config has entry_rules={('entry_rules' in config)} | "
+            f"config.entry_rules has scalping={('scalping' in config.get('entry_rules', {}))}"
+        )
+    except Exception:
+        pass
+
     rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
     rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
     rr_cap = float(sltp_cfg.get("rr_cap", 3.0) or 3.0)
@@ -448,6 +458,15 @@ def _calculate_sl_tp_prices(
 
     dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
     dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
+
+    # DEBUG: Tracer dyn_sl
+    try:
+        self.logger.critical(
+            f"🔍 [SL_CONFIG_DEBUG] dyn_sl keys={list(dyn_sl.keys()) if dyn_sl else 'EMPTY'} | "
+            f"dyn_sl.pips={dyn_sl.get('pips')}"
+        )
+    except Exception:
+        pass
 
     legacy = (
         (config.get("smart_sl_tp_settings") or {})
@@ -490,6 +509,16 @@ def _calculate_sl_tp_prices(
             "pips", legacy.get("stop_loss_pips", config.get("stop_loss_pips", 10))
         )
     )
+    # DEBUG: Tracer d'où vient sl_pips_default
+    try:
+        self.logger.critical(
+            f"🔍 [SL_DEBUG] sl_pips_default={sl_pips_default} | "
+            f"dyn_sl.pips={dyn_sl.get('pips')} | "
+            f"legacy.stop_loss_pips={legacy.get('stop_loss_pips')} | "
+            f"config.stop_loss_pips={config.get('stop_loss_pips')}"
+        )
+    except Exception:
+        pass
 
     # Paramètres TP dyn -> legacy -> défauts
     tp_atr_period = int(dyn_tp.get("atr_period", legacy.get("tp_atr_period", 14)))
