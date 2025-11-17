@@ -3052,16 +3052,16 @@ def main(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Les arguments parsés de la ligne de commande.
     """
     # 1. Configuration du Logging de Production (Appelé en premier)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    from utils.logger_setup import setup_production_logging
+
+    log_level = getattr(args, "log_level", "INFO")
+    setup_production_logging(log_level=log_level)
     logger = logging.getLogger(__name__)
 
     # 2. Initialisation du ConfigManager
     from core.config_manager import ConfigManager
 
-    config_manager = ConfigManager.get_instance()
+    config_manager = ConfigManager()
 
     # 3. Définir le mode d'exécution du bot (CLI > Config > Défaut)
     bot_mode = (
@@ -3159,8 +3159,6 @@ def main(args: argparse.Namespace) -> None:
 
     # 6. Vérification Finale de l'Environnement et des Modules
     try:
-        from run_bot import verify_environment_and_config, run_single_pipeline_cycle
-
         verify_environment_and_config(config_manager, mt5_connector, bot_mode)
 
         default_cycle_interval_from_config = config_manager.get(
