@@ -38,8 +38,7 @@ try:
     from mecanique_generale.mecano import Mecano
     from run_bot import (
         run_single_pipeline_cycle,
-        trailing_stop_monitor_thread,  # ✅ AJOUTÉ pour surveillance trailing
-    )  # ← on garde uniquement la fonction de run
+    )  
     from utils.logger_setup import (
         setup_production_logging,
     )  # ← source unique pour le logging

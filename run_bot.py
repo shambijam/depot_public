@@ -2756,6 +2756,176 @@ def run_single_pipeline_cycle(
         return trade_executed_successfully
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# THREADS SÉPARÉS POUR SCALPING (10s) ET LIQUIDITY (60s)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def scalping_fast_thread(
+    mt5_connector,
+    decision_pipeline,
+    trade_executor,
+    config_manager,
+    mecano,
+    strategy_manager,
+    is_dry_run,
+    stop_event: threading.Event,
+    global_context: dict,
+    context_lock: threading.Lock,
+    logger
+):
+    """
+    Thread dédié au SCALPING - Cycle rapide 10 secondes.
+
+    Responsabilités:
+    - Analyse M1 (XAUUSD uniquement)
+    - PhaseObserver → global_context (partagé avec liquidity)
+    - FusionManager → Signaux scalping
+    - monitor_burst_baskets() → Fermeture +15 pips
+    """
+    cycle_interval = 10  # 10 secondes
+    cycle_count = 0
+
+    logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 10s)")
+
+    while not stop_event.is_set():
+        cycle_count += 1
+        cycle_start = time.time()
+
+        try:
+            # Analyse XAUUSD uniquement
+            rates_df = mt5_connector.get_rates("XAUUSD", "M1", 500)
+            if rates_df is None or rates_df.empty:
+                logger.warning("[SCALPING_THREAD] Données XAUUSD indisponibles")
+                time.sleep(cycle_interval)
+                continue
+
+            # MarketAnalyzer (phase + patterns + features)
+            from core.market_analyzer import MarketAnalyzer
+            market_analyzer = MarketAnalyzer(config_manager, mecano)
+            market_results = market_analyzer.analyze(rates_df, "XAUUSD")
+
+            # Stocker dans global_context (avec lock)
+            with context_lock:
+                global_context["XAUUSD"] = market_results
+
+            # FusionManager (si disponible)
+            fusion_mgr = getattr(mecano, "fusion_manager", None)
+            if fusion_mgr and market_results:
+                # Extraction inputs fusion
+                orderflow = market_results.get("orderflow_v6", {})
+                footprint = market_results.get("footprint", {})
+                triggers = market_results.get("triggers", {})
+                strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
+
+                ctx = {
+                    "asset": "XAUUSD",
+                    "phase": market_results.get("phase", {}),
+                    "volatility_pips": market_results.get("volatility_pips", 0.0),
+                }
+
+                # Fusion decision
+                fusion_out = fusion_mgr.fuse(
+                    orderflow=orderflow,
+                    footprint=footprint,
+                    triggers=triggers,
+                    strategy_config=strat_cfg,
+                    context=ctx
+                )
+
+                # Si signal valide → Exécution
+                if fusion_out.get("ok"):
+                    logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {fusion_out['action']} (conf={fusion_out['fused_confidence']:.2f})")
+
+                    # Exécuter trade (utiliser la fast-lane existante)
+                    # TODO: Appeler trade_executor directement ici
+
+            # Surveillance baskets (fermeture +15 pips)
+            try:
+                base_config = config_manager.get_current_dynamic_config()
+                trade_executor.monitor_burst_baskets(config=base_config)
+            except Exception as e:
+                logger.debug(f"[SCALPING_THREAD] monitor_burst_baskets error: {e}")
+
+        except Exception as e:
+            logger.error(f"[SCALPING_THREAD] Erreur cycle #{cycle_count}: {e}", exc_info=True)
+
+        # Sleep dynamique
+        elapsed = time.time() - cycle_start
+        sleep_time = max(0, cycle_interval - elapsed)
+        if sleep_time > 0:
+            stop_event.wait(timeout=sleep_time)
+
+    logger.info("🛑 [SCALPING_THREAD] Arrêté proprement")
+
+
+def liquidity_main_thread(
+    mt5_connector,
+    decision_pipeline,
+    trade_executor,
+    config_manager,
+    mecano,
+    strategy_manager,
+    is_dry_run,
+    stop_event: threading.Event,
+    global_context: dict,
+    context_lock: threading.Lock,
+    logger
+):
+    """
+    Thread dédié à LIQUIDITY - Cycle standard 60 secondes.
+
+    Responsabilités:
+    - Analyse M1+M5 (EURUSD, GBPUSD, XAUUSD)
+    - decision_pipeline.institutional_decision_pipeline()
+    - LiquidityStrategy → EQH/EQL breakout
+    - Exécution ordres LIMIT
+    """
+    cycle_interval = 60  # 60 secondes
+    cycle_count = 0
+    daily_trade_count = 0
+
+    logger.info("🚀 [LIQUIDITY_THREAD] Démarré (cycle 60s)")
+
+    while not stop_event.is_set():
+        cycle_count += 1
+        cycle_start = time.time()
+
+        try:
+            # Utiliser la fonction existante run_single_pipeline_cycle
+            # mais en mode "liquidity only"
+            trade_executed = run_single_pipeline_cycle(
+                mt5_connector,
+                decision_pipeline,
+                trade_executor,
+                config_manager,
+                mecano,
+                strategy_manager,
+                is_dry_run,
+                cycle_count,
+                daily_trade_count,
+            )
+
+            if trade_executed:
+                daily_trade_count += 1
+
+            # Surveillance ordres LIMIT pending
+            try:
+                trade_executor.monitor_pending_orders()
+            except Exception as e:
+                logger.warning(f"[LIQUIDITY_THREAD] monitor_pending_orders error: {e}")
+
+        except Exception as e:
+            logger.error(f"[LIQUIDITY_THREAD] Erreur cycle #{cycle_count}: {e}", exc_info=True)
+
+        # Sleep dynamique
+        elapsed = time.time() - cycle_start
+        sleep_time = max(0, cycle_interval - elapsed)
+        if sleep_time > 0:
+            stop_event.wait(timeout=sleep_time)
+
+    logger.info("🛑 [LIQUIDITY_THREAD] Arrêté proprement")
+
+
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
