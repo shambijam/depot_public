@@ -938,6 +938,7 @@ def monitor_burst_baskets(
     if enable_profit_close and rt_fast_window_ms > 0 and rt_poll_interval_ms > 0:
         deadline = time.monotonic() + (rt_fast_window_ms / 1000.0)
         loop_count = 0
+        last_log_ts = {}  # Timestamp du dernier log par basket (éviter spam)
 
         while True:
             loop_count += 1
@@ -955,6 +956,8 @@ def monitor_burst_baskets(
                 # init âge
                 if basket_id not in self._basket_first_seen_ts:
                     self._basket_first_seen_ts[basket_id] = time.time()
+                    logger.info(f"🆕 [BASKET_DETECTED] {basket_id} | {len(pos)} positions détectées")
+
                 age_ms = int(
                     (time.time() - self._basket_first_seen_ts[basket_id]) * 1000
                 )
@@ -974,19 +977,36 @@ def monitor_burst_baskets(
                     continue  # Stats impossibles : skip silencieux
                 sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
+                # 📊 Log PnL toutes les 5 secondes pour suivre l'évolution
+                now = time.time()
+                last_log = last_log_ts.get(basket_id, 0)
+                if now - last_log >= 5.0:
+                    last_log_ts[basket_id] = now
+                    logger.info(
+                        f"📊 [BASKET_MONITOR] {basket_id} | {sym} {direction} | "
+                        f"PnL={pnl_pips:+.1f}p (target={target_profit:.1f}p) | "
+                        f"Entry={avg_entry:.5f} Current={avg_price:.5f} | "
+                        f"Age={age_ms/1000:.1f}s | {len(pos)}/{expected or len(pos)} pos"
+                    )
+
                 # ✅ FERMETURE si PnL >= target_profit_pips
                 if pnl_pips >= target_profit:
                     logger.info(
-                        f"🎯 [PROFIT_TARGET] {basket_id} ({sym} {direction}) | "
+                        f"🎯 [PROFIT_TARGET_REACHED] {basket_id} ({sym} {direction}) | "
                         f"PnL={pnl_pips:.1f}p >= {target_profit:.1f}p | "
-                        f"Age={age_ms}ms | Count={len(pos)}/{expected or len(pos)} → FERMETURE COMPLÈTE"
+                        f"Age={age_ms}ms | Count={len(pos)}/{expected or len(pos)} → FERMETURE IMMÉDIATE"
                     )
                     if _close_basket(basket_id, pos):
-                        logger.info(f"✅ [BASKET_CLOSED] {basket_id} fermé avec succès à +{pnl_pips:.1f} pips")
+                        logger.info(f"✅ [BASKET_CLOSED_SUCCESS] {basket_id} fermé à +{pnl_pips:.1f} pips | Profit sécurisé !")
+                        # Nettoyer le tracking
+                        if basket_id in self._basket_first_seen_ts:
+                            del self._basket_first_seen_ts[basket_id]
+                        if basket_id in last_log_ts:
+                            del last_log_ts[basket_id]
                         any_action = True
                         continue
                     else:
-                        logger.error(f"❌ [BASKET_CLOSE_FAILED] {basket_id} échec fermeture")
+                        logger.error(f"❌ [BASKET_CLOSE_FAILED] {basket_id} échec fermeture | Retry au prochain cycle")
 
             if time.monotonic() >= deadline:
                 break  # Deadline : sortie silencieuse

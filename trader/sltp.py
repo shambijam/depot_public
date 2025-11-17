@@ -381,8 +381,11 @@ def _calculate_sl_tp_prices(
     min_ticks_soft = 2
     soft_min_price = max(min_stop_price, min_ticks_soft * tick_size)
 
-    # pips (digits 3/5 => 10 points/pip, sinon 1)
-    points_per_pip = 10.0 if digits in (3, 5) else 1.0
+    # pips (digits 2/3/5 => 10 points/pip, digits 4/0 => 1 point/pip)
+    # XAUUSD (digits=2): 1 pip = 10 points = 0.10
+    # EURUSD (digits=5): 1 pip = 10 points = 0.00010
+    # JPY pairs (digits=3): 1 pip = 10 points = 0.010
+    points_per_pip = 10.0 if digits in (2, 3, 5) else 1.0
     pip_size = point * points_per_pip
 
     # ---------- 2) Données marché, overrides ----------
@@ -1211,7 +1214,10 @@ def _split_multi_tp_orders(
         raise TradeExecutionError("symbol_info.point invalide (<=0).")
 
     # PIP sizing
-    points_per_pip = 10.0 if digits in (3, 5) else 1.0
+    # XAUUSD (digits=2): 1 pip = 10 points = 0.10
+    # EURUSD (digits=5): 1 pip = 10 points = 0.00010
+    # JPY pairs (digits=3): 1 pip = 10 points = 0.010
+    points_per_pip = 10.0 if digits in (2, 3, 5) else 1.0
     pip_size = point * points_per_pip
 
     # [PATCH] Résolution opportuniste du contexte panier si absent

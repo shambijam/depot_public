@@ -2169,15 +2169,23 @@ def run_single_pipeline_cycle(
 
         # === Gestion fermetures SL/TP des paniers (sécurité) ===
         try:
+            # Fusionner config scalping pour avoir entry_rules.closure_rules
+            scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+            merged_config = dict(base_config)
+            if "entry_rules" in scalping_config:
+                merged_config.setdefault("entry_rules", {}).update(
+                    scalping_config["entry_rules"]
+                )
+
             closure_cfg = (
-                base_config.get("entry_rules", {})
+                merged_config.get("entry_rules", {})
                 .get("scalping", {})
                 .get("burst_scalping", {})
                 .get("closure_rules", {})
                 or {}
             )
             trade_executor.monitor_burst_baskets(
-                config=base_config,
+                config=merged_config,
                 max_loss_pips=float(closure_cfg.get("max_loss_pips", 15.0)),
             )
         except Exception as e:
@@ -2193,8 +2201,16 @@ def run_single_pipeline_cycle(
         # 📊 Surveillance et fermeture automatique des baskets au profit cible
         # Surveille en temps réel (100ms/check) et ferme dès que PnL >= target_profit_pips (défaut: 15 pips)
         try:
+            # Fusionner config scalping pour avoir entry_rules.closure_rules
+            scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+            merged_config = dict(base_config)
+            if "entry_rules" in scalping_config:
+                merged_config.setdefault("entry_rules", {}).update(
+                    scalping_config["entry_rules"]
+                )
+
             trade_executor.monitor_burst_baskets(
-                config=base_config
+                config=merged_config
             )
         except Exception as e:
             logger.debug(f"[BURST_MONITOR] Erreur: {e}")
