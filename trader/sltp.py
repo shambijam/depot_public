@@ -2365,6 +2365,9 @@ def update_basket_sltp_dynamically(
         spread_mult        = float((floors_cfg.get("spread_multiplier", 2.0) or 2.0))
         extra_buffer_pips  = float((floors_cfg.get("extra_buffer_pips", 2.0) or 2.0))
 
+        # ✅ FIX BUG #7: Initialiser spread_floor_pips AVANT utilisation
+        spread_floor_pips = 0.0  # Sera recalculé plus tard avec le spread actuel
+
         # 🚨 CALCUL IMMÉDIAT DU SPREAD (ne pas attendre plus tard)
         cur_spread_pips = 0.0
         try:
