@@ -2693,7 +2693,7 @@ def run_single_pipeline_cycle(
                         max_loss = float(
                             (
                                 (
-                                    base_config.get("entry_rules", {})
+                                    merged_config.get("entry_rules", {})
                                     .get("scalping", {})
                                     .get("burst_scalping", {})
                                     .get("closure_rules", {})
@@ -2702,7 +2702,7 @@ def run_single_pipeline_cycle(
                             )
                         )
                         trade_executor.monitor_burst_baskets(
-                            config=base_config, max_loss_pips=max_loss
+                            config=merged_config, max_loss_pips=max_loss
                         )
                     except Exception as e:
                         logger.warning(f"[BURST EXIT] Post-exec (SLTP): {e}")
