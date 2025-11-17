@@ -2685,6 +2685,21 @@ def update_basket_sltp_dynamically(
             "fill_ratio": fill_ratio,
         }
 
+    except Exception as e:
+        # Capturer toutes les exceptions non gérées
+        try:
+            self.logger.critical(f"❌ [SLTP][BasketUpdate] EXCEPTION CRITIQUE pour basket {basket_id}: {e}", exc_info=True)
+        except Exception:
+            pass
+        return {
+            "status": "error",
+            "basket_id": basket_id,
+            "timestamp": now,
+            "reason": f"exception: {str(e)[:100]}",
+            "updates_applied": [],
+            "updates_failed": [],
+        }
+
     finally:
         if lock and locked:
             try:
