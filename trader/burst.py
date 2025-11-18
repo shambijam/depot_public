@@ -652,14 +652,21 @@ def monitor_burst_baskets(
         logger.info("=" * 80)
         logger.info("🎯 [BASKET_MONITOR] Configuration closure_rules chargée:")
         logger.info(f"   • enabled: {enabled}")
-        logger.info(f"   • enable_profit_close: {enable_profit_close}")
-        logger.info(f"   • target_profit_pips: {target_profit_pips} pips  ← SEUIL DE FERMETURE")
-        logger.info(f"   • enable_loss_guard: {enable_loss_guard}")
-        logger.info(f"   • max_loss_pips: {max_loss_pips} pips")
-        logger.info(f"   • require_full_count_for_profit_close: {require_full_count}")
-        logger.info(f"   • min_age_ms_for_any_close: {min_age_ms_for_any_close} ms")
-        logger.info(f"   • rt_fast_window_ms: {rt_fast_window_ms} ms")
-        logger.info(f"   • rt_poll_interval_ms: {rt_poll_interval_ms} ms")
+        logger.info("")
+        logger.info("   📈 PROFIT (fermeture automatique au gain):")
+        logger.info(f"      • enable_profit_close: {enable_profit_close}")
+        logger.info(f"      • target_profit_pips: {target_profit_pips} pips  ← Fermeture si atteint")
+        logger.info(f"      • require_full_count_for_profit_close: {require_full_count}")
+        logger.info("")
+        logger.info("   🛡️  LOSS GUARD (protection perte maximale):")
+        logger.info(f"      • enable_loss_guard: {enable_loss_guard}  ← {'ACTIVÉ ✅' if enable_loss_guard else 'DÉSACTIVÉ'}")
+        logger.info(f"      • max_loss_pips: {max_loss_pips} pips  ← Fermeture si perte >= -{max_loss_pips} pips")
+        logger.info(f"      • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai avant activation)")
+        logger.info("")
+        logger.info("   ⚙️  PARAMÈTRES GÉNÉRAUX:")
+        logger.info(f"      • min_age_ms_for_any_close: {min_age_ms_for_any_close} ms")
+        logger.info(f"      • rt_fast_window_ms: {rt_fast_window_ms} ms")
+        logger.info(f"      • rt_poll_interval_ms: {rt_poll_interval_ms} ms")
         logger.info("=" * 80)
 
     # ---- Connexion / états ----
@@ -1057,9 +1064,63 @@ def monitor_burst_baskets(
         logger.warning(f"⛔ [BASKET_MONITOR] Boucle de surveillance NON démarrée: enable_profit_close={enable_profit_close} | rt_fast_window_ms={rt_fast_window_ms} | rt_poll_interval_ms={rt_poll_interval_ms}")
 
     # =========================
-    # Phase B — SUPPRIMÉE (loss guard désactivé, SL -300 pips suffit)
+    # Phase B — LOSS GUARD (protection perte maximale)
     # =========================
-    # Aucune action si enable_loss_guard = false (défaut)
+    if enable_loss_guard and max_loss_pips > 0:
+        logger.info("=" * 80)
+        logger.info(f"🛡️  [LOSS_GUARD] Surveillance protection perte activée:")
+        logger.info(f"   • max_loss_pips: {max_loss_pips} pips (fermeture si dépassé)")
+        logger.info(f"   • loss_guard_arming_ms: {loss_guard_arming_ms} ms (délai activation)")
+        logger.info("=" * 80)
+
+        open_positions = _snapshot_positions()
+        if open_positions:
+            baskets = _group_baskets(open_positions)
+            for basket_id, pos in baskets.items():
+                # Vérifier l'âge minimum (éviter fermeture trop rapide)
+                if basket_id not in self._basket_first_seen_ts:
+                    continue
+
+                age_ms = int((time.time() - self._basket_first_seen_ts[basket_id]) * 1000)
+
+                # Arming delay : attendre avant d'activer la protection
+                if age_ms < loss_guard_arming_ms:
+                    continue
+
+                # Calculer PnL
+                stats = _basket_stats(pos)
+                if not stats:
+                    continue
+
+                sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
+
+                # 🛡️ FERMETURE si perte >= max_loss_pips (valeur NÉGATIVE)
+                if pnl_pips <= -max_loss_pips:
+                    logger.error("=" * 80)
+                    logger.error(f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})")
+                    logger.error(f"   📊 PnL actuel: {pnl_pips:.2f} pips")
+                    logger.error(f"   🛡️  Seuil max perte: -{max_loss_pips:.2f} pips")
+                    logger.error(f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{max_loss_pips:.2f}")
+                    logger.error(f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)")
+                    logger.error(f"   📦 Positions: {len(pos)}")
+                    logger.error("   → DÉCLENCHEMENT FERMETURE PROTECTION")
+                    logger.error("=" * 80)
+
+                    if _close_basket(basket_id, pos):
+                        logger.error("=" * 80)
+                        logger.error(f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte")
+                        logger.error(f"   💔 Perte limitée à: {pnl_pips:.2f} pips (au lieu de -300 pips)")
+                        logger.error(f"   🛡️  Seuil max: -{max_loss_pips:.2f} pips")
+                        logger.error(f"   💰 Économisé: {(-300 - pnl_pips):.2f} pips vs SL complet")
+                        logger.error("=" * 80)
+                        # Nettoyer le tracking
+                        if basket_id in self._basket_first_seen_ts:
+                            del self._basket_first_seen_ts[basket_id]
+                    else:
+                        logger.error(f"❌ [LOSS_GUARD_FAILED] Échec fermeture basket {basket_id} | Retry au prochain cycle")
+    else:
+        if logger:
+            logger.info(f"⛔ [LOSS_GUARD] Protection perte désactivée (enable_loss_guard={enable_loss_guard})")
 
 
 # ======================================================================================
