@@ -647,6 +647,21 @@ def monitor_burst_baskets(
         # totalement passif si non activé
         return
 
+    # 📊 LOG CONFIG AU DÉMARRAGE DU MONITOR
+    if logger:
+        logger.info("=" * 80)
+        logger.info("🎯 [BASKET_MONITOR] Configuration closure_rules chargée:")
+        logger.info(f"   • enabled: {enabled}")
+        logger.info(f"   • enable_profit_close: {enable_profit_close}")
+        logger.info(f"   • target_profit_pips: {target_profit_pips} pips  ← SEUIL DE FERMETURE")
+        logger.info(f"   • enable_loss_guard: {enable_loss_guard}")
+        logger.info(f"   • max_loss_pips: {max_loss_pips} pips")
+        logger.info(f"   • require_full_count_for_profit_close: {require_full_count}")
+        logger.info(f"   • min_age_ms_for_any_close: {min_age_ms_for_any_close} ms")
+        logger.info(f"   • rt_fast_window_ms: {rt_fast_window_ms} ms")
+        logger.info(f"   • rt_poll_interval_ms: {rt_poll_interval_ms} ms")
+        logger.info("=" * 80)
+
     # ---- Connexion / états ----
     mt5c = getattr(self, "mt5_connector", None)
     if not mt5c:
@@ -991,13 +1006,35 @@ def monitor_burst_baskets(
 
                 # ✅ FERMETURE si PnL >= target_profit_pips
                 if pnl_pips >= target_profit:
+                    logger.info("=" * 80)
                     logger.info(
-                        f"🎯 [PROFIT_TARGET_REACHED] {basket_id} ({sym} {direction}) | "
-                        f"PnL={pnl_pips:.1f}p >= {target_profit:.1f}p | "
-                        f"Age={age_ms}ms | Count={len(pos)}/{expected or len(pos)} → FERMETURE IMMÉDIATE"
+                        f"🎯 [PROFIT_TARGET_REACHED] {basket_id} ({sym} {direction})"
                     )
+                    logger.info(
+                        f"   📊 PnL actuel: {pnl_pips:+.2f} pips"
+                    )
+                    logger.info(
+                        f"   🎯 Seuil configuré: {target_profit:.2f} pips  ← target_profit_pips"
+                    )
+                    logger.info(
+                        f"   ✅ Condition remplie: {pnl_pips:.2f} >= {target_profit:.2f}"
+                    )
+                    logger.info(
+                        f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s"
+                    )
+                    logger.info(
+                        f"   📦 Positions: {len(pos)}/{expected or len(pos)}"
+                    )
+                    logger.info("   → DÉCLENCHEMENT FERMETURE IMMÉDIATE")
+                    logger.info("=" * 80)
+
                     if _close_basket(basket_id, pos):
-                        logger.info(f"✅ [BASKET_CLOSED_SUCCESS] {basket_id} fermé à +{pnl_pips:.1f} pips | Profit sécurisé !")
+                        logger.info("=" * 80)
+                        logger.info(f"✅ [BASKET_CLOSED_SUCCESS] Basket {basket_id} fermé avec succès !")
+                        logger.info(f"   💰 Profit sécurisé: +{pnl_pips:.2f} pips")
+                        logger.info(f"   🎯 Seuil utilisé: {target_profit:.2f} pips (target_profit_pips)")
+                        logger.info(f"   📈 Performance: {((pnl_pips/target_profit)*100):.1f}% du target")
+                        logger.info("=" * 80)
                         # Nettoyer le tracking
                         if basket_id in self._basket_first_seen_ts:
                             del self._basket_first_seen_ts[basket_id]
@@ -1006,7 +1043,11 @@ def monitor_burst_baskets(
                         any_action = True
                         continue
                     else:
-                        logger.error(f"❌ [BASKET_CLOSE_FAILED] {basket_id} échec fermeture | Retry au prochain cycle")
+                        logger.error("=" * 80)
+                        logger.error(f"❌ [BASKET_CLOSE_FAILED] Échec fermeture du basket {basket_id}")
+                        logger.error(f"   📊 PnL: {pnl_pips:+.2f} pips | Target: {target_profit:.2f} pips")
+                        logger.error(f"   🔄 Retry au prochain cycle...")
+                        logger.error("=" * 80)
 
             if time.monotonic() >= deadline:
                 break  # Deadline : sortie silencieuse
