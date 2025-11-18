@@ -642,6 +642,18 @@ def monitor_burst_baskets(
 
     logger = getattr(self, "logger", None)
 
+    # 🔍 DEBUG: Vérifier ce qui est lu depuis closure_rules
+    if logger:
+        logger.critical("=" * 80)
+        logger.critical("🔍 [BASKET_MONITOR][DEBUG] Lecture closure_rules:")
+        logger.critical(f"   • burst_cfg keys: {list(burst_cfg.keys())}")
+        logger.critical(f"   • closure keys: {list(closure.keys())}")
+        logger.critical(f"   • enabled (raw): {closure.get('enabled')}")
+        logger.critical(f"   • enabled (bool): {enabled}")
+        logger.critical(f"   • enable_loss_guard: {enable_loss_guard}")
+        logger.critical(f"   • max_loss_pips: {max_loss_pips}")
+        logger.critical("=" * 80)
+
     if not enabled:
         if logger:
             logger.warning("⛔ [BASKET_MONITOR] closure_rules.enabled=False → surveillance désactivée")

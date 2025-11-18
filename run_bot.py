@@ -2191,6 +2191,21 @@ def run_single_pipeline_cycle(
             logger.info(f"🔍 [BURST_EXIT][1ST_CALL] Config lue:")
             logger.info(f"   • enable_loss_guard: {closure_cfg.get('enable_loss_guard')}")
             logger.info(f"   • max_loss_pips: {closure_cfg.get('max_loss_pips')} pips")
+            logger.info(f"   • enabled: {closure_cfg.get('enabled')}")
+
+            # 🔍 DEBUG: Vérifier ce que contient merged_config
+            test_path = (
+                merged_config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("closure_rules", {})
+            )
+            logger.critical(f"🔍 [BURST_EXIT][1ST_CALL] merged_config path test:")
+            logger.critical(f"   • entry_rules exists: {'entry_rules' in merged_config}")
+            logger.critical(f"   • scalping exists: {'scalping' in merged_config.get('entry_rules', {})}")
+            logger.critical(f"   • burst_scalping exists: {'burst_scalping' in merged_config.get('entry_rules', {}).get('scalping', {})}")
+            logger.critical(f"   • closure_rules exists: {'closure_rules' in merged_config.get('entry_rules', {}).get('scalping', {}).get('burst_scalping', {})}")
+            logger.critical(f"   • test_path.get('enabled'): {test_path.get('enabled')}")
 
             trade_executor.monitor_burst_baskets(
                 config=merged_config,
@@ -2230,6 +2245,21 @@ def run_single_pipeline_cycle(
             logger.info(f"🔍 [BURST_MONITOR][2ND_CALL] Config lue:")
             logger.info(f"   • enable_loss_guard: {closure_cfg.get('enable_loss_guard')}")
             logger.info(f"   • max_loss_pips: {closure_cfg.get('max_loss_pips')} pips")
+            logger.info(f"   • enabled: {closure_cfg.get('enabled')}")
+
+            # 🔍 DEBUG: Vérifier ce que contient merged_config
+            test_path = (
+                merged_config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("closure_rules", {})
+            )
+            logger.critical(f"🔍 [BURST_MONITOR][2ND_CALL] merged_config path test:")
+            logger.critical(f"   • entry_rules exists: {'entry_rules' in merged_config}")
+            logger.critical(f"   • scalping exists: {'scalping' in merged_config.get('entry_rules', {})}")
+            logger.critical(f"   • burst_scalping exists: {'burst_scalping' in merged_config.get('entry_rules', {}).get('scalping', {})}")
+            logger.critical(f"   • closure_rules exists: {'closure_rules' in merged_config.get('entry_rules', {}).get('scalping', {}).get('burst_scalping', {})}")
+            logger.critical(f"   • test_path.get('enabled'): {test_path.get('enabled')}")
 
             trade_executor.monitor_burst_baskets(
                 config=merged_config
