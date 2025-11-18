@@ -747,12 +747,27 @@ def prepare_order(self, decision_package: dict) -> dict:
         # 2. Asset override (ex: XAUUSD.json)
         # 3. Global config (prod_config.json)
         # 4. Fallback documenté (0.30%)
+        # 📊 TRACE: Sources de risk_per_trade_percent (pour debug hot-reload)
+        risk_from_account = account_trade_settings.get("risk_per_trade_percent")
+        risk_from_asset = (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent")
+        risk_from_global = self.config_manager.get("risk_management.risk_per_trade_percent")
+
         resolved_risk_pct = _cascade(
-            account_trade_settings.get("risk_per_trade_percent"),
-            (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent"),
-            self.config_manager.get("risk_management.risk_per_trade_percent"),
+            risk_from_account,
+            risk_from_asset,
+            risk_from_global,
             0.30,  # Fallback documenté (au lieu de 0.25%)
         )
+
+        # 📊 LOG: Traçabilité de la source du risk%
+        self.logger.critical("=" * 80)
+        self.logger.critical("🔍 [RISK%] Résolution risk_per_trade_percent:")
+        self.logger.critical(f"   1️⃣  Broker account: {risk_from_account} {'← UTILISÉ' if risk_from_account else ''}")
+        self.logger.critical(f"   2️⃣  Asset config:   {risk_from_asset} {'← UTILISÉ' if not risk_from_account and risk_from_asset else ''}")
+        self.logger.critical(f"   3️⃣  Global config:  {risk_from_global} {'← UTILISÉ' if not risk_from_account and not risk_from_asset and risk_from_global else ''}")
+        self.logger.critical(f"   4️⃣  Fallback:       0.30 {'← UTILISÉ' if not any([risk_from_account, risk_from_asset, risk_from_global]) else ''}")
+        self.logger.critical(f"   ✅ Valeur finale: {resolved_risk_pct}%")
+        self.logger.critical("=" * 80)
 
         def _to_pos_float(x, default=None):
             try:
