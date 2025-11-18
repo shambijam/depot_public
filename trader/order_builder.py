@@ -747,6 +747,12 @@ def prepare_order(self, decision_package: dict) -> dict:
         # 2. Asset override (ex: XAUUSD.json)
         # 3. Global config (prod_config.json)
         # 4. Fallback documenté (0.30%)
+
+        # 📊 DEBUG: Voir le contenu COMPLET de account_trade_settings
+        self.logger.critical("=" * 80)
+        self.logger.critical(f"🔍 [DEBUG_ACCOUNT] account_trade_settings COMPLET: {account_trade_settings}")
+        self.logger.critical("=" * 80)
+
         # 📊 TRACE: Sources de risk_per_trade_percent (pour debug hot-reload)
         risk_from_account = account_trade_settings.get("risk_per_trade_percent")
         risk_from_asset = (active_config.get("risk_management", {}) or {}).get("risk_per_trade_percent")
