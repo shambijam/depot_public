@@ -175,6 +175,69 @@ class ConfigManager:
         }
         # Les caches sont maintenant gérés par les modules dédiés.
 
+    def reload_all_configs(self) -> None:
+        """
+        Recharge TOUTES les configurations à chaud (sans redémarrer le bot).
+
+        Recharge :
+        - prod_config.json (configuration principale)
+        - Configs modulaires (phase_observer, telegram)
+        - Cache des assets (EURUSD, GBPUSD, XAUUSD)
+        - Configs des stratégies (scalping, liquidity)
+
+        Usage : Appelez cette méthode après modification manuelle des fichiers JSON.
+        """
+        try:
+            self.logger.info("🔄 [HOT-RELOAD] Début du rechargement de toutes les configurations...")
+
+            # 1. Vider le cache des assets
+            if hasattr(self, "_asset_config_cache"):
+                cache_size = len(self._asset_config_cache)
+                self._asset_config_cache.clear()
+                self.logger.info(f"🔄 [HOT-RELOAD] Cache assets vidé ({cache_size} entrées)")
+
+            # 2. Recharger prod_config.json
+            template_path = self.get("paths.prod_config", "config/prod_config.json")
+            if Path(template_path).exists():
+                base_config = self.config_loader.load_dynamic_config(template_path)
+                self._dynamic_config = base_config
+                self.logger.info(f"🔄 [HOT-RELOAD] prod_config.json rechargé")
+
+            # 3. Recharger configs modulaires (phase_observer, telegram)
+            configs_to_reload = {
+                "paths.phase_observer_config": "phase_observer_config.json",
+                "paths.telegram_config": "telegram_config.json",
+            }
+            for config_key, config_name in configs_to_reload.items():
+                config_file_path_str = self.get(config_key)
+                if config_file_path_str:
+                    config_file_path = Path(config_file_path_str)
+                    if config_file_path.exists():
+                        try:
+                            supplemental_config = self.config_loader.load_dynamic_config(
+                                str(config_file_path)
+                            )
+                            self._dynamic_config = self._merge_dicts(
+                                self._dynamic_config, supplemental_config
+                            )
+                            self.logger.info(f"🔄 [HOT-RELOAD] {config_name} rechargé et fusionné")
+                        except Exception as e:
+                            self.logger.error(f"🔄 [HOT-RELOAD] Erreur rechargement {config_name}: {e}")
+
+            # 4. Recharger les stratégies via StrategyManager
+            if hasattr(self, "strategy_manager") and self.strategy_manager:
+                try:
+                    self.strategy_manager.load_all_strategies()
+                    self.logger.info(f"🔄 [HOT-RELOAD] Stratégies rechargées via StrategyManager")
+                except Exception as e:
+                    self.logger.error(f"🔄 [HOT-RELOAD] Erreur rechargement stratégies: {e}")
+
+            self.logger.info("✅ [HOT-RELOAD] Rechargement terminé avec succès !")
+
+        except Exception as e:
+            self.logger.error(f"❌ [HOT-RELOAD] Erreur critique lors du rechargement: {e}", exc_info=True)
+            raise
+
     def get_mt5_account_credentials(
         self, account_id: Optional[str] = None, mode: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:

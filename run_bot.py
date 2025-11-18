@@ -13,6 +13,8 @@ import time
 import math
 import threading
 import re
+import signal
+import platform
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from datetime import UTC
@@ -3103,6 +3105,43 @@ def main(args: argparse.Namespace) -> None:
 
     startup_delay_seconds = config_manager.get("app.startup_delay_seconds", 3)
     time.sleep(startup_delay_seconds)
+
+    # 4. Configuration du Hot-Reload (rechargement config sans redémarrage)
+    def setup_hot_reload_handler():
+        """
+        Configure le handler de signal pour rechargement config à chaud.
+        Usage: kill -SIGUSR1 <PID> ou kill -SIGUSR2 <PID> (Windows)
+        """
+        def reload_config_handler(signum, frame):
+            """Handler appelé lors de la réception du signal de rechargement."""
+            try:
+                logger.info("=" * 80)
+                logger.info("🔄 [HOT-RELOAD] Signal de rechargement reçu !")
+                logger.info("=" * 80)
+                config_manager.reload_all_configs()
+                logger.info("=" * 80)
+                logger.info("✅ [HOT-RELOAD] Configuration rechargée avec succès")
+                logger.info("💡 [HOT-RELOAD] Les prochains cycles utiliseront la nouvelle config")
+                logger.info("=" * 80)
+            except Exception as e:
+                logger.error(f"❌ [HOT-RELOAD] Erreur lors du rechargement: {e}", exc_info=True)
+
+        # Utiliser SIGUSR1 (Linux/Mac) ou SIGBREAK (Windows)
+        if platform.system() == "Windows":
+            # Windows: SIGBREAK (Ctrl+Break) est le seul signal custom disponible
+            logger.info("🔧 [HOT-RELOAD] Système Windows détecté - Handler SIGBREAK configuré")
+            logger.info("💡 [HOT-RELOAD] Pour recharger: envoyez SIGBREAK au processus")
+            signal.signal(signal.SIGBREAK, reload_config_handler)
+        else:
+            # Linux/Mac: SIGUSR1
+            logger.info("🔧 [HOT-RELOAD] Système Unix détecté - Handler SIGUSR1 configuré")
+            logger.info(f"💡 [HOT-RELOAD] Pour recharger: kill -SIGUSR1 {os.getpid()}")
+            signal.signal(signal.SIGUSR1, reload_config_handler)
+
+    try:
+        setup_hot_reload_handler()
+    except Exception as e:
+        logger.warning(f"⚠️ [HOT-RELOAD] Impossible de configurer le hot-reload: {e}")
 
     # 5. Instanciation des Modules Fondamentaux
     try:
