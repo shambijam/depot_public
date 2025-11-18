@@ -226,6 +226,7 @@
     "max_allowed_spread_points": 10,
     "mt5_max_retries": 5,
     "mt5_retry_delay_seconds": 3,
+    "burst_send_sleep_s": 0.01,
     "manual_override_enabled": false,
     "manual_override_volume_threshold": 50,
     "manual_override_timeout_seconds": 60,

@@ -2186,12 +2186,18 @@ def run_single_pipeline_cycle(
                 .get("closure_rules", {})
                 or {}
             )
+
+            # Log pour debug : vérifier que max_loss_pips est bien transmis
+            logger.info(f"🔍 [BURST_EXIT][1ST_CALL] Config lue:")
+            logger.info(f"   • enable_loss_guard: {closure_cfg.get('enable_loss_guard')}")
+            logger.info(f"   • max_loss_pips: {closure_cfg.get('max_loss_pips')} pips")
+
             trade_executor.monitor_burst_baskets(
                 config=merged_config,
-                max_loss_pips=float(closure_cfg.get("max_loss_pips", 15.0)),
+                max_loss_pips=float(closure_cfg.get("max_loss_pips", 90.0)),  # Fallback cohérent avec config
             )
         except Exception as e:
-            logger.warning(f"[BURST EXIT] Contrôle fermeture panier (SLTP): {e}")
+            logger.error(f"❌ [BURST EXIT] Erreur CRITIQUE: {e}", exc_info=True)
 
         # === Pipeline institutionnel (peut produire Liquidity, etc.) ===
         print("🤖 [PIPELINE] Appel du decision_pipeline...")
@@ -2211,11 +2217,25 @@ def run_single_pipeline_cycle(
                     scalping_config["entry_rules"]
                 )
 
+            # Lire closure_cfg pour logs explicites
+            closure_cfg = (
+                merged_config.get("entry_rules", {})
+                .get("scalping", {})
+                .get("burst_scalping", {})
+                .get("closure_rules", {})
+                or {}
+            )
+
+            # Log pour debug : vérifier que max_loss_pips est bien transmis
+            logger.info(f"🔍 [BURST_MONITOR][2ND_CALL] Config lue:")
+            logger.info(f"   • enable_loss_guard: {closure_cfg.get('enable_loss_guard')}")
+            logger.info(f"   • max_loss_pips: {closure_cfg.get('max_loss_pips')} pips")
+
             trade_executor.monitor_burst_baskets(
                 config=merged_config
             )
         except Exception as e:
-            logger.debug(f"[BURST_MONITOR] Erreur: {e}")
+            logger.error(f"❌ [BURST_MONITOR] Erreur CRITIQUE: {e}", exc_info=True)
 
         # === Intégrer les décisions Fusion dans le package ===
         try:

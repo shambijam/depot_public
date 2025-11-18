@@ -884,33 +884,31 @@ def prepare_order(self, decision_package: dict) -> dict:
                 "  4) En mode DEMO/dry-run, une equity par défaut est OBLIGATOIRE."
             )
 
-        # Propagation stricte dans tous les contextes
-        account_ctx["equity"] = equity_val
-        ai = account_ctx.get("account_info") or {}
-        ai["equity"] = equity_val
-        account_ctx["account_info"] = ai
-        market_context["active_broker_account"] = account_ctx
-
-        # FIX: sizing.py cherche dans context["account_info"] directement
-        mc_ai = market_context.get("account_info") or {}
-        mc_ai["equity"] = equity_val
-        market_context["account_info"] = mc_ai
+        # ⚠️ NE PLUS MODIFIER market_context pour éviter la pollution du cache
+        #    L'equity est passée via account_trade_settings_over (voir ligne 909)
+        #    sizing.py lit maintenant depuis account_trade_settings en priorité (ligne 84-89)
 
         self.logger.info(f"✅ [SIZING] Équité résolue et validée → {equity_val}")
 
         # --- Préparation du payload pour sizing.py ---
-        # 1) Mise à jour du trade_settings du contexte
-        ab = market_context.get("active_broker_account") or {}
-        ts = dict((ab.get("trade_settings") or {}))
-        ts["equity"] = equity_val  # ⬅ CRITIQUE
-        ts["risk_per_trade_percent"] = resolved_risk_pct
-        ab["trade_settings"] = ts
-        market_context["active_broker_account"] = ab
+        # 1) ⚠️ NE PLUS MODIFIER market_context (évite la pollution du cache)
+        #    Le market_context doit rester PUR (config + état MT5 uniquement)
+        #    Les valeurs calculées (equity, risk%) sont passées via account_trade_settings_over
 
         # 2) Payload EXPLICITE (prioritaire pour sizing.py)
         account_trade_settings_over = dict(account_trade_settings or {})
         account_trade_settings_over["risk_per_trade_percent"] = resolved_risk_pct
         account_trade_settings_over["equity"] = equity_val  # ⬅ OBLIGATOIRE
+
+        # 📊 LOG: Payload final transmis à sizing.py
+        self.logger.critical("=" * 80)
+        self.logger.critical("📦 [PAYLOAD_SIZING] Payload final transmis à _calculate_risk_based_volume:")
+        self.logger.critical(f"   • equity:                  {account_trade_settings_over.get('equity')}")
+        self.logger.critical(f"   • risk_per_trade_percent: {account_trade_settings_over.get('risk_per_trade_percent')} ← DOIT ÊTRE 1.5% ✅")
+        self.logger.critical(f"   • max_lot:                 {account_trade_settings_over.get('max_lot')}")
+        self.logger.critical(f"   • min_lot:                 {account_trade_settings_over.get('min_lot')}")
+        self.logger.critical(f"   • lot_step:                {account_trade_settings_over.get('lot_step')}")
+        self.logger.critical("=" * 80)
 
         # Guards anti-régression (sécurité supplémentaire)
         if account_trade_settings_over.get("equity") in (None, "", 0, 0.0):

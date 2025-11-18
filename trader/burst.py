@@ -80,8 +80,9 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
         except Exception as e:
             errors.append({"exc": str(e)})
 
-        # micro-délai anti-rafale (évite retcodes “trade context busy”)
-        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.02) or 0.02))
+        # micro-délai anti-rafale (évite retcodes "trade context busy")
+        # Réduit à 0.01s pour minimiser l'écart de prix entre positions (au lieu de 0.02s)
+        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.01) or 0.01))
 
     # marque le cooldown “dernier burst”
     try:
@@ -951,6 +952,19 @@ def monitor_burst_baskets(
             f"[CLOSE] Fermeture partielle '{basket_id}' ({ok}/{ok+ko})."
         )
         return False
+
+    # =========================
+    # INIT: Enregistrer tous les baskets (requis pour loss_guard)
+    # =========================
+    # ⚠️ CRITIQUE: Initialiser _basket_first_seen_ts AVANT les phases A/B
+    #    Sinon, si enable_profit_close=False, la Phase B (loss_guard) skip tous les baskets !
+    open_positions_init = _snapshot_positions()
+    if open_positions_init:
+        baskets_init = _group_baskets(open_positions_init)
+        for basket_id in baskets_init.keys():
+            if basket_id not in self._basket_first_seen_ts:
+                self._basket_first_seen_ts[basket_id] = time.time()
+                logger.info(f"🆕 [BASKET_INIT] {basket_id} enregistré pour surveillance (profit + loss_guard)")
 
     # =========================
     # Phase A — FAST (profit target)

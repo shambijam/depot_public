@@ -79,8 +79,14 @@ def _calculate_risk_based_volume(
         raise TradeExecutionError(f"Action invalide pour sizing: '{action}'")
 
     # ----- Compte / budget -----
-    acct = (context or {}).get("account_info") or {}
-    equity = _as_float(acct.get("equity"), "Équité du compte")
+    # Priorité 1: account_trade_settings (évite pollution market_context)
+    # Priorité 2: context["account_info"] (fallback rétrocompatibilité)
+    equity_from_ats = (account_trade_settings or {}).get("equity")
+    if equity_from_ats:
+        equity = _as_float(equity_from_ats, "Équité du compte")
+    else:
+        acct = (context or {}).get("account_info") or {}
+        equity = _as_float(acct.get("equity"), "Équité du compte")
 
     risk_pct = _as_float(
         (account_trade_settings or {}).get("risk_per_trade_percent"),
