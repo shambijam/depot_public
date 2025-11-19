@@ -303,8 +303,12 @@ class FusionManager:
         maj = coherence["majority"]
         maj_str = "BUY" if maj > 0 else ("SELL" if maj < 0 else "TIE")
 
+        # ok=True seulement si action != HOLD ET fused >= seuil minimum (0.55 CAUTIOUS)
+        # Cela évite que des signaux faibles (< 55%) soient exécutés
+        is_actionable = decision["action"] != "HOLD" and fused >= 0.55
+
         return {
-            "ok": decision["action"] != "HOLD",
+            "ok": is_actionable,
             "action": decision["action"],
             "signal_type": decision["signal_type"],
             "direction": decision["direction"],

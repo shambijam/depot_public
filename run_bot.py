@@ -1846,7 +1846,37 @@ def run_single_pipeline_cycle(
 
         # === FAST-LANE (exécuter immédiatement la meilleure décision Fusion valide) ===
         try:
-            if fusion_scalping_decisions:
+            # ✅ FIX Bug #2: Filtrer par confidence minimum (respecte entry_threshold configuré)
+            # Lecture du seuil configuré (ex: entry_threshold: 0.70 dans XAUUSD.json)
+            # Si pas configuré, utilise seuil MODERATE par défaut (0.70)
+            filtered_fusion_decisions = []
+            for fd in fusion_scalping_decisions:
+                sym = str(fd.get("asset", "")).upper()
+                confidence = float(fd.get("confidence", 0.0))
+
+                # Lire entry_threshold depuis asset config
+                try:
+                    aconf = config_manager.load_asset_config(sym) or {}
+                    entry_threshold = float(
+                        (
+                            (aconf.get("entry_rules", {}) or {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("entry_threshold", 0.70)  # Fallback MODERATE
+                        ) or 0.70
+                    )
+                except Exception:
+                    entry_threshold = 0.70  # Fallback MODERATE si erreur lecture config
+
+                # Filtrer les signaux avec confidence >= seuil configuré
+                if confidence >= entry_threshold:
+                    filtered_fusion_decisions.append(fd)
+                else:
+                    logger.info(
+                        f"⛔ [FUSION][FAST-LANE] {sym} signal rejeté (confidence={confidence:.1%} < seuil={entry_threshold:.1%})"
+                    )
+
+            if filtered_fusion_decisions:
                 import re, time
 
                 _positions_cache = None
@@ -1895,8 +1925,8 @@ def run_single_pipeline_cycle(
                         alive = 1 if age < ttl else 0
                         return (alive, float(fd.get("confidence", 0.0)))
 
-                    fusion_scalping_decisions.sort(key=_score_fd, reverse=True)
-                    best = fusion_scalping_decisions[0]
+                    filtered_fusion_decisions.sort(key=_score_fd, reverse=True)
+                    best = filtered_fusion_decisions[0]
                     age = max(0, now_ms - int(best.get("ts_created", now_ms)))
                     if age < int(best.get("validity_ms", 800)):
                         sym = str(best.get("asset", "")).upper()
