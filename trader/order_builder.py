@@ -929,11 +929,11 @@ def prepare_order(self, decision_package: dict) -> dict:
             f"   ├─ burst_size={resolved_burst}\n"
             f"   └─ sl_price={sl_price}"
         )
-        if "equity" not in account_trade_settings_over or account_trade_settings_over[
-            "equity"
-        ] in (None, "", 0):
-            account_trade_settings_over["equity"] = 10000.0
-            self.logger.warning("⚠️ Equity manquante, fallback à 10000")
+
+        # ❌ SUPPRIMÉ: Fallback equity silencieux (toxique)
+        # Le système DOIT échouer si equity manquante (MT5 déconnecté, config incorrecte)
+        # L'equity a déjà été validée ligne 876-885 (exception si None)
+        # Si on arrive ici avec equity None, c'est un BUG critique à corriger
 
         # 3) Calcul du lot (risk% / burst_size si scope BASKET)
         volume_final = float(

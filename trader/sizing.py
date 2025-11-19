@@ -150,12 +150,34 @@ def _calculate_risk_based_volume(
     tv = _sget(symbol_info, "trade_tick_value", "tick_value", default=None)
     ts = _sget(symbol_info, "trade_tick_size", "tick_size", default=None)
 
-    # DEBUG LOG
+    # ========== LOGS ULTRA-DÉTAILLÉS POUR DIAGNOSTIC ==========
     import logging
     logger = logging.getLogger(__name__)
-    logger.critical(f"🔍 [SIZING] {sym_name} | distance={distance:.6f} | entry={entry_price:.6f} | sl={sl_price:.6f}")
-    logger.critical(f"🔍 [SIZING] tick_value={tv} | tick_size={ts} | burst_size={burst_size} | scope={sizing_scope}")
-    logger.critical(f"🔍 [SIZING] equity={equity:.2f} | risk%={risk_pct} | max_risk_amount={max_risk_amount:.2f} | per_ticket_risk={per_ticket_risk:.2f}")
+
+    logger.critical("=" * 80)
+    logger.critical(f"🎯 [SIZING_START] Calcul volume pour {sym_name} ({action})")
+    logger.critical("=" * 80)
+    logger.critical(f"📊 [INPUTS]")
+    logger.critical(f"   • Symbol:        {sym_name}")
+    logger.critical(f"   • Action:        {action}")
+    logger.critical(f"   • Entry price:   {entry_price:.6f}")
+    logger.critical(f"   • SL price:      {sl_price:.6f}")
+    logger.critical(f"   • Distance SL:   {distance:.6f} points ({distance * 10:.1f} pips pour OR)")
+    logger.critical("")
+    logger.critical(f"💰 [CAPITAL & RISK]")
+    logger.critical(f"   • Equity:        {equity:.2f} $ ← DOIT ÊTRE VOTRE CAPITAL RÉEL !")
+    logger.critical(f"   • Risk %:        {risk_pct}% ← DOIT CHANGER quand vous modifiez la config !")
+    logger.critical(f"   • Budget risque: {max_risk_amount:.2f} $ (equity × risk%)")
+    logger.critical("")
+    logger.critical(f"🧺 [BURST CONFIG]")
+    logger.critical(f"   • Rule name:     {rule_name}")
+    logger.critical(f"   • Sizing scope:  {sizing_scope}")
+    logger.critical(f"   • Burst size:    {burst_size} positions")
+    logger.critical(f"   • Risk/position: {per_ticket_risk:.2f} $ (budget ÷ burst_size)")
+    logger.critical("")
+    logger.critical(f"🔧 [SYMBOL INFO MT5]")
+    logger.critical(f"   • Tick value:    {tv}")
+    logger.critical(f"   • Tick size:     {ts}")
 
     # Méthode UNIQUE : tick_value / tick_size (pas de fallback toxique)
     if tv is None or ts is None:
@@ -172,7 +194,10 @@ def _calculate_risk_based_volume(
             raise TradeExecutionError(f"[SIZING] tick_size invalide: {ts}")
 
         per_lot_loss = (distance / ts) * tv
-        logger.critical(f"✅ [SIZING] MÉTHODE UNIQUE (tick): per_lot_loss={per_lot_loss:.2f} $")
+        logger.critical("")
+        logger.critical(f"💵 [PERTE PAR LOT]")
+        logger.critical(f"   • Formule:       ({distance:.6f} / {ts}) × {tv}")
+        logger.critical(f"   • per_lot_loss:  {per_lot_loss:.2f} $ par lot standard")
 
     except Exception as e:
         logger.critical(f"❌ [SIZING] Erreur calcul per_lot_loss: {e}")
@@ -183,7 +208,12 @@ def _calculate_risk_based_volume(
 
     # ===================== Volume brut (par ticket si basket) =====================
     raw_volume = per_ticket_risk / per_lot_loss
-    logger.critical(f"📊 [SIZING] CALCUL: {per_ticket_risk:.2f} $ / {per_lot_loss:.2f} $ = {raw_volume:.6f} lots (brut)")
+    logger.critical("")
+    logger.critical(f"🧮 [CALCUL VOLUME BRUT]")
+    logger.critical(f"   • Formule:       risk/position ÷ perte/lot")
+    logger.critical(f"   • Calcul:        {per_ticket_risk:.2f} $ ÷ {per_lot_loss:.2f} $")
+    logger.critical(f"   • Volume brut:   {raw_volume:.8f} lots (avant quantification)")
+
     if raw_volume <= 0 or not math.isfinite(raw_volume):
         raise TradeExecutionError("Volume brut nul")
 
@@ -216,7 +246,13 @@ def _calculate_risk_based_volume(
 
     volume_floor = math.floor((raw_volume + EPS) / step) * step
     min_required = max(vol_min_sym, min_lot_account)
-    logger.critical(f"🔧 [SIZING] volume_floor={volume_floor:.6f} | min_required={min_required} | step={step}")
+
+    logger.critical("")
+    logger.critical(f"📐 [QUANTIFICATION FLOOR]")
+    logger.critical(f"   • Step broker:   {step} lots")
+    logger.critical(f"   • Min lot:       {min_required} lots")
+    logger.critical(f"   • Max lot:       {min(vol_max_sym, max_lot_account)} lots")
+    logger.critical(f"   • Volume FLOOR:  {volume_floor:.8f} lots (jamais au-dessus budget)")
 
     # Si basket et qu'on ne peut pas atteindre le min lot PAR TICKET → on échoue clairement
     if volume_floor + EPS < min_required:
@@ -228,6 +264,22 @@ def _calculate_risk_based_volume(
         raise TradeExecutionError("Budget risque trop faible pour le lot minimum")
 
     volume = min(volume_floor, vol_max_sym, max_lot_account)
-    logger.critical(f"✅ [SIZING] FINAL: volume={volume:.6f} lots (decimals={decimals})")
+
+    logger.critical("")
+    logger.critical("=" * 80)
+    logger.critical(f"✅ [SIZING_FINAL] Volume calculé: {volume:.{decimals}f} lots")
+    logger.critical("")
+    logger.critical(f"📋 [RÉSUMÉ DU CALCUL]")
+    logger.critical(f"   1. Equity {equity:.2f} $ × Risk {risk_pct}% = Budget {max_risk_amount:.2f} $")
+    logger.critical(f"   2. Budget ÷ Burst {burst_size} = {per_ticket_risk:.2f} $ par position")
+    logger.critical(f"   3. Distance SL {distance:.6f} points → Perte/lot {per_lot_loss:.2f} $")
+    logger.critical(f"   4. Volume brut: {per_ticket_risk:.2f} $ ÷ {per_lot_loss:.2f} $ = {raw_volume:.8f} lots")
+    logger.critical(f"   5. FLOOR quantification → {volume:.{decimals}f} lots FINAL")
+    logger.critical("")
+    logger.critical(f"🎯 [VÉRIFICATIONS]")
+    logger.critical(f"   • Volume change si risk% change ? {'✅ OUI' if risk_pct > 0 else '❌ NON'}")
+    logger.critical(f"   • Volume change si equity change ? {'✅ OUI' if equity > 0 else '❌ NON'}")
+    logger.critical(f"   • Formule correcte ? ✅ OUI (equity × risk% ÷ perte/lot)")
+    logger.critical("=" * 80)
 
     return round(volume, decimals)
