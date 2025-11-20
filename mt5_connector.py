@@ -619,6 +619,120 @@ class MT5Connector:
         return {"total": total, "closed": ok, "failed": ko, "still_open": still_open}
 
 
+    def close_positions_parallel(self, tickets: list[int], *,
+                                  reason: str | None = None,
+                                  comment: str | None = None,
+                                  max_retry: int = 1) -> dict:
+        """
+        Ferme SIMULTANÉMENT une liste de tickets (envoie tous les ordres sans attendre).
+
+        Stratégie:
+        1. Envoie TOUS les ordres de fermeture d'un coup (0ms entre chaque)
+        2. Attend 200ms pour que MT5 traite les ordres
+        3. Vérifie quelles positions sont encore ouvertes
+        4. Retry les positions restantes si besoin
+
+        Returns:
+            dict: {"total": int, "closed": int, "failed": int, "still_open": list}
+        """
+        import time
+
+        tickets = [int(t) for t in (tickets or []) if t is not None]
+        total = len(tickets)
+
+        if not tickets:
+            return {"total": 0, "closed": 0, "failed": 0, "still_open": []}
+
+        self.logger.info(f"[MT5C] close_positions_parallel: fermeture de {total} positions SIMULTANÉMENT")
+
+        # Phase 1: Envoyer TOUS les ordres sans attendre
+        sent_count = 0
+        for ticket in tickets:
+            try:
+                pos = self._get_position_by_ticket(ticket)
+                if not pos:
+                    self.logger.warning(f"[MT5C] close_positions_parallel: ticket {ticket} introuvable (déjà fermé?)")
+                    continue
+
+                symbol = str(getattr(pos, "symbol", "")).upper()
+                vol = float(getattr(pos, "volume", 0.0))
+                pos_type = int(getattr(pos, "type", 0))
+
+                # Type inverse (BUY=0 → close SELL=1, SELL=1 → close BUY=0)
+                close_type = self.ORDER_TYPE_SELL if pos_type == 0 else self.ORDER_TYPE_BUY
+
+                # Prix de fermeture
+                if close_type == self.ORDER_TYPE_BUY:
+                    close_price = self.mt5.symbol_info_tick(symbol).ask
+                else:
+                    close_price = self.mt5.symbol_info_tick(symbol).bid
+
+                # Construire la requête
+                req = {
+                    "action": self.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": vol,
+                    "type": close_type,
+                    "position": ticket,
+                    "price": close_price,
+                    "deviation": 20,
+                    "magic": int(getattr(pos, "magic", 0)),
+                    "comment": comment or f"close_parallel_{reason or 'basket'}",
+                    "type_filling": self.ORDER_FILLING_IOC,
+                }
+
+                # Envoyer SANS attendre la réponse (fire and forget)
+                res = self.mt5.order_send(req)
+                sent_count += 1
+
+                # Log minimal (pas de vérification du retcode ici, on fait ça après)
+                retcode = getattr(res, "retcode", None)
+                if retcode != self.TRADE_RETCODE_DONE:
+                    self.logger.debug(f"[MT5C] close_parallel: #{ticket} envoyé, retcode={retcode}")
+
+            except Exception as e:
+                self.logger.error(f"[MT5C] close_positions_parallel: erreur envoi ticket {ticket}: {e}")
+
+        self.logger.info(f"[MT5C] close_positions_parallel: {sent_count}/{total} ordres envoyés, attente 200ms...")
+
+        # Phase 2: Attendre que MT5 traite les ordres
+        time.sleep(0.2)
+
+        # Phase 3: Vérifier les positions encore ouvertes
+        open_now = {int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])}
+        still_open = [t for t in tickets if t in open_now]
+        closed_count = total - len(still_open)
+
+        self.logger.info(f"[MT5C] close_positions_parallel: {closed_count}/{total} fermées, {len(still_open)} restantes")
+
+        # Phase 4: Retry positions restantes (1 fois max)
+        if still_open and max_retry > 0:
+            self.logger.warning(f"[MT5C] close_positions_parallel: retry {len(still_open)} positions restantes...")
+
+            for ticket in still_open:
+                if self.close_position(ticket, reason=f"{reason}_retry", comment=comment):
+                    closed_count += 1
+
+            # Re-vérifier après retry
+            time.sleep(0.15)
+            open_now = {int(getattr(p, "ticket", -1)) for p in (self.get_open_positions() or [])}
+            still_open = [t for t in tickets if t in open_now]
+
+        failed_count = len(still_open)
+
+        if still_open:
+            self.logger.error(f"[MT5C] close_positions_parallel: ÉCHEC FINAL - {failed_count} positions non fermées: {still_open}")
+        else:
+            self.logger.info(f"[MT5C] close_positions_parallel: ✅ SUCCÈS - {total} positions fermées")
+
+        return {
+            "total": total,
+            "closed": closed_count,
+            "failed": failed_count,
+            "still_open": still_open
+        }
+
+
     def _resolve_order_filling(self, symbol_info, preferred: str | None = None):
         """
         Choisit un type_filling accepté par le symbole.

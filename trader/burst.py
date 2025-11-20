@@ -870,66 +870,86 @@ def monitor_burst_baskets(
         self._basket_all_seen[basket_id] = len(seen) >= expected
 
     def _close_basket(basket_id: str, positions: List[dict]) -> bool:
-        """Ferme le panier (bulk si possible; sinon ticket par ticket)."""
-        # sécurité: n’agir que si tous les pos sont bien *nos* pos
+        """Ferme le panier (PARALLÈLE pour fermeture simultanée instantanée)."""
+        # sécurité: n'agir que si tous les pos sont bien *nos* pos
         if not positions or not all(_is_bot_pos(p) for p in positions):
             return False
 
-        # bulk
-        mt5c_close = getattr(mt5c, "close_positions", None)
-        if callable(mt5c_close):
+        # Extraction des tickets
+        tickets = [
+            int(_v(p, "ticket"))
+            for p in positions
+            if _v(p, "ticket") is not None
+        ]
+
+        if not tickets:
+            return False
+
+        # FERMETURE PARALLÈLE (simultanée - méthode prioritaire)
+        mt5c_close_parallel = getattr(mt5c, "close_positions_parallel", None)
+        if callable(mt5c_close_parallel):
             try:
-                tickets = [
-                    int(_v(p, "ticket"))
-                    for p in positions
-                    if _v(p, "ticket") is not None
-                ]
-                if tickets:
-                    mt5c_close(tickets=tickets)
-                    time.sleep(0.05)
-                    left = [
-                        p
-                        for p in _snapshot_positions()
-                        if _extract_basket_id(p) == basket_id
-                    ]
-                    if not left:
-                        # cooldown par symbole si demandé
-                        try:
-                            sym_from_positions = (
-                                (str(_v(positions[0], "symbol", "") or "").upper())
-                                if positions
-                                else ""
+                result = mt5c_close_parallel(
+                    tickets=tickets,
+                    reason="basket_close",
+                    comment=f"basket_{basket_id}"
+                )
+
+                # Vérifier le résultat
+                if result.get("failed", 0) == 0:
+                    # SUCCÈS TOTAL - toutes les positions fermées
+                    logger.info(f"[CLOSE] ✅ Panier '{basket_id}' fermé INSTANTANÉMENT ({result['total']} positions parallèles).")
+
+                    # Cooldown par symbole si demandé
+                    try:
+                        sym_from_positions = (
+                            (str(_v(positions[0], "symbol", "") or "").upper())
+                            if positions
+                            else ""
+                        )
+                        if sym_from_positions:
+                            cd = float(
+                                self.config_manager.get("cooldown_after_exit_s", 0)
+                                or 0.0
                             )
-                            if sym_from_positions:
+                            if cd <= 0:
                                 cd = float(
-                                    self.config_manager.get("cooldown_after_exit_s", 0)
+                                    self.config_manager.get(
+                                        "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
+                                        0,
+                                    )
                                     or 0.0
                                 )
-                                if cd <= 0:
-                                    cd = float(
-                                        self.config_manager.get(
-                                            "entry_rules.scalping.burst_scalping.cooldown_after_exit_s",
-                                            0,
-                                        )
-                                        or 0.0
-                                    )
-                                if cd > 0:
-                                    if not hasattr(self, "_cooldown_until"):
-                                        self._cooldown_until = {}
-                                    self._cooldown_until[sym_from_positions] = (
-                                        time.time() + cd
-                                    )
-                                    self.logger.info(
-                                        f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
-                                    )
-                        except Exception as _e:
-                            self.logger.warning(f"[COOLDOWN] set KO: {_e}")
-                        self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (bulk).")
-                        return True
-            except Exception as e:
-                self.logger.error(f"[CLOSE] close_positions bulk KO: {e}")
+                            if cd > 0:
+                                if not hasattr(self, "_cooldown_until"):
+                                    self._cooldown_until = {}
+                                self._cooldown_until[sym_from_positions] = (
+                                    time.time() + cd
+                                )
+                                self.logger.info(
+                                    f"[COOLDOWN] {sym_from_positions} bloqué {int(cd)}s après fermeture panier '{basket_id}'."
+                                )
+                    except Exception as _e:
+                        self.logger.warning(f"[COOLDOWN] set KO: {_e}")
 
-        # fallback ticket par ticket
+                    return True
+                else:
+                    # ÉCHEC PARTIEL - certaines positions n'ont pas fermé
+                    logger.warning(
+                        f"[CLOSE] Fermeture partielle '{basket_id}': "
+                        f"{result['closed']}/{result['total']} fermées, "
+                        f"{result['failed']} échecs"
+                    )
+                    # On retourne True quand même si la majorité est fermée
+                    return result['closed'] > 0
+
+            except Exception as e:
+                logger.error(f"[CLOSE] close_positions_parallel KO: {e}")
+                # Fallback vers méthode série si erreur
+
+        # FALLBACK: Fermeture série (ancienne méthode)
+        logger.warning(f"[CLOSE] Fallback série pour '{basket_id}' ({len(tickets)} positions)")
+
         ok, ko = 0, 0
         for p in positions:
             try:
@@ -940,15 +960,15 @@ def monitor_burst_baskets(
                 ok += 1
             except Exception as e:
                 ko += 1
-                self.logger.error(f"[CLOSE] ticket #{_v(p,'ticket')} KO: {e}")
+                logger.error(f"[CLOSE] ticket #{_v(p,'ticket')} KO: {e}")
 
         time.sleep(0.05)
         left = [p for p in _snapshot_positions() if _extract_basket_id(p) == basket_id]
         if not left:
-            self.logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback tickets).")
+            logger.info(f"[CLOSE] Panier '{basket_id}' fermé (fallback série).")
             return True
 
-        self.logger.warning(
+        logger.warning(
             f"[CLOSE] Fermeture partielle '{basket_id}' ({ok}/{ok+ko})."
         )
         return False
