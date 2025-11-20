@@ -207,6 +207,154 @@ class FusionManager:
         }
         # Mini-cache cohérence (TTL en secondes)
         self._coh_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+    def _log_consolidated_report(
+        self,
+        asset: str,
+        n_tr: Dict[str, Any],
+        n_of: Dict[str, Any],
+        n_fp: Dict[str, Any],
+        fused: float,
+        decision: Dict[str, Any],
+        weights: Dict[str, float],
+    ):
+        """
+        📊 BILAN CONSOLIDÉ : Rapport unifié montrant comment les 3 fonctions travaillent ensemble.
+
+        Architecture du flux de données :
+
+        1️⃣ FOOTPRINT M1 (Validation institutionnelle)
+           → Agrège ticks par niveau de prix
+           → Calcule buy/sell/delta/POC
+           → OUTPUT: DataFrame avec volumes réels
+
+        2️⃣ ORDERFLOW V6 (Analyse Volume Profile)
+           → Lit barres M1 (avec tick_volume)
+           → Calcule VPOC, VA, HVN/LVN, imbalances
+           → OUTPUT: Score directional + metrics
+
+        3️⃣ FOOTPRINT TRIGGERS (Détection patterns)
+           → UTILISE le DataFrame de Footprint M1
+           → Cherche STACKING/ABSORPTION/CLIMAX
+           → OUTPUT: Pattern détecté + confidence
+
+        4️⃣ FUSION (Synthèse pondérée)
+           → Score = w_trigger × trigger + w_orderflow × OF + w_footprint × FP
+           → Décision finale (BUY/SELL/HOLD)
+        """
+        try:
+            # Symboles directionnels
+            dir_symbols = {1: "🟢 BUY", -1: "🔴 SELL", 0: "⚪ NEUTRAL"}
+
+            # En-tête
+            self.log.info("=" * 80)
+            self.log.info(f"📊 BILAN CONSOLIDÉ - {asset}")
+            self.log.info("=" * 80)
+
+            # Section 1 : Inputs bruts
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 1️⃣  FOOTPRINT M1 (Validation Institutionnelle)                      │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            fp_status = n_fp.get("status", "UNKNOWN")
+            fp_score = n_fp.get("score", 0.0)
+            fp_dir = dir_symbols.get(n_fp.get("dir", 0), "⚪ NEUTRAL")
+            fp_delta = n_fp.get("delta", 0.0)
+            fp_poc = n_fp.get("poc", None)
+            self.log.info(f"│ Status  : {fp_status:<20} Score : {fp_score:>6.2f}              │")
+            self.log.info(f"│ Direction: {fp_dir:<18} Delta : {fp_delta:>8.1f}            │")
+            self.log.info(f"│ POC Price: {fp_poc if fp_poc else 'N/A':<53}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 2️⃣  ORDERFLOW V6 (Analyse Volume Profile)                           │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            of_score = n_of.get("score", 0.0)
+            of_dir = dir_symbols.get(n_of.get("dir", 0), "⚪ NEUTRAL")
+            of_delta = n_of.get("delta", 0.0)
+            of_imb = n_of.get("imbalance", 0.0)
+            of_vpoc = n_of.get("vpoc", None)
+            self.log.info(f"│ Score   : {of_score:>6.2f}                Direction: {of_dir:<18}│")
+            self.log.info(f"│ Delta   : {of_delta:>8.1f}             Imbalance: {of_imb:>6.3f}         │")
+            self.log.info(f"│ VPOC    : {of_vpoc if of_vpoc else 'N/A':<53}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 3️⃣  FOOTPRINT TRIGGERS (Patterns - Utilise Footprint M1)            │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            tr_score = n_tr.get("score", 0.0)
+            tr_dir = dir_symbols.get(n_tr.get("dir", 0), "⚪ NEUTRAL")
+            tr_type = n_tr.get("type", "none")
+            tr_conf = n_tr.get("confidence", 0.0)
+            tr_anchor = n_tr.get("anchor", None)
+            self.log.info(f"│ Pattern : {tr_type:<20} Confidence: {tr_conf:>6.2f}         │")
+            self.log.info(f"│ Score   : {tr_score:>6.2f}                Direction: {tr_dir:<18}│")
+            self.log.info(f"│ Anchor  : {tr_anchor if tr_anchor else 'N/A':<53}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # Section 2 : Fusion pondérée
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 4️⃣  FUSION PONDÉRÉE (Synthèse)                                      │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            w_tr = weights.get("trigger", 0.5)
+            w_of = weights.get("orderflow", 0.25)
+            w_fp = weights.get("footprint", 0.25)
+            contrib_tr = w_tr * tr_score
+            contrib_of = w_of * of_score
+            contrib_fp = w_fp * fp_score
+
+            self.log.info(f"│ Pondérations: Trigger={w_tr:.0%}  OrderFlow={w_of:.0%}  Footprint={w_fp:.0%}   │")
+            self.log.info(f"│ Contributions:                                                      │")
+            self.log.info(f"│   • Trigger    : {w_tr:.2f} × {tr_score:.2f} = {contrib_tr:>5.3f}                      │")
+            self.log.info(f"│   • OrderFlow  : {w_of:.2f} × {of_score:.2f} = {contrib_of:>5.3f}                      │")
+            self.log.info(f"│   • Footprint  : {w_fp:.2f} × {fp_score:.2f} = {contrib_fp:>5.3f}                      │")
+            self.log.info(f"│ ───────────────────────────────────────────────────────────────────│")
+            self.log.info(f"│ Score Fusionné : {fused:>5.3f} ({fused*100:>5.1f}%)                                 │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # Section 3 : Décision finale
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 DÉCISION FINALE                                                   │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            action = decision.get("action", "HOLD")
+            signal = decision.get("signal_type", "UNKNOWN")
+            direction = decision.get("direction", "NEUTRAL")
+
+            # Emoji selon action
+            action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️"}.get(action, "⚪")
+
+            # Seuils
+            if fused >= 0.80:
+                level = "HIGH_CONVICTION (≥80%)"
+            elif fused >= 0.70:
+                level = "MODERATE (≥70%)"
+            elif fused >= 0.55:
+                level = "CAUTIOUS (≥55%)"
+            else:
+                level = "INSUFFISANT (<55%)"
+
+            self.log.info(f"│ Action  : {action_emoji} {action:<15}                                       │")
+            self.log.info(f"│ Signal  : {signal:<45}│")
+            self.log.info(f"│ Level   : {level:<45}│")
+            self.log.info(f"│ Direction: {direction:<45}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # Section 4 : Flux de données
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🔄 FLUX DE DONNÉES                                                   │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info("│ Barres M1 (tick_volume) ──┬──→ OrderFlow V6 → Score + VPOC         │")
+            self.log.info("│                           │                                         │")
+            self.log.info("│ Ticks récents ────────────┴──→ Footprint M1 → DataFrame            │")
+            self.log.info("│                                     ↓                               │")
+            self.log.info("│                              Footprint Triggers → Pattern           │")
+            self.log.info("│                                                                     │")
+            self.log.info("│ Fusion Manager ← (Trigger + OrderFlow + Footprint) → Décision      │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            self.log.info("=" * 80)
+
+        except Exception as e:
+            self.log.error(f"[FUSION] Erreur génération rapport consolidé: {e}", exc_info=True)
         self._coh_cache_ttl: float = 5.0
 
     # -------------- Public API --------------
@@ -306,6 +454,35 @@ class FusionManager:
         # ok=True seulement si action != HOLD ET fused >= seuil minimum (0.55 CAUTIOUS)
         # Cela évite que des signaux faibles (< 55%) soient exécutés
         is_actionable = decision["action"] != "HOLD" and fused >= 0.55
+
+        # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
+        # Récupérer les poids utilisés pour la fusion
+        adaptive_w = self._compute_adaptive_weights(
+            ctx.get("regime"), ctx.get("volatility"), ctx.get("session")
+        )
+        if adaptive_w:
+            weights_used = adaptive_w
+        else:
+            # Lire depuis config ou utiliser défauts
+            p = cfg.get("ponderations", {})
+            weights_used = {
+                "trigger": _to_float(p.get("trigger_weight"), 0.50),
+                "orderflow": _to_float(p.get("orderflow_weight"), 0.25),
+                "footprint": _to_float(p.get("footprint_weight"), 0.25),
+            }
+
+        # Appeler le rapport consolidé (actif seulement si FUSION_PROBE=1)
+        if FUSION_PROBE:
+            asset_name = ctx.get("asset", "UNKNOWN")
+            self._log_consolidated_report(
+                asset=asset_name,
+                n_tr=n_tr,
+                n_of=n_of,
+                n_fp=n_fp,
+                fused=fused,
+                decision=decision,
+                weights=weights_used,
+            )
 
         return {
             "ok": is_actionable,

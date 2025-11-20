@@ -132,6 +132,7 @@ class MarketAnalyzer:
         # On transmet aussi un contexte optionnel (spread/session/régime/horodatage…)
         ctx = dict(context or {})
         ctx.setdefault("now_ts", None)  # si absent, FusionManager utilise time.time()
+        ctx["asset"] = asset  # ✅ AJOUTÉ: Transmettre l'asset pour le rapport consolidé
 
         try:
             fused = self.fusion_manager.fuse(

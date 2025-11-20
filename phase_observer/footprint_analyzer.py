@@ -544,10 +544,17 @@ class FootprintAnalyzer:
             from .detectors import footprint_validator
 
             try:
+                # ⚠️ FIX: Utiliser avant-dernière barre (index -2) car dernière barre est en formation
+                # Les ticks couvrent ~3 minutes (ex: 168s), mais footprint_validator filtre strictement
+                # sur la fenêtre [start_ts, end_ts) d'UNE SEULE barre M1
+                # → Si on prend la dernière barre en formation, aucun tick ne match
+                # → On prend donc l'avant-dernière barre (complète)
+                candle_idx = len(bars) - 2 if len(bars) >= 2 else 0
+
                 fp_m1_result = footprint_validator(
                     candles=bars,
                     ticks=ticks,
-                    candle_index=None,  # Dernière barre
+                    candle_index=candle_idx,  # Avant-dernière barre (complète)
                     price_step=float((strategy_config or {}).get("price_step", 0.01) or 0.01),
                     fp_conf=strategy_config,
                     asset=asset,
