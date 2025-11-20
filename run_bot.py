@@ -878,7 +878,8 @@ def run_single_pipeline_cycle(
             return None
 
     def _mk_fusion_inputs(
-        signals: dict, latest: dict, symbol_info, mt5c: MT5Connector, sym: str
+        signals: dict, latest: dict, symbol_info, mt5c: MT5Connector, sym: str,
+        footprint_trigger: Optional[Dict] = None  # ✅ AJOUT: vrai trigger footprint
     ):
         of_score = _scale100(latest.get("orderflow_score"))
         fp_score = _scale100(latest.get("footprint_score"))
@@ -909,26 +910,31 @@ def run_single_pipeline_cycle(
             "summary": fp_summary,
         }
 
-        # Déduire un trigger minimal (optionnel). Ici on reprend la direction OF.
-        trig_dir = of_bias if of_bias in {"BUY", "SELL"} else None
-        anchor = None
-        try:
-            tk = mt5c.get_symbol_tick(sym)
-            ask = tk.get("ask") if isinstance(tk, dict) else getattr(tk, "ask", None)
-            bid = tk.get("bid") if isinstance(tk, dict) else getattr(tk, "bid", None)
-            if trig_dir == "BUY" and ask:
-                anchor = float(ask)
-            if trig_dir == "SELL" and bid:
-                anchor = float(bid)
-        except Exception:
-            pass
+        # Utiliser le vrai footprint trigger si disponible, sinon fallback
+        if footprint_trigger:
+            # Vrai trigger détecté (climax/stacking/absorption)
+            triggers = footprint_trigger
+        else:
+            # Fallback: trigger minimal déduit de l'orderflow
+            trig_dir = of_bias if of_bias in {"BUY", "SELL"} else None
+            anchor = None
+            try:
+                tk = mt5c.get_symbol_tick(sym)
+                ask = tk.get("ask") if isinstance(tk, dict) else getattr(tk, "ask", None)
+                bid = tk.get("bid") if isinstance(tk, dict) else getattr(tk, "bid", None)
+                if trig_dir == "BUY" and ask:
+                    anchor = float(ask)
+                if trig_dir == "SELL" and bid:
+                    anchor = float(bid)
+            except Exception:
+                pass
 
-        triggers = {
-            "direction": trig_dir,  # peut être None → mode dégradé autorisé
-            "confidence": float(signals.get("confidence_score", 0.5) or 0.5),
-            "anchor_price": anchor,
-            "trigger_type": "fusion_pretrigger",
-        }
+            triggers = {
+                "direction": trig_dir,  # peut être None → mode dégradé autorisé
+                "confidence": float(signals.get("confidence_score", 0.5) or 0.5),
+                "anchor_price": anchor,
+                "trigger_type": "fusion_pretrigger",
+            }
 
         ctx = {
             "now_ts": __import__("time").time(),
@@ -1111,6 +1117,30 @@ def run_single_pipeline_cycle(
                     logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
 
                 market_results = market_analyzer.analyze(subset_df, asset, ticks=ticks_df)
+
+                # 🎯 Analyse footprint triggers (patterns d'entrée précis temps réel)
+                footprint_trigger_result = None
+                if asset == "XAUUSD" and ticks_df is not None and not ticks_df.empty:
+                    try:
+                        trigger_ok, trigger_data = market_analyzer.analyze_footprint_triggers(
+                            asset=asset,
+                            ticks=ticks_df,
+                            bars=subset_df,
+                            strategy_config=active_config
+                        )
+                        if trigger_ok:
+                            footprint_trigger_result = trigger_data
+                            logger.info(
+                                f"[FOOTPRINT_TRIGGER] {asset} ✅ {trigger_data.get('trigger')} | "
+                                f"direction={trigger_data.get('direction')} | "
+                                f"conf={trigger_data.get('confidence'):.2f}"
+                            )
+                        else:
+                            logger.debug(
+                                f"[FOOTPRINT_TRIGGER] {asset} no trigger: {trigger_data.get('reason', 'unknown')}"
+                            )
+                    except Exception as e:
+                        logger.error(f"[FOOTPRINT_TRIGGER] Erreur analyse triggers {asset}: {e}")
 
                 # Option: purge patterns si OFF
                 if not CANDLES_ENABLED:
@@ -1382,7 +1412,8 @@ def run_single_pipeline_cycle(
                     if _fusion_applies(asset):
                         if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                             of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
-                                signals, latest, symbol_info_mt5, mt5_connector, asset
+                                signals, latest, symbol_info_mt5, mt5_connector, asset,
+                                footprint_trigger=footprint_trigger_result  # ✅ Vrai trigger si détecté
                             )
                             out = _fusion_mgr.fuse(
                                 orderflow=of,
@@ -1556,7 +1587,8 @@ def run_single_pipeline_cycle(
                 if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                     _syminfo = mt5_connector.get_symbol_info(asset)
                     of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
-                        sig, _latest, _syminfo, mt5_connector, asset
+                        sig, _latest, _syminfo, mt5_connector, asset,
+                        footprint_trigger=None  # Snapshot: pas de trigger temps réel
                     )
                     fdec_syn = _fusion_mgr.fuse(
                         orderflow=of,
