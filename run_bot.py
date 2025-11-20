@@ -1121,14 +1121,17 @@ def run_single_pipeline_cycle(
                 # 🎯 Analyse footprint triggers (patterns d'entrée précis temps réel)
                 footprint_trigger_result = None
                 if asset == "XAUUSD" and ticks_df is not None and not ticks_df.empty:
+                    logger.info(f"[FOOTPRINT_TRIGGER][DEBUG] Début analyse triggers {asset} | ticks={len(ticks_df)}")
                     try:
                         scalping_strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
+                        logger.info(f"[FOOTPRINT_TRIGGER][DEBUG] Config chargée, appel analyze_footprint_triggers...")
                         trigger_ok, trigger_data = market_analyzer.analyze_footprint_triggers(
                             asset=asset,
                             ticks=ticks_df,
                             bars=subset_df,
                             strategy_config=scalping_strat_cfg
                         )
+                        logger.info(f"[FOOTPRINT_TRIGGER][DEBUG] Retour: trigger_ok={trigger_ok} | trigger_data={trigger_data}")
                         if trigger_ok:
                             footprint_trigger_result = trigger_data
                             logger.info(
@@ -1137,11 +1140,11 @@ def run_single_pipeline_cycle(
                                 f"conf={trigger_data.get('confidence'):.2f}"
                             )
                         else:
-                            logger.debug(
-                                f"[FOOTPRINT_TRIGGER] {asset} no trigger: {trigger_data.get('reason', 'unknown')}"
+                            logger.info(
+                                f"[FOOTPRINT_TRIGGER] {asset} ❌ no trigger: {trigger_data.get('reason', 'unknown')}"
                             )
                     except Exception as e:
-                        logger.error(f"[FOOTPRINT_TRIGGER] Erreur analyse triggers {asset}: {e}")
+                        logger.error(f"[FOOTPRINT_TRIGGER] ❌ Erreur analyse triggers {asset}: {e}", exc_info=True)
 
                 # Option: purge patterns si OFF
                 if not CANDLES_ENABLED:
