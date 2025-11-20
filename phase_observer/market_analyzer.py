@@ -166,7 +166,7 @@ class MarketAnalyzer:
     # ============================================================
     # 🔹 Analyse unifiée
     # ============================================================
-    def analyze(self, df: pd.DataFrame, asset: str = "") -> Dict[str, Any]:
+    def analyze(self, df: pd.DataFrame, asset: str = "", ticks: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
         Étapes :
           1) PhaseObserver (annotation df)
@@ -187,7 +187,7 @@ class MarketAnalyzer:
         else:
             try:
                 annotated_df = self.phase_observer.analyze(
-                    df.copy(), asset_symbol=asset
+                    df.copy(), asset_symbol=asset, ticks=ticks
                 )
             except Exception as e:
                 self.logger.error(f"[MarketAnalyzer] PhaseObserver analyze failed: {e}")

@@ -1098,7 +1098,18 @@ def run_single_pipeline_cycle(
                     full_refresh_bars if do_full_refresh else rolling_lookback
                 ).copy()
 
-                market_results = market_analyzer.analyze(subset_df, asset)
+                # 🎯 Récupération des ticks MT5 pour footprint M1
+                ticks_df = None
+                try:
+                    ticks_df = mt5_connector.get_ticks(asset, count=1000)
+                    if ticks_df is not None and not ticks_df.empty:
+                        logger.debug(f"[TICKS] Récupéré {len(ticks_df)} ticks pour {asset}")
+                    else:
+                        logger.warning(f"[TICKS] Aucun tick disponible pour {asset}")
+                except Exception as e:
+                    logger.error(f"[TICKS] Erreur récupération ticks {asset}: {e}")
+
+                market_results = market_analyzer.analyze(subset_df, asset, ticks=ticks_df)
 
                 # Option: purge patterns si OFF
                 if not CANDLES_ENABLED:
@@ -1645,7 +1656,7 @@ def run_single_pipeline_cycle(
                         _dig(
                             base,
                             ["entry_rules", "scalping", "footprint", "m1_min_ticks"],
-                            30,
+                            5,  # ✅ CORRIGÉ: 30→5 (scalping rapide)
                         ),
                     )
                 )
@@ -1661,7 +1672,7 @@ def run_single_pipeline_cycle(
                                 "footprint",
                                 "m1_min_coverage_s",
                             ],
-                            8,
+                            3,  # ✅ CORRIGÉ: 8→3 (scalping rapide)
                         ),
                     )
                 )
@@ -1672,7 +1683,7 @@ def run_single_pipeline_cycle(
                         _dig(
                             base,
                             ["entry_rules", "scalping", "footprint", "tickrate_min"],
-                            1.5,
+                            1.0,  # ✅ CORRIGÉ: 1.5→1.0 (moins restrictif pour scalping rapide)
                         ),
                     )
                 )
