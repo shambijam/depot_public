@@ -557,8 +557,14 @@ class FootprintAnalyzer:
                 footprint_df_m1 = fp_m1_result.get("footprint_df")
 
                 if footprint_df_m1 is None or footprint_df_m1.empty:
-                    self.logger.warning(f"[FOOTPRINT_TRIGGER] Footprint M1 vide pour {asset}")
-                    return False, {"reason": "footprint_m1_empty"}
+                    summary = fp_m1_result.get("summary", {})
+                    self.logger.warning(
+                        f"[FOOTPRINT_TRIGGER] Footprint M1 vide pour {asset} | "
+                        f"reason: {summary.get('comment', 'unknown')} | "
+                        f"status: {fp_m1_result.get('status')} | "
+                        f"score: {fp_m1_result.get('score')}"
+                    )
+                    return False, {"reason": "footprint_m1_empty", "detail": summary.get("comment")}
 
                 self.logger.info(
                     f"[FOOTPRINT_TRIGGER] ✅ Footprint M1 récupéré | niveaux={len(footprint_df_m1)} | "
