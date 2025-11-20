@@ -286,8 +286,8 @@ class MarketAnalyzer:
                 # Remettre dans latest (convertir en string si besoin)
                 latest["footprint_summary"] = str(fp_summ)
 
-                self.logger.debug(
-                    f"[MarketAnalyzer][{asset}] footprint_summary enrichi: "
+                self.logger.info(
+                    f"[MarketAnalyzer][{asset}] ✅ footprint_summary enrichi: "
                     f"tick_count={tick_count}, coverage_s={coverage_s:.2f}, tick_rate={tick_rate:.2f}"
                 )
             except Exception as e:
