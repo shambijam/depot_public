@@ -1634,8 +1634,28 @@ def run_single_pipeline_cycle(
                     return cur if cur is not None else default
 
                 latest = sig.get("__latest__") or {}
-                fp = sig.get("footprint_summary") or {}
-                of = sig.get("orderflow_summary") or {}
+                fp_raw = sig.get("footprint_summary") or {}
+                of_raw = sig.get("orderflow_summary") or {}
+
+                # Parser footprint_summary si c'est une string
+                if isinstance(fp_raw, str):
+                    try:
+                        import ast
+                        fp = ast.literal_eval(fp_raw)
+                    except Exception:
+                        fp = {}
+                else:
+                    fp = fp_raw if isinstance(fp_raw, dict) else {}
+
+                # Parser orderflow_summary si c'est une string
+                if isinstance(of_raw, str):
+                    try:
+                        import ast
+                        of = ast.literal_eval(of_raw)
+                    except Exception:
+                        of = {}
+                else:
+                    of = of_raw if isinstance(of_raw, dict) else {}
 
                 # métriques mesurées
                 ticks = fp.get("tick_count", None)

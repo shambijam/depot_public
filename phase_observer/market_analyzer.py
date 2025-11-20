@@ -241,7 +241,7 @@ class MarketAnalyzer:
 
         # 3️⃣ Dernier point brut (Series Pandas)
         try:
-            latest = annotated_df.iloc[-1]  # on garde la Series (compat en aval)
+            latest = annotated_df.iloc[-1].copy()  # .copy() pour éviter SettingWithCopyWarning
         except Exception:
             latest = None
 
@@ -283,7 +283,7 @@ class MarketAnalyzer:
                 fp_summ["coverage_s"] = round(coverage_s, 2)
                 fp_summ["tick_rate"] = round(tick_rate, 2)
 
-                # Remettre dans latest (convertir en string si besoin)
+                # Remettre dans latest (sur la copie, pas de warning)
                 latest["footprint_summary"] = str(fp_summ)
 
                 self.logger.info(
