@@ -258,11 +258,44 @@ class FusionManager:
             fp_status = n_fp.get("status", "UNKNOWN")
             fp_score = n_fp.get("score", 0.0)
             fp_dir = dir_symbols.get(n_fp.get("dir", 0), "⚪ NEUTRAL")
-            fp_delta = n_fp.get("delta", 0.0)
+            fp_delta = n_fp.get("delta_total", 0.0)
             fp_poc = n_fp.get("poc", None)
-            self.log.info(f"│ Status  : {fp_status:<20} Score : {fp_score:>6.2f}              │")
-            self.log.info(f"│ Direction: {fp_dir:<18} Delta : {fp_delta:>8.1f}            │")
-            self.log.info(f"│ POC Price: {fp_poc if fp_poc else 'N/A':<53}│")
+            fp_absorption = n_fp.get("absorption", False)
+
+            # Extraire métriques détaillées depuis raw
+            fp_raw = n_fp.get("raw", {})
+            fp_summary = fp_raw.get("summary", {})
+            if isinstance(fp_summary, str):
+                try:
+                    import ast
+                    fp_summary = ast.literal_eval(fp_summary)
+                except:
+                    fp_summary = {}
+
+            # Métriques ticks
+            tick_count = fp_summary.get("tick_count", 0)
+            coverage_s = fp_summary.get("coverage_s", 0.0)
+            tick_rate = fp_summary.get("tick_rate", 0.0)
+
+            # Métriques buy/sell
+            buy_vol = fp_summary.get("buy_volume", 0.0)
+            sell_vol = fp_summary.get("sell_volume", 0.0)
+            total_vol = fp_summary.get("total_volume", buy_vol + sell_vol)
+            buy_pct = (buy_vol / total_vol * 100) if total_vol > 0 else 50.0
+            sell_pct = (sell_vol / total_vol * 100) if total_vol > 0 else 50.0
+
+            self.log.info(f"│ Status     : {fp_status:<15} Score    : {fp_score:>6.2%}           │")
+            self.log.info(f"│ Direction  : {fp_dir:<18} Delta    : {fp_delta:>8.1f}         │")
+            self.log.info(f"│ POC Price  : {fp_poc if fp_poc else 'N/A':<20} Absorption: {'✅ YES' if fp_absorption else '❌ NO':<10}│")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📊 Ticks Metrics:                                                   │")
+            self.log.info(f"│   • Tick Count : {tick_count:>6} ticks    Coverage: {coverage_s:>6.1f}s           │")
+            self.log.info(f"│   • Tick Rate  : {tick_rate:>6.2f} ticks/s                               │")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📈 Volume Distribution:                                             │")
+            self.log.info(f"│   • Buy Volume : {buy_vol:>8.1f} ({buy_pct:>5.1f}%)                           │")
+            self.log.info(f"│   • Sell Volume: {sell_vol:>8.1f} ({sell_pct:>5.1f}%)                           │")
+            self.log.info(f"│   • Total      : {total_vol:>8.1f}                                       │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
@@ -270,12 +303,49 @@ class FusionManager:
             self.log.info("├─────────────────────────────────────────────────────────────────────┤")
             of_score = n_of.get("score", 0.0)
             of_dir = dir_symbols.get(n_of.get("dir", 0), "⚪ NEUTRAL")
-            of_delta = n_of.get("delta", 0.0)
-            of_imb = n_of.get("imbalance", 0.0)
-            of_vpoc = n_of.get("vpoc", None)
-            self.log.info(f"│ Score   : {of_score:>6.2f}                Direction: {of_dir:<18}│")
-            self.log.info(f"│ Delta   : {of_delta:>8.1f}             Imbalance: {of_imb:>6.3f}         │")
-            self.log.info(f"│ VPOC    : {of_vpoc if of_vpoc else 'N/A':<53}│")
+            of_delta = n_of.get("delta_total", 0.0)
+            of_absorption = n_of.get("absorption", False)
+            of_status = n_of.get("status", "UNKNOWN")
+            of_poc = n_of.get("poc", None)
+
+            # Extraire métriques OrderFlow depuis raw
+            of_raw = n_of.get("raw", {})
+            of_summary = of_raw.get("summary", {})
+            if isinstance(of_summary, str):
+                try:
+                    import ast
+                    of_summary = ast.literal_eval(of_summary)
+                except:
+                    of_summary = {}
+
+            # Métriques avancées
+            imbalance = of_summary.get("imbalance", 0.0)
+            cvd_slope = of_summary.get("cvd_slope", 0.0)
+            bias = of_summary.get("bias", "NEUTRAL")
+
+            # Volume Profile nodes
+            vah = of_summary.get("vah", None)  # Value Area High
+            val = of_summary.get("val", None)  # Value Area Low
+            vpoc = of_summary.get("vpoc_price", of_poc)
+
+            # HVN/LVN counts
+            hvn_count = len(of_summary.get("hvn_levels", []))
+            lvn_count = len(of_summary.get("lvn_levels", []))
+
+            self.log.info(f"│ Status     : {of_status:<15} Score    : {of_score:>6.2%}           │")
+            self.log.info(f"│ Direction  : {of_dir:<18} Bias     : {bias:<10}      │")
+            self.log.info(f"│ Delta Total: {of_delta:>8.1f}         Absorption: {'✅ YES' if of_absorption else '❌ NO':<10}│")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📊 Volume Profile:                                                  │")
+            self.log.info(f"│   • VPOC       : {vpoc if vpoc else 'N/A':<15}                              │")
+            self.log.info(f"│   • VAH (70%)  : {vah if vah else 'N/A':<15}                              │")
+            self.log.info(f"│   • VAL (30%)  : {val if val else 'N/A':<15}                              │")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📈 Orderflow Metrics:                                               │")
+            self.log.info(f"│   • Imbalance  : {imbalance:>6.3f}      (déséquilibre buy/sell)         │")
+            self.log.info(f"│   • CVD Slope  : {cvd_slope:>6.3f}      (pente delta cumulé)           │")
+            self.log.info(f"│   • HVN Nodes  : {hvn_count:>2}           (zones haute densité)          │")
+            self.log.info(f"│   • LVN Nodes  : {lvn_count:>2}           (zones basse densité)          │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
@@ -284,11 +354,58 @@ class FusionManager:
             tr_score = n_tr.get("score", 0.0)
             tr_dir = dir_symbols.get(n_tr.get("dir", 0), "⚪ NEUTRAL")
             tr_type = n_tr.get("type", "none")
-            tr_conf = n_tr.get("confidence", 0.0)
+            tr_conf = tr_score  # confidence = score normalisé
             tr_anchor = n_tr.get("anchor", None)
-            self.log.info(f"│ Pattern : {tr_type:<20} Confidence: {tr_conf:>6.2f}         │")
-            self.log.info(f"│ Score   : {tr_score:>6.2f}                Direction: {tr_dir:<18}│")
-            self.log.info(f"│ Anchor  : {tr_anchor if tr_anchor else 'N/A':<53}│")
+
+            # Extraire métriques Trigger depuis raw
+            tr_raw = n_tr.get("raw", {})
+
+            # Détails du pattern détecté
+            pattern_action = tr_raw.get("action", "HOLD")
+            pattern_direction = tr_raw.get("direction", "NEUTRAL")
+            pattern_meta = tr_raw.get("meta", {})
+
+            # Fenêtre utilisée pour détection
+            window_used = pattern_meta.get("used_window_s", "N/A")
+
+            # Métriques du snapshot utilisé
+            snapshot_stats = pattern_meta.get("snapshot_stats", {})
+            levels_count = snapshot_stats.get("levels_count", 0)
+            delta_ratio_mean = snapshot_stats.get("delta_ratio_mean", 0.0)
+            volume_zscore_max = snapshot_stats.get("volume_zscore_max", 0.0)
+
+            # Type de pattern détecté (STACKING, ABSORPTION, CLIMAX)
+            trigger_type_detail = tr_raw.get("trigger_type", tr_type)
+
+            # Reason si échec
+            reason = tr_raw.get("reason", "")
+
+            # Emoji selon pattern
+            pattern_emoji = {
+                "stacking": "📚",
+                "absorption": "🛡️",
+                "climax": "💥",
+                "micro_stack": "📖",
+                "micro_absorption": "🛡",
+                "none": "⚪",
+            }.get(tr_type.lower(), "❓")
+
+            self.log.info(f"│ Pattern    : {pattern_emoji} {tr_type:<17} Confidence: {tr_conf:>6.2%}      │")
+            self.log.info(f"│ Direction  : {tr_dir:<18} Action   : {pattern_action:<10}      │")
+            self.log.info(f"│ Anchor     : {tr_anchor if tr_anchor else 'N/A':<20}                             │")
+            self.log.info(f"│                                                                     │")
+
+            if tr_type != "none" and levels_count > 0:
+                self.log.info(f"│ 📊 Detection Metrics:                                               │")
+                self.log.info(f"│   • Window Used: {window_used}s                                             │")
+                self.log.info(f"│   • Price Levels: {levels_count:<3}     (niveaux analysés)               │")
+                self.log.info(f"│   • Delta Ratio : {delta_ratio_mean:>5.3f}      (force directionnelle)        │")
+                self.log.info(f"│   • Vol Z-Score : {volume_zscore_max:>5.2f}      (écart-type volume)          │")
+            else:
+                self.log.info(f"│ ❌ Aucun pattern détecté                                            │")
+                if reason:
+                    self.log.info(f"│    Reason: {reason:<55}│")
+
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # Section 2 : Fusion pondérée
