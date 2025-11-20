@@ -962,6 +962,17 @@ class FootprintAnalyzer:
                 )
                 if d1.get("ok"):
                     candidates.append(d1)
+                else:
+                    try:
+                        self._fp_log(
+                            "DETAIL",
+                            "[FP-CLIMAX] no trigger | win=%ss | reason=%s",
+                            int(window_s),
+                            d1.get("reason", "thresholds_not_met"),
+                            level="info",
+                        )
+                    except Exception:
+                        pass
             except Exception as e:
                 self._log_error(
                     "climax_detection",
@@ -1001,7 +1012,7 @@ class FootprintAnalyzer:
                         d2.get("reason", "thresholds_not_met"),
                         d2.get("meta", {}).get("levels"),
                         float((d2.get("meta", {}).get("delta_ratio_mean") or 0.0)),
-                        level="debug",
+                        level="info",  # ✅ CHANGÉ: debug → info pour voir dans les logs
                     )
 
                 except Exception:
@@ -1029,6 +1040,17 @@ class FootprintAnalyzer:
             d3 = detect_absorption_reject(df_levels, **abs_kwargs)
             if d3.get("ok"):
                 candidates.append(d3)
+            else:
+                try:
+                    self._fp_log(
+                        "DETAIL",
+                        "[FP-ABSORPTION] no trigger | win=%ss | reason=%s",
+                        int(window_s),
+                        d3.get("reason", "thresholds_not_met"),
+                        level="info",
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             self._log_error(
                 "absorption_detection", e, {"kwargs": abs_kwargs, "window_s": window_s}
