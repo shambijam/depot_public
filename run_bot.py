@@ -1067,7 +1067,7 @@ def run_single_pipeline_cycle(
 
         dcfg = base_config.get("data_collection", {}) or {}
         timeframe_str = dcfg.get("default_timeframe", "M1")
-        bars_to_fetch = int(dcfg.get("default_bars_count", 500))
+        bars_to_fetch = int(dcfg.get("default_bars_count", 200))  # ✅ RÉDUIT: 500→200 (inutile d'analyser autant)
         min_required_bars = 50
 
         for asset in tradeable_assets:
@@ -2942,7 +2942,7 @@ def scalping_fast_thread(
 
         try:
             # Analyse XAUUSD uniquement
-            rates_df = mt5_connector.get_rates("XAUUSD", "M1", 500)
+            rates_df = mt5_connector.get_rates("XAUUSD", "M1", 200)  # ✅ RÉDUIT: 500→200
             if rates_df is None or rates_df.empty:
                 logger.warning("[SCALPING_THREAD] Données XAUUSD indisponibles")
                 time.sleep(cycle_interval)
