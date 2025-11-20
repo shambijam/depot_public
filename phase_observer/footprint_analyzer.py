@@ -776,7 +776,7 @@ class FootprintAnalyzer:
         # --- snapshot footprint ---
         try:
             df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=int(window_s)
+                ticks, price_step=price_step, window_s=int(window_s), logger=self.logger
             )
             if df_levels is None or df_levels.empty:
                 return None, None, None

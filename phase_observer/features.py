@@ -75,6 +75,7 @@ def _compute_footprint_snapshot(
     price_step: float,
     window_s: int = 5,
     dynamic_price_step: bool = False,  # Nouveau paramètre pour activer un price_step dynamique
+    logger: Optional[logging.Logger] = None,  # ✅ AJOUTÉ pour debug
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Construit un snapshot footprint sur 'window_s' dernières secondes.
@@ -83,8 +84,14 @@ def _compute_footprint_snapshot(
         ['ask_vol','bid_vol','vol','delta','delta_ratio','zscore_vol','is_poc']
       - meta: {'tick_rate','spread','window_s','poc_price'}
     """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    logger.info(f"[SNAPSHOT][DEBUG] Début | window_s={window_s} | ticks_input={len(ticks) if ticks is not None else 0}")
+
     meta = {"tick_rate": 0.0, "spread": 0.0, "window_s": window_s, "poc_price": None}
     if ticks is None or len(ticks) == 0:
+        logger.warning(f"[SNAPSHOT][DEBUG] Ticks vide ou None → retour vide")
         return (
             pd.DataFrame(
                 columns=[
@@ -101,14 +108,26 @@ def _compute_footprint_snapshot(
         )
 
     df = ticks.copy()
+    logger.info(f"[SNAPSHOT][DEBUG] Après copy | len={len(df)} | columns={list(df.columns)}")
+
     # time coercition
     if not np.issubdtype(df["time"].dtype, np.datetime64):
         df["time"] = pd.to_datetime(
             df["time"], errors="coerce", unit="s", utc=True
         ).fillna(pd.Timestamp.utcnow())
+
+    time_min = df["time"].min()
+    time_max = df["time"].max()
+    logger.info(f"[SNAPSHOT][DEBUG] time_range | min={time_min} | max={time_max}")
+
     cutoff = df["time"].max() - pd.Timedelta(seconds=window_s)
+    logger.info(f"[SNAPSHOT][DEBUG] cutoff={cutoff} | window_s={window_s}")
+
     df = df[df["time"] >= cutoff].copy()
+    logger.info(f"[SNAPSHOT][DEBUG] Après filtrage temporel | len={len(df)} | cutoff={cutoff}")
+
     if df.empty:
+        logger.warning(f"[SNAPSHOT][DEBUG] DataFrame vide après filtrage temporel → retour vide")
         return (
             pd.DataFrame(
                 columns=[
@@ -132,13 +151,17 @@ def _compute_footprint_snapshot(
         1.0
     )
 
+    logger.info(f"[SNAPSHOT][DEBUG] Extraction colonnes | price_na={price.isna().sum()} | bid_na={bid.isna().sum()} | ask_na={ask.isna().sum()} | vol_mean={vol.mean():.2f}")
+
     # tentative de side: si 'side' absent, inférer vs mid
     if "side" in df.columns:
         side = df["side"].astype(str).str.lower()
         is_buy = side.isin(["buy", "ask", "a", "b"])  # tolérance
+        logger.info(f"[SNAPSHOT][DEBUG] side depuis colonne | buy={is_buy.sum()} | sell={(~is_buy).sum()}")
     else:
         mid = (bid + ask) / 2.0
         is_buy = price >= mid
+        logger.info(f"[SNAPSHOT][DEBUG] side inféré vs mid | buy={is_buy.sum()} | sell={(~is_buy).sum()}")
 
     # gestion du price_step dynamique ou statique
     if price_step <= 0 or dynamic_price_step:
@@ -147,9 +170,14 @@ def _compute_footprint_snapshot(
             float(np.nanmedian(np.abs(price.diff().dropna()).replace(0.0, np.nan)))
             or 0.1
         )
+        logger.info(f"[SNAPSHOT][DEBUG] price_step dynamique calculé={price_step}")
+    else:
+        logger.info(f"[SNAPSHOT][DEBUG] price_step statique={price_step}")
 
     # re-binner les prix au pas
     rounded = np.round(price / price_step) * price_step
+    logger.info(f"[SNAPSHOT][DEBUG] Binning | price_step={price_step} | rounded_unique={len(rounded.dropna().unique())}")
+
     agg = defaultdict(lambda: [0.0, 0.0])
     for p, v, b in zip(rounded, vol, is_buy):
         if np.isnan(p) or np.isnan(v):
@@ -159,13 +187,19 @@ def _compute_footprint_snapshot(
         else:
             agg[p][1] += float(v)
 
+    logger.info(f"[SNAPSHOT][DEBUG] Agrégation | niveaux_prix={len(agg)}")
+
     rows = []
     for p, (ask_vol, bid_vol) in agg.items():
         total = ask_vol + bid_vol
         delta = ask_vol - bid_vol
         ratio = (abs(delta) / total) if total > 0 else 0.0
         rows.append((p, ask_vol, bid_vol, total, delta, ratio))
+
+    logger.info(f"[SNAPSHOT][DEBUG] Construction rows | rows_count={len(rows)}")
+
     if not rows:
+        logger.warning(f"[SNAPSHOT][DEBUG] Aucun row construit → retour vide")
         return (
             pd.DataFrame(
                 columns=["ask_vol", "bid_vol", "vol", "delta", "delta_ratio", "is_poc"]
@@ -181,6 +215,8 @@ def _compute_footprint_snapshot(
         .set_index("price")
     )
 
+    logger.info(f"[SNAPSHOT][DEBUG] DataFrame levels créé | len={len(levels)} | index={levels.index.min():.2f}→{levels.index.max():.2f}")
+
     # z-score du volume par niveau (dans la fenêtre)
     m = float(levels["vol"].mean() or 0.0)
     s = float(levels["vol"].std(ddof=0) or 1.0)
@@ -194,6 +230,9 @@ def _compute_footprint_snapshot(
     meta["tick_rate"] = _tick_rate(df, window_s=5)
     meta["spread"] = _last_spread(df)
     meta["poc_price"] = poc_price
+
+    logger.info(f"[SNAPSHOT][DEBUG] Fin OK | levels={len(levels)} | poc={poc_price} | tick_rate={meta['tick_rate']:.2f}")
+
     return levels, meta
 
 
