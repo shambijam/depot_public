@@ -1665,19 +1665,19 @@ def run_single_pipeline_cycle(
                 of_sc = latest.get("orderflow_score", None)
                 spread = sig.get("current_spread_points", float("nan"))
 
-                # seuils depuis conf (priorité: asset overrides -> global)
+                # seuils depuis conf (priorité: asset overrides -> strategy scalping -> fallback)
                 xcfg = config_manager.load_asset_config("XAUUSD") or {}
-                base = base_config
+                scalping_cfg = strategy_manager.get_strategy_config("scalping") or {}
 
-                # Footprint M1
+                # Footprint M1 (depuis config_trade_scalping.json)
                 m1_min_ticks = int(
                     _dig(
                         xcfg,
                         ["overrides", "scalping", "footprint", "m1_min_ticks"],
                         _dig(
-                            base,
+                            scalping_cfg,
                             ["entry_rules", "scalping", "footprint", "m1_min_ticks"],
-                            5,  # ✅ CORRIGÉ: 30→5 (scalping rapide)
+                            25,  # Fallback aligné avec config_trade_scalping.json
                         ),
                     )
                 )
@@ -1686,14 +1686,9 @@ def run_single_pipeline_cycle(
                         xcfg,
                         ["overrides", "scalping", "footprint", "m1_min_coverage_s"],
                         _dig(
-                            base,
-                            [
-                                "entry_rules",
-                                "scalping",
-                                "footprint",
-                                "m1_min_coverage_s",
-                            ],
-                            3,  # ✅ CORRIGÉ: 8→3 (scalping rapide)
+                            scalping_cfg,
+                            ["entry_rules", "scalping", "footprint", "m1_min_coverage_s"],
+                            8.0,  # Fallback aligné avec config_trade_scalping.json
                         ),
                     )
                 )
@@ -1702,9 +1697,9 @@ def run_single_pipeline_cycle(
                         xcfg,
                         ["overrides", "scalping", "footprint", "tickrate_min"],
                         _dig(
-                            base,
+                            scalping_cfg,
                             ["entry_rules", "scalping", "footprint", "tickrate_min"],
-                            1.0,  # ✅ CORRIGÉ: 1.5→1.0 (moins restrictif pour scalping rapide)
+                            1.0,
                         ),
                     )
                 )
