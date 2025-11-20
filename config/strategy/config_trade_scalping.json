@@ -198,6 +198,9 @@
     "triple_confirmation_bonus": true,
     "weak_footprint_score_th": 0.60
   },
+  "logging": {
+    "footprint_mode": "verbose"
+  },
   "legacy": {
     "smart_sl_tp_settings": {
       "disabled": true,
