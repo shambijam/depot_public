@@ -19,6 +19,102 @@ except Exception:
 from collections import defaultdict
 
 
+def _convert_volume_profile_to_footprint(
+    vp: Dict[str, Any],
+    df_m1: pd.DataFrame,
+    logger: Optional[logging.Logger] = None,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Convertit un Volume Profile (OrderFlow V6) en format Footprint (ask_vol/bid_vol/delta).
+
+    Logique:
+    - Pour chaque bin du Volume Profile, on détermine le sens dominant (buy/sell)
+      en comptant les barres M1 bullish (close>open) vs bearish (close<open) dans ce bin
+    - ask_vol = volume total × ratio de barres bullish
+    - bid_vol = volume total × ratio de barres bearish
+    - delta = ask_vol - bid_vol
+
+    Retourne:
+    - df_levels: DataFrame indexé par price avec colonnes [ask_vol, bid_vol, vol, delta, delta_ratio, zscore_vol, is_poc]
+    - meta: dict avec tick_rate, spread, window_s, poc_price
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    meta = {"tick_rate": 0.0, "spread": 0.0, "window_s": 0, "poc_price": None}
+
+    # Vérifications
+    if not vp or not isinstance(vp, dict):
+        logger.warning("[VP→FP] Volume Profile vide ou invalide")
+        return pd.DataFrame(columns=["ask_vol", "bid_vol", "vol", "delta", "delta_ratio", "zscore_vol", "is_poc"]), meta
+
+    if df_m1 is None or df_m1.empty:
+        logger.warning("[VP→FP] DataFrame M1 vide")
+        return pd.DataFrame(columns=["ask_vol", "bid_vol", "vol", "delta", "delta_ratio", "zscore_vol", "is_poc"]), meta
+
+    # Extraire les données du VP (retour de calculate_volume_profile)
+    # On n'a pas les bins détaillés, mais on peut reconstruire depuis les barres M1
+
+    # Stratégie alternative: utiliser les barres M1 directement
+    # Chaque barre = 1 niveau de prix (on prend close comme prix représentatif)
+    rows = []
+
+    for idx, row in df_m1.iterrows():
+        try:
+            price = float(row.get("close", 0))
+            volume = float(row.get("tick_volume", row.get("volume", 1.0)))
+            open_price = float(row.get("open", price))
+
+            if volume <= 0:
+                volume = 1.0
+
+            # Déterminer sens: bullish si close > open
+            is_bullish = price > open_price
+
+            if is_bullish:
+                ask_vol = volume
+                bid_vol = 0.0
+            else:
+                ask_vol = 0.0
+                bid_vol = volume
+
+            total = ask_vol + bid_vol
+            delta = ask_vol - bid_vol
+            ratio = (abs(delta) / total) if total > 0 else 0.0
+
+            rows.append((price, ask_vol, bid_vol, total, delta, ratio))
+
+        except Exception as e:
+            logger.debug(f"[VP→FP] Erreur traitement barre: {e}")
+            continue
+
+    if not rows:
+        logger.warning("[VP→FP] Aucun niveau de prix construit")
+        return pd.DataFrame(columns=["ask_vol", "bid_vol", "vol", "delta", "delta_ratio", "zscore_vol", "is_poc"]), meta
+
+    # Construire DataFrame
+    levels = pd.DataFrame(
+        rows, columns=["price", "ask_vol", "bid_vol", "vol", "delta", "delta_ratio"]
+    ).sort_values("price").set_index("price")
+
+    # Z-score du volume
+    m = float(levels["vol"].mean() or 0.0)
+    s = float(levels["vol"].std(ddof=0) or 1.0)
+    levels["zscore_vol"] = (levels["vol"] - m) / (s if s != 0 else 1.0)
+
+    # POC
+    poc_price = vp.get("vpoc_price") or (float(levels["vol"].idxmax()) if not levels["vol"].empty else None)
+    levels["is_poc"] = levels.index == poc_price
+
+    # Meta
+    meta["poc_price"] = poc_price
+    meta["window_s"] = len(df_m1)  # Nombre de barres M1
+
+    logger.info(f"[VP→FP] Conversion OK | niveaux={len(levels)} | poc={poc_price}")
+
+    return levels, meta
+
+
 def _micro_atr_from_ticks(ticks: pd.DataFrame, window_s: int = 10) -> float:
     """
     Micro-ATR sur 'window_s' dernières secondes en points monétaires.
@@ -150,6 +246,11 @@ def _compute_footprint_snapshot(
 
     # ✅ FIX: Prioriser volume_real (MT5 ticks) puis volume, puis vol, puis fallback 1.0
     vol = pd.to_numeric(df.get("volume_real", df.get("volume", df.get("vol", 1.0))), errors="coerce").fillna(1.0)
+
+    # ✅ FIX BROKER: Si broker ne fournit pas de volume (moyenne=0), utiliser volume synthétique=1.0 par tick
+    if vol.mean() == 0.0 or (vol == 0.0).all():
+        logger.warning(f"[SNAPSHOT][DEBUG] Broker ne fournit pas de volume (vol_mean=0.00) → Fallback volume synthétique=1.0 par tick")
+        vol = pd.Series(1.0, index=df.index)
 
     logger.info(f"[SNAPSHOT][DEBUG] Extraction colonnes | price_na={price.isna().sum()} | bid_na={bid.isna().sum()} | ask_na={ask.isna().sum()} | vol_mean={vol.mean():.2f}")
 

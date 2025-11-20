@@ -538,7 +538,38 @@ class FootprintAnalyzer:
         tick_count_soft = "?"  # fixé après validation
 
         with self.monitor.measure_phase("total"):
-            # 0) pré-traitement feed-agnostic (price/volume)
+            # 🎯 NOUVELLE APPROCHE: Récupérer le footprint_df depuis Footprint M1
+            # Au lieu de recalculer depuis les ticks (sans volume broker), on réutilise
+            # le footprint_df déjà calculé par footprint_validator avec volumes des barres M1
+            from .detectors import footprint_validator
+
+            try:
+                fp_m1_result = footprint_validator(
+                    candles=bars,
+                    ticks=ticks,
+                    candle_index=None,  # Dernière barre
+                    price_step=float((strategy_config or {}).get("price_step", 0.01) or 0.01),
+                    fp_conf=strategy_config,
+                    asset=asset,
+                )
+
+                # Récupérer le footprint_df (colonnes: price_level, buy, sell, unknown, total, delta, buy_pct)
+                footprint_df_m1 = fp_m1_result.get("footprint_df")
+
+                if footprint_df_m1 is None or footprint_df_m1.empty:
+                    self.logger.warning(f"[FOOTPRINT_TRIGGER] Footprint M1 vide pour {asset}")
+                    return False, {"reason": "footprint_m1_empty"}
+
+                self.logger.info(
+                    f"[FOOTPRINT_TRIGGER] ✅ Footprint M1 récupéré | niveaux={len(footprint_df_m1)} | "
+                    f"delta_total={footprint_df_m1['delta'].sum():.1f}"
+                )
+
+            except Exception as e:
+                self.logger.error(f"[FOOTPRINT_TRIGGER] Erreur récupération Footprint M1: {e}", exc_info=True)
+                return False, {"reason": f"footprint_m1_error: {e}"}
+
+            # 0) pré-traitement feed-agnostic (price/volume) - conservé pour compatibilité
             ticks = self._ensure_price_volume_columns(ticks)
 
             # 1) validation
@@ -654,6 +685,7 @@ class FootprintAnalyzer:
                             params=params_map,
                             price_step=price_step,
                             cfg=cfg,
+                            footprint_df_m1=footprint_df_m1,  # ✅ AJOUTÉ: Passer le Footprint M1
                         )
                         if decision and decision.get("ok"):
                             window_decisions.append(
@@ -758,6 +790,7 @@ class FootprintAnalyzer:
         params: Dict[str, Any],
         price_step: float,
         cfg: TriggerConfig,
+        footprint_df_m1: Optional[pd.DataFrame] = None,  # ✅ AJOUTÉ: Footprint M1 pré-calculé
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]]:
         """
         Retourne (best_decision, meta_snapshot, window_used)
@@ -773,17 +806,68 @@ class FootprintAnalyzer:
         if isinstance(params, TriggerConfig):
             params = params.to_dict()
 
-        # --- snapshot footprint ---
-        try:
-            df_levels, meta = _compute_footprint_snapshot(
-                ticks, price_step=price_step, window_s=int(window_s), logger=self.logger
-            )
-            if df_levels is None or df_levels.empty:
-                return None, None, None
+        # 🎯 NOUVELLE APPROCHE: Utiliser Footprint M1 au lieu de recalculer
+        if footprint_df_m1 is not None and not footprint_df_m1.empty:
+            # Convertir footprint_df_m1 (colonnes: price_level, buy, sell, total, delta, buy_pct)
+            # en format df_levels (colonnes: ask_vol, bid_vol, vol, delta, delta_ratio, zscore_vol, is_poc)
             try:
-                df_levels = df_levels.sort_index()
-            except Exception:
-                pass
+                df_levels = footprint_df_m1.copy()
+
+                # Renommer colonnes pour compatibilité avec détecteurs
+                df_levels = df_levels.rename(columns={
+                    "price_level": "price",
+                    "buy": "ask_vol",
+                    "sell": "bid_vol",
+                    "total": "vol"
+                })
+
+                # Recalculer delta_ratio (au cas où)
+                df_levels["delta_ratio"] = (df_levels["delta"].abs() / df_levels["vol"].replace(0, np.nan)).fillna(0.0)
+
+                # Z-score
+                m = float(df_levels["vol"].mean() or 0.0)
+                s = float(df_levels["vol"].std(ddof=0) or 1.0)
+                df_levels["zscore_vol"] = (df_levels["vol"] - m) / (s if s != 0 else 1.0)
+
+                # POC
+                if "price" in df_levels.columns:
+                    df_levels = df_levels.set_index("price")
+                poc_price = float(df_levels["vol"].idxmax()) if not df_levels["vol"].empty else None
+                df_levels["is_poc"] = df_levels.index == poc_price
+
+                # Meta simple
+                meta = {
+                    "tick_rate": 0.0,
+                    "spread": 0.0,
+                    "window_s": window_s,
+                    "poc_price": poc_price,
+                }
+
+                self.logger.info(
+                    f"[FOOTPRINT_TRIGGER] Utilisation Footprint M1 | niveaux={len(df_levels)} | "
+                    f"poc={poc_price} | delta_total={df_levels['delta'].sum():.1f}"
+                )
+
+            except Exception as e:
+                self.logger.error(f"[FOOTPRINT_TRIGGER] Erreur conversion Footprint M1: {e}", exc_info=True)
+                return None, None, None
+
+        else:
+            # Fallback: utiliser l'ancien système (ticks)
+            self.logger.warning("[FOOTPRINT_TRIGGER] Pas de Footprint M1, fallback ticks (volumes synthétiques)")
+            try:
+                df_levels, meta = _compute_footprint_snapshot(
+                    ticks, price_step=price_step, window_s=int(window_s), logger=self.logger
+                )
+                if df_levels is None or df_levels.empty:
+                    return None, None, None
+                try:
+                    df_levels = df_levels.sort_index()
+                except Exception:
+                    pass
+            except Exception as e:
+                self.logger.error(f"[FOOTPRINT_TRIGGER] Erreur snapshot ticks: {e}", exc_info=True)
+                return None, None, None
             # === PATCH: Harmonisation colonnes + métriques manquantes ===
             # On veut: vol, delta, delta_ratio, zscore_vol
 
