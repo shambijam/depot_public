@@ -1100,14 +1100,15 @@ def run_single_pipeline_cycle(
 
                 # 🎯 Récupération des ticks MT5 pour footprint M1
                 ticks_df = None
+                logger.info(f"[TICKS][DEBUG] Tentative récupération ticks pour {asset}...")
                 try:
                     ticks_df = mt5_connector.get_ticks(asset, count=1000)
                     if ticks_df is not None and not ticks_df.empty:
-                        logger.debug(f"[TICKS] Récupéré {len(ticks_df)} ticks pour {asset}")
+                        logger.info(f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset}")
                     else:
-                        logger.warning(f"[TICKS] Aucun tick disponible pour {asset}")
+                        logger.warning(f"[TICKS] ⚠️ Aucun tick disponible pour {asset}")
                 except Exception as e:
-                    logger.error(f"[TICKS] Erreur récupération ticks {asset}: {e}")
+                    logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
 
                 market_results = market_analyzer.analyze(subset_df, asset, ticks=ticks_df)
 
