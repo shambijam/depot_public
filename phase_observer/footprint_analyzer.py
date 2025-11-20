@@ -868,81 +868,82 @@ class FootprintAnalyzer:
             except Exception as e:
                 self.logger.error(f"[FOOTPRINT_TRIGGER] Erreur snapshot ticks: {e}", exc_info=True)
                 return None, None, None
+
             # === PATCH: Harmonisation colonnes + métriques manquantes ===
             # On veut: vol, delta, delta_ratio, zscore_vol
+            try:
+                cols = {c.lower(): c for c in df_levels.columns}
 
-            cols = {c.lower(): c for c in df_levels.columns}
+                def _pick(*names):
+                    for n in names:
+                        if n in cols:
+                            return cols[n]
+                    return None
 
-            def _pick(*names):
-                for n in names:
-                    if n in cols:
-                        return cols[n]
-                return None
+                # 1) volume
+                vol_col = _pick("vol", "volume", "qty", "size", "amount")
+                if vol_col is None:
+                    df_levels["vol"] = 0.0
+                else:
+                    if vol_col != "vol":
+                        df_levels.rename(columns={vol_col: "vol"}, inplace=True)
 
-            # 1) volume
-            vol_col = _pick("vol", "volume", "qty", "size", "amount")
-            if vol_col is None:
-                df_levels["vol"] = 0.0
-            else:
-                if vol_col != "vol":
-                    df_levels.rename(columns={vol_col: "vol"}, inplace=True)
+                # 2) delta
+                delt_col = _pick("delta", "Δ", "delta_value", "delt")
+                if delt_col is None:
+                    df_levels["delta"] = 0.0
+                else:
+                    if delt_col != "delta":
+                        df_levels.rename(columns={delt_col: "delta"}, inplace=True)
 
-            # 2) delta
-            delt_col = _pick("delta", "Δ", "delta_value", "delt")
-            if delt_col is None:
-                df_levels["delta"] = 0.0
-            else:
-                if delt_col != "delta":
-                    df_levels.rename(columns={delt_col: "delta"}, inplace=True)
+                # 3) delta_ratio = |delta| / max(vol, eps)
+                if "delta_ratio" not in df_levels.columns:
+                    eps = 1e-9
+                    df_levels["delta_ratio"] = (df_levels["delta"].abs()) / (
+                        df_levels["vol"].abs() + eps
+                    )
 
-            # 3) delta_ratio = |delta| / max(vol, eps)
-            if "delta_ratio" not in df_levels.columns:
-                eps = 1e-9
-                df_levels["delta_ratio"] = (df_levels["delta"].abs()) / (
-                    df_levels["vol"].abs() + eps
+                # 4) zscore_vol (robuste) — indispensable pour l'absorption
+                if "zscore_vol" not in df_levels.columns:
+                    v = df_levels["vol"].astype(float)
+                    if v.count() >= 8:
+                        med = float(v.median())
+                        mad = float((v - med).abs().median())
+                        if mad > 1e-9:
+                            df_levels["zscore_vol"] = (v - med) / (1.4826 * mad + 1e-9)
+                        else:
+                            std = float(v.std(ddof=0))
+                            df_levels["zscore_vol"] = (v - float(v.mean())) / (std + 1e-9)
+                    else:
+                        df_levels["zscore_vol"] = 0.0
+
+                # 5) Cache métriques snapshot (évite recalcul)
+                zmax_cached = float(
+                    df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
+                )
+                dr_p95_cached = float(
+                    df_levels["delta_ratio"].quantile(0.95)
+                    if "delta_ratio" in df_levels
+                    else 0.0
+                )
+                dsum_cached = float(df_levels["delta"].sum() if "delta" in df_levels else 0.0)
+
+                # LOG instantané (visible seulement en verbose sur actifs autorisés)
+                self._fp_log(
+                    "SNAPSHOT",
+                    "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
+                    int(window_s),
+                    int(len(df_levels)),
+                    float(df_levels["vol"].median() if "vol" in df_levels else 0.0),
+                    zmax_cached,
+                    dr_p95_cached,
+                    dsum_cached,
+                    level="debug",
                 )
 
-            # 4) zscore_vol (robuste) — indispensable pour l’absorption
-            if "zscore_vol" not in df_levels.columns:
-                v = df_levels["vol"].astype(float)
-                if v.count() >= 8:
-                    med = float(v.median())
-                    mad = float((v - med).abs().median())
-                    if mad > 1e-9:
-                        df_levels["zscore_vol"] = (v - med) / (1.4826 * mad + 1e-9)
-                    else:
-                        std = float(v.std(ddof=0))
-                        df_levels["zscore_vol"] = (v - float(v.mean())) / (std + 1e-9)
-                else:
-                    df_levels["zscore_vol"] = 0.0
-
-            # 5) Cache métriques snapshot (évite recalcul)
-            zmax_cached = float(
-                df_levels["zscore_vol"].max() if "zscore_vol" in df_levels else 0.0
-            )
-            dr_p95_cached = float(
-                df_levels["delta_ratio"].quantile(0.95)
-                if "delta_ratio" in df_levels
-                else 0.0
-            )
-            dsum_cached = float(df_levels["delta"].sum() if "delta" in df_levels else 0.0)
-
-            # LOG instantané (visible seulement en verbose sur actifs autorisés)
-            self._fp_log(
-                "SNAPSHOT",
-                "[FP-SNAPSHOT] win=%ss levels=%d vol_med=%.2f zmax=%.2f dratio_p95=%.2f dsum=%.2f",
-                int(window_s),
-                int(len(df_levels)),
-                float(df_levels["vol"].median() if "vol" in df_levels else 0.0),
-                zmax_cached,
-                dr_p95_cached,
-                dsum_cached,
-                level="debug",
-            )
-
-        except Exception as e:
-            self._log_error("snapshot", e, {"window_s": window_s})
-            return None, None, None
+            except Exception as e:
+                self._log_error("snapshot", e, {"window_s": window_s})
+                return None, None, None
 
         # === CONTEXTE RAPIDE: tick_rate & pas des niveaux (pour micro-triggers) ===
         try:
