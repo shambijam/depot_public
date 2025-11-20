@@ -92,18 +92,13 @@
         ],
         "ttl_ms": 800,
         "max_slippage_points": 100,
-        "allow_degraded_vote": false,
-        "require_phase_alignment": true,
+        "require_phase_alignment": false,
         "require_footprint": true,
         "of_score_scale": "0_1",
         "ponderations": {
           "trigger_weight": 0.50,
           "orderflow_weight": 0.25,
           "footprint_weight": 0.25
-        },
-        "degraded_vote_conditions": {
-          "min_of_delta_abs": 80.0,
-          "min_of_score": 0.55
         }
       }
     }

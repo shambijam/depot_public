@@ -1431,18 +1431,8 @@ def run_single_pipeline_cycle(
                                 else:
                                     _fc = _fc / 100.0  # si jamais 0..100
 
-                                _fusion_cfg = ((base_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}).get("fusion", {}) or {}
-                                allow_degraded = bool(_fusion_cfg.get("allow_degraded_vote", True))
-                                fire_th = float((_fusion_cfg.get("min_score_to_fire", 0.15) or 0.15))
-
-                                # Si Fusion dit HOLD mais la confiance dépasse le seuil “fire_th” et le mode dégradé est autorisé → OK
-                                if (not out.get("ok")) and (out.get("signal_type") == "WAIT_CONFIRMATION") and allow_degraded and (_fc >= fire_th):
-                                    # choisir une direction cohérente (triggers.direction sinon biais OF)
-                                    _dir = (trig.get("direction") if isinstance(trig, dict) else None) or of.get("bias") or out.get("action")
-                                    if _dir in {"BUY", "SELL"}:
-                                        out["ok"] = True
-                                        out["action"] = _dir
-                                        out["signal_type"] = "DIRECT"  # promote
+                                # ❌ FALLBACK DÉGRADÉ SUPPRIMÉ - Respect strict des seuils FusionManager uniquement
+                                # Le code ne force plus jamais un trade si FusionManager dit WAIT_CONFIRMATION
                             except Exception:
                                 pass
 
