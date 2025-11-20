@@ -68,8 +68,8 @@
       },
       "footprint": {
         "enabled": true,
-        "m1_min_ticks": 5,
-        "m1_min_coverage_s": 3,
+        "m1_min_ticks": 25,
+        "m1_min_coverage_s": 8,
         "tickrate_min": 1.0,
         "veto_absorption": true,
         "warn_absorption": false,
