@@ -147,9 +147,9 @@ def _compute_footprint_snapshot(
     price = pd.to_numeric(df.get("last", df.get("price")), errors="coerce")
     bid = pd.to_numeric(df.get("bid", price), errors="coerce")
     ask = pd.to_numeric(df.get("ask", price), errors="coerce")
-    vol = pd.to_numeric(df.get("volume", df.get("vol", 1.0)), errors="coerce").fillna(
-        1.0
-    )
+
+    # ✅ FIX: Prioriser volume_real (MT5 ticks) puis volume, puis vol, puis fallback 1.0
+    vol = pd.to_numeric(df.get("volume_real", df.get("volume", df.get("vol", 1.0))), errors="coerce").fillna(1.0)
 
     logger.info(f"[SNAPSHOT][DEBUG] Extraction colonnes | price_na={price.isna().sum()} | bid_na={bid.isna().sum()} | ask_na={ask.isna().sum()} | vol_mean={vol.mean():.2f}")
 
