@@ -245,6 +245,54 @@ class MarketAnalyzer:
         except Exception:
             latest = None
 
+        # 3️⃣bis Enrichir footprint_summary avec métadonnées ticks (pour validation footprint M1)
+        if latest is not None and ticks is not None and not ticks.empty:
+            try:
+                # Calculer métadonnées depuis ticks_df
+                tick_count = len(ticks)
+
+                # Coverage temporel (secondes)
+                if "time" in ticks.columns:
+                    time_col = ticks["time"]
+                    time_min = time_col.min()
+                    time_max = time_col.max()
+                    if pd.notna(time_min) and pd.notna(time_max):
+                        coverage_s = (time_max - time_min).total_seconds()
+                    else:
+                        coverage_s = 0.0
+                else:
+                    coverage_s = 0.0
+
+                # Tick rate (ticks/seconde)
+                tick_rate = tick_count / coverage_s if coverage_s > 0 else 0.0
+
+                # Enrichir footprint_summary
+                fp_summ = latest.get("footprint_summary")
+                if isinstance(fp_summ, str):
+                    # Si c'est une string, la parser
+                    try:
+                        import ast
+                        fp_summ = ast.literal_eval(fp_summ)
+                    except Exception:
+                        fp_summ = {}
+                elif not isinstance(fp_summ, dict):
+                    fp_summ = {}
+
+                # Ajouter les métadonnées
+                fp_summ["tick_count"] = tick_count
+                fp_summ["coverage_s"] = round(coverage_s, 2)
+                fp_summ["tick_rate"] = round(tick_rate, 2)
+
+                # Remettre dans latest (convertir en string si besoin)
+                latest["footprint_summary"] = str(fp_summ)
+
+                self.logger.debug(
+                    f"[MarketAnalyzer][{asset}] footprint_summary enrichi: "
+                    f"tick_count={tick_count}, coverage_s={coverage_s:.2f}, tick_rate={tick_rate:.2f}"
+                )
+            except Exception as e:
+                self.logger.warning(f"[MarketAnalyzer][{asset}] Échec enrichissement footprint_summary: {e}")
+
         # 4️⃣ Scoring qualité
         quality_score, quality_diag = self._compute_quality_metrics(
             annotated_df, latest
