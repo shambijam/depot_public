@@ -1122,11 +1122,12 @@ def run_single_pipeline_cycle(
                 footprint_trigger_result = None
                 if asset == "XAUUSD" and ticks_df is not None and not ticks_df.empty:
                     try:
+                        scalping_strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
                         trigger_ok, trigger_data = market_analyzer.analyze_footprint_triggers(
                             asset=asset,
                             ticks=ticks_df,
                             bars=subset_df,
-                            strategy_config=active_config
+                            strategy_config=scalping_strat_cfg
                         )
                         if trigger_ok:
                             footprint_trigger_result = trigger_data
@@ -1709,7 +1710,7 @@ def run_single_pipeline_cycle(
                         _dig(
                             scalping_cfg,
                             ["entry_rules", "scalping", "footprint", "m1_min_ticks"],
-                            25,  # Fallback aligné avec config_trade_scalping.json
+                            50,  # Fallback aligné avec config_trade_scalping.json (seuils relevés)
                         ),
                     )
                 )
@@ -1720,7 +1721,7 @@ def run_single_pipeline_cycle(
                         _dig(
                             scalping_cfg,
                             ["entry_rules", "scalping", "footprint", "m1_min_coverage_s"],
-                            8.0,  # Fallback aligné avec config_trade_scalping.json
+                            15.0,  # Fallback aligné avec config_trade_scalping.json (seuils relevés)
                         ),
                     )
                 )
@@ -1731,7 +1732,7 @@ def run_single_pipeline_cycle(
                         _dig(
                             scalping_cfg,
                             ["entry_rules", "scalping", "footprint", "tickrate_min"],
-                            1.0,
+                            2.0,  # Fallback aligné avec config_trade_scalping.json (seuils relevés)
                         ),
                     )
                 )
@@ -1740,7 +1741,7 @@ def run_single_pipeline_cycle(
                         xcfg,
                         ["overrides", "scalping", "footprint", "coverage_s_min_burst"],
                         _dig(
-                            base,
+                            scalping_cfg,
                             [
                                 "entry_rules",
                                 "scalping",
@@ -1758,7 +1759,7 @@ def run_single_pipeline_cycle(
                         xcfg,
                         ["overrides", "scalping", "orderflow", "delta_abs_min"],
                         _dig(
-                            base,
+                            scalping_cfg,
                             ["entry_rules", "scalping", "orderflow", "delta_abs_min"],
                             30.0,
                         ),
@@ -1766,7 +1767,7 @@ def run_single_pipeline_cycle(
                 )
                 degr_min_of_sc = float(
                     _dig(
-                        base,
+                        scalping_cfg,
                         [
                             "entry_rules",
                             "scalping",
@@ -1781,7 +1782,7 @@ def run_single_pipeline_cycle(
                 # Spread (si tu as un max en conf, sinon on ignore)
                 spread_max = float(
                     _dig(
-                        base,
+                        scalping_cfg,
                         ["entry_rules", "scalping", "fusion", "max_spread_points"],
                         float("inf"),
                     )
@@ -1789,7 +1790,7 @@ def run_single_pipeline_cycle(
 
                 # News blackout
                 news_blackout = bool(
-                    _dig(base, ["guardrails", "sessions", "news_blackout"], False)
+                    _dig(scalping_cfg, ["guardrails", "sessions", "news_blackout"], False)
                 )
 
                 # Évaluation des portes (sans bloquer l’exécution ; juste diag)
@@ -1865,7 +1866,7 @@ def run_single_pipeline_cycle(
                 # 6) Burst guard global (panier existant) déjà checké plus bas, mais on log ici aussi
                 try:
                     burst_cfg = (
-                        base.get("entry_rules", {})
+                        base_config.get("entry_rules", {})
                         .get("scalping", {})
                         .get("burst_scalping", {})
                         or {}
