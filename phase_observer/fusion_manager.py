@@ -903,57 +903,288 @@ class FusionManager:
             "triple_bonus": triple_bonus,
         }
 
-    # -------------- 4) Confidence Fusion System --------------
+    # -------------- 4) Composite Score (Primary Data) --------------
+    def _calculate_composite_score(
+        self, n_of: Dict, n_fp: Dict, n_tr: Dict, coherence: Dict, quality: Dict
+    ) -> Dict[str, Any]:
+        """
+        Score composite basé sur les données PRIMORDIALES :
+        - buy_volume / sell_volume (pression marché)
+        - delta_total (force nette)
+        - imbalance / buy_pct (domination)
+
+        Pondération :
+        - 40% : Pression (buy/sell volumes)
+        - 20% : Delta (force nette)
+        - 30% : Ratios (domination %)
+        - 10% : Dynamique (momentum)
+
+        Retourne : {
+            "base_score": 0-1,
+            "pression_score": 0-1,
+            "delta_score": 0-1,
+            "ratios_score": 0-1,
+            "dynamique_score": 0-1,
+        }
+        """
+        import numpy as np
+
+        # ========== EXTRACTION DONNÉES PRIMORDIALES ==========
+
+        # OrderFlow
+        of_raw = n_of.get("raw", {})
+        of_summary = of_raw.get("summary", {})
+        if isinstance(of_summary, str):
+            try:
+                of_summary = ast.literal_eval(of_summary)
+            except:
+                of_summary = {}
+
+        of_delta = _to_float(of_summary.get("delta_total"), 0.0)
+        of_total_vol = _to_float(of_summary.get("volume_total"), 0.0)
+        of_buy_ratio = _to_float(of_summary.get("buy_ratio"), 0.5)
+
+        # Calcul buy/sell volumes : PRIORITÉ au buy_ratio (plus fiable que delta)
+        if of_total_vol > 0:
+            of_buy_vol = of_total_vol * of_buy_ratio
+            of_sell_vol = of_total_vol * (1.0 - of_buy_ratio)
+        else:
+            of_buy_vol = 0.0
+            of_sell_vol = 0.0
+
+        of_imbalance = _to_float(of_summary.get("mean_imbalance"), 0.5)
+        of_cvd_slope = _to_float(of_summary.get("cvd_slope"), 0.0)
+
+        # Footprint M1
+        fp_raw = n_fp.get("raw", {})
+        fp_summary = fp_raw.get("summary", {})
+        if isinstance(fp_summary, str):
+            try:
+                fp_summary = ast.literal_eval(fp_summary)
+            except:
+                fp_summary = {}
+
+        fp_delta = _to_float(n_fp.get("delta_total"), 0.0)
+        fp_buy_vol = _to_float(fp_summary.get("buy_volume"), 0.0)
+        fp_sell_vol = _to_float(fp_summary.get("sell_volume"), 0.0)
+        fp_total_vol = _to_float(fp_summary.get("total_volume", fp_buy_vol + fp_sell_vol), fp_buy_vol + fp_sell_vol)
+        fp_tick_rate = _to_float(fp_summary.get("tick_rate"), 0.0)
+
+        # ========== COMBINAISON DES SOURCES ==========
+
+        # Volumes combinés (OF + FP)
+        buy_vol_combined = of_buy_vol + fp_buy_vol
+        sell_vol_combined = of_sell_vol + fp_sell_vol
+        total_vol_combined = buy_vol_combined + sell_vol_combined
+
+        # Delta combiné
+        delta_combined = of_delta + fp_delta
+
+        # Protection division par zéro
+        if total_vol_combined < 1e-6:
+            return {
+                "base_score": 0.0,
+                "pression_score": 0.0,
+                "delta_score": 0.0,
+                "ratios_score": 0.0,
+                "dynamique_score": 0.0,
+            }
+
+        # ========== CALCUL SCORES PAR COMPOSANTE ==========
+
+        # --- 1) PRESSION MARCHÉ (40%) ---
+        buy_dominance = buy_vol_combined / total_vol_combined  # 0-1
+        sell_dominance = sell_vol_combined / total_vol_combined  # 0-1
+
+        # Asymétrie de pression (amplifiée au carré pour renforcer les écarts)
+        # Ex: 60% buy → asymétrie 0.20 → 0.20² = 0.04 (trop faible)
+        # Mieux : normalisation forte
+        # Si buy_dominance > 0.5 : score = (buy_dom - 0.5) / 0.5
+        # => 60% → (0.6-0.5)/0.5 = 0.2
+        # => 70% → (0.7-0.5)/0.5 = 0.4
+        # => 80% → (0.8-0.5)/0.5 = 0.6
+
+        if buy_dominance > sell_dominance:
+            pression_normalized = (buy_dominance - 0.5) / 0.5  # 0-1
+        else:
+            pression_normalized = (sell_dominance - 0.5) / 0.5  # 0-1
+
+        pression_score = 0.40 * pression_normalized
+
+        # --- 2) DELTA (20%) ---
+        # Normalisation avec tanh (seuil 2000 pour XAUUSD)
+        delta_normalized = np.tanh(abs(delta_combined) / 2000.0)  # 0-1
+
+        delta_score = 0.20 * delta_normalized
+
+        # --- 3) RATIOS (30%) ---
+        # Imbalance deviation (OF)
+        imbalance_deviation = abs(of_imbalance - 0.5) * 2  # 0-1
+
+        # Buy percentage (FP)
+        if fp_total_vol > 0:
+            fp_buy_pct = fp_buy_vol / fp_total_vol
+            buy_pct_deviation = abs(fp_buy_pct - 0.5) * 2  # 0-1
+        else:
+            buy_pct_deviation = 0.0
+
+        # Moyenne des 2 ratios
+        ratios_score = 0.30 * max(imbalance_deviation, buy_pct_deviation)
+
+        # --- 4) DYNAMIQUE (10%) ---
+        # CVD slope (momentum)
+        cvd_normalized = np.tanh(abs(of_cvd_slope) / 2.0)  # 0-1
+
+        # Tick rate (activité) - bonus si >40 ticks/s
+        tick_rate_normalized = min(1.0, fp_tick_rate / 80.0) if fp_tick_rate > 0 else 0.0
+
+        dynamique_score = 0.10 * (0.7 * cvd_normalized + 0.3 * tick_rate_normalized)
+
+        # ========== SCORE DE BASE ==========
+        base_score = pression_score + delta_score + ratios_score + dynamique_score
+
+        return {
+            "base_score": float(max(0.0, min(1.0, base_score))),
+            "pression_score": float(pression_score),
+            "delta_score": float(delta_score),
+            "ratios_score": float(ratios_score),
+            "dynamique_score": float(dynamique_score),
+            "details": {
+                "buy_vol_combined": float(buy_vol_combined),
+                "sell_vol_combined": float(sell_vol_combined),
+                "delta_combined": float(delta_combined),
+                "buy_dominance": float(buy_dominance),
+                "imbalance_deviation": float(imbalance_deviation),
+                "cvd_normalized": float(cvd_normalized),
+            }
+        }
+
+    # -------------- 5) Confidence Fusion System (Composite + Trigger Boost) --------------
     def _calculate_fused_confidence(
         self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
     ) -> float:
-        p = cfg.get("ponderations", {}) or {}
-        w_tr = _to_float(p.get("trigger_weight"), 0.50)
-        w_of = _to_float(p.get("orderflow_weight"), 0.25)
-        w_fp = _to_float(p.get("footprint_weight"), 0.25)
+        """
+        NOUVEAU SYSTÈME DE SCORING :
 
-        # Override adaptatif (si activé) basé sur contexte (regime/volatility/session)
-        aw_enabled = bool((cfg.get("adaptive_weights", True)))
-        if aw_enabled:
-            aw = self._adaptive_weights(
-                ctx.get("regime"), ctx.get("volatility"), ctx.get("session")
-            )
-            if aw:
-                w_tr, w_of, w_fp = aw["trigger"], aw["orderflow"], aw["footprint"]
+        1. Score Composite (90%) : Basé sur données primordiales (buy/sell volumes, delta, ratios)
+        2. Filtre Qualité : tick_count, coverage_s, status
+        3. BONUS Trigger (+15%) : Si pattern réel détecté (stacking/climax/absorption)
+        4. Bonus/Malus Cohérence : Alignement 3/3, conflits
 
-        # Normalisation des poids
-        total = (w_tr or 0) + (w_of or 0) + (w_fp or 0)
-        if total <= 0:
-            w_tr, w_of, w_fp = 0.5, 0.25, 0.25
-        else:
-            w_tr, w_of, w_fp = w_tr / total, w_of / total, w_fp / total
+        Le trigger devient un AMPLIFICATEUR (pas un bloqueur).
+        """
 
-        base = (w_tr * n_tr["score"]) + (w_of * n_of["score"]) + (w_fp * n_fp["score"])
+        # ========== 1. SCORE COMPOSITE (Données Primordiales) ==========
+        composite = self._calculate_composite_score(n_of, n_fp, n_tr, coherence, quality)
+        base_score = composite["base_score"]  # 0-1
 
-        # Bonus cohérence 0..15%
-        coh_bonus_max = _to_float(p.get("coherence_bonus_max"), 0.15)
-        base *= 1.0 + coh_bonus_max * coherence["agreement"]
+        # ========== 2. FILTRE QUALITÉ ==========
 
-        # Malus conflit 0..25% si matrice montre des conflits
-        matrix = coherence["matrix"]
+        # Extraction métriques qualité
+        fp_raw = n_fp.get("raw", {})
+        fp_summary = fp_raw.get("summary", {})
+        if isinstance(fp_summary, str):
+            try:
+                fp_summary = ast.literal_eval(fp_summary)
+            except:
+                fp_summary = {}
+
+        tick_count = _to_float(fp_summary.get("tick_count"), 0.0)
+        coverage_s = _to_float(fp_summary.get("coverage_s"), 0.0)
+        status_of = n_of.get("status", "SUSPECT")
+        status_fp = n_fp.get("status", "SUSPECT")
+
+        # Multiplicateur qualité
+        quality_multiplier = 1.0
+
+        # Tick count minimum
+        if tick_count < 50:
+            quality_multiplier *= 0.3  # Pénalité sévère
+        elif tick_count < 100:
+            quality_multiplier *= 0.7
+
+        # Coverage minimum
+        if coverage_s < 10:
+            quality_multiplier *= 0.4
+        elif coverage_s < 20:
+            quality_multiplier *= 0.8
+
+        # Status validation
+        if status_of != "VALID":
+            quality_multiplier *= 0.7
+        if status_fp != "VALID":
+            quality_multiplier *= 0.7
+
+        # Application filtre qualité
+        base_score *= quality_multiplier
+
+        # ========== 3. BONUS TRIGGER (Amplificateur) ==========
+
+        trigger_boost = 0.0
+        trigger_type = n_tr.get("type", "")
+        trigger_conf = n_tr.get("score", 0.0)
+
+        # Vérifie si trigger RÉEL (pas fusion_pretrigger)
+        valid_patterns = ["stacking", "climax", "absorption", "micro_stack", "micro_absorption"]
+        is_real_trigger = trigger_type in valid_patterns
+
+        if is_real_trigger:
+            # Bonus selon qualité du trigger
+            if trigger_conf >= 0.85 and trigger_type in ["stacking", "climax"]:
+                trigger_boost = 0.15  # +15% DIAMANT
+            elif trigger_conf >= 0.75:
+                trigger_boost = 0.12  # +12% PLATINE
+            elif trigger_conf >= 0.65:
+                trigger_boost = 0.08  # +8% OR
+            else:
+                trigger_boost = 0.05  # +5% ARGENT
+
+            # Bonus volume exceptionnel (si disponible dans trigger metadata)
+            tr_raw = n_tr.get("raw", {})
+            tr_meta = tr_raw.get("meta", {}) if isinstance(tr_raw, dict) else {}
+            snapshot_stats = tr_meta.get("snapshot_stats", {}) if isinstance(tr_meta, dict) else {}
+            volume_zscore = _to_float(snapshot_stats.get("volume_zscore_max"), 0.0) if isinstance(snapshot_stats, dict) else 0.0
+
+            if volume_zscore >= 2.5:
+                trigger_boost += 0.03  # +3% événement exceptionnel
+
+        # Application bonus trigger
+        base_score += trigger_boost
+
+        # ========== 4. BONUS/MALUS COHÉRENCE ==========
+
+        # Bonus alignement 3/3 (si trigger présent)
+        if is_real_trigger and rules_eval.get("aligned3"):
+            base_score *= 1.08  # +8% consensus unanime
+
+        # Malus conflits
+        matrix = coherence.get("matrix", {})
         conflicts = sum(1 for v in matrix.values() if v == "conflict")
-        conflict_malus = min(0.25, 0.10 * conflicts)
-        base *= 1.0 - conflict_malus
+        if conflicts >= 2:
+            base_score *= 0.85  # -15% conflit majeur
+        elif conflicts == 1:
+            base_score *= 0.92  # -8% conflit mineur
 
-        # Qualité des données
-        q = quality.get("quality_score", 1.0)
-        base *= 0.85 + 0.15 * q
+        # Bonus timing (si disponible)
+        timing_bonus = rules_eval.get("timing_bonus", 0.0)
+        if timing_bonus > 0:
+            base_score += timing_bonus
 
-        # Malus FP faible (seuil issu des règles)
-        if rules_eval.get("weak_fp", False):
-            base *= 0.85
+        # ========== 5. NORMALISATION FINALE ==========
+        final_score = max(0.0, min(0.99, float(base_score)))
 
-        # Bonus triple-confirmation + bonus timing
-        if rules_eval.get("aligned3") and rules_eval.get("triple_bonus", True):
-            base *= 1.08
-        base = base + rules_eval.get("timing_bonus", 0.0)
+        # Logging détaillé (si FUSION_PROBE actif)
+        if FUSION_PROBE:
+            _probe(
+                self.log,
+                f"[COMPOSITE_SCORE] base={composite['base_score']:.3f} "
+                f"(pression={composite['pression_score']:.3f}, delta={composite['delta_score']:.3f}, "
+                f"ratios={composite['ratios_score']:.3f}, dynamique={composite['dynamique_score']:.3f}) | "
+                f"quality_mult={quality_multiplier:.3f} | trigger_boost={trigger_boost:.3f} | "
+                f"final={final_score:.3f}"
+            )
 
-        return max(0.0, min(0.99, float(base)))
+        return final_score
 
     # -------------- 6) Decision Generator --------------
     def _final_decision(
