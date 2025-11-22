@@ -8,11 +8,16 @@ import numpy as np
 from contextlib import contextmanager
 import time
 
-# Tes détecteurs “maison”
+# Tes détecteurs "maison"
 from .detectors import (
     detect_imbalance_stacking,
     detect_absorption_reject,
     detect_volume_climax_after_consolidation,
+    # Nouveaux triggers (Session 22 Nov 2025)
+    detect_liquidation_clusters,
+    detect_failed_breakout,
+    detect_momentum_imbalance,
+    detect_accumulation_zones,
 )
 
 """
@@ -57,12 +62,19 @@ class ErrorCode(Enum):
 
 
 class TriggerType(Enum):
+    # Triggers existants
     CLIMAX = "climax_after_consolidation"
     STACKING = "imbalance_stacking"
     ABSORPTION = "absorption_reject"
     MICRO_STACK = "stacking_inline"
     MICRO_ABSORPTION = "absorption_inline"
     MICRO_BURST = "micro_burst"
+
+    # Nouveaux triggers (Session 22 Nov 2025)
+    LIQUIDATION_CLUSTERS = "liquidation_clusters"  # Priorité MAX - Liquidations massives
+    FAILED_BREAKOUT = "failed_breakout"  # Priorité HAUTE - Faux breakouts institutionnels
+    MOMENTUM_IMBALANCE = "momentum_imbalance"  # Priorité MOYENNE - Accélération momentum
+    ACCUMULATION_ZONES = "accumulation_zones"  # Priorité BASSE - Zones accumulation/distribution
 
 
 @dataclass
@@ -341,12 +353,18 @@ class ConfidenceScorer:
     @staticmethod
     def _alias(trigger: str) -> str:
         mapping = {
+            # Triggers existants
             "stacking": TriggerType.STACKING.value,
             "imbalance_stacking": TriggerType.STACKING.value,
             "climax_after_consolidation": TriggerType.CLIMAX.value,
             "absorption_reject": TriggerType.ABSORPTION.value,
             "stacking_inline": TriggerType.MICRO_STACK.value,
             "absorption_inline": TriggerType.MICRO_ABSORPTION.value,
+            # Nouveaux triggers (Session 22 Nov 2025)
+            "liquidation_clusters": TriggerType.LIQUIDATION_CLUSTERS.value,
+            "failed_breakout": TriggerType.FAILED_BREAKOUT.value,
+            "momentum_imbalance": TriggerType.MOMENTUM_IMBALANCE.value,
+            "accumulation_zones": TriggerType.ACCUMULATION_ZONES.value,
         }
         return mapping.get(str(trigger), str(trigger))
 
@@ -373,12 +391,20 @@ class ConfidenceScorer:
         valid = [c for c in candidates if c and c.get("ok")]
         if not valid:
             return None
+        # Hiérarchie recommandée (Rapport Session 22 Nov 2025) :
+        # Liquidation > Failed Breakout > Stacking > Climax > Absorption > Momentum
         prio = {
-            TriggerType.STACKING.value: 3,
-            TriggerType.CLIMAX.value: 2,
-            TriggerType.ABSORPTION.value: 1.5,
+            # Nouveaux triggers
+            TriggerType.LIQUIDATION_CLUSTERS.value: 5.0,  # Priorité MAX - Mouvement forcé
+            TriggerType.FAILED_BREAKOUT.value: 4.0,       # Priorité HAUTE - Piège haute probabilité
+            # Triggers existants (ordre ajusté)
+            TriggerType.STACKING.value: 3.0,              # Mouvement organique
+            TriggerType.CLIMAX.value: 2.5,                # Breakout
+            TriggerType.ABSORPTION.value: 2.0,            # Retournement
+            TriggerType.MOMENTUM_IMBALANCE.value: 1.8,    # Early signal (nouveau)
             TriggerType.MICRO_STACK.value: 1.2,
             TriggerType.MICRO_ABSORPTION.value: 1.0,
+            TriggerType.ACCUMULATION_ZONES.value: 0.9,    # Anticipatif (nouveau)
         }
         valid.sort(
             key=lambda d: (
@@ -1154,7 +1180,126 @@ class FootprintAnalyzer:
                 "absorption_detection", e, {"kwargs": abs_kwargs, "window_s": window_s}
             )
 
-        # --- 4) Fallbacks micro si rien (optionnels selon régime) ---
+        # --- 4) NOUVEAUX TRIGGERS (Session 22 Nov 2025) ---
+
+        # --- 4a) Liquidation Clusters (Priorité MAX) ---
+        try:
+            liquidation_kwargs = dict(
+                volume_zscore_threshold=2.8,
+                delta_ratio_threshold=0.80,
+                min_cluster_levels=3,
+                price_proximity_ticks=3.0,
+                window_seconds=10.0,
+            )
+            d_liq = detect_liquidation_clusters(df_levels, **liquidation_kwargs)
+            if d_liq.get("ok"):
+                candidates.append(d_liq)
+                try:
+                    self._fp_log(
+                        "DETAIL",
+                        "[FP-LIQUIDATION] ✅ TRIGGER | win=%ss | dir=%s | conf=%.3f | cluster_size=%d | z-score=%.1f",
+                        int(window_s),
+                        d_liq.get("direction"),
+                        float(d_liq.get("confidence", 0)),
+                        int(d_liq.get("meta", {}).get("cluster_size", 0)),
+                        float(d_liq.get("meta", {}).get("avg_volume_zscore", 0)),
+                        level="info",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log_error(
+                "liquidation_detection", e, {"kwargs": liquidation_kwargs, "window_s": window_s}
+            )
+
+        # --- 4b) Failed Breakout (Priorité HAUTE) ---
+        try:
+            breakout_kwargs = dict(
+                lookback_candles=12,
+                breakout_min_volume_mult=1.3,
+                rejection_delta_ratio=0.65,
+                min_absorption_volume_ratio=0.70,
+            )
+            d_breakout = detect_failed_breakout(df_levels, **breakout_kwargs)
+            if d_breakout.get("ok"):
+                candidates.append(d_breakout)
+                try:
+                    self._fp_log(
+                        "DETAIL",
+                        "[FP-BREAKOUT] ✅ TRIGGER | win=%ss | dir=%s | conf=%.3f | level=%.2f | rejection=%.3f",
+                        int(window_s),
+                        d_breakout.get("direction"),
+                        float(d_breakout.get("confidence", 0)),
+                        float(d_breakout.get("meta", {}).get("level_tested", 0)),
+                        float(d_breakout.get("meta", {}).get("rejection_delta_ratio", 0)),
+                        level="info",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log_error(
+                "breakout_detection", e, {"kwargs": breakout_kwargs, "window_s": window_s}
+            )
+
+        # --- 4c) Momentum Imbalance (Priorité MOYENNE) ---
+        try:
+            momentum_kwargs = dict(
+                min_consecutive_levels=4,
+                delta_growth_threshold=1.15,
+                volume_growth_threshold=1.10,
+                min_tick_rate_increase=1.20,
+            )
+            d_momentum = detect_momentum_imbalance(df_levels, **momentum_kwargs)
+            if d_momentum.get("ok"):
+                candidates.append(d_momentum)
+                try:
+                    self._fp_log(
+                        "DETAIL",
+                        "[FP-MOMENTUM] ✅ TRIGGER | win=%ss | dir=%s | conf=%.3f | levels=%d | growth=%.1f%%",
+                        int(window_s),
+                        d_momentum.get("direction"),
+                        float(d_momentum.get("confidence", 0)),
+                        int(d_momentum.get("meta", {}).get("consecutive_levels", 0)),
+                        float(d_momentum.get("meta", {}).get("delta_growth_rate", 0)) * 100,
+                        level="info",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log_error(
+                "momentum_detection", e, {"kwargs": momentum_kwargs, "window_s": window_s}
+            )
+
+        # --- 4d) Accumulation Zones (Priorité BASSE) ---
+        try:
+            accumulation_kwargs = dict(
+                volume_density_mult=3.0,
+                delta_balance_threshold=0.30,
+                price_range_atr_ratio=0.50,
+                min_time_residence_pct=0.75,
+            )
+            d_accum = detect_accumulation_zones(df_levels, **accumulation_kwargs)
+            if d_accum.get("ok"):
+                candidates.append(d_accum)
+                try:
+                    self._fp_log(
+                        "DETAIL",
+                        "[FP-ACCUMULATION] ✅ TRIGGER | win=%ss | dir=%s | conf=%.3f | density=%.1fx | balance=%.3f",
+                        int(window_s),
+                        d_accum.get("direction"),
+                        float(d_accum.get("confidence", 0)),
+                        float(d_accum.get("meta", {}).get("volume_density", 0)),
+                        float(d_accum.get("meta", {}).get("delta_balance", 0)),
+                        level="info",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log_error(
+                "accumulation_detection", e, {"kwargs": accumulation_kwargs, "window_s": window_s}
+            )
+
+        # --- 5) Fallbacks micro si rien (optionnels selon régime) ---
         allow_micro = bool(params.get("allow_micro", True))
         self._tick_rate_tmp = params.get("tick_rate", None)  # pour micro_absorption
         if not candidates and allow_micro:

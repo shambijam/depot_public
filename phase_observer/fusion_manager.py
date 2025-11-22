@@ -1125,12 +1125,22 @@ class FusionManager:
         trigger_conf = n_tr.get("score", 0.0)
 
         # Vérifie si trigger RÉEL (pas fusion_pretrigger)
-        valid_patterns = ["stacking", "climax", "absorption", "micro_stack", "micro_absorption"]
+        valid_patterns = [
+            # Triggers existants
+            "stacking", "climax", "absorption", "micro_stack", "micro_absorption",
+            # Nouveaux triggers (Session 22 Nov 2025)
+            "liquidation_clusters", "failed_breakout", "momentum_imbalance", "accumulation_zones"
+        ]
         is_real_trigger = trigger_type in valid_patterns
 
         if is_real_trigger:
             # Bonus selon qualité du trigger
-            if trigger_conf >= 0.85 and trigger_type in ["stacking", "climax"]:
+            # Triggers prioritaires : stacking, climax, liquidation_clusters, failed_breakout
+            priority_triggers = [
+                "stacking", "climax", "absorption",
+                "liquidation_clusters", "failed_breakout", "momentum_imbalance"
+            ]
+            if trigger_conf >= 0.85 and trigger_type in priority_triggers:
                 trigger_boost = 0.15  # +15% DIAMANT
             elif trigger_conf >= 0.75:
                 trigger_boost = 0.12  # +12% PLATINE
