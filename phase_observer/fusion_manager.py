@@ -21,11 +21,27 @@ def _probe(logger, msg, *args):
 
 
 def _get_thresholds(cfg: dict):
+    """
+    Récupère les seuils de confiance depuis la configuration.
+
+    Ordre de priorité :
+    1. cfg["fusion"]["scoring_thresholds"] (config_trade_scalping.json)
+    2. cfg["scoring_thresholds"] (fallback ancien format)
+    3. Valeurs par défaut hardcodées
+    """
     cfg = cfg or {}
-    th = (cfg.get("scoring_thresholds") or {}) if isinstance(cfg, dict) else {}
+
+    # Cherche d'abord dans fusion.scoring_thresholds (nouveau format)
+    fusion_cfg = cfg.get("fusion", {}) if isinstance(cfg, dict) else {}
+    th = fusion_cfg.get("scoring_thresholds", {}) if isinstance(fusion_cfg, dict) else {}
+
+    # Fallback sur ancien format (racine)
+    if not th:
+        th = cfg.get("scoring_thresholds", {}) if isinstance(cfg, dict) else {}
+
     return {
-        "cautious": float(th.get("cautious", th.get("direct", 0.55))),
-        "moderate": float(th.get("moderate", 0.65)),
+        "cautious": float(th.get("cautious", 0.55)),
+        "moderate": float(th.get("moderate", 0.70)),
         "high": float(th.get("high", 0.80)),
         "conditional": float(th.get("conditional", 0.35)),
         "allow_conditional": bool(cfg.get("allow_conditional_entries", True)),
@@ -1217,7 +1233,7 @@ class FusionManager:
         )
         anchor_price = n_tr[
             "anchor"
-        ]  # l’ancre du trigger reste prioritaire; POC pris plus haut si None
+        ]  # l'ancre du trigger reste prioritaire; POC pris plus haut si None
 
         if mode == "HOLD":
             return {
@@ -1227,21 +1243,27 @@ class FusionManager:
                 "anchor_price": anchor_price,
             }
 
-        if fused >= 0.80 and direction in ("BUY", "SELL"):
+        # Récupération des seuils dynamiques depuis la configuration
+        thresholds = _get_thresholds(cfg)
+        high_threshold = thresholds.get("high", 0.80)
+        moderate_threshold = thresholds.get("moderate", 0.70)
+        cautious_threshold = thresholds.get("cautious", 0.55)
+
+        if fused >= high_threshold and direction in ("BUY", "SELL"):
             return {
                 "action": direction,
                 "signal_type": f"HIGH_CONVICTION_{direction}",
                 "direction": direction,
                 "anchor_price": anchor_price,
             }
-        if fused >= 0.70 and direction in ("BUY", "SELL"):
+        if fused >= moderate_threshold and direction in ("BUY", "SELL"):
             return {
                 "action": direction,
                 "signal_type": f"MODERATE_{direction}",
                 "direction": direction,
                 "anchor_price": anchor_price,
             }
-        if fused >= 0.55 and direction in ("BUY", "SELL"):
+        if fused >= cautious_threshold and direction in ("BUY", "SELL"):
             return {
                 "action": direction,
                 "signal_type": f"CAUTIOUS_{direction}",

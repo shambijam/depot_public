@@ -349,6 +349,34 @@
                     "delta_ratio_max": 0.5,
                     "attempts_min": 2
                 },
+                "liquidation_clusters": {
+                    "enabled": true,
+                    "volume_zscore_threshold": 2.8,
+                    "delta_ratio_threshold": 0.80,
+                    "min_cluster_levels": 3,
+                    "price_proximity_ticks": 3.0,
+                    "window_seconds": 10.0
+                },
+                "failed_breakout": {
+                    "enabled": true,
+                    "lookback_candles": 5,
+                    "rejection_delta_ratio": 0.70,
+                    "volume_vs_median": 1.5,
+                    "level_tolerance_pct": 0.002
+                },
+                "momentum_imbalance": {
+                    "enabled": true,
+                    "min_consecutive_levels": 4,
+                    "delta_growth_threshold": 1.15,
+                    "volume_growth_threshold": 1.10,
+                    "min_tick_rate_increase": 1.20
+                },
+                "accumulation_zones": {
+                    "enabled": true,
+                    "min_volume_density": 1.8,
+                    "max_delta_ratio_mean": 0.40,
+                    "max_price_range_vs_atr": 0.30
+                },
                 "order": {
                     "entry_style": "MARKET",
                     "price_offset_ticks": 2,

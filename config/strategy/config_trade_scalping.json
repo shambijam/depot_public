@@ -140,7 +140,7 @@
   "fusion": {
     "adaptive_weights": true,
     "seuils_entree": {
-      "min_confidence": 0.60,
+      "min_confidence": 0.70,
       "min_orderflow_score": 0.70,
       "max_spread_pts": 40
     },
@@ -151,7 +151,9 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "direct": 0.55,
+      "high": 0.85,
+      "moderate": 0.75,
+      "cautious": 0.65,
       "conditional": 0.40
     },
     "momentum": {
