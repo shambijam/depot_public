@@ -207,22 +207,10 @@ class LiquidityStrategy(BaseStrategy):
             df_work = df_m1.copy() if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50 else None
 
 
-            # --- 0b) Détection patterns via MarketAnalyzer ---
-            latest_pattern = None
-            try:
-                if isinstance(df_work, pd.DataFrame):
-                    analyzer = MarketAnalyzer(
-                        config_manager=self.config_manager, logger=self.logger
-                    )
-                    mres = analyzer.analyze(df_work.copy(), asset)
-                    if isinstance(mres, dict):
-                        latest_pattern = mres.get("patterns", {}).get("candles", [])[-1] \
-                            if mres.get("patterns", {}).get("candles") else mres.get("latest")
-            except Exception as e:
-                self.logger.debug(f"[{asset}] MarketAnalyzer skipped: {e}")
-
-            if latest_pattern:
-                asset_signals["latest_pattern"] = latest_pattern
+            # === [DÉTECTION PATTERNS SUPPRIMÉE - Session 23 Nov 2025] ===
+            # Bloc MarketAnalyzer patterns retiré (16 lignes)
+            # Raison : Détecteurs de patterns/bougies supprimés du système
+            # latest_pattern causait ValueError (pandas.Series ambiguity)
 
             strat_cfg = (self.strategy_config or {}).copy()
 

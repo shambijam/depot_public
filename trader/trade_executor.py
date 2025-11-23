@@ -29,6 +29,7 @@ from trader.burst import monitor_burst_baskets, open_burst_basket
 from trader.reconcile import (
     reconcile_state_with_broker,
     _update_internal_position_state,
+    monitor_pending_orders,
 )
 
 # Ces deux fonctions viennent de validators (pas de reconcile)
@@ -453,6 +454,7 @@ TradeExecutor._calculate_sl_tp_prices = _calculate_sl_tp_prices
 TradeExecutor.monitor_burst_baskets = monitor_burst_baskets
 TradeExecutor._update_internal_position_state = _update_internal_position_state
 TradeExecutor.reconcile_state_with_broker = reconcile_state_with_broker
+TradeExecutor.monitor_pending_orders = monitor_pending_orders
 TradeExecutor.approve_pending_order = approve_pending_order
 TradeExecutor.manual_override_if_needed = manual_override_if_needed
 TradeExecutor._log_audit_trail = _log_audit_trail

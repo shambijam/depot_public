@@ -590,7 +590,7 @@ class FusionManager:
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
         # Récupérer les poids utilisés pour la fusion
-        adaptive_w = self._compute_adaptive_weights(
+        adaptive_w = self._adaptive_weights(
             ctx.get("regime"), ctx.get("volatility"), ctx.get("session")
         )
         if adaptive_w:
