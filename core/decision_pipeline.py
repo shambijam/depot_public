@@ -321,8 +321,7 @@ class DecisionPipeline:
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
                         "phase_observer": inject_phase,  # <-- conditionnel
-                        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-                        # "ai_interface": getattr(self, "ai_interface", None),
+                      
                         "risk_manager": getattr(self, "risk_manager", None),
                         "audit_logger": logging.getLogger("AuditLogger"),
                     },
@@ -437,8 +436,7 @@ class DecisionPipeline:
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
                         "phase_observer": getattr(self, "phase_observer", None),
-                        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-                        # "ai_interface": getattr(self, "ai_interface", None),
+                      
                         "risk_manager": getattr(self, "risk_manager", None),
                         "audit_logger": logging.getLogger("AuditLogger"),
                     },

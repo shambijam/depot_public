@@ -13,7 +13,7 @@ import logging
 import json
 import sys
 from datetime import datetime, timezone
-import time 
+import time
 from pathlib import Path
 import importlib
 import core.strategy_manager
@@ -33,22 +33,17 @@ try:
 
     importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor
-    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-    # Import AIDecision retiré (module ai_core supprimé)
     from mt5_connector import MT5Connector
     from mecanique_generale.mecano import Mecano
     from run_bot import (
         run_single_pipeline_cycle,
-    )  
+    )
     from utils.logger_setup import (
         setup_production_logging,
     )  # ← source unique pour le logging
     from core.audit_logger import AuditLogger
     from core.strategy_manager import StrategyManager
-    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-    # Import AIInterface retiré (module ai_interface supprimé)
     from core.decision_pipeline import DecisionPipeline
-    
 
     from run_bot import (
         verify_environment_and_config,
@@ -64,8 +59,8 @@ except ImportError as e:
         exc_info=True,
     )
     sys.exit(1)
-    
-  
+
+
 def sleep_until_next_minute():
     now = datetime.now(timezone.utc)
     to_sleep = 60.0 - (now.second + now.microsecond / 1e6)
@@ -94,35 +89,31 @@ def verify_environment_and_config(
         SystemExit: Si des composants critiques sont manquants ou invalides.
     """
     logger = logging.getLogger(__name__)
-    logger.info("Vérification de l'environnement de production et de la configuration chargée...")
+    logger.info(
+        "Vérification de l'environnement de production et de la configuration chargée..."
+    )
 
     # --- Vérification de la configuration dynamique ---
     try:
         current_config = config_manager.get_current_dynamic_config()
         if not current_config:
-            logger.critical("FATAL: La configuration dynamique est vide après l'initialisation. Le bot ne peut pas continuer.")
+            logger.critical(
+                "FATAL: La configuration dynamique est vide après l'initialisation. Le bot ne peut pas continuer."
+            )
             sys.exit(1)
         logger.info("Configuration dynamique accédée avec succès pour vérification.")
     except Exception as e:
-        logger.critical(f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}", exc_info=True)
+        logger.critical(
+            f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}",
+            exc_info=True,
+        )
         sys.exit(1)
-
-    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-    # Vérification du modèle IA (désactivée)
-    # models_dir = config_manager.get("paths.models", "models/")
-    # ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
-    # model_path = Path(models_dir) / ai_model_name
-    # if not model_path.is_file():
-    #     logger.critical(
-    #         f"FATAL: Modèle IA non trouvé à '{model_path}'. Le bot ne peut pas démarrer sans modèle IA. "
-    #         f"Veuillez télécharger le modèle GGUF."
-    #     )
-    #     sys.exit(1)
-    # logger.info(f"Modèle IA trouvé : {model_path}")
 
     # --- Vérification des identifiants MT5 (sans tentative de connexion ici) ---
     try:
-        active_mt5_account_details = config_manager.get_mt5_account_credentials(mode=bot_mode)
+        active_mt5_account_details = config_manager.get_mt5_account_credentials(
+            mode=bot_mode
+        )
         if active_mt5_account_details is None:
             logger.critical(
                 f"FATAL: Aucun compte MT5 actif ou valide n'a pu être trouvé pour le mode '{bot_mode}'. "
@@ -135,7 +126,10 @@ def verify_environment_and_config(
             f"'{active_mt5_account_details['account_id']}' (Login: {active_mt5_account_details['login']})."
         )
     except Exception as e:
-        logger.critical(f"FATAL: Erreur lors du chargement des identifiants MT5 : {e}", exc_info=True)
+        logger.critical(
+            f"FATAL: Erreur lors du chargement des identifiants MT5 : {e}",
+            exc_info=True,
+        )
         sys.exit(1)
 
     # --- Vérification des identifiants Telegram ---
@@ -151,11 +145,17 @@ def verify_environment_and_config(
             )
             sys.exit(1)
         else:
-            logger.warning("Les notifications Telegram sont globalement désactivées. Le bot continue sans alertes Telegram.")
+            logger.warning(
+                "Les notifications Telegram sont globalement désactivées. Le bot continue sans alertes Telegram."
+            )
     else:
-        logger.info("Identifiants Telegram chargés (via ConfigManager depuis les variables d'environnement).")
+        logger.info(
+            "Identifiants Telegram chargés (via ConfigManager depuis les variables d'environnement)."
+        )
 
-    logger.info("Vérification de la configuration et de l'environnement terminée avec succès.")
+    logger.info(
+        "Vérification de la configuration et de l'environnement terminée avec succès."
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -186,8 +186,6 @@ def main(args: argparse.Namespace) -> None:
     # Initialiser les variables pour le bloc finally
     config_manager = None
     mt5_connector = None
-    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-    # ai_decision = None
 
     try:
         # --- Étape A : Charger la Configuration ---
@@ -209,14 +207,24 @@ def main(args: argparse.Namespace) -> None:
         )
         # --- SNAPSHOT CFG BURST (complet) ---
         base_cfg = config_manager.get_current_dynamic_config() or {}
-        g_burst = (((base_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+        g_burst = (
+            ((base_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                "burst_scalping"
+            )
+            or {}
+        ).get("burst_size")
 
         # stratégie (config_trade_scalping.json via StrategyManager)
         try:
             strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
         except Exception:
             strat_cfg = {}
-        s_burst = (((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
+        s_burst = (
+            ((strat_cfg.get("entry_rules") or {}).get("scalping") or {}).get(
+                "burst_scalping"
+            )
+            or {}
+        ).get("burst_size")
 
         # asset XAUUSD : entry_rules + overrides (deux chemins possibles) + legacy
         try:
@@ -224,16 +232,30 @@ def main(args: argparse.Namespace) -> None:
         except Exception:
             xau = {}
 
-        a_entry   = ((((xau.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size"))
-        a_override = (((((xau.get("overrides") or {}).get("scalping") or {}).get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping") or {}).get("burst_size")
-        a_legacy  = (((xau.get("overrides") or {}).get("scalping") or {}).get("burst") or {}).get("burst_size")
+        a_entry = (
+            ((xau.get("entry_rules") or {}).get("scalping") or {}).get("burst_scalping")
+            or {}
+        ).get("burst_size")
+        a_override = (
+            (
+                (
+                    ((xau.get("overrides") or {}).get("scalping") or {}).get(
+                        "entry_rules"
+                    )
+                    or {}
+                ).get("scalping")
+                or {}
+            ).get("burst_scalping")
+            or {}
+        ).get("burst_size")
+        a_legacy = (
+            ((xau.get("overrides") or {}).get("scalping") or {}).get("burst") or {}
+        ).get("burst_size")
 
         logger.critical(
             f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | "
             f"XAUUSD.entry={a_entry} | XAUUSD.override={a_override} | XAUUSD.legacy={a_legacy}"
         )
-
-
 
         # --- Étape B : Créer et Assembler toutes les "Briques" dans le bon ordre ---
         logger.info("Assemblage des modules principaux de l'application...")
@@ -247,52 +269,15 @@ def main(args: argparse.Namespace) -> None:
         )
         strategy_manager.initialize_strategies()
 
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # models_dir = config_manager.get("paths.models", "models/")
-        # ai_model_name = config_manager.get(
-        #     "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
-        # )
-        # ai_decision = AIDecision(
-        #     model_path=str(Path(models_dir) / ai_model_name),
-        #     config_manager_instance=config_manager,
-        # )
-        # ai_interface = AIInterface(
-        #     config_manager_instance=config_manager, ai_decision_instance=ai_decision
-        # )
-
         decision_pipeline = DecisionPipeline(
             config_manager_instance=config_manager,
-            # ai_interface_instance=ai_interface,  # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
             strategy_manager_instance=strategy_manager,
         )
         decision_pipeline.extra_context = {}
         mecano = Mecano(config_manager_instance=config_manager)
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # mecano.set_ai_analyzer(ai_decision)
 
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # config_manager.ai_decision_instance = ai_decision
-        
         phase_observer = PhaseObserver(config_manager=config_manager)
         market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
-
-        
-        
-
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # Déclenchement des rapports au démarrage (Daily IA + Weekly Mecano)
-        # try:
-        #     _trigger_fn = globals().get("_trigger_ai_and_mecano_reports_on_start")
-        #     if callable(_trigger_fn):
-        #         _trigger_fn(ai_decision, mecano, config_manager)
-        #     else:
-        #         logger.debug(
-        #             "Helper '_trigger_ai_and_mecano_reports_on_start' introuvable : saut du déclenchement auto des rapports."
-        #         )
-        # except Exception as e:
-        #     logger.warning(
-        #         f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True
-        #     )
 
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode_cfg = str(config_manager.get("mode_execution", "DEMO")).upper()
@@ -335,7 +320,7 @@ def main(args: argparse.Namespace) -> None:
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
         )
         trade_executor.reconcile_state_with_broker()
-      
+
     except (SystemExit, RuntimeError, Exception) as e:
         logger.critical(
             f"FATAL: Erreur critique lors du démarrage du bot: {e}", exc_info=True
@@ -400,9 +385,11 @@ def main(args: argparse.Namespace) -> None:
         # ═══════════════════════════════════════════════════════════════════════
         while True:
             cycle_count += 1
-            print(f"[Cycle] SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
+            print(
+                f"[Cycle] SNIPER_X CYCLE #{cycle_count} - {datetime.now().strftime('%H:%M:%S')}"
+            )
             cycle_start_time = time.time()
-                      
+
             # Préparer un dictionnaire de pré-signaux live pour ce cycle
             live_pre_signals = {}
             for asset in readiness_symbols:
@@ -411,10 +398,15 @@ def main(args: argparse.Namespace) -> None:
                     if live_signal:
                         live_pre_signals[asset] = live_signal
                 except Exception as e:
-                    logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
-                       
+                    logger.warning(
+                        f"[{asset}] Impossible d'analyser la bougie live: {e}"
+                    )
+
             _current_ctx = getattr(decision_pipeline, "extra_context", {})
-            decision_pipeline.extra_context = {**_current_ctx, "live_pre_signals": live_pre_signals}
+            decision_pipeline.extra_context = {
+                **_current_ctx,
+                "live_pre_signals": live_pre_signals,
+            }
 
             trade_executed_in_cycle = run_single_pipeline_cycle(
                 mt5_connector,
@@ -422,7 +414,7 @@ def main(args: argparse.Namespace) -> None:
                 trade_executor,
                 config_manager,
                 mecano,
-                strategy_manager,   
+                strategy_manager,
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
@@ -437,14 +429,18 @@ def main(args: argparse.Namespace) -> None:
 
                 # Fusionner la config de stratégie scalping pour avoir entry_rules
                 try:
-                    scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                    scalping_config = (
+                        strategy_manager.get_strategy_config("scalping") or {}
+                    )
                     merged_config = dict(base_config)
                     if "entry_rules" in scalping_config:
                         merged_config.setdefault("entry_rules", {}).update(
                             scalping_config["entry_rules"]
                         )
                 except Exception as merge_err:
-                    logger.warning(f"[BASKET_MONITOR] Fusion config scalping échouée: {merge_err}")
+                    logger.warning(
+                        f"[BASKET_MONITOR] Fusion config scalping échouée: {merge_err}"
+                    )
                     merged_config = base_config
 
                 trade_executor.monitor_burst_baskets(config=merged_config)
@@ -460,10 +456,14 @@ def main(args: argparse.Namespace) -> None:
                 try:
                     live_signal = phase_observer.analyze_live_bar(asset)
                     if live_signal:
-                        logger.debug(f"[{asset}] Pré-signal live: Δ={live_signal['footprint_delta']} | POC={live_signal['footprint_poc']}")
+                        logger.debug(
+                            f"[{asset}] Pré-signal live: Δ={live_signal['footprint_delta']} | POC={live_signal['footprint_poc']}"
+                        )
                 except Exception as e:
-                    logger.warning(f"[{asset}] Impossible d'analyser la bougie live: {e}")
-            
+                    logger.warning(
+                        f"[{asset}] Impossible d'analyser la bougie live: {e}"
+                    )
+
             # 🔄 Recalibration périodique toutes les 30 minutes
             if cycle_count % 30 == 0:
                 for asset in readiness_symbols:
@@ -514,15 +514,6 @@ def main(args: argparse.Namespace) -> None:
             f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}",
         )
     finally:
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # if config_manager and config_manager.get("ai.enabled", False) and ai_decision:
-        #     logger.info(
-        #         "Sauvegarde de l'historique des suggestions de l'IA avant l'arrêt..."
-        #     )
-        #     try:
-        #         ai_decision._save_suggestion_history()
-        #     except Exception as e:
-        #         logger.error(f"Erreur lors de la sauvegarde de l'historique IA: {e}")
 
         if mt5_connector and mt5_connector.is_connected:
             try:

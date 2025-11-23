@@ -2,7 +2,6 @@
 
 import os
 import json
-import yaml
 import re
 import logging
 from pathlib import Path

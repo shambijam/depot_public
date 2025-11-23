@@ -3,7 +3,7 @@
 import logging
 import json
 import sys
-import yaml
+
 import numpy as np
 import jsonschema
 import os
@@ -31,8 +31,7 @@ from typing import (
 from functools import lru_cache
 from enum import Enum
 from core.config_loader import ConfigLoader
-# === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-# from core.ai_interface import AIInterface (module supprimé)
+
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
 from core.decision_pipeline import DecisionPipeline
@@ -87,8 +86,7 @@ class ConfigManager:
         # Dépendances principales
         self.config_loader = ConfigLoader(config_manager_instance=self)
         self.audit_logger = AuditLogger(config_manager_instance=self)
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # self.ai_interface = AIInterface(config_manager_instance=self) (module supprimé)
+   
         self.strategy_manager = StrategyManager(
             config_loader_instance=self.config_loader, config_manager_instance=self
         )
@@ -98,8 +96,7 @@ class ConfigManager:
 
         self.decision_pipeline = DecisionPipeline(
             config_manager_instance=self,
-            # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-            # ai_interface_instance=self.ai_interface, (paramètre retiré)
+           
             strategy_manager_instance=self.strategy_manager,
         )
 

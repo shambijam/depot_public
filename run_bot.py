@@ -38,7 +38,6 @@ try:
     from core.decision_pipeline import DecisionPipeline
     from trader.trade_executor import run_trade_execution_pipeline
     from trader.trade_executor import TradeExecutor, run_trade_execution_pipeline
-    from ai_core.ai_decision import AIDecision
     from mt5_connector import MT5Connector
     from utils.logger_setup import setup_production_logging
     from mecanique_generale.mecano import Mecano
@@ -3266,16 +3265,7 @@ def main(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         # Instancier AI Decision
-        models_dir = config_manager.get("paths.models", "models/")
-        ai_model_name_for_init = config_manager.get(
-            "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
-        )
-        ai_decision_model_full_path = Path(models_dir) / ai_model_name_for_init
-        ai_decision = AIDecision(
-            model_path=str(ai_decision_model_full_path),
-            config_manager_instance=config_manager,
-        )
-
+        
         # Instancier TradeExecutor
         trade_executor = TradeExecutor(
             config_manager=config_manager, mt5_connector=mt5_connector, mode=bot_mode
@@ -3283,25 +3273,17 @@ def main(args: argparse.Namespace) -> None:
 
         # Instancier Mecano
         mecano = Mecano(config_manager_instance=config_manager)
-        mecano.set_ai_analyzer(ai_decision)
-
+     
         # Instancier StrategyManager
         strategy_manager = StrategyManager(
             config_loader_instance=config_manager.config_loader,
             config_manager_instance=config_manager,
         )
         strategy_manager.initialize_strategies()
-
-        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-        # Instanciation AIInterface retirée (module supprimé)
-        # from core.ai_interface import AIInterface
-        # ai_interface = AIInterface(...)
-
+      
         # Instancier DecisionPipeline
         decision_pipeline = DecisionPipeline(
             config_manager_instance=config_manager,
-            # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
-            # ai_interface_instance=ai_interface, (paramètre retiré)
             strategy_manager_instance=strategy_manager,
         )
         decision_pipeline.extra_context = {}
@@ -3522,10 +3504,7 @@ def main(args: argparse.Namespace) -> None:
                 logger.info("✅ Thread basket_monitor arrêté proprement")
         except Exception as e:
             logger.error(f"Erreur arrêt threads: {e}")
-
-        if "ai_decision" in locals() and ai_decision:
-            logger.info("Sauvegarde historique IA avant arrêt...")
-            ai_decision._save_suggestion_history()
+       
 
         if "mt5_connector" in locals() and mt5_connector.is_connected():
             mt5_connector.disconnect()
