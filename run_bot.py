@@ -1023,15 +1023,9 @@ def run_single_pipeline_cycle(
             mode=execution_mode
         )
 
-        # Candles switch
-        try:
-            _cs = (
-                config_manager.get("phase_detection_defaults.candlestick_analysis", {})
-                or {}
-            )
-            CANDLES_ENABLED = bool(_cs.get("enabled", True))
-        except Exception:
-            CANDLES_ENABLED = True
+        # === [CANDLES SWITCH SUPPRIMÉ - Session 23 Nov 2025] ===
+        # Variable CANDLES_ENABLED retirée (détecteurs patterns/bougies supprimés)
+        CANDLES_ENABLED = False  # Désactivé définitivement
 
         # Assets autorisés
         global_safety = base_config.get("global_safety", {}) or {}
@@ -1146,15 +1140,9 @@ def run_single_pipeline_cycle(
                     except Exception as e:
                         logger.error(f"[FOOTPRINT_TRIGGER] ❌ Erreur analyse triggers {asset}: {e}", exc_info=True)
 
-                # Option: purge patterns si OFF
-                if not CANDLES_ENABLED:
-                    try:
-                        market_results.pop("patterns", None)
-                        lat = market_results.get("latest")
-                        if isinstance(lat, dict):
-                            lat.pop("candles", None)
-                    except Exception:
-                        pass
+                # === [PURGE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc purge patterns retiré (CANDLES_ENABLED toujours False)
+                # market_results ne contient plus de patterns (détecteurs supprimés)
 
                 if cycle_count == 1 or do_full_refresh:
                     market_analyzer.phase_observer.load_initial_history(
@@ -1179,37 +1167,9 @@ def run_single_pipeline_cycle(
                     f"[MarketAnalyzer] Actif: {asset} | Phase: {market_results.get('phase', 'N/A')}"
                 )
 
-                # Log 200 bougies
-                if CANDLES_ENABLED:
-                    try:
-                        last_200 = annotated_rates_df.tail(200)
-                        avg_vol = (
-                            last_200["tick_volume"].mean()
-                            if "tick_volume" in last_200
-                            else None
-                        )
-                        avg_range = (
-                            ((last_200["high"] - last_200["low"]).mean())
-                            if {"high", "low"} <= set(last_200.columns)
-                            else None
-                        )
-                        bull_candles = (
-                            int((last_200["close"] > last_200["open"]).sum())
-                            if {"close", "open"} <= set(last_200.columns)
-                            else 0
-                        )
-                        bear_candles = (
-                            int((last_200["close"] < last_200["open"]).sum())
-                            if {"close", "open"} <= set(last_200.columns)
-                            else 0
-                        )
-                        logger.info(
-                            f"[{asset}] Historique(200) → Bull={bull_candles}, Bear={bear_candles}, VolMoy={avg_vol:.2f} | RangeMoy={avg_range:.5f}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[{asset}] Résumé 200 bougies impossible: {e}")
-                else:
-                    logger.debug(f"[{asset}] Skip résumé 200 (candles disabled).")
+                # === [LOG 200 BOUGIES SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc logging bull/bear candles retiré (30 lignes)
+                # Ce log était conditionné par CANDLES_ENABLED (désactivé définitivement)
 
                 # === FOOTPRINT ANALYSE (bougie M1 clôturée, + option live si indispo) ===
                 try:
@@ -1352,10 +1312,9 @@ def run_single_pipeline_cycle(
 
                 signals["__latest__"] = latest  # pour diag WHY_NO_TRADE
 
-                if CANDLES_ENABLED:
-                    _pat = market_results.get("patterns", {})
-                    if _pat:
-                        signals.update(_pat)
+                # === [UPDATE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc signals.update(patterns) retiré (CANDLES_ENABLED=False)
+                # market_results ne contient plus de patterns
 
                 signals["phase"] = market_results.get(
                     "phase", signals.get("phase", "neutral")

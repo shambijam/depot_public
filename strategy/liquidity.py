@@ -248,47 +248,9 @@ class LiquidityStrategy(BaseStrategy):
                 self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
                 return {}
 
-            # --- 3) Marubozu Playbook ---
-            mp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_playbook", {})
-            )
-            if (
-                mp_cfg.get("enabled", True)
-                and isinstance(df_work, pd.DataFrame)
-                and latest_pattern
-                and "marubozu" in str(latest_pattern.get("pattern", "")).lower()
-            ):
-                try:
-                    mp_decision = self._rule_marubozu_playbook(
-                        asset=asset,
-                        df=df_work,
-                        price=price,
-                        meta=meta,
-                        mtf_ctx=(analyzed_context.get("market_data") or {}).get(asset, {}),
-                        cfg=mp_cfg,
-                    )
-                    if mp_decision:
-                        return self._finalize_decision(mp_decision, analyzed_context)
-                except Exception as e:
-                    self.logger.debug(f"[{asset}] marubozu_playbook erreur: {e}")
-
-            # --- 3b) Marubozu Impulse ---
-            imp_cfg = (
-                (strat_cfg.get("entry_rules") or {})
-                .get("scalping", {})
-                .get("marubozu_impulse", {})
-            )
-            if imp_cfg.get("enabled", True) and isinstance(df_work, pd.DataFrame):
-                try:
-                    impulse_decision = self._rule_marubozu_impulse(
-                        df=df_work, asset=asset, price=price, meta=meta, cfg=imp_cfg
-                    )
-                    if impulse_decision:
-                        return self._finalize_decision(impulse_decision, analyzed_context)
-                except Exception as e:
-                    self.logger.debug(f"[{asset}] marubozu_impulse erreur: {e}")
+            # === [APPELS MARUBOZU FANTÔMES SUPPRIMÉS - Session 23 Nov 2025] ===
+            # Les appels à _rule_marubozu_playbook et _rule_marubozu_impulse ont été supprimés
+            # Raison : Ces fonctions n'existent PAS dans liquidity.py (code mort causant AttributeError)
 
             # --- 4) Biais directionnel ---
             action = self._infer_action_from_signals(asset_signals)

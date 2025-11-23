@@ -485,7 +485,6 @@ class PhaseObserver:
                 "regime_alignment": float(
                     weights.get("regime", weights.get("regime_alignment", 0.15))
                 ),
-                "candle_pattern": 0.15,
             }
 
         confluence_bonus = cfg.get("confluence_bonus", cfg.get("confluence", {})) or {}
@@ -532,38 +531,11 @@ class PhaseObserver:
         if bool(row.get("institutional_setup", False)):
             score += confluence_bonus.get("full_confluence_bonus", 0.20)
 
-        # --- 5) Bougies ---
-        candle_type = str(row.get("candle_pattern", "")).lower()
-        candle_score = float(row.get("candle_pattern_strength", 0.0) or 0.0)
-        if candle_score > 0:
-            base_bonus = signal_weights.get("candle_pattern", 0.15) * min(
-                1.0, candle_score
-            )
-            if candle_type in {
-                "bullish_engulfing",
-                "morning_star",
-                "three_white_soldiers",
-            }:
-                score += base_bonus * 1.3
-            elif candle_type in {
-                "bearish_engulfing",
-                "evening_star",
-                "three_black_crows",
-            }:
-                score += base_bonus * 1.3
-            elif candle_type in {"doji", "doji_cluster_consolidation"}:
-                score += base_bonus * 0.7
-            elif candle_type in {
-                "hammer",
-                "shooting_star",
-                "bullish_pinbar",
-                "bearish_pinbar",
-            }:
-                score += base_bonus * 1.0
-            else:
-                score += base_bonus
+        # === [SECTION BOUGIES SUPPRIMÉE - Session 23 Nov 2025] ===
+        # Supprimé : scoring basé sur candle_pattern (30 lignes)
+        # Raison : Détecteurs de patterns de bougies retirés du système
 
-        # --- 6) Multiplicateurs qualité ---
+        # --- 5) Multiplicateurs qualité ---
         if bool(row.get("is_liquid", True)):
             score *= quality_multipliers.get("tight_spread", 1.05)
         if regime_strength > 0.8:
@@ -855,27 +827,9 @@ class PhaseObserver:
                 df_an["bos_mss_details"] = [None] * len(df_an)
                 df_an["bos_mss_detected"] = False
 
-                # === (NOUVEAU) CANDLE PATTERNS ===
-                if toggles.get("detect_candles", True):
-                    try:
-                        candle_signals = self.detectors.detect_candle_patterns(df_an)
-                        if candle_signals and isinstance(candle_signals, list):
-                            df_an["candle_pattern"] = [
-                                c.get("pattern") if c else None for c in candle_signals
-                            ]
-                            df_an["candle_pattern_score"] = [  # ✅ nouveau nom
-                                c.get("strength_score") if c else 0.0
-                                for c in candle_signals
-                            ]
-                        else:
-                            df_an["candle_pattern"] = None
-                            df_an["candle_pattern_score"] = 0.0
-                    except Exception as e:
-                        self.logger.warning(
-                            f"[{current_asset_symbol}] Erreur detect_candle_patterns: {e}"
-                        )
-                        df_an["candle_pattern"] = None
-                        df_an["candle_pattern_score"] = 0.0
+                # === [CANDLE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc détection candle_patterns retiré (21 lignes)
+                # Raison : Détecteurs de patterns de bougies retirés du système
                         
             # === PHASE 2bis: RANGE POSITION (accumulation/distribution en range) ===
             try:
@@ -1450,18 +1404,8 @@ class PhaseObserver:
                     f"Volatilité={last_vol:.3f}% | Rule={last_rule}"
                 )
 
-                # 🔍 Bougies (nouveau log)
-                if "candle_pattern" in df_an.columns:
-                    last_candle = str(df_an["candle_pattern"].iloc[-1])
-                    last_candle_strength = float(
-                        df_an.get("candle_pattern_score", [0.0])[-1]
-                    )
-
-                    if last_candle and last_candle != "None":
-                        self.logger.info(
-                            f"🕯️ [{current_asset_symbol}] Dernier pattern détecté: {last_candle} "
-                            f"(strength={last_candle_strength:.2f})"
-                        )
+                # === [LOG BOUGIES SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc logging candle_pattern retiré (12 lignes)
 
                 # --- PATCH: ajoute current_price ---
                 try:
@@ -1506,13 +1450,8 @@ class PhaseObserver:
 
         # --- Détecteurs (par bar) ---
         res = {"asset": asset_symbol, "index": int(i_last)}
-        try:
-            # Patterns chandeliers / combos (ex: tes fonctions savent accepter un index)
-            res["candle_pattern"] = (
-                self.detectors.detect_candle_patterns(last_bar_df) or [None]
-            )[-1]
-        except Exception:
-            res["candle_pattern"] = None
+        # === [CANDLE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
+        # Bloc détection candle_pattern dans analyze_last_bar retiré (7 lignes)
 
         try:
             fvg_details = self.detectors.detect_fvg_enhanced(df_an)
@@ -1886,47 +1825,9 @@ class PhaseObserver:
                 if not last_signals:
                     raise ValueError(f"Analyse {tf} vide")
 
-                # 🔥 Enrichissement Candle Patterns
-                try:
-                    # On relance le détecteur de patterns chandeliers sur le DataFrame
-                    candle_signals = self.detectors.detect_candle_patterns(tf_data)
-
-                    if candle_signals and isinstance(candle_signals, list):
-                        last_candle = candle_signals[-1] if candle_signals else None
-                        if last_candle:
-                            # On enrichit last_signals (déjà produit par analyze_last_bar)
-                            last_signals.update(
-                                {
-                                    "candle_pattern": last_candle.get("pattern"),
-                                    "candle_strength": last_candle.get(
-                                        "strength_score"
-                                    ),
-                                }
-                            )
-                        else:
-                            # Pas de pattern → on laisse vide
-                            last_signals.update(
-                                {
-                                    "candle_pattern": None,
-                                    "candle_strength": 0.0,
-                                }
-                            )
-                    else:
-                        last_signals.update(
-                            {
-                                "candle_pattern": None,
-                                "candle_strength": 0.0,
-                            }
-                        )
-
-                except Exception as e:
-                    self.logger.warning(f"[{asset}] Erreur candle_patterns {tf}: {e}")
-                    last_signals.update(
-                        {
-                            "candle_pattern": None,
-                            "candle_strength": 0.0,
-                        }
-                    )
+                # === [CANDLE PATTERNS MTF SUPPRIMÉ - Session 23 Nov 2025] ===
+                # Bloc enrichissement candle patterns multi-timeframe retiré (41 lignes)
+                # Raison : Détecteurs de patterns de bougies retirés du système
 
                     tf_analyses[tf] = last_signals
 

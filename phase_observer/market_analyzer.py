@@ -7,11 +7,9 @@ from typing import Dict, Any, Tuple, Optional, List
 import pandas as pd
 
 from .orchestrator import PhaseObserver
-from .detectors import (
-    detect_single_candle,
-    detect_multi_candle_patterns,
-    detect_combos,
-)
+# === [IMPORTS PATTERNS SUPPRIMÉS - Session 23 Nov 2025] ===
+# Imports detect_single_candle, detect_multi_candle_patterns, detect_combos retirés
+# Raison : Détecteurs de patterns/bougies supprimés du système
 from .detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
 from .footprint_analyzer import FootprintAnalyzer
 from .fusion_manager import FusionManager
@@ -198,25 +196,12 @@ class MarketAnalyzer:
             return {"annotated_df": pd.DataFrame(), "latest": None, "patterns": {}}
 
         # 2️⃣ Détecteurs factuels
-        try:
-            candles = [
-                detect_single_candle(annotated_df, i) for i in range(len(annotated_df))
-            ]
-        except Exception as e:
-            self.logger.debug(f"[MarketAnalyzer] single_candle detectors failed: {e}")
-            candles = []
-
-        try:
-            multi_patterns = detect_multi_candle_patterns(annotated_df)
-        except Exception as e:
-            self.logger.debug(f"[MarketAnalyzer] multi_candle detectors failed: {e}")
-            multi_patterns = []
-
-        try:
-            combo_patterns = detect_combos(annotated_df)
-        except Exception as e:
-            self.logger.debug(f"[MarketAnalyzer] combo detectors failed: {e}")
-            combo_patterns = []
+        # === [DÉTECTEURS PATTERNS SUPPRIMÉS - Session 23 Nov 2025] ===
+        # Appels à detect_single_candle, detect_multi_candle_patterns, detect_combos retirés (18 lignes)
+        # Raison : Détecteurs de patterns/bougies supprimés du système
+        candles = []
+        multi_patterns = []
+        combo_patterns = []
 
         # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
         of_kwargs = self._get_ofv6_params(asset)
