@@ -33,7 +33,8 @@ try:
 
     importlib.reload(core.strategy_manager)
     from trader.trade_executor import TradeExecutor
-    from ai_core.ai_decision import AIDecision
+    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    # Import AIDecision retiré (module ai_core supprimé)
     from mt5_connector import MT5Connector
     from mecanique_generale.mecano import Mecano
     from run_bot import (
@@ -44,7 +45,8 @@ try:
     )  # ← source unique pour le logging
     from core.audit_logger import AuditLogger
     from core.strategy_manager import StrategyManager
-    from core.ai_interface import AIInterface
+    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    # Import AIInterface retiré (module ai_interface supprimé)
     from core.decision_pipeline import DecisionPipeline
     
 
@@ -69,178 +71,11 @@ def sleep_until_next_minute():
     to_sleep = 60.0 - (now.second + now.microsecond / 1e6)
     if to_sleep > 0:
         time.sleep(to_sleep)
-         
-# === Helper: déclenchement des rapports au démarrage (IA quotidien & Mecano hebdo) ===
 
 
-def _trigger_ai_and_mecano_reports_on_start(ai_decision, mecano, config_manager):
-    """
-    Déclenche au DÉMARRAGE :
-      - Rapport IA quotidien (si pas encore fait aujourd'hui ET si activé dans la conf)
-      - Rapport Mecano hebdo le dimanche (si pas encore fait aujourd'hui ET si activé dans la conf)
-    Persiste l'état dans <ai_audit>/.last_runs.json pour éviter les doublons.
-    ⚠️ Ne dépend ni de MT5 ni du pipeline : sûr à appeler juste après les instanciations.
-    """
-
-    # ---- Résolution dossier ai_audit ----
-    try:
-        base_cfg = config_manager.get("paths.configs", "config")
-    except Exception:
-        base_cfg = "config"
-    try:
-        ai_audit_dir_cfg = config_manager.get("paths.ai_audit", None)
-    except Exception:
-        ai_audit_dir_cfg = None
-    ai_audit_dir = Path(ai_audit_dir_cfg or (Path(base_cfg) / "ai_audit"))
-    ai_audit_dir.mkdir(parents=True, exist_ok=True)
-
-    state_path = ai_audit_dir / ".last_runs.json"
-
-    # ---- Load state (safe) ----
-    state = {"last_daily_date": None, "last_weekly_date": None}
-    try:
-        if state_path.exists():
-            loaded = json.loads(state_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                state.update(loaded)
-    except Exception:
-        pass
-
-    # ---- Flags de configuration (interrupteurs) ----
-    # IA (daily) : on respecte ai.audit_mode.enabled et ai.audit_mode.daily_report_enabled
-    ai_global_enabled = bool(config_manager.get("ai.audit_mode.enabled", True))
-    ai_daily_enabled = bool(
-        config_manager.get("ai.audit_mode.daily_report_enabled", True)
-    )
-    # Mecano (weekly) : compat deux chemins possibles
-    mecano_weekly_enabled = bool(
-        config_manager.get(
-            "mecano.weekly_report_enabled",
-            config_manager.get("mecano.audit_mode.weekly_report_enabled", True),
-        )
-    )
-
-    # ---- Date/weekday (locale machine) ----
-    now_local = datetime.now()
-    today_str = now_local.strftime("%Y-%m-%d")
-    weekday = now_local.weekday()  # Monday=0 ... Sunday=6
-
-    # ---- Helper: collecte de logs IA du jour (best-effort) ----
-    def _collect_daily_logs():
-        """
-        Essaie de charger les logs IA pertinents (ai_supervisor_logs.jsonl) du jour.
-        Si indisponible, renvoie une liste vide.
-        """
-        import json
-        from datetime import datetime
-
-        try:
-            logs_dir = Path(config_manager.get("paths.logs", "logs"))
-        except Exception:
-            logs_dir = Path("logs")
-        src = logs_dir / "ai_supervisor_logs.jsonl"
-        if not src.exists():
-            return []
-        out = []
-        cutoff = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        try:
-            with src.open("r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                        ts = rec.get("timestamp")
-                        if not ts:
-                            out.append(rec)
-                            continue
-                        ts_norm = str(ts).replace("Z", "+00:00")
-                        try:
-                            dt = datetime.fromisoformat(ts_norm)
-                        except Exception:
-                            dt = None
-                        if dt and dt.date() == cutoff.date():
-                            out.append(rec)
-                    except Exception:
-                        continue
-        except Exception:
-            return []
-        return out
-
-    # ---- DAILY IA ----
-    if ai_decision:
-        if not ai_global_enabled or not ai_daily_enabled:
-            try:
-                ai_decision.logger.info(
-                    "[Reports] Daily IA report disabled by config (ai.audit_mode.daily_report_enabled=false or ai.audit_mode.enabled=false)."
-                )
-            except Exception:
-                pass
-        elif state.get("last_daily_date") != today_str:
-            try:
-                logs_today = _collect_daily_logs()
-                ai_result = ai_decision.audit_trading_performance(
-                    logs=logs_today, period="last_day", current_context=None
-                )
-                # Marquer comme fait seulement si succès IA
-                if isinstance(ai_result, dict) and "error" not in ai_result:
-                    state["last_daily_date"] = today_str
-                    try:
-                        ai_decision.logger.info(
-                            "[Reports] Daily IA report generated on start."
-                        )
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        ai_decision.logger.warning(
-                            "[Reports] Daily IA report FAILED on start."
-                        )
-                    except Exception:
-                        pass
-            except Exception as e:
-                try:
-                    ai_decision.logger.error(
-                        f"[Reports] Daily IA report exception: {e}", exc_info=True
-                    )
-                except Exception:
-                    pass
-
-    # ---- WEEKLY MECANO (Dimanche=6) ----
-    if mecano and weekday == 6:
-        if not mecano_weekly_enabled:
-            try:
-                mecano.logger.info(
-                    "[Reports] Weekly Mecano report disabled by config (mecano.weekly_report_enabled=false)."
-                )
-            except Exception:
-                pass
-        elif state.get("last_weekly_date") != today_str:
-            try:
-                weekly = mecano.build_weekly_report()
-                mecano.export_report(weekly, format="json")
-                state["last_weekly_date"] = today_str
-                try:
-                    mecano.logger.info(
-                        "[Reports] Weekly Mecano report generated on Sunday start."
-                    )
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    mecano.logger.error(
-                        f"[Reports] Weekly Mecano report exception: {e}", exc_info=True
-                    )
-                except Exception:
-                    pass
-
-    # ---- Persist state (atomique simple) ----
-    try:
-        tmp = state_path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp.replace(state_path)
-    except Exception:
-        pass
+# === [FONCTION IA SUPPRIMÉE - Session 23 Nov 2025] ===
+# Fonction _trigger_ai_and_mecano_reports_on_start supprimée (169 lignes)
+# Raison : Module IA (ai_core, ai_interface) complètement retiré du système
 
 
 def verify_environment_and_config(
@@ -272,17 +107,18 @@ def verify_environment_and_config(
         logger.critical(f"FATAL: Impossible de charger la configuration du bot. Erreur: {e}", exc_info=True)
         sys.exit(1)
 
-    # --- Vérification du modèle IA ---
-    models_dir = config_manager.get("paths.models", "models/")
-    ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
-    model_path = Path(models_dir) / ai_model_name
-    if not model_path.is_file():
-        logger.critical(
-            f"FATAL: Modèle IA non trouvé à '{model_path}'. Le bot ne peut pas démarrer sans modèle IA. "
-            f"Veuillez télécharger le modèle GGUF."
-        )
-        sys.exit(1)
-    logger.info(f"Modèle IA trouvé : {model_path}")
+    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    # Vérification du modèle IA (désactivée)
+    # models_dir = config_manager.get("paths.models", "models/")
+    # ai_model_name = config_manager.get("ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf")
+    # model_path = Path(models_dir) / ai_model_name
+    # if not model_path.is_file():
+    #     logger.critical(
+    #         f"FATAL: Modèle IA non trouvé à '{model_path}'. Le bot ne peut pas démarrer sans modèle IA. "
+    #         f"Veuillez télécharger le modèle GGUF."
+    #     )
+    #     sys.exit(1)
+    # logger.info(f"Modèle IA trouvé : {model_path}")
 
     # --- Vérification des identifiants MT5 (sans tentative de connexion ici) ---
     try:
@@ -350,7 +186,8 @@ def main(args: argparse.Namespace) -> None:
     # Initialiser les variables pour le bloc finally
     config_manager = None
     mt5_connector = None
-    ai_decision = None
+    # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    # ai_decision = None
 
     try:
         # --- Étape A : Charger la Configuration ---
@@ -410,28 +247,31 @@ def main(args: argparse.Namespace) -> None:
         )
         strategy_manager.initialize_strategies()
 
-        models_dir = config_manager.get("paths.models", "models/")
-        ai_model_name = config_manager.get(
-            "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
-        )
-        ai_decision = AIDecision(
-            model_path=str(Path(models_dir) / ai_model_name),
-            config_manager_instance=config_manager,
-        )
-        ai_interface = AIInterface(
-            config_manager_instance=config_manager, ai_decision_instance=ai_decision
-        )
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # models_dir = config_manager.get("paths.models", "models/")
+        # ai_model_name = config_manager.get(
+        #     "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
+        # )
+        # ai_decision = AIDecision(
+        #     model_path=str(Path(models_dir) / ai_model_name),
+        #     config_manager_instance=config_manager,
+        # )
+        # ai_interface = AIInterface(
+        #     config_manager_instance=config_manager, ai_decision_instance=ai_decision
+        # )
 
         decision_pipeline = DecisionPipeline(
             config_manager_instance=config_manager,
-            ai_interface_instance=ai_interface,
+            # ai_interface_instance=ai_interface,  # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
             strategy_manager_instance=strategy_manager,
         )
         decision_pipeline.extra_context = {}
         mecano = Mecano(config_manager_instance=config_manager)
-        mecano.set_ai_analyzer(ai_decision)
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # mecano.set_ai_analyzer(ai_decision)
 
-        config_manager.ai_decision_instance = ai_decision
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # config_manager.ai_decision_instance = ai_decision
         
         phase_observer = PhaseObserver(config_manager=config_manager)
         market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
@@ -439,19 +279,20 @@ def main(args: argparse.Namespace) -> None:
         
         
 
-        # === Déclenchement des rapports au démarrage (Daily IA + Weekly Mecano) ===
-        try:
-            _trigger_fn = globals().get("_trigger_ai_and_mecano_reports_on_start")
-            if callable(_trigger_fn):
-                _trigger_fn(ai_decision, mecano, config_manager)
-            else:
-                logger.debug(
-                    "Helper '_trigger_ai_and_mecano_reports_on_start' introuvable : saut du déclenchement auto des rapports."
-                )
-        except Exception as e:
-            logger.warning(
-                f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True
-            )
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # Déclenchement des rapports au démarrage (Daily IA + Weekly Mecano)
+        # try:
+        #     _trigger_fn = globals().get("_trigger_ai_and_mecano_reports_on_start")
+        #     if callable(_trigger_fn):
+        #         _trigger_fn(ai_decision, mecano, config_manager)
+        #     else:
+        #         logger.debug(
+        #             "Helper '_trigger_ai_and_mecano_reports_on_start' introuvable : saut du déclenchement auto des rapports."
+        #         )
+        # except Exception as e:
+        #     logger.warning(
+        #         f"Échec déclenchement auto rapports (démarrage): {e}", exc_info=True
+        #     )
 
         # --- Étape C : Établir les connexions et faire les vérifications finales ---
         bot_mode_cfg = str(config_manager.get("mode_execution", "DEMO")).upper()
@@ -673,14 +514,15 @@ def main(args: argparse.Namespace) -> None:
             f"**SNIPER_X BOT S'EST ARRÊTÉ (CRASH) !**\nErreur: {type(e).__name__} : {e}",
         )
     finally:
-        if config_manager and config_manager.get("ai.enabled", False) and ai_decision:
-            logger.info(
-                "Sauvegarde de l'historique des suggestions de l'IA avant l'arrêt..."
-            )
-            try:
-                ai_decision._save_suggestion_history()
-            except Exception as e:
-                logger.error(f"Erreur lors de la sauvegarde de l'historique IA: {e}")
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # if config_manager and config_manager.get("ai.enabled", False) and ai_decision:
+        #     logger.info(
+        #         "Sauvegarde de l'historique des suggestions de l'IA avant l'arrêt..."
+        #     )
+        #     try:
+        #         ai_decision._save_suggestion_history()
+        #     except Exception as e:
+        #         logger.error(f"Erreur lors de la sauvegarde de l'historique IA: {e}")
 
         if mt5_connector and mt5_connector.is_connected:
             try:

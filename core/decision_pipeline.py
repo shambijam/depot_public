@@ -9,7 +9,8 @@ import traceback
 from datetime import datetime, UTC, timezone
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
-from core.ai_interface import AIInterface
+# === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+# Import AIInterface retiré (module supprimé)
 from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
@@ -49,7 +50,8 @@ class DecisionPipeline:
     def __init__(
         self,
         config_manager_instance,
-        ai_interface_instance=None,
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # Paramètre ai_interface_instance retiré (module supprimé)
         strategy_manager_instance=None,
         phase_observer_instance=None,
     ):
@@ -60,7 +62,8 @@ class DecisionPipeline:
         """
         self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager_instance
-        self.ai_interface = ai_interface_instance
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # self.ai_interface = ai_interface_instance (retiré)
         self.strategy_manager = strategy_manager_instance
 
         # ✅ Flags internes (hardcodés)
@@ -318,7 +321,8 @@ class DecisionPipeline:
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
                         "phase_observer": inject_phase,  # <-- conditionnel
-                        "ai_interface": getattr(self, "ai_interface", None),
+                        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+                        # "ai_interface": getattr(self, "ai_interface", None),
                         "risk_manager": getattr(self, "risk_manager", None),
                         "audit_logger": logging.getLogger("AuditLogger"),
                     },
@@ -433,7 +437,8 @@ class DecisionPipeline:
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
                         "phase_observer": getattr(self, "phase_observer", None),
-                        "ai_interface": getattr(self, "ai_interface", None),
+                        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+                        # "ai_interface": getattr(self, "ai_interface", None),
                         "risk_manager": getattr(self, "risk_manager", None),
                         "audit_logger": logging.getLogger("AuditLogger"),
                     },
