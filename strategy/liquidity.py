@@ -6,6 +6,7 @@ import math
 import pandas as pd
 import numpy as np
 from phase_observer.market_analyzer import MarketAnalyzer
+from phase_observer.detectors import Detectors
 
 
 
@@ -36,6 +37,14 @@ class LiquidityStrategy(BaseStrategy):
         self.config_manager = config_manager
         self.strategy_config = strategy_config or {}
         self.logger = logger or getattr(config_manager, "logger", None)
+
+        # Initialisation des détecteurs de liquidité
+        try:
+            self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
+            self.logger.info("✅ Détecteurs de liquidité initialisés avec succès.")
+        except Exception as e:
+            self.logger.error(f"❌ Erreur initialisation Detectors: {e}", exc_info=True)
+            self.detectors = None
 
         self.logger.info("Moteur de stratégie Liquidity initialisé.")
 
@@ -70,7 +79,126 @@ class LiquidityStrategy(BaseStrategy):
     # =========================
     #   LOGIQUE PAR ACTIF
     # =========================
-    
+
+    def _detect_liquidity_signals(
+        self,
+        asset: str,
+        df: pd.DataFrame,
+        df_htf: Optional[pd.DataFrame] = None
+    ) -> Dict[str, Any]:
+        """
+        Appelle les 8 détecteurs de liquidité et retourne un dict enrichi.
+
+        Retourne:
+            {
+                "sweep_details": {...},
+                "ob_details": {...},
+                "fvg_details": {...},
+                "eqh_eql_details": {...},
+                "bos_mss_details": {...},
+                "absorption_details": {...},
+                "market_regime": "...",
+                "micro_phase": "..."
+            }
+        """
+        if self.detectors is None:
+            self.logger.warning(f"[{asset}] Détecteurs non disponibles, retour vide.")
+            return {}
+
+        signals = {}
+
+        try:
+            # 1. Liquidity Sweeps (prioritaire pour SL/Entry)
+            sweeps = self.detectors.detect_liquidity_sweeps(df, df_htf)
+            if sweeps and len(sweeps) > 0:
+                latest_sweep = sweeps[-1]
+                if latest_sweep is not None:
+                    signals["sweep_details"] = latest_sweep
+                    self.logger.debug(f"[{asset}] Sweep détecté: {latest_sweep.get('type')} @ {latest_sweep.get('price')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_liquidity_sweeps error: {e}")
+
+        try:
+            # 2. Order Blocks (zones d'entrée + TP)
+            obs = self.detectors.detect_order_block_ml_enhanced(df, df_htf)
+            if obs and len(obs) > 0:
+                latest_ob = obs[-1]
+                if latest_ob is not None:
+                    signals["ob_details"] = latest_ob
+                    self.logger.debug(f"[{asset}] OB détecté: {latest_ob.get('type')} @ {latest_ob.get('zone')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_order_block_ml_enhanced error: {e}")
+
+        try:
+            # 3. Fair Value Gaps (zones d'entrée + TP)
+            fvgs = self.detectors.detect_fvg_enhanced(df)
+            if fvgs and len(fvgs) > 0:
+                latest_fvg = fvgs[-1]
+                if latest_fvg is not None:
+                    signals["fvg_details"] = latest_fvg
+                    self.logger.debug(f"[{asset}] FVG détecté: {latest_fvg.get('type')} @ {latest_fvg.get('zone')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_fvg_enhanced error: {e}")
+
+        try:
+            # 4. Equal Highs/Lows (TP prioritaire)
+            eqh_eql = self.detectors.detect_eqh_eql(df)
+            if eqh_eql and len(eqh_eql) > 0:
+                latest_eq = eqh_eql[-1]
+                if latest_eq is not None:
+                    signals["eqh_eql_details"] = latest_eq
+                    self.logger.debug(f"[{asset}] EQH/EQL détecté: {latest_eq.get('type')} @ {latest_eq.get('level')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_eqh_eql error: {e}")
+
+        try:
+            # 5. Break of Structure / Market Structure Shift (SL)
+            bos_mss = self.detectors.detect_bos_mss_enhanced(df, df_htf)
+            if bos_mss and len(bos_mss) > 0:
+                latest_bos = bos_mss[-1]
+                if latest_bos is not None:
+                    signals["bos_mss_details"] = latest_bos
+                    self.logger.debug(f"[{asset}] BOS/MSS détecté: {latest_bos.get('type')} @ {latest_bos.get('level')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_bos_mss_enhanced error: {e}")
+
+        try:
+            # 6. Absorption (extrêmes)
+            absorption = self.detectors.detect_absorption(df)
+            if absorption and len(absorption) > 0:
+                latest_abs = absorption[-1]
+                if latest_abs is not None:
+                    signals["absorption_details"] = latest_abs
+                    self.logger.debug(f"[{asset}] Absorption détectée: {latest_abs.get('type')}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_absorption error: {e}")
+
+        try:
+            # 7. Market Regime (contexte global)
+            regime = self.detectors.detect_market_regime(df)
+            if regime is not None and not regime.empty:
+                signals["market_regime"] = str(regime.iloc[-1])
+                self.logger.debug(f"[{asset}] Regime: {signals['market_regime']}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_market_regime error: {e}")
+
+        try:
+            # 8. Micro Phase M1 (phase courte durée)
+            micro = self.detectors.detect_micro_phase_m1(df)
+            if micro and len(micro) > 0:
+                latest_micro = micro[-1]
+                if latest_micro is not None:
+                    signals["micro_phase"] = str(latest_micro.get("phase", "unknown"))
+                    self.logger.debug(f"[{asset}] Micro phase: {signals['micro_phase']}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] detect_micro_phase_m1 error: {e}")
+
+        # Log résumé
+        detected_count = sum(1 for k in signals.keys() if k.endswith("_details"))
+        self.logger.info(f"[{asset}] 🔍 Détection liquidité: {detected_count}/6 signaux détectés")
+
+        return signals
+
         # --- helpers nécessaires par _evaluate_single_asset -----------------------
     def _safe_asset_meta(
         self,
@@ -206,6 +334,22 @@ class LiquidityStrategy(BaseStrategy):
 
             df_work = df_m1.copy() if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50 else None
 
+            # --- 0.5) Détection des signaux de liquidité (Session 23 Nov 2025) ---
+            # Récupération des DataFrames HTF si disponibles
+            df_htf = None
+            for key in ("df_htf", "rates_df_h1", "df_h1"):
+                val = ctx_md.get(key)
+                if isinstance(val, pd.DataFrame) and not val.empty:
+                    df_htf = val
+                    break
+
+            # Appel des 8 détecteurs de liquidité
+            if df_work is not None:
+                liquidity_signals = self._detect_liquidity_signals(asset, df_work, df_htf)
+                # Fusion avec asset_signals pour que les fonctions aval les trouvent
+                asset_signals = {**asset_signals, **liquidity_signals}
+            else:
+                self.logger.warning(f"[{asset}] df_work non disponible, détection liquidité skip.")
 
             # === [DÉTECTION PATTERNS SUPPRIMÉE - Session 23 Nov 2025] ===
             # Bloc MarketAnalyzer patterns retiré (16 lignes)

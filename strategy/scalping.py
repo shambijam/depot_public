@@ -8,7 +8,6 @@ import uuid
 from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
-from phase_observer.detectors import Detectors
 
 class ScalpingStrategy(BaseStrategy):
     """
@@ -38,10 +37,11 @@ class ScalpingStrategy(BaseStrategy):
         self.strategy_config = strategy_config or {}
         self.mt5_connector = mt5_connector  # ✅ plus d'erreur
         self.logger = logger or getattr(config_manager, "logger", None)
-       
 
-        # Initialisation des détecteurs
-        self.detectors = Detectors(logger=self.logger, config_manager=config_manager)
+        # === CODE MORT SUPPRIMÉ (Session 23 Nov 2025) ===
+        # L'instance Detectors n'était JAMAIS utilisée (grep "self.detectors." → 0 résultats)
+        # Scalping utilise FootprintAnalyzer qui importe les 7 fonctions standalone
+        # Les 8 méthodes de classe Detectors sont réservées à LiquidityStrategy
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
