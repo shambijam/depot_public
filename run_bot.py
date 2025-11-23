@@ -3292,17 +3292,16 @@ def main(args: argparse.Namespace) -> None:
         )
         strategy_manager.initialize_strategies()
 
-        # Instancier AIInterface
-        from core.ai_interface import AIInterface
-        ai_interface = AIInterface(
-            config_manager_instance=config_manager,
-            ai_decision_instance=ai_decision
-        )
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # Instanciation AIInterface retirée (module supprimé)
+        # from core.ai_interface import AIInterface
+        # ai_interface = AIInterface(...)
 
         # Instancier DecisionPipeline
         decision_pipeline = DecisionPipeline(
             config_manager_instance=config_manager,
-            ai_interface_instance=ai_interface,
+            # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+            # ai_interface_instance=ai_interface, (paramètre retiré)
             strategy_manager_instance=strategy_manager,
         )
         decision_pipeline.extra_context = {}

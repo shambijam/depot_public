@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from core.config_manager import ConfigManager
-from core.ai_interface import AIInterface
+# === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+# from core.ai_interface import AIInterface (module supprimé)
 from tempfile import NamedTemporaryFile
 from datetime import datetime, UTC
 
@@ -55,22 +56,24 @@ class Mecano:
     """
     Observateur silencieux pour monitoring de performance, erreurs et ressources.
     Collecte métriques et génère rapports sans interférer avec le pipeline.
-    Couplage asynchrone avec AIInterface pour analyses consultatives journalières.
+    === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    Couplage AIInterface retiré (module supprimé)
     """
 
     def __init__(self, config_manager_instance: Optional[ConfigManager] = None):
         """
         Initialise Mecano avec ConfigManager pour configs dynamiques.
-        Instancie AIInterface pour rapports consultatifs.
+        === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        Instanciation AIInterface retirée (module supprimé)
         """
         self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager_instance
         if self.config_manager is None:
             self.logger.warning("Mecano sans ConfigManager. Chemins non dynamiques.")
 
-        self.ai_interface = AIInterface(config_manager_instance=self.config_manager) if self.config_manager else None
-        if self.ai_interface is None:
-            self.logger.warning("Mecano sans AIInterface. Rapports IA désactivés.")
+        # === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        # self.ai_interface = AIInterface(...) (module supprimé)
+        # Rapports IA désormais désactivés
 
         self.logs_dir = Path(self.config_manager.get("paths.logs", "logs/")) if self.config_manager else Path("logs/")
         self.reports_dir = Path(self.config_manager.get("paths.ai_audit", "config/ai_audit")) if self.config_manager else Path("output/")
@@ -106,15 +109,9 @@ class Mecano:
 
         self.logger.info("Mecano initialisé. Prêt pour monitoring et rapports.")
 
-    def set_ai_analyzer(self, ai_analyzer_instance):
-        """
-        Injecte l'instance AIDecision dans AIInterface pour couplage.
-        """
-        if self.ai_interface:
-            self.ai_interface.ai_decision_instance = ai_analyzer_instance
-            self.logger.info("AIDecision injectée dans AIInterface pour rapports consultatifs.")
-        else:
-            self.logger.warning("set_ai_analyzer appelé sans AIInterface active.")
+    # === [MÉTHODE IA SUPPRIMÉE - Session 23 Nov 2025] ===
+    # def set_ai_analyzer(self, ai_analyzer_instance):
+    #     Injection AIDecision retirée (module ai_interface supprimé)
 
     def _setup_loggers(self) -> None:
         """
@@ -411,24 +408,10 @@ class Mecano:
 
     def analyze_report_with_ia(self, prompt: str) -> dict:
         """
-        Envoie prompt à AIInterface pour analyse consultative.
+        === [IA SUPPRIMÉE - Session 23 Nov 2025] ===
+        Analyse AIInterface retirée (module supprimé)
         """
-        if not self.ai_interface:
-            return {"error": "AIInterface non disponible."}
-        try:
-            analysis = self.ai_interface.get_decision(prompt)  # Adaptez à méthode réelle
-            ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.ia_analysis_log_file_prefix}{ts}.json"
-            filepath = self.reports_dir / filename
-            temp_filepath = filepath.with_suffix(".tmp")
-            with open(temp_filepath, "w", encoding="utf-8") as f:
-                json.dump(analysis, f, indent=4)
-            temp_filepath.rename(filepath)
-            self.logger.info(f"Analyse IA sauvegardée: '{filepath}'")
-            return analysis
-        except Exception as e:
-            self.log_exception("analyze_report_with_ia", e)
-            return {"error": str(e)}
+        return {"error": "AIInterface supprimée - fonctionnalité désactivée"}
 
     def export_report(self, report: dict, format: str = "json") -> None:
         """
