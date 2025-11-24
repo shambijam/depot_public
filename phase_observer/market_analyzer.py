@@ -252,7 +252,8 @@ class MarketAnalyzer:
                 # Tick rate (ticks/seconde)
                 tick_rate = tick_count / coverage_s if coverage_s > 0 else 0.0
 
-                # Enrichir footprint_summary
+                # Enrichir footprint_summary (EN CONSERVANT les champs existants !)
+                # ✅ FIX (24 Nov 2025): Ne PAS écraser buy_volume/sell_volume/buy_pct venant de detectors.py
                 fp_summ = latest.get("footprint_summary")
                 if isinstance(fp_summ, str):
                     # Si c'est une string, la parser
@@ -263,8 +264,11 @@ class MarketAnalyzer:
                         fp_summ = {}
                 elif not isinstance(fp_summ, dict):
                     fp_summ = {}
+                else:
+                    # ✅ Créer une COPIE pour ne pas modifier l'original
+                    fp_summ = dict(fp_summ)
 
-                # Ajouter les métadonnées
+                # Ajouter/mettre à jour UNIQUEMENT les métadonnées temporelles (SANS écraser le reste)
                 fp_summ["tick_count"] = tick_count
                 fp_summ["coverage_s"] = round(coverage_s, 2)
                 fp_summ["tick_rate"] = round(tick_rate, 2)
