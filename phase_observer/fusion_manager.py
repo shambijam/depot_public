@@ -292,6 +292,12 @@ class FusionManager:
             tick_count = fp_summary.get("tick_count", 0)
             coverage_s = fp_summary.get("coverage_s", 0.0)
             tick_rate = fp_summary.get("tick_rate", 0.0)
+            # ✅ FIX (24 Nov 2025): Afficher les TICKS buy/sell au lieu des niveaux avec imbalance
+            buy_volume = fp_summary.get("buy_volume", 0.0)  # Nombre de ticks buy
+            sell_volume = fp_summary.get("sell_volume", 0.0)  # Nombre de ticks sell
+            buy_pct = fp_summary.get("buy_pct", 50.0)  # % de ticks buy
+
+            # Niveaux avec imbalance forte (pour info)
             imbalance_buy_levels = fp_summary.get("imbalance_buy", 0)
             imbalance_sell_levels = fp_summary.get("imbalance_sell", 0)
 
@@ -303,9 +309,13 @@ class FusionManager:
             self.log.info(f"│   • Ticks      : {tick_count:>6} ticks    Coverage: {coverage_s:>6.1f}s           │")
             self.log.info(f"│   • Tick Rate  : {tick_rate:>6.2f} ticks/s                               │")
             self.log.info(f"│                                                                     │")
-            self.log.info(f"│ 📈 Imbalance par Niveaux de Prix:                                   │")
-            self.log.info(f"│   • Buy Levels : {imbalance_buy_levels:>3} niveaux  (pression acheteuse)         │")
-            self.log.info(f"│   • Sell Levels: {imbalance_sell_levels:>3} niveaux  (pression vendeuse)         │")
+            self.log.info(f"│ 📈 Répartition Ticks Acheteurs/Vendeurs:                            │")
+            self.log.info(f"│   • Ticks Buy  : {int(buy_volume):>6} ticks ({buy_pct:>5.1f}%)                        │")
+            self.log.info(f"│   • Ticks Sell : {int(sell_volume):>6} ticks ({100-buy_pct:>5.1f}%)                        │")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 🎯 Niveaux avec Imbalance Forte (>70%):                            │")
+            self.log.info(f"│   • Buy Levels : {imbalance_buy_levels:>3} niveaux  (pression acheteuse dominante)   │")
+            self.log.info(f"│   • Sell Levels: {imbalance_sell_levels:>3} niveaux  (pression vendeuse dominante)   │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
