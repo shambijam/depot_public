@@ -288,30 +288,24 @@ class FusionManager:
                 except:
                     fp_summary = {}
 
-            # Métriques ticks
+            # Métriques ticks (qualité des données)
             tick_count = fp_summary.get("tick_count", 0)
             coverage_s = fp_summary.get("coverage_s", 0.0)
             tick_rate = fp_summary.get("tick_rate", 0.0)
-
-            # Métriques buy/sell
-            buy_vol = fp_summary.get("buy_volume", 0.0)
-            sell_vol = fp_summary.get("sell_volume", 0.0)
-            total_vol = fp_summary.get("total_volume", buy_vol + sell_vol)
-            buy_pct = (buy_vol / total_vol * 100) if total_vol > 0 else 50.0
-            sell_pct = (sell_vol / total_vol * 100) if total_vol > 0 else 50.0
+            imbalance_buy_levels = fp_summary.get("imbalance_buy", 0)
+            imbalance_sell_levels = fp_summary.get("imbalance_sell", 0)
 
             self.log.info(f"│ Status     : {fp_status:<15} Score    : {fp_score:>6.2%}           │")
             self.log.info(f"│ Direction  : {fp_dir:<18} Delta    : {fp_delta:>8.1f}         │")
             self.log.info(f"│ POC Price  : {fp_poc if fp_poc else 'N/A':<20} Absorption: {'✅ YES' if fp_absorption else '❌ NO':<10}│")
             self.log.info(f"│                                                                     │")
-            self.log.info(f"│ 📊 Ticks Metrics:                                                   │")
-            self.log.info(f"│   • Tick Count : {tick_count:>6} ticks    Coverage: {coverage_s:>6.1f}s           │")
+            self.log.info(f"│ 📊 Qualité Données:                                                 │")
+            self.log.info(f"│   • Ticks      : {tick_count:>6} ticks    Coverage: {coverage_s:>6.1f}s           │")
             self.log.info(f"│   • Tick Rate  : {tick_rate:>6.2f} ticks/s                               │")
             self.log.info(f"│                                                                     │")
-            self.log.info(f"│ 📈 Volume Distribution:                                             │")
-            self.log.info(f"│   • Buy Volume : {buy_vol:>8.1f} ({buy_pct:>5.1f}%)                           │")
-            self.log.info(f"│   • Sell Volume: {sell_vol:>8.1f} ({sell_pct:>5.1f}%)                           │")
-            self.log.info(f"│   • Total      : {total_vol:>8.1f}                                       │")
+            self.log.info(f"│ 📈 Imbalance par Niveaux de Prix:                                   │")
+            self.log.info(f"│   • Buy Levels : {imbalance_buy_levels:>3} niveaux  (pression acheteuse)         │")
+            self.log.info(f"│   • Sell Levels: {imbalance_sell_levels:>3} niveaux  (pression vendeuse)         │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
@@ -336,8 +330,25 @@ class FusionManager:
 
             # Métriques avancées
             imbalance = of_summary.get("imbalance", 0.0)
+            imbalance_mean = of_summary.get("imbalance_mean", imbalance)  # Alias
             cvd_slope = of_summary.get("cvd_slope", 0.0)
             bias = of_summary.get("bias", "NEUTRAL")
+
+            # Volumes (calculés par OrderFlow V6 depuis tick_volume des barres)
+            total_volume = of_summary.get("total_volume", 0.0)
+            # OrderFlow calcule le delta et l'imbalance, on peut en déduire buy/sell
+            # buy_volume ≈ (total * (1 + delta/total)) / 2
+            # sell_volume ≈ (total * (1 - delta/total)) / 2
+            if total_volume > 0 and of_delta != 0:
+                buy_volume = (total_volume + of_delta) / 2.0
+                sell_volume = (total_volume - of_delta) / 2.0
+            else:
+                # Fallback : utiliser imbalance_mean comme proxy du ratio buy/sell
+                buy_volume = total_volume * imbalance_mean if total_volume > 0 else 0.0
+                sell_volume = total_volume * (1.0 - imbalance_mean) if total_volume > 0 else 0.0
+
+            buy_pct = (buy_volume / total_volume * 100) if total_volume > 0 else 50.0
+            sell_pct = (sell_volume / total_volume * 100) if total_volume > 0 else 50.0
 
             # Volume Profile nodes
             vah = of_summary.get("vah", None)  # Value Area High
@@ -357,8 +368,13 @@ class FusionManager:
             self.log.info(f"│   • VAH (70%)  : {vah if vah else 'N/A':<15}                              │")
             self.log.info(f"│   • VAL (30%)  : {val if val else 'N/A':<15}                              │")
             self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📈 Volume Distribution (tick_volume des barres M1):                 │")
+            self.log.info(f"│   • Buy Volume : {buy_volume:>8.1f} ({buy_pct:>5.1f}%)                           │")
+            self.log.info(f"│   • Sell Volume: {sell_volume:>8.1f} ({sell_pct:>5.1f}%)                           │")
+            self.log.info(f"│   • Total      : {total_volume:>8.1f}                                       │")
+            self.log.info(f"│                                                                     │")
             self.log.info(f"│ 📈 Orderflow Metrics:                                               │")
-            self.log.info(f"│   • Imbalance  : {imbalance:>6.3f}      (déséquilibre buy/sell)         │")
+            self.log.info(f"│   • Imbalance  : {imbalance_mean:>6.3f}      (déséquilibre buy/sell)         │")
             self.log.info(f"│   • CVD Slope  : {cvd_slope:>6.3f}      (pente delta cumulé)           │")
             self.log.info(f"│   • HVN Nodes  : {hvn_count:>2}           (zones haute densité)          │")
             self.log.info(f"│   • LVN Nodes  : {lvn_count:>2}           (zones basse densité)          │")
@@ -444,7 +460,75 @@ class FusionManager:
             self.log.info(f"│ Score Fusionné : {fused:>5.3f} ({fused*100:>5.1f}%)                                 │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
-            # Section 3 : Décision finale
+            # Section 3 : SYNTHÈSE GLOBALE (vision unifiée des 3 fonctions)
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 SYNTHÈSE GLOBALE (Vision Unifiée)                                │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+
+            # Cohérence directionnelle (consensus)
+            directions = []
+            if n_of.get("dir", 0) != 0:
+                directions.append(("OrderFlow", "BUY" if n_of.get("dir") > 0 else "SELL"))
+            if n_fp.get("dir", 0) != 0:
+                directions.append(("Footprint", "BUY" if n_fp.get("dir") > 0 else "SELL"))
+            if n_tr.get("dir", 0) != 0 and tr_type not in ["none", "fusion_pretrigger"]:
+                directions.append(("Trigger", "BUY" if n_tr.get("dir") > 0 else "SELL"))
+
+            # Compter consensus
+            buy_votes = sum(1 for _, d in directions if d == "BUY")
+            sell_votes = sum(1 for _, d in directions if d == "SELL")
+            total_votes = len(directions)
+
+            if buy_votes == total_votes and total_votes > 0:
+                consensus = f"✅ UNANIME BUY ({buy_votes}/{total_votes})"
+            elif sell_votes == total_votes and total_votes > 0:
+                consensus = f"✅ UNANIME SELL ({sell_votes}/{total_votes})"
+            elif buy_votes > sell_votes:
+                consensus = f"🟡 MAJORITAIRE BUY ({buy_votes}/{total_votes})"
+            elif sell_votes > buy_votes:
+                consensus = f"🟡 MAJORITAIRE SELL ({sell_votes}/{total_votes})"
+            else:
+                consensus = f"❌ CONFLIT ({buy_votes}B/{sell_votes}S)"
+
+            self.log.info(f"│ Consensus : {consensus:<55}│")
+            for func_name, dir_value in directions:
+                emoji = "🟢" if dir_value == "BUY" else "🔴"
+                self.log.info(f"│   • {func_name:<12}: {emoji} {dir_value:<10}                              │")
+
+            self.log.info(f"│                                                                     │")
+
+            # Delta combiné (OF + FP)
+            delta_combined = abs(of_delta) + abs(fp_delta)
+            delta_alignment = "✅ Alignés" if (of_delta * fp_delta) >= 0 else "❌ Divergents"
+            self.log.info(f"│ Delta Combiné: {delta_combined:>8.1f}         {delta_alignment:<20}    │")
+            self.log.info(f"│   • OrderFlow  : {of_delta:>8.1f}                                       │")
+            self.log.info(f"│   • Footprint  : {fp_delta:>8.1f}                                       │")
+
+            self.log.info(f"│                                                                     │")
+
+            # Qualité des données (validation)
+            data_quality_items = []
+            if tick_count >= 100:
+                data_quality_items.append("✅ Ticks suffisants")
+            elif tick_count >= 50:
+                data_quality_items.append("🟡 Ticks moyens")
+            else:
+                data_quality_items.append("❌ Ticks faibles")
+
+            if fp_status == "VALID":
+                data_quality_items.append("✅ FP valide")
+            else:
+                data_quality_items.append("❌ FP suspect")
+
+            if of_status == "VALID":
+                data_quality_items.append("✅ OF valide")
+            else:
+                data_quality_items.append("❌ OF suspect")
+
+            self.log.info(f"│ Qualité: {' | '.join(data_quality_items):<56}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # Section 4 : Décision finale
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
             self.log.info("│ 🎯 DÉCISION FINALE                                                   │")
             self.log.info("├─────────────────────────────────────────────────────────────────────┤")
