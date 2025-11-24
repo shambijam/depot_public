@@ -270,7 +270,8 @@ class MarketAnalyzer:
                 fp_summ["tick_rate"] = round(tick_rate, 2)
 
                 # Remettre dans latest (sur la copie, pas de warning)
-                latest["footprint_summary"] = str(fp_summ)
+                # 🔧 FIX (24 Nov 2025): Garder en dict, ne PAS convertir en string
+                latest["footprint_summary"] = fp_summ
 
                 self.logger.info(
                     f"[MarketAnalyzer][{asset}] ✅ footprint_summary enrichi: "
