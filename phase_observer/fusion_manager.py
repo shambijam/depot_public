@@ -348,22 +348,6 @@ class FusionManager:
             cvd_slope = of_summary.get("cvd_slope", 0.0)
             bias = of_summary.get("bias", "NEUTRAL")
 
-            # Volumes (calculés par OrderFlow V6 depuis tick_volume des barres)
-            total_volume = of_summary.get("total_volume", 0.0)
-            # OrderFlow calcule le delta et l'imbalance, on peut en déduire buy/sell
-            # buy_volume ≈ (total * (1 + delta/total)) / 2
-            # sell_volume ≈ (total * (1 - delta/total)) / 2
-            if total_volume > 0 and of_delta != 0:
-                buy_volume = (total_volume + of_delta) / 2.0
-                sell_volume = (total_volume - of_delta) / 2.0
-            else:
-                # Fallback : utiliser imbalance_mean comme proxy du ratio buy/sell
-                buy_volume = total_volume * imbalance_mean if total_volume > 0 else 0.0
-                sell_volume = total_volume * (1.0 - imbalance_mean) if total_volume > 0 else 0.0
-
-            buy_pct = (buy_volume / total_volume * 100) if total_volume > 0 else 50.0
-            sell_pct = (sell_volume / total_volume * 100) if total_volume > 0 else 50.0
-
             # Volume Profile nodes
             vah = of_summary.get("vah", None)  # Value Area High
             val = of_summary.get("val", None)  # Value Area Low
@@ -381,11 +365,6 @@ class FusionManager:
             self.log.info(f"│   • VPOC       : {vpoc if vpoc else 'N/A':<15}                              │")
             self.log.info(f"│   • VAH (70%)  : {vah if vah else 'N/A':<15}                              │")
             self.log.info(f"│   • VAL (30%)  : {val if val else 'N/A':<15}                              │")
-            self.log.info(f"│                                                                     │")
-            self.log.info(f"│ 📈 Volume Distribution (tick_volume des barres M1):                 │")
-            self.log.info(f"│   • Buy Volume : {buy_volume:>8.1f} ({buy_pct:>5.1f}%)                           │")
-            self.log.info(f"│   • Sell Volume: {sell_volume:>8.1f} ({sell_pct:>5.1f}%)                           │")
-            self.log.info(f"│   • Total      : {total_volume:>8.1f}                                       │")
             self.log.info(f"│                                                                     │")
             self.log.info(f"│ 📈 Orderflow Metrics:                                               │")
             self.log.info(f"│   • Imbalance  : {imbalance_mean:>6.3f}      (déséquilibre buy/sell)         │")
