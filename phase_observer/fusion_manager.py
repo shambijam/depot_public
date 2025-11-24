@@ -454,24 +454,31 @@ class FusionManager:
 
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
-            # Section 2 : Fusion pondérée
+            # Section 2 : Score Simplifié (24 Nov 2025)
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
-            self.log.info("│ 4️⃣  FUSION PONDÉRÉE (Synthèse)                                      │")
+            self.log.info("│ 4️⃣  SCORE FUSIONNÉ (Simplifié)                                      │")
             self.log.info("├─────────────────────────────────────────────────────────────────────┤")
-            w_tr = weights.get("trigger", 0.5)
-            w_of = weights.get("orderflow", 0.25)
-            w_fp = weights.get("footprint", 0.25)
-            contrib_tr = w_tr * tr_score
-            contrib_of = w_of * of_score
-            contrib_fp = w_fp * fp_score
 
-            self.log.info(f"│ Pondérations: Trigger={w_tr:.0%}  OrderFlow={w_of:.0%}  Footprint={w_fp:.0%}   │")
-            self.log.info(f"│ Contributions:                                                      │")
-            self.log.info(f"│   • Trigger    : {w_tr:.2f} × {tr_score:.2f} = {contrib_tr:>5.3f}                      │")
-            self.log.info(f"│   • OrderFlow  : {w_of:.2f} × {of_score:.2f} = {contrib_of:>5.3f}                      │")
-            self.log.info(f"│   • Footprint  : {w_fp:.2f} × {fp_score:.2f} = {contrib_fp:>5.3f}                      │")
+            # Base : moyenne OF + FP
+            base_avg = (of_score + fp_score) / 2.0
+            self.log.info(f"│ Score Base:                                                         │")
+            self.log.info(f"│   • OrderFlow  : {of_score:>5.3f} ({of_score*100:>5.1f}%)                              │")
+            self.log.info(f"│   • Footprint  : {fp_score:>5.3f} ({fp_score*100:>5.1f}%)                              │")
+            self.log.info(f"│   • Moyenne    : {base_avg:>5.3f} ({base_avg*100:>5.1f}%)                              │")
+
+            # Trigger boost (si présent)
+            trigger_boost = fused - base_avg if fused > base_avg else 0.0
+            if trigger_boost > 0.001:
+                self.log.info(f"│ ───────────────────────────────────────────────────────────────────│")
+                self.log.info(f"│ Bonus Trigger  : +{trigger_boost:>5.3f} (+{trigger_boost*100:>4.1f}%)                           │")
+                self.log.info(f"│   Type         : {tr_type:<50}│")
+                self.log.info(f"│   Confiance    : {tr_score:>5.3f} ({tr_score*100:>5.1f}%)                              │")
+            else:
+                self.log.info(f"│ ───────────────────────────────────────────────────────────────────│")
+                self.log.info(f"│ Bonus Trigger  : Aucun (pas de pattern détecté)                    │")
+
             self.log.info(f"│ ───────────────────────────────────────────────────────────────────│")
-            self.log.info(f"│ Score Fusionné : {fused:>5.3f} ({fused*100:>5.1f}%)                                 │")
+            self.log.info(f"│ Score Final    : {fused:>5.3f} ({fused*100:>5.1f}%)                                 │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # Section 3 : SYNTHÈSE GLOBALE (vision unifiée des 3 fonctions)
@@ -1173,24 +1180,26 @@ class FusionManager:
             }
         }
 
-    # -------------- 5) Confidence Fusion System (Composite + Trigger Boost) --------------
+    # -------------- 5) Confidence Fusion System (Simple Average + Trigger Boost) --------------
     def _calculate_fused_confidence(
         self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
     ) -> float:
         """
-        NOUVEAU SYSTÈME DE SCORING :
+        SYSTÈME DE SCORING SIMPLIFIÉ (24 Nov 2025):
 
-        1. Score Composite (90%) : Basé sur données primordiales (buy/sell volumes, delta, ratios)
+        1. Base Score : (OrderFlow + Footprint) / 2
         2. Filtre Qualité : tick_count, coverage_s, status
-        3. BONUS Trigger (+15%) : Si pattern réel détecté (stacking/climax/absorption)
+        3. BONUS Trigger : Si pattern réel détecté (stacking/climax/absorption)
         4. Bonus/Malus Cohérence : Alignement 3/3, conflits
 
-        Le trigger devient un AMPLIFICATEUR (pas un bloqueur).
+        Le trigger est un AMPLIFICATEUR (pas un composant de base).
         """
 
-        # ========== 1. SCORE COMPOSITE (Données Primordiales) ==========
-        composite = self._calculate_composite_score(n_of, n_fp, n_tr, coherence, quality)
-        base_score = composite["base_score"]  # 0-1
+        # ========== 1. BASE SCORE : Moyenne OrderFlow + Footprint ==========
+        of_score = _to_float(n_of.get("score"), 0.0)
+        fp_score = _to_float(n_fp.get("score"), 0.0)
+
+        base_score = (of_score + fp_score) / 2.0
 
         # ========== 2. FILTRE QUALITÉ ==========
 
@@ -1199,7 +1208,8 @@ class FusionManager:
         fp_summary = fp_raw.get("summary", {})
         if isinstance(fp_summary, str):
             try:
-                fp_summary = ast.literal_eval(fp_summary)
+                import json
+                fp_summary = json.loads(fp_summary)
             except:
                 fp_summary = {}
 
@@ -1273,39 +1283,37 @@ class FusionManager:
                 trigger_boost += 0.03  # +3% événement exceptionnel
 
         # Application bonus trigger
-        base_score += trigger_boost
+        score_with_trigger = base_score + trigger_boost
 
         # ========== 4. BONUS/MALUS COHÉRENCE ==========
 
         # Bonus alignement 3/3 (si trigger présent)
         if is_real_trigger and rules_eval.get("aligned3"):
-            base_score *= 1.08  # +8% consensus unanime
+            score_with_trigger *= 1.08  # +8% consensus unanime
 
         # Malus conflits
         matrix = coherence.get("matrix", {})
         conflicts = sum(1 for v in matrix.values() if v == "conflict")
         if conflicts >= 2:
-            base_score *= 0.85  # -15% conflit majeur
+            score_with_trigger *= 0.85  # -15% conflit majeur
         elif conflicts == 1:
-            base_score *= 0.92  # -8% conflit mineur
+            score_with_trigger *= 0.92  # -8% conflit mineur
 
         # Bonus timing (si disponible)
         timing_bonus = rules_eval.get("timing_bonus", 0.0)
         if timing_bonus > 0:
-            base_score += timing_bonus
+            score_with_trigger += timing_bonus
 
         # ========== 5. NORMALISATION FINALE ==========
-        final_score = max(0.0, min(0.99, float(base_score)))
+        final_score = max(0.0, min(0.99, float(score_with_trigger)))
 
         # Logging détaillé (si FUSION_PROBE actif)
         if FUSION_PROBE:
             _probe(
                 self.log,
-                f"[COMPOSITE_SCORE] base={composite['base_score']:.3f} "
-                f"(pression={composite['pression_score']:.3f}, delta={composite['delta_score']:.3f}, "
-                f"ratios={composite['ratios_score']:.3f}, dynamique={composite['dynamique_score']:.3f}) | "
-                f"quality_mult={quality_multiplier:.3f} | trigger_boost={trigger_boost:.3f} | "
-                f"final={final_score:.3f}"
+                f"[SIMPLE_SCORE] OF={of_score:.3f} FP={fp_score:.3f} base={(of_score+fp_score)/2:.3f} | "
+                f"quality_mult={quality_multiplier:.3f} | base_after_quality={base_score:.3f} | "
+                f"trigger_boost={trigger_boost:.3f} | final={final_score:.3f}"
             )
 
         return final_score

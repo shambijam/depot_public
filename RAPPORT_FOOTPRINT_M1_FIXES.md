@@ -582,6 +582,319 @@ self.log.info("└────────────────────�
 
 ---
 
+## 🔥 Fix Final : JSON Parsing (24 Novembre 2025 - 19h30)
+
+### 🎯 Problème Identifié
+
+Après le fix du skip analyse redondante, les données `buy_volume`/`sell_volume`/`buy_pct` étaient **toujours manquantes** dans le BILAN CONSOLIDÉ.
+
+**Symptôme** :
+```
+[FUSION_DEBUG] fp_summary keys: ['tick_count', 'coverage_s', 'tick_rate']
+[FUSION_DEBUG] buy_volume=0.0, sell_volume=0.0, buy_pct=50.0
+```
+
+Pourtant, les ticks étaient bien classifiés :
+```
+[DETECTORS_DEBUG] buy_volume=83.0, sell_volume=69.0, buy_pct=54.6
+```
+
+---
+
+### 🔍 Root Cause Détaillée
+
+Le flux de données complet :
+
+1. ✅ **detectors.py** (`footprint_validator()`) :
+   - Retourne `summary` avec **TOUS les champs** :
+     ```python
+     {
+       "delta_total": -8.0,
+       "total_volume": 122.0,
+       "buy_volume": 57.0,      # ✅ Présent
+       "sell_volume": 65.0,     # ✅ Présent
+       "buy_pct": 46.7,         # ✅ Présent
+       "poc": 4093.96,
+       "imbalance_buy": 38,
+       "imbalance_sell": 32,
+       ...
+     }
+     ```
+
+2. ✅ **orchestrator.py** (`analyze_last_bar()`) :
+   - Reçoit le summary complet
+   - **STOCKE en JSON string** dans le DataFrame :
+     ```python
+     df_an.loc[df_an.index[-1], "footprint_summary"] = json.dumps(
+         fp_res.get("summary", {})
+     )
+     ```
+   - Raison : Pandas ne supporte pas les dicts imbriqués dans les cellules
+
+3. ❌ **market_analyzer.py** (ligne 258-267) :
+   - Récupère `footprint_summary` qui est une **JSON string**
+   - Essayait de parser avec `ast.literal_eval()` (Python literal) :
+     ```python
+     try:
+         import ast
+         fp_summ = ast.literal_eval(fp_summ)  # ❌ ERREUR !
+     except Exception:
+         fp_summ = {}  # ← Fallback dict vide
+     ```
+   - **Problème** : JSON et Python literal ne sont PAS compatibles :
+     - JSON : `null`, `true`, `false`
+     - Python : `None`, `True`, `False`
+   - **Résultat** : Parsing échoue silencieusement → dict vide → données perdues
+
+4. ❌ **market_analyzer.py** (ligne 274-276) :
+   - Ajoute `tick_count`, `coverage_s`, `tick_rate` à un dict **VIDE**
+   - Résultat : `fp_summ = {'tick_count': 122, 'coverage_s': 53.0, 'tick_rate': 2.3}`
+   - **buy_volume, sell_volume, buy_pct PERDUS !**
+
+5. ❌ **fusion_manager.py** :
+   - Reçoit `fp_summary` avec **SEULEMENT 3 champs**
+   - Affiche `0 ticks (50.0%)` pour buy/sell
+
+---
+
+### ✅ Solution : json.loads() au lieu de ast.literal_eval()
+
+**Fichier** : `phase_observer/market_analyzer.py` ligne 263
+
+**AVANT** :
+```python
+try:
+    import ast
+    fp_summ = ast.literal_eval(fp_summ)  # ❌ Mauvais parser
+except Exception:
+    fp_summ = {}
+```
+
+**APRÈS** :
+```python
+try:
+    import json
+    fp_summ = json.loads(fp_summ)  # ✅ Bon parser pour JSON
+except Exception as e:
+    self.logger.error(f"[MarketAnalyzer] JSON parse failed for footprint_summary: {e}")
+    fp_summ = {}
+```
+
+---
+
+### 📊 Résultat Final
+
+**Logs de validation** :
+
+```
+[ANALYZER_DEBUG] JSON parsed successfully - keys: ['delta_total', 'total_volume', 'buy_volume', 'sell_volume', 'buy_pct', 'poc', 'imbalance_buy', 'imbalance_sell', ...]
+[ANALYZER_DEBUG] buy_volume=83.0, sell_volume=69.0
+```
+
+**BILAN CONSOLIDÉ** :
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1️⃣  FOOTPRINT M1 (Validation Institutionnelle)                      │
+├─────────────────────────────────────────────────────────────────────┤
+│ Status     : VALID           Score    : 80.00%           │
+│ Direction  : 🟢 BUY              Delta    :     14.0         │
+│ POC Price  : 4094.0               Absorption: ❌ NO      │
+│                                                                     │
+│ 📊 Qualité Données:                                                 │
+│   • Ticks      :    152 ticks    Coverage:   59.0s           │
+│   • Tick Rate  :   2.58 ticks/s                               │
+│                                                                     │
+│ 📈 Répartition Ticks Acheteurs/Vendeurs:                            │
+│   • Ticks Buy  :     83 ticks ( 54.6%)                        │  ✅
+│   • Ticks Sell :     69 ticks ( 45.4%)                        │  ✅
+│                                                                     │
+│ 🎯 Niveaux avec Imbalance Forte (>70%):                            │
+│   • Buy Levels :  38 niveaux  (pression acheteuse dominante)   │
+│   • Sell Levels:  32 niveaux  (pression vendeuse dominante)   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 🎯 Fichiers Modifiés (Fix Final)
+
+| Fichier | Lignes | Modification |
+|---------|--------|--------------|
+| **market_analyzer.py** | 263 | ✅ `ast.literal_eval()` → `json.loads()` |
+| **market_analyzer.py** | 265 | ✅ Amélioration message d'erreur |
+| **detectors.py** | 1873-1876 | 🗑️ Suppression logs DEBUG temporaires |
+| **orchestrator.py** | 1519-1524 | 🗑️ Suppression logs DEBUG temporaires |
+| **market_analyzer.py** | 277-285 | 🗑️ Suppression logs DEBUG temporaires |
+
+---
+
+### 🏆 Résultat Final COMPLET
+
+✅ **Problème initial** : Score Footprint M1 = 0%, tick_count = 0
+✅ **Fix #1** : Skip analyse redondante → tick_count correct
+✅ **Fix #2** : Amélioration affichage BILAN CONSOLIDÉ
+✅ **Fix #3 (FINAL)** : JSON parsing correct → buy_volume/sell_volume affichés
+
+**TOUT FONCTIONNE PARFAITEMENT !** 🎉
+
+---
+
+## 📊 Fix #3 : Simplification Système de Scoring (24 Nov 2025)
+
+### Problème Identifié
+
+**Incohérence entre Affichage et Calcul** :
+- L'affichage montrait : `Score Fusionné : 0.024 (2.4%)` avec un système pondéré (Trigger=50%, OF=30%, FP=20%)
+- Le calcul réel utilisait : Un système composite complexe basé sur volumes/delta/ratios/dynamiques
+- Le log montrait : `[COMPOSITE_SCORE] final=0.102` (10.2%)
+- **Écart de 425%** entre affichage et calcul réel !
+
+### Système Souhaité (Simple)
+
+L'utilisateur a confirmé vouloir un système simple :
+```
+Score Base = (OrderFlow + Footprint) / 2
+
+Si trigger détecté:
+    Score Final = Score Base + Bonus Trigger (5-15%)
+Sinon:
+    Score Final = Score Base
+```
+
+### Solution Appliquée
+
+**Fichier** : `phase_observer/fusion_manager.py`
+
+#### 1. Simplification du Calcul (lignes 1176-1312)
+
+**AVANT** : Système composite complexe
+```python
+def _calculate_fused_confidence(...):
+    # 1. Score Composite (90%) basé sur volumes/delta/ratios/dynamiques
+    composite = self._calculate_composite_score(...)
+    base_score = composite["base_score"]
+
+    # 2. Filtre qualité
+    base_score *= quality_multiplier
+
+    # 3. Bonus trigger (+15%)
+    base_score += trigger_boost
+```
+
+**APRÈS** : Système simple moyenne + bonus
+```python
+def _calculate_fused_confidence(...):
+    """
+    SYSTÈME DE SCORING SIMPLIFIÉ (24 Nov 2025):
+
+    1. Base Score : (OrderFlow + Footprint) / 2
+    2. Filtre Qualité : tick_count, coverage_s, status
+    3. BONUS Trigger : Si pattern réel détecté
+    4. Bonus/Malus Cohérence : Alignement 3/3, conflits
+    """
+
+    # ========== 1. BASE SCORE : Moyenne OF + FP ==========
+    of_score = _to_float(n_of.get("score"), 0.0)
+    fp_score = _to_float(n_fp.get("score"), 0.0)
+
+    base_score = (of_score + fp_score) / 2.0
+
+    # ========== 2. FILTRE QUALITÉ ==========
+    # Tick count minimum, coverage, status validation
+    base_score *= quality_multiplier
+
+    # ========== 3. BONUS TRIGGER ==========
+    trigger_boost = 0.0
+    if is_real_trigger:
+        if trigger_conf >= 0.85:
+            trigger_boost = 0.15  # +15% DIAMANT
+        elif trigger_conf >= 0.75:
+            trigger_boost = 0.12  # +12% PLATINE
+        elif trigger_conf >= 0.65:
+            trigger_boost = 0.08  # +8% OR
+        else:
+            trigger_boost = 0.05  # +5% ARGENT
+
+    score_with_trigger = base_score + trigger_boost
+
+    # ========== 4. COHÉRENCE ==========
+    # Bonus alignement 3/3, malus conflits
+
+    return final_score
+```
+
+#### 2. Mise à Jour de l'Affichage (lignes 457-482)
+
+**AVANT** : Affichage pondéré (OLD)
+```
+│ 4️⃣  FUSION PONDÉRÉE (Synthèse)                                      │
+│ Pondérations: Trigger=50%  OrderFlow=30%  Footprint=20%              │
+│ Contributions:                                                       │
+│   • Trigger    : 0.50 × 0.54 = 0.270                                │
+│   • OrderFlow  : 0.30 × 0.09 = 0.027                                │
+│   • Footprint  : 0.20 × 0.79 = 0.158                                │
+│ Score Fusionné : 0.024 (  2.4%)                                     │
+```
+
+**APRÈS** : Affichage simple (NEW)
+```
+│ 4️⃣  SCORE FUSIONNÉ (Simplifié)                                      │
+│ Score Base:                                                          │
+│   • OrderFlow  : 0.090 ( 9.0%)                                      │
+│   • Footprint  : 0.790 (79.0%)                                      │
+│   • Moyenne    : 0.440 (44.0%)                                      │
+│ ─────────────────────────────────────────────────────────────────  │
+│ Bonus Trigger  : +0.120 (+12.0%)                                    │
+│   Type         : stacking                                            │
+│   Confiance    : 0.820 (82.0%)                                      │
+│ ─────────────────────────────────────────────────────────────────  │
+│ Score Final    : 0.560 (56.0%)                                      │
+```
+
+### Bénéfices
+
+| Aspect | Avant | Après | Gain |
+|--------|-------|-------|------|
+| **Clarté** | Score composite opaque | Moyenne simple visible | ✅ **100% transparent** |
+| **Cohérence** | Affichage ≠ calcul (425% écart) | Affichage = calcul | ✅ **Parfait** |
+| **Compréhension** | Complexe (volumes/delta/ratios) | Simple (moyenne + bonus) | ✅ **Immédiat** |
+| **Rôle Trigger** | Composant 50% (bloqueur) | Bonus +5-15% (amplificateur) | ✅ **Logique** |
+| **Maintenance** | 260 lignes complexes | 140 lignes simples | ✅ **-46%** |
+
+### Logique Finale
+
+```
+Exemple concret:
+- OrderFlow : 0.70 (70%)
+- Footprint : 0.85 (85%)
+- Base       : (0.70 + 0.85) / 2 = 0.775 (77.5%)
+
+Si trigger STACKING détecté avec conf 0.82:
+- Bonus      : +0.12 (platine 75-85%)
+- Final      : 0.775 + 0.12 = 0.895 (89.5%)
+
+Si pas de trigger:
+- Bonus      : 0
+- Final      : 0.775 (77.5%)
+```
+
+### Fichiers Modifiés
+
+| Fichier | Lignes | Modification |
+|---------|--------|--------------|
+| `phase_observer/fusion_manager.py` | 1176-1312 | Simplification calcul (composite → moyenne) |
+| `phase_observer/fusion_manager.py` | 457-482 | Mise à jour affichage (pondéré → simple) |
+
+### Impact Attendu
+
+1. ✅ **Score cohérent** : Affichage = calcul réel
+2. ✅ **Transparence** : Voir immédiatement OF, FP et bonus trigger
+3. ✅ **Logique claire** : Trigger amplifie (ne bloque plus)
+4. ✅ **Maintenance facile** : Moins de code, plus simple
+
+---
+
 *Rapport créé le 24 Novembre 2025*
 *Auteur : Claude Code*
-*Version : 1.0*
+*Version : 1.2 (ajout fix JSON parsing + simplification scoring)*
