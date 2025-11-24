@@ -1108,12 +1108,11 @@ def run_single_pipeline_cycle(
                         # Utiliser la dernière bougie (index -1) au lieu de -2
                         # car -2 pouvait être trop ancienne après changement d'heure
                         candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
-                        target_candle = subset_df.iloc[candle_idx]
 
                         # Extraire les timestamps de la bougie M1 (60 secondes)
-                        candle_time = target_candle.name  # timestamp de la bougie
-                        candle_start = candle_time
-                        candle_end = candle_time + pd.Timedelta(minutes=1)
+                        # Utiliser l'index du DataFrame (qui contient les timestamps)
+                        candle_start = subset_df.index[candle_idx]
+                        candle_end = candle_start + pd.Timedelta(minutes=1)
 
                         logger.info(
                             f"[TICKS] Récupération ticks pour bougie M1 | "
