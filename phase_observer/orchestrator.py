@@ -1147,8 +1147,8 @@ class PhaseObserver:
                         df_an.loc[df_an.index[-1], "footprint_status"] = fp_res.get(
                             "status", "UNKNOWN"
                         )
-                        # 🔧 FIX (24 Nov 2025): Garder en dict
-                        df_an.loc[df_an.index[-1], "footprint_summary"] = fp_res.get(
+                        # 🔧 FIX (24 Nov 2025): Utiliser .at[] pour assigner un dict (pas .loc[])
+                        df_an.at[df_an.index[-1], "footprint_summary"] = fp_res.get(
                             "summary", {}
                         )
             except Exception as e:
@@ -1157,8 +1157,8 @@ class PhaseObserver:
                 )
                 df_an.loc[df_an.index[-1], "footprint_score"] = 0
                 df_an.loc[df_an.index[-1], "footprint_status"] = "ERROR"
-                # 🔧 FIX (24 Nov 2025): Garder en dict
-                df_an.loc[df_an.index[-1], "footprint_summary"] = {}
+                # 🔧 FIX (24 Nov 2025): Utiliser .at[] pour assigner un dict
+                df_an.at[df_an.index[-1], "footprint_summary"] = {}
 
             # === PHASE 5: PHASE PRIMAIRE (déterministe) ===
  
