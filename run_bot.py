@@ -1128,10 +1128,11 @@ def run_single_pipeline_cycle(
                         )
 
                         # Récupérer UNIQUEMENT les ticks de cette fenêtre de 60 secondes
-                        ticks_df = mt5_connector.get_ticks(
+                        # ✅ FIX (24 Nov 2025): Utiliser get_ticks_for_candle() qui classifie les ticks (flags 16/32 + tick-rule)
+                        ticks_df = mt5_connector.get_ticks_for_candle(
                             asset,
-                            start=candle_start.to_pydatetime(),
-                            end=candle_end.to_pydatetime()
+                            candle_start.to_pydatetime(),
+                            candle_end.to_pydatetime()
                         )
 
                         if ticks_df is not None and not ticks_df.empty:
