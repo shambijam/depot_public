@@ -570,12 +570,13 @@ class FootprintAnalyzer:
             from .detectors import footprint_validator
 
             try:
-                # ⚠️ FIX: Utiliser avant-dernière barre (index -2) car dernière barre est en formation
-                # Les ticks couvrent ~3 minutes (ex: 168s), mais footprint_validator filtre strictement
-                # sur la fenêtre [start_ts, end_ts) d'UNE SEULE barre M1
-                # → Si on prend la dernière barre en formation, aucun tick ne match
-                # → On prend donc l'avant-dernière barre (complète)
-                candle_idx = len(bars) - 2 if len(bars) >= 2 else 0
+                # 🕐 TEST: Passage heure d'hiver - essai avec dernière bougie (index -1)
+                # Hypothèse: décalage timezone après changement d'heure → avant-dernière trop ancienne
+                # Si ça marche, le problème vient du timing/timezone MT5
+                candle_idx = len(bars) - 1 if len(bars) >= 1 else 0
+
+                # Ancien code (avant-dernière):
+                # candle_idx = len(bars) - 2 if len(bars) >= 2 else 0
 
                 fp_m1_result = footprint_validator(
                     candles=bars,
