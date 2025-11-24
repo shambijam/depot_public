@@ -1870,6 +1870,11 @@ def footprint_validator(
     sell_volume = float(agg["sell"].sum())
     buy_pct = (buy_volume / max(total_volume, 1.0)) * 100.0 if total_volume > 0 else 50.0
 
+    # 🔍 DEBUG (24 Nov 2025): Log du summary AVANT return
+    logger.critical(f"[DETECTORS_DEBUG] Summary being returned:")
+    logger.critical(f"[DETECTORS_DEBUG]   buy_volume={buy_volume}, sell_volume={sell_volume}, buy_pct={buy_pct}")
+    logger.critical(f"[DETECTORS_DEBUG]   delta_total={delta_total}, total_volume={total_volume}")
+
     return {
         "summary": {
             "delta_total": delta_total,

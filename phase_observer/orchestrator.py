@@ -1515,6 +1515,13 @@ class PhaseObserver:
                 res["footprint_score"] = fp.get("score", 0)
                 res["footprint_status"] = fp.get("status", "UNKNOWN")
                 res["footprint_summary"] = fp.get("summary", {})
+
+                # 🔍 DEBUG (24 Nov 2025): Log ce qu'on reçoit de detectors
+                fp_summ_keys = list(res["footprint_summary"].keys()) if isinstance(res["footprint_summary"], dict) else "NOT_DICT"
+                self.log.critical(f"[ORCHESTRATOR_DEBUG] fp summary keys from detectors: {fp_summ_keys}")
+                if isinstance(res["footprint_summary"], dict):
+                    self.log.critical(f"[ORCHESTRATOR_DEBUG] buy_volume={res['footprint_summary'].get('buy_volume', 'MISSING')}")
+                    self.log.critical(f"[ORCHESTRATOR_DEBUG] sell_volume={res['footprint_summary'].get('sell_volume', 'MISSING')}")
             else:
                 res["footprint_score"] = 0
                 res["footprint_status"] = "N/A"
