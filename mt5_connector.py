@@ -1698,18 +1698,21 @@ class MT5Connector:
 
             # 2️⃣ Sinon fallback depuis maintenant
             if ticks is None or len(ticks) == 0:
+                # 🕐 FIX: Utiliser datetime.now() sans UTC pour heure broker
+                # MT5 attend l'heure broker (ex: UTC+2), pas UTC pure
                 ticks = self.mt5.copy_ticks_from(
                     symbol,
-                    datetime.now(timezone.utc) - timedelta(minutes=5),
+                    datetime.now() - timedelta(minutes=5),
                     count,
                     self.mt5.COPY_TICKS_ALL,
                 )
 
             # 3️⃣ Encore vide ? → fallback large
             if ticks is None or len(ticks) == 0:
+                # 🕐 FIX: Utiliser datetime.now() sans UTC pour heure broker
                 ticks = self.mt5.copy_ticks_from(
                     symbol,
-                    datetime.now(timezone.utc) - timedelta(hours=1),
+                    datetime.now() - timedelta(hours=1),
                     count,
                     self.mt5.COPY_TICKS_ALL,
                 )
