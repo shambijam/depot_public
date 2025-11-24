@@ -1110,8 +1110,16 @@ def run_single_pipeline_cycle(
                         candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
 
                         # Extraire les timestamps de la bougie M1 (60 secondes)
-                        # Utiliser l'index du DataFrame (qui contient les timestamps)
-                        candle_start = subset_df.index[candle_idx]
+                        # Utiliser la colonne 'time' si disponible, sinon l'index
+                        if 'time' in subset_df.columns:
+                            candle_start = pd.to_datetime(subset_df.iloc[candle_idx]['time'])
+                        elif isinstance(subset_df.index, pd.DatetimeIndex):
+                            candle_start = subset_df.index[candle_idx]
+                        else:
+                            # Fallback : convertir l'index en DatetimeIndex
+                            subset_df.index = pd.to_datetime(subset_df.index)
+                            candle_start = subset_df.index[candle_idx]
+
                         candle_end = candle_start + pd.Timedelta(minutes=1)
 
                         logger.info(
