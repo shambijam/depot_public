@@ -355,8 +355,9 @@ class PhaseObserver:
                         self._history_df.at[last_idx, "footprint_status"] = (
                             footprint_final.get("status", pd.NA)
                         )
-                        # 🔧 FIX (24 Nov 2025): Garder en dict pour exploitation par FusionManager
-                        self._history_df.at[last_idx, "footprint_summary"] = (
+                        # 🔧 FIX (24 Nov 2025): Stocker en JSON string (Pandas incompatible avec dicts)
+                        import json
+                        self._history_df.at[last_idx, "footprint_summary"] = json.dumps(
                             footprint_final.get("summary", {})
                         )
 
@@ -375,10 +376,10 @@ class PhaseObserver:
                                 )
                 else:
                     self._history_df.at[last_idx, "footprint_status"] = "SUSPECT"
-                    # 🔧 FIX (24 Nov 2025): Garder en dict
-                    self._history_df.at[last_idx, "footprint_summary"] = {
+                    # 🔧 FIX (24 Nov 2025): Stocker en JSON string
+                    self._history_df.at[last_idx, "footprint_summary"] = json.dumps({
                         "comment": "validator error or no ticks"
-                    }
+                    })
 
             # Clear buffer ticks
             self._ticks_current_bar.clear()
@@ -1147,9 +1148,11 @@ class PhaseObserver:
                         df_an.loc[df_an.index[-1], "footprint_status"] = fp_res.get(
                             "status", "UNKNOWN"
                         )
-                        # 🔧 FIX (24 Nov 2025): Utiliser .at[] pour assigner un dict (pas .loc[])
-                        df_an.at[df_an.index[-1], "footprint_summary"] = fp_res.get(
-                            "summary", {}
+                        # 🔧 FIX (24 Nov 2025): Pandas ne supporte pas les dicts dans DataFrame
+                        # Stocker en JSON string (sera lu directement depuis latest, pas depuis df_an)
+                        import json
+                        df_an.loc[df_an.index[-1], "footprint_summary"] = json.dumps(
+                            fp_res.get("summary", {})
                         )
             except Exception as e:
                 self.logger.warning(
@@ -1157,8 +1160,8 @@ class PhaseObserver:
                 )
                 df_an.loc[df_an.index[-1], "footprint_score"] = 0
                 df_an.loc[df_an.index[-1], "footprint_status"] = "ERROR"
-                # 🔧 FIX (24 Nov 2025): Utiliser .at[] pour assigner un dict
-                df_an.at[df_an.index[-1], "footprint_summary"] = {}
+                # 🔧 FIX (24 Nov 2025): Stocker en JSON string
+                df_an.loc[df_an.index[-1], "footprint_summary"] = "{}"
 
             # === PHASE 5: PHASE PRIMAIRE (déterministe) ===
  

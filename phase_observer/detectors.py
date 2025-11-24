@@ -1855,10 +1855,18 @@ def footprint_validator(
         score -= 10
         comments.append(f"Delta absolu faible (<{_delta_thr}).")
 
+    # Calculer buy_volume et sell_volume totaux
+    buy_volume = float(agg["buy"].sum())
+    sell_volume = float(agg["sell"].sum())
+    buy_pct = (buy_volume / max(total_volume, 1.0)) * 100.0 if total_volume > 0 else 50.0
+
     return {
         "summary": {
             "delta_total": delta_total,
             "total_volume": total_volume,
+            "buy_volume": buy_volume,  # ✅ AJOUTÉ (24 Nov 2025)
+            "sell_volume": sell_volume,  # ✅ AJOUTÉ (24 Nov 2025)
+            "buy_pct": round(buy_pct, 1),  # ✅ AJOUTÉ (24 Nov 2025) - % acheteurs
             "poc": poc,
             "imbalance_buy": imbalance_buy,
             "imbalance_sell": imbalance_sell,

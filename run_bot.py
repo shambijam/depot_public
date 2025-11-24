@@ -1257,33 +1257,50 @@ def run_single_pipeline_cycle(
                         )
 
                     if ticks_df is not None and not ticks_df.empty:
-                        ticks_df["time"] = pd.to_datetime(
-                            ticks_df["time"], utc=True, errors="coerce"
-                        )
-                        fp_res = footprint_validator(
-                            annotated_rates_df,
-                            ticks_df,
-                            candle_index=use_idx,
-                            price_step=(
-                                getattr(symbol_info_mt5, "point", None) or None
-                            ),
-                            imbalance_threshold=float(
-                                (
-                                    (
-                                        base_config.get("phase_detection_defaults", {})
-                                        or {}
-                                    ).get("footprint_settings", {})
-                                    or {}
-                                ).get("imbalance_threshold", 0.7)
-                            ),
-                            fp_conf=base_config,  # ← branche les seuils existants (min_ticks, coverage, tickrate, POC, delta, burst…)
-                            asset=asset,  # ← applique les overrides XAUUSD
+                        # ✅ FIX (24 Nov 2025): Ne PAS écraser footprint_summary si déjà enrichi par MarketAnalyzer
+                        # MarketAnalyzer a déjà appelé PhaseObserver qui a fait l'analyse Footprint
+                        # et a enrichi footprint_summary avec tick_count, coverage_s, tick_rate
+                        # → On skip cette analyse redondante pour éviter d'écraser l'enrichissement
+                        existing_fp_summary = latest.get("footprint_summary")
+                        skip_redundant_analysis = (
+                            isinstance(existing_fp_summary, dict)
+                            and existing_fp_summary.get("tick_count", 0) > 0
                         )
 
-                        latest = dict(latest)
-                        latest["footprint_score"] = fp_res.get("score", 0)
-                        latest["footprint_status"] = fp_res.get("status", "N/A")
-                        latest["footprint_summary"] = fp_res.get("summary", {})
+                        if skip_redundant_analysis:
+                            logger.info(
+                                f"[FOOTPRINT][{asset}] ✅ Footprint déjà analysé par PhaseObserver "
+                                f"(tick_count={existing_fp_summary.get('tick_count')}) → skip analyse redondante"
+                            )
+                        else:
+                            # Analyse Footprint si pas déjà fait (fallback pour compatibilité)
+                            ticks_df["time"] = pd.to_datetime(
+                                ticks_df["time"], utc=True, errors="coerce"
+                            )
+                            fp_res = footprint_validator(
+                                annotated_rates_df,
+                                ticks_df,
+                                candle_index=use_idx,
+                                price_step=(
+                                    getattr(symbol_info_mt5, "point", None) or None
+                                ),
+                                imbalance_threshold=float(
+                                    (
+                                        (
+                                            base_config.get("phase_detection_defaults", {})
+                                            or {}
+                                        ).get("footprint_settings", {})
+                                        or {}
+                                    ).get("imbalance_threshold", 0.7)
+                                ),
+                                fp_conf=base_config,
+                                asset=asset,
+                            )
+
+                            latest = dict(latest)
+                            latest["footprint_score"] = fp_res.get("score", 0)
+                            latest["footprint_status"] = fp_res.get("status", "N/A")
+                            latest["footprint_summary"] = fp_res.get("summary", {})
                     else:
                         logger.warning(
                             f"[FOOTPRINT][{asset}] Aucun tick reçu (close+live) → skip."
