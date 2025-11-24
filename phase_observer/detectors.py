@@ -1674,18 +1674,17 @@ def footprint_validator(
     bad_sz = ~np.isfinite(ticks["size"]) | (ticks["size"] <= 0)
     ticks.loc[bad_sz, "size"] = 1.0
 
-    # Side + flags (évite de transformer NaN en "nan")
+    # Side - normalisation basique uniquement
+    # ✅ FIX (24 Nov 2025): Ne PAS réappliquer la classification des flags ici
+    # mt5_connector.get_ticks_for_candle() a DÉJÀ fait la classification complète :
+    #   - Flags 16/32 (BUY/SELL prioritaires)
+    #   - Tick-rule (Lee-Ready sur Δmid)
+    #   - Fallback bits 1/2 (ASK/BID changed)
+    # → On garde uniquement la normalisation string pour compatibilité
+    if "side" not in ticks.columns:
+        ticks["side"] = "unknown"
     ticks["side"] = ticks["side"].astype("string").str.lower()
     ticks["side"] = ticks["side"].replace({"b": "buy", "s": "sell"}).fillna("unknown")
-
-    if "flags" in ticks.columns:
-        flags = pd.to_numeric(ticks["flags"], errors="coerce").fillna(0).astype(int)
-        unk_mask = ticks["side"].eq("unknown")
-        if unk_mask.any():
-            buy_mask = ((flags & 1) > 0) | ((flags & 16) > 0)
-            sell_mask = ((flags & 2) > 0) | ((flags & 32) > 0)
-            ticks.loc[unk_mask & buy_mask, "side"] = "buy"
-            ticks.loc[unk_mask & sell_mask, "side"] = "sell"
 
     # ---------- 3) FENÊTRE STRICTE ----------
     try:
