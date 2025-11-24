@@ -297,6 +297,10 @@ class FusionManager:
             sell_volume = fp_summary.get("sell_volume", 0.0)  # Nombre de ticks sell
             buy_pct = fp_summary.get("buy_pct", 50.0)  # % de ticks buy
 
+            # 🔍 DEBUG (24 Nov 2025): Log fp_summary pour voir ce qui arrive
+            self.log.critical(f"[FUSION_DEBUG] fp_summary keys: {list(fp_summary.keys()) if isinstance(fp_summary, dict) else 'NOT_DICT'}")
+            self.log.critical(f"[FUSION_DEBUG] buy_volume={buy_volume}, sell_volume={sell_volume}, buy_pct={buy_pct}")
+
             # Niveaux avec imbalance forte (pour info)
             imbalance_buy_levels = fp_summary.get("imbalance_buy", 0)
             imbalance_sell_levels = fp_summary.get("imbalance_sell", 0)
