@@ -256,11 +256,14 @@ class MarketAnalyzer:
                 # ✅ FIX (24 Nov 2025): Ne PAS écraser buy_volume/sell_volume/buy_pct venant de detectors.py
                 fp_summ = latest.get("footprint_summary")
                 if isinstance(fp_summ, str):
-                    # Si c'est une string, la parser
+                    # Si c'est une JSON string, la parser avec json.loads() (PAS ast.literal_eval)
+                    # ✅ FIX (24 Nov 2025): orchestrator.py stocke footprint_summary en JSON string
                     try:
-                        import ast
-                        fp_summ = ast.literal_eval(fp_summ)
-                    except Exception:
+                        import json
+                        fp_summ = json.loads(fp_summ)
+                        self.logger.critical(f"[ANALYZER_DEBUG] JSON parsed successfully - keys: {list(fp_summ.keys()) if isinstance(fp_summ, dict) else 'NOT_DICT'}")
+                    except Exception as e:
+                        self.logger.error(f"[ANALYZER_DEBUG] JSON parse failed: {e}")
                         fp_summ = {}
                 elif not isinstance(fp_summ, dict):
                     fp_summ = {}
