@@ -595,6 +595,8 @@ class FootprintAnalyzer:
                     self.logger.warning(
                         f"[FOOTPRINT_TRIGGER] Footprint M1 vide pour {asset} | "
                         f"reason: {summary.get('comment', 'unknown')} | "
+                        f"🔍 WINDOW: [{summary.get('window_start', 'N/A')} → {summary.get('window_end', 'N/A')}] | "
+                        f"🔍 TICKS: [{summary.get('ticks_range_min', 'N/A')} → {summary.get('ticks_range_max', 'N/A')}] ({summary.get('ticks_count_total', 0)} ticks) | "
                         f"status: {fp_m1_result.get('status')} | "
                         f"score: {fp_m1_result.get('score')}"
                     )

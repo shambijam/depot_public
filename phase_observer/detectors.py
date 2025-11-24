@@ -1690,11 +1690,17 @@ def footprint_validator(
         df = ticks.copy()
 
     if df.empty:
+        # 🔍 DEBUG: Log timestamps pour diagnostic timezone
+        ticks_min = ticks["time"].min() if not ticks.empty else None
+        ticks_max = ticks["time"].max() if not ticks.empty else None
         return {
             "summary": {
                 "comment": "Aucun tick trouvé pour la bougie (fenêtre stricte).",
                 "window_start": pd.Timestamp(start_ts).isoformat(),
                 "window_end": pd.Timestamp(end_ts).isoformat(),
+                "ticks_range_min": pd.Timestamp(ticks_min).isoformat() if ticks_min else "N/A",
+                "ticks_range_max": pd.Timestamp(ticks_max).isoformat() if ticks_max else "N/A",
+                "ticks_count_total": len(ticks),
             },
             "score": 0,
             "status": "SUSPECT",
