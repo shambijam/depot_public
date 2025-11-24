@@ -261,9 +261,8 @@ class MarketAnalyzer:
                     try:
                         import json
                         fp_summ = json.loads(fp_summ)
-                        self.logger.critical(f"[ANALYZER_DEBUG] JSON parsed successfully - keys: {list(fp_summ.keys()) if isinstance(fp_summ, dict) else 'NOT_DICT'}")
                     except Exception as e:
-                        self.logger.error(f"[ANALYZER_DEBUG] JSON parse failed: {e}")
+                        self.logger.error(f"[MarketAnalyzer] JSON parse failed for footprint_summary: {e}")
                         fp_summ = {}
                 elif not isinstance(fp_summ, dict):
                     fp_summ = {}
@@ -276,16 +275,9 @@ class MarketAnalyzer:
                 fp_summ["coverage_s"] = round(coverage_s, 2)
                 fp_summ["tick_rate"] = round(tick_rate, 2)
 
-                # 🔍 DEBUG (24 Nov 2025): Log AVANT de remettre dans latest
-                self.logger.critical(f"[ANALYZER_DEBUG] fp_summ AVANT latest update - keys: {list(fp_summ.keys())}")
-                self.logger.critical(f"[ANALYZER_DEBUG] buy_volume={fp_summ.get('buy_volume', 'MISSING')}, sell_volume={fp_summ.get('sell_volume', 'MISSING')}")
-
                 # Remettre dans latest (sur la copie, pas de warning)
                 # 🔧 FIX (24 Nov 2025): Garder en dict, ne PAS convertir en string
                 latest["footprint_summary"] = fp_summ
-
-                # 🔍 DEBUG (24 Nov 2025): Log APRÈS avoir remis dans latest
-                self.logger.critical(f"[ANALYZER_DEBUG] latest['footprint_summary'] APRÈS update - keys: {list(latest['footprint_summary'].keys())}")
 
                 self.logger.info(
                     f"[MarketAnalyzer][{asset}] ✅ footprint_summary enrichi: "
