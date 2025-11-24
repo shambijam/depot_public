@@ -1098,14 +1098,47 @@ def run_single_pipeline_cycle(
                 ).copy()
 
                 # 🎯 Récupération des ticks MT5 pour footprint M1
+                # 🔧 FIX (24 Nov 2025): Récupérer ticks UNIQUEMENT pour la dernière bougie M1
+                # au lieu de 1000 ticks arbitraires (qui couvraient 6 minutes au lieu de 60 secondes)
                 ticks_df = None
                 logger.info(f"[TICKS][DEBUG] Tentative récupération ticks pour {asset}...")
                 try:
-                    ticks_df = mt5_connector.get_ticks(asset, count=1000)
-                    if ticks_df is not None and not ticks_df.empty:
-                        logger.info(f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset}")
+                    # Identifier la dernière bougie M1 complète
+                    if subset_df is not None and not subset_df.empty:
+                        # Utiliser la dernière bougie (index -1) au lieu de -2
+                        # car -2 pouvait être trop ancienne après changement d'heure
+                        candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
+                        target_candle = subset_df.iloc[candle_idx]
+
+                        # Extraire les timestamps de la bougie M1 (60 secondes)
+                        candle_time = target_candle.name  # timestamp de la bougie
+                        candle_start = candle_time
+                        candle_end = candle_time + pd.Timedelta(minutes=1)
+
+                        logger.info(
+                            f"[TICKS] Récupération ticks pour bougie M1 | "
+                            f"start={candle_start.isoformat()} | end={candle_end.isoformat()}"
+                        )
+
+                        # Récupérer UNIQUEMENT les ticks de cette fenêtre de 60 secondes
+                        ticks_df = mt5_connector.get_ticks(
+                            asset,
+                            start=candle_start.to_pydatetime(),
+                            end=candle_end.to_pydatetime()
+                        )
+
+                        if ticks_df is not None and not ticks_df.empty:
+                            logger.info(
+                                f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset} | "
+                                f"fenêtre=[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                            )
+                        else:
+                            logger.warning(
+                                f"[TICKS] ⚠️ Aucun tick dans la fenêtre M1 pour {asset} | "
+                                f"[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                            )
                     else:
-                        logger.warning(f"[TICKS] ⚠️ Aucun tick disponible pour {asset}")
+                        logger.warning(f"[TICKS] ⚠️ subset_df vide, impossible de déterminer fenêtre M1")
                 except Exception as e:
                     logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
 

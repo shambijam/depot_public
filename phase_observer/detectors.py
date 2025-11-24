@@ -1549,32 +1549,36 @@ def footprint_validator(
         candle_index = len(candles) - 1
     candle_index = max(0, min(candles.index.size - 1, candle_index))
 
+    # 🕐 FIX (24 Nov 2025): Retirer utc=True pour heure broker
     if "time" in candles.columns:
         if not pd.api.types.is_datetime64_any_dtype(candles["time"]):
-            candles["time"] = pd.to_datetime(candles["time"], errors="coerce", utc=True)
+            candles["time"] = pd.to_datetime(candles["time"], errors="coerce")
     else:
         if not isinstance(candles.index, pd.DatetimeIndex):
             try:
-                candles.index = pd.to_datetime(candles.index, errors="coerce", utc=True)
+                candles.index = pd.to_datetime(candles.index, errors="coerce")
             except Exception:
                 pass
         candles["time"] = candles.index
 
+    # 🕐 FIX (24 Nov 2025): Heure broker, pas UTC
     if candles["time"].isna().all():
-        candles["time"] = pd.Timestamp.now(tz="UTC")
+        candles["time"] = pd.Timestamp.now()
 
     candle = candles.iloc[candle_index]
+    # 🕐 FIX (24 Nov 2025): Retirer utc=True car MT5 retourne heure broker (pas UTC)
+    # Forcer UTC causait un décalage de 2h avec les ticks
     start_ts = pd.to_datetime(
-        candle.get("time", candle.name), utc=True, errors="coerce"
+        candle.get("time", candle.name), errors="coerce"
     )
     if pd.isna(start_ts):
-        start_ts = pd.Timestamp.now(tz="UTC")
+        start_ts = pd.Timestamp.now()  # Heure locale (broker time)
 
     # fenêtre M1 stricte
     if candle_index + 1 < len(candles):
         nxt = candles.iloc[candle_index + 1]
         end_ts = pd.to_datetime(
-            nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce"
+            nxt.get("time", candles.index[candle_index + 1]), errors="coerce"
         )
         if pd.isna(end_ts) or end_ts <= start_ts:
             end_ts = start_ts + pd.Timedelta(minutes=1)
@@ -1592,10 +1596,11 @@ def footprint_validator(
             else:  # side
                 ticks[col] = "unknown"
 
-    # Time -> UTC
+    # Time -> datetime (heure broker, pas UTC)
+    # 🕐 FIX (24 Nov 2025): Retirer utc=True pour cohérence avec les bougies
     if not pd.api.types.is_datetime64_any_dtype(ticks["time"]):
-        ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce", utc=True)
-    ticks["time"] = ticks["time"].fillna(pd.Timestamp.now(tz="UTC"))
+        ticks["time"] = pd.to_datetime(ticks["time"], errors="coerce")
+    ticks["time"] = ticks["time"].fillna(pd.Timestamp.now())
 
     # Prix de secours si 'price' inexploitable
     price_raw = pd.to_numeric(ticks["price"], errors="coerce")
