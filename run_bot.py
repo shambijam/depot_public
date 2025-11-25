@@ -1486,28 +1486,25 @@ def run_single_pipeline_cycle(
                             except Exception:
                                 _score100 = 0.0
 
-                            fdec = {
-                                "ok": bool(out.get("ok")),
-                                "action": out.get("action"),
+                            # ✅ CORRECTION: Garder 'out' complet (avec components, trigger_boost, etc.)
+                            # puis ajouter les champs supplémentaires nécessaires
+                            fdec = dict(out)  # Copie de 'out' pour garder tous les champs FusionManager
+
+                            # Ajouter/surcharger les champs de configuration
+                            fdec.update({
                                 "score": float(_score100),
                                 "price": (
                                     trig.get("anchor_price")
                                     if isinstance(trig, dict)
                                     else None
-                                ),
+                                ) if "price" not in fdec or not fdec["price"] else fdec["price"],
                                 "ttl_ms": ttl_ms,
                                 "slippage_guard_points": slippage_pts,
                                 "ts_created": __import__("pandas")
                                 .Timestamp.utcnow()
                                 .value
                                 // 1_000_000,
-                                "meta": {
-                                    "signal_type": out.get("signal_type"),
-                                    "consensus": out.get("consensus"),
-                                    "trail": out.get("suggested_trailing"),
-                                    "quality": out.get("quality"),
-                                },
-                            }
+                            })
 
                         elif REQUIRE_FUSION_MGR:
                             fdec = {"ok": False, "reason": "fusion_manager_missing"}
