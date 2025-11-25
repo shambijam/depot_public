@@ -177,6 +177,9 @@ class TradeLogger:
         # Stocker dans le cache des trades actifs
         self._active_trades[basket_id] = trade_data
 
+        # Écrire l'entrée immédiatement dans le fichier
+        self._write_to_file(trade_data)
+
         self.logger.info(
             f"📝 [TRADE_LOG][ENTRY] {basket_id} | {symbol} {direction} @ {entry_price:.2f} | "
             f"Score: {score_final:.1%} ({self._categorize_score(score_final)}) | "
