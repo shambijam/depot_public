@@ -1540,6 +1540,8 @@ def run_single_pipeline_cycle(
                                     ),
                                     "ts_created": int(fdec.get("ts_created")),
                                     "fusion_meta": fdec.get("meta", {}),
+                                    # ✅ AJOUT: Stocker fdec complet avec components, trigger_boost, etc.
+                                    "fusion_full": fdec,
                                 }
                             )
                             logger.info(
@@ -2200,7 +2202,7 @@ def run_single_pipeline_cycle(
                                 "trade": {"action": side, "side": side},
                                 # ✅ AJOUT: Données FusionManager complètes
                                 "confidence": best.get("confidence"),
-                                "fusion_data": best,  # Tout le signal fusion
+                                "fusion_data": best.get("fusion_full", {}),  # Données complètes de FusionManager
                             }
                             # --- Harmoniser fat-finger policy avec la voie normale ---
                             safety = td.setdefault("safety", {})
