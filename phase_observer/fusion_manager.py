@@ -626,7 +626,7 @@ class FusionManager:
         rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
-        fused = self._calculate_fused_confidence(
+        fused, trigger_boost = self._calculate_fused_confidence(
             n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
         )
 
@@ -707,6 +707,7 @@ class FusionManager:
             "signal_type": decision["signal_type"],
             "direction": decision["direction"],
             "fused_confidence": round(float(fused), 3),
+            "trigger_boost": round(float(trigger_boost), 3),  # ✅ Ajout pour burst.py
             "anchor_price": decision["anchor_price"],
             "rationale": rationale,
             "components": {"orderflow": n_of, "validator": n_fp, "trigger": n_tr},
@@ -1299,7 +1300,8 @@ class FusionManager:
                 f"trigger_boost={trigger_boost:.3f} | final={final_score:.3f}"
             )
 
-        return final_score
+        # Retourner (score final, trigger_boost) pour que burst.py puisse logger le boost
+        return (final_score, trigger_boost)
 
     # -------------- 6) Decision Generator --------------
     def _final_decision(

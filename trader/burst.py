@@ -108,15 +108,17 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             # Récupérer trade_decision depuis base_request
             td = base_request.get("trade_decision", {})
             self.logger.info(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}")
-            fusion_data = td.get("fusion_data", {})
+            # fusion_data est directement dans trade_decision (pas de sous-clé "fusion_data")
+            fusion_data = td  # td contient déjà fused_confidence, components, consensus, quality
 
             # Extraire scores
             score_final = float(fusion_data.get("fused_confidence", 0.0))
-            normalized = fusion_data.get("normalized", {})
+            # "components" contient orderflow, footprint, trigger (pas "normalized")
+            components = fusion_data.get("components", {})
 
-            n_of = normalized.get("orderflow", {})
-            n_fp = normalized.get("footprint", {})
-            n_tr = normalized.get("trigger", {})
+            n_of = components.get("orderflow", {})
+            n_fp = components.get("validator", {})  # FusionManager retourne "validator" pas "footprint"
+            n_tr = components.get("trigger", {})
 
             of_score = float(n_of.get("score", 0.0))
             fp_score = float(n_fp.get("score", 0.0))
