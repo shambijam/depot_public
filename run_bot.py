@@ -2198,6 +2198,9 @@ def run_single_pipeline_cycle(
                                     "symbol": sym,
                                 },
                                 "trade": {"action": side, "side": side},
+                                # ✅ AJOUT: Données FusionManager complètes
+                                "confidence": best.get("confidence"),
+                                "fusion_data": best,  # Tout le signal fusion
                             }
                             # --- Harmoniser fat-finger policy avec la voie normale ---
                             safety = td.setdefault("safety", {})

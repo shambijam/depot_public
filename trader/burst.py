@@ -114,17 +114,14 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             td = base_request.get("trade_decision", {})
             print(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}", flush=True)
 
-            # Chercher fusion_data
-            fusion_data = td.get("fusion_meta", {})
-            print(f"🔍 [TRADE_LOG][DEBUG] fusion_meta keys: {list(fusion_data.keys())}", flush=True)
+            # Les données FusionManager sont dans td["fusion_data"]
+            fusion_data = td.get("fusion_data", {})
+            print(f"🔍 [TRADE_LOG][DEBUG] fusion_data keys: {list(fusion_data.keys())}", flush=True)
 
-            # Chercher confidence
-            confidence = td.get("confidence")
-            print(f"🔍 [TRADE_LOG][DEBUG] td.confidence: {confidence}", flush=True)
-
-            # Extraire scores
+            # Score final
             score_final = float(fusion_data.get("fused_confidence", 0.0))
-            # "components" contient orderflow, footprint, trigger (pas "normalized")
+
+            # Components
             components = fusion_data.get("components", {})
 
             n_of = components.get("orderflow", {})
