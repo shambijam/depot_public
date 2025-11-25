@@ -56,13 +56,13 @@
         "closure_rules": {
           "enabled": true,
           "enable_profit_close": true,
-          "target_profit_pips": 30.0,
+          "target_profit_pips": 35.0,
           "require_full_count_for_profit_close": true,
           "rt_fast_window_ms": 120000,
           "rt_poll_interval_ms": 100,
           "min_age_ms_for_any_close": 2000,
           "enable_loss_guard": true,
-          "max_loss_pips": 78.0,
+          "max_loss_pips": 48.0,
           "loss_guard_arming_ms": 3000
         }
       },
