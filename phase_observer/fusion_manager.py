@@ -1164,12 +1164,15 @@ class FusionManager:
         self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
     ) -> float:
         """
-        SYSTÈME DE SCORING SIMPLIFIÉ (24 Nov 2025):
+        SYSTÈME DE SCORING DATA-DRIVEN (25 Nov 2025):
 
         1. Base Score : (OrderFlow + Footprint) / 2
-        2. Filtre Qualité : tick_count, coverage_s, status
-        3. BONUS Trigger : Si pattern réel détecté (stacking/climax/absorption)
-        4. Bonus/Malus Cohérence : Alignement 3/3, conflits
+        2. BONUS Trigger : Si pattern réel détecté (stacking/climax/absorption)
+        3. Bonus/Malus Cohérence : Alignement 3/3, conflits (LOGIQUE MÉTIER)
+
+        ⚠️ PÉNALITÉS QUALITÉ SUPPRIMÉES (tick_count, coverage_s, status)
+        Raison : Aucune validation empirique. On collecte les données SANS filtrage,
+        puis on analysera (après 100+ trades) si ces métriques impactent le win rate.
 
         Le trigger est un AMPLIFICATEUR (pas un composant de base).
         """
@@ -1180,7 +1183,7 @@ class FusionManager:
 
         base_score = (of_score + fp_score) / 2.0
 
-        # ========== 2. FILTRE QUALITÉ ==========
+        # ========== 2. MÉTRIQUES QUALITÉ (Capturées mais Sans Pénalité) ==========
 
         # Extraction métriques qualité
         fp_raw = n_fp.get("raw", {})
@@ -1192,34 +1195,23 @@ class FusionManager:
             except:
                 fp_summary = {}
 
+        # ✅ SUPPRIMÉ (25 Nov 2025): Pénalités qualité arbitraires
+        # Raison: Aucune validation empirique. On collecte les données SANS filtrage,
+        # puis on analysera si tick_count/coverage_s/status impactent réellement le win rate.
+        #
+        # Ancien code (pénalités inventées):
+        # - if tick_count < 50: score *= 0.3   → Pourquoi 50 ? Pourquoi 0.3 ?
+        # - if coverage_s < 10: score *= 0.4   → Pourquoi 10s ? Pourquoi 0.4 ?
+        # - if status != "VALID": score *= 0.7 → Pourquoi 0.7 ?
+        #
+        # Décision: Valider avec données réelles (après 100+ trades) si ces métriques
+        # ont vraiment un impact. Si oui, ajuster. Si non, laisser sans pénalité.
+
+        # Métriques capturées pour analyse (mais pas de pénalité appliquée)
         tick_count = _to_float(fp_summary.get("tick_count"), 0.0)
         coverage_s = _to_float(fp_summary.get("coverage_s"), 0.0)
         status_of = n_of.get("status", "SUSPECT")
         status_fp = n_fp.get("status", "SUSPECT")
-
-        # Multiplicateur qualité
-        quality_multiplier = 1.0
-
-        # Tick count minimum
-        if tick_count < 50:
-            quality_multiplier *= 0.3  # Pénalité sévère
-        elif tick_count < 100:
-            quality_multiplier *= 0.7
-
-        # Coverage minimum
-        if coverage_s < 10:
-            quality_multiplier *= 0.4
-        elif coverage_s < 20:
-            quality_multiplier *= 0.8
-
-        # Status validation
-        if status_of != "VALID":
-            quality_multiplier *= 0.7
-        if status_fp != "VALID":
-            quality_multiplier *= 0.7
-
-        # Application filtre qualité
-        base_score *= quality_multiplier
 
         # ========== 3. BONUS TRIGGER (Amplificateur) ==========
 
@@ -1291,7 +1283,7 @@ class FusionManager:
             _probe(
                 self.log,
                 f"[SIMPLE_SCORE] OF={of_score:.3f} FP={fp_score:.3f} base={(of_score+fp_score)/2:.3f} | "
-                f"quality_mult={quality_multiplier:.3f} | base_after_quality={base_score:.3f} | "
+                f"ticks={tick_count} cov={coverage_s}s status_of={status_of} status_fp={status_fp} | "
                 f"trigger_boost={trigger_boost:.3f} | final={final_score:.3f}"
             )
 
