@@ -281,17 +281,21 @@ class TradeLogger:
 
     def _write_to_file(self, trade_data: Dict[str, Any]) -> None:
         """Écrit une entrée de trade dans les fichiers JSON Lines et Markdown."""
+        basket_id = trade_data.get("trade_id", "UNKNOWN")
+
         # 1. Format JSON Lines (pour analyse automatique)
         try:
             with open(self.log_file_jsonl, 'a', encoding='utf-8') as f:
                 json.dump(trade_data, f, ensure_ascii=False)
                 f.write('\n')
+            self.logger.info(f"✅ [TRADE_LOG][DEBUG] JSONL écrit pour {basket_id}")
         except Exception as e:
             self.logger.error(f"❌ [TRADE_LOG] Erreur écriture JSONL: {e}", exc_info=True)
 
         # 2. Format Markdown (pour lecture humaine)
         try:
             self._write_md_entry(trade_data)
+            self.logger.info(f"✅ [TRADE_LOG][DEBUG] MD écrit pour {basket_id}")
         except Exception as e:
             self.logger.error(f"❌ [TRADE_LOG] Erreur écriture MD: {e}", exc_info=True)
 

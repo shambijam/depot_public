@@ -97,10 +97,17 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     )
 
     # ✅ AJOUTÉ (25 Nov 2025): Journalisation ENTRÉE trade pour analyse data-driven
+    # DEBUG: Tracer les conditions
+    has_tickets = bool(tickets)
+    has_attr = hasattr(self, 'trade_logger')
+    logger_not_none = has_attr and self.trade_logger is not None
+    self.logger.info(f"🔍 [TRADE_LOG][DEBUG] tickets={has_tickets} hasattr={has_attr} not_none={logger_not_none}")
+
     if tickets and hasattr(self, 'trade_logger') and self.trade_logger is not None:
         try:
             # Récupérer trade_decision depuis base_request
             td = base_request.get("trade_decision", {})
+            self.logger.info(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}")
             fusion_data = td.get("fusion_data", {})
 
             # Extraire scores
@@ -184,6 +191,7 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
                 tickets=tickets,
                 status=status
             )
+            self.logger.info(f"✅ [TRADE_LOG][DEBUG] log_trade_entry() appelé avec succès pour basket {basket_id}")
         except Exception as e:
             self.logger.error(f"❌ [TRADE_LOG] Erreur log entrée basket {basket_id}: {e}", exc_info=True)
 
