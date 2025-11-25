@@ -33,10 +33,14 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     Ouvre un panier de 'burst_size' tickets avec le MÊME SL/TP et le MÊME basket_id.
     - Conserve le mode single-basket (guardrails effectués en amont).
     - Comment ultra-compact ≤16 chars: 'bs_<id8hex>' (ex: bs_abc12345 = 11 chars)
-      (on n’ajoute PAS 'i/n' pour rester sous 31 chars).
+      (on n'ajoute PAS 'i/n' pour rester sous 31 chars).
     - Met à jour self._last_burst_time pour le cooldown.
     """
     import uuid, time as _t
+
+    # 🔍 DEBUG: Vérifier ce que contient base_request
+    self.logger.info(f"🔍 [BURST_DEBUG] base_request keys: {list(base_request.keys())}")
+    self.logger.info(f"🔍 [BURST_DEBUG] has trade_decision: {'trade_decision' in base_request}")
 
     if not isinstance(base_request, dict) or burst_size is None:
         return {"status": "failed", "reason": "bad_args"}
