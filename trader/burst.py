@@ -36,11 +36,12 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
       (on n'ajoute PAS 'i/n' pour rester sous 31 chars).
     - Met à jour self._last_burst_time pour le cooldown.
     """
+    print("🔍 [BURST_DEBUG] FONCTION APPELÉE", flush=True)
     import uuid, time as _t
 
     # 🔍 DEBUG: Vérifier ce que contient base_request
-    self.logger.info(f"🔍 [BURST_DEBUG] base_request keys: {list(base_request.keys())}")
-    self.logger.info(f"🔍 [BURST_DEBUG] has trade_decision: {'trade_decision' in base_request}")
+    print(f"🔍 [BURST_DEBUG] base_request keys: {list(base_request.keys())}", flush=True)
+    print(f"🔍 [BURST_DEBUG] has trade_decision: {'trade_decision' in base_request}", flush=True)
 
     if not isinstance(base_request, dict) or burst_size is None:
         return {"status": "failed", "reason": "bad_args"}
