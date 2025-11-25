@@ -101,6 +101,15 @@ class TradeExecutor:
         # Optionnel: AuditLogger attaché dans ConfigManager
         self.audit_logger = getattr(config_manager, "audit_logger", None)
 
+        # ✅ AJOUTÉ (25 Nov 2025): Journalisation trades pour analyse data-driven
+        from trader.trade_logger import TradeLogger
+        try:
+            self.trade_logger = TradeLogger(config_manager)
+            self.logger.info("✅ TradeLogger initialisé - journalisation trades activée")
+        except Exception as e:
+            self.logger.error(f"❌ Erreur initialisation TradeLogger: {e}", exc_info=True)
+            self.trade_logger = None
+
     # ------------------------------------------------------------------------
     # Helpers "safe" (alert & feedback)
     # ------------------------------------------------------------------------
@@ -417,8 +426,12 @@ def run_trade_execution_pipeline(
             _audit("rejected", {"asset": asset, "mode": "standard", "reason": (isinstance(r, dict) and r.get("reason"))})
         return r
 
-    # BURST: délègue à l’implémentation native (gère N tickets, volumes, commentaires, etc.)
+    # BURST: délègue à l'implémentation native (gère N tickets, volumes, commentaires, etc.)
     _log("info", f"[EXEC][BURST] open_burst_basket burst_size={burst_size}")
+
+    # ✅ AJOUTÉ (25 Nov 2025): Passer trade_decision pour journalisation
+    mt5_request["trade_decision"] = td
+
     try:
         burst_result = trade_executor.open_burst_basket(mt5_request, burst_size)
     except Exception as e:

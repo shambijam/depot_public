@@ -95,6 +95,98 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
         if len(tickets) == burst_size and not errors
         else "partial" if tickets else "failed"
     )
+
+    # ✅ AJOUTÉ (25 Nov 2025): Journalisation ENTRÉE trade pour analyse data-driven
+    if tickets and hasattr(self, 'trade_logger') and self.trade_logger is not None:
+        try:
+            # Récupérer trade_decision depuis base_request
+            td = base_request.get("trade_decision", {})
+            fusion_data = td.get("fusion_data", {})
+
+            # Extraire scores
+            score_final = float(fusion_data.get("fused_confidence", 0.0))
+            normalized = fusion_data.get("normalized", {})
+
+            n_of = normalized.get("orderflow", {})
+            n_fp = normalized.get("footprint", {})
+            n_tr = normalized.get("trigger", {})
+
+            of_score = float(n_of.get("score", 0.0))
+            fp_score = float(n_fp.get("score", 0.0))
+            score_base = (of_score + fp_score) / 2.0
+
+            # Trigger
+            trigger_type = str(n_tr.get("type", "none"))
+            trigger_confidence = float(n_tr.get("score", 0.0))
+            trigger_boost = float(fusion_data.get("trigger_boost", 0.0))
+
+            # Qualité données
+            fp_raw = n_fp.get("raw", {})
+            fp_summary = fp_raw.get("summary", {})
+            if isinstance(fp_summary, str):
+                import json
+                try:
+                    fp_summary = json.loads(fp_summary)
+                except:
+                    fp_summary = {}
+
+            tick_count = int(fp_summary.get("tick_count", 0))
+            coverage_s = float(fp_summary.get("coverage_s", 0.0))
+            status_of = str(n_of.get("status", "UNKNOWN"))
+            status_fp = str(n_fp.get("status", "UNKNOWN"))
+            quality_multiplier = float(fusion_data.get("quality_multiplier", 1.0))
+
+            # Cohérence
+            coherence = fusion_data.get("coherence", {})
+            aligned_3_of_3 = bool(coherence.get("aligned3", False))
+            matrix = coherence.get("matrix", {})
+            conflicts_count = sum(1 for v in matrix.values() if v == "conflict")
+
+            # Infos position
+            symbol = str(base_request.get("symbol", "UNKNOWN"))
+            direction = "BUY" if base_request.get("action") == "BUY" else "SELL"
+            entry_price = float(base_request.get("price", 0.0))
+            volume_per_ticket = float(base_request.get("volume", 0.0))
+            volume_total = volume_per_ticket * len(tickets)  # Volume réel des positions ouvertes
+            sl_price = float(base_request.get("sl", 0.0))
+            tp_price = float(base_request.get("tp", 0.0))
+
+            # Log entrée
+            self.trade_logger.log_trade_entry(
+                basket_id=basket_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                volume=volume_total,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                # Scoring
+                score_final=score_final,
+                score_base=score_base,
+                of_score=of_score,
+                fp_score=fp_score,
+                trigger_type=trigger_type,
+                trigger_confidence=trigger_confidence,
+                trigger_boost=trigger_boost,
+                quality_multiplier=quality_multiplier,
+                # Qualité
+                tick_count=tick_count,
+                coverage_s=coverage_s,
+                status_of=status_of,
+                status_fp=status_fp,
+                # Cohérence
+                aligned_3_of_3=aligned_3_of_3,
+                conflicts_count=conflicts_count,
+                # Contexte
+                strategy="scalping",
+                burst_size=len(tickets),
+                # Extra
+                tickets=tickets,
+                status=status
+            )
+        except Exception as e:
+            self.logger.error(f"❌ [TRADE_LOG] Erreur log entrée basket {basket_id}: {e}", exc_info=True)
+
     return {
         "status": status,
         "basket_id": basket_id,
@@ -584,6 +676,55 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                 f"[CLOSE] Panier '{basket_id}' PARTIEL. restants={len(final_left)} | closed={tickets_closed} "
                 f"failed={tickets_failed} cancelled={cancelled} forced_sl={forced_sl}"
             )
+
+        # ✅ AJOUTÉ (25 Nov 2025): Journalisation SORTIE trade si toutes positions fermées
+        if all_closed and hasattr(self, 'trade_logger') and self.trade_logger is not None:
+            try:
+                # Calculer PnL total depuis les positions fermées
+                total_pnl_pips = 0.0
+                total_pnl_usd = 0.0
+                exit_prices = []
+
+                for p in basket_pos:
+                    try:
+                        # Profit en USD (directement depuis MT5)
+                        profit_usd = _safe_float(_v(p, "profit"), 0.0)
+                        total_pnl_usd += profit_usd
+
+                        # Calcul profit en pips (approximation)
+                        # Pour XAUUSD: 1 pip = 0.01, donc profit_pips = profit_usd / (volume * 10)
+                        volume = _safe_float(_v(p, "volume"), 0.01)
+                        profit_pips = profit_usd / (volume * 10.0) if volume > 0 else 0.0
+                        total_pnl_pips += profit_pips
+
+                        # Prix de sortie (si disponible)
+                        exit_price = _safe_float(_v(p, "price_current"))
+                        if exit_price:
+                            exit_prices.append(exit_price)
+                    except Exception:
+                        pass
+
+                # Prix de sortie moyen
+                exit_price_avg = sum(exit_prices) / len(exit_prices) if exit_prices else 0.0
+
+                # Déterminer raison sortie
+                if forced_sl:
+                    exit_reason = "sl_hit"
+                elif tickets_closed == len(basket_pos):
+                    exit_reason = "manual_close"  # Fermeture complète normale
+                else:
+                    exit_reason = "partial_close"
+
+                # Log sortie
+                self.trade_logger.log_trade_exit(
+                    basket_id=basket_id,
+                    exit_price=exit_price_avg,
+                    pnl_pips=total_pnl_pips,
+                    pnl_usd=total_pnl_usd,
+                    exit_reason=exit_reason
+                )
+            except Exception as e:
+                self.logger.error(f"❌ [TRADE_LOG] Erreur log sortie basket {basket_id}: {e}", exc_info=True)
 
         _purge_states(basket_id, symbol_hint)
         return {
