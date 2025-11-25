@@ -113,8 +113,10 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             # Récupérer trade_decision depuis base_request
             td = base_request.get("trade_decision", {})
             print(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}", flush=True)
-            # fusion_data est directement dans trade_decision (pas de sous-clé "fusion_data")
-            fusion_data = td  # td contient déjà fused_confidence, components, consensus, quality
+
+            # Le vrai fusion_data est dans td["fusion_meta"] !
+            fusion_data = td.get("fusion_meta", {})
+            print(f"🔍 [TRADE_LOG][DEBUG] fusion_meta keys: {list(fusion_data.keys())}", flush=True)
 
             # Extraire scores
             score_final = float(fusion_data.get("fused_confidence", 0.0))
