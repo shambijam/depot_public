@@ -106,13 +106,13 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
     has_tickets = bool(tickets)
     has_attr = hasattr(self, 'trade_logger')
     logger_not_none = has_attr and self.trade_logger is not None
-    self.logger.info(f"🔍 [TRADE_LOG][DEBUG] tickets={has_tickets} hasattr={has_attr} not_none={logger_not_none}")
+    print(f"🔍 [TRADE_LOG][DEBUG] tickets={has_tickets} hasattr={has_attr} not_none={logger_not_none}", flush=True)
 
     if tickets and hasattr(self, 'trade_logger') and self.trade_logger is not None:
         try:
             # Récupérer trade_decision depuis base_request
             td = base_request.get("trade_decision", {})
-            self.logger.info(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}")
+            print(f"🔍 [TRADE_LOG][DEBUG] trade_decision keys: {list(td.keys())}", flush=True)
             # fusion_data est directement dans trade_decision (pas de sous-clé "fusion_data")
             fusion_data = td  # td contient déjà fused_confidence, components, consensus, quality
 
