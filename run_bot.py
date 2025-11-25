@@ -1536,8 +1536,8 @@ def run_single_pipeline_cycle(
                                         fdec.get("slippage_guard_points", 10.0)
                                     ),
                                     "ts_created": int(fdec.get("ts_created")),
-                                    "fusion_meta": fdec.get("meta", {}),
-                                    # ✅ AJOUT: Stocker fdec complet avec components, trigger_boost, etc.
+                                    # ✅ CORRECTION: fusion_full contient déjà tout (signal_type, consensus, quality, etc.)
+                                    # Pas besoin de fusion_meta qui créait un doublon vide
                                     "fusion_full": fdec,
                                 }
                             )
