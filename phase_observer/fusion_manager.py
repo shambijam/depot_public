@@ -864,7 +864,8 @@ class FusionManager:
         dir_int = 1 if a == "BUY" else (-1 if a == "SELL" else 0)
         conf = max(0.0, min(0.99, _to_float(tr.get("confidence"), 0.0) or 0.0))
         anchor = _to_float(tr.get("anchor_price"), None)
-        ttype = str(tr.get("trigger_type") or "unknown")
+        # FIX: footprint_analyzer retourne "trigger" pas "trigger_type"
+        ttype = str(tr.get("trigger") or tr.get("trigger_type") or "unknown")
         ts = _to_float(tr.get("timestamp"), None)
         return {
             "score": conf,
