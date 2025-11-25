@@ -1,5 +1,248 @@
 # CLAUDE.md - Historique des Modifications
 
+## Session du 25 Novembre 2025 - Phase Collecte Données : Ouverture des Vannes
+
+### 🎯 Objectif : Collecter Données pour Optimisation Data-Driven
+
+**Stratégie Utilisateur** : *"Il nous faut des données donc on va relâcher l'étau pour optimiser notre système de scoring. On va commencer par ouvrir les vannes de façon à prendre pas mal de trades et on resserrera au fur et à mesure tous les X jours."*
+
+---
+
+### 📊 Modifications Appliquées
+
+#### **1. Réduction Drastique des Seuils de Scoring**
+
+**Fichier** : `config/strategy/config_trade_scalping.json` ligne 153-158
+
+**Avant** (Seuils très sélectifs) :
+```json
+"scoring_thresholds": {
+  "high": 0.85,        // Quasi-impossible à atteindre
+  "moderate": 0.75,    // Très rare
+  "cautious": 0.65     // Rare
+}
+```
+
+**Après** (Seuils permissifs - Phase Collecte) :
+```json
+"scoring_thresholds": {
+  "high": 0.65,        // PHASE COLLECTE DONNÉES - Ouverture vannes
+  "moderate": 0.55,    // Objectif: 50-100 trades pour analyse
+  "cautious": 0.45     // Resserrage progressif après validation
+}
+```
+
+**Impact Attendu** :
+- **Volume** : 15-25 trades/jour (au lieu de 1-2)
+- **Objectif** : 100 trades en ~5-7 jours
+- **Analyse** : Possible dès J+7
+
+---
+
+#### **2. Création Plan d'Optimisation**
+
+**Fichier** : `Documents_MAJ/PLAN_OPTIMISATION_SCORING.md`
+
+**Contenu** :
+- Stratégie de resserrage progressif
+- Calendrier sur 21 jours (3 phases)
+- Métriques de suivi
+- Critères de validation
+- Log des modifications (historique)
+
+**Phases Prévues** :
+1. **J0-J7** : Collecte 100 trades (seuils 65/55/45)
+2. **J7-J14** : Première optimisation (seuils 70/60/50 estimé)
+3. **J14-J21** : Stabilisation (seuils 75/65/55 estimé)
+4. **J21+** : Production optimisée (seuils 80/70/60 cible finale)
+
+---
+
+#### **3. Script de Suivi Quotidien**
+
+**Fichier** : `tools/quick_stats.py` (nouveau)
+
+**Fonctionnalités** :
+- Nombre de trades collectés
+- Win rate global et par catégorie
+- Distribution DIAMANT/PLATINE/OR/ARGENT
+- Trades par jour (cadence)
+- PnL total et moyen
+- Barre de progression vers objectif (100 trades)
+- Conseils automatiques selon avancement
+
+**Usage** :
+```bash
+python tools/quick_stats.py
+```
+
+**Exemple Output** :
+```
+======================================================================
+📊 STATISTIQUES RAPIDES - COLLECTE DONNÉES
+======================================================================
+
+📅 Période : 2025-11-25 → 2025-11-27 (3 jours)
+📈 Trades Collectés : 45 trades
+⚡ Cadence : 15.0 trades/jour
+
+======================================================================
+🎯 RÉSULTATS
+======================================================================
+  ✅ WIN     :  27 trades
+  ❌ LOSS    :  15 trades
+  🟡 BE      :   2 trades
+  ⏳ PENDING :   1 trades
+
+  📊 Win Rate : 64.3% (27W / 15L)
+
+  💰 PnL Total : +187.50 USD
+  💵 PnL Moyen : +4.38 USD/trade
+
+======================================================================
+📊 DISTRIBUTION PAR CATÉGORIE
+======================================================================
+  💎 DIAMANT  :   8 trades ( 17.8%)
+  🔷 PLATINE  :  18 trades ( 40.0%)
+  🟡 OR       :  15 trades ( 33.3%)
+  🔘 ARGENT   :   4 trades (  8.9%)
+
+======================================================================
+🎯 OBJECTIFS
+======================================================================
+  Objectif Phase 1 : 100 trades
+  Progression      : [██████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░] 45.0%
+  Restant          : 55 trades
+  Estimation       : ~3.7 jours restants
+
+💡 Conseil : Continuez la collecte (minimum 50 trades recommandé)
+```
+
+---
+
+### 🎯 Justification Technique
+
+#### Pourquoi les Anciens Seuils Étaient Trop Élevés
+
+**Seuils 85/75/65** avec le système de scoring actuel :
+
+**Scénario Typique** (signal BON mais pas exceptionnel) :
+```
+OrderFlow   : 75% (VALID)
+Footprint   : 70% (VALID)
+Trigger     : Climax 78%
+
+Calcul:
+  base = (75% + 70%) / 2 = 72.5%
+  × quality_mult = 1.0
+  + trigger_boost = +12%
+  = 84.5%
+
+Résultat: ❌ REJETÉ (ne passe ni 85%, ni 75%, ni 65%)
+```
+
+**Avec Nouveaux Seuils 65/55/45** :
+```
+Même signal → 84.5% → ✅ HIGH_CONVICTION (passe 65%)
+```
+
+**Impact** :
+- Anciens seuils : **1-2 trades/jour** (trop strict)
+- Nouveaux seuils : **15-25 trades/jour** (collecte efficace)
+- Après optimisation : **5-10 trades/jour** (cible finale)
+
+---
+
+### 📈 Méthodologie d'Optimisation Data-Driven
+
+#### Cycle d'Amélioration Continue
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 1. COLLECTER DONNÉES (100 trades)                       │
+│    - Seuils permissifs (65/55/45)                       │
+│    - Journalisation complète (31 métriques/trade)       │
+└────────────────────┬────────────────────────────────────┘
+                     ↓
+┌─────────────────────────────────────────────────────────┐
+│ 2. ANALYSER (tools/analyze_trades.py)                   │
+│    - Win rate par catégorie                             │
+│    - Performance par trigger                            │
+│    - Impact pénalités qualité                           │
+│    - Faux positifs/négatifs                             │
+└────────────────────┬────────────────────────────────────┘
+                     ↓
+┌─────────────────────────────────────────────────────────┐
+│ 3. OPTIMISER (ajustements basés sur données)            │
+│    - Augmenter seuils si win rate > 60%                 │
+│    - Ajuster bonus trigger selon impact réel            │
+│    - Valider/supprimer pénalités qualité                │
+└────────────────────┬────────────────────────────────────┘
+                     ↓
+┌─────────────────────────────────────────────────────────┐
+│ 4. VALIDER (100 nouveaux trades)                        │
+│    - Comparer avant/après                               │
+│    - Vérifier amélioration                              │
+└────────────────────┬────────────────────────────────────┘
+                     ↓
+                  RÉPÉTER
+```
+
+#### Questions à Résoudre avec les Données
+
+1. **Les scores élevés prédisent-ils vraiment le succès ?**
+   - Win rate DIAMANT (≥90%) vs PLATINE (80-89%) vs OR (70-79%)
+   - Corrélation score → outcome
+
+2. **Les triggers améliorent-ils les performances ?**
+   - Win rate avec trigger vs sans trigger
+   - Performance par type (stacking/climax/absorption)
+
+3. **Les pénalités qualité sont-elles justifiées ?**
+   - Impact tick_count < 100 sur win rate
+   - Impact coverage_s < 20s sur win rate
+   - Impact status "SUSPECT" sur win rate
+
+4. **Quels sont les patterns gagnants ?**
+   - Combinaisons OF/FP/Trigger les plus performantes
+   - Configurations à éviter (faux positifs récurrents)
+
+---
+
+### 🔧 Fichiers Modifiés
+
+| Fichier | Type | Modification |
+|---------|------|--------------|
+| config/strategy/config_trade_scalping.json | ✅ Modif | Seuils 85/75/65 → 65/55/45 |
+| Documents_MAJ/PLAN_OPTIMISATION_SCORING.md | ✅ Créé | Plan d'optimisation sur 21 jours |
+| tools/quick_stats.py | ✅ Créé | Script de suivi quotidien (~200 lignes) |
+
+---
+
+### ✅ État Final
+
+**Phase** : COLLECTE DONNÉES (J0)
+
+**Seuils Actifs** : 65/55/45 (permissifs)
+
+**Système de Journalisation** : ✅ Opérationnel
+- `logs/trades_history.jsonl` (analyse automatique)
+- `logs/trades_history.md` (lecture humaine)
+
+**Outils Disponibles** :
+- ✅ `python tools/quick_stats.py` (suivi quotidien)
+- ✅ `python tools/analyze_trades.py --min-trades 50` (analyse complète)
+
+**Objectif Immédiat** : Collecter 100 trades en ~7 jours
+
+**Prochaine Étape** : Première analyse après 50-100 trades collectés
+
+---
+
+*Dernière mise à jour : 25 Novembre 2025*
+
+---
+
 ## Session du 15 Novembre 2025 (Suite 3) - Suppression FALLBACK Toxique
 
 ### 🎯 Objectif : Éliminer les Fallbacks et Corriger burst_size
