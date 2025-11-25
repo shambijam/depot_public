@@ -86,8 +86,8 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             errors.append({"exc": str(e)})
 
         # micro-délai anti-rafale (évite retcodes "trade context busy")
-        # Réduit à 0.01s pour minimiser l'écart de prix entre positions (au lieu de 0.02s)
-        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.01) or 0.01))
+        # ⚡ OPTIMISATION LATENCE: Réduit à 0.005s (5ms) pour gain de ~40ms sur 8 positions
+        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.005) or 0.005))
 
     # marque le cooldown “dernier burst”
     try:
