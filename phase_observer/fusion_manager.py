@@ -1221,19 +1221,30 @@ class FusionManager:
 
         # Vérifie si trigger RÉEL (pas fusion_pretrigger)
         valid_patterns = [
-            # Triggers existants
-            "stacking", "climax", "absorption", "micro_stack", "micro_absorption",
+            # Triggers existants (noms EXACTS retournés par footprint_analyzer.py)
+            "imbalance_stacking",           # TriggerType.STACKING
+            "climax_after_consolidation",   # TriggerType.CLIMAX
+            "absorption_reject",            # TriggerType.ABSORPTION
+            "stacking_inline",              # TriggerType.MICRO_STACK
+            "absorption_inline",            # TriggerType.MICRO_ABSORPTION
             # Nouveaux triggers (Session 22 Nov 2025)
-            "liquidation_clusters", "failed_breakout", "momentum_imbalance", "accumulation_zones"
+            "liquidation_clusters",         # TriggerType.LIQUIDATION_CLUSTERS
+            "failed_breakout",              # TriggerType.FAILED_BREAKOUT
+            "momentum_imbalance",           # TriggerType.MOMENTUM_IMBALANCE
+            "accumulation_zones",           # TriggerType.ACCUMULATION_ZONES
+            # Alias legacy (au cas où)
+            "stacking", "climax", "absorption", "micro_stack", "micro_absorption"
         ]
         is_real_trigger = trigger_type in valid_patterns
 
         if is_real_trigger:
             # Bonus selon qualité du trigger
-            # Triggers prioritaires : stacking, climax, liquidation_clusters, failed_breakout
+            # Triggers prioritaires (noms EXACTS)
             priority_triggers = [
-                "stacking", "climax", "absorption",
-                "liquidation_clusters", "failed_breakout", "momentum_imbalance"
+                "imbalance_stacking", "climax_after_consolidation", "absorption_reject",
+                "liquidation_clusters", "failed_breakout", "momentum_imbalance",
+                # Alias legacy
+                "stacking", "climax", "absorption"
             ]
             if trigger_conf >= 0.85 and trigger_type in priority_triggers:
                 trigger_boost = 0.15  # +15% DIAMANT
