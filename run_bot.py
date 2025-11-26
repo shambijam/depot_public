@@ -2978,8 +2978,37 @@ def scalping_fast_thread(
 
             # MarketAnalyzer (phase + patterns + features)
             from phase_observer.market_analyzer import MarketAnalyzer
+            from core.footprint_cache import footprint_cache  # ✅ AJOUTÉ: Import cache
+
             market_analyzer = MarketAnalyzer(config_manager, mecano)
-            market_results = market_analyzer.analyze(rates_df, "XAUUSD")
+
+            # ✅ OPTIMISATION: Lire footprint depuis CACHE au lieu de le calculer
+            cached_footprint = footprint_cache.get("XAUUSD", max_age_seconds=15.0)
+
+            if cached_footprint:
+                # Cache HIT → Analyse ultra-rapide (sans calcul footprint)
+                cache_age = footprint_cache.get_age("XAUUSD")
+                logger.debug(
+                    f"⚡ [SCALPING_THREAD] CACHE HIT | age={cache_age:.1f}s | "
+                    f"ticks={cached_footprint.get('footprint_summary', {}).get('tick_count', 0)}"
+                )
+
+                # Analyse SANS ticks (plus rapide, utilise seulement OrderFlow)
+                market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=None)
+
+                # Injecter les données footprint depuis le cache
+                market_results['footprint'] = cached_footprint.get('footprint_summary', {})
+                market_results['footprint_trigger'] = cached_footprint.get('trigger_data', {})
+                market_results['footprint_df'] = cached_footprint.get('footprint_df')
+                market_results['_cache_hit'] = True
+                market_results['_cache_age_s'] = cache_age
+            else:
+                # Cache MISS → Fallback analyse complète (rare)
+                logger.warning(
+                    "⚠️ [SCALPING_THREAD] CACHE MISS | Fallback analyse complète (DataEngine lag?)"
+                )
+                market_results = market_analyzer.analyze(rates_df, "XAUUSD")  # Analyse normale avec ticks
+                market_results['_cache_hit'] = False
 
             # Stocker dans global_context (avec lock)
             with context_lock:
@@ -2991,7 +3020,7 @@ def scalping_fast_thread(
                 # Extraction inputs fusion
                 orderflow = market_results.get("orderflow_v6", {})
                 footprint = market_results.get("footprint", {})
-                triggers = market_results.get("triggers", {})
+                triggers = market_results.get("footprint_trigger", {})  # ✅ MODIFIÉ: footprint_trigger au lieu de triggers
                 strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
 
                 ctx = {
@@ -3450,6 +3479,7 @@ def main(args: argparse.Namespace) -> None:
     logger.info("=" * 80)
     logger.info("🚀 DÉMARRAGE DES THREADS SÉPARÉS")
     logger.info("=" * 80)
+    logger.info("  • DATAENGINE Thread     : Cycle 5s (Analyse Footprint asynchrone)")
     logger.info("  • SCALPING Thread       : Cycle 10s (XAUUSD)")
     logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD, XAUUSD)")
     logger.info("  • BASKET MONITOR Thread : Surveillance continue (polling 100ms)")
@@ -3463,6 +3493,7 @@ def main(args: argparse.Namespace) -> None:
     scalping_stop_event = threading.Event()
     liquidity_stop_event = threading.Event()
     basket_monitor_stop_event = threading.Event()
+    data_engine_stop_event = threading.Event()  # ✅ AJOUTÉ pour DataEngine
 
     # Créer les threads
     scalping_thread = threading.Thread(
@@ -3516,7 +3547,18 @@ def main(args: argparse.Namespace) -> None:
         name="BasketMonitorThread"
     )
 
+    # ✅ AJOUTÉ: DataEngine Thread pour analyse footprint asynchrone
+    from core.data_engine import DataEngine
+    data_engine = DataEngine(
+        symbols=['XAUUSD'],  # Symboles prioritaires pour le scalping
+        mt5_connector=mt5_connector,
+        market_analyzer=mecano,
+        update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)
+        stop_event=data_engine_stop_event
+    )
+
     # Démarrer les threads
+    data_engine.start()  # ✅ Démarrer DataEngine AVANT scalping (pour pré-remplir le cache)
     scalping_thread.start()
     liquidity_thread.start()
     basket_monitor.start()
@@ -3550,10 +3592,12 @@ def main(args: argparse.Namespace) -> None:
         logger.info("🛑 Arrêt des threads en cours...")
 
         try:
+            data_engine_stop_event.set()  # ✅ AJOUTÉ: Arrêter DataEngine
             scalping_stop_event.set()
             liquidity_stop_event.set()
             basket_monitor_stop_event.set()
 
+            data_engine.join(timeout=5.0)  # ✅ AJOUTÉ: Attendre DataEngine
             scalping_thread.join(timeout=5.0)
             liquidity_thread.join(timeout=5.0)
             basket_monitor.join(timeout=5.0)
