@@ -151,9 +151,9 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "high": 0.85,
-      "moderate": 0.75,
-      "cautious": 0.75,
+      "high": 0.90,
+      "moderate": 0.80,
+      "cautious": 0.80,
       "conditional": 0.40
     },
     "momentum": {
