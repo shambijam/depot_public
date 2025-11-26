@@ -3549,10 +3549,15 @@ def main(args: argparse.Namespace) -> None:
 
     # ✅ AJOUTÉ: DataEngine Thread pour analyse footprint asynchrone
     from core.data_engine import DataEngine
+    from phase_observer.market_analyzer import MarketAnalyzer
+
+    # Créer un MarketAnalyzer dédié pour le DataEngine
+    market_analyzer_for_dataengine = MarketAnalyzer(config_manager, mecano)
+
     data_engine = DataEngine(
         symbols=['XAUUSD'],  # Symboles prioritaires pour le scalping
         mt5_connector=mt5_connector,
-        market_analyzer=market_analyzer,  # ✅ CORRIGÉ: market_analyzer au lieu de mecano
+        market_analyzer=market_analyzer_for_dataengine,  # ✅ MarketAnalyzer dédié
         update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)
         stop_event=data_engine_stop_event
     )

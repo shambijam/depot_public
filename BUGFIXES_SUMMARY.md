@@ -89,16 +89,19 @@ if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
 
 ---
 
-## 🔴 Bug #4 : Mauvaise instance passée au DataEngine
+## 🔴 Bug #4 : Mauvaise instance + Variable non définie
 
-**Fichier** : `run_bot.py:3555`
+**Fichier** : `run_bot.py:3555-3560`
 
-**Symptôme** :
+**Symptômes** :
 ```
 AttributeError: 'Mecano' object has no attribute 'analyze'
+NameError: name 'market_analyzer' is not defined
 ```
 
-**Cause** : Passage de l'objet `mecano` au lieu de `market_analyzer`
+**Causes** :
+1. Passage de l'objet `mecano` au lieu d'un `MarketAnalyzer`
+2. La variable `market_analyzer` n'existe pas dans le scope de `main()`
 
 **Fix** :
 ```python
@@ -111,10 +114,15 @@ data_engine = DataEngine(
 )
 
 # APRÈS ✅
+from phase_observer.market_analyzer import MarketAnalyzer
+
+# Créer un MarketAnalyzer dédié pour le DataEngine
+market_analyzer_for_dataengine = MarketAnalyzer(config_manager, mecano)
+
 data_engine = DataEngine(
     symbols=['XAUUSD'],
     mt5_connector=mt5_connector,
-    market_analyzer=market_analyzer,  # ✅ Bonne instance (MarketAnalyzer)
+    market_analyzer=market_analyzer_for_dataengine,  # ✅ Bonne instance
     ...
 )
 ```

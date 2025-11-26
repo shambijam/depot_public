@@ -127,18 +127,19 @@ if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
 
 ---
 
-### **Bug #4 : Mauvaise instance passée au DataEngine**
+### **Bug #4 : Mauvaise instance + Variable non définie**
 
-**Fichier** : `run_bot.py` (ligne 3555)
+**Fichier** : `run_bot.py` (lignes 3555-3560)
 
-**Erreur** :
+**Erreurs** :
 ```
 AttributeError: 'Mecano' object has no attribute 'analyze'
+NameError: name 'market_analyzer' is not defined
 ```
 
-**Impact** : DataEngine crashait lors de l'analyse footprint car `mecano` n'a pas la méthode `analyze()`
+**Impact** : DataEngine crashait car `mecano` n'a pas `analyze()` et `market_analyzer` n'existe pas dans le scope
 
-**Correction** :
+**Correction complète** :
 ```python
 # AVANT ❌
 data_engine = DataEngine(
@@ -147,13 +148,21 @@ data_engine = DataEngine(
 )
 
 # APRÈS ✅
+from phase_observer.market_analyzer import MarketAnalyzer
+
+# Créer un MarketAnalyzer dédié pour le DataEngine
+market_analyzer_for_dataengine = MarketAnalyzer(config_manager, mecano)
+
 data_engine = DataEngine(
-    market_analyzer=market_analyzer,  # ✅ Bonne instance (MarketAnalyzer)
+    market_analyzer=market_analyzer_for_dataengine,  # ✅ Bonne instance
     ...
 )
 ```
 
-**Raison** : L'objet `mecano` (classe Mecano) n'a pas de méthode `analyze()`. C'est `market_analyzer` (classe MarketAnalyzer) qui possède cette méthode.
+**Raison** :
+1. L'objet `mecano` (classe Mecano) n'a pas de méthode `analyze()`
+2. La variable `market_analyzer` n'existe pas dans le scope de `main()`
+3. Solution : Créer un `MarketAnalyzer` dédié au DataEngine avec les bons paramètres
 
 ---
 

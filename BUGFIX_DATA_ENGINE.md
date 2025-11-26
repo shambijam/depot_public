@@ -168,14 +168,38 @@ Avec ce bugfix, le système de cache asynchrone fonctionne enfin correctement :
 
 | Ligne | Problème | Correction |
 |-------|----------|------------|
-| 3555 | Mauvaise instance passée au DataEngine | `market_analyzer=mecano` → `market_analyzer=market_analyzer` |
+| 3555-3560 | Mauvaise instance + variable non définie | Création d'un `MarketAnalyzer` dédié pour DataEngine |
 
-**Erreur** :
+**Erreurs** :
 ```
 AttributeError: 'Mecano' object has no attribute 'analyze'
+NameError: name 'market_analyzer' is not defined
 ```
 
-**Raison** : L'objet `mecano` n'a pas de méthode `analyze()`, c'est `market_analyzer` (MarketAnalyzer) qui l'a.
+**Correction complète** :
+```python
+# AVANT ❌
+data_engine = DataEngine(
+    market_analyzer=mecano,  # ❌ Mauvaise instance
+    ...
+)
+
+# APRÈS ✅
+from phase_observer.market_analyzer import MarketAnalyzer
+
+# Créer un MarketAnalyzer dédié pour le DataEngine
+market_analyzer_for_dataengine = MarketAnalyzer(config_manager, mecano)
+
+data_engine = DataEngine(
+    market_analyzer=market_analyzer_for_dataengine,  # ✅ Bonne instance
+    ...
+)
+```
+
+**Raison** :
+1. L'objet `mecano` n'a pas de méthode `analyze()`
+2. La variable `market_analyzer` n'existe pas dans le scope de `main()`
+3. Solution : Créer un `MarketAnalyzer` dédié au DataEngine
 
 ---
 
