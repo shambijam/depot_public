@@ -173,7 +173,7 @@ class DataEngine(threading.Thread):
                 exc_info=True
             )
 
-    def _get_current_m1_ticks(self, symbol: str) -> Optional[List[Any]]:
+    def _get_current_m1_ticks(self, symbol: str) -> Optional[Any]:
         """
         Récupère les ticks de la bougie M1 en cours.
 
@@ -181,7 +181,7 @@ class DataEngine(threading.Thread):
             symbol: Symbole
 
         Returns:
-            Liste des ticks, ou None si erreur
+            DataFrame des ticks, ou None si erreur
         """
         try:
             # Récupérer les ticks depuis le début de la bougie M1 actuelle
@@ -193,15 +193,20 @@ class DataEngine(threading.Thread):
             candle_start = now.replace(second=0, microsecond=0)
             candle_end = now
 
-            # Appel MT5 pour récupérer les ticks
-            ticks = self.mt5_connector.get_ticks_range(
+            # Appel MT5 pour récupérer les ticks de la bougie M1 en cours
+            # Note: get_ticks_for_candle() attend normalement une bougie complète (60s)
+            # mais fonctionne aussi pour une bougie en cours
+            ticks_df = self.mt5_connector.get_ticks_for_candle(
                 symbol=symbol,
-                date_from=candle_start,
-                date_to=candle_end,
-                flags=None  # Tous les ticks (bid/ask/last/volume)
+                start_ts=candle_start,
+                end_ts=candle_end
             )
 
-            return ticks
+            # Retourner le DataFrame (ou None si vide)
+            if ticks_df is None or len(ticks_df) == 0:
+                return None
+
+            return ticks_df
 
         except Exception as e:
             self.logger.error(
