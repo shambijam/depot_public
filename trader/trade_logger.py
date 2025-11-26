@@ -305,11 +305,43 @@ class TradeLogger:
     def _write_md_entry(self, td: Dict[str, Any]) -> None:
         """Écrit une entrée de trade en format Markdown lisible."""
         with open(self.log_file_md, 'a', encoding='utf-8') as f:
-            # Header du trade
+            # Header du trade avec résultat
             outcome = td.get("outcome", "PENDING")
             emoji = "🟢" if outcome == "WIN" else "🔴" if outcome == "LOSS" else "🟡" if outcome == "BE" else "⏳"
 
+            # Direction avec emoji
+            direction = td.get('direction', 'UNKNOWN')
+            dir_emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
+
+            # Score catégorie avec emoji
+            score_cat = td.get('score_category', 'UNKNOWN')
+            cat_emoji = {"DIAMANT": "💎", "PLATINE": "🔷", "OR": "🟡", "ARGENT": "🔘", "BRONZE": "⚪"}.get(score_cat, "❓")
+
+            # Trigger avec emoji
+            has_trigger = td.get('has_real_trigger', False)
+            trigger_type = td.get('trigger_type', 'none')
+            trigger_emoji = "🎯" if has_trigger else "❌"
+
+            # Extraire l'heure depuis l'ISO timestamp
+            entry_time_str = td.get('entry_time', '')
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_time_str)
+                    time_display = entry_dt.strftime("%H:%M:%S")
+                except:
+                    time_display = entry_time_str
+            else:
+                time_display = "N/A"
+
+            # Header enrichi avec toutes les infos principales
             f.write(f"## {emoji} Trade #{td.get('trade_id', 'UNKNOWN')}\n\n")
+            f.write(f"**⏰ {time_display}** | "
+                   f"{dir_emoji} **{direction}** {td.get('symbol', 'N/A')} @ **{td.get('entry_price', 0):.2f}** | "
+                   f"{cat_emoji} **{score_cat}** ({td.get('score_final', 0):.1%}) | "
+                   f"{trigger_emoji} **{trigger_type}** ({td.get('trigger_confidence', 0):.1%})\n\n")
+
+            f.write(f"📊 **Scores:** OF={td.get('score_of', 0):.1%} | FP={td.get('score_fp', 0):.1%} | "
+                   f"Base={td.get('score_base', 0):.1%} | Boost={td.get('trigger_boost', 0):+.1%}\n\n")
 
             # Informations de base
             f.write("### 📋 Informations\n\n")
@@ -341,36 +373,6 @@ class TradeLogger:
                 f.write(f"| **Exit Price** | {td.get('exit_price', 0):.2f} |\n")
 
             f.write("\n")
-
-            # Scoring
-            score_cat = td.get('score_category', 'UNKNOWN')
-            cat_emoji = {"DIAMANT": "💎", "PLATINE": "🔷", "OR": "🟡", "ARGENT": "🔘", "BRONZE": "⚪"}.get(score_cat, "❓")
-
-            f.write(f"### {cat_emoji} Scoring - {score_cat}\n\n")
-            f.write(f"| Métrique | Valeur |\n")
-            f.write(f"|----------|--------|\n")
-            f.write(f"| **Score Final** | {td.get('score_final', 0):.1%} |\n")
-            f.write(f"| **Score Base** | {td.get('score_base', 0):.1%} (OF+FP)/2 |\n")
-            f.write(f"| ├─ OrderFlow** | {td.get('score_of', 0):.1%} |\n")
-            f.write(f"| └─ Footprint** | {td.get('score_fp', 0):.1%} |\n")
-            f.write(f"| **Quality Mult** | ×{td.get('quality_multiplier', 1.0):.2f} |\n")
-            f.write("\n")
-
-            # Trigger
-            if td.get('has_real_trigger'):
-                trig_type = td.get('trigger_type', 'none')
-                trig_conf = td.get('trigger_confidence', 0)
-                trig_boost = td.get('trigger_boost', 0)
-
-                f.write(f"### 🎯 Trigger - {trig_type.upper()}\n\n")
-                f.write(f"| Métrique | Valeur |\n")
-                f.write(f"|----------|--------|\n")
-                f.write(f"| **Type** | {trig_type} |\n")
-                f.write(f"| **Confidence** | {trig_conf:.1%} |\n")
-                f.write(f"| **Bonus Appliqué** | +{trig_boost:.1%} |\n")
-                f.write("\n")
-            else:
-                f.write(f"### 🎯 Trigger - AUCUN\n\n")
 
             # Qualité données
             f.write(f"### 📊 Qualité Données\n\n")
