@@ -233,6 +233,7 @@ class FusionManager:
         fused: float,
         decision: Dict[str, Any],
         weights: Dict[str, float],
+        thresholds: Dict[str, float] = None,
     ):
         """
         📊 BILAN CONSOLIDÉ : Rapport unifié montrant comment les 3 fonctions travaillent ensemble.
@@ -539,15 +540,22 @@ class FusionManager:
             # Emoji selon action
             action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️"}.get(action, "⚪")
 
-            # Seuils
-            if fused >= 0.80:
-                level = "HIGH_CONVICTION (≥80%)"
-            elif fused >= 0.70:
-                level = "MODERATE (≥70%)"
-            elif fused >= 0.55:
-                level = "CAUTIOUS (≥55%)"
+            # ✅ Seuils dynamiques basés sur la config (pas hardcodés)
+            if thresholds is None:
+                thresholds = {"high": 0.80, "moderate": 0.70, "cautious": 0.55}
+
+            th_high = thresholds.get("high", 0.80)
+            th_moderate = thresholds.get("moderate", 0.70)
+            th_cautious = thresholds.get("cautious", 0.55)
+
+            if fused >= th_high:
+                level = f"HIGH_CONVICTION (≥{th_high:.0%})"
+            elif fused >= th_moderate:
+                level = f"MODERATE (≥{th_moderate:.0%})"
+            elif fused >= th_cautious:
+                level = f"CAUTIOUS (≥{th_cautious:.0%})"
             else:
-                level = "INSUFFISANT (<55%)"
+                level = f"INSUFFISANT (<{th_cautious:.0%})"
 
             self.log.info(f"│ Action  : {action_emoji} {action:<15}                                       │")
             self.log.info(f"│ Signal  : {signal:<45}│")
@@ -691,6 +699,8 @@ class FusionManager:
         # Appeler le rapport consolidé (actif seulement si FUSION_PROBE=1)
         if FUSION_PROBE:
             asset_name = ctx.get("asset", "UNKNOWN")
+            # ✅ Récupérer les seuils configurés pour affichage dynamique
+            configured_thresholds = _get_thresholds(cfg)
             self._log_consolidated_report(
                 asset=asset_name,
                 n_tr=n_tr,
@@ -699,6 +709,7 @@ class FusionManager:
                 fused=fused,
                 decision=decision,
                 weights=weights_used,
+                thresholds=configured_thresholds,
             )
 
         return {
