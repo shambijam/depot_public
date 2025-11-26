@@ -152,7 +152,7 @@
     },
     "scoring_thresholds": {
       "high": 0.80,
-      "moderate": 0.65,
+      "moderate": 0.70,
       "cautious": 0.65,
       "conditional": 0.40
     },
