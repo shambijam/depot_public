@@ -223,50 +223,60 @@ class ScalpingStrategy(BaseStrategy):
             # --- 5) Range Accumulation MTF ---
             try:
                 mtf_cfg = strat_cfg.get("range_accumulation_mtf") or {}
-                mtf_decision = self._rule_range_accumulation_mtf(
-                    df_m1=df_work,
-                    asset=asset,
-                    price=price,
-                    meta=meta,
-                    cfg=mtf_cfg,
-                    analyzed_context=analyzed_context,
-                )
-                if mtf_decision:
-                    return self._finalize_decision(mtf_decision, analyzed_context)
+                if mtf_cfg.get("enabled", False):  # ✅ Vérifier enabled
+                    mtf_decision = self._rule_range_accumulation_mtf(
+                        df_m1=df_work,
+                        asset=asset,
+                        price=price,
+                        meta=meta,
+                        cfg=mtf_cfg,
+                        analyzed_context=analyzed_context,
+                    )
+                    if mtf_decision:
+                        return self._finalize_decision(mtf_decision, analyzed_context)
                 
                           # --- 3) Momentum & Breakout (nouvelles règles) ---
                 try:
                     mom_cfg = (strat_cfg.get("momentum") or {}) if isinstance(strat_cfg, dict) else {}
                     pat_cfg = (strat_cfg.get("patterns") or {}) if isinstance(strat_cfg, dict) else {}
-                    weights = (strat_cfg.get("scoring_weights") or {"context": 0.3, "technical": 0.4, "orderflow": 0.2, "risk": 0.1})
-                    thresholds = (strat_cfg.get("scoring_thresholds") or {"direct": 0.70, "conditional": 0.50})
 
-                    candidates: List[Dict[str, Any]] = []
+                    # ✅ Vérifier que momentum ET patterns sont enabled
+                    if not mom_cfg.get("enabled", False) and not pat_cfg.get("enabled", False):
+                        self.logger.debug(f"[{asset}] Momentum/Pattern désactivés dans config")
+                    else:
+                        weights = (strat_cfg.get("scoring_weights") or {"context": 0.3, "technical": 0.4, "orderflow": 0.2, "risk": 0.1})
+                        thresholds = (strat_cfg.get("scoring_thresholds") or {"direct": 0.70, "conditional": 0.50})
 
-                    rb = self._rule_breakout_consolidation(df_work, asset, price, meta, mom_cfg.get("breakout", {}) or {})
-                    if rb: candidates.append(rb)
+                        candidates: List[Dict[str, Any]] = []
 
-                    tpull = self._rule_trend_pullback(df_work, asset, price, meta, mom_cfg.get("trend_pullback", {}) or {})
-                    if tpull: candidates.append(tpull)
+                        # Evaluer momentum patterns seulement si enabled
+                        if mom_cfg.get("enabled", False):
+                            rb = self._rule_breakout_consolidation(df_work, asset, price, meta, mom_cfg.get("breakout", {}) or {})
+                            if rb: candidates.append(rb)
 
-                    ib = self._rule_inside_bar_breakout(df_work, asset, price, meta, (pat_cfg.get("inside_bar", {}) or {}))
-                    if ib: candidates.append(ib)
+                            tpull = self._rule_trend_pullback(df_work, asset, price, meta, mom_cfg.get("trend_pullback", {}) or {})
+                            if tpull: candidates.append(tpull)
 
-                    ign = self._rule_momentum_ignition(df_work, asset, price, meta, mom_cfg.get("ignition", {}) or {})
-                    if ign: candidates.append(ign)
+                            ign = self._rule_momentum_ignition(df_work, asset, price, meta, mom_cfg.get("ignition", {}) or {})
+                            if ign: candidates.append(ign)
 
-                    if candidates:
-                        best = self._choose_best_candidate(
-                            candidates=candidates,
-                            asset=asset,
-                            meta=meta,
-                            asset_signals=asset_signals,
-                            analyzed_context=analyzed_context,
-                            weights=weights,
-                            thresholds=thresholds,
-                        )
-                        if best and float(best.get("score", 0.0)) >= float(thresholds.get("direct", 0.70)):
-                            return self._finalize_decision(best, analyzed_context)
+                        # Evaluer patterns seulement si enabled
+                        if pat_cfg.get("enabled", False):
+                            ib = self._rule_inside_bar_breakout(df_work, asset, price, meta, (pat_cfg.get("inside_bar", {}) or {}))
+                            if ib: candidates.append(ib)
+
+                        if candidates:
+                            best = self._choose_best_candidate(
+                                candidates=candidates,
+                                asset=asset,
+                                meta=meta,
+                                asset_signals=asset_signals,
+                                analyzed_context=analyzed_context,
+                                weights=weights,
+                                thresholds=thresholds,
+                            )
+                            if best and float(best.get("score", 0.0)) >= float(thresholds.get("direct", 0.70)):
+                                return self._finalize_decision(best, analyzed_context)
                 except Exception as e:
                     self.logger.debug(f"[{asset}] Momentum/Pattern block skipped: {e}")
 
@@ -275,19 +285,21 @@ class ScalpingStrategy(BaseStrategy):
 
             # --- 6) Range Accumulation simple ---
             try:
-                range_decision = self._rule_range_accumulation(
-                    df=df_work,
-                    asset=asset,
-                    price=price,
-                    action=action,
-                    meta=meta,
-                    cfg=(strat_cfg.get("range_accumulation") or {}),
-                )
-                if range_decision:
-                    range_decision.setdefault("strategy_type", "scalping")
-                    range_decision.setdefault("rule_name", "range_accumulation")
-                    range_decision.setdefault("execution_status", "ready")
-                    return self._finalize_decision(range_decision, analyzed_context)
+                range_cfg = strat_cfg.get("range_accumulation") or {}
+                if range_cfg.get("enabled", False):  # ✅ Vérifier enabled
+                    range_decision = self._rule_range_accumulation(
+                        df=df_work,
+                        asset=asset,
+                        price=price,
+                        action=action,
+                        meta=meta,
+                        cfg=range_cfg,
+                    )
+                    if range_decision:
+                        range_decision.setdefault("strategy_type", "scalping")
+                        range_decision.setdefault("rule_name", "range_accumulation")
+                        range_decision.setdefault("execution_status", "ready")
+                        return self._finalize_decision(range_decision, analyzed_context)
             except Exception as e:
                 self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
 
