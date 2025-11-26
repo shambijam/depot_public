@@ -73,6 +73,29 @@ return ticks_df
 
 ---
 
+## 🐛 Bug Secondaire : Validation DataFrame Ambiguë
+
+### **Erreur détectée** :
+
+```
+ValueError: The truth value of a DataFrame is ambiguous.
+Use a.empty, a.bool(), a.item(), a.any() or a.all().
+```
+
+**Ligne 135** (ancienne version ❌) :
+```python
+if not ticks_data or len(ticks_data) == 0:  # ❌ Erreur avec DataFrame
+```
+
+**Ligne 136** (nouvelle version ✅) :
+```python
+if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):  # ✅
+```
+
+**Raison** : Avec pandas DataFrame, on ne peut pas utiliser `if not df`, il faut utiliser `df.empty`.
+
+---
+
 ## 📊 Résultat Attendu
 
 Après ce bugfix, le DataEngine devrait :
@@ -130,6 +153,19 @@ Avec ce bugfix, le système de cache asynchrone fonctionne enfin correctement :
 
 ---
 
+## 📝 Résumé des Corrections
+
+**Fichier modifié** : `core/data_engine.py`
+
+| Ligne | Problème | Correction |
+|-------|----------|------------|
+| 65 | Variable `update_interval` inexistante | `update_interval` → `self.update_interval` |
+| 176 | Type hint incorrect | `Optional[List[Any]]` → `Optional[Any]` (DataFrame) |
+| 199-209 | Méthode MT5 inexistante | `get_ticks_range()` → `get_ticks_for_candle()` |
+| 136 | Validation DataFrame ambiguë | `if not ticks_data` → `if ticks_data is None or ticks_data.empty` |
+
+---
+
 *Date de correction: 26 Novembre 2025*
-*Fichier modifié: core/data_engine.py (lignes 176, 199-209)*
+*Fichier modifié: core/data_engine.py (4 corrections)*
 *Impact: Résout le CACHE MISS permanent et restaure le gain de performance de 71%*

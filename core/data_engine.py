@@ -132,7 +132,8 @@ class DataEngine(threading.Thread):
             # (depuis le début de la bougie jusqu'à maintenant)
             ticks_data = self._get_current_m1_ticks(symbol)
 
-            if not ticks_data or len(ticks_data) == 0:
+            # Vérifier si les données sont valides (DataFrame pandas)
+            if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
                 self.logger.debug(
                     f"⚠️ [DATA_ENGINE][{symbol}] Aucun tick disponible (marché fermé?)"
                 )
