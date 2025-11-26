@@ -942,11 +942,35 @@ def run_single_pipeline_cycle(
             "regime": str(signals.get("phase", "")) or None,
         }
 
-        # price_step utilisé par _suggest_trailing
+        # ✅ FIX: Charger la config scalping complète (pas juste price_step)
+        # pour que FusionManager ait accès aux scoring_thresholds configurés
         step = getattr(symbol_info, "point", None) if symbol_info else None
         strat_cfg = {
             "price_step": float(step) if isinstance(step, (int, float)) else 0.01
         }
+
+        # Charger la config scalping depuis strategy_manager
+        try:
+            scalping_full_config = strategy_manager.get_strategy_config("scalping") or {}
+
+            # Merger les sections importantes dans strat_cfg
+            if "fusion" in scalping_full_config:
+                strat_cfg["fusion"] = scalping_full_config["fusion"]
+
+            if "scoring_thresholds" in scalping_full_config:
+                strat_cfg["scoring_thresholds"] = scalping_full_config["scoring_thresholds"]
+
+            # Log pour debug (si scoring_thresholds présent)
+            if "scoring_thresholds" in strat_cfg:
+                logger.info(
+                    f"[FUSION_CONFIG] Seuils chargés: "
+                    f"high={strat_cfg['scoring_thresholds'].get('high', 'N/A')} "
+                    f"moderate={strat_cfg['scoring_thresholds'].get('moderate', 'N/A')} "
+                    f"cautious={strat_cfg['scoring_thresholds'].get('cautious', 'N/A')}"
+                )
+        except Exception as e:
+            logger.warning(f"[FUSION_CONFIG] Erreur chargement config scalping: {e}")
+
         return orderflow, footprint, triggers, strat_cfg, ctx
 
     # === Préparation exécution ===
