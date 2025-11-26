@@ -267,16 +267,30 @@ class DataEngine(threading.Thread):
                 ticks=ticks_data  # Ticks pour analyse footprint
             )
 
-            # Le résultat contient déjà footprint_summary enrichi
-            # par le MarketAnalyzer (voir market_analyzer.py ligne ~300)
-            if 'footprint_summary' not in result:
+            # Extraire footprint_summary depuis result['latest']
+            # (MarketAnalyzer stocke footprint_summary dans latest, pas au niveau racine)
+            latest = result.get('latest')
+            if latest is None:
                 self.logger.warning(
-                    f"⚠️ [DATA_ENGINE][{symbol}] footprint_summary manquant dans résultat"
+                    f"⚠️ [DATA_ENGINE][{symbol}] 'latest' manquant dans résultat"
+                )
+                return None
+
+            # Extraire footprint_summary depuis latest (peut être une Series pandas)
+            if hasattr(latest, 'get'):
+                footprint_summary = latest.get('footprint_summary', {})
+            else:
+                # Si latest est None ou pas un dict/Series
+                footprint_summary = {}
+
+            if not footprint_summary:
+                self.logger.warning(
+                    f"⚠️ [DATA_ENGINE][{symbol}] footprint_summary vide ou manquant"
                 )
                 return None
 
             return {
-                'footprint_summary': result.get('footprint_summary', {}),
+                'footprint_summary': footprint_summary,
                 'trigger_data': result.get('footprint_trigger', {}),
                 'footprint_df': result.get('footprint_df'),
                 'raw_result': result  # Garder tout au cas où
