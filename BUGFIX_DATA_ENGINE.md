@@ -155,7 +155,7 @@ Avec ce bugfix, le système de cache asynchrone fonctionne enfin correctement :
 
 ## 📝 Résumé des Corrections
 
-**Fichier modifié** : `core/data_engine.py`
+### **Fichier modifié** : `core/data_engine.py`
 
 | Ligne | Problème | Correction |
 |-------|----------|------------|
@@ -164,8 +164,21 @@ Avec ce bugfix, le système de cache asynchrone fonctionne enfin correctement :
 | 199-209 | Méthode MT5 inexistante | `get_ticks_range()` → `get_ticks_for_candle()` |
 | 136 | Validation DataFrame ambiguë | `if not ticks_data` → `if ticks_data is None or ticks_data.empty` |
 
+### **Fichier modifié** : `run_bot.py`
+
+| Ligne | Problème | Correction |
+|-------|----------|------------|
+| 3555 | Mauvaise instance passée au DataEngine | `market_analyzer=mecano` → `market_analyzer=market_analyzer` |
+
+**Erreur** :
+```
+AttributeError: 'Mecano' object has no attribute 'analyze'
+```
+
+**Raison** : L'objet `mecano` n'a pas de méthode `analyze()`, c'est `market_analyzer` (MarketAnalyzer) qui l'a.
+
 ---
 
 *Date de correction: 26 Novembre 2025*
-*Fichier modifié: core/data_engine.py (4 corrections)*
+*Fichiers modifiés: core/data_engine.py (4 corrections) + run_bot.py (1 correction)*
 *Impact: Résout le CACHE MISS permanent et restaure le gain de performance de 71%*

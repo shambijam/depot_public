@@ -127,6 +127,36 @@ if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
 
 ---
 
+### **Bug #4 : Mauvaise instance passée au DataEngine**
+
+**Fichier** : `run_bot.py` (ligne 3555)
+
+**Erreur** :
+```
+AttributeError: 'Mecano' object has no attribute 'analyze'
+```
+
+**Impact** : DataEngine crashait lors de l'analyse footprint car `mecano` n'a pas la méthode `analyze()`
+
+**Correction** :
+```python
+# AVANT ❌
+data_engine = DataEngine(
+    market_analyzer=mecano,  # ❌ Mauvaise instance
+    ...
+)
+
+# APRÈS ✅
+data_engine = DataEngine(
+    market_analyzer=market_analyzer,  # ✅ Bonne instance (MarketAnalyzer)
+    ...
+)
+```
+
+**Raison** : L'objet `mecano` (classe Mecano) n'a pas de méthode `analyze()`. C'est `market_analyzer` (classe MarketAnalyzer) qui possède cette méthode.
+
+---
+
 ## 📊 Impact Cumulé
 
 | Métrique | Avant | Après | Gain |

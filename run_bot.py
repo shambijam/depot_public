@@ -3552,7 +3552,7 @@ def main(args: argparse.Namespace) -> None:
     data_engine = DataEngine(
         symbols=['XAUUSD'],  # Symboles prioritaires pour le scalping
         mt5_connector=mt5_connector,
-        market_analyzer=mecano,
+        market_analyzer=market_analyzer,  # ✅ CORRIGÉ: market_analyzer au lieu de mecano
         update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)
         stop_event=data_engine_stop_event
     )
