@@ -128,19 +128,27 @@ class DataEngine(threading.Thread):
         analysis_start = time.time()
 
         try:
-            # 1. Récupérer les ticks de la bougie M1 en cours
+            # 1. Récupérer les barres M1 (nécessaire pour MarketAnalyzer)
+            rates_df = self.mt5_connector.get_rates(symbol, "M1", 50)
+            if rates_df is None or (hasattr(rates_df, 'empty') and rates_df.empty):
+                self.logger.debug(
+                    f"⚠️ [DATA_ENGINE][{symbol}] Barres M1 indisponibles (marché fermé?)"
+                )
+                return
+
+            # 2. Récupérer les ticks de la bougie M1 en cours
             # (depuis le début de la bougie jusqu'à maintenant)
             ticks_data = self._get_current_m1_ticks(symbol)
 
-            # Vérifier si les données sont valides (DataFrame pandas)
+            # Vérifier si les ticks sont valides (DataFrame pandas)
             if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
                 self.logger.debug(
                     f"⚠️ [DATA_ENGINE][{symbol}] Aucun tick disponible (marché fermé?)"
                 )
                 return
 
-            # 2. Analyser le footprint avec MarketAnalyzer
-            footprint_result = self._analyze_footprint(symbol, ticks_data)
+            # 3. Analyser le footprint avec MarketAnalyzer
+            footprint_result = self._analyze_footprint(symbol, rates_df, ticks_data)
 
             if not footprint_result:
                 self.logger.debug(
@@ -219,17 +227,19 @@ class DataEngine(threading.Thread):
     def _analyze_footprint(
         self,
         symbol: str,
-        ticks_data: List[Any]
+        rates_df: Any,
+        ticks_data: Any
     ) -> Optional[Dict[str, Any]]:
         """
-        Analyse le footprint depuis les ticks.
+        Analyse le footprint depuis les barres M1 et les ticks.
 
         IMPORTANT: Cette méthode réutilise EXACTEMENT la même logique
         que le thread SCALPING actuel pour garantir la cohérence.
 
         Args:
             symbol: Symbole
-            ticks_data: Liste des ticks
+            rates_df: DataFrame des barres M1 OHLC
+            ticks_data: DataFrame des ticks
 
         Returns:
             Dict contenant:
@@ -238,23 +248,23 @@ class DataEngine(threading.Thread):
             - footprint_df: DataFrame du footprint (optionnel)
         """
         try:
-            # Convertir les ticks en DataFrame pandas si besoin
             import pandas as pd
-            if not isinstance(ticks_data, pd.DataFrame):
-                # Convertir la liste de ticks MT5 en DataFrame
-                if len(ticks_data) == 0:
-                    return None
 
-                ticks_df = pd.DataFrame(ticks_data)
-            else:
-                ticks_df = ticks_data
+            # Vérifier que les DataFrames sont valides
+            if not isinstance(rates_df, pd.DataFrame) or rates_df.empty:
+                self.logger.warning(f"[DATA_ENGINE][{symbol}] rates_df invalide")
+                return None
+
+            if not isinstance(ticks_data, pd.DataFrame) or ticks_data.empty:
+                self.logger.warning(f"[DATA_ENGINE][{symbol}] ticks_data invalide")
+                return None
 
             # Appeler la méthode analyze() du MarketAnalyzer
-            # avec les ticks pour qu'il fasse l'analyse footprint
+            # AVEC les barres M1 (df) ET les ticks
             result = self.market_analyzer.analyze(
-                df=None,  # Pas besoin de barres OHLC pour footprint
+                df=rates_df,  # ✅ Barres M1 nécessaires
                 asset=symbol,
-                ticks=ticks_df
+                ticks=ticks_data  # Ticks pour analyse footprint
             )
 
             # Le résultat contient déjà footprint_summary enrichi

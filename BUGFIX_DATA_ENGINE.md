@@ -203,6 +203,58 @@ data_engine = DataEngine(
 
 ---
 
+---
+
+## 🐛 Bug Secondaire #5 : footprint_summary manquant (df=None)
+
+###**Erreur détectée** :
+
+```
+⚠️ [DATA_ENGINE][XAUUSD] footprint_summary manquant dans résultat
+⚠️ [SCALPING_THREAD] CACHE MISS | Fallback analyse complète (DataEngine lag?)
+```
+
+**Cause** : `market_analyzer.analyze()` retourne un résultat vide quand `df=None` (ligne 177-178 de market_analyzer.py)
+
+**Correction** : Récupérer aussi les barres M1, pas seulement les ticks
+
+**Fichier** : `core/data_engine.py`
+
+**Changements** (lignes 131-151) :
+```python
+# AVANT ❌
+ticks_data = self._get_current_m1_ticks(symbol)
+footprint_result = self._analyze_footprint(symbol, ticks_data)
+
+# ...
+result = self.market_analyzer.analyze(
+    df=None,  # ❌ MarketAnalyzer retourne vide si df=None
+    asset=symbol,
+    ticks=ticks_df
+)
+
+# APRÈS ✅
+# 1. Récupérer les barres M1 (nécessaire pour MarketAnalyzer)
+rates_df = self.mt5_connector.get_rates(symbol, "M1", 50)
+
+# 2. Récupérer les ticks
+ticks_data = self._get_current_m1_ticks(symbol)
+
+# 3. Analyser avec les deux
+footprint_result = self._analyze_footprint(symbol, rates_df, ticks_data)
+
+# ...
+result = self.market_analyzer.analyze(
+    df=rates_df,  # ✅ Barres M1 nécessaires
+    asset=symbol,
+    ticks=ticks_data
+)
+```
+
+**Impact** : Résout le CACHE MISS permanent causé par `footprint_summary` manquant
+
+---
+
 *Date de correction: 26 Novembre 2025*
-*Fichiers modifiés: core/data_engine.py (4 corrections) + run_bot.py (1 correction)*
+*Fichiers modifiés: core/data_engine.py (5 corrections) + run_bot.py (1 correction)*
 *Impact: Résout le CACHE MISS permanent et restaure le gain de performance de 71%*
