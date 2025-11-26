@@ -62,7 +62,7 @@ class DataEngine(threading.Thread):
         self.cycle_count = 0
 
         self.logger.info(
-            f"🔧 [DATA_ENGINE] Initialisé | symbols={symbols} | interval={update_interval}s"
+            f"🔧 [DATA_ENGINE] Initialisé | symbols={symbols} | interval={self.update_interval}s"
         )
 
     def run(self):
