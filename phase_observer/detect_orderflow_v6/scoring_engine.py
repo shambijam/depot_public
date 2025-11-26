@@ -95,15 +95,15 @@ def calculate_score(
 
     # -------- pénalités & ajustements --------
     penalty = 0.0
-    # Rescue (strict)
+    # Rescue (allégé pour permettre trading en heures creuses)
     if rescue_level == 1:
-        penalty += 10.0
+        penalty += 5.0  # réduit de 10 → 5
     elif rescue_level >= 2:
-        penalty += 25.0
+        penalty += 10.0  # réduit de 25 → 10
 
-    # Volume trop faible
+    # Volume trop faible (allégé)
     if total_vol < 1e-6:
-        penalty += 25.0
+        penalty += 10.0  # réduit de 25 → 10
 
     # Échantillon court
     if rows > 0 and rows < 10:
@@ -123,9 +123,11 @@ def calculate_score(
 
     # -------- statut (garde-fous) --------
     status = "VALID" if score >= 70.0 else "SUSPECT"
+    # ✅ Suppression du cap à 69% - on garde juste le statut SUSPECT
+    # Cela permet au score de contribuer correctement à la fusion même avec rescue_level=2
     if rescue_level >= 2:
         status = "SUSPECT"
-        score = min(score, 69.0)
+        # score = min(score, 69.0)  # ❌ SUPPRIMÉ - trop restrictif
 
     # -------- dominance simple --------
     dominance = (
