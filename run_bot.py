@@ -2457,12 +2457,15 @@ def run_single_pipeline_cycle(
             )
             print("=" * 60 + "\n")
 
-        # === Filtre scalping: FUSION-ONLY + XAUUSD ===
+        # === Filtre scalping: FUSION-ONLY + XAUUSD + fusion_data valide ===
         scalping_decisions = [
             d
             for d in (decision_package.get("scalping_decisions") or [])
             if str(d.get("rule_name", "")).lower() == "fusion_scalping"
             and str(d.get("asset", "")).upper() == "XAUUSD"
+            # ✅ BLOQUEUR CRITIQUE: Rejeter si fusion_data vide (pattern désactivé)
+            and d.get("fusion_data")  # fusion_data doit exister et ne pas être vide
+            and d.get("fusion_data", {}).get("fused_confidence", 0.0) > 0.0  # score > 0%
         ]
 
         # === WHY_NO_TRADE si rien à exécuter ===
