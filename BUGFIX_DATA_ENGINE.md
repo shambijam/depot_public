@@ -203,6 +203,32 @@ data_engine = DataEngine(
 
 ---
 
+## 🐛 Bug Secondaire #6 : Mauvais logger passé à MarketAnalyzer
+
+### **Erreur détectée** :
+
+```
+AttributeError: 'Mecano' object has no attribute 'info'
+AttributeError: 'Mecano' object has no attribute 'warning'
+```
+
+**Cause** : `MarketAnalyzer(config_manager, mecano)` passe `mecano` comme logger, mais `mecano` n'a pas les méthodes `info()`, `warning()`, etc.
+
+**Signature correcte** : `MarketAnalyzer(config_manager, logger)`
+
+**Corrections** :
+
+**Fichier** : `run_bot.py`
+
+| Ligne | Avant ❌ | Après ✅ |
+|-------|---------|---------|
+| 2984 (SCALPING) | `MarketAnalyzer(config_manager, mecano)` | `MarketAnalyzer(config_manager, logger)` |
+| 3556 (DataEngine) | `MarketAnalyzer(config_manager, mecano)` | `MarketAnalyzer(config_manager, logger)` |
+
+**Impact** : Résout les crashes lors des logs dans `MarketAnalyzer.analyze()`
+
+---
+
 ---
 
 ## 🐛 Bug Secondaire #5 : footprint_summary manquant (df=None)
@@ -256,5 +282,5 @@ result = self.market_analyzer.analyze(
 ---
 
 *Date de correction: 26 Novembre 2025*
-*Fichiers modifiés: core/data_engine.py (5 corrections) + run_bot.py (1 correction)*
+*Fichiers modifiés: core/data_engine.py (5 corrections) + run_bot.py (3 corrections)*
 *Impact: Résout le CACHE MISS permanent et restaure le gain de performance de 71%*

@@ -2980,7 +2980,8 @@ def scalping_fast_thread(
             from phase_observer.market_analyzer import MarketAnalyzer
             from core.footprint_cache import footprint_cache  # ✅ AJOUTÉ: Import cache
 
-            market_analyzer = MarketAnalyzer(config_manager, mecano)
+            # Signature: MarketAnalyzer(config_manager, logger)
+            market_analyzer = MarketAnalyzer(config_manager, logger)
 
             # ✅ OPTIMISATION: Lire footprint depuis CACHE au lieu de le calculer
             cached_footprint = footprint_cache.get("XAUUSD", max_age_seconds=15.0)
@@ -3552,7 +3553,8 @@ def main(args: argparse.Namespace) -> None:
     from phase_observer.market_analyzer import MarketAnalyzer
 
     # Créer un MarketAnalyzer dédié pour le DataEngine
-    market_analyzer_for_dataengine = MarketAnalyzer(config_manager, mecano)
+    # Signature: MarketAnalyzer(config_manager, logger)
+    market_analyzer_for_dataengine = MarketAnalyzer(config_manager, logger)
 
     data_engine = DataEngine(
         symbols=['XAUUSD'],  # Symboles prioritaires pour le scalping
