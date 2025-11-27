@@ -210,53 +210,33 @@ class MarketAnalyzer:
         combo_patterns = []
 
         # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
-        # ⚡ MODIFIÉ: Enrichit la dernière barre avec ask_volume/bid_volume depuis les ticks
-        # Raison: run_bot récupère seulement les ticks de la dernière minute
-        #         OrderFlow V6 analysera: NIVEAU 1 (dernière barre footprint) + NIVEAU 2 (30 barres OHLC)
+        # ⚡ MODIFIÉ: Passe les données Footprint M1 directement (dict) à OrderFlow
+        # OrderFlow fait SON travail (8-10 barres) + intègre Footprint dans le scoring
         of_kwargs = self._get_ofv6_params(asset)
 
-        # Construire la dernière barre avec footprint (ask_volume/bid_volume)
-        # SOURCE 1 : Depuis les ticks (si disponibles)
-        # SOURCE 2 : Depuis footprint_summary du cache (si disponible)
-        footprint_df = None
+        # Récupérer les données Footprint M1 depuis le résultat PhaseObserver
+        # SOURCE 1: Depuis footprint_summary (passé en paramètre - cache scalping)
+        # SOURCE 2: Depuis annotated_df (footprint_summary dans la dernière ligne)
+        footprint_data = None
 
-        if ticks is not None and not ticks.empty and not annotated_df.empty:
-            # SOURCE 1: Construire depuis ticks
+        if footprint_summary is not None and isinstance(footprint_summary, dict):
+            # SOURCE 1: Cache scalping
+            footprint_data = footprint_summary
+            self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis cache: delta={footprint_data.get('delta_total', 0):.1f}")
+
+        elif not annotated_df.empty and 'footprint_summary' in annotated_df.columns:
+            # SOURCE 2: Depuis annotated_df (dernière ligne)
             try:
-                # Calculer ask_volume et bid_volume depuis les ticks
-                ticks_copy = ticks.copy()
-
-                # Les ticks ont [time, price, size, side] après reconstruction MT5
-                if 'side' in ticks_copy.columns and 'size' in ticks_copy.columns:
-                    ask_volume = float(ticks_copy[ticks_copy['side'] == 'buy']['size'].sum())
-                    bid_volume = float(ticks_copy[ticks_copy['side'] == 'sell']['size'].sum())
-
-                    # Créer un DataFrame d'une seule barre (la dernière) enrichie
-                    last_bar = annotated_df.iloc[[-1]].copy()
-                    last_bar['ask_volume'] = ask_volume
-                    last_bar['bid_volume'] = bid_volume
-
-                    footprint_df = last_bar
-                    self.logger.info(f"[MarketAnalyzer] Footprint depuis ticks: ask={ask_volume:.1f} bid={bid_volume:.1f}")
+                import json
+                fp_json = annotated_df.iloc[-1]['footprint_summary']
+                if isinstance(fp_json, str):
+                    footprint_data = json.loads(fp_json)
+                    self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
+                elif isinstance(fp_json, dict):
+                    footprint_data = fp_json
+                    self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
             except Exception as e:
-                self.logger.warning(f"[MarketAnalyzer] Footprint construction from ticks failed: {e}")
-
-        elif footprint_summary is not None and not annotated_df.empty:
-            # SOURCE 2: Construire depuis footprint_summary (cache)
-            try:
-                buy_vol = float(footprint_summary.get('buy_volume', 0.0))
-                sell_vol = float(footprint_summary.get('sell_volume', 0.0))
-
-                if buy_vol > 0 or sell_vol > 0:
-                    # Créer un DataFrame d'une seule barre (la dernière) enrichie
-                    last_bar = annotated_df.iloc[[-1]].copy()
-                    last_bar['ask_volume'] = buy_vol
-                    last_bar['bid_volume'] = sell_vol
-
-                    footprint_df = last_bar
-                    self.logger.info(f"[MarketAnalyzer] Footprint depuis cache: ask={buy_vol:.1f} bid={sell_vol:.1f}")
-            except Exception as e:
-                self.logger.warning(f"[MarketAnalyzer] Footprint construction from cache failed: {e}")
+                self.logger.warning(f"[MarketAnalyzer] Footprint extraction from annotated_df failed: {e}")
 
         try:
             orderflow_signals = detect_orderflow_v6(
@@ -266,7 +246,7 @@ class MarketAnalyzer:
                 price_bins=of_kwargs["price_bins"],
                 vp_options=of_kwargs["vp_options"],
                 logger=self.logger,
-                footprint_df=footprint_df,  # ⚡ NOUVEAU: Footprint construit (pas ticks bruts)
+                footprint_data=footprint_data,  # ⚡ NOUVEAU: Données Footprint M1 (dict)
             )
             if not isinstance(orderflow_signals, dict):
                 raise TypeError("detect_orderflow_v6 must return a dict")

@@ -8,7 +8,7 @@ from .data_preparator import validate_and_prepare_data
 from .volume_analyzer import calculate_volume_metrics
 from .pattern_detector import detect_patterns
 from .institutional_metrics import calculate_volume_profile
-from .scoring_engine import calculate_score
+from .scoring_engine import calculate_score, calculate_score_integrated
 from .result_builder import build_result
 from .divergence_detector import detect_divergences
 
@@ -23,7 +23,7 @@ def detect_orderflow_v6(
         Dict[str, Any]
     ] = None,  # options Volume Profile avancées (facultatives)
     logger=None,
-    footprint_df: Optional[pd.DataFrame] = None,  # ⚡ NOUVEAU: Footprint construit (ask/bid_volume)
+    footprint_data: Optional[Dict[str, Any]] = None,  # ⚡ NOUVEAU: Données Footprint M1 (buy_volume, sell_volume, delta, poc...)
 ) -> Dict[str, Any]:
     """
     Interface publique V6 (compatible V5) → retourne:
@@ -51,42 +51,20 @@ def detect_orderflow_v6(
         }
 
     # --- 1) Préparation / validation des données ---
-    # ⚡ ANALYSE DOUBLE-NIVEAU (footprint dernière barre + tendance 30 barres)
-    #
-    # NIVEAU 1: Footprint dernière barre M1 (mouvement immédiat avec ask/bid_volume)
-    # NIVEAU 2: 30 dernières barres M1 (tendance court terme)
-    #
-    # Si footprint disponible: analyser LES DEUX et fusionner
-    # Sinon: fallback sur 30 barres seulement
+    # Analyser les 8-30 dernières barres M1 (configuration recommandée: 8-12 barres)
+    # + intégration données Footprint M1 si disponibles
 
-    df_footprint = None
-    df_bars = None
-    has_footprint = footprint_df is not None and not footprint_df.empty
+    has_footprint = footprint_data is not None and isinstance(footprint_data, dict)
 
     if has_footprint:
-        # NIVEAU 1: Footprint dernière barre (avec ask/bid_volume déjà calculés depuis ticks)
-        # footprint_df contient UNE seule barre (la dernière) enrichie avec ask_volume/bid_volume
-        safe_log(logger, "info", f"[OF V6] 📊 NIVEAU 1: Analyse FOOTPRINT dernière barre M1 - mouvement immédiat (ask/bid_volume depuis ticks)")
-        df_footprint, rescue_level_fp, rescue_note_fp = validate_and_prepare_data(footprint_df)
-
-        # NIVEAU 2: 30 dernières barres M1 OHLC (tendance court terme)
-        # On utilise df_m1 (qui contient les 30+ barres OHLC sans footprint)
-        df_bars_30 = df_m1.iloc[-30:] if len(df_m1) >= 30 else df_m1
-        safe_log(logger, "info", f"[OF V6] 📈 NIVEAU 2: Analyse {len(df_bars_30)} barres OHLC - tendance court terme")
-        df_bars, rescue_level_bars, rescue_note_bars = validate_and_prepare_data(df_bars_30)
-
-        # Rescue level = max des deux (le plus restrictif)
-        rescue_level = max(rescue_level_fp, rescue_level_bars)
-        rescue_note = f"dual_analysis_footprint({rescue_note_fp})_bars({rescue_note_bars})"
-
-        # Pour la suite, on va analyser le footprint dernière barre comme df principal
-        df = df_footprint
+        safe_log(logger, "info", f"[OF V6] 🎯 Analyse OrderFlow avec intégration Footprint M1")
     else:
-        # Fallback: analyser uniquement les 30 dernières barres M1 OHLC (sans footprint)
-        safe_log(logger, "info", f"[OF V6] Analyse 30 barres M1 OHLC (fallback, pas de footprint)")
-        df_bars_30 = df_m1.iloc[-30:] if len(df_m1) >= 30 else df_m1
-        df, rescue_level, rescue_note = validate_and_prepare_data(df_bars_30)
-        df_bars = df
+        safe_log(logger, "info", f"[OF V6] 📊 Analyse OrderFlow standard (sans Footprint)")
+
+    # Utiliser 8-12 barres pour analyse OrderFlow (recommandation doc)
+    lookback = 10  # Configurable
+    df_bars = df_m1.iloc[-lookback:] if len(df_m1) >= lookback else df_m1
+    df, rescue_level, rescue_note = validate_and_prepare_data(df_bars)
 
     # === PATCH TZ-NORMALIZE (2025-11-03) — neutralise les tz pour éviter .astype sur tz-aware ===
     try:
@@ -117,21 +95,7 @@ def detect_orderflow_v6(
         }
 
     # --- 2) Métriques volume (core) ---
-    # ⚡ DOUBLE-NIVEAU: Calculer métriques pour footprint dernière barre ET tendance 30 barres
-    if has_footprint and df_bars is not None:
-        # NIVEAU 1: Métriques footprint dernière barre (mouvement immédiat)
-        df, metrics_footprint = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
-
-        # NIVEAU 2: Métriques 30 barres footprint (tendance court terme)
-        df_bars, metrics_bars = calculate_volume_metrics(df_bars, cvd_smoothing=cvd_smoothing)
-
-        # Pour l'instant, on garde metrics_footprint comme metrics principal
-        # (on fusionnera les scores plus tard)
-        metrics = metrics_footprint
-    else:
-        # Mode simple: une seule analyse
-        df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
-        metrics_bars = None
+    df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
     # garder l'imbalance globale sur df.attrs pour d’éventuels détecteurs en aval
     try:
         df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)
@@ -210,59 +174,28 @@ def detect_orderflow_v6(
             "ib": {},
         }
 
-    # --- 5) Score / statut ---
-    # ⚡ FUSION DOUBLE-NIVEAU: Si on a analysé footprint + barres, fusionner les scores
-    if has_footprint and metrics_bars is not None:
-        # Score NIVEAU 1: Footprint dernière barre (mouvement immédiat)
-        score_fp, status_fp, summary_fp = calculate_score(
-            metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
-        )
+    # --- 5) Score / statut (NOUVEAU SYSTÈME INTÉGRÉ) ---
+    # Utilise calculate_score_integrated qui fusionne OrderFlow + Footprint + Triggers
+    score, status, summary = calculate_score_integrated(
+        metrics,
+        patterns,
+        int(rescue_level or 0),
+        str(rescue_note or ""),
+        footprint_data=footprint_data,  # Données Footprint M1 si disponibles
+    )
 
-        # Score NIVEAU 2: 30 barres footprint (tendance court terme)
-        score_bars, status_bars, summary_bars = calculate_score(
-            metrics_bars, patterns, int(rescue_level or 0), str(rescue_note or "")
-        )
-
-        # FUSION: Score pondéré + bonus cohérence
-        # - Footprint dernière barre (70%): mouvement immédiat prioritaire
-        # - 30 barres (30%): tendance court terme
-        score_weighted = (score_fp * 0.70) + (score_bars * 0.30)
-
-        # Bonus cohérence: Si les deux sont alignés (même direction)
-        delta_fp = metrics.get("delta_total", 0.0)
-        delta_bars = metrics_bars.get("delta_total", 0.0)
-        same_direction = (delta_fp > 0 and delta_bars > 0) or (delta_fp < 0 and delta_bars < 0)
-
-        if same_direction and abs(delta_fp) > 0 and abs(delta_bars) > 0:
-            # Bonus +10% si mouvement immédiat ET tendance alignés
-            coherence_bonus = 10.0
-            score_weighted += coherence_bonus
-            safe_log(logger, "info", f"[OF V6] ✅ Cohérence footprint/barres | bonus +{coherence_bonus}pts")
-
-        score = float(min(100.0, max(0.0, score_weighted)))
-        status = "VALID" if score >= 70.0 else "SUSPECT"
-
-        # Summary enrichi avec les deux niveaux
-        summary = summary_fp.copy()
-        summary["dual_level"] = {
-            "footprint_score": float(score_fp),
-            "bars_score": float(score_bars),
-            "coherence": same_direction,
-            "delta_fp": float(delta_fp),
-            "delta_bars": float(delta_bars),
-        }
-
+    # Log détaillé du scoring
+    if has_footprint:
         safe_log(
             logger,
             "info",
-            f"[OF V6] 📊 FUSION: Footprint={score_fp:.1f}% | Bars={score_bars:.1f}% | "
-            f"Final={score:.1f}% | Cohérence={'✅' if same_direction else '❌'}"
+            f"[OF V6] 🎯 Score intégré: {score:.1f}% | "
+            f"OrderFlow={summary.get('orderflow_score', 0):.1f}pts + "
+            f"Footprint={summary.get('footprint_score', 0):.1f}pts + "
+            f"Triggers={summary.get('triggers_bonus', 0):.1f}pts"
         )
     else:
-        # Mode simple: un seul score
-        score, status, summary = calculate_score(
-            metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
-        )
+        safe_log(logger, "info", f"[OF V6] 📊 Score OrderFlow: {score:.1f}%")
 
     # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
     res = build_result(score, status, summary, patterns, vp)

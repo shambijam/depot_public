@@ -3027,7 +3027,13 @@ def scalping_fast_thread(
                 )
 
                 # Analyse SANS ticks (plus rapide, utilise seulement OrderFlow)
-                market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=None)
+                # Mais on passe le footprint_summary depuis le cache
+                market_results = market_analyzer.analyze(
+                    rates_df,
+                    "XAUUSD",
+                    ticks=None,
+                    footprint_summary=cached_footprint.get('footprint_summary', {})
+                )
 
                 # Injecter les données footprint depuis le cache
                 market_results['footprint'] = cached_footprint.get('footprint_summary', {})
