@@ -165,7 +165,13 @@ class MarketAnalyzer:
     # ============================================================
     # 🔹 Analyse unifiée
     # ============================================================
-    def analyze(self, df: pd.DataFrame, asset: str = "", ticks: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    def analyze(
+        self,
+        df: pd.DataFrame,
+        asset: str = "",
+        ticks: Optional[pd.DataFrame] = None,
+        footprint_summary: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Étapes :
           1) PhaseObserver (annotation df)
@@ -209,9 +215,13 @@ class MarketAnalyzer:
         #         OrderFlow V6 analysera: NIVEAU 1 (dernière barre footprint) + NIVEAU 2 (30 barres OHLC)
         of_kwargs = self._get_ofv6_params(asset)
 
-        # Construire la dernière barre avec footprint (ask_volume/bid_volume depuis ticks)
+        # Construire la dernière barre avec footprint (ask_volume/bid_volume)
+        # SOURCE 1 : Depuis les ticks (si disponibles)
+        # SOURCE 2 : Depuis footprint_summary du cache (si disponible)
         footprint_df = None
+
         if ticks is not None and not ticks.empty and not annotated_df.empty:
+            # SOURCE 1: Construire depuis ticks
             try:
                 # Calculer ask_volume et bid_volume depuis les ticks
                 ticks_copy = ticks.copy()
@@ -227,9 +237,26 @@ class MarketAnalyzer:
                     last_bar['bid_volume'] = bid_volume
 
                     footprint_df = last_bar
-                    self.logger.info(f"[MarketAnalyzer] Footprint dernière barre: ask={ask_volume:.1f} bid={bid_volume:.1f}")
+                    self.logger.info(f"[MarketAnalyzer] Footprint depuis ticks: ask={ask_volume:.1f} bid={bid_volume:.1f}")
             except Exception as e:
-                self.logger.warning(f"[MarketAnalyzer] Footprint construction failed: {e}")
+                self.logger.warning(f"[MarketAnalyzer] Footprint construction from ticks failed: {e}")
+
+        elif footprint_summary is not None and not annotated_df.empty:
+            # SOURCE 2: Construire depuis footprint_summary (cache)
+            try:
+                buy_vol = float(footprint_summary.get('buy_volume', 0.0))
+                sell_vol = float(footprint_summary.get('sell_volume', 0.0))
+
+                if buy_vol > 0 or sell_vol > 0:
+                    # Créer un DataFrame d'une seule barre (la dernière) enrichie
+                    last_bar = annotated_df.iloc[[-1]].copy()
+                    last_bar['ask_volume'] = buy_vol
+                    last_bar['bid_volume'] = sell_vol
+
+                    footprint_df = last_bar
+                    self.logger.info(f"[MarketAnalyzer] Footprint depuis cache: ask={buy_vol:.1f} bid={sell_vol:.1f}")
+            except Exception as e:
+                self.logger.warning(f"[MarketAnalyzer] Footprint construction from cache failed: {e}")
 
         try:
             orderflow_signals = detect_orderflow_v6(
