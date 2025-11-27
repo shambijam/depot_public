@@ -75,18 +75,20 @@ def load_and_verify_environment(
         )
         sys.exit(1)
 
-    ai_model_name_from_config = config_manager.get(
-        "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
-    )
-    models_dir = config_manager.get("paths.models", "models/")
-    ai_model_path_from_config = Path(models_dir) / ai_model_name_from_config
-
-    if not ai_model_path_from_config.is_file():
-        logger.critical(
-            f"FATAL: Modèle IA non trouvé à '{ai_model_path_from_config}'. Veuillez télécharger le modèle GGUF. Le bot ne peut pas démarrer."
-        )
-        sys.exit(1)
-    logger.info(f"Modèle IA trouvé : {ai_model_path_from_config}")
+    # === IA DÉSACTIVÉE - Code commenté (27 Nov 2025) ===
+    # L'IA n'est plus utilisée dans le système de décision
+    # ai_model_name_from_config = config_manager.get(
+    #     "ai.model_name", "llama-2-7b-chat.Q4_K_M.gguf"
+    # )
+    # models_dir = config_manager.get("paths.models", "models/")
+    # ai_model_path_from_config = Path(models_dir) / ai_model_name_from_config
+    #
+    # if not ai_model_path_from_config.is_file():
+    #     logger.critical(
+    #         f"FATAL: Modèle IA non trouvé à '{ai_model_path_from_config}'. Veuillez télécharger le modèle GGUF. Le bot ne peut pas démarrer."
+    #     )
+    #     sys.exit(1)
+    # logger.info(f"Modèle IA trouvé : {ai_model_path_from_config}")
 
     try:
         active_mt5_account_details = config_manager.get_mt5_account_credentials(

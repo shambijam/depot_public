@@ -184,18 +184,8 @@ def detect_orderflow_v6(
         footprint_data=footprint_data,  # Données Footprint M1 si disponibles
     )
 
-    # Log détaillé du scoring
-    if has_footprint:
-        safe_log(
-            logger,
-            "info",
-            f"[OF V6] 🎯 Score intégré: {score:.1f}% | "
-            f"OrderFlow={summary.get('orderflow_score', 0):.1f}pts + "
-            f"Footprint={summary.get('footprint_score', 0):.1f}pts + "
-            f"Triggers={summary.get('triggers_bonus', 0):.1f}pts"
-        )
-    else:
-        safe_log(logger, "info", f"[OF V6] 📊 Score OrderFlow: {score:.1f}%")
+    # Log minimal (détails dans le bilan consolidé de fusion_manager.py)
+    safe_log(logger, "info", f"[OF V6] Score: {score:.1f}% | Status: {status}")
 
     # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
     res = build_result(score, status, summary, patterns, vp)
