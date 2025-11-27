@@ -489,6 +489,8 @@ def calculate_score_integrated(
         "volume_total": float(total_vol),
         "delta_ratio": round(delta_ratio, 3),
         "mean_imbalance": float(imb_mean),
+        "imbalance_mean": float(imb_mean),  # Alias pour compatibilité
+        "cvd_slope": float(cvd_slope),
         "buy_ratio": float(buy_ratio),
         "pattern_count": int(pattern_count),
 

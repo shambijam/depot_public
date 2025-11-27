@@ -382,15 +382,33 @@ class FusionManager:
             base_avg = (of_score + fp_score) / 2.0
             trigger_boost = fused - base_avg if fused > base_avg else 0.0
 
+            # Extraire les scores détaillés depuis of_summary (système intégré)
+            delta_momentum_pts = of_summary.get("delta_momentum_pts", 0.0)
+            volume_confirm_pts = of_summary.get("volume_confirm_pts", 0.0)
+            imbalance_strength_pts = of_summary.get("imbalance_strength_pts", 0.0)
+            orderflow_score_pts = of_summary.get("orderflow_score", 0.0)
+            footprint_score_pts = of_summary.get("footprint_score", 0.0)
+            triggers_bonus_pts = of_summary.get("triggers_bonus", 0.0)
+
             self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
-            self.log.info("│ 4️⃣  FUSION                                                           │")
+            self.log.info("│ 4️⃣  FUSION (Scoring Intégré)                                        │")
             self.log.info("├─────────────────────────────────────────────────────────────────────┤")
             self.log.info(f"│ Score Final: {fused:>5.3f} ({fused:>5.1%})                                      │")
-            self.log.info(f"│   • OrderFlow:  {of_score:>5.3f}  Footprint: {fp_score:>5.3f}  Moyenne: {base_avg:>5.3f}   │")
-            if trigger_boost > 0.001:
-                self.log.info(f"│   • Trigger Boost: +{trigger_boost:>5.3f} (+{trigger_boost:>4.1%}) | Type: {tr_type:<15}│")
-            else:
-                self.log.info(f"│   • Trigger Boost: Aucun                                            │")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📊 Détail OrderFlow (50 pts max):                                   │")
+            self.log.info(f"│   • Delta Momentum      : {delta_momentum_pts:>5.1f} pts  (force directionnelle)   │")
+            self.log.info(f"│   • Volume Confirmation : {volume_confirm_pts:>5.1f} pts  (intensité marché)      │")
+            self.log.info(f"│   • Imbalance Strength  : {imbalance_strength_pts:>5.1f} pts  (déséquilibre)          │")
+            self.log.info(f"│   └─ Total OrderFlow    : {orderflow_score_pts:>5.1f} pts                          │")
+            self.log.info(f"│                                                                     │")
+            if footprint_score_pts > 0:
+                self.log.info(f"│ 🛡️ Détail Footprint (30 pts max):                                  │")
+                self.log.info(f"│   • Total Footprint     : {footprint_score_pts:>5.1f} pts  (absorption + clustering)│")
+                self.log.info(f"│                                                                     │")
+            if triggers_bonus_pts > 0:
+                self.log.info(f"│ ⚡ Triggers Bonus (20 pts max):                                     │")
+                self.log.info(f"│   • Patterns détectés   : {triggers_bonus_pts:>5.1f} pts  (confluence)             │")
+                self.log.info(f"│                                                                     │")
             self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 🎯 SYNTHÈSE
