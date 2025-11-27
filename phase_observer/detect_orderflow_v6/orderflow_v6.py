@@ -23,6 +23,7 @@ def detect_orderflow_v6(
         Dict[str, Any]
     ] = None,  # options Volume Profile avancées (facultatives)
     logger=None,
+    ticks: Optional[pd.DataFrame] = None,  # ⚡ NOUVEAU: Ticks M1 pour cohérence avec Footprint
 ) -> Dict[str, Any]:
     """
     Interface publique V6 (compatible V5) → retourne:
@@ -50,7 +51,41 @@ def detect_orderflow_v6(
         }
 
     # --- 1) Préparation / validation des données ---
-    df, rescue_level, rescue_note = validate_and_prepare_data(df_m1)
+    # ⚡ ANALYSE DOUBLE-NIVEAU (cohérence mouvement immédiat + tendance court terme)
+    #
+    # NIVEAU 1: Ticks M1 (mouvement immédiat, dernière minute)
+    # NIVEAU 2: 30 dernières barres M1 (tendance court terme, 30 minutes)
+    #
+    # Si ticks disponibles: analyser LES DEUX et fusionner
+    # Sinon: fallback sur 30 barres seulement
+
+    df_ticks = None
+    df_bars = None
+    has_ticks = ticks is not None and not ticks.empty
+
+    if has_ticks:
+        # NIVEAU 1: Ticks M1 (mouvement immédiat)
+        safe_log(logger, "info", f"[OF V6] 📊 NIVEAU 1: Analyse TICKS M1 (count={len(ticks)}) - mouvement immédiat")
+        df_ticks, rescue_level_ticks, rescue_note_ticks = validate_and_prepare_data(ticks)
+
+        # NIVEAU 2: 30 dernières barres M1 (tendance court terme)
+        df_bars_30 = df_m1.iloc[-30:] if len(df_m1) >= 30 else df_m1
+        safe_log(logger, "info", f"[OF V6] 📈 NIVEAU 2: Analyse 30 barres M1 (count={len(df_bars_30)}) - tendance court terme")
+        df_bars, rescue_level_bars, rescue_note_bars = validate_and_prepare_data(df_bars_30)
+
+        # Rescue level = max des deux (le plus restrictif)
+        rescue_level = max(rescue_level_ticks, rescue_level_bars)
+        rescue_note = f"dual_analysis_ticks({rescue_note_ticks})_bars({rescue_note_bars})"
+
+        # Pour la suite, on va analyser les ticks comme df principal
+        # (les barres seront analysées séparément)
+        df = df_ticks
+    else:
+        # Fallback: analyser uniquement les 30 dernières barres M1
+        safe_log(logger, "info", f"[OF V6] Analyse 30 barres M1 OHLC (fallback, pas de ticks)")
+        df_bars_30 = df_m1.iloc[-30:] if len(df_m1) >= 30 else df_m1
+        df, rescue_level, rescue_note = validate_and_prepare_data(df_bars_30)
+        df_bars = df
 
     # === PATCH TZ-NORMALIZE (2025-11-03) — neutralise les tz pour éviter .astype sur tz-aware ===
     try:
@@ -81,7 +116,21 @@ def detect_orderflow_v6(
         }
 
     # --- 2) Métriques volume (core) ---
-    df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
+    # ⚡ DOUBLE-NIVEAU: Calculer métriques pour ticks ET barres si disponibles
+    if has_ticks and df_bars is not None:
+        # NIVEAU 1: Métriques ticks (mouvement immédiat)
+        df, metrics_ticks = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
+
+        # NIVEAU 2: Métriques barres (tendance court terme)
+        df_bars, metrics_bars = calculate_volume_metrics(df_bars, cvd_smoothing=cvd_smoothing)
+
+        # Pour l'instant, on garde metrics_ticks comme metrics principal
+        # (on fusionnera les scores plus tard)
+        metrics = metrics_ticks
+    else:
+        # Mode simple: une seule analyse
+        df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
+        metrics_bars = None
     # garder l'imbalance globale sur df.attrs pour d’éventuels détecteurs en aval
     try:
         df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)
@@ -161,9 +210,58 @@ def detect_orderflow_v6(
         }
 
     # --- 5) Score / statut ---
-    score, status, summary = calculate_score(
-        metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
-    )
+    # ⚡ FUSION DOUBLE-NIVEAU: Si on a analysé ticks + barres, fusionner les scores
+    if has_ticks and metrics_bars is not None:
+        # Score NIVEAU 1: Ticks M1 (mouvement immédiat)
+        score_ticks, status_ticks, summary_ticks = calculate_score(
+            metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
+        )
+
+        # Score NIVEAU 2: 30 barres M1 (tendance court terme)
+        score_bars, status_bars, summary_bars = calculate_score(
+            metrics_bars, patterns, int(rescue_level or 0), str(rescue_note or "")
+        )
+
+        # FUSION: Score pondéré + bonus cohérence
+        # - Ticks (70%): mouvement immédiat prioritaire
+        # - Barres (30%): tendance court terme
+        score_weighted = (score_ticks * 0.70) + (score_bars * 0.30)
+
+        # Bonus cohérence: Si les deux sont alignés (même direction)
+        delta_ticks = metrics.get("delta_total", 0.0)
+        delta_bars = metrics_bars.get("delta_total", 0.0)
+        same_direction = (delta_ticks > 0 and delta_bars > 0) or (delta_ticks < 0 and delta_bars < 0)
+
+        if same_direction and abs(delta_ticks) > 0 and abs(delta_bars) > 0:
+            # Bonus +10% si mouvement immédiat ET tendance alignés
+            coherence_bonus = 10.0
+            score_weighted += coherence_bonus
+            safe_log(logger, "info", f"[OF V6] ✅ Cohérence ticks/barres | bonus +{coherence_bonus}pts")
+
+        score = float(min(100.0, max(0.0, score_weighted)))
+        status = "VALID" if score >= 70.0 else "SUSPECT"
+
+        # Summary enrichi avec les deux niveaux
+        summary = summary_ticks.copy()
+        summary["dual_level"] = {
+            "ticks_score": float(score_ticks),
+            "bars_score": float(score_bars),
+            "coherence": same_direction,
+            "delta_ticks": float(delta_ticks),
+            "delta_bars": float(delta_bars),
+        }
+
+        safe_log(
+            logger,
+            "info",
+            f"[OF V6] 📊 FUSION: Ticks={score_ticks:.1f}% | Bars={score_bars:.1f}% | "
+            f"Final={score:.1f}% | Cohérence={'✅' if same_direction else '❌'}"
+        )
+    else:
+        # Mode simple: un seul score
+        score, status, summary = calculate_score(
+            metrics, patterns, int(rescue_level or 0), str(rescue_note or "")
+        )
 
     # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
     res = build_result(score, status, summary, patterns, vp)

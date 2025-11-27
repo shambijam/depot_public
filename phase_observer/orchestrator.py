@@ -737,7 +737,7 @@ class PhaseObserver:
                 volume_ma_period = 20
             volume_zscore_period = 50
 
-            if "tick_volume" in df_an.columns and len(df_an) > volume_zscore_period:
+            if "tick_volume" in df_an.columns and len(df_an) >= volume_zscore_period:
                 df_an["tick_volume"] = pd.to_numeric(
                     df_an["tick_volume"], errors="coerce"
                 ).fillna(0.0)

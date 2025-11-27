@@ -204,6 +204,7 @@ class MarketAnalyzer:
         combo_patterns = []
 
         # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
+        # ⚡ MODIFIÉ: Passe les ticks M1 en priorité pour cohérence avec Footprint M1
         of_kwargs = self._get_ofv6_params(asset)
         try:
             orderflow_signals = detect_orderflow_v6(
@@ -213,6 +214,7 @@ class MarketAnalyzer:
                 price_bins=of_kwargs["price_bins"],
                 vp_options=of_kwargs["vp_options"],
                 logger=self.logger,
+                ticks=ticks,  # ⚡ NOUVEAU: Passe les ticks M1 pour analyser les mêmes données que Footprint
             )
             if not isinstance(orderflow_signals, dict):
                 raise TypeError("detect_orderflow_v6 must return a dict")

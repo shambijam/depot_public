@@ -349,14 +349,15 @@ class FusionManager:
             cvd_slope = of_summary.get("cvd_slope", 0.0)
             bias = of_summary.get("bias", "NEUTRAL")
 
-            # Volume Profile nodes
-            vah = of_summary.get("vah", None)  # Value Area High
-            val = of_summary.get("val", None)  # Value Area Low
+            # Volume Profile nodes (depuis volume_profile si disponible)
+            vp_data = of_summary.get("volume_profile", {})
+            vah = vp_data.get("va_high") or of_summary.get("va_high")  # Value Area High
+            val = vp_data.get("va_low") or of_summary.get("va_low")    # Value Area Low
             vpoc = of_summary.get("vpoc_price", of_poc)
 
-            # HVN/LVN counts
-            hvn_count = len(of_summary.get("hvn_levels", []))
-            lvn_count = len(of_summary.get("lvn_levels", []))
+            # HVN/LVN counts (depuis volume_profile)
+            hvn_count = len(vp_data.get("hvn", []))
+            lvn_count = len(vp_data.get("lvn", []))
 
             self.log.info(f"│ Status     : {of_status:<15} Score    : {of_score:>6.2%}           │")
             self.log.info(f"│ Direction  : {of_dir:<18} Bias     : {bias:<10}      │")

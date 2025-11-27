@@ -62,9 +62,18 @@ def calculate_score(
     # bonus (optionnel) vwap_slope, capé
     f_vwap = min(1.0, abs(vwap_slope) / 10.0) if np.isfinite(vwap_slope) else 0.0
 
+    # ⚡ NOUVEAU: Delta absolu normalisé (critique pour détecter mouvements institutionnels)
+    # Échelle adaptative basée sur le volume total
+    # Ratio Delta/Volume indique la force du déséquilibre
+    delta_ratio = abs(delta_tot) / max(total_vol, 1.0) if total_vol > 1e-6 else 0.0
+    # Normaliser: ratio 0.3+ = mouvement très fort
+    f_delta = min(1.0, delta_ratio / 0.3)
+
     # -------- score de base --------
-    w_imb, w_agr, w_cvd = 0.45, 0.35, 0.20
-    base_core = (w_imb * f_imb + w_agr * f_agr + w_cvd * f_cvd) * 100.0
+    # ⚡ Poids équilibrés: Delta et imbalance sont égaux (35% chacun)
+    # Car Delta capture la force cumulative, imbalance capture le déséquilibre instantané
+    w_imb, w_agr, w_cvd, w_delta = 0.35, 0.25, 0.15, 0.25
+    base_core = (w_imb * f_imb + w_agr * f_agr + w_cvd * f_cvd + w_delta * f_delta) * 100.0
 
     # VWAP en bonus doux (max +6 pts) pour rester rétro-compatible
     base = base_core + (6.0 * f_vwap)
@@ -93,13 +102,23 @@ def calculate_score(
     bonus_patterns = min(12.0, 2.0 * pattern_count)  # +2 par pattern, cap +12
     base += bonus_patterns
 
+    # ⚡ NOUVEAU: Bonus léger pour mouvements directionnels forts
+    # Si delta_ratio > 0.45 (45%+ du volume dans une direction) = mouvement directionnel clair
+    if delta_ratio > 0.45:
+        # Bonus modéré: évite de "tricher" mais récompense les vrais mouvements
+        directional_bonus = min(15.0, (delta_ratio - 0.45) * 40.0)  # max +15pts
+        base += directional_bonus
+
     # -------- pénalités & ajustements --------
     penalty = 0.0
-    # Rescue (allégé pour permettre trading en heures creuses)
+    # Rescue (ultra-allégé pour permettre trading 24/7)
+    # Note: En heures creuses, rescue_level=2 est NORMAL et ne doit pas tuer le score
     if rescue_level == 1:
-        penalty += 5.0  # réduit de 10 → 5
-    elif rescue_level >= 2:
-        penalty += 10.0  # réduit de 25 → 10
+        penalty += 2.0  # ⚡ réduit de 5 → 2
+    elif rescue_level == 2:
+        penalty += 5.0  # ⚡ réduit de 10 → 5 (heures creuses acceptables)
+    elif rescue_level >= 3:
+        penalty += 15.0  # ⚡ rescue_level 3+ = vraiment problématique
 
     # Volume trop faible (allégé)
     if total_vol < 1e-6:
@@ -159,6 +178,7 @@ def calculate_score(
         "imbalance": float(imb_center),
         "aggress_ratio": float(agr),
         "dominance": dominance,
+        "delta_ratio": round(delta_ratio, 3),  # ⚡ Ratio Delta/Volume (nouveau)
     }
     if rows:
         summary["rows"] = int(rows)
