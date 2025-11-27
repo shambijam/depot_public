@@ -222,7 +222,7 @@ class MarketAnalyzer:
         if footprint_summary is not None and isinstance(footprint_summary, dict):
             # SOURCE 1: Cache scalping
             footprint_data = footprint_summary
-            self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis cache: delta={footprint_data.get('delta_total', 0):.1f}")
+            self.logger.debug(f"[MarketAnalyzer] Footprint M1 depuis cache: delta={footprint_data.get('delta_total', 0):.1f}")
 
         elif not annotated_df.empty and 'footprint_summary' in annotated_df.columns:
             # SOURCE 2: Depuis annotated_df (dernière ligne)
@@ -231,10 +231,10 @@ class MarketAnalyzer:
                 fp_json = annotated_df.iloc[-1]['footprint_summary']
                 if isinstance(fp_json, str):
                     footprint_data = json.loads(fp_json)
-                    self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
+                    self.logger.debug(f"[MarketAnalyzer] Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
                 elif isinstance(fp_json, dict):
                     footprint_data = fp_json
-                    self.logger.info(f"[MarketAnalyzer] 🎯 Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
+                    self.logger.debug(f"[MarketAnalyzer] Footprint M1 depuis annotated_df: delta={footprint_data.get('delta_total', 0):.1f}")
             except Exception as e:
                 self.logger.warning(f"[MarketAnalyzer] Footprint extraction from annotated_df failed: {e}")
 

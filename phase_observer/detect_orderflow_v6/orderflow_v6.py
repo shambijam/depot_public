@@ -190,20 +190,4 @@ def detect_orderflow_v6(
     # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
     res = build_result(score, status, summary, patterns, vp)
 
-    # --- 7) Log synthétique (sécurisé) ---
-    try:
-        safe_log(
-            logger,
-            "info",
-            (
-                f"[OF V6] score={res.get('score', 0.0):.1f} status={res.get('status','SUSPECT')} "
-                f"Δ={float(res['summary'].get('delta_total', 0.0)):.1f} "
-                f"imb={float(res['summary'].get('imbalance', 0.0)):.3f} "
-                f"vpoc={res['summary'].get('vpoc_price')}"
-            ),
-        )
-    except Exception:
-        # ne bloque jamais le retour pour une erreur de formatage de log
-        pass
-
     return res

@@ -347,40 +347,51 @@ class FusionManager:
                 "micro_stack": "📖", "micro_absorption": "🛡", "none": "⚪",
             }.get(tr_type.lower(), "❓")
 
-            # ========== AFFICHAGE COMPACT ==========
+            # ========== AFFICHAGE COMPACT AVEC CADRES ==========
 
             # 1️⃣ FOOTPRINT M1
-            self.log.info(f"1️⃣ FOOTPRINT M1 | {fp_status} ({fp_score:.1%}) | {fp_dir} | Δ: {fp_delta:+.1f}")
-            self.log.info(f"   Ticks: {tick_count} ({tick_rate:.1f} t/s, {coverage_s:.0f}s) | "
-                         f"Buy: {int(buy_volume)} ({buy_pct:.1f}%) | Sell: {int(sell_volume)} ({100-buy_pct:.1f}%)")
-            self.log.info(f"   POC: {fp_poc if fp_poc else 'N/A'} | "
-                         f"Absorption: {'✅' if fp_absorption else '❌'} | "
-                         f"Imbalance: {imbalance_buy_levels}B/{imbalance_sell_levels}S")
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 1️⃣  FOOTPRINT M1                                                     │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ {fp_status:<10} ({fp_score:>5.1%}) | {fp_dir} | Δ: {fp_delta:>+8.1f}                 │")
+            self.log.info(f"│ Ticks: {tick_count:>4} ({tick_rate:>4.1f} t/s, {coverage_s:>3.0f}s) | Buy: {int(buy_volume):>4} ({buy_pct:>4.1f}%) Sell: {int(sell_volume):>4} ({100-buy_pct:>4.1f}%)│")
+            self.log.info(f"│ POC: {str(fp_poc if fp_poc else 'N/A'):<15} Abs: {'✅' if fp_absorption else '❌'}  Imb: {imbalance_buy_levels:>2}B/{imbalance_sell_levels:>2}S        │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 2️⃣ ORDERFLOW V6
-            self.log.info(f"2️⃣ ORDERFLOW V6 | {of_status} ({of_score:.1%}) | {of_dir} | Δ: {of_delta:+.1f} | Bias: {bias}")
-            self.log.info(f"   VPOC: {vpoc if vpoc else 'N/A'} | VAH: {vah if vah else 'N/A'} | VAL: {val if val else 'N/A'}")
-            self.log.info(f"   Imbalance: {imbalance_mean:.3f} | CVD Slope: {cvd_slope:.3f} | "
-                         f"HVN: {hvn_count} | LVN: {lvn_count}")
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 2️⃣  ORDERFLOW V6                                                     │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ {of_status:<10} ({of_score:>5.1%}) | {of_dir} | Δ: {of_delta:>+8.1f} | Bias: {bias:<8}│")
+            self.log.info(f"│ VPOC: {str(vpoc if vpoc else 'N/A'):<12} VAH: {str(vah if vah else 'N/A'):<12} VAL: {str(val if val else 'N/A'):<12}│")
+            self.log.info(f"│ Imb: {imbalance_mean:>5.3f}  CVD: {cvd_slope:>+6.3f}  HVN: {hvn_count:>2}  LVN: {lvn_count:>2}              │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 3️⃣ TRIGGERS
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 3️⃣  TRIGGERS                                                         │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
             if tr_type != "none" and levels_count > 0:
-                self.log.info(f"3️⃣ TRIGGERS | {pattern_emoji} {tr_type.upper()} ({tr_score:.1%}) | {tr_dir} | Action: {pattern_action}")
-                self.log.info(f"   Anchor: {tr_anchor if tr_anchor else 'N/A'} | Window: {window_used}s | "
-                             f"Levels: {levels_count} | Δ Ratio: {delta_ratio_mean:.3f} | Vol Z: {volume_zscore_max:.2f}")
+                self.log.info(f"│ {pattern_emoji} {tr_type.upper():<15} ({tr_score:>5.1%}) | {tr_dir} | Action: {pattern_action:<8}│")
+                self.log.info(f"│ Anchor: {str(tr_anchor if tr_anchor else 'N/A'):<10} Window: {window_used}s  Levels: {levels_count:<3} ΔRatio: {delta_ratio_mean:>5.3f}  │")
             else:
-                self.log.info(f"3️⃣ TRIGGERS | ❌ Aucun pattern détecté")
+                self.log.info(f"│ ❌ Aucun pattern détecté                                            │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 4️⃣ FUSION
             base_avg = (of_score + fp_score) / 2.0
             trigger_boost = fused - base_avg if fused > base_avg else 0.0
 
-            self.log.info(f"4️⃣ FUSION | Score: {fused:.3f} ({fused:.1%})")
-            self.log.info(f"   OrderFlow: {of_score:.3f} | Footprint: {fp_score:.3f} | Moyenne: {base_avg:.3f}")
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 4️⃣  FUSION                                                           │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Score Final: {fused:>5.3f} ({fused:>5.1%})                                      │")
+            self.log.info(f"│   • OrderFlow:  {of_score:>5.3f}  Footprint: {fp_score:>5.3f}  Moyenne: {base_avg:>5.3f}   │")
             if trigger_boost > 0.001:
-                self.log.info(f"   Trigger Boost: +{trigger_boost:.3f} (+{trigger_boost:.1%}) | Type: {tr_type}")
+                self.log.info(f"│   • Trigger Boost: +{trigger_boost:>5.3f} (+{trigger_boost:>4.1%}) | Type: {tr_type:<15}│")
             else:
-                self.log.info(f"   Trigger Boost: Aucun")
+                self.log.info(f"│   • Trigger Boost: Aucun                                            │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 🎯 SYNTHÈSE
             # Consensus
@@ -423,9 +434,14 @@ class FusionManager:
             quality_flags.append("✅ FP" if fp_status == "VALID" else "❌ FP")
             quality_flags.append("✅ OF" if of_status == "VALID" else "❌ OF")
 
-            self.log.info(f"🎯 SYNTHÈSE | Consensus: {consensus}")
-            self.log.info(f"   Δ Combiné: {delta_combined:.1f} ({delta_alignment}) | OF: {of_delta:+.1f} | FP: {fp_delta:+.1f}")
-            self.log.info(f"   Qualité: {' | '.join(quality_flags)}")
+            # 🎯 SYNTHÈSE
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 SYNTHÈSE                                                          │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Consensus: {consensus:<56}│")
+            self.log.info(f"│ Δ Combiné: {delta_combined:>7.1f} ({delta_alignment})  OF: {of_delta:>+7.1f}  FP: {fp_delta:>+7.1f}        │")
+            self.log.info(f"│ Qualité: {' | '.join(quality_flags):<57}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
 
             # 🎯 DÉCISION FINALE
             action = decision.get("action", "HOLD")
@@ -449,7 +465,13 @@ class FusionManager:
             else:
                 level = f"INSUFFISANT (<{th_cautious:.0%})"
 
-            self.log.info(f"🎯 DÉCISION | {action_emoji} {action} | Signal: {signal} | Level: {level}")
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 DÉCISION FINALE                                                   │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Action:  {action_emoji} {action:<15}                                       │")
+            self.log.info(f"│ Signal:  {signal:<58}│")
+            self.log.info(f"│ Level:   {level:<58}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
             self.log.info("=" * 80)
 
         except Exception as e:
