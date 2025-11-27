@@ -1299,7 +1299,7 @@ class PhaseObserver:
             invalid_mask = ~df_an["phase"].isin(ALLOWED_PHASES)
             if invalid_mask.any():
                 bad = sorted(set(df_an.loc[invalid_mask, "phase"].astype(str).tolist()))
-                self.logger.error(f"[PhaseGuard] Phases invalides détectées et corrigées: {bad}")
+                self.logger.warning(f"[PhaseGuard] Phases invalides détectées et corrigées: {bad}")
 
                 # 2) remap déterministe par régime (filet ultime)
                 df_an.loc[invalid_mask, "phase"] = df_an.loc[invalid_mask].apply(

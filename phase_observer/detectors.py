@@ -1684,18 +1684,8 @@ def footprint_validator(
     if "side" not in ticks.columns:
         ticks["side"] = "unknown"
 
-    # 🔍 DEBUG (24 Nov 2025): Log side distribution AVANT normalisation
-    import logging
-    logger = logging.getLogger(__name__)
-    side_counts_before = ticks["side"].value_counts().to_dict() if not ticks.empty else {}
-    logger.critical(f"[FP_DEBUG] AVANT normalisation | side counts: {side_counts_before}")
-
     ticks["side"] = ticks["side"].astype("string").str.lower()
     ticks["side"] = ticks["side"].replace({"b": "buy", "s": "sell"}).fillna("unknown")
-
-    # 🔍 DEBUG (24 Nov 2025): Log side distribution APRÈS normalisation
-    side_counts_after = ticks["side"].value_counts().to_dict() if not ticks.empty else {}
-    logger.critical(f"[FP_DEBUG] APRÈS normalisation | side counts: {side_counts_after}")
 
     # ---------- 3) FENÊTRE STRICTE ----------
     try:
