@@ -431,10 +431,27 @@ class LiquidityStrategy(BaseStrategy):
             # Setup détecté
             rule_name = decision.get("rule_name", "unknown")
             setup_label = ""
+
+            # Phase 1 setups
             if rule_name == "liquidity_sweep_eql":
                 setup_label = "⚡ SWEEP + EQL (BUY)"
             elif rule_name == "liquidity_sweep_eqh":
                 setup_label = "⚡ SWEEP + EQH (SELL)"
+
+            # Phase 2 setups
+            elif rule_name == "liquidity_ob_fvg_buy":
+                setup_label = "⚡ ORDER BLOCK + FVG (BUY)"
+            elif rule_name == "liquidity_ob_fvg_sell":
+                setup_label = "⚡ ORDER BLOCK + FVG (SELL)"
+            elif rule_name == "liquidity_bos_absorption_buy":
+                setup_label = "⚡ BOS + ABSORPTION (BUY)"
+            elif rule_name == "liquidity_bos_absorption_sell":
+                setup_label = "⚡ BOS + ABSORPTION (SELL)"
+            elif rule_name == "liquidity_micro_phase_buy":
+                setup_label = "⚡ MICRO PHASE REVERSAL (BUY)"
+            elif rule_name == "liquidity_micro_phase_sell":
+                setup_label = "⚡ MICRO PHASE REVERSAL (SELL)"
+
             else:
                 setup_label = f"⚡ {rule_name.upper()}"
 
@@ -713,7 +730,265 @@ class LiquidityStrategy(BaseStrategy):
                             f"sweep-eqh={distance_pips:.1f}p (max 50p)"
                         )
 
-            # TODO Phase 2 : Ajouter d'autres setups (OB+FVG, BOS+Absorption, etc.)
+            # ========================================================================
+            # 🎯 PHASE 2 : Setups additionnels exploitant les 6 autres détecteurs
+            # ========================================================================
+
+            ob = liquidity_signals.get("ob_details")
+            fvg = liquidity_signals.get("fvg_details")
+            bos_mss = liquidity_signals.get("bos_mss_details")
+            absorption = liquidity_signals.get("absorption_details")
+            regime = liquidity_signals.get("market_regime", "").lower()
+            micro_phase = liquidity_signals.get("micro_phase", "").lower()
+
+            # --- Setup 3 : Order Block + Fair Value Gap (BUY) ---
+            if ob and fvg:
+                ob_type = ob.get("type", "").lower()
+                fvg_type = fvg.get("type", "").lower()
+
+                # BUY Setup : OB bullish + FVG bullish
+                if "bull" in ob_type and "bull" in fvg_type:
+                    ob_zone = ob.get("zone", [0.0, 0.0])
+                    fvg_zone = fvg.get("zone", [0.0, 0.0])
+
+                    if isinstance(ob_zone, list) and len(ob_zone) == 2 and isinstance(fvg_zone, list) and len(fvg_zone) == 2:
+                        ob_min, ob_max = float(ob_zone[0]), float(ob_zone[1])
+                        fvg_min, fvg_max = float(fvg_zone[0]), float(fvg_zone[1])
+
+                        # Validation : FVG au-dessus de l'OB (confluence)
+                        if fvg_min >= ob_max:
+                            distance_pips = (fvg_min - ob_max) / pip_size
+                            if distance_pips < 30:  # FVG proche de l'OB
+                                entry = price
+                                sl = ob_min - (10 * pip_size)  # SL sous l'OB
+                                tp = fvg_max + (distance_pips * pip_size)  # TP au-dessus FVG
+
+                                sl_pips = abs(entry - sl) / pip_size
+                                tp_pips = abs(tp - entry) / pip_size
+                                rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                                if rr >= 1.5:  # Filtre RR minimum
+                                    self.logger.info(
+                                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | ob_fvg_buy | "
+                                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                                    )
+
+                                    decision = {
+                                        "asset": asset,
+                                        "action": "BUY",
+                                        "entry_price": entry,
+                                        "sl": sl,
+                                        "tp": tp,
+                                        "confidence": 0.65,
+                                        "rule_name": "liquidity_ob_fvg_buy",
+                                        "strategy_type": "liquidity",
+                                        "execution_status": "ready",
+                                        "signals": liquidity_signals,
+                                        "meta": meta,
+                                        "rr": rr
+                                    }
+
+                                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                                    return decision
+
+                # SELL Setup : OB bearish + FVG bearish
+                elif "bear" in ob_type and "bear" in fvg_type:
+                    ob_zone = ob.get("zone", [0.0, 0.0])
+                    fvg_zone = fvg.get("zone", [0.0, 0.0])
+
+                    if isinstance(ob_zone, list) and len(ob_zone) == 2 and isinstance(fvg_zone, list) and len(fvg_zone) == 2:
+                        ob_min, ob_max = float(ob_zone[0]), float(ob_zone[1])
+                        fvg_min, fvg_max = float(fvg_zone[0]), float(fvg_zone[1])
+
+                        # Validation : FVG en-dessous de l'OB
+                        if fvg_max <= ob_min:
+                            distance_pips = (ob_min - fvg_max) / pip_size
+                            if distance_pips < 30:
+                                entry = price
+                                sl = ob_max + (10 * pip_size)  # SL au-dessus de l'OB
+                                tp = fvg_min - (distance_pips * pip_size)  # TP en-dessous FVG
+
+                                sl_pips = abs(sl - entry) / pip_size
+                                tp_pips = abs(entry - tp) / pip_size
+                                rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                                if rr >= 1.5:
+                                    self.logger.info(
+                                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | ob_fvg_sell | "
+                                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                                    )
+
+                                    decision = {
+                                        "asset": asset,
+                                        "action": "SELL",
+                                        "entry_price": entry,
+                                        "sl": sl,
+                                        "tp": tp,
+                                        "confidence": 0.65,
+                                        "rule_name": "liquidity_ob_fvg_sell",
+                                        "strategy_type": "liquidity",
+                                        "execution_status": "ready",
+                                        "signals": liquidity_signals,
+                                        "meta": meta,
+                                        "rr": rr
+                                    }
+
+                                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                                    return decision
+
+            # --- Setup 4 : Break of Structure + Absorption (BUY) ---
+            if bos_mss and absorption:
+                bos_type = bos_mss.get("type", "").lower()
+                abs_side = absorption.get("side", "").lower()
+
+                # BUY Setup : BOS bullish + Absorption buy-side
+                if "bull" in bos_type and abs_side == "buy":
+                    bos_level = float(bos_mss.get("level", price))
+                    body_ratio = float(absorption.get("body_ratio", 0.0))
+
+                    # Validation : Absorption forte (body_ratio >= 0.6)
+                    if body_ratio >= 0.6:
+                        entry = price
+                        sl = bos_level - (20 * pip_size)  # SL sous le BOS
+                        sl_pips = abs(entry - sl) / pip_size
+                        tp = entry + (sl_pips * 2.0 * pip_size)  # TP = 2x SL (RR 2.0)
+
+                        tp_pips = abs(tp - entry) / pip_size
+                        rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | bos_absorption_buy | "
+                            f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                            f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                        )
+
+                        decision = {
+                            "asset": asset,
+                            "action": "BUY",
+                            "entry_price": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "confidence": 0.68,
+                            "rule_name": "liquidity_bos_absorption_buy",
+                            "strategy_type": "liquidity",
+                            "execution_status": "ready",
+                            "signals": liquidity_signals,
+                            "meta": meta,
+                            "rr": rr
+                        }
+
+                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                        return decision
+
+                # SELL Setup : BOS bearish + Absorption sell-side
+                elif "bear" in bos_type and abs_side == "sell":
+                    bos_level = float(bos_mss.get("level", price))
+                    body_ratio = float(absorption.get("body_ratio", 0.0))
+
+                    if body_ratio >= 0.6:
+                        entry = price
+                        sl = bos_level + (20 * pip_size)  # SL au-dessus du BOS
+                        sl_pips = abs(sl - entry) / pip_size
+                        tp = entry - (sl_pips * 2.0 * pip_size)  # TP = 2x SL (RR 2.0)
+
+                        tp_pips = abs(entry - tp) / pip_size
+                        rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | bos_absorption_sell | "
+                            f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                            f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                        )
+
+                        decision = {
+                            "asset": asset,
+                            "action": "SELL",
+                            "entry_price": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "confidence": 0.68,
+                            "rule_name": "liquidity_bos_absorption_sell",
+                            "strategy_type": "liquidity",
+                            "execution_status": "ready",
+                            "signals": liquidity_signals,
+                            "meta": meta,
+                            "rr": rr
+                        }
+
+                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                        return decision
+
+            # --- Setup 5 : Micro Phase Reversal (BUY) ---
+            if micro_phase and regime:
+                # BUY Setup : Micro phase = accumulation + Regime favorable
+                if micro_phase == "accumulation" and regime in ["trending_up", "transitional"]:
+                    entry = price
+                    sl = entry - (30 * pip_size)  # SL 30 pips
+                    tp = entry + (60 * pip_size)  # TP 60 pips (RR 2.0)
+
+                    sl_pips = abs(entry - sl) / pip_size
+                    tp_pips = abs(tp - entry) / pip_size
+                    rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                    self.logger.info(
+                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | micro_phase_reversal_buy | "
+                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f} | Regime={regime}"
+                    )
+
+                    decision = {
+                        "asset": asset,
+                        "action": "BUY",
+                        "entry_price": entry,
+                        "sl": sl,
+                        "tp": tp,
+                        "confidence": 0.60,
+                        "rule_name": "liquidity_micro_phase_buy",
+                        "strategy_type": "liquidity",
+                        "execution_status": "ready",
+                        "signals": liquidity_signals,
+                        "meta": meta,
+                        "rr": rr
+                    }
+
+                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                    return decision
+
+                # SELL Setup : Micro phase = distribution + Regime favorable
+                elif micro_phase == "distribution" and regime in ["trending_down", "transitional"]:
+                    entry = price
+                    sl = entry + (30 * pip_size)  # SL 30 pips
+                    tp = entry - (60 * pip_size)  # TP 60 pips (RR 2.0)
+
+                    sl_pips = abs(sl - entry) / pip_size
+                    tp_pips = abs(entry - tp) / pip_size
+                    rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                    self.logger.info(
+                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | micro_phase_reversal_sell | "
+                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f} | Regime={regime}"
+                    )
+
+                    decision = {
+                        "asset": asset,
+                        "action": "SELL",
+                        "entry_price": entry,
+                        "sl": sl,
+                        "tp": tp,
+                        "confidence": 0.60,
+                        "rule_name": "liquidity_micro_phase_sell",
+                        "strategy_type": "liquidity",
+                        "execution_status": "ready",
+                        "signals": liquidity_signals,
+                        "meta": meta,
+                        "rr": rr
+                    }
+
+                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                    return decision
 
             # --- Aucun setup valide ---
             self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
