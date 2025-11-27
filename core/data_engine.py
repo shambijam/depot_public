@@ -38,7 +38,7 @@ class DataEngine(threading.Thread):
         symbols: List[str],
         mt5_connector,
         market_analyzer,
-        update_interval_seconds: float = 5.0,
+        update_interval_seconds: float = 2.5,  # ⚡ OPTIMISÉ: 2.5s (au lieu de 5s) pour mouvements ultra-rapides
         stop_event: Optional[threading.Event] = None
     ):
         """
@@ -48,7 +48,7 @@ class DataEngine(threading.Thread):
             symbols: Liste des symboles à analyser (ex: ['XAUUSD', 'EURUSD'])
             mt5_connector: Instance du connecteur MT5 pour récupérer les ticks
             market_analyzer: Instance du MarketAnalyzer pour analyser footprint
-            update_interval_seconds: Intervalle entre chaque cycle (défaut: 5s)
+            update_interval_seconds: Intervalle entre chaque cycle (défaut: 2.5s) ⚡ MODE ULTRA-RAPIDE
             stop_event: Event partagé pour arrêter proprement le thread
         """
         super().__init__(name="DataEngine", daemon=True)

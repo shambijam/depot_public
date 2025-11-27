@@ -2986,10 +2986,10 @@ def scalping_fast_thread(
     - FusionManager → Signaux scalping
     - monitor_burst_baskets() → Fermeture +15 pips
     """
-    cycle_interval = 10  # 10 secondes
+    cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes (au lieu de 10s) pour capturer mouvements rapides
     cycle_count = 0
 
-    logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 10s)")
+    logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 5s) ⚡ MODE ULTRA-RAPIDE")
 
     # ⚡ OPTION 1: PRÉ-CALCUL — Squelette trade decision (parties statiques)
     # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
