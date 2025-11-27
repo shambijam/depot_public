@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple
 
 
@@ -66,11 +67,13 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
         return r
 
     tickets, errors = [], []
-    for idx in range(burst_size):
-        req = _base_req_copy()
 
-        # DEBUG: Traçage position burst
+    # ⚡ OPTION 3: PARALLÉLISATION — Envoi simultané des ordres
+    def _send_single_order(idx: int) -> tuple:
+        """Envoie un ordre unique (fonction worker pour ThreadPoolExecutor)."""
+        req = _base_req_copy()
         burst_num = idx + 1
+
         print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Avant envoi | SL={req.get('sl')} | TP={req.get('tp')} | symbol={req.get('symbol')} | basket_id={basket_id}", flush=True)
 
         try:
@@ -78,16 +81,49 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             if res and res.get("status") in {"sent", "placed", "filled"}:
                 tk = res.get("order") or res.get("deal") or res.get("ticket")
                 if tk:
-                    tickets.append(int(tk))
                     print(f"🔍 [SL_TRACE][BURST_#{burst_num}/{burst_size}] Ordre envoyé | ticket={tk} | status={res.get('status')}", flush=True)
+                    return ("success", int(tk), None)
+                else:
+                    return ("error", None, res)
             else:
-                errors.append(res)
+                return ("error", None, res)
         except Exception as e:
-            errors.append({"exc": str(e)})
+            return ("error", None, {"exc": str(e)})
 
-        # micro-délai anti-rafale (évite retcodes "trade context busy")
-        # ⚡ OPTIMISATION LATENCE: Réduit à 0.005s (5ms) pour gain de ~40ms sur 8 positions
-        _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.005) or 0.005))
+    # Parallélisation avec ThreadPoolExecutor (max_workers = burst_size pour envoi simultané)
+    try:
+        parallel_enabled = bool(self.config_manager.get("burst_parallel_send", True))
+    except Exception:
+        parallel_enabled = True
+
+    if parallel_enabled and burst_size > 1:
+        # ⚡ ENVOI PARALLÈLE — Toutes les positions simultanément (~100ms au lieu de 840ms)
+        with ThreadPoolExecutor(max_workers=burst_size) as executor:
+            futures = {executor.submit(_send_single_order, idx): idx for idx in range(burst_size)}
+
+            for future in as_completed(futures):
+                try:
+                    status, ticket, error = future.result()
+                    if status == "success" and ticket:
+                        tickets.append(ticket)
+                    elif error:
+                        errors.append(error)
+                except Exception as e:
+                    errors.append({"exc": str(e)})
+
+        # Un seul micro-délai à la fin pour stabilisation MT5
+        _t.sleep(0.01)
+    else:
+        # FALLBACK: Mode séquentiel (si parallélisation désactivée dans config)
+        for idx in range(burst_size):
+            status, ticket, error = _send_single_order(idx)
+            if status == "success" and ticket:
+                tickets.append(ticket)
+            elif error:
+                errors.append(error)
+
+            # Micro-délai anti-rafale en mode séquentiel
+            _t.sleep(float(self.config_manager.get("burst_send_sleep_s", 0.005) or 0.005))
 
     # marque le cooldown “dernier burst”
     try:

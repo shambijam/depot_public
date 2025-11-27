@@ -2991,6 +2991,11 @@ def scalping_fast_thread(
 
     logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 10s)")
 
+    # ⚡ OPTION 1: PRÉ-CALCUL — Squelette trade decision (parties statiques)
+    # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
+    trade_decision_skeleton = None
+    last_config_update = 0
+
     while not stop_event.is_set():
         cycle_count += 1
         cycle_start = time.time()
@@ -3042,6 +3047,63 @@ def scalping_fast_thread(
             with context_lock:
                 global_context["XAUUSD"] = market_results
 
+            # ⚡ OPTION 1: PRÉ-CALCUL — Mise à jour squelette si config changée
+            try:
+                current_config_hash = hash(str(config_manager.get_current_dynamic_config()))
+                if trade_decision_skeleton is None or current_config_hash != last_config_update:
+                    # Obtenir base_config
+                    base_config = config_manager.get_current_dynamic_config()
+                    strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
+
+                    # Résoudre burst_size
+                    strat_cfg_entry = strat_cfg.get("entry_rules", {})
+                    scalping_cfg = strat_cfg_entry.get("scalping", {})
+                    burst_cfg = scalping_cfg.get("burst_scalping", {})
+                    resolved_burst = burst_cfg.get("burst_size", 5)
+
+                    # Copier config SLTP
+                    sltp_cfg = burst_cfg.get("sltp", {})
+                    if not sltp_cfg:
+                        sltp_cfg = (
+                            base_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("sltp", {})
+                        ) or {}
+
+                    # Fusionner config scalping avec base_config
+                    try:
+                        scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
+                        merged_config = dict(base_config)
+                        if "entry_rules" in scalping_strategy_config:
+                            merged_config.setdefault("entry_rules", {}).update(
+                                scalping_strategy_config["entry_rules"]
+                            )
+                    except Exception as e:
+                        logger.warning(f"[SCALPING_THREAD] Fusion config échouée: {e}")
+                        merged_config = base_config
+
+                    # ⚡ SQUELETTE PRÉ-CALCULÉ (parties statiques)
+                    trade_decision_skeleton = {
+                        "static": {
+                            "symbol": "XAUUSD",
+                            "rule_name": "burst_scalping",
+                            "burst_size": resolved_burst,
+                            "burst_enabled": True,
+                            "strategy": "scalping",
+                            "sltp": sltp_cfg,
+                            "safety": {
+                                "fat_finger": {"policy": "FLOOR"}
+                            },
+                        },
+                        "merged_config": merged_config,
+                        "resolved_burst": resolved_burst,
+                    }
+                    last_config_update = current_config_hash
+                    logger.info(f"⚡ [PRE-CALC] Squelette trade decision mis à jour (burst={resolved_burst})")
+            except Exception as e:
+                logger.warning(f"[PRE-CALC] Erreur pré-calcul squelette: {e}")
+
             # FusionManager (si disponible)
             fusion_mgr = getattr(mecano, "fusion_manager", None)
             if fusion_mgr and market_results:
@@ -3067,73 +3129,31 @@ def scalping_fast_thread(
                 )
 
                 # Si signal valide → Exécution
-                if fusion_out.get("ok"):
+                if fusion_out.get("ok") and trade_decision_skeleton is not None:
                     side = fusion_out["action"]  # BUY ou SELL
                     conf = fusion_out.get("fused_confidence", 0.0)
 
                     logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {side} (conf={conf:.2f})")
 
-                    # Construction trade decision
+                    # ⚡ OPTION 1: INJECTION RAPIDE — Utiliser squelette pré-calculé
                     try:
-                        # Obtenir base_config
-                        base_config = config_manager.get_current_dynamic_config()
+                        # Copier squelette statique
+                        skeleton = trade_decision_skeleton["static"]
 
-                        # Résoudre burst_size
-                        strat_cfg_entry = strat_cfg.get("entry_rules", {})
-                        scalping_cfg = strat_cfg_entry.get("scalping", {})
-                        burst_cfg = scalping_cfg.get("burst_scalping", {})
-                        resolved_burst = burst_cfg.get("burst_size", 5)
-
-                        # Construction td IDENTIQUE à FAST-LANE
-                        td = {
-                            "symbol": "XAUUSD",
-                            "action": side,  # ✅ AJOUTÉ - requis par trade_executor
+                        # ⚡ INJECTION valeurs dynamiques UNIQUEMENT (ultra-rapide)
+                        td = dict(skeleton)  # Shallow copy rapide
+                        td["action"] = side  # Dynamique
+                        td["side"] = side  # Dynamique
+                        td["confidence"] = conf  # Dynamique
+                        td["context"] = ctx  # Dynamique (phase, volatility)
+                        td["fusion_data"] = fusion_out  # Dynamique (scores OF/FP/triggers)
+                        td["order"] = {
+                            "action": side,
                             "side": side,
-                            "rule_name": "burst_scalping",
-                            "confidence": conf,
-                            "burst_size": resolved_burst,
-                            "burst_enabled": True,  # ✅ AJOUTÉ - active le mode burst
-                            "strategy": "scalping",
-                            "context": ctx,
-                            # ✅ AJOUTÉ - Structure order/trade comme FAST-LANE
-                            "order": {
-                                "action": side,
-                                "side": side,
-                                "type": "MARKET",
-                                "symbol": "XAUUSD",
-                            },
-                            "trade": {"action": side, "side": side},
+                            "type": "MARKET",
+                            "symbol": "XAUUSD",
                         }
-
-                        # ✅ AJOUTÉ - Fat finger policy (comme FAST-LANE)
-                        safety = td.setdefault("safety", {})
-                        ff = safety.setdefault("fat_finger", {})
-                        ff.setdefault("policy", "FLOOR")
-
-                        # Copier config SLTP
-                        sltp_cfg = burst_cfg.get("sltp", {})
-                        if not sltp_cfg:
-                            # Fallback depuis base_config
-                            sltp_cfg = (
-                                base_config.get("entry_rules", {})
-                                .get("scalping", {})
-                                .get("burst_scalping", {})
-                                .get("sltp", {})
-                            ) or {}
-                        if sltp_cfg:
-                            td["sltp"] = sltp_cfg
-
-                        # Fusionner config scalping avec base_config
-                        try:
-                            scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
-                            merged_config = dict(base_config)
-                            if "entry_rules" in scalping_strategy_config:
-                                merged_config.setdefault("entry_rules", {}).update(
-                                    scalping_strategy_config["entry_rules"]
-                                )
-                        except Exception as e:
-                            logger.warning(f"[SCALPING_THREAD] Fusion config échouée: {e}")
-                            merged_config = base_config
+                        td["trade"] = {"action": side, "side": side}
 
                         # Package décision - ✅ UTILISER global_context au lieu de ctx
                         with context_lock:
@@ -3142,15 +3162,15 @@ def scalping_fast_thread(
                         decision_pkg = {
                             "final_decision": td,
                             "context": global_ctx_copy,  # ✅ CORRIGÉ - global_context complet
-                            "active_config": merged_config,
+                            "active_config": trade_decision_skeleton["merged_config"],
                         }
                         decision_pkg.setdefault("audit_context", {}).update({
                             "intent_symbol": "XAUUSD",
                             "intent_side": side,
-                            "intent_burst": resolved_burst,
+                            "intent_burst": trade_decision_skeleton["resolved_burst"],
                         })
 
-                        logger.info(f"[SCALPING_THREAD] Exécution trade: {side} XAUUSD burst={resolved_burst}")
+                        logger.info(f"⚡ [PRE-CALC] Exécution RAPIDE: {side} XAUUSD burst={trade_decision_skeleton['resolved_burst']}")
 
                         # Exécution
                         res = run_trade_execution_pipeline(

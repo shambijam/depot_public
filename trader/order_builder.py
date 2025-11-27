@@ -14,6 +14,14 @@ from trader.sltp import (
     _resolve_basket_context_for_sltp,
 )
 
+# ⚡ OPTIMISATION: Import du module de parallélisation
+try:
+    from trader.order_builder_parallel import prepare_order_parallel_wrapper
+    PARALLEL_AVAILABLE = True
+except ImportError:
+    PARALLEL_AVAILABLE = False
+    prepare_order_parallel_wrapper = None
+
 
 # --- FLOW/VOL GATE (soft) ----------------------------------------------------
 def _passes_flow_vol_gate(
@@ -179,8 +187,9 @@ def _passes_flow_vol_gate(
         return True, {"info": info}
 
 
-def prepare_order(self, decision_package: dict) -> dict:
+def _prepare_order_sequential(self, decision_package: dict) -> dict:
     """
+    [VERSION SÉQUENTIELLE ORIGINALE]
     Calcule et prépare la demande d'ordre complète pour MetaTrader 5.
     Zéro tolérance aux valeurs 'UNKNOWN' : on normalise et on valide avant toute requête MT5.
 
@@ -1047,6 +1056,47 @@ def prepare_order(self, decision_package: dict) -> dict:
         raise TradeExecutionError(
             f"Échec inattendu de préparation d'ordre pour {broker_symbol}: {e}"
         ) from e
+
+
+def prepare_order(self, decision_package: dict) -> dict:
+    """
+    ⚡ [VERSION OPTIMISÉE AVEC PARALLÉLISATION]
+
+    Point d'entrée principal pour prepare_order.
+    - Si parallélisation activée (défaut): utilise version async optimisée
+    - Sinon: fallback sur version séquentielle originale
+
+    Interface 100% compatible avec l'ancien code.
+    """
+    # Vérifier si parallélisation disponible et activée
+    if not PARALLEL_AVAILABLE:
+        # Module parallel non disponible → fallback séquentiel
+        return self._prepare_order_sequential(decision_package)
+
+    # Vérifier config
+    try:
+        parallel_enabled = self.config_manager.get("order_builder_parallel", True)
+    except Exception:
+        parallel_enabled = True  # Par défaut = parallèle
+
+    if not parallel_enabled:
+        # Parallélisation désactivée via config
+        self.logger.debug("[ORDER_BUILDER] Mode séquentiel (config)")
+        return self._prepare_order_sequential(decision_package)
+
+    # MODE PARALLÈLE ⚡
+    try:
+        return prepare_order_parallel_wrapper(
+            original_prepare_order=self._prepare_order_sequential,
+            self=self,
+            decision_package=decision_package
+        )
+    except Exception as e:
+        # Fallback séquentiel en cas d'erreur
+        self.logger.warning(
+            f"⚠️ [ORDER_BUILDER] Erreur mode parallèle, fallback séquentiel: {e}"
+        )
+        return self._prepare_order_sequential(decision_package)
 
 
 def _build_mt5_request(
