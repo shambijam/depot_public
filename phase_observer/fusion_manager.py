@@ -280,7 +280,9 @@ class FusionManager:
             imbalance_sell_levels = fp_summary.get("imbalance_sell", 0)
 
             # Section 2 : OrderFlow V6
-            of_score = n_of.get("score", 0.0)
+            # ⚠️ FIX: NE PAS utiliser n_of.get("score") qui est le score TOTAL (OrderFlow+Footprint+Triggers)
+            # On veut le score OrderFlow SEUL, qui sera extrait de of_summary plus bas
+            of_score_total = n_of.get("score", 0.0)  # Score total (pour référence, non affiché ici)
             of_dir = dir_symbols.get(n_of.get("dir", 0), "⚪ NEUTRAL")
             of_delta = n_of.get("delta_total", 0.0)
             of_absorption = n_of.get("absorption", False)
@@ -311,6 +313,11 @@ class FusionManager:
 
             hvn_count = len(vp_data.get("hvn", []))
             lvn_count = len(vp_data.get("lvn", []))
+
+            # ✅ FIX: Calculer le score OrderFlow SEUL (pas le score total)
+            # Le score OrderFlow est sur 50 pts max, on le convertit en % (0-1)
+            of_score_pts = of_summary.get("orderflow_score", 0.0)  # ex: 35.5 pts
+            of_score = of_score_pts / 100.0  # Convertir en % (35.5 → 0.355 = 35.5%)
 
             # Section 3 : Triggers
             tr_score = n_tr.get("score", 0.0)
