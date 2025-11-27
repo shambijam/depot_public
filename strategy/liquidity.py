@@ -308,6 +308,215 @@ class LiquidityStrategy(BaseStrategy):
         # 4) Rien trouvé
         return None
 
+    def _log_liquidity_consolidated_report(
+        self,
+        asset: str,
+        liquidity_signals: Dict[str, Any],
+        decision: Optional[Dict[str, Any]],
+        price: float,
+        pip_size: float
+    ) -> None:
+        """
+        🔷 Bilan consolidé liquidity - Format similaire à OrderFlow V6
+
+        Affiche :
+        - [1] DÉTECTEURS INSTITUTIONNELS (8/8)
+        - [2] ANALYSE CONFLUENCE
+        - [3] DÉCISION FINALE
+        """
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%d %b %Y %H:%M:%S")
+
+        # Header
+        self.logger.info("═" * 71)
+        self.logger.info(f"🔷 BILAN LIQUIDITÉ | {asset} | {timestamp}")
+        self.logger.info("═" * 71)
+
+        # ========================================================================
+        # [1] DÉTECTEURS INSTITUTIONNELS (8/8)
+        # ========================================================================
+        self.logger.info("")
+        self.logger.info("[1] DÉTECTEURS INSTITUTIONNELS (8/8)")
+        self.logger.info("─" * 71)
+
+        # 1. Sweep
+        sweep = liquidity_signals.get("sweep_details")
+        if sweep:
+            side = sweep.get("side", "N/A")
+            sweep_price = sweep.get("price", 0.0)
+            wick_ratio = sweep.get("wick_ratio", 0.0)
+            dist_pips = sweep.get("dist_pips", 0.0)
+            vol_z = sweep.get("volume_z", 0.0)
+            self.logger.info(
+                f"  ✅ Sweep        : {side.upper()} @ {sweep_price:.5f} | "
+                f"wick={wick_ratio:.1f}x | dist={dist_pips:.1f}p | vol_z={vol_z:.1f}"
+            )
+        else:
+            self.logger.info("  ❌ Sweep        : Aucun détecté")
+
+        # 2. EQH/EQL
+        eqh_eql = liquidity_signals.get("eqh_eql_details")
+        if eqh_eql:
+            eq_type = eqh_eql.get("type", "N/A").upper()
+            eq_price = eqh_eql.get("price", eqh_eql.get("level", 0.0))
+            touches = eqh_eql.get("touches", 0)
+            quality = eqh_eql.get("quality", "UNKNOWN").upper()
+            self.logger.info(
+                f"  ✅ EQH/EQL      : {eq_type} @ {eq_price:.5f} | "
+                f"touches={touches} | qualité={quality}"
+            )
+        else:
+            self.logger.info("  ❌ EQH/EQL      : Aucun détecté")
+
+        # 3. Order Block
+        ob = liquidity_signals.get("ob_details")
+        if ob:
+            ob_type = ob.get("type", "N/A")
+            ob_zone = ob.get("zone", [0.0, 0.0])
+            ob_zone_str = f"{ob_zone[0]:.5f}-{ob_zone[1]:.5f}" if isinstance(ob_zone, list) and len(ob_zone) == 2 else "N/A"
+            self.logger.info(f"  ✅ Order Block  : {ob_type} @ {ob_zone_str}")
+        else:
+            self.logger.info("  ❌ Order Block  : Aucun détecté")
+
+        # 4. FVG
+        fvg = liquidity_signals.get("fvg_details")
+        if fvg:
+            fvg_type = fvg.get("type", "N/A")
+            fvg_zone = fvg.get("zone", [0.0, 0.0])
+            fvg_zone_str = f"{fvg_zone[0]:.5f}-{fvg_zone[1]:.5f}" if isinstance(fvg_zone, list) and len(fvg_zone) == 2 else "N/A"
+            self.logger.info(f"  ✅ FVG          : {fvg_type} @ {fvg_zone_str}")
+        else:
+            self.logger.info("  ❌ FVG          : Aucun détecté")
+
+        # 5. BOS/MSS
+        bos = liquidity_signals.get("bos_mss_details")
+        if bos:
+            bos_type = bos.get("type", "N/A")
+            bos_level = bos.get("level", 0.0)
+            self.logger.info(f"  ✅ BOS/MSS      : {bos_type} @ {bos_level:.5f}")
+        else:
+            self.logger.info("  ❌ BOS/MSS      : Aucun détecté")
+
+        # 6. Absorption
+        absorption = liquidity_signals.get("absorption_details")
+        if absorption:
+            abs_type = absorption.get("type", "N/A")
+            self.logger.info(f"  ✅ Absorption   : {abs_type}")
+        else:
+            self.logger.info("  ❌ Absorption   : Aucune")
+
+        # 7. Market Regime
+        regime = liquidity_signals.get("market_regime")
+        if regime:
+            self.logger.info(f"  ✅ Regime       : {regime}")
+        else:
+            self.logger.info("  ❌ Regime       : Inconnu")
+
+        # 8. Micro Phase
+        micro = liquidity_signals.get("micro_phase")
+        if micro:
+            self.logger.info(f"  ✅ Micro Phase  : {micro}")
+        else:
+            self.logger.info("  ❌ Micro Phase  : Inconnue")
+
+        # ========================================================================
+        # [2] ANALYSE CONFLUENCE
+        # ========================================================================
+        self.logger.info("")
+        self.logger.info("[2] ANALYSE CONFLUENCE")
+        self.logger.info("─" * 71)
+
+        if decision:
+            # Setup détecté
+            rule_name = decision.get("rule_name", "unknown")
+            setup_label = ""
+            if rule_name == "liquidity_sweep_eql":
+                setup_label = "⚡ SWEEP + EQL (BUY)"
+            elif rule_name == "liquidity_sweep_eqh":
+                setup_label = "⚡ SWEEP + EQH (SELL)"
+            else:
+                setup_label = f"⚡ {rule_name.upper()}"
+
+            self.logger.info(f"  Setup détecté   : {setup_label}")
+
+            # Distance
+            if sweep and eqh_eql:
+                sweep_price = float(sweep.get("price", price))
+                eq_price = float(eqh_eql.get("price", eqh_eql.get("level", price)))
+                distance_pips = abs(sweep_price - eq_price) / pip_size
+                distance_status = "✅" if distance_pips < 50 else "❌"
+                self.logger.info(f"  Distance        : {distance_status} {distance_pips:.1f} pips (< 50p)")
+            else:
+                self.logger.info(f"  Distance        : N/A")
+
+            # Entry / SL / TP
+            entry = decision.get("entry_price", 0.0)
+            sl = decision.get("sl", 0.0)
+            tp = decision.get("tp", 0.0)
+
+            sl_pips = abs(entry - sl) / pip_size if pip_size > 0 else 0
+            tp_pips = abs(tp - entry) / pip_size if pip_size > 0 else 0
+
+            self.logger.info(f"  Entry           : {entry:.5f} (market)")
+            self.logger.info(f"  Stop Loss       : {sl:.5f} ({sl_pips:.1f}p)")
+            self.logger.info(f"  Take Profit     : {tp:.5f} ({tp_pips:.1f}p)")
+
+            # RR
+            rr = decision.get("rr", 0.0)
+            self.logger.info(f"  Risk/Reward     : {rr:.2f}")
+
+        else:
+            # Aucun setup
+            self.logger.info("  Setup détecté   : ❌ Aucun")
+
+            # Raisons possibles
+            if not sweep:
+                self.logger.info("  Raison          : Aucun sweep de liquidité")
+            elif not eqh_eql:
+                self.logger.info("  Raison          : Aucun EQH/EQL détecté")
+            elif sweep and eqh_eql:
+                sweep_price = float(sweep.get("price", price))
+                eq_price = float(eqh_eql.get("price", eqh_eql.get("level", price)))
+                distance_pips = abs(sweep_price - eq_price) / pip_size
+                if distance_pips >= 50:
+                    self.logger.info(f"  Raison          : Distance trop grande ({distance_pips:.1f}p > 50p)")
+                else:
+                    sweep_side = sweep.get("side", "").lower()
+                    eq_type = eqh_eql.get("type", "").lower()
+                    if not ((sweep_side == "buy" and eq_type == "eql") or (sweep_side == "sell" and eq_type == "eqh")):
+                        self.logger.info(f"  Raison          : Confluence invalide ({sweep_side} + {eq_type})")
+                    else:
+                        self.logger.info("  Raison          : Confluence non validée")
+            else:
+                self.logger.info("  Raison          : Signaux insuffisants")
+
+        # ========================================================================
+        # [3] DÉCISION FINALE
+        # ========================================================================
+        self.logger.info("")
+        self.logger.info("[3] DÉCISION FINALE")
+        self.logger.info("─" * 71)
+
+        if decision:
+            action = decision.get("action", "N/A")
+            confidence = decision.get("confidence", 0.0) * 100
+            rule = decision.get("rule_name", "N/A")
+            status = decision.get("execution_status", "N/A").upper()
+
+            self.logger.info(f"  Action          : ✅ {action}")
+            self.logger.info(f"  Confidence      : {confidence:.0f}%")
+            self.logger.info(f"  Rule            : {rule}")
+            self.logger.info(f"  Status          : {status}")
+        else:
+            self.logger.info("  Action          : ❌ AUCUNE")
+            self.logger.info("  Confidence      : 0%")
+            self.logger.info("  Rule            : N/A")
+            self.logger.info("  Status          : WAITING")
+
+        # Footer
+        self.logger.info("")
+        self.logger.info("═" * 71)
 
 
     def _evaluate_single_asset(
@@ -350,6 +559,7 @@ class LiquidityStrategy(BaseStrategy):
                 asset_signals = {**asset_signals, **liquidity_signals}
             else:
                 self.logger.warning(f"[{asset}] df_work non disponible, détection liquidité skip.")
+                liquidity_signals = {}  # Initialisation pour éviter NameError
 
             # === [DÉTECTION PATTERNS SUPPRIMÉE - Session 23 Nov 2025] ===
             # Bloc MarketAnalyzer patterns retiré (16 lignes)
@@ -430,7 +640,7 @@ class LiquidityStrategy(BaseStrategy):
                             f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
                         )
 
-                        return {
+                        decision = {
                             "asset": asset,
                             "action": "BUY",
                             "entry_price": entry,
@@ -444,6 +654,11 @@ class LiquidityStrategy(BaseStrategy):
                             "meta": meta,
                             "rr": rr
                         }
+
+                        # 🔷 Afficher le bilan consolidé liquidity
+                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+
+                        return decision
                     else:
                         self.logger.info(
                             f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
@@ -473,7 +688,7 @@ class LiquidityStrategy(BaseStrategy):
                             f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
                         )
 
-                        return {
+                        decision = {
                             "asset": asset,
                             "action": "SELL",
                             "entry_price": entry,
@@ -487,6 +702,11 @@ class LiquidityStrategy(BaseStrategy):
                             "meta": meta,
                             "rr": rr
                         }
+
+                        # 🔷 Afficher le bilan consolidé liquidity
+                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+
+                        return decision
                     else:
                         self.logger.info(
                             f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
@@ -497,6 +717,10 @@ class LiquidityStrategy(BaseStrategy):
 
             # --- Aucun setup valide ---
             self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
+
+            # 🔷 Afficher le bilan consolidé liquidity (aucune décision)
+            self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
+
             return {}
 
         except Exception as e:
