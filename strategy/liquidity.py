@@ -391,117 +391,109 @@ class LiquidityStrategy(BaseStrategy):
                 return {}
 
 
-            # --- 5) Range Accumulation MTF ---
-            try:
-                mtf_cfg = strat_cfg.get("range_accumulation_mtf") or {}
-                mtf_decision = self._rule_range_accumulation_mtf(
-                    df_m1=df_work,
-                    asset=asset,
-                    price=price,
-                    meta=meta,
-                    cfg=mtf_cfg,
-                    analyzed_context=analyzed_context,
+            # ========================================================================
+            # 🎯 LOGIQUE LIQUIDITÉ - Analyse des setups institutionnels
+            # ========================================================================
+            # ✅ Phase 1 : Implémentation minimale (Sweep + EQH/EQL)
+            # Les 8 détecteurs ont retourné leurs signaux dans liquidity_signals
+
+            sweep = liquidity_signals.get("sweep_details")
+            eqh_eql = liquidity_signals.get("eqh_eql_details")
+
+            # --- Setup 1 : Liquidity Sweep + Equal Low (BUY) ---
+            if sweep and eqh_eql:
+                self.logger.info(
+                    f"[LIQUIDITY][{asset}] 🔍 Analyse confluence | "
+                    f"sweep={'✅' if sweep else '❌'} | eqh_eql={'✅' if eqh_eql else '❌'}"
                 )
-                if mtf_decision:
-                    return self._finalize_decision(mtf_decision, analyzed_context)
-            except Exception as e:
-                self.logger.debug(f"[{asset}] MTF range-accum skipped: {e}")
 
-            # --- 6) Range simple ---
-            try:
-                range_decision = self._rule_range_accumulation(
-                    df=df_work,
-                    asset=asset,
-                    price=price,
-                    action=action,
-                    meta=meta,
-                    cfg=(strat_cfg.get("range_accumulation") or {}),
-                )
-                if range_decision:
-                    range_decision.setdefault("strategy_type", "scalping")
-                    range_decision.setdefault("rule_name", "range_accumulation")
-                    range_decision.setdefault("execution_status", "ready")
-                    return self._finalize_decision(range_decision, analyzed_context)
-            except Exception as e:
-                self.logger.debug(f"[{asset}] Range accumulation simple skipped: {e}")
+                # BUY Setup : Sweep sell-side + Equal Low
+                if sweep.get("side") == "buy" and eqh_eql.get("type") == "eql":
+                    sweep_price = float(sweep.get("price", price))
+                    eql_price = float(eqh_eql.get("price", price))
 
-            # --- 7) Burst scalping ---
-            atr_m1_pips = None
-            if isinstance(df_work, pd.DataFrame):
-                try:
-                    atr_m1 = self._atr(df_work, period=14)
-                    atr_m1_pips = (atr_m1 / pip_size) if atr_m1 and pip_size > 0 else None
-                except Exception:
-                    atr_m1_pips = None
+                    # Validation : EQL doit être proche (< 50 pips)
+                    distance_pips = abs(sweep_price - eql_price) / pip_size
+                    if distance_pips < 50:
+                        entry = price  # Entrée au marché
+                        sl = sweep_price - (15 * pip_size)  # Stop 15 pips sous le sweep
+                        tp = eql_price  # Target = Equal Low
 
-            guardrails_cfg = {}
-            try:
-                guardrails_cfg = self.config_manager.get("guardrails", {}) or {}
-            except Exception:
-                guardrails_cfg = getattr(self.config_manager, "guardrails", {}) or {}
+                        # Calcul RR
+                        sl_pips = abs(entry - sl) / pip_size
+                        tp_pips = abs(tp - entry) / pip_size
+                        rr = tp_pips / sl_pips if sl_pips > 0 else 0
 
-            try:
-                min_atr_req = float(
-                    (strat_cfg.get("burst_scalping") or {}).get(
-                        "min_atr_m1_pips",
-                        guardrails_cfg.get("volatility", {}).get("min_atr_m1_pips", 0.0),
-                    )
-                )
-            except Exception:
-                min_atr_req = 0.0
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | sweep_eql | "
+                            f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                            f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                        )
 
-            try:
-                max_spread_burst = float(
-                    (strat_cfg.get("burst_scalping") or {}).get(
-                        "max_spread_pips",
-                        guardrails_cfg.get("volatility", {}).get("max_spread_pips", 999.0),
-                    )
-                )
-            except Exception:
-                max_spread_burst = 999.0
+                        return {
+                            "asset": asset,
+                            "action": "BUY",
+                            "entry_price": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "confidence": 0.70,
+                            "rule_name": "liquidity_sweep_eql",
+                            "strategy_type": "liquidity",
+                            "execution_status": "ready",
+                            "signals": liquidity_signals,
+                            "meta": meta,
+                            "rr": rr
+                        }
+                    else:
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
+                            f"sweep-eql={distance_pips:.1f}p (max 50p)"
+                        )
 
-            ignore_all = bool(guardrails_cfg.get("ignore_all", False))
-            burst_ignore_checks = bool((strat_cfg.get("burst_scalping") or {}).get("ignore_checks", False))
-            effective_ignore_checks = ignore_all or burst_ignore_checks
+                # SELL Setup : Sweep buy-side + Equal High
+                elif sweep.get("side") == "sell" and eqh_eql.get("type") == "eqh":
+                    sweep_price = float(sweep.get("price", price))
+                    eqh_price = float(eqh_eql.get("price", price))
 
-            self.logger.debug(
-                f"[{asset}][SCALPING] thresholds → min_atr_m1={min_atr_req}, "
-                f"max_spread={max_spread_burst}, ignore_checks={effective_ignore_checks}"
-            )
+                    # Validation : EQH doit être proche (< 50 pips)
+                    distance_pips = abs(sweep_price - eqh_price) / pip_size
+                    if distance_pips < 50:
+                        entry = price  # Entrée au marché
+                        sl = sweep_price + (15 * pip_size)  # Stop 15 pips au-dessus du sweep
+                        tp = eqh_price  # Target = Equal High
 
-            burst_allowed = True
-            if not effective_ignore_checks:
-                spread_now = float(meta.get("spread_pips", asset_signals.get("current_spread_points", float("inf"))))
-                if max_spread_burst and spread_now > max_spread_burst:
-                    self.logger.info(
-                        f"[{asset}] REFUS BURST → spread {spread_now:.2f}p > seuil {max_spread_burst:.2f}p"
-                    )
-                    burst_allowed = False
+                        # Calcul RR
+                        sl_pips = abs(sl - entry) / pip_size
+                        tp_pips = abs(entry - tp) / pip_size
+                        rr = tp_pips / sl_pips if sl_pips > 0 else 0
 
-                if min_atr_req > 0.0 and (atr_m1_pips is None or atr_m1_pips < min_atr_req):
-                    self.logger.info(
-                        f"[{asset}] REFUS BURST → ATR M1 {atr_m1_pips or 0:.2f}p < seuil {min_atr_req:.2f}p"
-                    )
-                    burst_allowed = False
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | sweep_eqh | "
+                            f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                            f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                        )
 
-            if bool((strat_cfg.get("burst_scalping") or {}).get("enabled", True)) and burst_allowed:
-                try:
-                    burst_decision = self._rule_burst_scalping(
-                        asset=asset,
-                        action=action,
-                        entry_price=price,
-                        meta=meta,
-                        signals={**asset_signals, "atr_m1_pips": atr_m1_pips},
-                        burst_cfg=(strat_cfg.get("burst_scalping") or {}),
-                        context=analyzed_context,
-                    )
-                    if burst_decision:
-                        burst_decision.setdefault("strategy_type", "scalping")
-                        burst_decision.setdefault("rule_name", "burst_scalping")
-                        burst_decision.setdefault("execution_status", "ready")
-                        return self._finalize_decision(burst_decision, analyzed_context)
-                except Exception as e:
-                    self.logger.debug(f"[{asset}] burst_scalping erreur: {e}")
+                        return {
+                            "asset": asset,
+                            "action": "SELL",
+                            "entry_price": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "confidence": 0.70,
+                            "rule_name": "liquidity_sweep_eqh",
+                            "strategy_type": "liquidity",
+                            "execution_status": "ready",
+                            "signals": liquidity_signals,
+                            "meta": meta,
+                            "rr": rr
+                        }
+                    else:
+                        self.logger.info(
+                            f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
+                            f"sweep-eqh={distance_pips:.1f}p (max 50p)"
+                        )
+
+            # TODO Phase 2 : Ajouter d'autres setups (OB+FVG, BOS+Absorption, etc.)
 
             # --- Aucun setup valide ---
             self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")

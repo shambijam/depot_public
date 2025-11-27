@@ -34,8 +34,8 @@
             "eqh_eql_break": {
                 "enabled": true,
                 "lookback_bars": 120,
-                "threshold_points": 0.0,
-                "min_distance_points": 0.0
+                "threshold_points": 10.0,
+                "min_distance_points": 20.0
             },
             "range_accumulation": {
                 "enabled": true,
