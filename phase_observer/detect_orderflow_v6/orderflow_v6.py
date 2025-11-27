@@ -64,16 +64,16 @@ def detect_orderflow_v6(
     has_footprint = footprint_df is not None and not footprint_df.empty
 
     if has_footprint:
-        # NIVEAU 1: Footprint dernière barre (avec ask/bid_volume déjà calculés)
-        # On prend la dernière barre du footprint (= bougie M1 en cours)
-        df_last_bar = footprint_df.iloc[-1:].copy()
-        safe_log(logger, "info", f"[OF V6] 📊 NIVEAU 1: Analyse FOOTPRINT dernière barre M1 - mouvement immédiat")
-        df_footprint, rescue_level_fp, rescue_note_fp = validate_and_prepare_data(df_last_bar)
+        # NIVEAU 1: Footprint dernière barre (avec ask/bid_volume déjà calculés depuis ticks)
+        # footprint_df contient UNE seule barre (la dernière) enrichie avec ask_volume/bid_volume
+        safe_log(logger, "info", f"[OF V6] 📊 NIVEAU 1: Analyse FOOTPRINT dernière barre M1 - mouvement immédiat (ask/bid_volume depuis ticks)")
+        df_footprint, rescue_level_fp, rescue_note_fp = validate_and_prepare_data(footprint_df)
 
-        # NIVEAU 2: 30 dernières barres M1 (tendance court terme)
-        # On utilise le footprint complet (30 barres avec ask/bid_volume)
-        safe_log(logger, "info", f"[OF V6] 📈 NIVEAU 2: Analyse {len(footprint_df)} barres FOOTPRINT - tendance court terme")
-        df_bars, rescue_level_bars, rescue_note_bars = validate_and_prepare_data(footprint_df)
+        # NIVEAU 2: 30 dernières barres M1 OHLC (tendance court terme)
+        # On utilise df_m1 (qui contient les 30+ barres OHLC sans footprint)
+        df_bars_30 = df_m1.iloc[-30:] if len(df_m1) >= 30 else df_m1
+        safe_log(logger, "info", f"[OF V6] 📈 NIVEAU 2: Analyse {len(df_bars_30)} barres OHLC - tendance court terme")
+        df_bars, rescue_level_bars, rescue_note_bars = validate_and_prepare_data(df_bars_30)
 
         # Rescue level = max des deux (le plus restrictif)
         rescue_level = max(rescue_level_fp, rescue_level_bars)

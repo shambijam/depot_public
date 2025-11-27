@@ -204,19 +204,32 @@ class MarketAnalyzer:
         combo_patterns = []
 
         # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
-        # ⚡ MODIFIÉ: Passe le footprint construit au lieu des ticks bruts
-        # Raison: Éviter redondance - Footprint M1 analyse déjà les ticks
-        #         OrderFlow V6 analyse le footprint agrégé + 30 barres pour vue d'ensemble
+        # ⚡ MODIFIÉ: Enrichit la dernière barre avec ask_volume/bid_volume depuis les ticks
+        # Raison: run_bot récupère seulement les ticks de la dernière minute
+        #         OrderFlow V6 analysera: NIVEAU 1 (dernière barre footprint) + NIVEAU 2 (30 barres OHLC)
         of_kwargs = self._get_ofv6_params(asset)
 
-        # Extraire le footprint construit depuis annotated_df (si disponible)
+        # Construire la dernière barre avec footprint (ask_volume/bid_volume depuis ticks)
         footprint_df = None
-        if not annotated_df.empty:
-            # Le footprint est construit par PhaseObserver et stocké dans annotated_df
-            # On extrait les dernières barres qui contiennent ask_volume/bid_volume
-            if "ask_volume" in annotated_df.columns and "bid_volume" in annotated_df.columns:
-                # Prendre les 30 dernières barres avec footprint
-                footprint_df = annotated_df.iloc[-30:] if len(annotated_df) >= 30 else annotated_df
+        if ticks is not None and not ticks.empty and not annotated_df.empty:
+            try:
+                # Calculer ask_volume et bid_volume depuis les ticks
+                ticks_copy = ticks.copy()
+
+                # Les ticks ont [time, price, size, side] après reconstruction MT5
+                if 'side' in ticks_copy.columns and 'size' in ticks_copy.columns:
+                    ask_volume = float(ticks_copy[ticks_copy['side'] == 'buy']['size'].sum())
+                    bid_volume = float(ticks_copy[ticks_copy['side'] == 'sell']['size'].sum())
+
+                    # Créer un DataFrame d'une seule barre (la dernière) enrichie
+                    last_bar = annotated_df.iloc[[-1]].copy()
+                    last_bar['ask_volume'] = ask_volume
+                    last_bar['bid_volume'] = bid_volume
+
+                    footprint_df = last_bar
+                    self.logger.info(f"[MarketAnalyzer] Footprint dernière barre: ask={ask_volume:.1f} bid={bid_volume:.1f}")
+            except Exception as e:
+                self.logger.warning(f"[MarketAnalyzer] Footprint construction failed: {e}")
 
         try:
             orderflow_signals = detect_orderflow_v6(
