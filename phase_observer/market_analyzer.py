@@ -204,8 +204,20 @@ class MarketAnalyzer:
         combo_patterns = []
 
         # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
-        # ⚡ MODIFIÉ: Passe les ticks M1 en priorité pour cohérence avec Footprint M1
+        # ⚡ MODIFIÉ: Passe le footprint construit au lieu des ticks bruts
+        # Raison: Éviter redondance - Footprint M1 analyse déjà les ticks
+        #         OrderFlow V6 analyse le footprint agrégé + 30 barres pour vue d'ensemble
         of_kwargs = self._get_ofv6_params(asset)
+
+        # Extraire le footprint construit depuis annotated_df (si disponible)
+        footprint_df = None
+        if not annotated_df.empty:
+            # Le footprint est construit par PhaseObserver et stocké dans annotated_df
+            # On extrait les dernières barres qui contiennent ask_volume/bid_volume
+            if "ask_volume" in annotated_df.columns and "bid_volume" in annotated_df.columns:
+                # Prendre les 30 dernières barres avec footprint
+                footprint_df = annotated_df.iloc[-30:] if len(annotated_df) >= 30 else annotated_df
+
         try:
             orderflow_signals = detect_orderflow_v6(
                 annotated_df,
@@ -214,7 +226,7 @@ class MarketAnalyzer:
                 price_bins=of_kwargs["price_bins"],
                 vp_options=of_kwargs["vp_options"],
                 logger=self.logger,
-                ticks=ticks,  # ⚡ NOUVEAU: Passe les ticks M1 pour analyser les mêmes données que Footprint
+                footprint_df=footprint_df,  # ⚡ NOUVEAU: Footprint construit (pas ticks bruts)
             )
             if not isinstance(orderflow_signals, dict):
                 raise TypeError("detect_orderflow_v6 must return a dict")
