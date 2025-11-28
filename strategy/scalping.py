@@ -783,6 +783,11 @@ class ScalpingStrategy(BaseStrategy):
         Affiche un bilan formaté des trois composants et du score final
         """
         try:
+            # 🔍 DEBUG: Log des résultats reçus
+            self.logger.info(f"[REPORT DEBUG][{asset}] orderflow_result keys: {list(orderflow_result.keys())}")
+            self.logger.info(f"[REPORT DEBUG][{asset}] footprint_result keys: {list(footprint_result.keys())}")
+            self.logger.info(f"[REPORT DEBUG][{asset}] footprint absorption_details: {footprint_result.get('details', {}).get('absorption', {})}")
+
             sep = "=" * 70
 
             self.logger.info(f"\n{sep}")
