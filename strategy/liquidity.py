@@ -736,6 +736,9 @@ class LiquidityStrategy(BaseStrategy):
             # Les appels à _rule_marubozu_playbook et _rule_marubozu_impulse ont été supprimés
             # Raison : Ces fonctions n'existent PAS dans liquidity.py (code mort causant AttributeError)
 
+            # 🔷 Afficher le bilan consolidé liquidity (TOUJOURS, même sans setup)
+            self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
+
             # --- 4) Biais directionnel ---
             action = self._infer_action_from_signals(asset_signals)
             if action is None:
@@ -748,9 +751,6 @@ class LiquidityStrategy(BaseStrategy):
             # ========================================================================
             # ✅ Phase 1 : Implémentation minimale (Sweep + EQH/EQL)
             # Les 8 détecteurs ont retourné leurs signaux dans liquidity_signals
-
-            # 🔷 Afficher le bilan consolidé liquidity (TOUJOURS, même sans setup)
-            self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
 
             sweep = liquidity_signals.get("sweep_details")
             eqh_eql = liquidity_signals.get("eqh_eql_details")
