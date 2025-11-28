@@ -1724,6 +1724,10 @@ def footprint_validator(
     # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
     df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
 
+    # 🔍 DEBUG: Log distribution des sides
+    side_counts = df["side_norm"].value_counts().to_dict()
+    logger.info(f"[FOOTPRINT_DEBUG] Side distribution: {side_counts} | total_ticks={len(df)}")
+
     if price_step is None or price_step <= 0:
         uniq = np.sort(df["price"].dropna().unique())
         if uniq.size >= 2:
@@ -1858,7 +1862,11 @@ def footprint_validator(
     # Calculer buy_volume et sell_volume totaux
     buy_volume = float(agg["buy"].sum())
     sell_volume = float(agg["sell"].sum())
+    unknown_volume = float(agg["unknown"].sum())
     buy_pct = (buy_volume / max(total_volume, 1.0)) * 100.0 if total_volume > 0 else 50.0
+
+    # 🔍 DEBUG: Log volumes calculés
+    logger.info(f"[FOOTPRINT_DEBUG] Volumes: buy={buy_volume}, sell={sell_volume}, unknown={unknown_volume}, total={total_volume}")
 
     return {
         "summary": {
