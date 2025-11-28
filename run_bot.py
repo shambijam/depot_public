@@ -31,7 +31,9 @@ from phase_observer.fusion_manager import FusionManager
 load_dotenv()
 
 try:
-    from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
+    # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+    # detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
+    # from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
     from phase_observer.detectors import footprint_validator
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
@@ -1353,32 +1355,17 @@ def run_single_pipeline_cycle(
                         )
                         last_candles_df.set_index("time", inplace=True)
 
-                    # Paramètres V6 pilotés par la conf (phase_observer_config.json)
-                    try:
-                        _ph = config_manager.get("phase_observer", {}) or {}
-                        _of6 = _ph.get("orderflow_v6", {}) or {}
-                        _imb = float(_of6.get("imbalance_threshold", 0.20))
-                        _cvd = float(_of6.get("cvd_smoothing", 0.0))
-                        _bins = int(_of6.get("price_bins", 24))
-                    except Exception:
-                        _imb, _cvd, _bins = 0.20, 0.0, 24
-
-                    of_res = detect_orderflow_v6(
-                        last_candles_df,
-                        imbalance_threshold=_imb,
-                        cvd_smoothing=_cvd,
-                        price_bins=_bins,
-                        logger=logger,
-                    )
-
+                    # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+                    # Ancienne analyse detect_orderflow_v6 supprimée
+                    # → Analyse OrderFlow V6 maintenant intégrée dans ScalpingStrategy._analyze_orderflow_v6()
                     latest = dict(latest)
-                    latest["orderflow_score"] = of_res.get("score", 0)
-                    latest["orderflow_status"] = of_res.get("status", "N/A")
-                    latest["orderflow_summary"] = of_res.get("summary", {})
-                    latest["orderflow_patterns"] = of_res.get("patterns", [])
+                    latest["orderflow_score"] = 0
+                    latest["orderflow_status"] = "N/A"
+                    latest["orderflow_summary"] = {}
+                    latest["orderflow_patterns"] = []
                 except Exception as e:
                     logger.error(
-                        f"[ORDERFLOW][{asset}] Erreur analyse Orderflow: {e}",
+                        f"[ORDERFLOW][{asset}] Erreur traitement latest: {e}",
                         exc_info=True,
                     )
 

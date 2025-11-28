@@ -38,10 +38,9 @@ try:
 except Exception:  # pragma: no cover
     footprint_validator = None  # type: ignore
 
-try:
-    from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6  # type: ignore
-except Exception:  # pragma: no cover
-    detect_orderflow_v6 = None  # type: ignore
+# === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+# detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
+# from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
 
 try:
     # Tes stratégies existantes
@@ -242,49 +241,12 @@ class ScalpingPipeline:
 
         # 2) Si la V6 est importée/chargeable, on calcule
         try:
-            if callable(detect_orderflow_v6):
-                md = (context.get("market_data") or {}).get(asset, {}) or {}
-
-                # Candidates de DataFrame pour la V6 (idéalement M1 OHLC+tick_volume)
-                df_m1 = (
-                    md.get("annotated_rates_df_m1")
-                    or md.get("annotated_rates_df")
-                    or md.get("rates_df")
-                    or md.get("ticks_window")
-                    or md.get("ticks_m1")
-                )
-
-                if isinstance(df_m1, pd.DataFrame) and not df_m1.empty:
-                    # Paramètres depuis la config (fallbacks sûrs)
-                    v6_cfg = ((self.config_manager.get("phase_observer") or {}).get("orderflow_v6") or {})
-                    imbalance_threshold = float(v6_cfg.get("imbalance_threshold", 0.20))
-                    cvd_smoothing      = float(v6_cfg.get("cvd_smoothing_alpha", 0.0))   # 0..1 (EMA alpha)
-                    price_bins         = int(v6_cfg.get("profile_bins", 24))
-
-                    # Aide logging: tag du symbole si absent
-                    try:
-                        if getattr(df_m1, "attrs", None) is not None:
-                            df_m1.attrs.setdefault("symbol", asset)
-                    except Exception:
-                        pass
-
-                    res = detect_orderflow_v6(
-                        df_m1,
-                        imbalance_threshold=imbalance_threshold,
-                        cvd_smoothing=cvd_smoothing,
-                        price_bins=price_bins,
-                        logger=self.logger,
-                    )
-
-                    # Option: on met en cache dans le contexte pour le reste du cycle
-                    try:
-                        context.setdefault("orderflow", {})[asset] = res
-                    except Exception:
-                        pass
-
-                    return res
+            # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+            # Ancienne analyse detect_orderflow_v6 supprimée
+            # → Analyse OrderFlow V6 maintenant intégrée dans ScalpingStrategy._analyze_orderflow_v6()
+            pass
         except Exception as e:
-            self.logger.debug(f"[{asset}] detect_orderflow_v6 skipped: {e}", exc_info=False)
+            self.logger.debug(f"[{asset}] OrderFlow analysis skipped: {e}", exc_info=False)
 
         return None
 

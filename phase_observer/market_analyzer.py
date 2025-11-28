@@ -10,7 +10,8 @@ from .orchestrator import PhaseObserver
 # === [IMPORTS PATTERNS SUPPRIMÉS - Session 23 Nov 2025] ===
 # Imports detect_single_candle, detect_multi_candle_patterns, detect_combos retirés
 # Raison : Détecteurs de patterns/bougies supprimés du système
-from .detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
+# === [IMPORT ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+# detect_orderflow_v6 supprimé → remplacé par analyse intégrée dans ScalpingStrategy
 from .footprint_analyzer import FootprintAnalyzer
 from .fusion_manager import FusionManager
 
@@ -209,10 +210,8 @@ class MarketAnalyzer:
         multi_patterns = []
         combo_patterns = []
 
-        # 2️⃣bis OrderFlow V6 (avec paramètres de config si dispos)
-        # ⚡ MODIFIÉ: Passe les données Footprint M1 directement (dict) à OrderFlow
-        # OrderFlow fait SON travail (8-10 barres) + intègre Footprint dans le scoring
-        of_kwargs = self._get_ofv6_params(asset)
+        # 2️⃣bis OrderFlow V6 - SUPPRIMÉ (Session 28 Nov 2025)
+        # → Analyse déplacée dans ScalpingStrategy._analyze_orderflow_v6()
 
         # Récupérer les données Footprint M1 depuis le résultat PhaseObserver
         # SOURCE 1: Depuis footprint_summary (passé en paramètre - cache scalping)
@@ -238,26 +237,10 @@ class MarketAnalyzer:
             except Exception as e:
                 self.logger.warning(f"[MarketAnalyzer] Footprint extraction from annotated_df failed: {e}")
 
-        try:
-            orderflow_signals = detect_orderflow_v6(
-                annotated_df,
-                imbalance_threshold=of_kwargs["imbalance_threshold"],
-                cvd_smoothing=of_kwargs["cvd_smoothing"],
-                price_bins=of_kwargs["price_bins"],
-                vp_options=of_kwargs["vp_options"],
-                logger=self.logger,
-                footprint_data=footprint_data,  # ⚡ NOUVEAU: Données Footprint M1 (dict)
-            )
-            if not isinstance(orderflow_signals, dict):
-                raise TypeError("detect_orderflow_v6 must return a dict")
-        except Exception as e:
-            self.logger.error(f"[MarketAnalyzer] detect_orderflow_v6 failed: {e}")
-            orderflow_signals = {
-                "score": 0.0,
-                "status": "SUSPECT",
-                "summary": {"rescue_level": 2, "rescue_note": f"of_v6_failed:{e}"},
-                "patterns": {},
-            }
+        # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+        # Ancienne analyse detect_orderflow_v6 supprimée
+        # → Remplacée par analyse OrderFlow V6 intégrée dans ScalpingStrategy._analyze_orderflow_v6()
+        orderflow_signals = {}
 
         # 3️⃣ Dernier point brut (Series Pandas)
         try:

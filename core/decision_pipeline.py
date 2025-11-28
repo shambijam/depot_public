@@ -15,12 +15,10 @@ from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
 from strategy.liquidity import LiquidityStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
-from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
-
-try:
-    from phase_observer.detect_orderflow_v6.logging_manager import Span
-except Exception:
-    Span = None
+# === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+# detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
+# from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
+# from phase_observer.detect_orderflow_v6.logging_manager import Span
 
 
 
@@ -1267,24 +1265,10 @@ class DecisionPipeline:
 
             # -- 2) ORDERFLOW M1 (V6 institutionnel) : score + biais (delta_total) + VP (VPOC/VA) --
             orderflow = {}
-            if isinstance(df_m1, pd.DataFrame) and not df_m1.empty:
-                of_cfg = ((current_config.get("phase_observer") or {}).get("orderflow_v6") or {})
-                try:
-                    kwargs = {
-                        "imbalance_threshold": float(of_cfg.get("imbalance_threshold", 0.20)),
-                        "cvd_smoothing":      float(of_cfg.get("cvd_smoothing", 0.0)),
-                        "price_bins":         int(of_cfg.get("price_bins", 24)),
-                        "logger":             self.logger,
-                    }
-                except Exception:
-                    # défauts sûrs si conf mal formée
-                    kwargs = {"imbalance_threshold": 0.20, "cvd_smoothing": 0.0, "price_bins": 24, "logger": self.logger}
-
-                if Span:
-                    with Span(self.logger, "orderflow_v6", warn_ms=50):
-                        orderflow = detect_orderflow_v6(df_m1.copy(), **kwargs)
-                else:
-                    orderflow = detect_orderflow_v6(df_m1.copy(), **kwargs)
+            # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
+            # Ancienne analyse detect_orderflow_v6 supprimée
+            # → Analyse OrderFlow V6 maintenant intégrée dans ScalpingStrategy._analyze_orderflow_v6()
+            orderflow = {}
 
 
             # -- 4) Appel brique de fusion (pondération + règles métier + veto) --
