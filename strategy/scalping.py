@@ -78,6 +78,784 @@ class ScalpingStrategy(BaseStrategy):
 
         return decision
 
+    # ==========================================================
+    # =========   ORDERFLOW V6 SCORING SYSTEM   ================
+    # ==========================================================
+
+    def _analyze_orderflow_v6(
+        self,
+        asset: str,
+        df_m1: pd.DataFrame,
+        df_m5: Optional[pd.DataFrame],
+        df_m15: Optional[pd.DataFrame],
+        asset_signals: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        📈 OrderFlow Analysis V6 - Multi-Timeframe
+
+        Périodes STRICTES :
+        • M1 : 8 bougies → Momentum immédiat
+        • M5 : 6 bougies → Structure court terme
+        • M15 : 4 bougies → Contexte moyen terme
+
+        Focus principal :
+        • Volume Profile : 15 bougies M1
+        • Delta Analysis : 10 bougies M1
+        • Imbalances : 5 bougies M1 + 8 bougies M5
+
+        Retourne :
+        {
+            "delta_momentum_score": 0-25,
+            "volume_confirmation_score": 0-15,
+            "imbalance_strength_score": 0-10,
+            "total_score": 0-50,
+            "mtf_alignment": {"m1": "", "m5": "", "m15": ""},
+            "details": {...}
+        }
+        """
+        result = {
+            "delta_momentum_score": 0.0,
+            "volume_confirmation_score": 0.0,
+            "imbalance_strength_score": 0.0,
+            "total_score": 0.0,
+            "mtf_alignment": {"m1": "neutral", "m5": "neutral", "m15": "neutral"},
+            "details": {}
+        }
+
+        try:
+            # ================================================================
+            # 0. ANALYSE MULTI-TIMEFRAME (M1/M5/M15)
+            # ================================================================
+            mtf_details = {}
+
+            # M1 : 8 bougies → Momentum immédiat
+            if df_m1 is not None and len(df_m1) >= 8:
+                m1_closes = df_m1["close"].tail(8).values
+                m1_opens = df_m1["open"].tail(8).values
+                m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
+                m1_bearish = 8 - m1_bullish
+
+                if m1_bullish >= 6:  # 6/8 haussier
+                    result["mtf_alignment"]["m1"] = "bullish"
+                elif m1_bearish >= 6:  # 6/8 baissier
+                    result["mtf_alignment"]["m1"] = "bearish"
+                else:
+                    result["mtf_alignment"]["m1"] = "neutral"
+
+                mtf_details["m1"] = {
+                    "bullish_bars": m1_bullish,
+                    "bearish_bars": m1_bearish,
+                    "direction": result["mtf_alignment"]["m1"]
+                }
+
+            # M5 : 6 bougies → Structure court terme
+            if df_m5 is not None and len(df_m5) >= 6:
+                m5_closes = df_m5["close"].tail(6).values
+                m5_opens = df_m5["open"].tail(6).values
+                m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
+                m5_bearish = 6 - m5_bullish
+
+                if m5_bullish >= 5:  # 5/6 haussier
+                    result["mtf_alignment"]["m5"] = "bullish"
+                elif m5_bearish >= 5:  # 5/6 baissier
+                    result["mtf_alignment"]["m5"] = "bearish"
+                else:
+                    result["mtf_alignment"]["m5"] = "neutral"
+
+                mtf_details["m5"] = {
+                    "bullish_bars": m5_bullish,
+                    "bearish_bars": m5_bearish,
+                    "direction": result["mtf_alignment"]["m5"]
+                }
+
+            # M15 : 4 bougies → Contexte moyen terme
+            if df_m15 is not None and len(df_m15) >= 4:
+                m15_closes = df_m15["close"].tail(4).values
+                m15_opens = df_m15["open"].tail(4).values
+                m15_bullish = sum(1 for i in range(len(m15_closes)) if m15_closes[i] > m15_opens[i])
+                m15_bearish = 4 - m15_bullish
+
+                if m15_bullish >= 3:  # 3/4 haussier
+                    result["mtf_alignment"]["m15"] = "bullish"
+                elif m15_bearish >= 3:  # 3/4 baissier
+                    result["mtf_alignment"]["m15"] = "bearish"
+                else:
+                    result["mtf_alignment"]["m15"] = "neutral"
+
+                mtf_details["m15"] = {
+                    "bullish_bars": m15_bullish,
+                    "bearish_bars": m15_bearish,
+                    "direction": result["mtf_alignment"]["m15"]
+                }
+
+            result["details"]["mtf"] = mtf_details
+
+            # Vérifier alignement multi-timeframe (bonus potentiel)
+            mtf_aligned = False
+            if (result["mtf_alignment"]["m1"] == result["mtf_alignment"]["m5"] == result["mtf_alignment"]["m15"]
+                and result["mtf_alignment"]["m1"] != "neutral"):
+                mtf_aligned = True
+                result["mtf_aligned"] = True
+                self.logger.debug(f"[{asset}] 🎯 MTF Alignment: {result['mtf_alignment']['m1'].upper()}")
+
+            # ================================================================
+            # 1. DELTA MOMENTUM (25 points max)
+            # ================================================================
+            delta_momentum_score = 0.0
+            delta_details = {}
+
+            # Récupérer delta depuis asset_signals (footprint)
+            fp_summary = asset_signals.get("footprint_summary", {})
+            delta_total = fp_summary.get("delta_total", 0)
+
+            # Analyser cohérence delta sur 10 bougies M1
+            if df_m1 is not None and len(df_m1) >= 10:
+                # Compter bougies avec delta cohérent
+                closes = df_m1["close"].tail(10).values
+                opens = df_m1["open"].tail(10).values
+                bullish_count = sum(1 for i in range(len(closes)) if closes[i] > opens[i])
+                bearish_count = sum(1 for i in range(len(closes)) if closes[i] < opens[i])
+
+                coherence = max(bullish_count, bearish_count) / 10.0  # 0.0 à 1.0
+                delta_details["coherence"] = coherence
+                delta_details["bullish_bars"] = bullish_count
+                delta_details["bearish_bars"] = bearish_count
+
+                # Scoring Delta Momentum
+                if abs(delta_total) > 0:
+                    delta_direction = "bullish" if delta_total > 0 else "bearish"
+                    delta_details["delta_total"] = delta_total
+                    delta_details["direction"] = delta_direction
+
+                    # Delta fort cohérent → 15-25 pts
+                    if coherence >= 0.8:  # 8/10 bougies cohérentes
+                        if abs(delta_total) >= 300:
+                            delta_momentum_score = 25.0  # Très fort
+                        elif abs(delta_total) >= 200:
+                            delta_momentum_score = 20.0  # Fort
+                        elif abs(delta_total) >= 100:
+                            delta_momentum_score = 15.0  # Moyen
+                    # Delta modéré → 5-10 pts
+                    elif coherence >= 0.6:
+                        delta_momentum_score = 10.0
+                    else:
+                        delta_momentum_score = 5.0
+                else:
+                    delta_details["direction"] = "neutral"
+                    delta_momentum_score = 5.0
+
+            result["delta_momentum_score"] = delta_momentum_score
+            result["details"]["delta"] = delta_details
+
+            # ================================================================
+            # 2. VOLUME CONFIRMATION (15 points max)
+            # ================================================================
+            volume_confirmation_score = 0.0
+            volume_details = {}
+
+            if df_m1 is not None and len(df_m1) >= 15 and "tick_volume" in df_m1.columns:
+                volumes = df_m1["tick_volume"].tail(15).values
+                current_volume = volumes[-1]
+                avg_volume = np.mean(volumes[:-1])  # Moyenne des 14 précédentes
+
+                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+                volume_details["current_volume"] = float(current_volume)
+                volume_details["avg_volume"] = float(avg_volume)
+                volume_details["ratio"] = volume_ratio
+
+                # Volume Profile POC (Point of Control)
+                if len(df_m1) >= 15:
+                    highs = df_m1["high"].tail(15).values
+                    lows = df_m1["low"].tail(15).values
+                    poc_price = (np.max(highs) + np.min(lows)) / 2.0  # Approximation POC
+                    volume_details["poc"] = float(poc_price)
+
+                # Scoring Volume
+                if volume_ratio >= 2.5:  # Volume spike
+                    volume_confirmation_score = 15.0
+                    volume_details["spike_detected"] = True
+                elif volume_ratio >= 1.8:  # Volume fort
+                    volume_confirmation_score = 12.0
+                elif volume_ratio >= 1.5:  # Volume au-dessus moyenne
+                    volume_confirmation_score = 10.0
+                elif volume_ratio >= 1.0:  # Volume normal
+                    volume_confirmation_score = 5.0
+                else:  # Volume faible
+                    volume_confirmation_score = 0.0
+
+            result["volume_confirmation_score"] = volume_confirmation_score
+            result["details"]["volume"] = volume_details
+
+            # ================================================================
+            # 3. IMBALANCE STRENGTH (10 points max)
+            # ================================================================
+            imbalance_strength_score = 0.0
+            imbalance_details = {"m1": [], "m5": []}
+
+            # Imbalances M1 (5 bougies)
+            if df_m1 is not None and len(df_m1) >= 7:  # 5 + 2 pour détecter gaps
+                for i in range(len(df_m1) - 6, len(df_m1) - 1):
+                    if i < 0:
+                        continue
+                    prev_close = df_m1["close"].iloc[i]
+                    next_open = df_m1["open"].iloc[i + 2]  # Bougie après la gap
+                    gap_size = abs(next_open - prev_close)
+
+                    if gap_size > 0:
+                        imbalance_type = "bullish" if next_open > prev_close else "bearish"
+                        imbalance_details["m1"].append({
+                            "type": imbalance_type,
+                            "size": float(gap_size)
+                        })
+
+            # Imbalances M5 (8 bougies)
+            if df_m5 is not None and len(df_m5) >= 10:
+                for i in range(len(df_m5) - 9, len(df_m5) - 1):
+                    if i < 0:
+                        continue
+                    prev_close = df_m5["close"].iloc[i]
+                    next_open = df_m5["open"].iloc[i + 2]
+                    gap_size = abs(next_open - prev_close)
+
+                    if gap_size > 0:
+                        imbalance_type = "bullish" if next_open > prev_close else "bearish"
+                        imbalance_details["m5"].append({
+                            "type": imbalance_type,
+                            "size": float(gap_size)
+                        })
+
+            # Scoring Imbalances
+            total_imbalances = len(imbalance_details["m1"]) + len(imbalance_details["m5"])
+            imbalance_details["total_count"] = total_imbalances
+
+            if total_imbalances >= 5:  # Beaucoup d'imbalances
+                imbalance_strength_score = 10.0
+            elif total_imbalances >= 3:  # Imbalances significatives
+                imbalance_strength_score = 8.0
+            elif total_imbalances >= 1:  # Imbalances mineures
+                imbalance_strength_score = 5.0
+            else:
+                imbalance_strength_score = 0.0
+
+            result["imbalance_strength_score"] = imbalance_strength_score
+            result["details"]["imbalances"] = imbalance_details
+
+            # ================================================================
+            # TOTAL ORDERFLOW SCORE
+            # ================================================================
+            result["total_score"] = (
+                delta_momentum_score +
+                volume_confirmation_score +
+                imbalance_strength_score
+            )
+
+            self.logger.debug(
+                f"[{asset}] OrderFlow V6: Delta={delta_momentum_score:.1f} "
+                f"Volume={volume_confirmation_score:.1f} "
+                f"Imbalance={imbalance_strength_score:.1f} "
+                f"→ Total={result['total_score']:.1f}/50"
+            )
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] OrderFlow V6 analysis error: {e}", exc_info=True)
+
+        return result
+
+    def _analyze_footprint_v6(
+        self,
+        asset: str,
+        df_m1: pd.DataFrame,
+        asset_signals: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        👣 Footprint Analysis V6 - Ticks Temps Réel
+
+        Concentration sur bougie courante :
+        • Analyse ticks en temps réel
+        • Détection clusters d'ordres
+        • Niveaux d'absorption critiques
+
+        Contexte immédiat :
+        • 3 bougies précédentes pour confirmation
+        • Focus sur la bougie en cours (0-59 secondes)
+
+        Retourne :
+        {
+            "absorption_levels_score": 0-15,
+            "order_clustering_score": 0-10,
+            "price_rejection_score": 0-5,
+            "total_score": 0-30,
+            "details": {...}
+        }
+        """
+        result = {
+            "absorption_levels_score": 0.0,
+            "order_clustering_score": 0.0,
+            "price_rejection_score": 0.0,
+            "total_score": 0.0,
+            "details": {}
+        }
+
+        try:
+            # Récupérer footprint depuis asset_signals
+            fp_summary = asset_signals.get("footprint_summary", {})
+            fp_status = asset_signals.get("footprint_status", "N/A").upper()
+
+            # ================================================================
+            # 1. ABSORPTION LEVELS (15 points max)
+            # ================================================================
+            absorption_score = 0.0
+            absorption_details = {}
+
+            # Récupérer les niveaux d'absorption depuis footprint
+            buy_vol = fp_summary.get("total_buy_volume", 0)
+            sell_vol = fp_summary.get("total_sell_volume", 0)
+            total_vol = buy_vol + sell_vol
+
+            if total_vol > 0:
+                buy_ratio = buy_vol / total_vol
+                sell_ratio = sell_vol / total_vol
+
+                absorption_details["buy_volume"] = buy_vol
+                absorption_details["sell_volume"] = sell_vol
+                absorption_details["buy_ratio"] = buy_ratio
+                absorption_details["sell_ratio"] = sell_ratio
+
+                # Déterminer absorption
+                if buy_ratio >= 0.75:  # 75%+ achats
+                    absorption_score = 15.0
+                    absorption_details["bias"] = "STRONG BULLISH"
+                elif buy_ratio >= 0.65:
+                    absorption_score = 12.0
+                    absorption_details["bias"] = "BULLISH"
+                elif sell_ratio >= 0.75:
+                    absorption_score = 15.0
+                    absorption_details["bias"] = "STRONG BEARISH"
+                elif sell_ratio >= 0.65:
+                    absorption_score = 12.0
+                    absorption_details["bias"] = "BEARISH"
+                else:
+                    absorption_score = 5.0
+                    absorption_details["bias"] = "NEUTRAL"
+
+            result["absorption_levels_score"] = absorption_score
+            result["details"]["absorption"] = absorption_details
+
+            # ================================================================
+            # 2. ORDER CLUSTERING (10 points max)
+            # ================================================================
+            clustering_score = 0.0
+            clustering_details = {}
+
+            # Analyser 3 bougies précédentes pour confirmation
+            if df_m1 is not None and len(df_m1) >= 4:
+                # Compter clusters (approximation via volume concentré)
+                volumes = df_m1["tick_volume"].tail(4).values
+                ranges = (df_m1["high"] - df_m1["low"]).tail(4).values
+
+                # Détect clusters : volume élevé + range faible = orders concentrés
+                cluster_count = 0
+                for i in range(len(volumes)):
+                    if ranges[i] > 0:
+                        vol_per_pip = volumes[i] / ranges[i]
+                        if vol_per_pip > np.median(volumes / ranges):  # Au-dessus médiane
+                            cluster_count += 1
+
+                clustering_details["cluster_count"] = cluster_count
+                clustering_details["distribution"] = "concentrated" if cluster_count >= 2 else "dispersed"
+
+                # Scoring
+                if cluster_count >= 3:
+                    clustering_score = 10.0
+                elif cluster_count >= 2:
+                    clustering_score = 7.0
+                elif cluster_count >= 1:
+                    clustering_score = 4.0
+                else:
+                    clustering_score = 0.0
+
+            result["order_clustering_score"] = clustering_score
+            result["details"]["clustering"] = clustering_details
+
+            # ================================================================
+            # 3. PRICE REJECTION (5 points max)
+            # ================================================================
+            rejection_score = 0.0
+            rejection_details = {}
+
+            # Analyser wicks pour détecter rejets
+            if df_m1 is not None and len(df_m1) >= 3:
+                last_bars = df_m1.tail(3)
+
+                rejection_count = 0
+                for idx, row in last_bars.iterrows():
+                    high_val = row["high"]
+                    low_val = row["low"]
+                    open_val = row["open"]
+                    close_val = row["close"]
+
+                    body = abs(close_val - open_val)
+                    full_range = high_val - low_val
+
+                    if full_range > 0:
+                        upper_wick = high_val - max(open_val, close_val)
+                        lower_wick = min(open_val, close_val) - low_val
+
+                        wick_ratio = max(upper_wick, lower_wick) / body if body > 0 else 0
+
+                        # Rejet net si wick > 2x body
+                        if wick_ratio >= 2.0:
+                            rejection_count += 1
+
+                rejection_details["rejection_bars"] = rejection_count
+
+                # Scoring
+                if rejection_count >= 3:
+                    rejection_score = 5.0
+                    rejection_details["strength"] = "strong"
+                elif rejection_count >= 2:
+                    rejection_score = 3.0
+                    rejection_details["strength"] = "moderate"
+                elif rejection_count >= 1:
+                    rejection_score = 2.0
+                    rejection_details["strength"] = "weak"
+                else:
+                    rejection_score = 0.0
+                    rejection_details["strength"] = "none"
+
+            result["price_rejection_score"] = rejection_score
+            result["details"]["rejection"] = rejection_details
+
+            # ================================================================
+            # TOTAL FOOTPRINT SCORE
+            # ================================================================
+            result["total_score"] = (
+                absorption_score +
+                clustering_score +
+                rejection_score
+            )
+
+            self.logger.debug(
+                f"[{asset}] Footprint V6: Absorption={absorption_score:.1f} "
+                f"Clustering={clustering_score:.1f} "
+                f"Rejection={rejection_score:.1f} "
+                f"→ Total={result['total_score']:.1f}/30"
+            )
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] Footprint V6 analysis error: {e}", exc_info=True)
+
+        return result
+
+    def _analyze_triggers_v6(
+        self,
+        asset: str,
+        df_m1: pd.DataFrame,
+        orderflow_result: Dict[str, Any],
+        footprint_result: Dict[str, Any],
+        asset_signals: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        ⚡ Triggers Detection V6 - Ultra-Rapide
+
+        Détection ultra-rapide :
+        • Bougie courante uniquement
+        • Surveillance ticks temps réel
+        • Seuils dynamiques selon volatilité
+
+        Triggers disponibles :
+        • Absorption @ POC : +8 points
+        • Breakout imbalance : +6 points
+        • Stop run bullish/bearish : +5 points
+        • Volume spike : +4 points
+        • Multi-trigger confluence : +2 à +4 points
+        • Alignement MTF : +3 points
+
+        Retourne :
+        {
+            "triggers": [...],
+            "total_score": 0-20+ (peut dépasser 20),
+            "details": {...}
+        }
+        """
+        result = {
+            "triggers": [],
+            "total_score": 0.0,
+            "details": {}
+        }
+
+        try:
+            trigger_points = 0.0
+            triggers_list = []
+
+            # Récupérer POC depuis orderflow
+            orderflow_volume = orderflow_result.get("details", {}).get("volume", {})
+            poc_price = orderflow_volume.get("poc")
+
+            footprint_absorption = footprint_result.get("details", {}).get("absorption", {})
+            absorption_bias = footprint_absorption.get("bias", "NEUTRAL")
+
+            # ================================================================
+            # TRIGGER 1 : Absorption @ POC (+8 points)
+            # ================================================================
+            if poc_price and absorption_bias in ["STRONG BULLISH", "STRONG BEARISH"]:
+                trigger_points += 8.0
+                triggers_list.append({
+                    "name": "absorption_at_poc",
+                    "points": 8,
+                    "direction": "bullish" if "BULLISH" in absorption_bias else "bearish"
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Absorption @ POC (+8 pts)")
+
+            # ================================================================
+            # TRIGGER 2 : Breakout Imbalance (+6 points)
+            # ================================================================
+            orderflow_imbalances = orderflow_result.get("details", {}).get("imbalances", {})
+            imbalance_count = orderflow_imbalances.get("total_count", 0)
+
+            if imbalance_count >= 3:  # Imbalances significatives
+                trigger_points += 6.0
+                triggers_list.append({
+                    "name": "breakout_imbalance",
+                    "points": 6,
+                    "imbalances": imbalance_count
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Breakout Imbalance (+6 pts)")
+
+            # ================================================================
+            # TRIGGER 3 : Volume Spike (+4 points)
+            # ================================================================
+            volume_spike = orderflow_volume.get("spike_detected", False)
+
+            if volume_spike:
+                trigger_points += 4.0
+                triggers_list.append({
+                    "name": "volume_spike",
+                    "points": 4,
+                    "ratio": orderflow_volume.get("ratio", 0)
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Volume Spike (+4 pts)")
+
+            # ================================================================
+            # TRIGGER 4 : Stop Run (+5 points) - Détecté via rejection
+            # ================================================================
+            rejection_strength = footprint_result.get("details", {}).get("rejection", {}).get("strength")
+
+            if rejection_strength == "strong":
+                trigger_points += 5.0
+                triggers_list.append({
+                    "name": "stop_run",
+                    "points": 5,
+                    "strength": "strong"
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Stop Run (+5 pts)")
+
+            # ================================================================
+            # BONUS : Multi-Trigger Confluence (+2 à +4 points)
+            # ================================================================
+            if len(triggers_list) >= 3:
+                bonus = 4
+            elif len(triggers_list) >= 2:
+                bonus = 2
+            else:
+                bonus = 0
+
+            if bonus > 0:
+                trigger_points += bonus
+                triggers_list.append({
+                    "name": "multi_trigger_confluence",
+                    "points": bonus,
+                    "trigger_count": len(triggers_list)
+                })
+                self.logger.debug(f"[{asset}] ⚡ Bonus: Multi-Trigger Confluence (+{bonus} pts)")
+
+            # ================================================================
+            # BONUS : Alignement Multi-Timeframe (+3 points)
+            # ================================================================
+            mtf_aligned = orderflow_result.get("mtf_aligned", False)
+
+            if mtf_aligned:
+                trigger_points += 3.0
+                triggers_list.append({
+                    "name": "mtf_alignment",
+                    "points": 3,
+                    "alignment": orderflow_result.get("mtf_alignment")
+                })
+                self.logger.debug(f"[{asset}] ⚡ Bonus: MTF Alignment (+3 pts)")
+
+            # ================================================================
+            # TOTAL TRIGGERS SCORE
+            # ================================================================
+            result["triggers"] = triggers_list
+            result["total_score"] = trigger_points
+            result["details"]["trigger_count"] = len(triggers_list)
+
+            self.logger.debug(
+                f"[{asset}] Triggers V6: {len(triggers_list)} triggers → {trigger_points:.1f} points"
+            )
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] Triggers V6 analysis error: {e}", exc_info=True)
+
+        return result
+
+    def _log_orderflow_consolidated_report(
+        self,
+        asset: str,
+        orderflow_result: Dict[str, Any],
+        footprint_result: Dict[str, Any],
+        triggers_result: Dict[str, Any],
+        final_score: float,
+        action: Optional[str]
+    ) -> None:
+        """
+        📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
+
+        Affiche un bilan formaté des trois composants et du score final
+        """
+        try:
+            sep = "=" * 70
+
+            self.logger.info(f"\n{sep}")
+            self.logger.info(f"📊 ORDERFLOW V6 - ANALYSE BURST SCALPING [{asset}]")
+            self.logger.info(f"{sep}")
+
+            # ================================================================
+            # 1. ANALYSE MULTI-TIMEFRAME
+            # ================================================================
+            mtf_alignment = orderflow_result.get("mtf_alignment", {})
+            m1_dir = mtf_alignment.get("m1", "N/A")
+            m5_dir = mtf_alignment.get("m5", "N/A")
+            m15_dir = mtf_alignment.get("m15", "N/A")
+            mtf_aligned = orderflow_result.get("mtf_aligned", False)
+
+            self.logger.info(f"\n⏱️  PÉRIODES MULTI-TIMEFRAME :")
+            self.logger.info(f"   • M1  (8 bougies)  → Momentum : {m1_dir.upper()}")
+            self.logger.info(f"   • M5  (6 bougies)  → Structure : {m5_dir.upper()}")
+            self.logger.info(f"   • M15 (4 bougies)  → Contexte  : {m15_dir.upper()}")
+
+            if mtf_aligned:
+                self.logger.info(f"   ✅ ALIGNEMENT MTF DÉTECTÉ (+3 pts bonus)")
+            else:
+                self.logger.info(f"   ⚠️  Pas d'alignement multi-timeframe")
+
+            # ================================================================
+            # 2. ORDERFLOW ANALYSIS (50% du score)
+            # ================================================================
+            of_score = orderflow_result.get("total_score", 0.0)
+            delta_score = orderflow_result.get("delta_momentum_score", 0.0)
+            volume_score = orderflow_result.get("volume_confirmation_score", 0.0)
+            imbalance_score = orderflow_result.get("imbalance_strength_score", 0.0)
+
+            delta_details = orderflow_result.get("delta_momentum_details", {})
+            volume_details = orderflow_result.get("volume_confirmation_details", {})
+            imbalance_details = orderflow_result.get("imbalance_strength_details", {})
+
+            self.logger.info(f"\n📈 ORDERFLOW ANALYSIS (50% du total) : {of_score:.1f}/50 points")
+            self.logger.info(f"   ├─ Delta Momentum      : {delta_score:.1f}/25 pts")
+            self.logger.info(f"   │  • Delta total       : {delta_details.get('delta_total', 0)}")
+            self.logger.info(f"   │  • Cohérence         : {delta_details.get('coherence', 0)*100:.0f}%")
+            self.logger.info(f"   │  • Direction         : {delta_details.get('delta_direction', 'N/A').upper()}")
+
+            self.logger.info(f"   ├─ Volume Confirmation : {volume_score:.1f}/15 pts")
+            self.logger.info(f"   │  • Volume ratio      : {volume_details.get('volume_ratio', 0):.2f}x")
+            self.logger.info(f"   │  • Spike détecté     : {'OUI' if volume_details.get('spike_detected') else 'NON'}")
+            self.logger.info(f"   │  • POC (Point of Control) : {volume_details.get('poc_price', 'N/A')}")
+
+            self.logger.info(f"   └─ Imbalance Strength  : {imbalance_score:.1f}/10 pts")
+            m1_imb = imbalance_details.get("m1", [])
+            m5_imb = imbalance_details.get("m5", [])
+            self.logger.info(f"      • Imbalances M1    : {len(m1_imb)} détectées")
+            self.logger.info(f"      • Imbalances M5    : {len(m5_imb)} détectées")
+
+            # ================================================================
+            # 3. FOOTPRINT ANALYSIS (30% du score)
+            # ================================================================
+            fp_score = footprint_result.get("total_score", 0.0)
+            absorption_score = footprint_result.get("absorption_score", 0.0)
+            clustering_score = footprint_result.get("clustering_score", 0.0)
+            rejection_score = footprint_result.get("rejection_score", 0.0)
+
+            absorption_details = footprint_result.get("absorption_details", {})
+            clustering_details = footprint_result.get("clustering_details", {})
+            rejection_details = footprint_result.get("rejection_details", {})
+
+            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS (30% du total) : {fp_score:.1f}/30 points")
+            self.logger.info(f"   ├─ Absorption Levels   : {absorption_score:.1f}/15 pts")
+            self.logger.info(f"   │  • Biais absorption  : {absorption_details.get('bias', 'N/A')}")
+            self.logger.info(f"   │  • Buy ratio         : {absorption_details.get('buy_ratio', 0)*100:.0f}%")
+            self.logger.info(f"   │  • Sell ratio        : {absorption_details.get('sell_ratio', 0)*100:.0f}%")
+
+            self.logger.info(f"   ├─ Order Clustering    : {clustering_score:.1f}/10 pts")
+            self.logger.info(f"   │  • Clusters détectés : {clustering_details.get('cluster_count', 0)}")
+            self.logger.info(f"   │  • Concentration     : {clustering_details.get('concentration', 'N/A')}")
+
+            self.logger.info(f"   └─ Price Rejection     : {rejection_score:.1f}/5 pts")
+            self.logger.info(f"      • Rejets détectés   : {rejection_details.get('rejection_count', 0)}/3")
+            self.logger.info(f"      • Force rejet       : {rejection_details.get('rejection_strength', 'N/A')}")
+
+            # ================================================================
+            # 4. TRIGGERS DETECTION (20% du score)
+            # ================================================================
+            trig_score = triggers_result.get("total_score", 0.0)
+            trigger_points = triggers_result.get("trigger_points", 0.0)
+            triggers_list = triggers_result.get("triggers_detected", [])
+
+            self.logger.info(f"\n⚡ TRIGGERS DETECTION (20% du total) : {trig_score:.1f}/20 points")
+
+            if triggers_list:
+                self.logger.info(f"   Triggers détectés ({len(triggers_list)}) :")
+                for trig in triggers_list:
+                    name = trig.get("name", "unknown")
+                    pts = trig.get("points", 0)
+                    direction = trig.get("direction", "N/A")
+
+                    # Emoji selon le type
+                    emoji = "🎯"
+                    if "absorption" in name:
+                        emoji = "🔵"
+                    elif "breakout" in name or "imbalance" in name:
+                        emoji = "🔓"
+                    elif "volume" in name:
+                        emoji = "📊"
+                    elif "stop_run" in name:
+                        emoji = "🎣"
+
+                    self.logger.info(f"   {emoji} {name.replace('_', ' ').title()} → +{pts} pts ({direction})")
+            else:
+                self.logger.info(f"   ⚠️  Aucun trigger détecté")
+
+            # Bonus
+            bonus_mtf = triggers_result.get("bonus_mtf_alignment", 0)
+            bonus_confluence = triggers_result.get("bonus_multi_trigger_confluence", 0)
+
+            if bonus_mtf > 0:
+                self.logger.info(f"   ✨ Bonus MTF Alignment : +{bonus_mtf} pts")
+            if bonus_confluence > 0:
+                self.logger.info(f"   ✨ Bonus Multi-Trigger : +{bonus_confluence} pts")
+
+            # ================================================================
+            # 5. SCORE FINAL & DÉCISION
+            # ================================================================
+            self.logger.info(f"\n{sep}")
+            self.logger.info(f"🎯 SCORE FINAL ORDERFLOW V6")
+            self.logger.info(f"{sep}")
+            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f} × 0.50 = {of_score * 0.50:.1f}")
+            self.logger.info(f"   Footprint (30%) : {fp_score:.1f} × 0.30 = {fp_score * 0.30:.1f}")
+            self.logger.info(f"   Triggers  (20%) : {trig_score:.1f} × 0.20 = {trig_score * 0.20:.1f}")
+            self.logger.info(f"   {'─' * 50}")
+            self.logger.info(f"   TOTAL           : {final_score:.1f}/100 points")
+
+            # Direction recommandée
+            if action:
+                action_emoji = "🟢" if action == "BUY" else "🔴"
+                self.logger.info(f"\n   {action_emoji} Direction recommandée : {action}")
+
+            self.logger.info(f"{sep}\n")
+
+        except Exception as e:
+            self.logger.error(f"[{asset}] Erreur rapport consolidé OrderFlow V6: {e}", exc_info=True)
+
 
     def evaluate_entry(
         self,
@@ -378,6 +1156,106 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 return {}
 
+            # ================================================================
+            # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M5/M15)
+            # ================================================================
+            try:
+                # Récupération des DataFrames multi-timeframe
+                df_m5 = None
+                df_m15 = None
+
+                # Essayer de récupérer M5 depuis analyzed_context
+                try:
+                    ctx_md_m5 = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+                    for k in ("annotated_rates_df_m5", "df_m5"):
+                        v = ctx_md_m5.get(k)
+                        if isinstance(v, pd.DataFrame):
+                            df_m5 = v
+                            break
+                except Exception:
+                    pass
+
+                # Essayer de récupérer M15 depuis analyzed_context
+                try:
+                    ctx_md_m15 = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+                    for k in ("annotated_rates_df_m15", "df_m15"):
+                        v = ctx_md_m15.get(k)
+                        if isinstance(v, pd.DataFrame):
+                            df_m15 = v
+                            break
+                except Exception:
+                    pass
+
+                # ⚡ 1. OrderFlow Analysis (50% du score)
+                orderflow_result = self._analyze_orderflow_v6(
+                    asset=asset,
+                    df_m1=df_work,
+                    df_m5=df_m5,
+                    df_m15=df_m15,
+                    asset_signals=asset_signals
+                )
+
+                # 👣 2. Footprint Analysis (30% du score)
+                footprint_result = self._analyze_footprint_v6(
+                    asset=asset,
+                    df_m1=df_work,
+                    asset_signals=asset_signals
+                )
+
+                # 🎯 3. Triggers Detection (20% du score)
+                triggers_result = self._analyze_triggers_v6(
+                    asset=asset,
+                    df_m1=df_work,
+                    orderflow_result=orderflow_result,
+                    footprint_result=footprint_result,
+                    asset_signals=asset_signals
+                )
+
+                # 📊 4. SCORING FINAL PONDÉRÉ
+                orderflow_score = orderflow_result.get("total_score", 0.0)
+                footprint_score = footprint_result.get("total_score", 0.0)
+                triggers_score = triggers_result.get("total_score", 0.0)
+
+                # Formule : (OrderFlow × 0.50) + (Footprint × 0.30) + (Triggers × 0.20)
+                final_score = (
+                    orderflow_score * 0.50 +
+                    footprint_score * 0.30 +
+                    triggers_score * 0.20
+                )
+
+                # 📋 5. RAPPORT CONSOLIDÉ
+                self._log_orderflow_consolidated_report(
+                    asset=asset,
+                    orderflow_result=orderflow_result,
+                    footprint_result=footprint_result,
+                    triggers_result=triggers_result,
+                    final_score=final_score,
+                    action=action
+                )
+
+                # 🚨 6. VALIDATION SEUILS DÉCISION
+                # Seuils configurables (par défaut : 60/100 pour trade)
+                min_score_threshold = float(sm_cfg.get("orderflow_v6_min_score", 60.0))
+
+                if final_score < min_score_threshold:
+                    self.logger.info(
+                        f"[{asset}] ❌ REFUS burst_scalping → Score OrderFlow V6 "
+                        f"{final_score:.1f}/100 < seuil {min_score_threshold:.1f}"
+                    )
+                    return {}
+
+                self.logger.info(
+                    f"[{asset}] ✅ VALIDATION burst_scalping → Score OrderFlow V6 "
+                    f"{final_score:.1f}/100 ≥ seuil {min_score_threshold:.1f}"
+                )
+
+            except Exception as e:
+                self.logger.warning(f"[{asset}] OrderFlow V6 analysis failed: {e}", exc_info=True)
+                # Continuer sans OrderFlow V6 si erreur (fallback)
+
+            # ================================================================
+            # DÉCISION BURST SCALPING
+            # ================================================================
             # Décision single_master (aucun volume/SL ici → calculés en aval dans prepare_order)
             entry_mode = str(sm_cfg.get("entry_mode", "MARKET")).upper()
             burst_sz = int(sm_cfg.get("burst_size", 5) or 5)
@@ -396,6 +1274,7 @@ class ScalpingStrategy(BaseStrategy):
                     "entry_source": "core_decision",
                     "per_leg_virtual": bool(sm_cfg.get("per_leg_virtual", True)),
                     "atr_m1_pips": atr_m1_pips,
+                    "orderflow_v6_score": final_score if 'final_score' in locals() else None,
                 },
             }
             return self._finalize_decision(sm_decision, analyzed_context)

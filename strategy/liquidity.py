@@ -114,7 +114,21 @@ class LiquidityStrategy(BaseStrategy):
                 latest_sweep = sweeps[-1]
                 if latest_sweep is not None:
                     signals["sweep_details"] = latest_sweep
-                    self.logger.debug(f"[{asset}] Sweep détecté: {latest_sweep.get('type')} @ {latest_sweep.get('price')}")
+
+                    # Phase 3 : Détection multiple sweeps (derniers 5)
+                    recent_sweeps = [s for s in sweeps[-5:] if s is not None]
+                    if len(recent_sweeps) >= 2:
+                        # Compter sweeps dans même direction
+                        buy_sweeps = sum(1 for s in recent_sweeps if s.get("side") == "buy")
+                        sell_sweeps = sum(1 for s in recent_sweeps if s.get("side") == "sell")
+                        signals["multiple_sweeps"] = {
+                            "count": len(recent_sweeps),
+                            "buy_count": buy_sweeps,
+                            "sell_count": sell_sweeps,
+                            "dominant_side": "buy" if buy_sweeps > sell_sweeps else "sell"
+                        }
+
+                    self.logger.debug(f"[{asset}] Sweep détecté: {latest_sweep.get('side')} @ {latest_sweep.get('price')}")
         except Exception as e:
             self.logger.debug(f"[{asset}] detect_liquidity_sweeps error: {e}")
 
@@ -192,6 +206,70 @@ class LiquidityStrategy(BaseStrategy):
                     self.logger.debug(f"[{asset}] Micro phase: {signals['micro_phase']}")
         except Exception as e:
             self.logger.debug(f"[{asset}] detect_micro_phase_m1 error: {e}")
+
+        # ========================================================================
+        # Phase 3 : Confluence Multi-Timeframe (HTF)
+        # ========================================================================
+        try:
+            if df_htf is not None and not df_htf.empty:
+                # Détecter les signaux HTF pour validation
+                htf_signals = {}
+
+                # Sweep HTF
+                try:
+                    htf_sweeps = self.detectors.detect_liquidity_sweeps(df_htf, None)
+                    if htf_sweeps and len(htf_sweeps) > 0:
+                        latest_htf_sweep = htf_sweeps[-1]
+                        if latest_htf_sweep is not None:
+                            htf_signals["sweep"] = latest_htf_sweep.get("side")
+                except Exception:
+                    pass
+
+                # BOS HTF
+                try:
+                    htf_bos = self.detectors.detect_bos_mss_enhanced(df_htf, None)
+                    if htf_bos and len(htf_bos) > 0:
+                        latest_htf_bos = htf_bos[-1]
+                        if latest_htf_bos is not None:
+                            bos_type = latest_htf_bos.get("type", "").lower()
+                            if "bull" in bos_type:
+                                htf_signals["bos"] = "buy"
+                            elif "bear" in bos_type:
+                                htf_signals["bos"] = "sell"
+                except Exception:
+                    pass
+
+                # Regime HTF
+                try:
+                    htf_regime = self.detectors.detect_market_regime(df_htf)
+                    if htf_regime is not None and not htf_regime.empty:
+                        htf_signals["regime"] = str(htf_regime.iloc[-1])
+                except Exception:
+                    pass
+
+                if htf_signals:
+                    signals["htf_confluence"] = htf_signals
+                    self.logger.debug(f"[{asset}] HTF signals: {htf_signals}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] HTF detection error: {e}")
+
+        # ========================================================================
+        # Phase 3 : ATR pour SL/TP dynamiques
+        # ========================================================================
+        try:
+            if "high" in df.columns and "low" in df.columns and "close" in df.columns:
+                # Calcul ATR(14)
+                high_low = df["high"] - df["low"]
+                high_close = (df["high"] - df["close"].shift(1)).abs()
+                low_close = (df["low"] - df["close"].shift(1)).abs()
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr = tr.rolling(14).mean().iloc[-1]
+
+                if not pd.isna(atr) and atr > 0:
+                    signals["atr"] = float(atr)
+                    self.logger.debug(f"[{asset}] ATR(14): {atr:.5f}")
+        except Exception as e:
+            self.logger.debug(f"[{asset}] ATR calculation error: {e}")
 
         # Log résumé
         detected_count = sum(1 for k in signals.keys() if k.endswith("_details"))
@@ -421,6 +499,42 @@ class LiquidityStrategy(BaseStrategy):
             self.logger.info("  ❌ Micro Phase  : Inconnue")
 
         # ========================================================================
+        # Phase 3 : Informations Additionnelles
+        # ========================================================================
+        self.logger.info("")
+        self.logger.info("  📊 PHASE 3 INDICATORS")
+        self.logger.info("  " + "─" * 67)
+
+        # Multiple Sweeps
+        multiple_sweeps = liquidity_signals.get("multiple_sweeps")
+        if multiple_sweeps:
+            count = multiple_sweeps.get("count", 0)
+            buy_count = multiple_sweeps.get("buy_count", 0)
+            sell_count = multiple_sweeps.get("sell_count", 0)
+            dominant = multiple_sweeps.get("dominant_side", "N/A")
+            self.logger.info(f"  ✅ Multiple Sweeps : {count} total | BUY={buy_count} SELL={sell_count} | Dominant={dominant.upper()}")
+        else:
+            self.logger.info("  ❌ Multiple Sweeps : Aucun")
+
+        # HTF Confluence
+        htf_confluence = liquidity_signals.get("htf_confluence")
+        if htf_confluence:
+            htf_sweep = htf_confluence.get("sweep", "N/A")
+            htf_bos = htf_confluence.get("bos", "N/A")
+            htf_regime = htf_confluence.get("regime", "N/A")
+            self.logger.info(f"  ✅ HTF Confluence  : Sweep={htf_sweep.upper()} | BOS={htf_bos.upper()} | Regime={htf_regime}")
+        else:
+            self.logger.info("  ❌ HTF Confluence  : Aucun signal HTF")
+
+        # ATR
+        atr_value = liquidity_signals.get("atr")
+        if atr_value:
+            atr_pips = atr_value / pip_size if pip_size > 0 else 0
+            self.logger.info(f"  ✅ ATR(14)         : {atr_value:.5f} ({atr_pips:.1f} pips)")
+        else:
+            self.logger.info("  ❌ ATR(14)         : Non calculé")
+
+        # ========================================================================
         # [2] ANALYSE CONFLUENCE
         # ========================================================================
         self.logger.info("")
@@ -452,10 +566,21 @@ class LiquidityStrategy(BaseStrategy):
             elif rule_name == "liquidity_micro_phase_sell":
                 setup_label = "⚡ MICRO PHASE REVERSAL (SELL)"
 
+            # Phase 3 setups
+            elif rule_name == "liquidity_multiple_sweeps_buy":
+                setup_label = "⚡ MULTIPLE SWEEPS (BUY)"
+            elif rule_name == "liquidity_multiple_sweeps_sell":
+                setup_label = "⚡ MULTIPLE SWEEPS (SELL)"
+
             else:
                 setup_label = f"⚡ {rule_name.upper()}"
 
             self.logger.info(f"  Setup détecté   : {setup_label}")
+
+            # HTF Confirmation (Phase 3)
+            htf_confirmed = decision.get("htf_confirmed", False)
+            if htf_confirmed:
+                self.logger.info(f"  HTF Confirmed   : ✅ YES (+10% confidence)")
 
             # Distance
             if sweep and eqh_eql:
@@ -985,6 +1110,144 @@ class LiquidityStrategy(BaseStrategy):
                         "signals": liquidity_signals,
                         "meta": meta,
                         "rr": rr
+                    }
+
+                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                    return decision
+
+            # ========================================================================
+            # 🎯 PHASE 3 : Setup Multiple Sweeps + Confluence HTF
+            # ========================================================================
+
+            multiple_sweeps = liquidity_signals.get("multiple_sweeps")
+            htf_confluence = liquidity_signals.get("htf_confluence", {})
+            atr_value = liquidity_signals.get("atr")
+
+            # --- Setup 6 : Multiple Sweeps (BUY) ---
+            if multiple_sweeps and multiple_sweeps.get("count", 0) >= 3:
+                dominant_side = multiple_sweeps.get("dominant_side")
+                buy_count = multiple_sweeps.get("buy_count", 0)
+                sell_count = multiple_sweeps.get("sell_count", 0)
+
+                # BUY Setup : 3+ sweeps avec dominance buy + confluence HTF
+                if dominant_side == "buy" and buy_count >= 3:
+                    # Validation HTF (optionnelle mais augmente confidence)
+                    htf_valid = False
+                    htf_boost = 0.0
+
+                    # Vérifier si HTF confirme la direction BUY
+                    if htf_confluence:
+                        htf_sweep = htf_confluence.get("sweep")
+                        htf_bos = htf_confluence.get("bos")
+                        htf_regime = htf_confluence.get("regime", "").lower()
+
+                        if (htf_sweep == "buy" or htf_bos == "buy" or "up" in htf_regime):
+                            htf_valid = True
+                            htf_boost = 0.10  # +10% confidence si HTF confirme
+
+                    # Calcul SL/TP dynamique avec ATR
+                    if atr_value and atr_value > 0:
+                        # SL = 1.5x ATR, TP = 3x ATR (RR 2.0)
+                        sl_distance = atr_value * 1.5
+                        tp_distance = atr_value * 3.0
+                    else:
+                        # Fallback fixe
+                        sl_distance = 25 * pip_size
+                        tp_distance = 50 * pip_size
+
+                    entry = price
+                    sl = entry - sl_distance
+                    tp = entry + tp_distance
+
+                    sl_pips = abs(entry - sl) / pip_size
+                    tp_pips = abs(tp - entry) / pip_size
+                    rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                    # Confidence basée sur nombre de sweeps + HTF
+                    base_confidence = 0.72
+                    confidence = min(base_confidence + htf_boost, 0.85)
+
+                    self.logger.info(
+                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | multiple_sweeps_buy | "
+                        f"Sweeps={buy_count} | HTF={'✅' if htf_valid else '❌'} | "
+                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                    )
+
+                    decision = {
+                        "asset": asset,
+                        "action": "BUY",
+                        "entry_price": entry,
+                        "sl": sl,
+                        "tp": tp,
+                        "confidence": confidence,
+                        "rule_name": "liquidity_multiple_sweeps_buy",
+                        "strategy_type": "liquidity",
+                        "execution_status": "ready",
+                        "signals": liquidity_signals,
+                        "meta": meta,
+                        "rr": rr,
+                        "htf_confirmed": htf_valid
+                    }
+
+                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
+                    return decision
+
+                # SELL Setup : 3+ sweeps avec dominance sell + confluence HTF
+                elif dominant_side == "sell" and sell_count >= 3:
+                    # Validation HTF
+                    htf_valid = False
+                    htf_boost = 0.0
+
+                    if htf_confluence:
+                        htf_sweep = htf_confluence.get("sweep")
+                        htf_bos = htf_confluence.get("bos")
+                        htf_regime = htf_confluence.get("regime", "").lower()
+
+                        if (htf_sweep == "sell" or htf_bos == "sell" or "down" in htf_regime):
+                            htf_valid = True
+                            htf_boost = 0.10
+
+                    # Calcul SL/TP dynamique avec ATR
+                    if atr_value and atr_value > 0:
+                        sl_distance = atr_value * 1.5
+                        tp_distance = atr_value * 3.0
+                    else:
+                        sl_distance = 25 * pip_size
+                        tp_distance = 50 * pip_size
+
+                    entry = price
+                    sl = entry + sl_distance
+                    tp = entry - tp_distance
+
+                    sl_pips = abs(sl - entry) / pip_size
+                    tp_pips = abs(entry - tp) / pip_size
+                    rr = tp_pips / sl_pips if sl_pips > 0 else 0
+
+                    base_confidence = 0.72
+                    confidence = min(base_confidence + htf_boost, 0.85)
+
+                    self.logger.info(
+                        f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | multiple_sweeps_sell | "
+                        f"Sweeps={sell_count} | HTF={'✅' if htf_valid else '❌'} | "
+                        f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
+                        f"TP={tp:.5f} ({tp_pips:.1f}p) | RR={rr:.2f}"
+                    )
+
+                    decision = {
+                        "asset": asset,
+                        "action": "SELL",
+                        "entry_price": entry,
+                        "sl": sl,
+                        "tp": tp,
+                        "confidence": confidence,
+                        "rule_name": "liquidity_multiple_sweeps_sell",
+                        "strategy_type": "liquidity",
+                        "execution_status": "ready",
+                        "signals": liquidity_signals,
+                        "meta": meta,
+                        "rr": rr,
+                        "htf_confirmed": htf_valid
                     }
 
                     self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
