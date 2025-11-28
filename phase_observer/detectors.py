@@ -1726,7 +1726,7 @@ def footprint_validator(
 
     # 🔍 DEBUG: Log distribution des sides
     side_counts = df["side_norm"].value_counts().to_dict()
-    logger.info(f"[FOOTPRINT_DEBUG] Side distribution: {side_counts} | total_ticks={len(df)}")
+    logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Side distribution: {side_counts} | total_ticks={len(df)}")
 
     if price_step is None or price_step <= 0:
         uniq = np.sort(df["price"].dropna().unique())
@@ -1866,7 +1866,7 @@ def footprint_validator(
     buy_pct = (buy_volume / max(total_volume, 1.0)) * 100.0 if total_volume > 0 else 50.0
 
     # 🔍 DEBUG: Log volumes calculés
-    logger.info(f"[FOOTPRINT_DEBUG] Volumes: buy={buy_volume}, sell={sell_volume}, unknown={unknown_volume}, total={total_volume}")
+    logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Volumes: buy={buy_volume}, sell={sell_volume}, unknown={unknown_volume}, total={total_volume}")
 
     return {
         "summary": {
