@@ -208,13 +208,17 @@ class ScalpingStrategy(BaseStrategy):
             fp_summary = asset_signals.get("footprint_summary", {})
             self.logger.debug(f"[OF V6][{asset}] footprint_summary keys: {list(fp_summary.keys() if isinstance(fp_summary, dict) else [])}")
 
-            # Récupérer delta depuis footprint_summary
-            # Peut être dans "delta_total" ou calculé depuis footprint_df
+            # Récupérer delta depuis footprint_summary (structure: {"summary": {"delta_total": ...}, ...})
             delta_total = 0
 
-            # Essayer différentes clés possibles
             if isinstance(fp_summary, dict):
-                delta_total = fp_summary.get("delta_total", 0)
+                # Essayer structure imbriquée (footprint_validator format)
+                summary = fp_summary.get("summary", {})
+                if isinstance(summary, dict):
+                    delta_total = summary.get("delta_total", 0)
+                else:
+                    # Fallback: try direct access (compatibility)
+                    delta_total = fp_summary.get("delta_total", 0)
 
                 # Si pas de delta_total, essayer de le calculer depuis footprint_df
                 if delta_total == 0:
@@ -446,10 +450,16 @@ class ScalpingStrategy(BaseStrategy):
             buy_vol = 0
             sell_vol = 0
 
-            # Essayer depuis fp_summary
+            # Essayer depuis fp_summary (structure: {"summary": {"buy_volume": ..., "sell_volume": ...}, ...})
             if isinstance(fp_summary, dict):
-                buy_vol = fp_summary.get("total_buy_volume", 0)
-                sell_vol = fp_summary.get("total_sell_volume", 0)
+                summary = fp_summary.get("summary", {})
+                if isinstance(summary, dict):
+                    buy_vol = summary.get("buy_volume", 0)
+                    sell_vol = summary.get("sell_volume", 0)
+                else:
+                    # Fallback: try direct access (compatibility)
+                    buy_vol = fp_summary.get("buy_volume", 0)
+                    sell_vol = fp_summary.get("sell_volume", 0)
 
             # Si pas dans summary, calculer depuis footprint_df
             if buy_vol == 0 and sell_vol == 0:
@@ -993,7 +1003,9 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Early entry si déséquilibre extrême (optionnel)
                 try:
-                    delta = fp_summary.get("delta_total")
+                    # Récupérer delta depuis structure imbriquée
+                    summary = fp_summary.get("summary", {})
+                    delta = summary.get("delta_total") if isinstance(summary, dict) else fp_summary.get("delta_total")
                 except Exception:
                     delta = None
                 if isinstance(delta, (int, float)) and abs(delta) >= 300:
@@ -1024,7 +1036,9 @@ class ScalpingStrategy(BaseStrategy):
                 # 3) dernier filet via le footprint (si résumé dispo)
                 try:
                     if action is None and isinstance(fp_summary, dict):
-                        d = fp_summary.get("delta_total")
+                        # Récupérer delta depuis structure imbriquée
+                        summary = fp_summary.get("summary", {})
+                        d = summary.get("delta_total") if isinstance(summary, dict) else fp_summary.get("delta_total")
                         if isinstance(d, (int, float)):
                             if d > 0:
                                 action = "BUY"
