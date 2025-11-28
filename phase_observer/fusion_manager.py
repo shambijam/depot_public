@@ -238,7 +238,14 @@ class FusionManager:
         """
         📊 BILAN CONSOLIDÉ (Version Compacte - 27 Nov 2025)
         Architecture: OrderFlow (50%) + Footprint (30%) + Triggers (20%)
+
+        === DÉSACTIVÉ (Session 28 Nov 2025) ===
+        Remplacé par les bilans spécifiques des stratégies :
+        - ScalpingStrategy._log_orderflow_consolidated_report()
+        - LiquidityStrategy._log_liquidity_consolidated_report()
         """
+        return  # ❌ Désactivé pour éviter pollution des logs
+
         try:
             # Symboles directionnels
             dir_symbols = {1: "🟢 BUY", -1: "🔴 SELL", 0: "⚪ NEUTRAL"}

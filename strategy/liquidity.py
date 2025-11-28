@@ -749,6 +749,9 @@ class LiquidityStrategy(BaseStrategy):
             # ✅ Phase 1 : Implémentation minimale (Sweep + EQH/EQL)
             # Les 8 détecteurs ont retourné leurs signaux dans liquidity_signals
 
+            # 🔷 Afficher le bilan consolidé liquidity (TOUJOURS, même sans setup)
+            self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
+
             sweep = liquidity_signals.get("sweep_details")
             eqh_eql = liquidity_signals.get("eqh_eql_details")
 
@@ -797,9 +800,6 @@ class LiquidityStrategy(BaseStrategy):
                             "rr": rr
                         }
 
-                        # 🔷 Afficher le bilan consolidé liquidity
-                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
-
                         return decision
                     else:
                         self.logger.info(
@@ -846,8 +846,6 @@ class LiquidityStrategy(BaseStrategy):
                         }
 
                         # 🔷 Afficher le bilan consolidé liquidity
-                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
-
                         return decision
                     else:
                         self.logger.info(
@@ -914,9 +912,7 @@ class LiquidityStrategy(BaseStrategy):
                                         "rr": rr
                                     }
 
-                                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                                     return decision
-
                 # SELL Setup : OB bearish + FVG bearish
                 elif "bear" in ob_type and "bear" in fvg_type:
                     ob_zone = ob.get("zone", [0.0, 0.0])
@@ -960,10 +956,8 @@ class LiquidityStrategy(BaseStrategy):
                                         "rr": rr
                                     }
 
-                                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                                     return decision
 
-            # --- Setup 4 : Break of Structure + Absorption (BUY) ---
             if bos_mss and absorption:
                 bos_type = bos_mss.get("type", "").lower()
                 abs_side = absorption.get("side", "").lower()
@@ -1004,11 +998,9 @@ class LiquidityStrategy(BaseStrategy):
                             "rr": rr
                         }
 
-                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                         return decision
 
                 # SELL Setup : BOS bearish + Absorption sell-side
-                elif "bear" in bos_type and abs_side == "sell":
                     bos_level = float(bos_mss.get("level", price))
                     body_ratio = float(absorption.get("body_ratio", 0.0))
 
@@ -1042,12 +1034,10 @@ class LiquidityStrategy(BaseStrategy):
                             "rr": rr
                         }
 
-                        self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                         return decision
 
             # --- Setup 5 : Micro Phase Reversal (BUY) ---
             if micro_phase and regime:
-                # BUY Setup : Micro phase = accumulation + Regime favorable
                 if micro_phase == "accumulation" and regime in ["trending_up", "transitional"]:
                     entry = price
                     sl = entry - (30 * pip_size)  # SL 30 pips
@@ -1078,13 +1068,11 @@ class LiquidityStrategy(BaseStrategy):
                         "rr": rr
                     }
 
-                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                     return decision
 
                 # SELL Setup : Micro phase = distribution + Regime favorable
                 elif micro_phase == "distribution" and regime in ["trending_down", "transitional"]:
                     entry = price
-                    sl = entry + (30 * pip_size)  # SL 30 pips
                     tp = entry - (60 * pip_size)  # TP 60 pips (RR 2.0)
 
                     sl_pips = abs(sl - entry) / pip_size
@@ -1112,14 +1100,12 @@ class LiquidityStrategy(BaseStrategy):
                         "rr": rr
                     }
 
-                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                     return decision
 
             # ========================================================================
             # 🎯 PHASE 3 : Setup Multiple Sweeps + Confluence HTF
             # ========================================================================
 
-            multiple_sweeps = liquidity_signals.get("multiple_sweeps")
             htf_confluence = liquidity_signals.get("htf_confluence", {})
             atr_value = liquidity_signals.get("atr")
 
@@ -1190,7 +1176,6 @@ class LiquidityStrategy(BaseStrategy):
                         "htf_confirmed": htf_valid
                     }
 
-                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                     return decision
 
                 # SELL Setup : 3+ sweeps avec dominance sell + confluence HTF
@@ -1198,7 +1183,6 @@ class LiquidityStrategy(BaseStrategy):
                     # Validation HTF
                     htf_valid = False
                     htf_boost = 0.0
-
                     if htf_confluence:
                         htf_sweep = htf_confluence.get("sweep")
                         htf_bos = htf_confluence.get("bos")
@@ -1250,17 +1234,14 @@ class LiquidityStrategy(BaseStrategy):
                         "htf_confirmed": htf_valid
                     }
 
-                    self._log_liquidity_consolidated_report(asset, liquidity_signals, decision, price, pip_size)
                     return decision
 
             # --- Aucun setup valide ---
             self.logger.info(f"[DEBUG][{asset}] evaluate_entry terminé → AUCUN setup retenu.")
 
             # 🔷 Afficher le bilan consolidé liquidity (aucune décision)
-            self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
 
             return {}
-
         except Exception as e:
             self.logger.error(f"[{asset}] evaluate_entry error: {e}", exc_info=True)
             return {}
