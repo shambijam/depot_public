@@ -437,8 +437,14 @@ class ScalpingStrategy(BaseStrategy):
             fp_summary = asset_signals.get("footprint_summary", {})
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
 
-            # ✅ DEBUG: Log footprint_summary
-            self.logger.debug(f"[FP V6][{asset}] footprint_summary keys: {list(fp_summary.keys() if isinstance(fp_summary, dict) else [])}")
+            # ✅ DEBUG: Log footprint_summary structure
+            if isinstance(fp_summary, dict):
+                self.logger.info(f"[FP V6][{asset}] 🔍 footprint_summary keys: {list(fp_summary.keys())}")
+                if "summary" in fp_summary:
+                    summary_keys = list(fp_summary["summary"].keys()) if isinstance(fp_summary["summary"], dict) else []
+                    self.logger.info(f"[FP V6][{asset}] 🔍 summary sub-keys: {summary_keys}")
+            else:
+                self.logger.info(f"[FP V6][{asset}] ⚠️ footprint_summary n'est pas un dict: {type(fp_summary)}")
 
             # ================================================================
             # 1. ABSORPTION LEVELS (15 points max)
@@ -456,10 +462,12 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(summary, dict):
                     buy_vol = summary.get("buy_volume", 0)
                     sell_vol = summary.get("sell_volume", 0)
+                    self.logger.info(f"[FP V6][{asset}] 🔍 Volumes depuis summary: buy={buy_vol}, sell={sell_vol}")
                 else:
                     # Fallback: try direct access (compatibility)
                     buy_vol = fp_summary.get("buy_volume", 0)
                     sell_vol = fp_summary.get("sell_volume", 0)
+                    self.logger.info(f"[FP V6][{asset}] 🔍 Volumes depuis fp_summary direct: buy={buy_vol}, sell={sell_vol}")
 
             # Si pas dans summary, calculer depuis footprint_df
             if buy_vol == 0 and sell_vol == 0:

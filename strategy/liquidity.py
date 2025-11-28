@@ -1106,6 +1106,7 @@ class LiquidityStrategy(BaseStrategy):
             # 🎯 PHASE 3 : Setup Multiple Sweeps + Confluence HTF
             # ========================================================================
 
+            multiple_sweeps = liquidity_signals.get("multiple_sweeps", {})
             htf_confluence = liquidity_signals.get("htf_confluence", {})
             atr_value = liquidity_signals.get("atr")
 
