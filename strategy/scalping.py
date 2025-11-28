@@ -204,9 +204,26 @@ class ScalpingStrategy(BaseStrategy):
             delta_momentum_score = 0.0
             delta_details = {}
 
-            # Récupérer delta depuis asset_signals (footprint)
+            # ✅ DEBUG: Log footprint_summary pour voir sa structure
             fp_summary = asset_signals.get("footprint_summary", {})
-            delta_total = fp_summary.get("delta_total", 0)
+            self.logger.debug(f"[OF V6][{asset}] footprint_summary keys: {list(fp_summary.keys() if isinstance(fp_summary, dict) else [])}")
+
+            # Récupérer delta depuis footprint_summary
+            # Peut être dans "delta_total" ou calculé depuis footprint_df
+            delta_total = 0
+
+            # Essayer différentes clés possibles
+            if isinstance(fp_summary, dict):
+                delta_total = fp_summary.get("delta_total", 0)
+
+                # Si pas de delta_total, essayer de le calculer depuis footprint_df
+                if delta_total == 0:
+                    footprint_df = asset_signals.get("footprint_df")
+                    if isinstance(footprint_df, pd.DataFrame) and "delta" in footprint_df.columns:
+                        delta_total = float(footprint_df["delta"].sum())
+                        self.logger.debug(f"[OF V6][{asset}] Delta calculé depuis footprint_df: {delta_total}")
+
+            self.logger.debug(f"[OF V6][{asset}] Delta total récupéré: {delta_total}")
 
             # Analyser cohérence delta sur 10 bougies M1
             if df_m1 is not None and len(df_m1) >= 10:
@@ -253,8 +270,23 @@ class ScalpingStrategy(BaseStrategy):
             volume_confirmation_score = 0.0
             volume_details = {}
 
-            if df_m1 is not None and len(df_m1) >= 15 and "tick_volume" in df_m1.columns:
-                volumes = df_m1["tick_volume"].tail(15).values
+            # ✅ DEBUG: Log colonnes df_m1
+            if df_m1 is not None:
+                self.logger.debug(f"[OF V6][{asset}] df_m1 columns: {list(df_m1.columns)[:10]}... (len={len(df_m1)})")
+
+            # Vérifier si tick_volume existe, sinon essayer volume ou real_volume
+            vol_col = None
+            if df_m1 is not None and len(df_m1) >= 15:
+                if "tick_volume" in df_m1.columns:
+                    vol_col = "tick_volume"
+                elif "volume" in df_m1.columns:
+                    vol_col = "volume"
+                elif "real_volume" in df_m1.columns:
+                    vol_col = "real_volume"
+
+            if vol_col is not None:
+                self.logger.debug(f"[OF V6][{asset}] Utilisation colonne volume: {vol_col}")
+                volumes = df_m1[vol_col].tail(15).values
                 current_volume = volumes[-1]
                 avg_volume = np.mean(volumes[:-1])  # Moyenne des 14 précédentes
 
@@ -293,12 +325,12 @@ class ScalpingStrategy(BaseStrategy):
             imbalance_details = {"m1": [], "m5": []}
 
             # Imbalances M1 (5 bougies)
-            if df_m1 is not None and len(df_m1) >= 7:  # 5 + 2 pour détecter gaps
+            if df_m1 is not None and len(df_m1) >= 6:  # Minimum 6 bougies pour détecter 5 gaps
                 for i in range(len(df_m1) - 6, len(df_m1) - 1):
-                    if i < 0:
+                    if i < 0 or i + 1 >= len(df_m1):
                         continue
                     prev_close = df_m1["close"].iloc[i]
-                    next_open = df_m1["open"].iloc[i + 2]  # Bougie après la gap
+                    next_open = df_m1["open"].iloc[i + 1]  # ✅ CORRIGÉ: i+1 au lieu de i+2
                     gap_size = abs(next_open - prev_close)
 
                     if gap_size > 0:
@@ -309,12 +341,12 @@ class ScalpingStrategy(BaseStrategy):
                         })
 
             # Imbalances M5 (8 bougies)
-            if df_m5 is not None and len(df_m5) >= 10:
+            if df_m5 is not None and len(df_m5) >= 9:  # Minimum 9 bougies pour détecter 8 gaps
                 for i in range(len(df_m5) - 9, len(df_m5) - 1):
-                    if i < 0:
+                    if i < 0 or i + 1 >= len(df_m5):
                         continue
                     prev_close = df_m5["close"].iloc[i]
-                    next_open = df_m5["open"].iloc[i + 2]
+                    next_open = df_m5["open"].iloc[i + 1]  # ✅ CORRIGÉ: i+1 au lieu de i+2
                     gap_size = abs(next_open - prev_close)
 
                     if gap_size > 0:
@@ -401,6 +433,9 @@ class ScalpingStrategy(BaseStrategy):
             fp_summary = asset_signals.get("footprint_summary", {})
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
 
+            # ✅ DEBUG: Log footprint_summary
+            self.logger.debug(f"[FP V6][{asset}] footprint_summary keys: {list(fp_summary.keys() if isinstance(fp_summary, dict) else [])}")
+
             # ================================================================
             # 1. ABSORPTION LEVELS (15 points max)
             # ================================================================
@@ -408,9 +443,25 @@ class ScalpingStrategy(BaseStrategy):
             absorption_details = {}
 
             # Récupérer les niveaux d'absorption depuis footprint
-            buy_vol = fp_summary.get("total_buy_volume", 0)
-            sell_vol = fp_summary.get("total_sell_volume", 0)
+            buy_vol = 0
+            sell_vol = 0
+
+            # Essayer depuis fp_summary
+            if isinstance(fp_summary, dict):
+                buy_vol = fp_summary.get("total_buy_volume", 0)
+                sell_vol = fp_summary.get("total_sell_volume", 0)
+
+            # Si pas dans summary, calculer depuis footprint_df
+            if buy_vol == 0 and sell_vol == 0:
+                footprint_df = asset_signals.get("footprint_df")
+                if isinstance(footprint_df, pd.DataFrame):
+                    if "buy_volume" in footprint_df.columns and "sell_volume" in footprint_df.columns:
+                        buy_vol = float(footprint_df["buy_volume"].sum())
+                        sell_vol = float(footprint_df["sell_volume"].sum())
+                        self.logger.debug(f"[FP V6][{asset}] Volumes calculés depuis footprint_df: buy={buy_vol}, sell={sell_vol}")
+
             total_vol = buy_vol + sell_vol
+            self.logger.debug(f"[FP V6][{asset}] Total volume: buy={buy_vol}, sell={sell_vol}, total={total_vol}")
 
             if total_vol > 0:
                 buy_ratio = buy_vol / total_vol
@@ -1164,27 +1215,50 @@ class ScalpingStrategy(BaseStrategy):
                 df_m5 = None
                 df_m15 = None
 
+                # ✅ DEBUG: Log structure analyzed_context
+                ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
+                self.logger.debug(f"[OF V6][{asset}] market_data keys: {list(ctx_md.keys())}")
+
                 # Essayer de récupérer M5 depuis analyzed_context
                 try:
-                    ctx_md_m5 = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-                    for k in ("annotated_rates_df_m5", "df_m5"):
-                        v = ctx_md_m5.get(k)
-                        if isinstance(v, pd.DataFrame):
+                    for k in ("annotated_rates_df_m5", "df_m5", "rates_m5"):
+                        v = ctx_md.get(k)
+                        if isinstance(v, pd.DataFrame) and len(v) >= 4:
                             df_m5 = v
+                            self.logger.debug(f"[OF V6][{asset}] M5 trouvé via clé '{k}' | len={len(df_m5)}")
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug(f"[OF V6][{asset}] Erreur récupération M5: {e}")
 
                 # Essayer de récupérer M15 depuis analyzed_context
                 try:
-                    ctx_md_m15 = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-                    for k in ("annotated_rates_df_m15", "df_m15"):
-                        v = ctx_md_m15.get(k)
-                        if isinstance(v, pd.DataFrame):
+                    for k in ("annotated_rates_df_m15", "df_m15", "rates_m15"):
+                        v = ctx_md.get(k)
+                        if isinstance(v, pd.DataFrame) and len(v) >= 4:
                             df_m15 = v
+                            self.logger.debug(f"[OF V6][{asset}] M15 trouvé via clé '{k}' | len={len(df_m15)}")
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug(f"[OF V6][{asset}] Erreur récupération M15: {e}")
+
+                # Si M5/M15 non trouvés, essayer de les récupérer via MT5
+                if df_m5 is None and self.mt5_connector:
+                    try:
+                        import MetaTrader5 as mt5
+                        df_m5 = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=20)
+                        if df_m5 is not None and len(df_m5) >= 4:
+                            self.logger.debug(f"[OF V6][{asset}] M5 récupéré via MT5 | len={len(df_m5)}")
+                    except Exception as e:
+                        self.logger.debug(f"[OF V6][{asset}] Impossible récupérer M5 via MT5: {e}")
+
+                if df_m15 is None and self.mt5_connector:
+                    try:
+                        import MetaTrader5 as mt5
+                        df_m15 = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M15, count=15)
+                        if df_m15 is not None and len(df_m15) >= 4:
+                            self.logger.debug(f"[OF V6][{asset}] M15 récupéré via MT5 | len={len(df_m15)}")
+                    except Exception as e:
+                        self.logger.debug(f"[OF V6][{asset}] Impossible récupérer M15 via MT5: {e}")
 
                 # ⚡ 1. OrderFlow Analysis (50% du score)
                 orderflow_result = self._analyze_orderflow_v6(
