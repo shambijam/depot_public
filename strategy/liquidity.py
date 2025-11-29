@@ -80,6 +80,22 @@ class LiquidityStrategy(BaseStrategy):
     #   LOGIQUE PAR ACTIF
     # =========================
 
+    def _validate_dataframe(self, df: pd.DataFrame, required_cols: List[str]) -> bool:
+        """
+        Valide qu'un DataFrame contient les colonnes requises.
+
+        Args:
+            df: DataFrame à valider
+            required_cols: Liste des colonnes requises
+
+        Returns:
+            True si toutes les colonnes sont présentes, False sinon
+        """
+        if df is None or df.empty:
+            return False
+        missing_cols = set(required_cols) - set(df.columns)
+        return len(missing_cols) == 0
+
     def _detect_liquidity_signals(
         self,
         asset: str,
@@ -103,6 +119,12 @@ class LiquidityStrategy(BaseStrategy):
         """
         if self.detectors is None:
             self.logger.warning(f"[{asset}] Détecteurs non disponibles, retour vide.")
+            return {}
+
+        # Validation colonnes requises
+        required_cols = ["open", "high", "low", "close", "volume"]
+        if not self._validate_dataframe(df, required_cols):
+            self.logger.warning(f"[{asset}] DataFrame invalide ou colonnes manquantes: {required_cols}")
             return {}
 
         signals = {}
@@ -129,8 +151,10 @@ class LiquidityStrategy(BaseStrategy):
                         }
 
                     self.logger.debug(f"[{asset}] Sweep détecté: {latest_sweep.get('side')} @ {latest_sweep.get('price')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_liquidity_sweeps error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_liquidity_sweeps unexpected error: {e}", exc_info=True)
 
         try:
             # 2. Order Blocks (zones d'entrée + TP)
@@ -140,8 +164,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_ob is not None:
                     signals["ob_details"] = latest_ob
                     self.logger.debug(f"[{asset}] OB détecté: {latest_ob.get('type')} @ {latest_ob.get('zone')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_order_block_ml_enhanced error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_order_block_ml_enhanced unexpected error: {e}", exc_info=True)
 
         try:
             # 3. Fair Value Gaps (zones d'entrée + TP)
@@ -151,8 +177,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_fvg is not None:
                     signals["fvg_details"] = latest_fvg
                     self.logger.debug(f"[{asset}] FVG détecté: {latest_fvg.get('type')} @ {latest_fvg.get('zone')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_fvg_enhanced error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_fvg_enhanced unexpected error: {e}", exc_info=True)
 
         try:
             # 4. Equal Highs/Lows (TP prioritaire)
@@ -162,8 +190,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_eq is not None:
                     signals["eqh_eql_details"] = latest_eq
                     self.logger.debug(f"[{asset}] EQH/EQL détecté: {latest_eq.get('type')} @ {latest_eq.get('level')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_eqh_eql error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_eqh_eql unexpected error: {e}", exc_info=True)
 
         try:
             # 5. Break of Structure / Market Structure Shift (SL)
@@ -173,8 +203,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_bos is not None:
                     signals["bos_mss_details"] = latest_bos
                     self.logger.debug(f"[{asset}] BOS/MSS détecté: {latest_bos.get('type')} @ {latest_bos.get('level')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_bos_mss_enhanced error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_bos_mss_enhanced unexpected error: {e}", exc_info=True)
 
         try:
             # 6. Absorption (extrêmes)
@@ -184,8 +216,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_abs is not None:
                     signals["absorption_details"] = latest_abs
                     self.logger.debug(f"[{asset}] Absorption détectée: {latest_abs.get('type')}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_absorption error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_absorption unexpected error: {e}", exc_info=True)
 
         try:
             # 7. Market Regime (contexte global)
@@ -193,8 +227,10 @@ class LiquidityStrategy(BaseStrategy):
             if regime is not None and not regime.empty:
                 signals["market_regime"] = str(regime.iloc[-1])
                 self.logger.debug(f"[{asset}] Regime: {signals['market_regime']}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_market_regime error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_market_regime unexpected error: {e}", exc_info=True)
 
         try:
             # 8. Micro Phase M1 (phase courte durée)
@@ -204,8 +240,10 @@ class LiquidityStrategy(BaseStrategy):
                 if latest_micro is not None:
                     signals["micro_phase"] = str(latest_micro.get("phase", "unknown"))
                     self.logger.debug(f"[{asset}] Micro phase: {signals['micro_phase']}")
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             self.logger.debug(f"[{asset}] detect_micro_phase_m1 error: {e}")
+        except Exception as e:
+            self.logger.error(f"[{asset}] detect_micro_phase_m1 unexpected error: {e}", exc_info=True)
 
         # ========================================================================
         # Phase 3 : Confluence Multi-Timeframe (HTF)
@@ -683,7 +721,14 @@ class LiquidityStrategy(BaseStrategy):
                     df_m1 = val
                     break
 
-            df_work = df_m1.copy() if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50 else None
+            # Validation et copie sécurisée du DataFrame
+            required_cols = ["open", "high", "low", "close", "volume"]
+            df_work = None
+            if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50:
+                if self._validate_dataframe(df_m1, required_cols):
+                    df_work = df_m1.copy()
+                else:
+                    self.logger.warning(f"[{asset}] DataFrame M1 manque colonnes requises: {required_cols}")
 
             # --- 0.5) Détection des signaux de liquidité (Session 23 Nov 2025) ---
             # Récupération des DataFrames HTF si disponibles
@@ -691,8 +736,9 @@ class LiquidityStrategy(BaseStrategy):
             for key in ("df_htf", "rates_df_h1", "df_h1"):
                 val = ctx_md.get(key)
                 if isinstance(val, pd.DataFrame) and not val.empty:
-                    df_htf = val
-                    break
+                    if self._validate_dataframe(val, required_cols):
+                        df_htf = val
+                        break
 
             # Appel des 8 détecteurs de liquidité
             if df_work is not None:
