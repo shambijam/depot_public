@@ -204,24 +204,13 @@ class ScalpingStrategy(BaseStrategy):
             delta_momentum_score = 0.0
             delta_details = {}
 
-            # ✅ DEBUG: Log footprint_summary pour voir sa structure
-            fp_summary = asset_signals.get("footprint_summary", {})
-            self.logger.debug(f"[OF V6][{asset}] footprint_summary keys: {list(fp_summary.keys() if isinstance(fp_summary, dict) else [])}")
+            # ✅ EXACTEMENT comme fusion_manager.py ligne 1000
+            fp_raw = asset_signals.get("footprint_summary", {})  # Structure complète
+            fp_summary = fp_raw.get("summary", {}) if isinstance(fp_raw, dict) else {}  # Extrait "summary"
 
-            # ✅ footprint_summary EST DÉJÀ LA PARTIE "summary" (extraction faite par market_analyzer)
             delta_total = 0
-
             if isinstance(fp_summary, dict):
-                delta_total = fp_summary.get("delta_total", 0)
-
-                # Si pas de delta_total, essayer de le calculer depuis footprint_df
-                if delta_total == 0:
-                    footprint_df = asset_signals.get("footprint_df")
-                    if isinstance(footprint_df, pd.DataFrame) and "delta" in footprint_df.columns:
-                        delta_total = float(footprint_df["delta"].sum())
-                        self.logger.debug(f"[OF V6][{asset}] Delta calculé depuis footprint_df: {delta_total}")
-
-            self.logger.debug(f"[OF V6][{asset}] Delta total récupéré: {delta_total}")
+                delta_total = float(fp_summary.get("delta_total", 0))
 
             # Analyser cohérence delta sur 10 bougies M1
             if df_m1 is not None and len(df_m1) >= 10:
@@ -293,12 +282,11 @@ class ScalpingStrategy(BaseStrategy):
                 volume_details["avg_volume"] = float(avg_volume)
                 volume_details["ratio"] = volume_ratio
 
-                # Volume Profile POC (Point of Control)
-                if len(df_m1) >= 15:
-                    highs = df_m1["high"].tail(15).values
-                    lows = df_m1["low"].tail(15).values
-                    poc_price = (np.max(highs) + np.min(lows)) / 2.0  # Approximation POC
-                    volume_details["poc"] = float(poc_price)
+                # ✅ POC depuis footprint_summary (VRAI POC calculé depuis profil de volume)
+                if isinstance(fp_summary, dict):
+                    poc_price = fp_summary.get("poc")
+                    if poc_price is not None and isinstance(poc_price, (int, float)):
+                        volume_details["poc"] = float(poc_price)
 
                 # Scoring Volume
                 if volume_ratio >= 2.5:  # Volume spike
@@ -320,52 +308,29 @@ class ScalpingStrategy(BaseStrategy):
             # 3. IMBALANCE STRENGTH (10 points max)
             # ================================================================
             imbalance_strength_score = 0.0
-            imbalance_details = {"m1": [], "m5": []}
+            imbalance_details = {}
 
-            # Imbalances M1 (5 bougies)
-            if df_m1 is not None and len(df_m1) >= 6:  # Minimum 6 bougies pour détecter 5 gaps
-                for i in range(len(df_m1) - 6, len(df_m1) - 1):
-                    if i < 0 or i + 1 >= len(df_m1):
-                        continue
-                    prev_close = df_m1["close"].iloc[i]
-                    next_open = df_m1["open"].iloc[i + 1]  # ✅ CORRIGÉ: i+1 au lieu de i+2
-                    gap_size = abs(next_open - prev_close)
+            # ✅ Récupérer imbalances depuis fp_summary (DÉJÀ calculées par footprint_validator)
+            if isinstance(fp_summary, dict):
+                imbalance_buy = int(fp_summary.get("imbalance_buy", 0))
+                imbalance_sell = int(fp_summary.get("imbalance_sell", 0))
+                total_imbalances = imbalance_buy + imbalance_sell
 
-                    if gap_size > 0:
-                        imbalance_type = "bullish" if next_open > prev_close else "bearish"
-                        imbalance_details["m1"].append({
-                            "type": imbalance_type,
-                            "size": float(gap_size)
-                        })
+                imbalance_details["imbalance_buy"] = imbalance_buy
+                imbalance_details["imbalance_sell"] = imbalance_sell
+                imbalance_details["m1_count"] = total_imbalances  # Les imbalances footprint sont M1
+                imbalance_details["m5_count"] = 0  # TODO: Si besoin M5 séparé, ajouter au footprint_validator
+                imbalance_details["total_count"] = total_imbalances
 
-            # Imbalances M5 (8 bougies)
-            if df_m5 is not None and len(df_m5) >= 9:  # Minimum 9 bougies pour détecter 8 gaps
-                for i in range(len(df_m5) - 9, len(df_m5) - 1):
-                    if i < 0 or i + 1 >= len(df_m5):
-                        continue
-                    prev_close = df_m5["close"].iloc[i]
-                    next_open = df_m5["open"].iloc[i + 1]  # ✅ CORRIGÉ: i+1 au lieu de i+2
-                    gap_size = abs(next_open - prev_close)
-
-                    if gap_size > 0:
-                        imbalance_type = "bullish" if next_open > prev_close else "bearish"
-                        imbalance_details["m5"].append({
-                            "type": imbalance_type,
-                            "size": float(gap_size)
-                        })
-
-            # Scoring Imbalances
-            total_imbalances = len(imbalance_details["m1"]) + len(imbalance_details["m5"])
-            imbalance_details["total_count"] = total_imbalances
-
-            if total_imbalances >= 5:  # Beaucoup d'imbalances
-                imbalance_strength_score = 10.0
-            elif total_imbalances >= 3:  # Imbalances significatives
-                imbalance_strength_score = 8.0
-            elif total_imbalances >= 1:  # Imbalances mineures
-                imbalance_strength_score = 5.0
-            else:
-                imbalance_strength_score = 0.0
+                # Scoring basé sur les imbalances totales
+                if total_imbalances >= 5:  # Beaucoup d'imbalances
+                    imbalance_strength_score = 10.0
+                elif total_imbalances >= 3:  # Imbalances significatives
+                    imbalance_strength_score = 8.0
+                elif total_imbalances >= 1:  # Imbalances mineures
+                    imbalance_strength_score = 5.0
+                else:
+                    imbalance_strength_score = 0.0
 
             result["imbalance_strength_score"] = imbalance_strength_score
             result["details"]["imbalances"] = imbalance_details
@@ -427,8 +392,9 @@ class ScalpingStrategy(BaseStrategy):
         }
 
         try:
-            # Récupérer footprint depuis asset_signals
-            fp_summary = asset_signals.get("footprint_summary", {})
+            # ✅ EXACTEMENT comme fusion_manager.py ligne 1000
+            fp_raw = asset_signals.get("footprint_summary", {})  # Structure complète
+            fp_summary = fp_raw.get("summary", {}) if isinstance(fp_raw, dict) else {}  # Extrait "summary"
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
 
 
@@ -442,23 +408,12 @@ class ScalpingStrategy(BaseStrategy):
             buy_vol = 0
             sell_vol = 0
 
-            # ✅ footprint_summary EST DÉJÀ LA PARTIE "summary" (extraction faite par market_analyzer)
+            # ✅ MÊME APPROCHE que fusion_manager.py (ligne 1008-1009) qui FONCTIONNAIT
             if isinstance(fp_summary, dict):
-                buy_vol = fp_summary.get("buy_volume", 0)
-                sell_vol = fp_summary.get("sell_volume", 0)
-                self.logger.debug(f"[FP V6][{asset}] Volumes récupérés: buy={buy_vol}, sell={sell_vol}")
-
-            # Si pas dans summary, calculer depuis footprint_df
-            if buy_vol == 0 and sell_vol == 0:
-                footprint_df = asset_signals.get("footprint_df")
-                if isinstance(footprint_df, pd.DataFrame):
-                    if "buy_volume" in footprint_df.columns and "sell_volume" in footprint_df.columns:
-                        buy_vol = float(footprint_df["buy_volume"].sum())
-                        sell_vol = float(footprint_df["sell_volume"].sum())
-                        self.logger.debug(f"[FP V6][{asset}] Volumes calculés depuis footprint_df: buy={buy_vol}, sell={sell_vol}")
+                buy_vol = float(fp_summary.get("buy_volume", 0))
+                sell_vol = float(fp_summary.get("sell_volume", 0))
 
             total_vol = buy_vol + sell_vol
-            self.logger.debug(f"[FP V6][{asset}] Total volume: buy={buy_vol}, sell={sell_vol}, total={total_vol}")
 
             if total_vol > 0:
                 buy_ratio = buy_vol / total_vol
@@ -806,15 +761,17 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"   │  • Direction         : {delta_details.get('delta_direction', 'N/A').upper()}")
 
             self.logger.info(f"   ├─ Volume Confirmation : {volume_score:.1f}/15 pts")
-            self.logger.info(f"   │  • Volume ratio      : {volume_details.get('volume_ratio', 0):.2f}x")
+            self.logger.info(f"   │  • Volume ratio      : {volume_details.get('ratio', 0):.2f}x")
             self.logger.info(f"   │  • Spike détecté     : {'OUI' if volume_details.get('spike_detected') else 'NON'}")
-            self.logger.info(f"   │  • POC (Point of Control) : {volume_details.get('poc_price', 'N/A')}")
+            poc_val = volume_details.get('poc')
+            poc_str = f"{poc_val:.2f}" if poc_val is not None else "N/A"
+            self.logger.info(f"   │  • POC (Point of Control) : {poc_str}")
 
             self.logger.info(f"   └─ Imbalance Strength  : {imbalance_score:.1f}/10 pts")
-            m1_imb = imbalance_details.get("m1", [])
-            m5_imb = imbalance_details.get("m5", [])
-            self.logger.info(f"      • Imbalances M1    : {len(m1_imb)} détectées")
-            self.logger.info(f"      • Imbalances M5    : {len(m5_imb)} détectées")
+            m1_count = imbalance_details.get("m1_count", 0)
+            m5_count = imbalance_details.get("m5_count", 0)
+            self.logger.info(f"      • Imbalances M1    : {m1_count} détectées")
+            self.logger.info(f"      • Imbalances M5    : {m5_count} détectées")
 
             # ================================================================
             # 3. FOOTPRINT ANALYSIS (30% du score)
@@ -990,8 +947,7 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Early entry si déséquilibre extrême (optionnel)
                 try:
-                    # ✅ footprint_summary EST DÉJÀ LA PARTIE "summary"
-                    delta = fp_summary.get("delta_total")
+                    delta = float(fp_summary.get("delta_total", 0)) if isinstance(fp_summary, dict) else 0
                 except Exception:
                     delta = None
                 if isinstance(delta, (int, float)) and abs(delta) >= 300:
@@ -1022,13 +978,11 @@ class ScalpingStrategy(BaseStrategy):
                 # 3) dernier filet via le footprint (si résumé dispo)
                 try:
                     if action is None and isinstance(fp_summary, dict):
-                        # ✅ footprint_summary EST DÉJÀ LA PARTIE "summary"
-                        d = fp_summary.get("delta_total")
-                        if isinstance(d, (int, float)):
-                            if d > 0:
-                                action = "BUY"
-                            elif d < 0:
-                                action = "SELL"
+                        d = float(fp_summary.get("delta_total", 0))
+                        if d > 0:
+                            action = "BUY"
+                        elif d < 0:
+                            action = "SELL"
                 except Exception:
                     pass
     
