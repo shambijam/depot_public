@@ -208,30 +208,20 @@ class ScalpingStrategy(BaseStrategy):
             # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
             fp_raw = asset_signals.get("footprint_summary", {})
 
-            # 🔍 DEBUG: Afficher le contenu EXACT de fp_raw
-            self.logger.critical(f"[OF V6][{asset}][DEBUG] fp_raw type={type(fp_raw)} | keys={list(fp_raw.keys()) if isinstance(fp_raw, dict) else 'N/A'}")
-            if isinstance(fp_raw, dict):
-                self.logger.critical(f"[OF V6][{asset}][DEBUG] fp_raw content preview: delta_total={fp_raw.get('delta_total')}, buy_volume={fp_raw.get('buy_volume')}, 'summary' in fp_raw={('summary' in fp_raw)}")
-
             # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
             if isinstance(fp_raw, dict):
                 if "summary" in fp_raw:
                     # Structure complète (depuis fusion_manager ou autre source)
                     fp_summary = fp_raw["summary"]
-                    self.logger.critical(f"[OF V6][{asset}][DEBUG] Using fp_raw['summary'] (nested structure)")
                 else:
                     # Structure directe (depuis orchestrator)
                     fp_summary = fp_raw
-                    self.logger.critical(f"[OF V6][{asset}][DEBUG] Using fp_raw directly (flat structure)")
             else:
                 fp_summary = {}
-                self.logger.critical(f"[OF V6][{asset}][DEBUG] fp_raw is NOT a dict, using empty dict")
 
             delta_total = 0
             if isinstance(fp_summary, dict):
                 delta_total = float(fp_summary.get("delta_total", 0))
-
-            self.logger.critical(f"[OF V6][{asset}][DEBUG] FINAL delta_total={delta_total}")
 
             # Stocker delta_total TOUJOURS (pour le rapport)
             delta_details["delta_total"] = delta_total
@@ -420,24 +410,16 @@ class ScalpingStrategy(BaseStrategy):
             # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
             fp_raw = asset_signals.get("footprint_summary", {})
 
-            # 🔍 DEBUG: Afficher le contenu EXACT de fp_raw
-            self.logger.critical(f"[FP V6][{asset}][DEBUG] fp_raw type={type(fp_raw)} | keys={list(fp_raw.keys()) if isinstance(fp_raw, dict) else 'N/A'}")
-            if isinstance(fp_raw, dict):
-                self.logger.critical(f"[FP V6][{asset}][DEBUG] fp_raw content: buy_volume={fp_raw.get('buy_volume')}, sell_volume={fp_raw.get('sell_volume')}, 'summary' in fp_raw={('summary' in fp_raw)}")
-
             # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
             if isinstance(fp_raw, dict):
                 if "summary" in fp_raw:
                     # Structure complète (depuis fusion_manager ou autre source)
                     fp_summary = fp_raw["summary"]
-                    self.logger.critical(f"[FP V6][{asset}][DEBUG] Using fp_raw['summary'] (nested structure)")
                 else:
                     # Structure directe (depuis orchestrator)
                     fp_summary = fp_raw
-                    self.logger.critical(f"[FP V6][{asset}][DEBUG] Using fp_raw directly (flat structure)")
             else:
                 fp_summary = {}
-                self.logger.critical(f"[FP V6][{asset}][DEBUG] fp_raw is NOT a dict, using empty dict")
 
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
 
