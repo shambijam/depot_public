@@ -233,6 +233,9 @@ class ScalpingStrategy(BaseStrategy):
 
             self.logger.critical(f"[OF V6][{asset}][DEBUG] FINAL delta_total={delta_total}")
 
+            # Stocker delta_total TOUJOURS (pour le rapport)
+            delta_details["delta_total"] = delta_total
+
             # Analyser cohérence delta sur 10 bougies M1
             if df_m1 is not None and len(df_m1) >= 10:
                 # Compter bougies avec delta cohérent
@@ -456,12 +459,14 @@ class ScalpingStrategy(BaseStrategy):
 
             total_vol = buy_vol + sell_vol
 
+            # Stocker TOUJOURS les volumes (pour le rapport)
+            absorption_details["buy_volume"] = buy_vol
+            absorption_details["sell_volume"] = sell_vol
+
             if total_vol > 0:
                 buy_ratio = buy_vol / total_vol
                 sell_ratio = sell_vol / total_vol
 
-                absorption_details["buy_volume"] = buy_vol
-                absorption_details["sell_volume"] = sell_vol
                 absorption_details["buy_ratio"] = buy_ratio
                 absorption_details["sell_ratio"] = sell_ratio
 
