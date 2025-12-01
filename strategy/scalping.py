@@ -204,9 +204,20 @@ class ScalpingStrategy(BaseStrategy):
             delta_momentum_score = 0.0
             delta_details = {}
 
-            # ✅ EXACTEMENT comme fusion_manager.py ligne 1000
-            fp_raw = asset_signals.get("footprint_summary", {})  # Structure complète
-            fp_summary = fp_raw.get("summary", {}) if isinstance(fp_raw, dict) else {}  # Extrait "summary"
+            # ✅ FIX (1er Décembre 2025): orchestrator stocke SEULEMENT "summary" (pas la structure complète)
+            # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
+            fp_raw = asset_signals.get("footprint_summary", {})
+
+            # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
+            if isinstance(fp_raw, dict):
+                if "summary" in fp_raw:
+                    # Structure complète (depuis fusion_manager ou autre source)
+                    fp_summary = fp_raw["summary"]
+                else:
+                    # Structure directe (depuis orchestrator)
+                    fp_summary = fp_raw
+            else:
+                fp_summary = {}
 
             delta_total = 0
             if isinstance(fp_summary, dict):
@@ -392,9 +403,21 @@ class ScalpingStrategy(BaseStrategy):
         }
 
         try:
-            # ✅ EXACTEMENT comme fusion_manager.py ligne 1000
-            fp_raw = asset_signals.get("footprint_summary", {})  # Structure complète
-            fp_summary = fp_raw.get("summary", {}) if isinstance(fp_raw, dict) else {}  # Extrait "summary"
+            # ✅ FIX (1er Décembre 2025): orchestrator stocke SEULEMENT "summary" (pas la structure complète)
+            # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
+            fp_raw = asset_signals.get("footprint_summary", {})
+
+            # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
+            if isinstance(fp_raw, dict):
+                if "summary" in fp_raw:
+                    # Structure complète (depuis fusion_manager ou autre source)
+                    fp_summary = fp_raw["summary"]
+                else:
+                    # Structure directe (depuis orchestrator)
+                    fp_summary = fp_raw
+            else:
+                fp_summary = {}
+
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
 
 
