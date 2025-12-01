@@ -263,7 +263,7 @@ class ScalpingStrategy(BaseStrategy):
                     delta_momentum_score = 5.0
 
             result["delta_momentum_score"] = delta_momentum_score
-            result["details"]["delta"] = delta_details
+            result["delta_momentum_details"] = delta_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # 2. VOLUME CONFIRMATION (15 points max)
@@ -316,7 +316,7 @@ class ScalpingStrategy(BaseStrategy):
                     volume_confirmation_score = 0.0
 
             result["volume_confirmation_score"] = volume_confirmation_score
-            result["details"]["volume"] = volume_details
+            result["volume_confirmation_details"] = volume_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # 3. IMBALANCE STRENGTH (10 points max)
@@ -347,7 +347,7 @@ class ScalpingStrategy(BaseStrategy):
                     imbalance_strength_score = 0.0
 
             result["imbalance_strength_score"] = imbalance_strength_score
-            result["details"]["imbalances"] = imbalance_details
+            result["imbalance_strength_details"] = imbalance_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # TOTAL ORDERFLOW SCORE
@@ -470,7 +470,7 @@ class ScalpingStrategy(BaseStrategy):
                     absorption_details["bias"] = "NEUTRAL"
 
             result["absorption_levels_score"] = absorption_score
-            result["details"]["absorption"] = absorption_details
+            result["absorption_details"] = absorption_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # 2. ORDER CLUSTERING (10 points max)
@@ -506,7 +506,7 @@ class ScalpingStrategy(BaseStrategy):
                     clustering_score = 0.0
 
             result["order_clustering_score"] = clustering_score
-            result["details"]["clustering"] = clustering_details
+            result["clustering_details"] = clustering_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # 3. PRICE REJECTION (5 points max)
@@ -555,7 +555,7 @@ class ScalpingStrategy(BaseStrategy):
                     rejection_details["strength"] = "none"
 
             result["price_rejection_score"] = rejection_score
-            result["details"]["rejection"] = rejection_details
+            result["rejection_details"] = rejection_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
             # TOTAL FOOTPRINT SCORE
