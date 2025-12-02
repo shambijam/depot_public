@@ -1036,9 +1036,10 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"\n{sep}")
             self.logger.info(f"🎯 SCORE FINAL ORDERFLOW V6")
             self.logger.info(f"{sep}")
-            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f} × 0.50 = {of_score * 0.50:.1f}")
-            self.logger.info(f"   Footprint (30%) : {fp_score:.1f} × 0.30 = {fp_score * 0.30:.1f}")
-            self.logger.info(f"   Triggers  (20%) : {trig_score:.1f} × 0.20 = {trig_score * 0.20:.1f}")
+            # ✅ FIX (2 Décembre 2025): Scores déjà pondérés, pas de multiplication
+            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
+            self.logger.info(f"   Footprint (30%) : {fp_score:.1f}/30 pts")
+            self.logger.info(f"   Triggers  (20%) : {trig_score:.1f}/20 pts")
             self.logger.info(f"   {'─' * 50}")
             self.logger.info(f"   TOTAL           : {final_score:.1f}/100 points")
 
@@ -1434,12 +1435,11 @@ class ScalpingStrategy(BaseStrategy):
                 footprint_score = footprint_result.get("total_score", 0.0)
                 triggers_score = triggers_result.get("total_score", 0.0)
 
-                # Formule : (OrderFlow × 0.50) + (Footprint × 0.30) + (Triggers × 0.20)
-                final_score = (
-                    orderflow_score * 0.50 +
-                    footprint_score * 0.30 +
-                    triggers_score * 0.20
-                )
+                # ✅ FIX (2 Décembre 2025): Les scores sont DÉJÀ pondérés (/50, /30, /20)
+                # Pas besoin de multiplier à nouveau, il suffit d'additionner !
+                # AVANT (FAUX): 20×0.5 + 14×0.3 + 10×0.2 = 16.2/100
+                # APRÈS (CORRECT): 20 + 14 + 10 = 44/100
+                final_score = orderflow_score + footprint_score + triggers_score
 
                 # 📋 5. RAPPORT CONSOLIDÉ
                 self._log_orderflow_consolidated_report(
