@@ -370,6 +370,89 @@ class ScalpingStrategy(BaseStrategy):
 
         return result
 
+    def calculate_orderflow_v6_standalone(
+        self,
+        asset: str,
+        df_m1: pd.DataFrame,
+        df_m5: Optional[pd.DataFrame],
+        df_m15: Optional[pd.DataFrame],
+        asset_signals: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        📈 Calcul OrderFlow V6 en mode standalone pour FusionManager.
+
+        Appelle _analyze_orderflow_v6() et convertit le résultat en format
+        compatible avec FusionManager.fuse().
+
+        Returns:
+            Dict compatible FusionManager:
+            {
+                "score": 0-100,  # Pourcentage pour FusionManager
+                "status": "VALID"/"WEAK"/"SUSPECT",
+                "summary": {
+                    "delta_total": float,
+                    "bias": "BUY"/"SELL"/"NEUTRAL",
+                    "poc": float,
+                    "imbalance_count": int,
+                    "volume_ratio": float,
+                    "mtf_alignment": dict
+                },
+                "total_score": 0-50,  # Score points pour rapport consolidé
+                "details": dict  # Détails complets pour debugging
+            }
+        """
+        # Appeler la fonction d'analyse existante
+        result = self._analyze_orderflow_v6(
+            asset=asset,
+            df_m1=df_m1,
+            df_m5=df_m5,
+            df_m15=df_m15,
+            asset_signals=asset_signals
+        )
+
+        # Extraire le score total (0-50 points)
+        total_score = result.get("total_score", 0.0)
+
+        # Convertir en pourcentage pour FusionManager (0-100)
+        score_pct = (total_score / 50.0) * 100.0
+
+        # Extraire détails pour construire summary
+        details = result.get("details", {})
+        delta_details = details.get("delta_momentum", {})
+        volume_details = details.get("volume_confirmation", {})
+        imbalance_details = details.get("imbalance_strength", {})
+
+        # Construire summary pour FusionManager
+        delta_total = delta_details.get("delta_total", 0.0)
+        summary = {
+            "delta_total": delta_total,
+            "bias": "BUY" if delta_total > 0 else "SELL" if delta_total < 0 else "NEUTRAL",
+            "poc": volume_details.get("poc"),
+            "vpoc_price": volume_details.get("poc"),  # Alias pour compatibilité
+            "imbalance_count": imbalance_details.get("m1_count", 0),
+            "volume_ratio": volume_details.get("ratio", 1.0),
+            "mtf_alignment": result.get("mtf_alignment", {}),
+            "spike_detected": volume_details.get("spike_detected", False)
+        }
+
+        # Déterminer status selon qualité du score
+        if total_score >= 30.0:  # 60% de 50 points
+            status = "VALID"
+        elif total_score >= 15.0:  # 30% de 50 points
+            status = "WEAK"
+        else:
+            status = "SUSPECT"
+
+        # Format final pour FusionManager
+        return {
+            "score": score_pct,  # 0-100 pour FusionManager._normalize_orderflow()
+            "status": status,
+            "summary": summary,
+            "total_score": total_score,  # 0-50 pour rapport consolidé
+            "details": details,  # Détails complets
+            "raw_result": result  # Résultat brut si besoin
+        }
+
     def _analyze_footprint_v6(
         self,
         asset: str,

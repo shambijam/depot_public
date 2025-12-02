@@ -1355,14 +1355,69 @@ def run_single_pipeline_cycle(
                         )
                         last_candles_df.set_index("time", inplace=True)
 
-                    # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
-                    # Ancienne analyse detect_orderflow_v6 supprimée
-                    # → Analyse OrderFlow V6 maintenant intégrée dans ScalpingStrategy._analyze_orderflow_v6()
+                    # === [ORDERFLOW V6 CALCULÉ POUR FUSIONMANAGER - 2 Déc 2025] ===
+                    # Calcul OrderFlow V6 en mode standalone pour FusionManager
+                    # → Utilise ScalpingStrategy.calculate_orderflow_v6_standalone()
                     latest = dict(latest)
-                    latest["orderflow_score"] = 0
-                    latest["orderflow_status"] = "N/A"
-                    latest["orderflow_summary"] = {}
-                    latest["orderflow_patterns"] = []
+
+                    # Calculer OrderFlow V6 si applicable
+                    try:
+                        # Récupérer la stratégie scalping
+                        scalping_strategy = strategy_manager.strategies.get("scalping")
+
+                        if scalping_strategy and annotated_rates_df is not None and len(annotated_rates_df) >= 15:
+                            # Préparer DataFrames multi-timeframe
+                            df_m1 = annotated_rates_df
+                            df_m5 = None
+                            df_m15 = None
+
+                            # Essayer de charger M5/M15 depuis MT5 (optionnel)
+                            try:
+                                import MetaTrader5 as mt5
+                                df_m5 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=20)
+                                df_m15 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M15, count=15)
+                                if df_m5 is not None and len(df_m5) < 6:
+                                    df_m5 = None
+                                if df_m15 is not None and len(df_m15) < 4:
+                                    df_m15 = None
+                            except Exception as e:
+                                logger.debug(f"[OF V6][{asset}] Impossible charger M5/M15: {e}")
+
+                            # Appeler la méthode standalone
+                            of_v6_result = scalping_strategy.calculate_orderflow_v6_standalone(
+                                asset=asset,
+                                df_m1=df_m1,
+                                df_m5=df_m5,
+                                df_m15=df_m15,
+                                asset_signals=signals if 'signals' in locals() else {}
+                            )
+
+                            # Stocker dans latest pour FusionManager
+                            latest["orderflow_score"] = of_v6_result.get("score", 0.0)  # 0-100
+                            latest["orderflow_status"] = of_v6_result.get("status", "SUSPECT")
+                            latest["orderflow_summary"] = of_v6_result.get("summary", {})
+                            latest["orderflow_patterns"] = []
+
+                            logger.info(
+                                f"[OF V6][{asset}] ✅ Score calculé: {of_v6_result['score']:.1f}/100 "
+                                f"({of_v6_result['total_score']:.1f}/50 pts) | "
+                                f"Status={of_v6_result['status']} | "
+                                f"Bias={of_v6_result['summary'].get('bias', 'N/A')}"
+                            )
+                        else:
+                            # Fallback si stratégie ou données indisponibles
+                            logger.warning(f"[OF V6][{asset}] Stratégie scalping ou données insuffisantes, fallback à 0")
+                            latest["orderflow_score"] = 0
+                            latest["orderflow_status"] = "N/A"
+                            latest["orderflow_summary"] = {}
+                            latest["orderflow_patterns"] = []
+                    except Exception as e:
+                        logger.error(f"[OF V6][{asset}] Erreur calcul OrderFlow V6: {e}", exc_info=True)
+                        # Fallback en cas d'erreur
+                        latest["orderflow_score"] = 0
+                        latest["orderflow_status"] = "ERROR"
+                        latest["orderflow_summary"] = {}
+                        latest["orderflow_patterns"] = []
                 except Exception as e:
                     logger.error(
                         f"[ORDERFLOW][{asset}] Erreur traitement latest: {e}",
