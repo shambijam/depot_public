@@ -45,7 +45,7 @@ def _get_thresholds(cfg: dict):
         "moderate": float(th["moderate"]),
         "high": float(th["high"]),
         "conditional": float(th["conditional"]),
-        "allow_conditional": bool(cfg["allow_conditional_entries"]),
+        "allow_conditional": bool(fusion_cfg["allow_conditional_entries"]),
     }
 
 

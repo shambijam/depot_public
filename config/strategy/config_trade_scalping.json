@@ -139,6 +139,7 @@
   },
   "fusion": {
     "adaptive_weights": true,
+    "allow_conditional_entries": true,
     "seuils_entree": {
       "min_confidence": 0.80,
       "min_orderflow_score": 0.75,
@@ -194,7 +195,6 @@
       "coherence_bonus_max": 0.10
     }
   },
-  "allow_conditional_entries": true,
   "regles_metier": {
     "veto_absorption": true,
     "never_against_strong_orderflow": true,
