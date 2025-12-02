@@ -39,12 +39,13 @@ def _get_thresholds(cfg: dict):
     if not th:
         th = cfg.get("scoring_thresholds", {}) if isinstance(cfg, dict) else {}
 
+    # ✅ FIX (2 Décembre 2025) : Fallback supprimés - le code doit planter si config manquante
     return {
-        "cautious": float(th.get("cautious", 0.55)),
-        "moderate": float(th.get("moderate", 0.70)),
-        "high": float(th.get("high", 0.80)),
-        "conditional": float(th.get("conditional", 0.35)),
-        "allow_conditional": bool(cfg.get("allow_conditional_entries", True)),
+        "cautious": float(th["cautious"]),
+        "moderate": float(th["moderate"]),
+        "high": float(th["high"]),
+        "conditional": float(th["conditional"]),
+        "allow_conditional": bool(cfg["allow_conditional_entries"]),
     }
 
 
@@ -481,12 +482,10 @@ class FusionManager:
             direction = decision.get("direction", "NEUTRAL")
             action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️"}.get(action, "⚪")
 
-            if thresholds is None:
-                thresholds = {"high": 0.80, "moderate": 0.70, "cautious": 0.55}
-
-            th_high = thresholds.get("high", 0.80)
-            th_moderate = thresholds.get("moderate", 0.70)
-            th_cautious = thresholds.get("cautious", 0.55)
+            # ✅ FIX (2 Décembre 2025) : Fallback critiques supprimés - doit planter si config manquante
+            th_high = thresholds["high"]
+            th_moderate = thresholds["moderate"]
+            th_cautious = thresholds["cautious"]
 
             if fused >= th_high:
                 level = f"HIGH_CONVICTION (≥{th_high:.0%})"
@@ -1274,9 +1273,10 @@ class FusionManager:
 
         # Récupération des seuils dynamiques depuis la configuration
         thresholds = _get_thresholds(cfg)
-        high_threshold = thresholds.get("high", 0.80)
-        moderate_threshold = thresholds.get("moderate", 0.70)
-        cautious_threshold = thresholds.get("cautious", 0.55)
+        # ✅ FIX (2 Décembre 2025) : Fallback supprimés - le code doit planter si config manquante
+        high_threshold = thresholds["high"]
+        moderate_threshold = thresholds["moderate"]
+        cautious_threshold = thresholds["cautious"]
 
         if fused >= high_threshold and direction in ("BUY", "SELL"):
             return {

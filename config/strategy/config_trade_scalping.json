@@ -194,6 +194,7 @@
       "coherence_bonus_max": 0.10
     }
   },
+  "allow_conditional_entries": true,
   "regles_metier": {
     "veto_absorption": true,
     "never_against_strong_orderflow": true,

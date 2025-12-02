@@ -303,6 +303,7 @@ class ScalpingStrategy(BaseStrategy):
                         volume_details["poc"] = float(poc_price)
 
                 # Scoring Volume
+                # ✅ FIX (2 Décembre 2025): Assouplissement seuils pour marché calme
                 if volume_ratio >= 2.5:  # Volume spike
                     volume_confirmation_score = 15.0
                     volume_details["spike_detected"] = True
@@ -312,7 +313,9 @@ class ScalpingStrategy(BaseStrategy):
                     volume_confirmation_score = 10.0
                 elif volume_ratio >= 1.0:  # Volume normal
                     volume_confirmation_score = 5.0
-                else:  # Volume faible
+                elif volume_ratio >= 0.5:  # ✅ NOUVEAU: Marché calme mais actif
+                    volume_confirmation_score = 3.0
+                else:  # Volume très faible
                     volume_confirmation_score = 0.0
 
             result["volume_confirmation_score"] = volume_confirmation_score
@@ -552,6 +555,13 @@ class ScalpingStrategy(BaseStrategy):
                     absorption_score = 5.0
                     absorption_details["bias"] = "NEUTRAL"
 
+            # ✅ FIX (2 Décembre 2025): Log de debug pour comprendre le calcul
+            self.logger.debug(
+                f"[{asset}] Absorption: buy_vol={buy_vol:.1f} sell_vol={sell_vol:.1f} "
+                f"total_vol={total_vol:.1f} buy_ratio={absorption_details.get('buy_ratio', 0):.2%} "
+                f"bias={absorption_details.get('bias', 'N/A')} absorption_score={absorption_score:.1f}"
+            )
+
             result["absorption_levels_score"] = absorption_score
             result["absorption_details"] = absorption_details  # FIX: Nom correct pour le rapport
 
@@ -567,16 +577,26 @@ class ScalpingStrategy(BaseStrategy):
                 volumes = df_m1["tick_volume"].tail(4).values
                 ranges = (df_m1["high"] - df_m1["low"]).tail(4).values
 
+                # ✅ FIX (2 Décembre 2025): Calcul sécurisé évitant division par 0
                 # Détect clusters : volume élevé + range faible = orders concentrés
                 cluster_count = 0
+                ranges_safe = np.maximum(ranges, 1e-9)  # Évite division by 0
+                vol_per_pip_arr = volumes / ranges_safe
+                median_vol_per_pip = np.median(vol_per_pip_arr)
+
                 for i in range(len(volumes)):
-                    if ranges[i] > 0:
-                        vol_per_pip = volumes[i] / ranges[i]
-                        if vol_per_pip > np.median(volumes / ranges):  # Au-dessus médiane
-                            cluster_count += 1
+                    if vol_per_pip_arr[i] > median_vol_per_pip:
+                        cluster_count += 1
 
                 clustering_details["cluster_count"] = cluster_count
                 clustering_details["distribution"] = "concentrated" if cluster_count >= 2 else "dispersed"
+
+                # Log de debug
+                self.logger.debug(
+                    f"[{asset}] Clustering: cluster_count={cluster_count} "
+                    f"median_vol_per_pip={median_vol_per_pip:.2f} "
+                    f"vol_per_pip={[f'{v:.1f}' for v in vol_per_pip_arr]}"
+                )
 
                 # Scoring
                 if cluster_count >= 3:
@@ -703,10 +723,11 @@ class ScalpingStrategy(BaseStrategy):
             triggers_list = []
 
             # Récupérer POC depuis orderflow
-            orderflow_volume = orderflow_result.get("details", {}).get("volume", {})
+            # ✅ FIX (2 Décembre 2025): Utiliser les vraies clés stockées
+            orderflow_volume = orderflow_result.get("volume_confirmation_details", {})
             poc_price = orderflow_volume.get("poc")
 
-            footprint_absorption = footprint_result.get("details", {}).get("absorption", {})
+            footprint_absorption = footprint_result.get("absorption_details", {})
             absorption_bias = footprint_absorption.get("bias", "NEUTRAL")
 
             # ================================================================
@@ -724,7 +745,8 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # TRIGGER 2 : Breakout Imbalance (+6 points)
             # ================================================================
-            orderflow_imbalances = orderflow_result.get("details", {}).get("imbalances", {})
+            # ✅ FIX (2 Décembre 2025): Utiliser la vraie clé
+            orderflow_imbalances = orderflow_result.get("imbalance_strength_details", {})
             imbalance_count = orderflow_imbalances.get("total_count", 0)
 
             if imbalance_count >= 3:  # Imbalances significatives
@@ -753,7 +775,8 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # TRIGGER 4 : Stop Run (+5 points) - Détecté via rejection
             # ================================================================
-            rejection_strength = footprint_result.get("details", {}).get("rejection", {}).get("strength")
+            # ✅ FIX (2 Décembre 2025): Utiliser la vraie clé
+            rejection_strength = footprint_result.get("rejection_details", {}).get("strength")
 
             if rejection_strength == "strong":
                 trigger_points += 5.0
@@ -763,6 +786,60 @@ class ScalpingStrategy(BaseStrategy):
                     "strength": "strong"
                 })
                 self.logger.debug(f"[{asset}] ⚡ Trigger: Stop Run (+5 pts)")
+
+            # ================================================================
+            # ✅ NOUVEAUX TRIGGERS (2 Décembre 2025) - Moins Restrictifs
+            # ================================================================
+
+            # TRIGGER 5 : Delta Strong (+3 points)
+            # ================================================================
+            orderflow_delta_details = orderflow_result.get("delta_momentum_details", {})
+            delta_total = abs(orderflow_delta_details.get("delta_total", 0))
+
+            if delta_total >= 100:
+                trigger_points += 3.0
+                triggers_list.append({
+                    "name": "delta_strong",
+                    "points": 3,
+                    "delta": delta_total
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Delta Strong (+3 pts) | delta={delta_total:.1f}")
+
+            # ================================================================
+            # TRIGGER 6 : High Imbalance Ratio (+2 points)
+            # ================================================================
+            imbalance_total = orderflow_imbalances.get("total_count", 0)
+
+            if imbalance_total >= 50:
+                trigger_points += 2.0
+                triggers_list.append({
+                    "name": "high_imbalance_ratio",
+                    "points": 2,
+                    "count": imbalance_total
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: High Imbalance Ratio (+2 pts) | count={imbalance_total}")
+
+            # ================================================================
+            # TRIGGER 7 : Partial MTF Coherence (+2 points)
+            # ================================================================
+            mtf_alignment = orderflow_result.get("mtf_alignment", {})
+            m1_dir = mtf_alignment.get("m1", "NEUTRAL").upper()
+            m5_dir = mtf_alignment.get("m5", "NEUTRAL").upper()
+            m15_dir = mtf_alignment.get("m15", "NEUTRAL").upper()
+
+            # Compter alignements (2/3 suffisent)
+            directions = [m1_dir, m5_dir, m15_dir]
+            bullish_count = directions.count("BULLISH")
+            bearish_count = directions.count("BEARISH")
+
+            if bullish_count >= 2 or bearish_count >= 2:
+                trigger_points += 2.0
+                triggers_list.append({
+                    "name": "partial_mtf_coherence",
+                    "points": 2,
+                    "alignment": f"{max(bullish_count, bearish_count)}/3"
+                })
+                self.logger.debug(f"[{asset}] ⚡ Trigger: Partial MTF Coherence (+2 pts) | {max(bullish_count, bearish_count)}/3 aligned")
 
             # ================================================================
             # BONUS : Multi-Trigger Confluence (+2 à +4 points)
@@ -888,9 +965,10 @@ class ScalpingStrategy(BaseStrategy):
             # 3. FOOTPRINT ANALYSIS (30% du score)
             # ================================================================
             fp_score = footprint_result.get("total_score", 0.0)
-            absorption_score = footprint_result.get("absorption_score", 0.0)
-            clustering_score = footprint_result.get("clustering_score", 0.0)
-            rejection_score = footprint_result.get("rejection_score", 0.0)
+            # ✅ FIX (2 Décembre 2025): Corriger clés pour matcher les vraies clés stockées
+            absorption_score = footprint_result.get("absorption_levels_score", 0.0)
+            clustering_score = footprint_result.get("order_clustering_score", 0.0)
+            rejection_score = footprint_result.get("price_rejection_score", 0.0)
 
             absorption_details = footprint_result.get("absorption_details", {})
             clustering_details = footprint_result.get("clustering_details", {})
@@ -904,11 +982,13 @@ class ScalpingStrategy(BaseStrategy):
 
             self.logger.info(f"   ├─ Order Clustering    : {clustering_score:.1f}/10 pts")
             self.logger.info(f"   │  • Clusters détectés : {clustering_details.get('cluster_count', 0)}")
-            self.logger.info(f"   │  • Concentration     : {clustering_details.get('concentration', 'N/A')}")
+            # ✅ FIX (2 Décembre 2025): Utiliser "distribution" (clé correcte)
+            self.logger.info(f"   │  • Distribution      : {clustering_details.get('distribution', 'N/A')}")
 
             self.logger.info(f"   └─ Price Rejection     : {rejection_score:.1f}/5 pts")
-            self.logger.info(f"      • Rejets détectés   : {rejection_details.get('rejection_count', 0)}/3")
-            self.logger.info(f"      • Force rejet       : {rejection_details.get('rejection_strength', 'N/A')}")
+            # ✅ FIX (2 Décembre 2025): Utiliser "rejection_bars" et "strength" (clés correctes)
+            self.logger.info(f"      • Rejets détectés   : {rejection_details.get('rejection_bars', 0)}/3")
+            self.logger.info(f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}")
 
             # ================================================================
             # 4. TRIGGERS DETECTION (20% du score)
