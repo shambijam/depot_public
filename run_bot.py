@@ -1363,7 +1363,7 @@ def run_single_pipeline_cycle(
                     # Calculer OrderFlow V6 si applicable
                     try:
                         # Récupérer la stratégie scalping
-                        scalping_strategy = strategy_manager.strategies.get("scalping")
+                        scalping_strategy = strategy_manager.get_strategy_instance("scalping")
 
                         if scalping_strategy and annotated_rates_df is not None and len(annotated_rates_df) >= 15:
                             # Préparer DataFrames multi-timeframe
