@@ -122,7 +122,7 @@ class LiquidityStrategy(BaseStrategy):
             return {}
 
         # Validation colonnes requises
-        required_cols = ["open", "high", "low", "close", "volume"]
+        required_cols = ["open", "high", "low", "close", "tick_volume"]
         if not self._validate_dataframe(df, required_cols):
             self.logger.warning(f"[{asset}] DataFrame invalide ou colonnes manquantes: {required_cols}")
             return {}
@@ -715,14 +715,19 @@ class LiquidityStrategy(BaseStrategy):
 
             # Sélection sécurisée du DataFrame (évite les erreurs pandas en booléen)
             df_m1 = None
+            self.logger.info(f"[{asset}][DEBUG] ctx_md keys: {list(ctx_md.keys())}")
             for key in ("df_m1", "rates_df", "annotated_rates_df", "df"):
                 val = ctx_md.get(key)
                 if isinstance(val, pd.DataFrame) and not val.empty:
+                    self.logger.info(f"[{asset}][DEBUG] Found DataFrame at key '{key}' | columns={list(val.columns)}")
                     df_m1 = val
                     break
 
+            if df_m1 is None:
+                self.logger.warning(f"[{asset}][DEBUG] No DataFrame found in market_data")
+
             # Validation et copie sécurisée du DataFrame
-            required_cols = ["open", "high", "low", "close", "volume"]
+            required_cols = ["open", "high", "low", "close", "tick_volume"]
             df_work = None
             if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50:
                 if self._validate_dataframe(df_m1, required_cols):

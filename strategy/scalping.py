@@ -1288,21 +1288,8 @@ class ScalpingStrategy(BaseStrategy):
                     action=action
                 )
 
-                # 🚨 6. VALIDATION SEUILS DÉCISION
-                # Seuils configurables (par défaut : 60/100 pour trade)
-                min_score_threshold = float(sm_cfg.get("orderflow_v6_min_score", 60.0))
-
-                if final_score < min_score_threshold:
-                    self.logger.info(
-                        f"[{asset}] ❌ REFUS burst_scalping → Score OrderFlow V6 "
-                        f"{final_score:.1f}/100 < seuil {min_score_threshold:.1f}"
-                    )
-                    return {}
-
-                self.logger.info(
-                    f"[{asset}] ✅ VALIDATION burst_scalping → Score OrderFlow V6 "
-                    f"{final_score:.1f}/100 ≥ seuil {min_score_threshold:.1f}"
-                )
+                # ✅ AUCUN SEUIL ICI - FusionManager gère TOUT avec scoring_thresholds
+                # (high: 0.80, moderate: 0.75, cautious: 0.70, conditional: 0.40)
 
             except Exception as e:
                 self.logger.warning(f"[{asset}] OrderFlow V6 analysis failed: {e}", exc_info=True)
