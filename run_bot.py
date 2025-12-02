@@ -1133,9 +1133,10 @@ def run_single_pipeline_cycle(
                 try:
                     # Identifier la dernière bougie M1 complète
                     if subset_df is not None and not subset_df.empty:
-                        # Utiliser la dernière bougie (index -1) au lieu de -2
-                        # car -2 pouvait être trop ancienne après changement d'heure
-                        candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
+                        # ✅ FIX (2 Décembre 2025): Utiliser bougie CLÔTURÉE (n-2) au lieu de bougie COURANTE (n-1)
+                        # Garantit des données complètes (~130 ticks) pour OrderFlow V6 et triggers
+                        # Bougie n-1 est en cours de formation et n'a que quelques ticks (4-10)
+                        candle_idx = len(subset_df) - 2 if len(subset_df) >= 2 else 0
 
                         # Extraire les timestamps de la bougie M1 (60 secondes)
                         # Utiliser la colonne 'time' si disponible, sinon l'index
@@ -1151,7 +1152,7 @@ def run_single_pipeline_cycle(
                         candle_end = candle_start + pd.Timedelta(minutes=1)
 
                         logger.info(
-                            f"[TICKS] Récupération ticks pour bougie M1 | "
+                            f"[TICKS] Récupération ticks pour bougie M1 CLÔTURÉE (n-2) | "
                             f"start={candle_start.isoformat()} | end={candle_end.isoformat()}"
                         )
 
