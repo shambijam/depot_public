@@ -135,9 +135,10 @@ class ScalpingStrategy(BaseStrategy):
                 m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
                 m1_bearish = 8 - m1_bullish
 
-                if m1_bullish >= 6:  # 6/8 haussier
+                # ✅ FIX (03 DEC 2025): Assouplir 6/8 → 5/8 (75% → 62.5%) pour scalping actif
+                if m1_bullish >= 5:  # 5/8 haussier (62.5%)
                     result["mtf_alignment"]["m1"] = "bullish"
-                elif m1_bearish >= 6:  # 6/8 baissier
+                elif m1_bearish >= 5:  # 5/8 baissier (62.5%)
                     result["mtf_alignment"]["m1"] = "bearish"
                 else:
                     result["mtf_alignment"]["m1"] = "neutral"
@@ -155,9 +156,10 @@ class ScalpingStrategy(BaseStrategy):
                 m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
                 m5_bearish = 6 - m5_bullish
 
-                if m5_bullish >= 5:  # 5/6 haussier
+                # ✅ FIX (03 DEC 2025): Assouplir 5/6 → 4/6 (83% → 67%) pour scalping actif
+                if m5_bullish >= 4:  # 4/6 haussier (67%)
                     result["mtf_alignment"]["m5"] = "bullish"
-                elif m5_bearish >= 5:  # 5/6 baissier
+                elif m5_bearish >= 4:  # 4/6 baissier (67%)
                     result["mtf_alignment"]["m5"] = "bearish"
                 else:
                     result["mtf_alignment"]["m5"] = "neutral"
@@ -245,17 +247,31 @@ class ScalpingStrategy(BaseStrategy):
                     delta_details["delta_total"] = delta_total
                     delta_details["direction"] = delta_direction
 
+                    # ✅ FIX (03 DEC 2025): Seuils adaptés SCALPING M1 (ticks temps réel sur 60s)
                     # Delta fort cohérent → 15-25 pts
                     if coherence >= 0.8:  # 8/10 bougies cohérentes
-                        if abs(delta_total) >= 300:
+                        if abs(delta_total) >= 50:  # ~28% déséquilibre (ex: 114 buy / 66 sell sur 180 ticks)
                             delta_momentum_score = 25.0  # Très fort
-                        elif abs(delta_total) >= 200:
+                        elif abs(delta_total) >= 30:  # ~17% déséquilibre (ex: 105 buy / 75 sell)
                             delta_momentum_score = 20.0  # Fort
-                        elif abs(delta_total) >= 100:
+                        elif abs(delta_total) >= 15:  # ~8% déséquilibre (ex: 97 buy / 83 sell)
+                            delta_momentum_score = 18.0  # Moyen-Fort
+                        elif abs(delta_total) >= 5:   # ~3% déséquilibre (ex: 92 buy / 88 sell)
                             delta_momentum_score = 15.0  # Moyen
-                    # Delta modéré → 5-10 pts
+                    # Delta modéré → 10-15 pts
+                    elif coherence >= 0.7:  # 7/10 bougies cohérentes
+                        if abs(delta_total) >= 30:
+                            delta_momentum_score = 15.0
+                        elif abs(delta_total) >= 15:
+                            delta_momentum_score = 12.0
+                        elif abs(delta_total) >= 5:
+                            delta_momentum_score = 10.0
+                    # Delta faible cohérence → 5-10 pts
                     elif coherence >= 0.6:
-                        delta_momentum_score = 10.0
+                        if abs(delta_total) >= 15:
+                            delta_momentum_score = 10.0
+                        else:
+                            delta_momentum_score = 7.0
                     else:
                         delta_momentum_score = 5.0
                 else:
@@ -277,7 +293,7 @@ class ScalpingStrategy(BaseStrategy):
 
             # Vérifier si tick_volume existe, sinon essayer volume ou real_volume
             vol_col = None
-            if df_m1 is not None and len(df_m1) >= 15:
+            if df_m1 is not None and len(df_m1) >= 16:  # ✅ FIX (03 DEC 2025): 16 bougies minimum (14+2)
                 if "tick_volume" in df_m1.columns:
                     vol_col = "tick_volume"
                 elif "volume" in df_m1.columns:
@@ -287,9 +303,9 @@ class ScalpingStrategy(BaseStrategy):
 
             if vol_col is not None:
                 self.logger.debug(f"[OF V6][{asset}] Utilisation colonne volume: {vol_col}")
-                volumes = df_m1[vol_col].tail(15).values
-                current_volume = volumes[-1]
-                avg_volume = np.mean(volumes[:-1])  # Moyenne des 14 précédentes
+                volumes = df_m1[vol_col].tail(16).values  # 16 bougies pour comparer dernière complète
+                current_volume = volumes[-2]  # ✅ FIX (03 DEC 2025): Dernière bougie COMPLÈTE (pas en cours)
+                avg_volume = np.mean(volumes[:-2])  # Moyenne des 14 précédentes (exclure les 2 dernières)
 
                 volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
                 volume_details["current_volume"] = float(current_volume)
@@ -355,17 +371,23 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # TOTAL ORDERFLOW SCORE
             # ================================================================
+            # ✅ FIX (03 DEC 2025): Ajouter le bonus MTF au score final
+            mtf_bonus = 3.0 if mtf_aligned else 0.0
+
             result["total_score"] = (
                 delta_momentum_score +
                 volume_confirmation_score +
-                imbalance_strength_score
+                imbalance_strength_score +
+                mtf_bonus
             )
+            result["mtf_bonus"] = mtf_bonus
 
             self.logger.debug(
                 f"[{asset}] OrderFlow V6: Delta={delta_momentum_score:.1f} "
                 f"Volume={volume_confirmation_score:.1f} "
                 f"Imbalance={imbalance_strength_score:.1f} "
-                f"→ Total={result['total_score']:.1f}/50"
+                f"MTF_Bonus={mtf_bonus:.1f} "
+                f"→ Total={result['total_score']:.1f}/53"
             )
 
         except Exception as e:
@@ -476,10 +498,10 @@ class ScalpingStrategy(BaseStrategy):
 
         Retourne :
         {
-            "absorption_levels_score": 0-15,
-            "order_clustering_score": 0-10,
-            "price_rejection_score": 0-5,
-            "total_score": 0-30,
+            "absorption_levels_score": 0-12.5,
+            "order_clustering_score": 0-8.5,
+            "price_rejection_score": 0-4.0,
+            "total_score": 0-25,
             "details": {...}
         }
         """
@@ -511,7 +533,7 @@ class ScalpingStrategy(BaseStrategy):
 
 
             # ================================================================
-            # 1. ABSORPTION LEVELS (15 points max)
+            # 1. ABSORPTION LEVELS (12.5 points max)
             # ================================================================
             absorption_score = 0.0
             absorption_details = {}
@@ -540,19 +562,19 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Déterminer absorption
                 if buy_ratio >= 0.75:  # 75%+ achats
-                    absorption_score = 15.0
+                    absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BULLISH"
                 elif buy_ratio >= 0.65:
-                    absorption_score = 12.0
+                    absorption_score = 10.0
                     absorption_details["bias"] = "BULLISH"
                 elif sell_ratio >= 0.75:
-                    absorption_score = 15.0
+                    absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BEARISH"
                 elif sell_ratio >= 0.65:
-                    absorption_score = 12.0
+                    absorption_score = 10.0
                     absorption_details["bias"] = "BEARISH"
                 else:
-                    absorption_score = 5.0
+                    absorption_score = 4.0
                     absorption_details["bias"] = "NEUTRAL"
 
             # ✅ FIX (2 Décembre 2025): Log de debug pour comprendre le calcul
@@ -566,7 +588,7 @@ class ScalpingStrategy(BaseStrategy):
             result["absorption_details"] = absorption_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
-            # 2. ORDER CLUSTERING (10 points max)
+            # 2. ORDER CLUSTERING (8.5 points max)
             # ================================================================
             clustering_score = 0.0
             clustering_details = {}
@@ -600,11 +622,11 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Scoring
                 if cluster_count >= 3:
-                    clustering_score = 10.0
+                    clustering_score = 8.5
                 elif cluster_count >= 2:
-                    clustering_score = 7.0
+                    clustering_score = 6.0
                 elif cluster_count >= 1:
-                    clustering_score = 4.0
+                    clustering_score = 3.5
                 else:
                     clustering_score = 0.0
 
@@ -612,7 +634,7 @@ class ScalpingStrategy(BaseStrategy):
             result["clustering_details"] = clustering_details  # FIX: Nom correct pour le rapport
 
             # ================================================================
-            # 3. PRICE REJECTION (5 points max)
+            # 3. PRICE REJECTION (4.0 points max)
             # ================================================================
             rejection_score = 0.0
             rejection_details = {}
@@ -645,13 +667,13 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Scoring
                 if rejection_count >= 3:
-                    rejection_score = 5.0
+                    rejection_score = 4.0
                     rejection_details["strength"] = "strong"
                 elif rejection_count >= 2:
-                    rejection_score = 3.0
+                    rejection_score = 2.5
                     rejection_details["strength"] = "moderate"
                 elif rejection_count >= 1:
-                    rejection_score = 2.0
+                    rejection_score = 1.5
                     rejection_details["strength"] = "weak"
                 else:
                     rejection_score = 0.0
@@ -673,7 +695,7 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Footprint V6: Absorption={absorption_score:.1f} "
                 f"Clustering={clustering_score:.1f} "
                 f"Rejection={rejection_score:.1f} "
-                f"→ Total={result['total_score']:.1f}/30"
+                f"→ Total={result['total_score']:.1f}/25"
             )
 
         except Exception as e:
@@ -756,7 +778,7 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"      • Imbalances M5    : {m5_count} détectées")
 
             # ================================================================
-            # 3. FOOTPRINT ANALYSIS (30% du score)
+            # 3. FOOTPRINT ANALYSIS (25% du score)
             # ================================================================
             fp_score = footprint_result.get("total_score", 0.0)
             # ✅ FIX (2 Décembre 2025): Corriger clés pour matcher les vraies clés stockées
@@ -768,18 +790,18 @@ class ScalpingStrategy(BaseStrategy):
             clustering_details = footprint_result.get("clustering_details", {})
             rejection_details = footprint_result.get("rejection_details", {})
 
-            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS (30% du total) : {fp_score:.1f}/30 points")
-            self.logger.info(f"   ├─ Absorption Levels   : {absorption_score:.1f}/15 pts")
+            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS (25% du total) : {fp_score:.1f}/25 points")
+            self.logger.info(f"   ├─ Absorption Levels   : {absorption_score:.1f}/12.5 pts")
             self.logger.info(f"   │  • Biais absorption  : {absorption_details.get('bias', 'N/A')}")
             self.logger.info(f"   │  • Buy ratio         : {absorption_details.get('buy_ratio', 0)*100:.0f}%")
             self.logger.info(f"   │  • Sell ratio        : {absorption_details.get('sell_ratio', 0)*100:.0f}%")
 
-            self.logger.info(f"   ├─ Order Clustering    : {clustering_score:.1f}/10 pts")
+            self.logger.info(f"   ├─ Order Clustering    : {clustering_score:.1f}/8.5 pts")
             self.logger.info(f"   │  • Clusters détectés : {clustering_details.get('cluster_count', 0)}")
             # ✅ FIX (2 Décembre 2025): Utiliser "distribution" (clé correcte)
             self.logger.info(f"   │  • Distribution      : {clustering_details.get('distribution', 'N/A')}")
 
-            self.logger.info(f"   └─ Price Rejection     : {rejection_score:.1f}/5 pts")
+            self.logger.info(f"   └─ Price Rejection     : {rejection_score:.1f}/4.0 pts")
             # ✅ FIX (2 Décembre 2025): Utiliser "rejection_bars" et "strength" (clés correctes)
             self.logger.info(f"      • Rejets détectés   : {rejection_details.get('rejection_bars', 0)}/3")
             self.logger.info(f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}")
@@ -800,11 +822,11 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"\n{sep}")
             self.logger.info(f"🎯 SCORE FINAL BURST SCALPING")
             self.logger.info(f"{sep}")
-            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
-            self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/30 pts")
+            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/53 pts (max 50 + 3 bonus MTF)")
+            self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/25 pts")
             self.logger.info(f"   VWAP (25%)      : {vwap_score_25pts:.1f}/25 pts")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/105 pts (fusion FusionManager)")
+            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/103 pts (base 100 + bonus MTF)")
 
             # Direction recommandée
             if action:
