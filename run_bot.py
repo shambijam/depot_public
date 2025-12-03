@@ -26,6 +26,7 @@ from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
 from phase_observer.fusion_manager import FusionManager
+from phase_observer.vwap import create_vwap_analyzer  # ✅ VWAP Module (03 DEC 2025)
 
 
 load_dotenv()
@@ -1481,10 +1482,65 @@ def run_single_pipeline_cycle(
                                 signals, latest, symbol_info_mt5, mt5_connector, asset,
                                 footprint_trigger=footprint_trigger_result  # ✅ Vrai trigger si détecté
                             )
+
+                            # === ✅ VWAP ANALYSIS (03 DEC 2025) - Module Institutionnel ===
+                            vwap_result = None
+                            try:
+                                # Récupérer DataFrame M1 (disponible depuis ligne 1348)
+                                df_vwap = annotated_rates_df if 'annotated_rates_df' in locals() else df_m1 if 'df_m1' in locals() else None
+
+                                # Récupérer current_price depuis latest
+                                current_price = None
+                                if isinstance(latest, dict):
+                                    current_price = latest.get("current_price") or latest.get("close")
+
+                                if df_vwap is not None and current_price is not None:
+                                    # Charger config scalping complète
+                                    try:
+                                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                                    except Exception:
+                                        scalping_config = strat_cfg or {}
+
+                                    # Créer analyseur VWAP et lancer analyse
+                                    vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
+                                    vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, ctx)
+                                    vwap_result = vwap_analysis.to_dict()
+
+                                    logger.info(
+                                        f"[VWAP][{asset}] ✅ Analysis complete | "
+                                        f"score={vwap_result.get('score', 0.0):.3f} | "
+                                        f"status={vwap_result.get('status', 'N/A')} | "
+                                        f"bias={vwap_result.get('bias', 'N/A')}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[VWAP][{asset}] ⚠️ Skipped | "
+                                        f"df_available={df_vwap is not None} | "
+                                        f"price_available={current_price is not None}"
+                                    )
+                                    # Fallback VWAP vide (score 0)
+                                    vwap_result = {
+                                        "score": 0.0,
+                                        "status": "INVALID",
+                                        "bias": "NEUTRAL",
+                                        "reason": "missing_data"
+                                    }
+                            except Exception as e:
+                                logger.error(f"[VWAP][{asset}] ❌ Analysis failed: {e}", exc_info=True)
+                                # Fallback VWAP vide (score 0)
+                                vwap_result = {
+                                    "score": 0.0,
+                                    "status": "INVALID",
+                                    "bias": "NEUTRAL",
+                                    "error": str(e)
+                                }
+
+                            # === FUSION avec VWAP (remplace triggers deprecated) ===
                             out = _fusion_mgr.fuse(
                                 orderflow=of,
                                 footprint=fp,
-                                triggers=trig,
+                                vwap=vwap_result,  # ✅ VWAP (25% du scoring)
+                                triggers=trig,     # ⚠️ DEPRECATED (rétrocompat, ignoré si vwap fourni)
                                 strategy_config=strat_cfg,
                                 context=ctx,
                             )
@@ -1645,10 +1701,30 @@ def run_single_pipeline_cycle(
                         sig, _latest, _syminfo, mt5_connector, asset,
                         footprint_trigger=None  # Snapshot: pas de trigger temps réel
                     )
+
+                    # === VWAP Analysis pour snapshot (cohérence avec décision réelle) ===
+                    vwap_snapshot = None
+                    try:
+                        market_data = all_assets_market_data.get(asset, {})
+                        df_snap = market_data.get("annotated_rates_df")
+                        price_snap = market_data.get("current_price") or _latest.get("current_price") or _latest.get("close")
+
+                        if df_snap is not None and price_snap is not None:
+                            scalping_config = strategy_manager.get_strategy_config("scalping") or strat_cfg or {}
+                            vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
+                            vwap_analysis = vwap_analyzer.analyze(df_snap, price_snap, ctx)
+                            vwap_snapshot = vwap_analysis.to_dict()
+                        else:
+                            vwap_snapshot = {"score": 0.0, "status": "INVALID", "bias": "NEUTRAL", "reason": "snapshot_missing_data"}
+                    except Exception as e:
+                        logger.debug(f"[VWAP][{asset}] Snapshot analysis skipped: {e}")
+                        vwap_snapshot = {"score": 0.0, "status": "INVALID", "bias": "NEUTRAL", "error": str(e)}
+
                     fdec_syn = _fusion_mgr.fuse(
                         orderflow=of,
                         footprint=fp,
-                        triggers=trig,
+                        vwap=vwap_snapshot,  # ✅ VWAP pour snapshot
+                        triggers=trig,       # ⚠️ DEPRECATED
                         strategy_config=strat_cfg,
                         context=ctx,
                     )
