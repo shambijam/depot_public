@@ -1501,9 +1501,16 @@ def run_single_pipeline_cycle(
                                     except Exception:
                                         scalping_config = strat_cfg or {}
 
+                                    # ✅ FIX: Reset index pour avoir 'time' en colonne (VWAP le requiert)
+                                    df_vwap_with_time = df_vwap.copy()
+                                    if 'time' not in df_vwap_with_time.columns and df_vwap_with_time.index.name in ['time', None]:
+                                        df_vwap_with_time = df_vwap_with_time.reset_index()
+                                        if df_vwap_with_time.columns[0] != 'time':
+                                            df_vwap_with_time = df_vwap_with_time.rename(columns={df_vwap_with_time.columns[0]: 'time'})
+
                                     # Créer analyseur VWAP et lancer analyse
                                     vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
-                                    vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, ctx)
+                                    vwap_analysis = vwap_analyzer.analyze(df_vwap_with_time, current_price, ctx)
                                     vwap_result = vwap_analysis.to_dict()
 
                                     logger.info(
@@ -1512,6 +1519,15 @@ def run_single_pipeline_cycle(
                                         f"status={vwap_result.get('status', 'N/A')} | "
                                         f"bias={vwap_result.get('bias', 'N/A')}"
                                     )
+
+                                    # ✅ Stocker dans latest pour accès par scalping.py
+                                    latest["vwap_score"] = float(vwap_result.get('score', 0.0))
+                                    latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
+                                    latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
+
+                                    # ✅ Mettre à jour signals["__latest__"] pour que scalping.py voit vwap_score
+                                    if 'signals' in locals() and isinstance(signals, dict):
+                                        signals["__latest__"] = latest
                                 else:
                                     logger.warning(
                                         f"[VWAP][{asset}] ⚠️ Skipped | "
@@ -1711,8 +1727,16 @@ def run_single_pipeline_cycle(
 
                         if df_snap is not None and price_snap is not None:
                             scalping_config = strategy_manager.get_strategy_config("scalping") or strat_cfg or {}
+
+                            # ✅ FIX: Reset index pour avoir 'time' en colonne (VWAP le requiert)
+                            df_snap_with_time = df_snap.copy()
+                            if 'time' not in df_snap_with_time.columns and df_snap_with_time.index.name in ['time', None]:
+                                df_snap_with_time = df_snap_with_time.reset_index()
+                                if df_snap_with_time.columns[0] != 'time':
+                                    df_snap_with_time = df_snap_with_time.rename(columns={df_snap_with_time.columns[0]: 'time'})
+
                             vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
-                            vwap_analysis = vwap_analyzer.analyze(df_snap, price_snap, ctx)
+                            vwap_analysis = vwap_analyzer.analyze(df_snap_with_time, price_snap, ctx)
                             vwap_snapshot = vwap_analysis.to_dict()
                         else:
                             vwap_snapshot = {"score": 0.0, "status": "INVALID", "bias": "NEUTRAL", "reason": "snapshot_missing_data"}

@@ -689,7 +689,9 @@ class ScalpingStrategy(BaseStrategy):
         footprint_result: Dict[str, Any],
         triggers_result: Dict[str, Any],
         final_score: float,
-        action: Optional[str]
+        action: Optional[str],
+        vwap_score_pct: float = 0.0,
+        vwap_status: str = "N/A"
     ) -> None:
         """
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
@@ -785,10 +787,12 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # 4. VWAP MODULE - INSTITUTIONNEL (03 DEC 2025)
             # ================================================================
-            # Note: VWAP est calculé dans FusionManager via MarketAnalyzer
-            # Les détails VWAP sont affichés dans les logs FusionManager
+            # Calcul du score VWAP sur 25 points
+            vwap_score_25pts = (vwap_score_pct / 100.0) * 25.0  # Convertir 0-100% → 0-25 pts
+
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL (25% du scoring)")
-            self.logger.info(f"   → Détails dans logs FusionManager (analyse complète)")
+            self.logger.info(f"   Score VWAP      : {vwap_score_25pts:.1f}/25 pts ({vwap_score_pct:.1f}%)")
+            self.logger.info(f"   Status          : {vwap_status}")
 
             # ================================================================
             # 5. SCORE FINAL & DÉCISION
@@ -798,9 +802,9 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"{sep}")
             self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
             self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/30 pts")
-            self.logger.info(f"   VWAP (25%)      : Calculé par FusionManager")
+            self.logger.info(f"   VWAP (25%)      : {vwap_score_25pts:.1f}/25 pts")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP)   : {final_score:.1f}/80 pts (avant fusion VWAP)")
+            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/105 pts (fusion FusionManager)")
 
             # Direction recommandée
             if action:
@@ -1200,13 +1204,25 @@ class ScalpingStrategy(BaseStrategy):
                 final_score = orderflow_score + footprint_score + triggers_score
 
                 # 📋 5. RAPPORT CONSOLIDÉ
+                # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
+                vwap_score_pct = 0.0
+                vwap_status = "N/A"
+                try:
+                    latest_signals = asset_signals.get("__latest__", {})
+                    vwap_score_pct = float(latest_signals.get("vwap_score", 0.0)) * 100.0  # Convertir 0-1 → 0-100
+                    vwap_status = str(latest_signals.get("vwap_status", "N/A"))
+                except Exception:
+                    pass
+
                 self._log_orderflow_consolidated_report(
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
                     triggers_result=triggers_result,
                     final_score=final_score,
-                    action=action
+                    action=action,
+                    vwap_score_pct=vwap_score_pct,
+                    vwap_status=vwap_status
                 )
 
                 # ✅ AUCUN SEUIL ICI - FusionManager gère TOUT avec scoring_thresholds
