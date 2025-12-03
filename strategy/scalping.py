@@ -783,24 +783,24 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}")
 
             # ================================================================
-            # 4. TRIGGERS DETECTION - DÉSACTIVÉ (03 DEC 2025)
+            # 4. VWAP MODULE - INSTITUTIONNEL (03 DEC 2025)
             # ================================================================
-            trig_score = triggers_result.get("total_score", 0.0)
-
-            self.logger.info(f"\n⚡ TRIGGERS DETECTION : DÉSACTIVÉ (supprimé le 03 DEC 2025)")
-            self.logger.info(f"   Score triggers : {trig_score:.1f} points (toujours 0)")
+            # Note: VWAP est calculé dans FusionManager via MarketAnalyzer
+            # Les détails VWAP sont affichés dans les logs FusionManager
+            self.logger.info(f"\n📊 VWAP INSTITUTIONNEL (25% du scoring)")
+            self.logger.info(f"   → Détails dans logs FusionManager (analyse complète)")
 
             # ================================================================
             # 5. SCORE FINAL & DÉCISION
             # ================================================================
             self.logger.info(f"\n{sep}")
-            self.logger.info(f"🎯 SCORE FINAL ORDERFLOW V6")
+            self.logger.info(f"🎯 SCORE FINAL BURST SCALPING")
             self.logger.info(f"{sep}")
             self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
-            self.logger.info(f"   Footprint (30%) : {fp_score:.1f}/30 pts")
-            self.logger.info(f"   Triggers  (--) DÉSACTIVÉ : {trig_score:.1f} pts")
+            self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/30 pts")
+            self.logger.info(f"   VWAP (25%)      : Calculé par FusionManager")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL           : {final_score:.1f}/80 points (max sans triggers)")
+            self.logger.info(f"   TOTAL (OF+FP)   : {final_score:.1f}/80 pts (avant fusion VWAP)")
 
             # Direction recommandée
             if action:

@@ -114,7 +114,7 @@ def _coherence_cached(self, key: str, compute_fn) -> Dict[str, Any]:
 
 # ---------- Mode dégradé ----------
 def _degraded_mode_decision(
-    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_vw: Dict[str, Any], n_tr: Dict[str, Any]
 ) -> Dict[str, Any]:
     available = {
         "orderflow": n_of["score"] > 0 or n_of["dir"] != 0,
@@ -126,7 +126,7 @@ def _degraded_mode_decision(
 
 # ---------- Validation croisée ----------
 def _cross_system_validation(
-    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_vw: Dict[str, Any], n_tr: Dict[str, Any]
 ) -> List[str]:
     issues: List[str] = []
     try:
@@ -1015,7 +1015,7 @@ class FusionManager:
 
     # -------------- 3) Business Rules Engine --------------
     def _apply_business_rules(
-        self, n_of, n_fp, n_tr, coherence, cfg, ctx
+        self, n_of, n_fp, n_vw, n_tr, coherence, cfg, ctx
     ) -> Dict[str, Any]:
         rules = cfg.get("regles_metier", {}) or {}
         # priorités fixées par ton cahier des charges
@@ -1326,7 +1326,7 @@ class FusionManager:
 
     # -------------- 6) Decision Generator --------------
     def _final_decision(
-        self, mode: str, fused: float, n_tr, coherence, cfg
+        self, mode: str, fused: float, n_vw, n_tr, coherence, cfg
     ) -> Dict[str, Any]:
         # direction finale: majorité pondérée; sinon direction du trigger; sinon NEUTRAL
         maj = coherence["majority"]
@@ -1392,7 +1392,7 @@ class FusionManager:
         }
 
     # -------------- 7) Rationale Builder --------------
-    def _rationale(self, decision, n_of, n_fp, n_tr, coherence, rules_eval) -> str:
+    def _rationale(self, decision, n_of, n_fp, n_vw, n_tr, coherence, rules_eval) -> str:
 
         parts = []
         st = decision["signal_type"]
