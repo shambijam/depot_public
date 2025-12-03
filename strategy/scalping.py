@@ -135,10 +135,9 @@ class ScalpingStrategy(BaseStrategy):
                 m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
                 m1_bearish = 8 - m1_bullish
 
-                # ✅ FIX (03 DEC 2025): Assouplir 6/8 → 5/8 (75% → 62.5%) pour scalping actif
-                if m1_bullish >= 5:  # 5/8 haussier (62.5%)
+                if m1_bullish >= 6:  # 6/8 haussier (75%)
                     result["mtf_alignment"]["m1"] = "bullish"
-                elif m1_bearish >= 5:  # 5/8 baissier (62.5%)
+                elif m1_bearish >= 6:  # 6/8 baissier (75%)
                     result["mtf_alignment"]["m1"] = "bearish"
                 else:
                     result["mtf_alignment"]["m1"] = "neutral"
@@ -156,10 +155,9 @@ class ScalpingStrategy(BaseStrategy):
                 m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
                 m5_bearish = 6 - m5_bullish
 
-                # ✅ FIX (03 DEC 2025): Assouplir 5/6 → 4/6 (83% → 67%) pour scalping actif
-                if m5_bullish >= 4:  # 4/6 haussier (67%)
+                if m5_bullish >= 5:  # 5/6 haussier (83%)
                     result["mtf_alignment"]["m5"] = "bullish"
-                elif m5_bearish >= 4:  # 4/6 baissier (67%)
+                elif m5_bearish >= 5:  # 5/6 baissier (83%)
                     result["mtf_alignment"]["m5"] = "bearish"
                 else:
                     result["mtf_alignment"]["m5"] = "neutral"
@@ -287,51 +285,48 @@ class ScalpingStrategy(BaseStrategy):
             volume_confirmation_score = 0.0
             volume_details = {}
 
-            # ✅ DEBUG: Log colonnes df_m1
-            if df_m1 is not None:
-                self.logger.debug(f"[OF V6][{asset}] df_m1 columns: {list(df_m1.columns)[:10]}... (len={len(df_m1)})")
+            # ✅ FIX (03 DEC 2025): Utiliser tick_count TEMPS RÉEL du footprint au lieu du DataFrame
+            # Le DataFrame tick_volume est obsolète, le footprint tick_count est calculé en temps réel
+            current_tick_count = 0
+            if isinstance(fp_summary, dict):
+                current_tick_count = int(fp_summary.get("tick_count", 0))
 
-            # Vérifier si tick_volume existe, sinon essayer volume ou real_volume
+            # Calculer moyenne tick_count sur 14 bougies précédentes (via DataFrame)
             vol_col = None
-            if df_m1 is not None and len(df_m1) >= 16:  # ✅ FIX (03 DEC 2025): 16 bougies minimum (14+2)
+            if df_m1 is not None and len(df_m1) >= 15:
                 if "tick_volume" in df_m1.columns:
                     vol_col = "tick_volume"
                 elif "volume" in df_m1.columns:
                     vol_col = "volume"
-                elif "real_volume" in df_m1.columns:
-                    vol_col = "real_volume"
 
-            if vol_col is not None:
-                self.logger.debug(f"[OF V6][{asset}] Utilisation colonne volume: {vol_col}")
-                volumes = df_m1[vol_col].tail(16).values  # 16 bougies pour comparer dernière complète
-                current_volume = volumes[-2]  # ✅ FIX (03 DEC 2025): Dernière bougie COMPLÈTE (pas en cours)
-                avg_volume = np.mean(volumes[:-2])  # Moyenne des 14 précédentes (exclure les 2 dernières)
+            if vol_col is not None and current_tick_count > 0:
+                # Prendre 14 bougies COMPLÈTES pour moyenne (exclure la dernière qui pourrait être en cours)
+                historical_volumes = df_m1[vol_col].tail(15).values[:-1]  # 14 dernières complètes
+                avg_volume = np.mean(historical_volumes) if len(historical_volumes) > 0 else 1.0
 
-                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-                volume_details["current_volume"] = float(current_volume)
+                volume_ratio = current_tick_count / avg_volume if avg_volume > 0 else 1.0
+                volume_details["current_volume"] = float(current_tick_count)
                 volume_details["avg_volume"] = float(avg_volume)
                 volume_details["ratio"] = volume_ratio
 
                 # ✅ POC depuis footprint_summary (VRAI POC calculé depuis profil de volume)
-                if isinstance(fp_summary, dict):
-                    poc_price = fp_summary.get("poc")
-                    if poc_price is not None and isinstance(poc_price, (int, float)):
-                        volume_details["poc"] = float(poc_price)
+                poc_price = fp_summary.get("poc")
+                if poc_price is not None and isinstance(poc_price, (int, float)):
+                    volume_details["poc"] = float(poc_price)
 
-                # Scoring Volume
-                # ✅ FIX (2 Décembre 2025): Assouplissement seuils pour marché calme
-                if volume_ratio >= 2.5:  # Volume spike
+                # Scoring Volume (seuils adaptés à la réalité du marché)
+                if volume_ratio >= 2.0:  # Spike significatif
                     volume_confirmation_score = 15.0
                     volume_details["spike_detected"] = True
-                elif volume_ratio >= 1.8:  # Volume fort
+                elif volume_ratio >= 1.5:  # Volume élevé
                     volume_confirmation_score = 12.0
-                elif volume_ratio >= 1.5:  # Volume au-dessus moyenne
+                elif volume_ratio >= 1.2:  # Volume au-dessus moyenne
                     volume_confirmation_score = 10.0
-                elif volume_ratio >= 1.0:  # Volume normal
-                    volume_confirmation_score = 5.0
-                elif volume_ratio >= 0.5:  # ✅ NOUVEAU: Marché calme mais actif
+                elif volume_ratio >= 0.8:  # Volume normal (±20% de la moyenne)
+                    volume_confirmation_score = 7.0
+                elif volume_ratio >= 0.5:  # Volume modéré
                     volume_confirmation_score = 3.0
-                else:  # Volume très faible
+                else:  # Volume très faible (< 50% moyenne)
                     volume_confirmation_score = 0.0
 
             result["volume_confirmation_score"] = volume_confirmation_score
@@ -371,23 +366,19 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # TOTAL ORDERFLOW SCORE
             # ================================================================
-            # ✅ FIX (03 DEC 2025): Ajouter le bonus MTF au score final
-            mtf_bonus = 3.0 if mtf_aligned else 0.0
-
             result["total_score"] = (
                 delta_momentum_score +
                 volume_confirmation_score +
-                imbalance_strength_score +
-                mtf_bonus
+                imbalance_strength_score
             )
-            result["mtf_bonus"] = mtf_bonus
+            result["mtf_aligned"] = mtf_aligned
 
             self.logger.debug(
                 f"[{asset}] OrderFlow V6: Delta={delta_momentum_score:.1f} "
                 f"Volume={volume_confirmation_score:.1f} "
                 f"Imbalance={imbalance_strength_score:.1f} "
-                f"MTF_Bonus={mtf_bonus:.1f} "
-                f"→ Total={result['total_score']:.1f}/53"
+                f"MTF={mtf_aligned} "
+                f"→ Total={result['total_score']:.1f}/50"
             )
 
         except Exception as e:
@@ -709,7 +700,6 @@ class ScalpingStrategy(BaseStrategy):
         asset: str,
         orderflow_result: Dict[str, Any],
         footprint_result: Dict[str, Any],
-        triggers_result: Dict[str, Any],
         final_score: float,
         action: Optional[str],
         vwap_score_pct: float = 0.0,
@@ -718,7 +708,7 @@ class ScalpingStrategy(BaseStrategy):
         """
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
 
-        Affiche un bilan formaté des trois composants et du score final
+        Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
         """
         try:
             sep = "=" * 70
@@ -742,7 +732,7 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"   • M15 (4 bougies)  → Contexte  : {m15_dir.upper()}")
 
             if mtf_aligned:
-                self.logger.info(f"   ✅ ALIGNEMENT MTF DÉTECTÉ (+3 pts bonus)")
+                self.logger.info(f"   ✅ ALIGNEMENT MTF DÉTECTÉ")
             else:
                 self.logger.info(f"   ⚠️  Pas d'alignement multi-timeframe")
 
@@ -822,11 +812,11 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"\n{sep}")
             self.logger.info(f"🎯 SCORE FINAL BURST SCALPING")
             self.logger.info(f"{sep}")
-            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/53 pts (max 50 + 3 bonus MTF)")
+            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
             self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/25 pts")
             self.logger.info(f"   VWAP (25%)      : {vwap_score_25pts:.1f}/25 pts")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/103 pts (base 100 + bonus MTF)")
+            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/100 pts")
 
             # Direction recommandée
             if action:
@@ -1199,31 +1189,17 @@ class ScalpingStrategy(BaseStrategy):
                     asset_signals=asset_signals
                 )
 
-                # 👣 2. Footprint Analysis (30% du score)
+                # 👣 2. Footprint Analysis (25% du score)
                 footprint_result = self._analyze_footprint_v6(
                     asset=asset,
                     df_m1=df_work,
                     asset_signals=asset_signals
                 )
 
-                # 🎯 3. Triggers Detection SUPPRIMÉ (03 DEC 2025)
-                # Les triggers ont été supprimés du pipeline de décision
-                triggers_result = {
-                    "total_score": 0.0,
-                    "triggers": [],
-                    "details": {}
-                }
-
-                # 📊 4. SCORING FINAL PONDÉRÉ
+                # 📊 3. SCORING FINAL PONDÉRÉ
                 orderflow_score = orderflow_result.get("total_score", 0.0)
                 footprint_score = footprint_result.get("total_score", 0.0)
-                triggers_score = triggers_result.get("total_score", 0.0)  # Toujours 0 (triggers supprimés)
-
-                # ⚠️ MODIFICATION (3 Décembre 2025): Triggers supprimés
-                # Score final = OrderFlow (/50) + Footprint (/30) + Triggers (0)
-                # Maximum possible : 80/100 (au lieu de 100/100)
-                # TODO: Ajuster les poids pour OrderFlow 50% + Footprint 50% = 100/100
-                final_score = orderflow_score + footprint_score + triggers_score
+                final_score = orderflow_score + footprint_score
 
                 # 📋 5. RAPPORT CONSOLIDÉ
                 # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
@@ -1240,7 +1216,6 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
-                    triggers_result=triggers_result,
                     final_score=final_score,
                     action=action,
                     vwap_score_pct=vwap_score_pct,
