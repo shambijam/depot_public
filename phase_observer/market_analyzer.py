@@ -58,25 +58,6 @@ class MarketAnalyzer:
             self.logger.error(f"[MarketAnalyzer] FusionManager init failed: {e}")
             self.fusion_manager = None
 
-    # === Pass-through pour l'analyse des triggers footprint ===
-    def analyze_footprint_triggers(
-        self,
-        asset: str,
-        ticks: pd.DataFrame,
-        bars: Optional[pd.DataFrame],
-        strategy_config: Dict[str, Any],
-    ) -> Tuple[bool, Dict[str, Any]]:
-        """⚠️ DEPRECATED (03 DEC 2025) - Triggers supprimés"""
-        if self.footprint is None:
-            return False, {"error": "FootprintAnalyzer unavailable"}
-        try:
-            return self.footprint.analyze_footprint_triggers(
-                asset, ticks, bars, strategy_config
-            )
-        except Exception as e:
-            self.logger.error(f"[MarketAnalyzer] footprint triggers failed: {e}")
-            return False, {"error": str(e)}
-
     # ============================================================
     # ✅ VWAP MODULE — Analyse VWAP institutionnelle (03 DEC 2025)
     # ============================================================
@@ -193,8 +174,9 @@ class MarketAnalyzer:
 
         # ✅ ANALYSE VWAP (03 DEC 2025)
         # Récupérer DataFrame M1 depuis market_results
-        df_m1 = (market_results or {}).get("annotated_df")
-        current_price = (latest or {}).get("close") if latest else None
+        # Essayer plusieurs clés possibles pour le DataFrame
+        df_m1 = (market_results or {}).get("annotated_rates_df") or (market_results or {}).get("annotated_df")
+        current_price = (latest or {}).get("close") or (latest or {}).get("current_price") if latest else None
 
         vwap_result = {}
         if df_m1 is not None and current_price is not None:

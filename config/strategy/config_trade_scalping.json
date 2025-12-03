@@ -79,11 +79,11 @@
         "enabled": true,
         "delta_abs_min": 30.0
       },
-      "triggers": {
-        "enabled": false,
-        "require_trigger": false,
-        "min_strength": 0.65,
-        "allow_opposite_trigger": false
+      "vwap": {
+        "enabled": true,
+        "session_reset": "midnight_utc",
+        "calculation_method": "standard",
+        "min_ticks_required": 20
       },
       "fusion": {
         "enabled": true,
@@ -98,7 +98,8 @@
         "ponderations": {
           "trigger_weight": 0.0,
           "orderflow_weight": 0.50,
-          "footprint_weight": 0.50
+          "footprint_weight": 0.25,
+          "vwap_weight": 0.25
         }
       }
     }
@@ -191,7 +192,8 @@
     "ponderations": {
       "trigger_weight": 0.0,
       "orderflow_weight": 0.50,
-      "footprint_weight": 0.50,
+      "footprint_weight": 0.25,
+      "vwap_weight": 0.25,
       "coherence_bonus_max": 0.10
     }
   },

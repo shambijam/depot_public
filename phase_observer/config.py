@@ -37,46 +37,8 @@ def update_parameters_from_config(self, strategy_config: dict) -> None:
     self.logger.info(
         f"PhaseObserver mis à jour avec les paramètres de la stratégie '{strategy_name}'."
     )
-    # --- [FOOTPRINT TRIGGERS: DEFAULTS + OVERRIDES] ----------------------
-    fp_user = dict(strategy_config.get("footprint_triggers", {}))
-    # Defaults robustes (XAUUSD à affiner)
-    fp_defaults = {
-        "enabled": True,
-        "filters": {
-            "spread_max_pts": 35,
-            "tickrate_min_per5s": 20,
-            "vol_level_min_ratio_median_30s": 0.5,
-        },
-        "stacking": {
-            "delta_ratio_min": 0.70,  # 70%
-            "min_levels": 3,
-            "invalidate_opposite_ratio": 0.60,
-            "validity_ms": 800,  # fenêtre d’envoi post-détection
-        },
-        "absorption": {
-            "vol_zscore_min": 2.0,
-            "delta_ratio_max": 0.25,
-            "attempts_min": 2,  # tentatives ratées avant rejet
-        },
-        "climax": {
-            "lookback_bars": 20,
-            "vol_ratio_min": 2.5,  # 2.5x la moyenne lookback
-            "delta_ratio_min": 0.70,
-            "need_consolidation": True,
-            "consolidation_max_atr_mult": 0.8,  # range/ATR < 0.8 sur N barres
-        },
-        "order": {
-            "entry_style": "LIMIT_FOK",
-            "burst_count": 5,  # à ajuster, compte démo
-            "burst_volume_each": 0.02,  # ex. 5x0.02 = 0.10
-            "price_offset_ticks": 0,  # 0 ou -1 tick favorable
-        },
-    }
-    fp_cfg = {**fp_defaults, **fp_user}
-    # Expose dans l'instance
-    setattr(self, "footprint_triggers", fp_cfg)
-    # ---------------------------------------------------------------------
-
+    # ✅ [FOOTPRINT TRIGGERS SUPPRIMÉS - 03 DEC 2025]
+    # Remplacés par VWAP Module institutionnel
     # TODO: invalider/rafraîchir les caches qui dépendent des anciens paramètres (si présents)
     # ex: setattr(self, "_tf_data_cache", {})  # si tu utilises un cache interne
 
