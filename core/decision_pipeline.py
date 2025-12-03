@@ -128,6 +128,18 @@ class DecisionPipeline:
         self.logger.info(
             f"[INIT] scalping_phase_observer_enabled={self.scalping_phase_observer_enabled} | arbiter={'present' if self.arbiter else 'absent'}"
         )
+
+        # ✅ [MARKET ANALYZER - 03 DEC 2025] Pour fusion avec VWAP
+        try:
+            self.market_analyzer = MarketAnalyzer(
+                phase_observer=self.phase_observer,
+                logger=self.logger
+            )
+            self.logger.info("[INIT] MarketAnalyzer initialisé avec succès (fusion VWAP)")
+        except Exception as e:
+            self.logger.error(f"[INIT] Échec init MarketAnalyzer: {e}")
+            self.market_analyzer = None
+
         # --- SCALPING PIPELINE (phase-free) ---
         try:
             self.scalping_pipeline = ScalpingPipeline(
@@ -1271,15 +1283,35 @@ class DecisionPipeline:
             orderflow = {}
 
 
-            # -- 4) Appel brique de fusion (pondération + règles métier + veto) --
-            fused = self._fuse_signals_for_scalping(
-                asset=asset_raw,
-                strategy_decision=trade_decision.copy(),
-                orderflow=orderflow or {},
-                trigger=trigger or {},
-                current_config=current_config,
-                context=context,
-            )
+            # -- 4) Appel fusion avec VWAP via MarketAnalyzer (03 DEC 2025) --
+            if self.market_analyzer is not None and df_m1 is not None:
+                # Construire market_results compatible avec build_fused_decision()
+                market_results = {
+                    "annotated_rates_df": df_m1,
+                    "annotated_df": df_m1,  # Fallback
+                    "latest": md_asset.get("latest") or {},
+                    "patterns": {
+                        "orderflow": orderflow or {}
+                    }
+                }
+
+                fused = self.market_analyzer.build_fused_decision(
+                    asset=asset_raw,
+                    strategy_config=current_config,
+                    footprint_trigger=trigger or {},
+                    market_results=market_results,
+                    context=context
+                )
+            else:
+                # Fallback: ancienne fusion sans VWAP
+                fused = self._fuse_signals_for_scalping(
+                    asset=asset_raw,
+                    strategy_decision=trade_decision.copy(),
+                    orderflow=orderflow or {},
+                    trigger=trigger or {},
+                    current_config=current_config,
+                    context=context,
+                )
 
             # -- 5) Si la fusion produit une décision, on remplace la décision courante --
             if fused and isinstance(fused, dict) and fused.get("action"):
