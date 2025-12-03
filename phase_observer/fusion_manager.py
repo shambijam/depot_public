@@ -128,6 +128,7 @@ def _degraded_mode_decision(
 def _cross_system_validation(
     self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_vw: Dict[str, Any], n_tr: Dict[str, Any]
 ) -> List[str]:
+    """✅ MISE À JOUR (03 DEC 2025): Validation croisée avec VWAP"""
     issues: List[str] = []
     try:
         if (
@@ -137,9 +138,12 @@ def _cross_system_validation(
             issues.append("delta_mismatch_of_vs_fp")
     except Exception:
         pass
-    # Exemple : trigger SELL mais OF très bullish
-    if n_tr["dir"] < 0 and (n_of["dir"] > 0 and n_of["score"] >= 0.7):
-        issues.append("trigger_vs_strong_OF_conflict")
+
+    # ✅ FIX (03 DEC 2025): VWAP vs OrderFlow fort - alerte si conflit majeur
+    if n_vw["dir"] != 0 and n_of["dir"] != 0 and n_of["score"] >= 0.7:
+        if n_vw["dir"] * n_of["dir"] < 0:  # Directions opposées
+            issues.append("vwap_vs_strong_OF_conflict")
+
     return issues
 
 
@@ -147,37 +151,43 @@ def _cross_system_validation(
 def _adaptive_weights(
     self, regime: Optional[str], volatility: Optional[str], session: Optional[str]
 ) -> Optional[Dict[str, float]]:
-    # Valeurs par défaut None → pas d’override
+    """✅ MISE À JOUR (03 DEC 2025): Poids adaptatifs avec VWAP (50%/25%/25%)"""
+    # Valeurs par défaut None → pas d'override
     if not (regime or volatility or session):
         return None
-    w_tr, w_of, w_fp = 0.50, 0.30, 0.20
-    # Volatilité élevée → renforcer orderflow
+
+    # ✅ NOUVEAUX POIDS DE BASE: OrderFlow 50%, Footprint 25%, VWAP 25%
+    w_of, w_fp, w_vw = 0.50, 0.25, 0.25
+
+    # Volatilité élevée → renforcer orderflow (tick data plus fiable)
     if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
-        w_tr, w_of, w_fp = 0.45, 0.40, 0.15
-    # Trending → renforcer orderflow ; Range → renforcer footprint (structure)
+        w_of, w_fp, w_vw = 0.55, 0.25, 0.20
+
+    # Trending → renforcer orderflow + VWAP ; Range → renforcer footprint (structure)
     if (regime or "").lower().startswith("trend"):
-        w_of += 0.05
-        w_tr -= 0.03
-        w_fp -= 0.02
+        w_of += 0.05  # OrderFlow important en trend
+        w_vw += 0.03  # VWAP confirme trend
+        w_fp -= 0.08  # Footprint moins pertinent
     elif (regime or "").lower().startswith("range"):
-        w_fp += 0.05
-        w_tr -= 0.03
-        w_of -= 0.02
-    # Session London → triggers réactifs ; Asia → footprint/structure
+        w_fp += 0.10  # Structure footprint cruciale en range
+        w_of -= 0.05
+        w_vw -= 0.05
+
+    # Session London/NY → orderflow + VWAP réactifs ; Asia → footprint/structure
     s = (session or "").lower()
-    if "london" in s or "europe" in s:
-        w_tr += 0.03
-        w_of += 0.00
-        w_fp -= 0.03
+    if "london" in s or "europe" in s or "ny" in s:
+        w_of += 0.03  # Forte liquidité → orderflow fiable
+        w_vw += 0.02  # VWAP institutionnel actif
+        w_fp -= 0.05
     elif "asia" in s:
-        w_fp += 0.03
-        w_tr -= 0.02
-        w_of -= 0.01
+        w_fp += 0.05  # Sessions calmes → focus structure
+        w_of -= 0.03
+        w_vw -= 0.02
 
     # Normalise
-    total = max(1e-9, w_tr + w_of + w_fp)
-    w_tr, w_of, w_fp = w_tr / total, w_of / total, w_fp / total
-    return {"trigger": w_tr, "orderflow": w_of, "footprint": w_fp}
+    total = max(1e-9, w_of + w_fp + w_vw)
+    w_of, w_fp, w_vw = w_of / total, w_fp / total, w_vw / total
+    return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw, "trigger": 0.0}
 
 
 # ---------- Maj métriques ----------
@@ -958,6 +968,28 @@ class FusionManager:
         if n_fp["dir"] != 0:
             votes.append(("validator", n_fp["dir"], n_fp["score"]))
 
+        # ✅ FIX (03 DEC 2025): VWAP vote avec BOOST institutionnel
+        if n_vw["dir"] != 0:
+            vwap_weight = n_vw["score"]
+
+            # BOOST VWAP quand tendance institutionnelle claire
+            regime = n_vw.get("regime", "BALANCED")
+            vw_summary = n_vw.get("summary", {})
+
+            # Boost +30% si TRENDING (tendance institutionnelle confirmée)
+            if regime == "TRENDING" and vwap_weight >= 0.70:
+                vwap_weight *= 1.30
+                self.log.debug(f"[VWAP_BOOST] Régime TRENDING détecté → poids × 1.30 = {vwap_weight:.3f}")
+
+            # Boost +20% si score élevé (>0.75) et slope significative
+            elif vwap_weight >= 0.75:
+                slope = abs(float(vw_summary.get("slope_20", 0.0)))
+                if slope > 0.0001:  # Slope significative
+                    vwap_weight *= 1.20
+                    self.log.debug(f"[VWAP_BOOST] Score élevé + slope forte → poids × 1.20 = {vwap_weight:.3f}")
+
+            votes.append(("vwap", n_vw["dir"], vwap_weight))
+
         pos = sum(w for _, d, w in votes if d > 0)
         neg = sum(w for _, d, w in votes if d < 0)
         if pos > neg:
@@ -971,11 +1003,11 @@ class FusionManager:
 
         # lead/lag (si timestamps fournis)
         now_ts = ctx.get("now_ts") or _now_ts()
-        lead = {"trigger_age_s": None, "orderflow_age_s": None, "footprint_age_s": None}
+        lead = {"orderflow_age_s": None, "footprint_age_s": None, "vwap_age_s": None}
         for k, n in (
-            ("trigger_age_s", n_tr),
             ("orderflow_age_s", n_of),
             ("footprint_age_s", n_fp),
+            ("vwap_age_s", n_vw),  # ✅ FIX (03 DEC 2025): VWAP timestamp tracking
         ):
             ts = n.get("ts")
             if ts is not None:
@@ -984,21 +1016,22 @@ class FusionManager:
                 except Exception:
                     lead[k] = None
 
+        # ✅ FIX (03 DEC 2025): Matrice de cohérence mise à jour avec VWAP
         matrix = {
-            "trigger_vs_of": (
-                "aligned"
-                if n_tr["dir"] == n_of["dir"]
-                else "conflict" if (n_tr["dir"] * n_of["dir"] < 0) else "neutral"
-            ),
-            "trigger_vs_fp": (
-                "aligned"
-                if n_tr["dir"] == n_fp["dir"]
-                else "conflict" if (n_tr["dir"] * n_fp["dir"] < 0) else "neutral"
-            ),
             "of_vs_fp": (
                 "aligned"
                 if n_of["dir"] == n_fp["dir"]
                 else "conflict" if (n_of["dir"] * n_fp["dir"] < 0) else "neutral"
+            ),
+            "of_vs_vwap": (
+                "aligned"
+                if n_of["dir"] == n_vw["dir"]
+                else "conflict" if (n_of["dir"] * n_vw["dir"] < 0) else "neutral"
+            ),
+            "fp_vs_vwap": (
+                "aligned"
+                if n_fp["dir"] == n_vw["dir"]
+                else "conflict" if (n_fp["dir"] * n_vw["dir"] < 0) else "neutral"
             ),
         }
 
