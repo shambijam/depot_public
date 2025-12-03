@@ -80,8 +80,8 @@
         "delta_abs_min": 30.0
       },
       "triggers": {
-        "enabled": true,
-        "require_trigger": true,
+        "enabled": false,
+        "require_trigger": false,
         "min_strength": 0.65,
         "allow_opposite_trigger": false
       },
@@ -96,9 +96,9 @@
         "require_footprint": true,
         "of_score_scale": "0_1",
         "ponderations": {
-          "trigger_weight": 0.50,
-          "orderflow_weight": 0.25,
-          "footprint_weight": 0.25
+          "trigger_weight": 0.0,
+          "orderflow_weight": 0.50,
+          "footprint_weight": 0.50
         }
       }
     }
@@ -189,9 +189,9 @@
       "enabled": false
     },
     "ponderations": {
-      "trigger_weight": 0.30,
+      "trigger_weight": 0.0,
       "orderflow_weight": 0.50,
-      "footprint_weight": 0.20,
+      "footprint_weight": 0.50,
       "coherence_bonus_max": 0.10
     }
   },

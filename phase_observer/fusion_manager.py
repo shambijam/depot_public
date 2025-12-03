@@ -1152,65 +1152,19 @@ class FusionManager:
         status_of = n_of.get("status", "SUSPECT")
         status_fp = n_fp.get("status", "SUSPECT")
 
-        # ========== 3. BONUS TRIGGER (Amplificateur) ==========
+        # ========== 3. BONUS TRIGGER SUPPRIMÉ (03 DEC 2025) ==========
+        # Les triggers ont été supprimés du pipeline de décision.
+        # trigger_boost est maintenant toujours 0.0 pour maintenir la compatibilité
+        # avec les appelants qui attendent un tuple (score, trigger_boost).
 
         trigger_boost = 0.0
-        trigger_type = n_tr.get("type", "")
-        trigger_conf = n_tr.get("score", 0.0)
-
-        # Vérifie si trigger RÉEL (pas fusion_pretrigger)
-        valid_patterns = [
-            # Triggers existants (noms EXACTS retournés par footprint_analyzer.py)
-            "imbalance_stacking",           # TriggerType.STACKING
-            "climax_after_consolidation",   # TriggerType.CLIMAX
-            "absorption_reject",            # TriggerType.ABSORPTION
-            "stacking_inline",              # TriggerType.MICRO_STACK
-            "absorption_inline",            # TriggerType.MICRO_ABSORPTION
-            # Nouveaux triggers (Session 22 Nov 2025)
-            "liquidation_clusters",         # TriggerType.LIQUIDATION_CLUSTERS
-            "failed_breakout",              # TriggerType.FAILED_BREAKOUT
-            "momentum_imbalance",           # TriggerType.MOMENTUM_IMBALANCE
-            "accumulation_zones",           # TriggerType.ACCUMULATION_ZONES
-            # Alias legacy (au cas où)
-            "stacking", "climax", "absorption", "micro_stack", "micro_absorption"
-        ]
-        is_real_trigger = trigger_type in valid_patterns
-
-        if is_real_trigger:
-            # Bonus selon qualité du trigger
-            # Triggers prioritaires (noms EXACTS)
-            priority_triggers = [
-                "imbalance_stacking", "climax_after_consolidation", "absorption_reject",
-                "liquidation_clusters", "failed_breakout", "momentum_imbalance",
-                # Alias legacy
-                "stacking", "climax", "absorption"
-            ]
-            if trigger_conf >= 0.85 and trigger_type in priority_triggers:
-                trigger_boost = 0.15  # +15% DIAMANT
-            elif trigger_conf >= 0.75:
-                trigger_boost = 0.12  # +12% PLATINE
-            elif trigger_conf >= 0.65:
-                trigger_boost = 0.08  # +8% OR
-            else:
-                trigger_boost = 0.05  # +5% ARGENT
-
-            # Bonus volume exceptionnel (si disponible dans trigger metadata)
-            tr_raw = n_tr.get("raw", {})
-            tr_meta = tr_raw.get("meta", {}) if isinstance(tr_raw, dict) else {}
-            snapshot_stats = tr_meta.get("snapshot_stats", {}) if isinstance(tr_meta, dict) else {}
-            volume_zscore = _to_float(snapshot_stats.get("volume_zscore_max"), 0.0) if isinstance(snapshot_stats, dict) else 0.0
-
-            if volume_zscore >= 2.5:
-                trigger_boost += 0.03  # +3% événement exceptionnel
-
-        # Application bonus trigger
-        score_with_trigger = base_score + trigger_boost
+        score_with_trigger = base_score  # Plus de bonus trigger
 
         # ========== 4. BONUS/MALUS COHÉRENCE ==========
 
-        # Bonus alignement 3/3 (si trigger présent)
-        if is_real_trigger and rules_eval.get("aligned3"):
-            score_with_trigger *= 1.08  # +8% consensus unanime
+        # Bonus alignement 3/3 (SUPPRIMÉ - 03 DEC 2025)
+        # Le bonus trigger pour alignement 3/3 a été supprimé avec la suppression des triggers
+        # Conservé uniquement les malus de conflits ci-dessous
 
         # Malus conflits
         matrix = coherence.get("matrix", {})

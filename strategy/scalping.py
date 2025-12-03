@@ -681,214 +681,6 @@ class ScalpingStrategy(BaseStrategy):
 
         return result
 
-    def _analyze_triggers_v6(
-        self,
-        asset: str,
-        df_m1: pd.DataFrame,
-        orderflow_result: Dict[str, Any],
-        footprint_result: Dict[str, Any],
-        asset_signals: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        ⚡ Triggers Detection V6 - Ultra-Rapide
-
-        Détection ultra-rapide :
-        • Bougie courante uniquement
-        • Surveillance ticks temps réel
-        • Seuils dynamiques selon volatilité
-
-        Triggers disponibles :
-        • Absorption @ POC : +8 points
-        • Breakout imbalance : +6 points
-        • Stop run bullish/bearish : +5 points
-        • Volume spike : +4 points
-        • Multi-trigger confluence : +2 à +4 points
-        • Alignement MTF : +3 points
-
-        Retourne :
-        {
-            "triggers": [...],
-            "total_score": 0-20+ (peut dépasser 20),
-            "details": {...}
-        }
-        """
-        result = {
-            "triggers": [],
-            "total_score": 0.0,
-            "details": {}
-        }
-
-        try:
-            trigger_points = 0.0
-            triggers_list = []
-
-            # Récupérer POC depuis orderflow
-            # ✅ FIX (2 Décembre 2025): Utiliser les vraies clés stockées
-            orderflow_volume = orderflow_result.get("volume_confirmation_details", {})
-            poc_price = orderflow_volume.get("poc")
-
-            footprint_absorption = footprint_result.get("absorption_details", {})
-            absorption_bias = footprint_absorption.get("bias", "NEUTRAL")
-
-            # ================================================================
-            # TRIGGER 1 : Absorption @ POC (+8 points)
-            # ================================================================
-            if poc_price and absorption_bias in ["STRONG BULLISH", "STRONG BEARISH"]:
-                trigger_points += 8.0
-                triggers_list.append({
-                    "name": "absorption_at_poc",
-                    "points": 8,
-                    "direction": "bullish" if "BULLISH" in absorption_bias else "bearish"
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Absorption @ POC (+8 pts)")
-
-            # ================================================================
-            # TRIGGER 2 : Breakout Imbalance (+6 points)
-            # ================================================================
-            # ✅ FIX (2 Décembre 2025): Utiliser la vraie clé
-            orderflow_imbalances = orderflow_result.get("imbalance_strength_details", {})
-            imbalance_count = orderflow_imbalances.get("total_count", 0)
-
-            if imbalance_count >= 3:  # Imbalances significatives
-                trigger_points += 6.0
-                triggers_list.append({
-                    "name": "breakout_imbalance",
-                    "points": 6,
-                    "imbalances": imbalance_count
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Breakout Imbalance (+6 pts)")
-
-            # ================================================================
-            # TRIGGER 3 : Volume Spike (+4 points)
-            # ================================================================
-            volume_spike = orderflow_volume.get("spike_detected", False)
-
-            if volume_spike:
-                trigger_points += 4.0
-                triggers_list.append({
-                    "name": "volume_spike",
-                    "points": 4,
-                    "ratio": orderflow_volume.get("ratio", 0)
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Volume Spike (+4 pts)")
-
-            # ================================================================
-            # TRIGGER 4 : Stop Run (+5 points) - Détecté via rejection
-            # ================================================================
-            # ✅ FIX (2 Décembre 2025): Utiliser la vraie clé
-            rejection_strength = footprint_result.get("rejection_details", {}).get("strength")
-
-            if rejection_strength == "strong":
-                trigger_points += 5.0
-                triggers_list.append({
-                    "name": "stop_run",
-                    "points": 5,
-                    "strength": "strong"
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Stop Run (+5 pts)")
-
-            # ================================================================
-            # ✅ NOUVEAUX TRIGGERS (2 Décembre 2025) - Moins Restrictifs
-            # ================================================================
-
-            # TRIGGER 5 : Delta Strong (+3 points)
-            # ================================================================
-            orderflow_delta_details = orderflow_result.get("delta_momentum_details", {})
-            delta_total = abs(orderflow_delta_details.get("delta_total", 0))
-
-            if delta_total >= 100:
-                trigger_points += 3.0
-                triggers_list.append({
-                    "name": "delta_strong",
-                    "points": 3,
-                    "delta": delta_total
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Delta Strong (+3 pts) | delta={delta_total:.1f}")
-
-            # ================================================================
-            # TRIGGER 6 : High Imbalance Ratio (+2 points)
-            # ================================================================
-            imbalance_total = orderflow_imbalances.get("total_count", 0)
-
-            if imbalance_total >= 50:
-                trigger_points += 2.0
-                triggers_list.append({
-                    "name": "high_imbalance_ratio",
-                    "points": 2,
-                    "count": imbalance_total
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: High Imbalance Ratio (+2 pts) | count={imbalance_total}")
-
-            # ================================================================
-            # TRIGGER 7 : Partial MTF Coherence (+2 points)
-            # ================================================================
-            mtf_alignment = orderflow_result.get("mtf_alignment", {})
-            m1_dir = mtf_alignment.get("m1", "NEUTRAL").upper()
-            m5_dir = mtf_alignment.get("m5", "NEUTRAL").upper()
-            m15_dir = mtf_alignment.get("m15", "NEUTRAL").upper()
-
-            # Compter alignements (2/3 suffisent)
-            directions = [m1_dir, m5_dir, m15_dir]
-            bullish_count = directions.count("BULLISH")
-            bearish_count = directions.count("BEARISH")
-
-            if bullish_count >= 2 or bearish_count >= 2:
-                trigger_points += 2.0
-                triggers_list.append({
-                    "name": "partial_mtf_coherence",
-                    "points": 2,
-                    "alignment": f"{max(bullish_count, bearish_count)}/3"
-                })
-                self.logger.debug(f"[{asset}] ⚡ Trigger: Partial MTF Coherence (+2 pts) | {max(bullish_count, bearish_count)}/3 aligned")
-
-            # ================================================================
-            # BONUS : Multi-Trigger Confluence (+2 à +4 points)
-            # ================================================================
-            if len(triggers_list) >= 3:
-                bonus = 4
-            elif len(triggers_list) >= 2:
-                bonus = 2
-            else:
-                bonus = 0
-
-            if bonus > 0:
-                trigger_points += bonus
-                triggers_list.append({
-                    "name": "multi_trigger_confluence",
-                    "points": bonus,
-                    "trigger_count": len(triggers_list)
-                })
-                self.logger.debug(f"[{asset}] ⚡ Bonus: Multi-Trigger Confluence (+{bonus} pts)")
-
-            # ================================================================
-            # BONUS : Alignement Multi-Timeframe (+3 points)
-            # ================================================================
-            mtf_aligned = orderflow_result.get("mtf_aligned", False)
-
-            if mtf_aligned:
-                trigger_points += 3.0
-                triggers_list.append({
-                    "name": "mtf_alignment",
-                    "points": 3,
-                    "alignment": orderflow_result.get("mtf_alignment")
-                })
-                self.logger.debug(f"[{asset}] ⚡ Bonus: MTF Alignment (+3 pts)")
-
-            # ================================================================
-            # TOTAL TRIGGERS SCORE
-            # ================================================================
-            result["triggers"] = triggers_list
-            result["total_score"] = trigger_points
-            result["details"]["trigger_count"] = len(triggers_list)
-
-            self.logger.debug(
-                f"[{asset}] Triggers V6: {len(triggers_list)} triggers → {trigger_points:.1f} points"
-            )
-
-        except Exception as e:
-            self.logger.error(f"[{asset}] Triggers V6 analysis error: {e}", exc_info=True)
-
-        return result
 
     def _log_orderflow_consolidated_report(
         self,
@@ -991,44 +783,12 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}")
 
             # ================================================================
-            # 4. TRIGGERS DETECTION (20% du score)
+            # 4. TRIGGERS DETECTION - DÉSACTIVÉ (03 DEC 2025)
             # ================================================================
             trig_score = triggers_result.get("total_score", 0.0)
-            trigger_points = triggers_result.get("trigger_points", 0.0)
-            triggers_list = triggers_result.get("triggers_detected", [])
 
-            self.logger.info(f"\n⚡ TRIGGERS DETECTION (20% du total) : {trig_score:.1f}/20 points")
-
-            if triggers_list:
-                self.logger.info(f"   Triggers détectés ({len(triggers_list)}) :")
-                for trig in triggers_list:
-                    name = trig.get("name", "unknown")
-                    pts = trig.get("points", 0)
-                    direction = trig.get("direction", "N/A")
-
-                    # Emoji selon le type
-                    emoji = "🎯"
-                    if "absorption" in name:
-                        emoji = "🔵"
-                    elif "breakout" in name or "imbalance" in name:
-                        emoji = "🔓"
-                    elif "volume" in name:
-                        emoji = "📊"
-                    elif "stop_run" in name:
-                        emoji = "🎣"
-
-                    self.logger.info(f"   {emoji} {name.replace('_', ' ').title()} → +{pts} pts ({direction})")
-            else:
-                self.logger.info(f"   ⚠️  Aucun trigger détecté")
-
-            # Bonus
-            bonus_mtf = triggers_result.get("bonus_mtf_alignment", 0)
-            bonus_confluence = triggers_result.get("bonus_multi_trigger_confluence", 0)
-
-            if bonus_mtf > 0:
-                self.logger.info(f"   ✨ Bonus MTF Alignment : +{bonus_mtf} pts")
-            if bonus_confluence > 0:
-                self.logger.info(f"   ✨ Bonus Multi-Trigger : +{bonus_confluence} pts")
+            self.logger.info(f"\n⚡ TRIGGERS DETECTION : DÉSACTIVÉ (supprimé le 03 DEC 2025)")
+            self.logger.info(f"   Score triggers : {trig_score:.1f} points (toujours 0)")
 
             # ================================================================
             # 5. SCORE FINAL & DÉCISION
@@ -1036,12 +796,11 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"\n{sep}")
             self.logger.info(f"🎯 SCORE FINAL ORDERFLOW V6")
             self.logger.info(f"{sep}")
-            # ✅ FIX (2 Décembre 2025): Scores déjà pondérés, pas de multiplication
             self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
             self.logger.info(f"   Footprint (30%) : {fp_score:.1f}/30 pts")
-            self.logger.info(f"   Triggers  (20%) : {trig_score:.1f}/20 pts")
+            self.logger.info(f"   Triggers  (--) DÉSACTIVÉ : {trig_score:.1f} pts")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL           : {final_score:.1f}/100 points")
+            self.logger.info(f"   TOTAL           : {final_score:.1f}/80 points (max sans triggers)")
 
             # Direction recommandée
             if action:
@@ -1421,24 +1180,23 @@ class ScalpingStrategy(BaseStrategy):
                     asset_signals=asset_signals
                 )
 
-                # 🎯 3. Triggers Detection (20% du score)
-                triggers_result = self._analyze_triggers_v6(
-                    asset=asset,
-                    df_m1=df_work,
-                    orderflow_result=orderflow_result,
-                    footprint_result=footprint_result,
-                    asset_signals=asset_signals
-                )
+                # 🎯 3. Triggers Detection SUPPRIMÉ (03 DEC 2025)
+                # Les triggers ont été supprimés du pipeline de décision
+                triggers_result = {
+                    "total_score": 0.0,
+                    "triggers": [],
+                    "details": {}
+                }
 
                 # 📊 4. SCORING FINAL PONDÉRÉ
                 orderflow_score = orderflow_result.get("total_score", 0.0)
                 footprint_score = footprint_result.get("total_score", 0.0)
-                triggers_score = triggers_result.get("total_score", 0.0)
+                triggers_score = triggers_result.get("total_score", 0.0)  # Toujours 0 (triggers supprimés)
 
-                # ✅ FIX (2 Décembre 2025): Les scores sont DÉJÀ pondérés (/50, /30, /20)
-                # Pas besoin de multiplier à nouveau, il suffit d'additionner !
-                # AVANT (FAUX): 20×0.5 + 14×0.3 + 10×0.2 = 16.2/100
-                # APRÈS (CORRECT): 20 + 14 + 10 = 44/100
+                # ⚠️ MODIFICATION (3 Décembre 2025): Triggers supprimés
+                # Score final = OrderFlow (/50) + Footprint (/30) + Triggers (0)
+                # Maximum possible : 80/100 (au lieu de 100/100)
+                # TODO: Ajuster les poids pour OrderFlow 50% + Footprint 50% = 100/100
                 final_score = orderflow_score + footprint_score + triggers_score
 
                 # 📋 5. RAPPORT CONSOLIDÉ
