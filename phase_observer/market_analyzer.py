@@ -14,6 +14,8 @@ from .orchestrator import PhaseObserver
 # detect_orderflow_v6 supprimé → remplacé par analyse intégrée dans ScalpingStrategy
 from .footprint_analyzer import FootprintAnalyzer
 from .fusion_manager import FusionManager
+# ✅ [IMPORT VWAP MODULE - Session 03 Dec 2025]
+from .vwap import create_vwap_analyzer
 
 
 LOG = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ class MarketAnalyzer:
         bars: Optional[pd.DataFrame],
         strategy_config: Dict[str, Any],
     ) -> Tuple[bool, Dict[str, Any]]:
+        """⚠️ DEPRECATED (03 DEC 2025) - Triggers supprimés"""
         if self.footprint is None:
             return False, {"error": "FootprintAnalyzer unavailable"}
         try:
@@ -75,7 +78,67 @@ class MarketAnalyzer:
             return False, {"error": str(e)}
 
     # ============================================================
-    # 🔹 FUSION MANAGER — décision unifiée (OFv6 + FP M1 + Trigger)
+    # ✅ VWAP MODULE — Analyse VWAP institutionnelle (03 DEC 2025)
+    # ============================================================
+    def analyze_vwap(
+        self,
+        asset: str,
+        df: pd.DataFrame,
+        current_price: float,
+        strategy_config: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Analyse VWAP institutionnelle via VWAPAnalyzer
+
+        Args:
+            asset: Symbol (XAUUSD, EURUSD, etc.)
+            df: DataFrame OHLC (depuis OrderFlow V6 ou MarketData)
+            current_price: Prix actuel
+            strategy_config: Config stratégie
+            context: Contexte additionnel
+
+        Returns:
+            Dict depuis VWAPAnalysisResult.to_dict()
+            {
+                "score": 0.0-1.0,
+                "status": "VALID"|"SUSPECT"|"INVALID",
+                "bias": "BUY"|"SELL"|"NEUTRAL",
+                "vwap_value": float,
+                "distance_pips": float,
+                "slope": float,
+                "zone": str,
+                "regime": str,
+                "summary": {...},
+                ...
+            }
+        """
+        try:
+            # Créer analyseur VWAP (léger, pas besoin de cache entre appels)
+            vwap_analyzer = create_vwap_analyzer(asset, strategy_config)
+
+            # Analyse complète
+            result = vwap_analyzer.analyze(df, current_price, context)
+
+            # Convertir en dict pour fusion
+            return result.to_dict()
+
+        except Exception as e:
+            self.logger.error(f"[MarketAnalyzer] VWAP analysis failed: {e}", exc_info=True)
+            return {
+                "score": 0.0,
+                "status": "INVALID",
+                "bias": "NEUTRAL",
+                "vwap_value": 0.0,
+                "distance_pips": 0.0,
+                "slope": 0.0,
+                "zone": "NEUTRAL",
+                "regime": "BALANCED",
+                "summary": {"error": str(e)},
+            }
+
+    # ============================================================
+    # 🔹 FUSION MANAGER — décision unifiée (OFv6 + FP M1 + VWAP)
     # ============================================================
     def build_fused_decision(
         self,
@@ -128,6 +191,32 @@ class MarketAnalyzer:
 
         trig = footprint_trigger or {}
 
+        # ✅ ANALYSE VWAP (03 DEC 2025)
+        # Récupérer DataFrame M1 depuis market_results
+        df_m1 = (market_results or {}).get("annotated_df")
+        current_price = (latest or {}).get("close") if latest else None
+
+        vwap_result = {}
+        if df_m1 is not None and current_price is not None:
+            try:
+                vwap_result = self.analyze_vwap(
+                    asset=asset,
+                    df=df_m1,
+                    current_price=current_price,
+                    strategy_config=strategy_config,
+                    context=context
+                )
+                self.logger.info(
+                    f"[MarketAnalyzer] ✅ VWAP | score={vwap_result.get('score', 0):.3f} | "
+                    f"bias={vwap_result.get('bias')} | zone={vwap_result.get('zone')} | "
+                    f"slope={vwap_result.get('slope', 0):.6f}"
+                )
+            except Exception as e:
+                self.logger.error(f"[MarketAnalyzer] VWAP analysis failed: {e}")
+                vwap_result = {}  # Fallback vide
+        else:
+            self.logger.warning(f"[MarketAnalyzer] VWAP skipped: df_m1={df_m1 is not None}, price={current_price}")
+
         # On transmet aussi un contexte optionnel (spread/session/régime/horodatage…)
         ctx = dict(context or {})
         ctx.setdefault("now_ts", None)  # si absent, FusionManager utilise time.time()
@@ -137,12 +226,13 @@ class MarketAnalyzer:
             fused = self.fusion_manager.fuse(
                 orderflow=of,
                 footprint=fp_payload,
-                triggers=trig,
+                vwap=vwap_result,  # ✅ VWAP ajouté
+                triggers=trig,  # DEPRECATED
                 strategy_config=strategy_config,
                 context=ctx,
             )
         except Exception as e:
-            self.logger.error(f"[MarketAnalyzer] Fusion failed: {e}")
+            self.logger.error(f"[MarketAnalyzer] Fusion failed: {e}", exc_info=True)
             return {"status": "SUSPECT", "error": str(e)}
 
         # Si pas d'ancre côté trigger, harmonise avec POC footprint, puis OF

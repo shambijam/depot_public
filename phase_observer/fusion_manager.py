@@ -90,11 +90,12 @@ def _hashable(self, obj: Any) -> str:
 
 
 def _coh_key(
-    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_tr: Dict[str, Any]
+    self, n_of: Dict[str, Any], n_fp: Dict[str, Any], n_vw: Dict[str, Any], n_tr: Dict[str, Any]
 ) -> str:
+    """✅ MISE À JOUR (03 DEC 2025): Inclut VWAP dans hash cohérence"""
     import hashlib
 
-    base = "|".join([self._hashable(n_of), self._hashable(n_fp), self._hashable(n_tr)])
+    base = "|".join([self._hashable(n_of), self._hashable(n_fp), self._hashable(n_vw), self._hashable(n_tr)])
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
@@ -197,7 +198,12 @@ def _update_metrics(self, dt: float, decision: str, fused: float):
 
 class FusionManager:
     """
-    Orchestration modulaire (OFv6 + Footprint + Triggers).
+    Orchestration modulaire (OFv6 + Footprint + VWAP).
+
+    ✅ MISE À JOUR (03 DEC 2025): Intégration module VWAP institutionnel
+    - Triggers supprimés → Remplacés par VWAP Module
+    - Pondération: OrderFlow 50% + Footprint 25% + VWAP 25%
+
     Sortie :
       {
         "ok": bool,
@@ -207,7 +213,7 @@ class FusionManager:
         "fused_confidence": float(0..1),
         "anchor_price": float|None,
         "rationale": str,
-        "components": {"orderflow":..., "validator":..., "trigger":...},
+        "components": {"orderflow":..., "footprint":..., "vwap":...},
         "consensus": {"maj": "BUY/SELL/TIE", "agreement": float, "votes":[...]},
         "quality": {"is_valid": bool, "quality_score": float, "missing":[], "warnings":[]},
         "suggested_trailing": {"distance": float, "unit": "price", "note": str}
@@ -513,16 +519,26 @@ class FusionManager:
         self,
         orderflow: Dict[str, Any],
         footprint: Dict[str, Any],
-        triggers: Optional[Dict[str, Any]],
+        vwap: Optional[Dict[str, Any]] = None,  # ✅ VWAP Module (remplace triggers)
+        triggers: Optional[Dict[str, Any]] = None,  # ⚠️ DEPRECATED (rétrocompat)
         strategy_config: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """
+        ✅ MISE À JOUR (03 DEC 2025): Intégration VWAP
+        - vwap: Dict depuis VWAPAnalyzer.analyze() (score 0-1, bias, zone, etc.)
+        - triggers: DEPRECATED (gardé pour rétrocompatibilité, ignoré si vwap fourni)
+        """
         cfg = (strategy_config or {}).get("fusion", {}) or {}
         ctx = context or {}
 
+        # Si vwap fourni, ignorer triggers (deprecated)
+        if vwap is not None:
+            triggers = None  # Force triggers à None pour éviter confusion
+
         # 1) Validation / qualité
         quality = self._validate_inputs(
-            orderflow or {}, footprint or {}, triggers or {}
+            orderflow or {}, footprint or {}, vwap or {}, triggers or {}
         )
         if not quality["is_valid"]:
             return self._mk_hold(
@@ -535,52 +551,55 @@ class FusionManager:
         # 2) Normalisation compacte
         n_of = self._normalize_orderflow(orderflow)
         n_fp = self._normalize_footprint(footprint)
-        n_tr = self._normalize_trigger(triggers or {})
+        n_vw = self._normalize_vwap(vwap or {})  # ✅ VWAP normalization
+        n_tr = self._normalize_trigger(triggers or {})  # Gardé pour rétrocompat
 
         # timestamps garantis
         n_of = self._ensure_timestamp(n_of, ctx)
         n_fp = self._ensure_timestamp(n_fp, ctx)
+        n_vw = self._ensure_timestamp(n_vw, ctx)  # ✅ VWAP timestamp
         n_tr = self._ensure_timestamp(n_tr, ctx)
 
         # validation croisée → warnings qualité
-        x_issues = self._cross_system_validation(n_of, n_fp, n_tr)
+        x_issues = self._cross_system_validation(n_of, n_fp, n_vw, n_tr)
         if x_issues:
             quality["warnings"].extend([f"csv:{w}" for w in x_issues])
 
         # 3) Cohérence (direction pondérée + matrice simple)
-        _key = self._coh_key(n_of, n_fp, n_tr)
+        _key = self._coh_key(n_of, n_fp, n_vw, n_tr)  # ✅ Inclut VWAP
         coherence = self._coherence_cached(
-            _key, lambda: self._analyze_coherence(n_of, n_fp, n_tr, ctx)
+            _key, lambda: self._analyze_coherence(n_of, n_fp, n_vw, n_tr, ctx)
         )
-        degraded = self._degraded_mode_decision(n_of, n_fp, n_tr)
+        degraded = self._degraded_mode_decision(n_of, n_fp, n_vw, n_tr)
         if degraded["is_degraded"]:
-            quality["warnings"].append("degraded_mode_no_triggers")
+            quality["warnings"].append("degraded_mode_fallback")
 
         # 4) Règles métier scalping
-        rules_eval = self._apply_business_rules(n_of, n_fp, n_tr, coherence, cfg, ctx)
+        rules_eval = self._apply_business_rules(n_of, n_fp, n_vw, n_tr, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
-        fused, trigger_boost = self._calculate_fused_confidence(
-            n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
+        # ✅ NOUVELLE FORMULE: OrderFlow 50% + Footprint 25% + VWAP 25%
+        fused, vwap_contribution = self._calculate_fused_confidence(
+            n_of, n_fp, n_vw, n_tr, coherence, quality, cfg, ctx, rules_eval
         )
 
         # === DEBUG 1C: DUMP normalized inputs ===
         try:
             of_sum = (n_of.get("summary") or {}) if isinstance(n_of, dict) else {}
             fp_sum = (n_fp.get("summary") or {}) if isinstance(n_fp, dict) else {}
+            vw_sum = (n_vw.get("summary") or {}) if isinstance(n_vw, dict) else {}
             _probe(
-                self.logger,
-                "[FUSION/DUMP] OF(score=%.2f, |Δ|=%.1f, bias=%s) | FP(score=%.2f, tickrate=%.2f/s, cov=%.2fs) | TR(dir=%s, conf=%.2f) | coherence=%.3f | fused=%.3f | quality=%s",
+                self.log,
+                "[FUSION/DUMP] OF(score=%.2f, |Δ|=%.1f, bias=%s) | FP(score=%.2f, tickrate=%.2f/s, cov=%.2fs) | VWAP(score=%.2f, bias=%s, zone=%s) | coherence=%.3f | fused=%.3f | quality=%s",
                 float((n_of.get("score") if isinstance(n_of, dict) else 0.0) or 0.0),
                 float(abs((of_sum.get("delta_total") or 0.0))),
                 str(n_of.get("bias") if isinstance(n_of, dict) else None),
                 float((n_fp.get("score") if isinstance(n_fp, dict) else 0.0) or 0.0),
                 float((fp_sum.get("tick_rate") or 0.0)),
                 float((fp_sum.get("coverage_s") or 0.0)),
-                str((n_tr.get("direction") if isinstance(n_tr, dict) else None)),
-                float(
-                    (n_tr.get("confidence") if isinstance(n_tr, dict) else 0.0) or 0.0
-                ),
+                float((n_vw.get("score") if isinstance(n_vw, dict) else 0.0) or 0.0),
+                str(n_vw.get("bias") if isinstance(n_vw, dict) else None),
+                str(n_vw.get("zone") if isinstance(n_vw, dict) else None),
                 float((coherence or 0.0)),
                 float((fused or 0.0)),
                 str(quality),
@@ -589,10 +608,10 @@ class FusionManager:
             pass
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
-        decision = self._final_decision("AUTO", fused, n_tr, coherence, cfg)
+        decision = self._final_decision("AUTO", fused, n_vw, n_tr, coherence, cfg)
 
         # 9) Rationale
-        rationale = self._rationale(decision, n_of, n_fp, n_tr, coherence, rules_eval)
+        rationale = self._rationale(decision, n_of, n_fp, n_vw, n_tr, coherence, rules_eval)
         # metrics update
         self._update_metrics(
             dt=_now_ts() - t0, decision=decision["action"], fused=fused
@@ -614,12 +633,13 @@ class FusionManager:
         if adaptive_w:
             weights_used = adaptive_w
         else:
-            # Lire depuis config ou utiliser défauts
+            # ✅ NOUVEAUX POIDS (03 DEC 2025): OrderFlow 50% + Footprint 25% + VWAP 25%
             p = cfg.get("ponderations", {})
             weights_used = {
-                "trigger": _to_float(p.get("trigger_weight"), 0.50),
-                "orderflow": _to_float(p.get("orderflow_weight"), 0.25),
+                "orderflow": _to_float(p.get("orderflow_weight"), 0.50),
                 "footprint": _to_float(p.get("footprint_weight"), 0.25),
+                "vwap": _to_float(p.get("vwap_weight"), 0.25),
+                "trigger": _to_float(p.get("trigger_weight"), 0.0),  # DEPRECATED
             }
 
         # Appeler le rapport consolidé (actif seulement si FUSION_PROBE=1)
@@ -632,6 +652,7 @@ class FusionManager:
                 n_tr=n_tr,
                 n_of=n_of,
                 n_fp=n_fp,
+                n_vw=n_vw,
                 fused=fused,
                 decision=decision,
                 weights=weights_used,
@@ -644,10 +665,16 @@ class FusionManager:
             "signal_type": decision["signal_type"],
             "direction": decision["direction"],
             "fused_confidence": round(float(fused), 3),
-            "trigger_boost": round(float(trigger_boost), 3),  # ✅ Ajout pour burst.py
+            "vwap_contribution": round(float(vwap_contribution), 3),  # ✅ Contribution VWAP
+            "trigger_boost": 0.0,  # DEPRECATED (gardé pour rétrocompat)
             "anchor_price": decision["anchor_price"],
             "rationale": rationale,
-            "components": {"orderflow": n_of, "validator": n_fp, "trigger": n_tr},
+            "components": {
+                "orderflow": n_of,
+                "footprint": n_fp,
+                "vwap": n_vw,  # ✅ VWAP ajouté
+                "trigger": n_tr  # DEPRECATED (gardé pour rétrocompat)
+            },
             "consensus": {
                 "maj": maj_str,
                 "agreement": round(coherence["agreement"], 3),
@@ -658,8 +685,15 @@ class FusionManager:
 
     # -------------- 1) Input Validator --------------
     def _validate_inputs(
-        self, of: Dict[str, Any], fp: Dict[str, Any], tr: Dict[str, Any]
+        self,
+        of: Dict[str, Any],
+        fp: Dict[str, Any],
+        vw: Dict[str, Any],
+        tr: Dict[str, Any]
     ) -> Dict[str, Any]:
+        """
+        ✅ MISE À JOUR (03 DEC 2025): Validation VWAP ajoutée
+        """
         missing, warnings = [], []
 
         def _req(d, path, keys):
@@ -672,9 +706,12 @@ class FusionManager:
         # schémas minimaux
         missing += _req(of, "orderflow", ["score", "status"])
         missing += _req(fp, "footprint", ["status"])
-        # triggers optionnels mais recommandés
+        # VWAP optionnel mais recommandé
+        if not vw or (vw.get("score") is None and vw.get("bias") is None):
+            warnings.append("vwap.missing_data")
+        # triggers DEPRECATED (ignoré)
         if not tr or (tr.get("direction") is None and tr.get("action") is None):
-            warnings.append("trigger.missing_direction")
+            pass  # Ignoré, triggers deprecated
 
         # Anti‐NaN / types incohérents
         for name, d in [("orderflow", of), ("footprint", fp)]:
@@ -798,20 +835,110 @@ class FusionManager:
         }
 
     def _normalize_trigger(self, tr: Dict[str, Any]) -> Dict[str, Any]:
+        """⚠️ DEPRECATED (03 DEC 2025) - Gardé pour rétrocompat"""
         a = str(tr.get("direction") or tr.get("action") or "").upper()
         dir_int = 1 if a == "BUY" else (-1 if a == "SELL" else 0)
         conf = max(0.0, min(0.99, _to_float(tr.get("confidence"), 0.0) or 0.0))
         anchor = _to_float(tr.get("anchor_price"), None)
-        # FIX: footprint_analyzer retourne "trigger" pas "trigger_type"
         ttype = str(tr.get("trigger") or tr.get("trigger_type") or "unknown")
         ts = _to_float(tr.get("timestamp"), None)
         return {
-            "score": conf,
-            "dir": dir_int,
+            "score": 0.0,  # DEPRECATED
+            "dir": 0,  # DEPRECATED
             "anchor": anchor,
             "type": ttype,
             "ts": ts,
             "raw": tr,
+        }
+
+    def _normalize_vwap(self, vw: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        ✅ NOUVEAU (03 DEC 2025): Normalise résultat VWAPAnalyzer
+
+        Input (depuis VWAPAnalyzer.analyze()):
+          {
+            "score": 0.0-1.0,  # Déjà normalisé
+            "status": "VALID"|"SUSPECT"|"INVALID",
+            "bias": "BUY"|"SELL"|"NEUTRAL",
+            "vwap_value": float,
+            "distance_pips": float,
+            "slope": float,
+            "zone": "NEUTRAL"|"STRONG"|"EXTREME",
+            "regime": "ACCUMULATION"|"TRENDING"|"BALANCED"|"TRANSITIONAL",
+            "summary": {...}
+          }
+
+        Output normalisé:
+          {
+            "score": 0.0-1.0,
+            "status": str,
+            "dir": -1|0|1,
+            "bias": str,
+            "zone": str,
+            "regime": str,
+            "vwap_value": float,
+            "distance_pips": float,
+            "slope": float,
+            "summary": dict,
+            "raw": dict
+          }
+        """
+        if not vw:
+            return {
+                "score": 0.0,
+                "status": "INVALID",
+                "dir": 0,
+                "bias": "NEUTRAL",
+                "zone": "NEUTRAL",
+                "regime": "BALANCED",
+                "vwap_value": 0.0,
+                "distance_pips": 0.0,
+                "slope": 0.0,
+                "summary": {},
+                "raw": {}
+            }
+
+        # Score déjà normalisé 0-1
+        score = max(0.0, min(1.0, _to_float(vw.get("score"), 0.0)))
+
+        # Status
+        status = str(vw.get("status", "SUSPECT")).upper()
+
+        # Bias → direction
+        bias = str(vw.get("bias", "NEUTRAL")).upper()
+        dir_int = 1 if bias == "BUY" else (-1 if bias == "SELL" else 0)
+
+        # Métriques VWAP
+        zone = str(vw.get("zone", "NEUTRAL"))
+        regime = str(vw.get("regime", "BALANCED"))
+        vwap_value = _to_float(vw.get("vwap_value"), 0.0)
+        distance_pips = _to_float(vw.get("distance_pips"), 0.0)
+        slope = _to_float(vw.get("slope"), 0.0)
+
+        # Summary
+        summary = vw.get("summary") or {}
+        if isinstance(summary, str):
+            try:
+                summary = ast.literal_eval(summary)
+            except Exception:
+                summary = {}
+
+        # Pénalité status
+        if status != "VALID":
+            score *= 0.8  # -20% si SUSPECT ou INVALID
+
+        return {
+            "score": score,
+            "status": status,
+            "dir": dir_int,
+            "bias": bias,
+            "zone": zone,
+            "regime": regime,
+            "vwap_value": vwap_value,
+            "distance_pips": distance_pips,
+            "slope": slope,
+            "summary": summary,
+            "raw": vw,
         }
 
     # -------------- 2) Coherence Analyzer --------------
@@ -819,6 +946,7 @@ class FusionManager:
         self,
         n_of: Dict[str, Any],
         n_fp: Dict[str, Any],
+        n_vw: Dict[str, Any],  # ✅ VWAP ajouté
         n_tr: Dict[str, Any],
         ctx: Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -1100,27 +1228,34 @@ class FusionManager:
 
     # -------------- 5) Confidence Fusion System (Simple Average + Trigger Boost) --------------
     def _calculate_fused_confidence(
-        self, n_of, n_fp, n_tr, coherence, quality, cfg, ctx, rules_eval
-    ) -> float:
+        self, n_of, n_fp, n_vw, n_tr, coherence, quality, cfg, ctx, rules_eval
+    ) -> Tuple[float, float]:
         """
-        SYSTÈME DE SCORING DATA-DRIVEN (25 Nov 2025):
+        ✅ MISE À JOUR (03 DEC 2025): SCORING VWAP INTÉGRÉ
 
-        1. Base Score : (OrderFlow + Footprint) / 2
-        2. BONUS Trigger : Si pattern réel détecté (stacking/climax/absorption)
-        3. Bonus/Malus Cohérence : Alignement 3/3, conflits (LOGIQUE MÉTIER)
+        NOUVELLE FORMULE DE FUSION:
+        - OrderFlow:  50%
+        - Footprint:  25%
+        - VWAP:       25%
 
-        ⚠️ PÉNALITÉS QUALITÉ SUPPRIMÉES (tick_count, coverage_s, status)
-        Raison : Aucune validation empirique. On collecte les données SANS filtrage,
-        puis on analysera (après 100+ trades) si ces métriques impactent le win rate.
+        1. Pondération fixe : OF * 0.50 + FP * 0.25 + VWAP * 0.25
+        2. Bonus/Malus Cohérence : Alignement 3/3, conflits
+        3. TRIGGERS SUPPRIMÉS (trigger_boost=0.0)
 
-        Le trigger est un AMPLIFICATEUR (pas un composant de base).
+        Returns:
+            (final_score, vwap_contribution)
         """
 
-        # ========== 1. BASE SCORE : Moyenne OrderFlow + Footprint ==========
+        # ========== 1. SCORES NORMALISÉS (0-1) ==========
         of_score = _to_float(n_of.get("score"), 0.0)
         fp_score = _to_float(n_fp.get("score"), 0.0)
+        vw_score = _to_float(n_vw.get("score"), 0.0)
 
-        base_score = (of_score + fp_score) / 2.0
+        # ========== 2. FUSION PONDÉRÉE: 50% + 25% + 25% ==========
+        weighted_score = (of_score * 0.50) + (fp_score * 0.25) + (vw_score * 0.25)
+
+        # Contribution VWAP pour tracking
+        vwap_contribution = vw_score * 0.25
 
         # ========== 2. MÉTRIQUES QUALITÉ (Capturées mais Sans Pénalité) ==========
 
@@ -1152,47 +1287,42 @@ class FusionManager:
         status_of = n_of.get("status", "SUSPECT")
         status_fp = n_fp.get("status", "SUSPECT")
 
-        # ========== 3. BONUS TRIGGER SUPPRIMÉ (03 DEC 2025) ==========
-        # Les triggers ont été supprimés du pipeline de décision.
-        # trigger_boost est maintenant toujours 0.0 pour maintenir la compatibilité
-        # avec les appelants qui attendent un tuple (score, trigger_boost).
-
-        trigger_boost = 0.0
-        score_with_trigger = base_score  # Plus de bonus trigger
-
-        # ========== 4. BONUS/MALUS COHÉRENCE ==========
-
-        # Bonus alignement 3/3 (SUPPRIMÉ - 03 DEC 2025)
-        # Le bonus trigger pour alignement 3/3 a été supprimé avec la suppression des triggers
-        # Conservé uniquement les malus de conflits ci-dessous
-
-        # Malus conflits
+        # ========== 3. BONUS/MALUS COHÉRENCE ==========
+        # Malus conflits (si 2+ conflits entre composants)
         matrix = coherence.get("matrix", {})
         conflicts = sum(1 for v in matrix.values() if v == "conflict")
         if conflicts >= 2:
-            score_with_trigger *= 0.85  # -15% conflit majeur
+            weighted_score *= 0.85  # -15% conflit majeur
         elif conflicts == 1:
-            score_with_trigger *= 0.92  # -8% conflit mineur
+            weighted_score *= 0.92  # -8% conflit mineur
+
+        # Bonus alignement 3/3 (tous alignés)
+        alignments = sum(1 for v in matrix.values() if v == "aligned")
+        if alignments >= 3:
+            weighted_score += 0.05  # +5% pour alignement parfait
 
         # Bonus timing (si disponible)
         timing_bonus = rules_eval.get("timing_bonus", 0.0)
         if timing_bonus > 0:
-            score_with_trigger += timing_bonus
+            weighted_score += timing_bonus
 
-        # ========== 5. NORMALISATION FINALE ==========
-        final_score = max(0.0, min(0.99, float(score_with_trigger)))
+        # ========== 4. NORMALISATION FINALE ==========
+        final_score = max(0.0, min(0.99, float(weighted_score)))
 
         # Logging détaillé (si FUSION_PROBE actif)
         if FUSION_PROBE:
+            status_vw = n_vw.get("status", "SUSPECT")
             _probe(
                 self.log,
-                f"[SIMPLE_SCORE] OF={of_score:.3f} FP={fp_score:.3f} base={(of_score+fp_score)/2:.3f} | "
-                f"ticks={tick_count} cov={coverage_s}s status_of={status_of} status_fp={status_fp} | "
-                f"trigger_boost={trigger_boost:.3f} | final={final_score:.3f}"
+                f"[VWAP_FUSION] OF={of_score:.3f}(50%) + FP={fp_score:.3f}(25%) + VWAP={vw_score:.3f}(25%) = {weighted_score:.3f} | "
+                f"ticks={tick_count} cov={coverage_s}s | "
+                f"status: OF={status_of} FP={status_fp} VWAP={status_vw} | "
+                f"conflicts={conflicts} alignments={alignments} | "
+                f"final={final_score:.3f} vwap_contrib={vwap_contribution:.3f}"
             )
 
-        # Retourner (score final, trigger_boost) pour que burst.py puisse logger le boost
-        return (final_score, trigger_boost)
+        # Retourner (score final, vwap_contribution)
+        return (final_score, vwap_contribution)
 
     # -------------- 6) Decision Generator --------------
     def _final_decision(
