@@ -18,6 +18,7 @@ from .models import (
     SignalAction
 )
 from .config import VWAPConfig
+from .regime_mapper import RegimeMapper
 
 
 logger = logging.getLogger(__name__)
@@ -80,29 +81,55 @@ class VWAPSignalGenerator:
                 derivatives
             )
 
-            # 4. Score total (0-25 points)
-            total_score = trend_score + position_score
+            # 4. Adaptive scoring basé sur régime (✅ NEW)
+            # Appliquer les poids adaptatifs selon le régime VWAP
+            adjustments = RegimeMapper.get_scoring_adjustment(derivatives.regime)
+            trend_weight = adjustments['trend_weight']
+            position_weight = adjustments['position_weight']
+
+            # Ajuster les scores selon le régime
+            adjusted_trend_score = trend_score * trend_weight
+            adjusted_position_score = position_score * position_weight
+
+            # Score total ajusté (0-25 points max)
+            # Normaliser pour conserver max 25 points
+            total_raw = adjusted_trend_score + adjusted_position_score
+            normalization_factor = (trend_weight * 15 + position_weight * 10) / 25.0
+            total_score = min(25.0, total_raw / normalization_factor)
+
+            # Log adaptation si significative
+            if abs(trend_weight - 1.0) > 0.05 or abs(position_weight - 1.0) > 0.05:
+                self.logger.debug(
+                    f"[VWAP_SIGNALS] Adaptive scoring | "
+                    f"Regime={derivatives.regime.value} | "
+                    f"TrendW={trend_weight:.2f} | PositionW={position_weight:.2f} | "
+                    f"Raw={trend_score:.1f}+{position_score:.1f}={trend_score+position_score:.1f} → "
+                    f"Adjusted={total_score:.1f}"
+                )
 
             # 5. Détection type de signal
             signal_type = self._detect_signal_type(derivatives, current_price)
 
             # 6. Strength (0-1) et confidence
+            # Utiliser les scores ajustés pour strength calculation
             strength = self._calculate_strength(
-                trend_score,
-                position_score,
-                derivatives
+                adjusted_trend_score,
+                adjusted_position_score,
+                derivatives,
+                trend_weight,
+                position_weight
             )
             confidence = derivatives.confidence
 
             # 7. Triggers détaillés
             triggers = self._build_triggers(
                 derivatives,
-                trend_score,
+                adjusted_trend_score,
                 position_score,
                 signal_type
             )
 
-            # 8. Métadonnées
+            # 8. Métadonnées (incluant adaptive scoring info)
             metadata = {
                 'slope_20': derivatives.slope_20,
                 'slope_50': derivatives.slope_50,
@@ -111,6 +138,14 @@ class VWAPSignalGenerator:
                 'zone': derivatives.zone.value,
                 'regime': derivatives.regime.value,
                 'quality_score': derivatives.quality_score,
+                # ✅ Adaptive scoring info
+                'raw_trend_score': trend_score,
+                'raw_position_score': position_score,
+                'raw_total_score': trend_score + position_score,
+                'trend_weight': trend_weight,
+                'position_weight': position_weight,
+                'adjusted_trend_score': adjusted_trend_score,
+                'adjusted_position_score': adjusted_position_score,
             }
 
             return VWAPSignal(
@@ -126,9 +161,9 @@ class VWAPSignalGenerator:
                 slope=derivatives.slope_20,
                 zone=derivatives.zone,
                 regime=derivatives.regime,
-                trend_score=trend_score,
-                position_score=position_score,
-                total_score=total_score,
+                trend_score=adjusted_trend_score,  # ✅ Use adjusted scores
+                position_score=adjusted_position_score,  # ✅ Use adjusted scores
+                total_score=total_score,  # ✅ Already adjusted and normalized
                 metadata=metadata,
                 triggers=triggers,
             )
@@ -308,17 +343,27 @@ class VWAPSignalGenerator:
         self,
         trend_score: float,
         position_score: float,
-        derivatives: VWAPDerivatives
+        derivatives: VWAPDerivatives,
+        trend_weight: float = 1.0,
+        position_weight: float = 1.0
     ) -> float:
         """
         Calcule force du signal (0-1)
 
+        Args:
+            trend_score: Score trend (ajusté ou non)
+            position_score: Score position (ajusté ou non)
+            derivatives: Dérivés VWAP
+            trend_weight: Poids appliqué au trend (pour normalisation)
+            position_weight: Poids appliqué à la position (pour normalisation)
+
         Returns:
             Strength normalisée
         """
-        # Score total normalisé
+        # Score total normalisé avec poids
         total_score = trend_score + position_score
-        base_strength = total_score / 25.0
+        max_possible = trend_weight * 15 + position_weight * 10
+        base_strength = total_score / max_possible if max_possible > 0 else 0.0
 
         # Ajustement par confidence
         strength = base_strength * derivatives.confidence
@@ -329,11 +374,7 @@ class VWAPSignalGenerator:
         elif derivatives.zone == VWAPZone.STRONG:
             strength *= 0.85
 
-        # Ajustement par régime
-        if derivatives.regime == VWAPRegime.TRENDING:
-            strength *= 1.1  # Boost en trending
-        elif derivatives.regime == VWAPRegime.ACCUMULATION:
-            strength *= 0.9  # Réduction en accumulation
+        # ✅ REMOVED: Ajustement par régime (déjà fait via adaptive scoring)
 
         return min(1.0, max(0.0, strength))
 

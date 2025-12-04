@@ -25,6 +25,7 @@ from .signals import VWAPSignalGenerator
 from .cache import VWAPCacheManager
 from .metrics import VWAPMetricsCollector
 from .validators import DataValidator, DataNormalizer, QualityScorer
+from .regime_mapper import RegimeMapper
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,9 @@ class VWAPAnalyzer:
         Args:
             df: DataFrame OHLC (depuis OrderFlow V6 ou MarketData)
             current_price: Prix actuel
-            context: Contexte additionnel (MTF, orderflow, etc.)
+            context: Contexte additionnel (MTF, orderflow, phase_observer_regime, etc.)
+                     - phase_observer_regime: Régime PhaseObserver (string)
+                     - regime_strength: Force du régime PhaseObserver (0-1, optionnel)
 
         Returns:
             VWAPAnalysisResult avec score normalisé 0-1
@@ -122,29 +125,59 @@ class VWAPAnalyzer:
 
             price_array = df['close'].values
 
-            # 4. Calcul dérivés
+            # 4. Mapping régime PhaseObserver → VWAP (si fourni)
+            phase_observer_regime = None
+            regime_confidence = None
+            mapped_vwap_regime = None
+
+            if context:
+                phase_observer_regime = context.get("phase_observer_regime")
+                regime_strength = context.get("regime_strength")
+
+                if phase_observer_regime:
+                    # Map PhaseObserver regime → VWAP regime
+                    mapped_vwap_regime, regime_confidence = RegimeMapper.map_regime(
+                        phase_observer_regime=phase_observer_regime,
+                        regime_strength=regime_strength
+                    )
+
+                    self.logger.debug(
+                        f"[VWAP_ANALYZER] Regime mapping | "
+                        f"PhaseObserver={phase_observer_regime} → "
+                        f"VWAP={mapped_vwap_regime.value} | "
+                        f"Confidence={regime_confidence:.2f}"
+                    )
+
+            # 5. Calcul dérivés (avec régime mappé si disponible)
             derivatives = self.derivatives_calc.calculate_all(
                 vwap_array=vwap_array,
                 price_array=price_array,
                 timestamp=timestamp
             )
 
-            # 5. Génération signal
+            # Override regime si mappé depuis PhaseObserver
+            if mapped_vwap_regime is not None:
+                derivatives.regime = mapped_vwap_regime
+                # Ajuster confidence basée sur mapping
+                if regime_confidence is not None:
+                    derivatives.confidence = (derivatives.confidence + regime_confidence) / 2.0
+
+            # 6. Génération signal
             signal = self.signal_generator.generate_signal(
                 derivatives=derivatives,
                 current_price=current_price,
                 context=context
             )
 
-            # 6. Calcul score normalisé (0-1 pour FusionManager)
+            # 7. Calcul score normalisé (0-1 pour FusionManager)
             # Signal: 0-25 points -> normaliser à 0-1
             normalized_score = signal.total_score / 25.0
 
-            # 7. Détermination status et bias
+            # 8. Détermination status et bias
             status = self._determine_status(derivatives, signal)
             bias = self._determine_bias(signal)
 
-            # 8. Qualité données
+            # 9. Qualité données
             coverage_seconds = self.normalizer.calculate_coverage_seconds(df)
             data_quality = QualityScorer.score_data_quality(
                 tick_count=len(df),
@@ -153,7 +186,7 @@ class VWAPAnalyzer:
                 has_vwap=True
             )
 
-            # 9. Construction résultat
+            # 10. Construction résultat
             result = VWAPAnalysisResult(
                 symbol=self.symbol,
                 timestamp=timestamp,
@@ -175,13 +208,13 @@ class VWAPAnalyzer:
                 cache_hit=False,
             )
 
-            # 10. Stockage cache
+            # 11. Stockage cache
             self.cache.set_analysis_result(result)
             self.cache.set_derivatives(derivatives)
             self.cache.set_signal(signal)
             self.cache.set_vwap_value(vwap_value)
 
-            # 11. Métriques
+            # 12. Métriques
             self.metrics.record_calculation(
                 calc_time_ms=result.calculation_time_ms,
                 data_quality=data_quality,
@@ -195,11 +228,11 @@ class VWAPAnalyzer:
                 score=signal.total_score
             )
 
-            # 12. Sauvegarde
+            # 13. Sauvegarde
             self.last_analysis = result
 
-            # Log résultat
-            self._log_analysis_result(result)
+            # Log résultat (avec régime PhaseObserver si présent)
+            self._log_analysis_result(result, phase_observer_regime)
 
             return result
 
@@ -377,9 +410,13 @@ class VWAPAnalyzer:
             cache_hit=False,
         )
 
-    def _log_analysis_result(self, result: VWAPAnalysisResult) -> None:
+    def _log_analysis_result(
+        self,
+        result: VWAPAnalysisResult,
+        phase_observer_regime: Optional[str] = None
+    ) -> None:
         """Log résultat d'analyse"""
-        self.logger.info(
+        log_msg = (
             f"[VWAP_ANALYZER] 📊 Analyse | "
             f"Score={result.score:.3f} | "
             f"Status={result.status} | "
@@ -388,9 +425,16 @@ class VWAPAnalyzer:
             f"Distance={result.distance_pips:.1f} pips | "
             f"Slope={result.slope:.6f} | "
             f"Zone={result.zone} | "
-            f"Regime={result.regime} | "
-            f"Time={result.calculation_time_ms:.2f}ms"
+            f"Regime={result.regime}"
         )
+
+        # Ajouter régime PhaseObserver si présent
+        if phase_observer_regime:
+            log_msg += f" (PO={phase_observer_regime})"
+
+        log_msg += f" | Time={result.calculation_time_ms:.2f}ms"
+
+        self.logger.info(log_msg)
 
         # Log détails si score significatif
         if result.score > 0.5 and result.signal:

@@ -91,6 +91,12 @@ from .validators import (
     QualityScorer,
 )
 
+# Regime mapping
+from .regime_mapper import (
+    RegimeMapper,
+    validate_regime_mapper,
+)
+
 
 # ==================== PUBLIC API ====================
 
@@ -134,6 +140,10 @@ __all__ = [
     "DataValidator",
     "DataNormalizer",
     "QualityScorer",
+
+    # Regime mapping
+    "RegimeMapper",
+    "validate_regime_mapper",
 ]
 
 

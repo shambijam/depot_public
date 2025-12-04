@@ -1508,9 +1508,24 @@ def run_single_pipeline_cycle(
                                         if df_vwap_with_time.columns[0] != 'time':
                                             df_vwap_with_time = df_vwap_with_time.rename(columns={df_vwap_with_time.columns[0]: 'time'})
 
+                                    # ✅ Enrichir contexte avec régime PhaseObserver
+                                    vwap_ctx = ctx.copy() if ctx else {}
+
+                                    # Extraire régime PhaseObserver depuis annotated_rates_df
+                                    if 'annotated_rates_df' in locals() and annotated_rates_df is not None:
+                                        if not annotated_rates_df.empty and 'regime' in annotated_rates_df.columns:
+                                            try:
+                                                phase_observer_regime = str(annotated_rates_df['regime'].iloc[-1])
+                                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
+                                                logger.debug(
+                                                    f"[VWAP][{asset}] PhaseObserver regime: {phase_observer_regime}"
+                                                )
+                                            except Exception as e:
+                                                logger.debug(f"[VWAP][{asset}] Could not extract regime: {e}")
+
                                     # Créer analyseur VWAP et lancer analyse
                                     vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
-                                    vwap_analysis = vwap_analyzer.analyze(df_vwap_with_time, current_price, ctx)
+                                    vwap_analysis = vwap_analyzer.analyze(df_vwap_with_time, current_price, vwap_ctx)
                                     vwap_result = vwap_analysis.to_dict()
 
                                     logger.info(
@@ -1735,8 +1750,19 @@ def run_single_pipeline_cycle(
                                 if df_snap_with_time.columns[0] != 'time':
                                     df_snap_with_time = df_snap_with_time.rename(columns={df_snap_with_time.columns[0]: 'time'})
 
+                            # ✅ Enrichir contexte avec régime PhaseObserver pour snapshot
+                            vwap_snap_ctx = ctx.copy() if ctx else {}
+
+                            # Extraire régime depuis df_snap
+                            if not df_snap.empty and 'regime' in df_snap.columns:
+                                try:
+                                    phase_observer_regime = str(df_snap['regime'].iloc[-1])
+                                    vwap_snap_ctx['phase_observer_regime'] = phase_observer_regime
+                                except Exception:
+                                    pass
+
                             vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
-                            vwap_analysis = vwap_analyzer.analyze(df_snap_with_time, price_snap, ctx)
+                            vwap_analysis = vwap_analyzer.analyze(df_snap_with_time, price_snap, vwap_snap_ctx)
                             vwap_snapshot = vwap_analysis.to_dict()
                         else:
                             vwap_snapshot = {"score": 0.0, "status": "INVALID", "bias": "NEUTRAL", "reason": "snapshot_missing_data"}
