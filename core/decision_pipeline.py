@@ -132,7 +132,7 @@ class DecisionPipeline:
         # ✅ [MARKET ANALYZER - 03 DEC 2025] Pour fusion avec VWAP
         try:
             self.market_analyzer = MarketAnalyzer(
-                phase_observer=self.phase_observer,
+                config_manager=self.config_manager,
                 logger=self.logger
             )
             self.logger.info("[INIT] MarketAnalyzer initialisé avec succès (fusion VWAP)")
