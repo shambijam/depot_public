@@ -155,7 +155,7 @@
     "scoring_thresholds": {
       "high": 0.80,
       "moderate": 0.75,
-      "cautious": 0.70,
+      "cautious": 0.55,
       "conditional": 0.40
     },
     "momentum": {
