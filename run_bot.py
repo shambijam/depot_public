@@ -2020,25 +2020,26 @@ def run_single_pipeline_cycle(
                 except Exception:
                     pass
 
-                # 5) FusionManager diagnostic (pas de veto : on log l’état HOLD/SIGNAL)
-                try:
-                    if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                        _syminfo = mt5_connector.get_symbol_info("XAUUSD")
-                        of_i, fp_i, trig_i, strat_cfg_i, ctx_i = _mk_fusion_inputs(
-                            sig, latest, _syminfo, mt5_connector, "XAUUSD"
-                        )
-                        fdec_diag = _fusion_mgr.fuse(
-                            orderflow=of_i,
-                            footprint=fp_i,
-                            strategy_config=strat_cfg_i,
-                            context=ctx_i,
-                        )
-                        if not fdec_diag.get("ok"):
-                            blocks.append(
-                                f"fusion={fdec_diag.get('signal_type','WAIT_CONFIRMATION')}"
-                            )
-                except Exception:
-                    pass
+                # 5) FusionManager diagnostic (pas de veto : on log l'état HOLD/SIGNAL)
+                # ⚠️ DÉSACTIVÉ: Ce diagnostic bloquait les trades car il ne passait pas le VWAP
+                # try:
+                #     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
+                #         _syminfo = mt5_connector.get_symbol_info("XAUUSD")
+                #         of_i, fp_i, trig_i, strat_cfg_i, ctx_i = _mk_fusion_inputs(
+                #             sig, latest, _syminfo, mt5_connector, "XAUUSD"
+                #         )
+                #         fdec_diag = _fusion_mgr.fuse(
+                #             orderflow=of_i,
+                #             footprint=fp_i,
+                #             strategy_config=strat_cfg_i,
+                #             context=ctx_i,
+                #         )
+                #         if not fdec_diag.get("ok"):
+                #             blocks.append(
+                #                 f"fusion={fdec_diag.get('signal_type','WAIT_CONFIRMATION')}"
+                #             )
+                # except Exception:
+                #     pass
 
                 # 6) Burst guard global (panier existant) déjà checké plus bas, mais on log ici aussi
                 try:
