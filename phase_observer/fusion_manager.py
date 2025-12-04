@@ -367,9 +367,11 @@ class FusionManager:
         maj = coherence["majority"]
         maj_str = "BUY" if maj > 0 else ("SELL" if maj < 0 else "TIE")
 
-        # ok=True seulement si action != HOLD ET fused >= seuil minimum (0.55 CAUTIOUS)
-        # Cela évite que des signaux faibles (< 55%) soient exécutés
-        is_actionable = decision["action"] != "HOLD" and fused >= 0.55
+        # ok=True seulement si action != HOLD ET fused >= seuil minimum (depuis config)
+        # Récupérer le seuil cautious depuis la configuration
+        thresholds = _get_thresholds(cfg)
+        min_threshold = thresholds.get("cautious", 0.40)
+        is_actionable = decision["action"] != "HOLD" and fused >= min_threshold
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
         # Récupérer les poids utilisés pour la fusion
