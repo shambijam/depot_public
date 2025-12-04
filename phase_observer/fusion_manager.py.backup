@@ -188,7 +188,7 @@ def _adaptive_weights(
     # Normalise
     total = max(1e-9, w_of + w_fp + w_vw)
     w_of, w_fp, w_vw = w_of / total, w_fp / total, w_vw / total
-    return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw}
+    return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw, "trigger": 0.0}
 
 
 # ---------- Maj métriques ----------
@@ -267,26 +267,283 @@ class FusionManager:
 
     # -------------- Public API --------------
 
+            # ========== EXTRACTION MÉTRIQUES ==========
+            # Section 1 : Footprint M1
+            fp_status = n_fp.get("status", "UNKNOWN")
+            fp_score = n_fp.get("score", 0.0)
+            fp_dir = dir_symbols.get(n_fp.get("dir", 0), "⚪ NEUTRAL")
+            fp_delta = n_fp.get("delta_total", 0.0)
+            fp_poc = n_fp.get("poc", None)
+            fp_absorption = n_fp.get("absorption", False)
+
+            # Extraire métriques détaillées depuis raw
+            fp_raw = n_fp.get("raw", {})
+            fp_summary = fp_raw.get("summary", {})
+            if isinstance(fp_summary, str):
+                try:
+                    import ast
+                    fp_summary = ast.literal_eval(fp_summary)
+                except:
+                    fp_summary = {}
+
+            # Métriques ticks (qualité des données)
+            tick_count = fp_summary.get("tick_count", 0)
+            coverage_s = fp_summary.get("coverage_s", 0.0)
+            tick_rate = fp_summary.get("tick_rate", 0.0)
+            # ✅ FIX (24 Nov 2025): Afficher les TICKS buy/sell au lieu des niveaux avec imbalance
+            buy_volume = fp_summary.get("buy_volume", 0.0)  # Nombre de ticks buy
+            sell_volume = fp_summary.get("sell_volume", 0.0)  # Nombre de ticks sell
+            buy_pct = fp_summary.get("buy_pct", 50.0)  # % de ticks buy
+
+            imbalance_buy_levels = fp_summary.get("imbalance_buy", 0)
+            imbalance_sell_levels = fp_summary.get("imbalance_sell", 0)
+
+            # Section 2 : OrderFlow V6
+            # ⚠️ FIX: NE PAS utiliser n_of.get("score") qui est le score TOTAL (OrderFlow+Footprint+Triggers)
+            # On veut le score OrderFlow SEUL, qui sera extrait de of_summary plus bas
+            of_score_total = n_of.get("score", 0.0)  # Score total (pour référence, non affiché ici)
+            of_dir = dir_symbols.get(n_of.get("dir", 0), "⚪ NEUTRAL")
+            of_delta = n_of.get("delta_total", 0.0)
+            of_absorption = n_of.get("absorption", False)
+            of_status = n_of.get("status", "UNKNOWN")
+            of_poc = n_of.get("poc", None)
+
+            # Extraire métriques OrderFlow depuis raw
+            of_raw = n_of.get("raw", {})
+            of_summary = of_raw.get("summary", {})
+            if isinstance(of_summary, str):
+                try:
+                    import ast
+                    of_summary = ast.literal_eval(of_summary)
+                except:
+                    of_summary = {}
+
+            # Métriques avancées
+            imbalance = of_summary.get("imbalance", 0.0)
+            imbalance_mean = of_summary.get("imbalance_mean", imbalance)  # Alias
+            cvd_slope = of_summary.get("cvd_slope", 0.0)
+            bias = of_summary.get("bias", "NEUTRAL")
+
+            # Volume Profile nodes (depuis volume_profile si disponible)
+            vp_data = of_summary.get("volume_profile", {})
+            vah = vp_data.get("va_high") or of_summary.get("va_high")  # Value Area High
+            val = vp_data.get("va_low") or of_summary.get("va_low")    # Value Area Low
+            vpoc = of_summary.get("vpoc_price", of_poc)
+
+            hvn_count = len(vp_data.get("hvn", []))
+            lvn_count = len(vp_data.get("lvn", []))
+
+            # ✅ FIX: Calculer le score OrderFlow SEUL (pas le score total)
+            # Le score OrderFlow est sur 50 pts max, on le convertit en % (0-1)
+            of_score_pts = of_summary.get("orderflow_score", 0.0)  # ex: 35.5 pts
+            of_score = of_score_pts / 100.0  # Convertir en % (35.5 → 0.355 = 35.5%)
+
+            # Section 3 : Triggers
+            tr_score = n_tr.get("score", 0.0)
+            tr_dir = dir_symbols.get(n_tr.get("dir", 0), "⚪ NEUTRAL")
+            tr_type = n_tr.get("type", "none")
+            tr_conf = tr_score  # confidence = score normalisé
+            tr_anchor = n_tr.get("anchor", None)
+
+            # Extraire métriques Trigger depuis raw
+            tr_raw = n_tr.get("raw", {})
+
+            # Détails du pattern détecté
+            pattern_action = tr_raw.get("action", "HOLD")
+            pattern_direction = tr_raw.get("direction", "NEUTRAL")
+            pattern_meta = tr_raw.get("meta", {})
+
+            # Fenêtre utilisée pour détection
+            window_used = pattern_meta.get("used_window_s", "N/A")
+
+            # Métriques du snapshot utilisé
+            snapshot_stats = pattern_meta.get("snapshot_stats", {})
+            levels_count = snapshot_stats.get("levels_count", 0)
+            delta_ratio_mean = snapshot_stats.get("delta_ratio_mean", 0.0)
+            volume_zscore_max = snapshot_stats.get("volume_zscore_max", 0.0)
+
+            # Type de pattern détecté (STACKING, ABSORPTION, CLIMAX)
+            trigger_type_detail = tr_raw.get("trigger_type", tr_type)
+
+            # Reason si échec
+            reason = tr_raw.get("reason", "")
+
+            pattern_emoji = {
+                "stacking": "📚", "absorption": "🛡️", "climax": "💥",
+                "micro_stack": "📖", "micro_absorption": "🛡", "none": "⚪",
+            }.get(tr_type.lower(), "❓")
+
+            # ========== AFFICHAGE COMPACT AVEC CADRES ==========
+
+            # 1️⃣ FOOTPRINT M1
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 1️⃣  FOOTPRINT M1                                                     │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ {fp_status:<10} ({fp_score:>5.1%}) | {fp_dir} | Δ: {fp_delta:>+8.1f}                 │")
+            self.log.info(f"│ Ticks: {tick_count:>4} ({tick_rate:>4.1f} t/s, {coverage_s:>3.0f}s) | Buy: {int(buy_volume):>4} ({buy_pct:>4.1f}%) Sell: {int(sell_volume):>4} ({100-buy_pct:>4.1f}%)│")
+            self.log.info(f"│ POC: {str(fp_poc if fp_poc else 'N/A'):<15} Abs: {'✅' if fp_absorption else '❌'}  Imb: {imbalance_buy_levels:>2}B/{imbalance_sell_levels:>2}S        │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # 2️⃣ ORDERFLOW V6
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 2️⃣  ORDERFLOW V6                                                     │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ {of_status:<10} ({of_score:>5.1%}) | {of_dir} | Δ: {of_delta:>+8.1f} | Bias: {bias:<8}│")
+            self.log.info(f"│ VPOC: {str(vpoc if vpoc else 'N/A'):<12} VAH: {str(vah if vah else 'N/A'):<12} VAL: {str(val if val else 'N/A'):<12}│")
+            self.log.info(f"│ Imb: {imbalance_mean:>5.3f}  CVD: {cvd_slope:>+6.3f}  HVN: {hvn_count:>2}  LVN: {lvn_count:>2}              │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # 3️⃣ TRIGGERS
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 3️⃣  TRIGGERS                                                         │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            if tr_type != "none" and levels_count > 0:
+                self.log.info(f"│ {pattern_emoji} {tr_type.upper():<15} ({tr_score:>5.1%}) | {tr_dir} | Action: {pattern_action:<8}│")
+                self.log.info(f"│ Anchor: {str(tr_anchor if tr_anchor else 'N/A'):<10} Window: {window_used}s  Levels: {levels_count:<3} ΔRatio: {delta_ratio_mean:>5.3f}  │")
+            else:
+                self.log.info(f"│ ❌ Aucun pattern détecté                                            │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # 4️⃣ FUSION
+            base_avg = (of_score + fp_score) / 2.0
+            trigger_boost = fused - base_avg if fused > base_avg else 0.0
+
+            # Extraire les scores détaillés depuis of_summary (système intégré)
+            delta_momentum_pts = of_summary.get("delta_momentum_pts", 0.0)
+            volume_confirm_pts = of_summary.get("volume_confirm_pts", 0.0)
+            imbalance_strength_pts = of_summary.get("imbalance_strength_pts", 0.0)
+            orderflow_score_pts = of_summary.get("orderflow_score", 0.0)
+            footprint_score_pts = of_summary.get("footprint_score", 0.0)
+            triggers_bonus_pts = of_summary.get("triggers_bonus", 0.0)
+
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 4️⃣  FUSION (Scoring Intégré)                                        │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Score Final: {fused:>5.3f} ({fused:>5.1%})                                      │")
+            self.log.info(f"│                                                                     │")
+            self.log.info(f"│ 📊 Détail OrderFlow (50 pts max):                                   │")
+            self.log.info(f"│   • Delta Momentum      : {delta_momentum_pts:>5.1f} pts  (force directionnelle)   │")
+            self.log.info(f"│   • Volume Confirmation : {volume_confirm_pts:>5.1f} pts  (intensité marché)      │")
+            self.log.info(f"│   • Imbalance Strength  : {imbalance_strength_pts:>5.1f} pts  (déséquilibre)          │")
+            self.log.info(f"│   └─ Total OrderFlow    : {orderflow_score_pts:>5.1f} pts                          │")
+            self.log.info(f"│                                                                     │")
+            if footprint_score_pts > 0:
+                self.log.info(f"│ 🛡️ Détail Footprint (30 pts max):                                  │")
+                self.log.info(f"│   • Total Footprint     : {footprint_score_pts:>5.1f} pts  (absorption + clustering)│")
+                self.log.info(f"│                                                                     │")
+            if triggers_bonus_pts > 0:
+                self.log.info(f"│ ⚡ Triggers Bonus (20 pts max):                                     │")
+                self.log.info(f"│   • Patterns détectés   : {triggers_bonus_pts:>5.1f} pts  (confluence)             │")
+                self.log.info(f"│                                                                     │")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # 🎯 SYNTHÈSE
+            # Consensus
+            directions = []
+            if n_of.get("dir", 0) != 0:
+                directions.append(("OF", "BUY" if n_of.get("dir") > 0 else "SELL"))
+            if n_fp.get("dir", 0) != 0:
+                directions.append(("FP", "BUY" if n_fp.get("dir") > 0 else "SELL"))
+            if n_tr.get("dir", 0) != 0 and tr_type not in ["none", "fusion_pretrigger"]:
+                directions.append(("TR", "BUY" if n_tr.get("dir") > 0 else "SELL"))
+
+            buy_votes = sum(1 for _, d in directions if d == "BUY")
+            sell_votes = sum(1 for _, d in directions if d == "SELL")
+            total_votes = len(directions)
+
+            if buy_votes == total_votes and total_votes > 0:
+                consensus = f"✅ UNANIME BUY ({buy_votes}/{total_votes})"
+            elif sell_votes == total_votes and total_votes > 0:
+                consensus = f"✅ UNANIME SELL ({sell_votes}/{total_votes})"
+            elif buy_votes > sell_votes:
+                consensus = f"🟡 MAJORITAIRE BUY ({buy_votes}/{total_votes})"
+            elif sell_votes > buy_votes:
+                consensus = f"🟡 MAJORITAIRE SELL ({sell_votes}/{total_votes})"
+            else:
+                consensus = f"❌ CONFLIT ({buy_votes}B/{sell_votes}S)"
+
+            # Delta combiné
+            delta_combined = abs(of_delta) + abs(fp_delta)
+            delta_alignment = "✅ Alignés" if (of_delta * fp_delta) >= 0 else "❌ Divergents"
+
+            # Qualité
+            quality_flags = []
+            if tick_count >= 100:
+                quality_flags.append("✅ Ticks")
+            elif tick_count >= 50:
+                quality_flags.append("🟡 Ticks")
+            else:
+                quality_flags.append("❌ Ticks")
+
+            quality_flags.append("✅ FP" if fp_status == "VALID" else "❌ FP")
+            quality_flags.append("✅ OF" if of_status == "VALID" else "❌ OF")
+
+            # 🎯 SYNTHÈSE
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 SYNTHÈSE                                                          │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Consensus: {consensus:<56}│")
+            self.log.info(f"│ Δ Combiné: {delta_combined:>7.1f} ({delta_alignment})  OF: {of_delta:>+7.1f}  FP: {fp_delta:>+7.1f}        │")
+            self.log.info(f"│ Qualité: {' | '.join(quality_flags):<57}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+
+            # 🎯 DÉCISION FINALE
+            action = decision.get("action", "HOLD")
+            signal = decision.get("signal_type", "UNKNOWN")
+            direction = decision.get("direction", "NEUTRAL")
+            action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️"}.get(action, "⚪")
+
+            # ✅ FIX (2 Décembre 2025) : Fallback critiques supprimés - doit planter si config manquante
+            th_high = thresholds["high"]
+            th_moderate = thresholds["moderate"]
+            th_cautious = thresholds["cautious"]
+
+            if fused >= th_high:
+                level = f"HIGH_CONVICTION (≥{th_high:.0%})"
+            elif fused >= th_moderate:
+                level = f"MODERATE (≥{th_moderate:.0%})"
+            elif fused >= th_cautious:
+                level = f"CAUTIOUS (≥{th_cautious:.0%})"
+            else:
+                level = f"INSUFFISANT (<{th_cautious:.0%})"
+
+            self.log.info("┌─────────────────────────────────────────────────────────────────────┐")
+            self.log.info("│ 🎯 DÉCISION FINALE                                                   │")
+            self.log.info("├─────────────────────────────────────────────────────────────────────┤")
+            self.log.info(f"│ Action:  {action_emoji} {action:<15}                                       │")
+            self.log.info(f"│ Signal:  {signal:<58}│")
+            self.log.info(f"│ Level:   {level:<58}│")
+            self.log.info("└─────────────────────────────────────────────────────────────────────┘")
+            self.log.info("=" * 80)
+
+        except Exception as e:
+            self.log.error(f"[FUSION] Erreur génération rapport consolidé: {e}", exc_info=True)
+
+    # -------------- Public API --------------
     def fuse(
         self,
         orderflow: Dict[str, Any],
         footprint: Dict[str, Any],
-        vwap: Optional[Dict[str, Any]] = None,
+        vwap: Optional[Dict[str, Any]] = None,  # ✅ VWAP Module (remplace triggers)
+        triggers: Optional[Dict[str, Any]] = None,  # ⚠️ DEPRECATED (rétrocompat)
         strategy_config: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        ✅ MISE À JOUR (04 DEC 2025): VWAP principal (triggers supprimés)
-        - orderflow: Dict depuis OrderFlowV6.analyze()
-        - footprint: Dict depuis FootprintM1.analyze()
-        - vwap: Dict depuis VWAPAnalyzer.analyze() (score 0-1, bias, zone, régime, etc.)
+        ✅ MISE À JOUR (03 DEC 2025): Intégration VWAP
+        - vwap: Dict depuis VWAPAnalyzer.analyze() (score 0-1, bias, zone, etc.)
+        - triggers: DEPRECATED (gardé pour rétrocompatibilité, ignoré si vwap fourni)
         """
         cfg = (strategy_config or {}).get("fusion", {}) or {}
         ctx = context or {}
 
+        # Si vwap fourni, ignorer triggers (deprecated)
+        if vwap is not None:
+            triggers = None  # Force triggers à None pour éviter confusion
+
         # 1) Validation / qualité
         quality = self._validate_inputs(
-            orderflow or {}, footprint or {}, vwap or {}
+            orderflow or {}, footprint or {}, vwap or {}, triggers or {}
         )
         if not quality["is_valid"]:
             return self._mk_hold(
@@ -432,10 +689,11 @@ class FusionManager:
         self,
         of: Dict[str, Any],
         fp: Dict[str, Any],
-        vw: Dict[str, Any]
+        vw: Dict[str, Any],
+        tr: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        ✅ MISE À JOUR (04 DEC 2025): VWAP validation (triggers supprimés)
+        ✅ MISE À JOUR (03 DEC 2025): Validation VWAP ajoutée
         """
         missing, warnings = [], []
 
@@ -452,6 +710,9 @@ class FusionManager:
         # VWAP optionnel mais recommandé
         if not vw or (vw.get("score") is None and vw.get("bias") is None):
             warnings.append("vwap.missing_data")
+        # triggers DEPRECATED (ignoré)
+        if not tr or (tr.get("direction") is None and tr.get("action") is None):
+            pass  # Ignoré, triggers deprecated
 
         # Anti‐NaN / types incohérents
         for name, d in [("orderflow", of), ("footprint", fp)]:
@@ -572,6 +833,23 @@ class FusionManager:
             "poc": poc,
             "absorption": absorption,
             "raw": fp,
+        }
+
+    def _normalize_trigger(self, tr: Dict[str, Any]) -> Dict[str, Any]:
+        """⚠️ DEPRECATED (03 DEC 2025) - Gardé pour rétrocompat"""
+        a = str(tr.get("direction") or tr.get("action") or "").upper()
+        dir_int = 1 if a == "BUY" else (-1 if a == "SELL" else 0)
+        conf = max(0.0, min(0.99, _to_float(tr.get("confidence"), 0.0) or 0.0))
+        anchor = _to_float(tr.get("anchor_price"), None)
+        ttype = str(tr.get("trigger") or tr.get("trigger_type") or "unknown")
+        ts = _to_float(tr.get("timestamp"), None)
+        return {
+            "score": 0.0,  # DEPRECATED
+            "dir": 0,  # DEPRECATED
+            "anchor": anchor,
+            "type": ttype,
+            "ts": ts,
+            "raw": tr,
         }
 
     def _normalize_vwap(self, vw: Dict[str, Any]) -> Dict[str, Any]:
@@ -808,11 +1086,9 @@ class FusionManager:
 
     # -------------- 4) Composite Score (Primary Data) --------------
     def _calculate_composite_score(
-        self, n_of: Dict, n_fp: Dict, coherence: Dict, quality: Dict
+        self, n_of: Dict, n_fp: Dict, n_tr: Dict, coherence: Dict, quality: Dict
     ) -> Dict[str, Any]:
         """
-        ✅ MISE À JOUR (04 DEC 2025): Triggers supprimés complètement
-
         Score composite basé sur les données PRIMORDIALES :
         - buy_volume / sell_volume (pression marché)
         - delta_total (force nette)
