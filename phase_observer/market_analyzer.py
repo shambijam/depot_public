@@ -208,8 +208,7 @@ class MarketAnalyzer:
             fused = self.fusion_manager.fuse(
                 orderflow=of,
                 footprint=fp_payload,
-                vwap=vwap_result,  # ✅ VWAP ajouté
-                triggers=trig,  # DEPRECATED
+                vwap=vwap_result,
                 strategy_config=strategy_config,
                 context=ctx,
             )
