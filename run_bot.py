@@ -1571,7 +1571,6 @@ def run_single_pipeline_cycle(
                                 orderflow=of,
                                 footprint=fp,
                                 vwap=vwap_result,  # ✅ VWAP (25% du scoring)
-                                triggers=trig,     # ⚠️ DEPRECATED (rétrocompat, ignoré si vwap fourni)
                                 strategy_config=strat_cfg,
                                 context=ctx,
                             )
@@ -1774,7 +1773,6 @@ def run_single_pipeline_cycle(
                         orderflow=of,
                         footprint=fp,
                         vwap=vwap_snapshot,  # ✅ VWAP pour snapshot
-                        triggers=trig,       # ⚠️ DEPRECATED
                         strategy_config=strat_cfg,
                         context=ctx,
                     )
@@ -2032,7 +2030,6 @@ def run_single_pipeline_cycle(
                         fdec_diag = _fusion_mgr.fuse(
                             orderflow=of_i,
                             footprint=fp_i,
-                            triggers=trig_i,
                             strategy_config=strat_cfg_i,
                             context=ctx_i,
                         )
@@ -2633,7 +2630,6 @@ def run_single_pipeline_cycle(
                         fdec_diag = _fusion_mgr.fuse(
                             orderflow=of,
                             footprint=fp,
-                            triggers=trig,
                             strategy_config=strat_cfg,
                             context=ctx,
                         )
@@ -3277,7 +3273,6 @@ def scalping_fast_thread(
                 fusion_out = fusion_mgr.fuse(
                     orderflow=orderflow,
                     footprint=footprint,
-                    triggers=triggers,
                     strategy_config=strat_cfg,
                     context=ctx
                 )
