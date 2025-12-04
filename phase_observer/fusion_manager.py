@@ -44,8 +44,8 @@ def _get_thresholds(cfg: dict):
         "cautious": float(th["cautious"]),
         "moderate": float(th["moderate"]),
         "high": float(th["high"]),
-        "conditional": float(th["conditional"]),
-        "allow_conditional": bool(fusion_cfg["allow_conditional_entries"]),
+        "conditional": float(th.get("conditional", 0.40)),  # ✅ Fallback si absent
+        "allow_conditional": bool(fusion_cfg.get("allow_conditional_entries", True)),  # ✅ Fallback
     }
 
 
@@ -244,9 +244,9 @@ class FusionManager:
     def _log_consolidated_report(
         self,
         asset: str,
-        n_tr: Dict[str, Any],
         n_of: Dict[str, Any],
         n_fp: Dict[str, Any],
+        n_vw: Dict[str, Any],
         fused: float,
         decision: Dict[str, Any],
         weights: Dict[str, float],
@@ -585,7 +585,7 @@ class FusionManager:
             quality["warnings"].append("degraded_mode_fallback")
 
         # 4) Règles métier scalping
-        rules_eval = self._apply_business_rules(n_of, n_fp, n_vw, n_tr, coherence, cfg, ctx)
+        rules_eval = self._apply_business_rules(n_of, n_fp, n_vw, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
         # ✅ NOUVELLE FORMULE: OrderFlow 50% + Footprint 25% + VWAP 25%
@@ -618,10 +618,10 @@ class FusionManager:
             pass
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
-        decision = self._final_decision("AUTO", fused, n_vw, n_tr, coherence, cfg)
+        decision = self._final_decision("AUTO", fused, n_vw, coherence, cfg)
 
         # 9) Rationale
-        rationale = self._rationale(decision, n_of, n_fp, n_vw, n_tr, coherence, rules_eval)
+        rationale = self._rationale(decision, n_of, n_fp, n_vw, coherence, rules_eval)
         # metrics update
         self._update_metrics(
             dt=_now_ts() - t0, decision=decision["action"], fused=fused
@@ -659,7 +659,6 @@ class FusionManager:
             configured_thresholds = _get_thresholds(cfg)
             self._log_consolidated_report(
                 asset=asset_name,
-                n_tr=n_tr,
                 n_of=n_of,
                 n_fp=n_fp,
                 n_vw=n_vw,
@@ -1048,50 +1047,42 @@ class FusionManager:
 
     # -------------- 3) Business Rules Engine --------------
     def _apply_business_rules(
-        self, n_of, n_fp, n_vw, n_tr, coherence, cfg, ctx
+        self, n_of, n_fp, n_vw, coherence, cfg, ctx
     ) -> Dict[str, Any]:
+        """
+        ✅ MISE À JOUR (04 DEC 2025): Triggers supprimés, règles simplifiées
+
+        Règles actives :
+        - WEAK FOOTPRINT : Score FP < seuil → note
+        - TRIPLE CONFIRMATION : OF + FP + VWAP tous alignés → bonus
+
+        Règles SUPPRIMÉES (dépendaient de triggers) :
+        - NEVER AGAINST STRONG ORDERFLOW (comparait trigger vs OF)
+        - ABSORPTION VETO (comparait trigger vs FP)
+        - TIMING BONUS (age du trigger)
+        """
         rules = cfg.get("regles_metier", {}) or {}
-        # priorités fixées par ton cahier des charges
-        never_against_strong_of = bool(
-            rules.get("never_against_strong_orderflow", True)
-        )
-        veto_absorption = bool(rules.get("veto_absorption", True))
         triple_bonus = bool(rules.get("triple_confirmation_bonus", True))
         weak_fp_penalty_th = _to_float(rules.get("weak_footprint_score_th", 0.60), 0.60)
 
         allow = True
         notes: List[str] = []
 
-        # “NEVER AGAINST STRONG ORDERFLOW” (score > 0.80 → of fort)
-        if never_against_strong_of and n_of["score"] >= 0.80:
-            if n_tr["dir"] != 0 and n_tr["dir"] != n_of["dir"]:
-                allow = False
-                notes.append("AGAINST_STRONG_ORDERFLOW")
-
-        # “ABSORPTION VETO”
-        if veto_absorption and n_fp["absorption"]:
-            if n_tr["dir"] != 0 and n_tr["dir"] != n_fp["dir"]:
-                allow = False
-                notes.append("ABSORPTION_VETO")
-
-        # “WEAK FOOTPRINT PENALTY”
+        # "WEAK FOOTPRINT PENALTY"
         weak_fp = n_fp["score"] < weak_fp_penalty_th
         if weak_fp:
             notes.append("WEAK_FOOTPRINT")
 
-        # “TRIPLE CONFIRMATION BONUS” (cohérence 3/3)
+        # "TRIPLE CONFIRMATION BONUS" (cohérence 3/3 : OF + FP + VWAP)
+        matrix = coherence.get("matrix", {})
         aligned3 = (
-            coherence["matrix"]["trigger_vs_of"] == "aligned"
-            and coherence["matrix"]["trigger_vs_fp"] == "aligned"
-            and coherence["matrix"]["of_vs_fp"] == "aligned"
+            matrix.get("of_vs_fp") == "aligned"
+            and matrix.get("of_vs_vwap") == "aligned"
+            and matrix.get("fp_vs_vwap") == "aligned"
         )
 
-        # Timing optimisation (lead/lag)
+        # Timing bonus supprimé (dépendait de trigger_age)
         timing_bonus = 0.0
-        trig_age = coherence["leadlag"].get("trigger_age_s")
-        if trig_age is not None and trig_age <= 5.0 and n_of["score"] >= 0.50:
-            timing_bonus += 0.03
-            notes.append("TIMING_OK")
 
         return {
             "allow": allow,
@@ -1359,26 +1350,38 @@ class FusionManager:
 
     # -------------- 6) Decision Generator --------------
     def _final_decision(
-        self, mode: str, fused: float, n_vw, n_tr, coherence, cfg
+        self, mode: str, fused: float, n_vw, coherence, cfg
     ) -> Dict[str, Any]:
-        # direction finale: majorité pondérée; sinon direction du trigger; sinon NEUTRAL
+        """
+        ✅ MISE À JOUR (04 DEC 2025): Triggers supprimés, VWAP utilisé pour direction/anchor
+
+        Direction finale :
+        1. Majorité pondérée (OF + FP + VWAP)
+        2. Si égalité → Fallback VWAP bias
+        3. Si VWAP neutral → NEUTRAL
+
+        Anchor price :
+        - Valeur VWAP (support/résistance dynamique)
+        """
+        # direction finale: majorité pondérée; sinon fallback VWAP bias
         maj = coherence["majority"]
-        direction = (
-            "BUY"
-            if maj > 0
-            else (
-                "SELL"
-                if maj < 0
-                else (
-                    "BUY"
-                    if n_tr["dir"] > 0
-                    else "SELL" if n_tr["dir"] < 0 else "NEUTRAL"
-                )
-            )
-        )
-        anchor_price = n_tr[
-            "anchor"
-        ]  # l'ancre du trigger reste prioritaire; POC pris plus haut si None
+
+        if maj > 0:
+            direction = "BUY"
+        elif maj < 0:
+            direction = "SELL"
+        else:
+            # Fallback: utiliser VWAP bias
+            vwap_bias = n_vw.get("bias", "neutral").upper()
+            if vwap_bias == "BULLISH":
+                direction = "BUY"
+            elif vwap_bias == "BEARISH":
+                direction = "SELL"
+            else:
+                direction = "NEUTRAL"
+
+        # Anchor price = VWAP value (support/resistance dynamique)
+        anchor_price = n_vw.get("value")  # Peut être None si VWAP non disponible
 
         if mode == "HOLD":
             return {
@@ -1425,8 +1428,10 @@ class FusionManager:
         }
 
     # -------------- 7) Rationale Builder --------------
-    def _rationale(self, decision, n_of, n_fp, n_vw, n_tr, coherence, rules_eval) -> str:
-
+    def _rationale(self, decision, n_of, n_fp, n_vw, coherence, rules_eval) -> str:
+        """
+        ✅ MISE À JOUR (04 DEC 2025): Triggers supprimés, remplacés par VWAP
+        """
         parts = []
         st = decision["signal_type"]
         if decision["action"] == "HOLD":
@@ -1444,16 +1449,15 @@ class FusionManager:
             if n_fp["dir"] > 0
             else ("bearish" if n_fp["dir"] < 0 else "neutre")
         )
-        trig_txt = (
-            "aucun trigger"
-            if n_tr["dir"] == 0
-            else f"trigger={'BUY' if n_tr['dir']>0 else 'SELL'} conf={n_tr['score']:.2f}"
-        )
+
+        # VWAP remplace triggers
+        vwap_bias = n_vw.get("bias", "neutral")
+        vwap_txt = f"vwap {vwap_bias} (score={n_vw.get('score', 0.0):.2f})"
 
         parts += [
             f"orderflow {dir_of} (score={n_of['score']:.2f}, Δ={n_of['delta_total']:.2f})",
             f"footprint {dir_fp}{' avec ABSORPTION' if n_fp['absorption'] else ''}",
-            trig_txt,
+            vwap_txt,
             f"cohérence={coherence['agreement']:.2f}, votes={coherence['votes']}",
         ]
         if rules_eval["reasons"]:
@@ -1506,11 +1510,11 @@ class FusionManager:
             },
         }
         # enrich si fournis
-        if "n_of" in kw or "n_fp" in kw or "n_tr" in kw:
+        if "n_of" in kw or "n_fp" in kw or "n_vw" in kw:
             out["components"] = {
                 "orderflow": kw.get("n_of"),
-                "validator": kw.get("n_fp"),
-                "trigger": kw.get("n_tr"),
+                "footprint": kw.get("n_fp"),
+                "vwap": kw.get("n_vw"),
             }
         if "fused" in kw:
             out["fused_confidence"] = float(kw["fused"])
