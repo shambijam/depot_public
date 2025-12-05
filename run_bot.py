@@ -2604,9 +2604,13 @@ def run_single_pipeline_cycle(
             print("=" * 60 + "\n")
 
         # === Filtre scalping: FUSION-ONLY + XAUUSD + fusion_data valide ===
+        _all_scalping = decision_package.get("scalping_decisions") or []
+        for d in _all_scalping:
+            logger.info(f"[FILTER_DEBUG] Decision: rule={d.get('rule_name')} asset={d.get('asset')} has_fusion_data={bool(d.get('fusion_data'))} fused_conf={d.get('fusion_data', {}).get('fused_confidence', 0.0)}")
+
         scalping_decisions = [
             d
-            for d in (decision_package.get("scalping_decisions") or [])
+            for d in _all_scalping
             if str(d.get("rule_name", "")).lower() in ("fusion_scalping", "burst_scalping")
             and str(d.get("asset", "")).upper() == "XAUUSD"
             # ✅ BLOQUEUR CRITIQUE: Rejeter si fusion_data vide (pattern désactivé)
