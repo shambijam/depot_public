@@ -497,8 +497,12 @@ class FusionManager:
         # of v6: {score:0..100, status, summary{delta_total, imbalance, cvd_slope, vpoc_price, bias, ...}}
         status = str(of.get("status", "SUSPECT")).upper()
         score01 = max(0.0, min(1.0, _to_float(of.get("score"), 0.0) / 100.0))
-        if status != "VALID":
-            score01 *= 0.6
+
+        # ✅ FIX (05 DEC 2025): SUPPRESSION PÉNALITÉ STATUS ARBITRAIRE
+        # Le score OrderFlow V6 est DÉJÀ calculé avec qualité intégrée (delta + volume + imbalance)
+        # Pénaliser à nouveau sur status="WEAK" est une double pénalité injustifiée
+        # Ancien code: if status != "VALID": score01 *= 0.6
+        # Résultat: score=30 devient 0.18 au lieu de 0.30 → bot bloqué artificiellement
 
         summ = of.get("summary") or {}
         if isinstance(summ, str):
@@ -570,8 +574,9 @@ class FusionManager:
                 score01 += 0.05
             score01 = max(0.0, min(1.0, score01))
 
-        if status != "VALID":
-            score01 *= 0.6
+        # ✅ FIX (05 DEC 2025): SUPPRESSION PÉNALITÉ STATUS ARBITRAIRE
+        # Même raisonnement que OrderFlow - le score Footprint intègre déjà la qualité
+        # Ancien code: if status != "VALID": score01 *= 0.6
 
         dir_int = _dir_from_sign(delta or 0.0)
 
@@ -657,9 +662,9 @@ class FusionManager:
             except Exception:
                 summary = {}
 
-        # Pénalité status
-        if status != "VALID":
-            score *= 0.8  # -20% si SUSPECT ou INVALID
+        # ✅ FIX (05 DEC 2025): SUPPRESSION PÉNALITÉ STATUS ARBITRAIRE
+        # Même logique - le score VWAP est déjà calculé avec qualité intégrée
+        # Ancien code: if status != "VALID": score *= 0.8
 
         return {
             "score": score,
