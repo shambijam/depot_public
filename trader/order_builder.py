@@ -1096,7 +1096,7 @@ def prepare_order(self, decision_package: dict) -> dict:
         self.logger.warning(
             f"⚠️ [ORDER_BUILDER] Erreur mode parallèle, fallback séquentiel: {e}"
         )
-        return self._prepare_order_sequential(decision_package)
+        return _prepare_order_sequential(self, decision_package)
 
 
 def _build_mt5_request(
