@@ -2607,7 +2607,7 @@ def run_single_pipeline_cycle(
         scalping_decisions = [
             d
             for d in (decision_package.get("scalping_decisions") or [])
-            if str(d.get("rule_name", "")).lower() == "fusion_scalping"
+            if str(d.get("rule_name", "")).lower() in ("fusion_scalping", "burst_scalping")
             and str(d.get("asset", "")).upper() == "XAUUSD"
             # ✅ BLOQUEUR CRITIQUE: Rejeter si fusion_data vide (pattern désactivé)
             and d.get("fusion_data")  # fusion_data doit exister et ne pas être vide
