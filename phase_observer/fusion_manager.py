@@ -150,19 +150,23 @@ def _cross_system_validation(
 
 # ---------- Poids adaptatifs ----------
 def _adaptive_weights(
-    self, regime: Optional[str], volatility: Optional[str], session: Optional[str]
+    self, regime: Optional[str], volatility: Optional[str], session: Optional[str], cfg: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, float]]:
-    """✅ MISE À JOUR (03 DEC 2025): Poids adaptatifs avec VWAP (50%/25%/25%)"""
+    """✅ MISE À JOUR (05 DEC 2025): Poids adaptatifs DEPUIS CONFIG"""
     # Valeurs par défaut None → pas d'override
     if not (regime or volatility or session):
         return None
 
-    # ✅ NOUVEAUX POIDS DE BASE: OrderFlow 50%, Footprint 25%, VWAP 25%
-    w_of, w_fp, w_vw = 0.50, 0.25, 0.25
+    # ✅ POIDS DE BASE DEPUIS CONFIG (pas hardcodés)
+    p = (cfg or {}).get("ponderations", {})
+    w_of = _to_float(p.get("orderflow_weight"), 0.30)
+    w_fp = _to_float(p.get("footprint_weight"), 0.35)
+    w_vw = _to_float(p.get("vwap_weight"), 0.35)
 
-    # Volatilité élevée → renforcer orderflow (tick data plus fiable)
+    # Volatilité élevée → renforcer orderflow +10%, réduire VWAP -10%
     if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
-        w_of, w_fp, w_vw = 0.55, 0.25, 0.20
+        w_of += 0.10
+        w_vw -= 0.10
 
     # Trending → renforcer orderflow + VWAP ; Range → renforcer footprint (structure)
     if (regime or "").lower().startswith("trend"):
@@ -383,19 +387,19 @@ class FusionManager:
         is_actionable = decision["action"] != "HOLD" and fused >= min_threshold
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
-        # Récupérer les poids utilisés pour la fusion
+        # Récupérer les poids utilisés pour la fusion (AVEC cfg pour lire poids de base)
         adaptive_w = self._adaptive_weights(
-            ctx.get("regime"), ctx.get("volatility"), ctx.get("session")
+            ctx.get("regime"), ctx.get("volatility"), ctx.get("session"), cfg
         )
         if adaptive_w:
             weights_used = adaptive_w
         else:
-            # ✅ NOUVEAUX POIDS (03 DEC 2025): OrderFlow 50% + Footprint 25% + VWAP 25%
+            # ✅ POIDS DEPUIS CONFIG (05 DEC 2025): Lecture dynamique depuis strategy_config
             p = cfg.get("ponderations", {})
             weights_used = {
-                "orderflow": _to_float(p.get("orderflow_weight"), 0.50),
-                "footprint": _to_float(p.get("footprint_weight"), 0.25),
-                "vwap": _to_float(p.get("vwap_weight"), 0.25),
+                "orderflow": _to_float(p.get("orderflow_weight"), 0.30),
+                "footprint": _to_float(p.get("footprint_weight"), 0.35),
+                "vwap": _to_float(p.get("vwap_weight"), 0.35),
                 "trigger": _to_float(p.get("trigger_weight"), 0.0),  # DEPRECATED
             }
 
@@ -1005,11 +1009,18 @@ class FusionManager:
         fp_score = _to_float(n_fp.get("score"), 0.0)
         vw_score = _to_float(n_vw.get("score"), 0.0)
 
-        # ========== 2. FUSION PONDÉRÉE: 50% + 25% + 25% ==========
-        weighted_score = (of_score * 0.50) + (fp_score * 0.25) + (vw_score * 0.25)
+        # ========== 2. POIDS DEPUIS CONFIG ==========
+        # Lire les poids depuis la configuration (avec fallbacks)
+        p = cfg.get("ponderations", {})
+        w_of = _to_float(p.get("orderflow_weight"), 0.30)
+        w_fp = _to_float(p.get("footprint_weight"), 0.35)
+        w_vw = _to_float(p.get("vwap_weight"), 0.35)
+
+        # ========== 3. FUSION PONDÉRÉE AVEC POIDS CONFIG ==========
+        weighted_score = (of_score * w_of) + (fp_score * w_fp) + (vw_score * w_vw)
 
         # Contribution VWAP pour tracking
-        vwap_contribution = vw_score * 0.25
+        vwap_contribution = vw_score * w_vw
 
         # ========== 2. MÉTRIQUES QUALITÉ (Capturées mais Sans Pénalité) ==========
 
@@ -1068,7 +1079,7 @@ class FusionManager:
             status_vw = n_vw.get("status", "SUSPECT")
             _probe(
                 self.log,
-                f"[VWAP_FUSION] OF={of_score:.3f}(50%) + FP={fp_score:.3f}(25%) + VWAP={vw_score:.3f}(25%) = {weighted_score:.3f} | "
+                f"[VWAP_FUSION] OF={of_score:.3f}({w_of*100:.0f}%) + FP={fp_score:.3f}({w_fp*100:.0f}%) + VWAP={vw_score:.3f}({w_vw*100:.0f}%) = {weighted_score:.3f} | "
                 f"ticks={tick_count} cov={coverage_s}s | "
                 f"status: OF={status_of} FP={status_fp} VWAP={status_vw} | "
                 f"conflicts={conflicts} alignments={alignments} | "
