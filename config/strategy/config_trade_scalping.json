@@ -191,9 +191,9 @@
     },
     "ponderations": {
       "trigger_weight": 0.0,
-      "orderflow_weight": 0.40,
-      "footprint_weight": 0.35,
-      "vwap_weight": 0.25,
+      "orderflow_weight": 0.45,
+      "footprint_weight": 0.40,
+      "vwap_weight": 0.15,
       "coherence_bonus_max": 0.10
     }
   },
