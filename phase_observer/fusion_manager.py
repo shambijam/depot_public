@@ -284,6 +284,15 @@ class FusionManager:
         cfg = (strategy_config or {}).get("fusion", {}) or {}
         ctx = context or {}
 
+        # 🔍 DEBUG LOG ENTRÉE FUSION
+        _probe(
+            self.log,
+            f"[FUSION_ENTREE] OrderFlow score={orderflow.get('score') if orderflow else 'N/A'} "
+            f"status={orderflow.get('status') if orderflow else 'N/A'} | "
+            f"Footprint status={footprint.get('status') if footprint else 'N/A'} | "
+            f"VWAP score={vwap.get('score') if vwap else 'N/A'} bias={vwap.get('bias') if vwap else 'N/A'}"
+        )
+
         # 1) Validation / qualité
         quality = self._validate_inputs(
             orderflow or {}, footprint or {}, vwap or {}
@@ -1113,6 +1122,16 @@ class FusionManager:
         high_threshold = thresholds["high"]
         moderate_threshold = thresholds["moderate"]
         cautious_threshold = thresholds["cautious"]
+        conditional_threshold = thresholds.get("conditional", 0.35)
+        allow_conditional = thresholds.get("allow_conditional", True)
+
+        # 🔍 DEBUG LOG CRITIQUE - Décision finale
+        _probe(
+            self.log,
+            f"[DECISION_FINALE] fused={fused:.3f} direction={direction} | "
+            f"Seuils: high={high_threshold} moderate={moderate_threshold} cautious={cautious_threshold} "
+            f"conditional={conditional_threshold} | allow_conditional={allow_conditional}"
+        )
 
         if fused >= high_threshold and direction in ("BUY", "SELL"):
             return {
@@ -1136,6 +1155,22 @@ class FusionManager:
                 "anchor_price": anchor_price,
             }
 
+        # ✅ FIX (05 DEC 2025): SEUIL CONDITIONAL - Si score >= 0.35 ET allow_conditional=True → TRADE
+        if allow_conditional and fused >= conditional_threshold and direction in ("BUY", "SELL"):
+            _probe(self.log, f"[DECISION_FINALE] ✅ CONDITIONAL {direction} AUTORISÉ (score={fused:.3f} >= {conditional_threshold})")
+            return {
+                "action": direction,
+                "signal_type": f"CONDITIONAL_{direction}",
+                "direction": direction,
+                "anchor_price": anchor_price,
+            }
+
+        # Si on arrive ici, le score est trop bas ou allow_conditional=False
+        _probe(
+            self.log,
+            f"[DECISION_FINALE] ❌ HOLD - score={fused:.3f} < conditional={conditional_threshold} "
+            f"OU allow_conditional={allow_conditional}"
+        )
         return {
             "action": "HOLD",
             "signal_type": "WAIT_CONFIRMATION",
