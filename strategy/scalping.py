@@ -711,6 +711,15 @@ class ScalpingStrategy(BaseStrategy):
         Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
         """
         try:
+            # ✅ Lire les pondérations depuis la config (dynamique)
+            strategy_cfg = self.strategy_manager.get_strategy_config("scalping") or {}
+            fusion_cfg = strategy_cfg.get("fusion", {})
+            ponderations = fusion_cfg.get("ponderations", {})
+
+            w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100  # 30% -> 30
+            w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100  # 35% -> 35
+            w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100       # 35% -> 35
+
             sep = "=" * 70
 
             self.logger.info(f"\n{sep}")
@@ -748,7 +757,7 @@ class ScalpingStrategy(BaseStrategy):
             volume_details = orderflow_result.get("volume_confirmation_details", {})
             imbalance_details = orderflow_result.get("imbalance_strength_details", {})
 
-            self.logger.info(f"\n📈 ORDERFLOW ANALYSIS (50% du total) : {of_score:.1f}/50 points")
+            self.logger.info(f"\n📈 ORDERFLOW ANALYSIS ({w_of:.0f}% du total) : {of_score:.1f}/{w_of:.0f} points")
             self.logger.info(f"   ├─ Delta Momentum      : {delta_score:.1f}/25 pts")
             self.logger.info(f"   │  • Delta total       : {delta_details.get('delta_total', 0)}")
             self.logger.info(f"   │  • Cohérence         : {delta_details.get('coherence', 0)*100:.0f}%")
@@ -780,7 +789,7 @@ class ScalpingStrategy(BaseStrategy):
             clustering_details = footprint_result.get("clustering_details", {})
             rejection_details = footprint_result.get("rejection_details", {})
 
-            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS (25% du total) : {fp_score:.1f}/25 points")
+            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS ({w_fp:.0f}% du total) : {fp_score:.1f}/{w_fp:.0f} points")
             self.logger.info(f"   ├─ Absorption Levels   : {absorption_score:.1f}/12.5 pts")
             self.logger.info(f"   │  • Biais absorption  : {absorption_details.get('bias', 'N/A')}")
             self.logger.info(f"   │  • Buy ratio         : {absorption_details.get('buy_ratio', 0)*100:.0f}%")
@@ -799,11 +808,11 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # 4. VWAP MODULE - INSTITUTIONNEL (03 DEC 2025)
             # ================================================================
-            # Calcul du score VWAP sur 25 points
-            vwap_score_25pts = (vwap_score_pct / 100.0) * 25.0  # Convertir 0-100% → 0-25 pts
+            # Calcul du score VWAP sur w_vw points (dynamique)
+            vwap_score_pts = (vwap_score_pct / 100.0) * w_vw  # Convertir 0-100% → 0-w_vw pts
 
-            self.logger.info(f"\n📊 VWAP INSTITUTIONNEL (25% du scoring)")
-            self.logger.info(f"   Score VWAP      : {vwap_score_25pts:.1f}/25 pts ({vwap_score_pct:.1f}%)")
+            self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
+            self.logger.info(f"   Score VWAP      : {vwap_score_pts:.1f}/{w_vw:.0f} pts ({vwap_score_pct:.1f}%)")
             self.logger.info(f"   Status          : {vwap_status}")
 
             # ================================================================
@@ -812,11 +821,11 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"\n{sep}")
             self.logger.info(f"🎯 SCORE FINAL BURST SCALPING")
             self.logger.info(f"{sep}")
-            self.logger.info(f"   OrderFlow (50%) : {of_score:.1f}/50 pts")
-            self.logger.info(f"   Footprint (25%) : {fp_score:.1f}/25 pts")
-            self.logger.info(f"   VWAP (25%)      : {vwap_score_25pts:.1f}/25 pts")
+            self.logger.info(f"   OrderFlow ({w_of:.0f}%) : {of_score:.1f}/{w_of:.0f} pts")
+            self.logger.info(f"   Footprint ({w_fp:.0f}%) : {fp_score:.1f}/{w_fp:.0f} pts")
+            self.logger.info(f"   VWAP ({w_vw:.0f}%)      : {vwap_score_pts:.1f}/{w_vw:.0f} pts")
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_25pts:.1f}/100 pts")
+            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_pts:.1f}/100 pts")
 
             # Direction recommandée
             if action:
