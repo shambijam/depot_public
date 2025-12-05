@@ -712,8 +712,7 @@ class ScalpingStrategy(BaseStrategy):
         """
         try:
             # ✅ Lire les pondérations depuis la config (dynamique)
-            strategy_cfg = self.strategy_manager.get_strategy_config("scalping") or {}
-            fusion_cfg = strategy_cfg.get("fusion", {})
+            fusion_cfg = self.strategy_config.get("fusion", {})
             ponderations = fusion_cfg.get("ponderations", {})
 
             w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100  # 30% -> 30

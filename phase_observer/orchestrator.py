@@ -1050,13 +1050,13 @@ class PhaseObserver:
                     sweep_up
                     & (df_an["close"] < df_an["open"])
                     & (body_ratio >= body_to_range_min)
-                    & ((~closes_through_mid.astype(int)) | (df_an["close"] <= mid_range))
+                    & ((not closes_through_mid) | (df_an["close"] <= mid_range))
                 )
                 absorb_dn = (
                     sweep_dn
                     & (df_an["close"] > df_an["open"])
                     & (body_ratio >= body_to_range_min)
-                    & ((~closes_through_mid.astype(int)) | (df_an["close"] >= mid_range))
+                    & ((not closes_through_mid) | (df_an["close"] >= mid_range))
                 )
                 df_an["absorption_confirmed"] = (absorb_up | absorb_dn).fillna(False)
 
