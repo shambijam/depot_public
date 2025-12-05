@@ -1245,6 +1245,11 @@ class ScalpingStrategy(BaseStrategy):
                 "order_type": entry_mode,  # MARKET / BUY_LIMIT / SELL_LIMIT
                 "entry_price": (float(price) if entry_mode != "MARKET" else None),
                 "burst_size": burst_sz,  # virtuel (logique interne)
+                "fusion_data": {
+                    "fused_confidence": final_score / 100.0 if 'final_score' in locals() else 0.0,
+                    "orderflow": orderflow_result if 'orderflow_result' in locals() else {},
+                    "footprint": footprint_result if 'footprint_result' in locals() else {},
+                },
                 "meta": {
                     "burst": True,
                     "entry_source": "core_decision",
@@ -1450,6 +1455,9 @@ class ScalpingStrategy(BaseStrategy):
             "entry_price": float(entry_price) if entry_mode != "MARKET" else None,
             "burst_size": burst_size,                 # virtuel (utile pour ta logique interne)
             "basket_id": basket_id,
+            "fusion_data": {
+                "fused_confidence": 1.0,  # Fallback pour ancienne règle sans fusion
+            },
             "meta": {
                 "burst": True,
                 "entry_source": "core_decision"
