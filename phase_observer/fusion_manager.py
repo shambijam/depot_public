@@ -381,9 +381,10 @@ class FusionManager:
         maj_str = "BUY" if maj > 0 else ("SELL" if maj < 0 else "TIE")
 
         # ok=True seulement si action != HOLD ET fused >= seuil minimum (depuis config)
-        # Récupérer le seuil cautious depuis la configuration
+        # ✅ FIX (05 DEC 2025): Utiliser le seuil MINIMUM (conditional) au lieu de cautious
+        # Car CONDITIONAL_BUY est valide dès que score >= conditional
         thresholds = _get_thresholds(cfg)
-        min_threshold = thresholds.get("cautious", 0.40)
+        min_threshold = thresholds.get("conditional", 0.28)  # Plus bas seuil
         is_actionable = decision["action"] != "HOLD" and fused >= min_threshold
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
