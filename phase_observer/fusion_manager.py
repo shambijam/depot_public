@@ -179,12 +179,6 @@ def _adaptive_weights(
     if not (regime or volatility or session or vwap_regime):
         return None
 
-    # ✅ POIDS DE BASE DEPUIS CONFIG (pas hardcodés)
-    p = (cfg or {}).get("ponderations", {})
-    w_of = _to_float(p.get("orderflow_weight"), 0.30)
-    w_fp = _to_float(p.get("footprint_weight"), 0.35)
-    w_vw = _to_float(p.get("vwap_weight"), 0.35)
-
     # === PRIORITÉ 1 : VWAP REGIME (nouveau système dynamique - PRIORITAIRE) ===
     if vwap_regime:
         vr = str(vwap_regime).upper()
@@ -223,6 +217,11 @@ def _adaptive_weights(
 
     # === PRIORITÉ 2 : Ajustements LEGACY (si pas de VWAP regime) ===
     else:
+        # ✅ FALLBACK (06 DEC 2025): Poids par défaut + ajustements legacy
+        w_of = 0.30
+        w_fp = 0.35
+        w_vw = 0.35
+
         # Volatilité élevée → renforcer orderflow +10%, réduire VWAP -10%
         if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
             w_of += 0.10
@@ -458,13 +457,12 @@ class FusionManager:
         if adaptive_w:
             weights_used = adaptive_w
         else:
-            # ✅ POIDS DEPUIS CONFIG (05 DEC 2025): Lecture dynamique depuis strategy_config
-            p = cfg.get("ponderations", {})
+            # ✅ FALLBACK (06 DEC 2025): Poids par défaut si système adaptatif échoue
             weights_used = {
-                "orderflow": _to_float(p.get("orderflow_weight"), 0.30),
-                "footprint": _to_float(p.get("footprint_weight"), 0.35),
-                "vwap": _to_float(p.get("vwap_weight"), 0.35),
-                "trigger": _to_float(p.get("trigger_weight"), 0.0),  # DEPRECATED
+                "orderflow": 0.30,
+                "footprint": 0.35,
+                "vwap": 0.35,
+                "trigger": 0.0,  # DEPRECATED
             }
 
         # Appeler le rapport consolidé (actif seulement si FUSION_PROBE=1)
@@ -1037,14 +1035,16 @@ class FusionManager:
         self, n_of, n_fp, n_vw, coherence, quality, cfg, ctx, rules_eval
     ) -> Tuple[float, float]:
         """
-        ✅ MISE À JOUR (04 DEC 2025): SCORING VWAP INTÉGRÉ (triggers supprimés complètement)
+        ✅ MISE À JOUR (06 DEC 2025): POIDS ADAPTATIFS VWAP DYNAMIQUES
 
         NOUVELLE FORMULE DE FUSION:
-        - OrderFlow:  50%
-        - Footprint:  25%
-        - VWAP:       25%
+        - Poids adaptatifs selon régime VWAP (TRENDING/BALANCED/ACCUMULATION/TRANSITIONAL)
+        - TRENDING:      VWAP 50% / OF 30% / FP 20%
+        - BALANCED:      VWAP 30% / OF 35% / FP 35%
+        - ACCUMULATION:  VWAP 25% / OF 35% / FP 40%
+        - TRANSITIONAL:  VWAP 20% / OF 40% / FP 40%
 
-        1. Pondération fixe : OF * 0.50 + FP * 0.25 + VWAP * 0.25
+        1. Pondération adaptative (via _adaptive_weights)
         2. Bonus/Malus Cohérence : Alignement 3/3, conflits
         3. TRIGGERS SUPPRIMÉS
 
@@ -1057,14 +1057,25 @@ class FusionManager:
         fp_score = _to_float(n_fp.get("score"), 0.0)
         vw_score = _to_float(n_vw.get("score"), 0.0)
 
-        # ========== 2. POIDS DEPUIS CONFIG ==========
-        # Lire les poids depuis la configuration (avec fallbacks)
-        p = cfg.get("ponderations", {})
-        w_of = _to_float(p.get("orderflow_weight"), 0.30)
-        w_fp = _to_float(p.get("footprint_weight"), 0.35)
-        w_vw = _to_float(p.get("vwap_weight"), 0.35)
+        # ========== 2. POIDS ADAPTATIFS (système dynamique VWAP) ==========
+        # ✅ MAJ (06 DEC 2025): Utiliser _adaptive_weights au lieu de poids fixes JSON
+        vwap_regime = n_vw.get("regime")  # "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
+        adaptive_w = self._adaptive_weights(
+            ctx.get("regime"), ctx.get("volatility"), ctx.get("session"), cfg, vwap_regime
+        )
 
-        # ========== 3. FUSION PONDÉRÉE AVEC POIDS CONFIG ==========
+        if adaptive_w:
+            # Poids adaptatifs calculés dynamiquement
+            w_of = adaptive_w.get("orderflow", 0.30)
+            w_fp = adaptive_w.get("footprint", 0.35)
+            w_vw = adaptive_w.get("vwap", 0.35)
+        else:
+            # Fallback: poids par défaut (si aucune adaptation possible)
+            w_of = 0.30
+            w_fp = 0.35
+            w_vw = 0.35
+
+        # ========== 3. FUSION PONDÉRÉE AVEC POIDS ADAPTATIFS ==========
         weighted_score = (of_score * w_of) + (fp_score * w_fp) + (vw_score * w_vw)
 
         # Contribution VWAP pour tracking

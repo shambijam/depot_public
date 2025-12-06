@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.40
+        "min_confidence": 0.60
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -94,13 +94,7 @@
         "max_slippage_points": 100,
         "require_phase_alignment": false,
         "require_footprint": true,
-        "of_score_scale": "0_1",
-        "ponderations": {
-          "trigger_weight": 0.0,
-          "orderflow_weight": 0.30,
-          "footprint_weight": 0.35,
-          "vwap_weight": 0.35
-        }
+        "of_score_scale": "0_1"
       }
     }
   },
@@ -142,7 +136,7 @@
     "adaptive_weights": true,
     "allow_conditional_entries": true,
     "seuils_entree": {
-      "min_confidence": 0.40,
+      "min_confidence": 0.60,
       "min_orderflow_score": 0.40,
       "max_spread_pts": 30
     },
@@ -188,13 +182,6 @@
     },
     "range_accumulation_mtf": {
       "enabled": false
-    },
-    "ponderations": {
-      "trigger_weight": 0.0,
-      "orderflow_weight": 0.35,
-      "footprint_weight": 0.40,
-      "vwap_weight": 0.25,
-      "coherence_bonus_max": 0.10
     }
   },
   "regles_metier": {
