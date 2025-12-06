@@ -150,11 +150,33 @@ def _cross_system_validation(
 
 # ---------- Poids adaptatifs ----------
 def _adaptive_weights(
-    self, regime: Optional[str], volatility: Optional[str], session: Optional[str], cfg: Optional[Dict[str, Any]] = None
+    self,
+    regime: Optional[str],
+    volatility: Optional[str],
+    session: Optional[str],
+    cfg: Optional[Dict[str, Any]] = None,
+    vwap_regime: Optional[str] = None
 ) -> Optional[Dict[str, float]]:
-    """✅ MISE À JOUR (05 DEC 2025): Poids adaptatifs DEPUIS CONFIG"""
+    """
+    ✅ MAJ VWAP DYNAMIQUE (06 DEC 2025): Poids adaptatifs selon régime VWAP
+
+    Arguments:
+        regime: Régime PhaseObserver (trending_*, range_*, etc.) - LEGACY
+        volatility: Volatilité ("high", "low", etc.) - LEGACY
+        session: Session de trading ("london", "ny", "asia") - LEGACY
+        cfg: Configuration avec poids de base
+        vwap_regime: Régime VWAP ("TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL")
+
+    Poids VWAP optimaux selon régime (doc MAJ_dynamique_VWAP.MD):
+        - TRENDING: 50% (VWAP = indicateur principal, tendance institutionnelle)
+        - BALANCED: 30% (VWAP = référence neutre, équilibre)
+        - ACCUMULATION: 25% (VWAP = support/résistance, micro-structure dominante)
+        - TRANSITIONAL: 20% (VWAP = peu fiable, chaos/compression)
+
+    Note: vwap_regime PRIME sur les autres paramètres (regime, volatility, session)
+    """
     # Valeurs par défaut None → pas d'override
-    if not (regime or volatility or session):
+    if not (regime or volatility or session or vwap_regime):
         return None
 
     # ✅ POIDS DE BASE DEPUIS CONFIG (pas hardcodés)
@@ -163,35 +185,74 @@ def _adaptive_weights(
     w_fp = _to_float(p.get("footprint_weight"), 0.35)
     w_vw = _to_float(p.get("vwap_weight"), 0.35)
 
-    # Volatilité élevée → renforcer orderflow +10%, réduire VWAP -10%
-    if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
-        w_of += 0.10
-        w_vw -= 0.10
+    # === PRIORITÉ 1 : VWAP REGIME (nouveau système dynamique - PRIORITAIRE) ===
+    if vwap_regime:
+        vr = str(vwap_regime).upper()
 
-    # Trending → renforcer orderflow + VWAP ; Range → renforcer footprint (structure)
-    if (regime or "").lower().startswith("trend"):
-        w_of += 0.05  # OrderFlow important en trend
-        w_vw += 0.03  # VWAP confirme trend
-        w_fp -= 0.08  # Footprint moins pertinent
-    elif (regime or "").lower().startswith("range"):
-        w_fp += 0.10  # Structure footprint cruciale en range
-        w_of -= 0.05
-        w_vw -= 0.05
+        if vr == "TRENDING":
+            # TRENDING: VWAP = 50%, OrderFlow = 30%, Footprint = 20%
+            # Logique : Tendance institutionnelle forte, VWAP = indicateur principal
+            w_vw = 0.50
+            w_of = 0.30
+            w_fp = 0.20
+            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=TRENDING → VWAP=50% OF=30% FP=20%")
 
-    # Session London/NY → orderflow + VWAP réactifs ; Asia → footprint/structure
-    s = (session or "").lower()
-    if "london" in s or "europe" in s or "ny" in s:
-        w_of += 0.03  # Forte liquidité → orderflow fiable
-        w_vw += 0.02  # VWAP institutionnel actif
-        w_fp -= 0.05
-    elif "asia" in s:
-        w_fp += 0.05  # Sessions calmes → focus structure
-        w_of -= 0.03
-        w_vw -= 0.02
+        elif vr == "BALANCED":
+            # BALANCED: VWAP = 30%, OrderFlow = 35%, Footprint = 35%
+            # Logique : Équilibre, VWAP référence neutre
+            w_vw = 0.30
+            w_of = 0.35
+            w_fp = 0.35
+            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=BALANCED → VWAP=30% OF=35% FP=35%")
+
+        elif vr == "ACCUMULATION":
+            # ACCUMULATION (range): VWAP = 25%, OrderFlow = 35%, Footprint = 40%
+            # Logique : Micro-structure dominante (footprint), accumulation fine
+            w_vw = 0.25
+            w_of = 0.35
+            w_fp = 0.40
+            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=ACCUMULATION → VWAP=25% OF=35% FP=40%")
+
+        elif vr == "TRANSITIONAL":
+            # TRANSITIONAL: VWAP = 20%, OrderFlow = 40%, Footprint = 40%
+            # Logique : Chaos/Compression, VWAP peu fiable, focus OF+FP
+            w_vw = 0.20
+            w_of = 0.40
+            w_fp = 0.40
+            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=TRANSITIONAL → VWAP=20% OF=40% FP=40%")
+
+    # === PRIORITÉ 2 : Ajustements LEGACY (si pas de VWAP regime) ===
+    else:
+        # Volatilité élevée → renforcer orderflow +10%, réduire VWAP -10%
+        if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
+            w_of += 0.10
+            w_vw -= 0.10
+
+        # Trending → renforcer orderflow + VWAP ; Range → renforcer footprint (structure)
+        if (regime or "").lower().startswith("trend"):
+            w_of += 0.05  # OrderFlow important en trend
+            w_vw += 0.03  # VWAP confirme trend
+            w_fp -= 0.08  # Footprint moins pertinent
+        elif (regime or "").lower().startswith("range"):
+            w_fp += 0.10  # Structure footprint cruciale en range
+            w_of -= 0.05
+            w_vw -= 0.05
+
+        # Session London/NY → orderflow + VWAP réactifs ; Asia → footprint/structure
+        s = (session or "").lower()
+        if "london" in s or "europe" in s or "ny" in s:
+            w_of += 0.03  # Forte liquidité → orderflow fiable
+            w_vw += 0.02  # VWAP institutionnel actif
+            w_fp -= 0.05
+        elif "asia" in s:
+            w_fp += 0.05  # Sessions calmes → focus structure
+            w_of -= 0.03
+            w_vw -= 0.02
 
     # Normalise
     total = max(1e-9, w_of + w_fp + w_vw)
     w_of, w_fp, w_vw = w_of / total, w_fp / total, w_vw / total
+
     return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw}
 
 
@@ -389,8 +450,10 @@ class FusionManager:
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
         # Récupérer les poids utilisés pour la fusion (AVEC cfg pour lire poids de base)
+        # ✅ MAJ (06 DEC 2025): Passer vwap_regime pour poids adaptatifs dynamiques
+        vwap_regime = n_vw.get("regime")  # "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
         adaptive_w = self._adaptive_weights(
-            ctx.get("regime"), ctx.get("volatility"), ctx.get("session"), cfg
+            ctx.get("regime"), ctx.get("volatility"), ctx.get("session"), cfg, vwap_regime
         )
         if adaptive_w:
             weights_used = adaptive_w
@@ -700,26 +763,10 @@ class FusionManager:
         if n_fp["dir"] != 0:
             votes.append(("footprint", n_fp["dir"], n_fp["score"]))
 
-        # ✅ FIX (03 DEC 2025): VWAP vote avec BOOST institutionnel
+        # ✅ MAJ (06 DEC 2025): VWAP vote - boost supprimé, poids adaptatifs gérés par _adaptive_weights()
         if n_vw["dir"] != 0:
+            # Score VWAP brut (pas de boost - les poids adaptatifs sont dans _adaptive_weights)
             vwap_weight = n_vw["score"]
-
-            # BOOST VWAP quand tendance institutionnelle claire
-            regime = n_vw.get("regime", "BALANCED")
-            vw_summary = n_vw.get("summary", {})
-
-            # Boost +30% si TRENDING (tendance institutionnelle confirmée)
-            if regime == "TRENDING" and vwap_weight >= 0.70:
-                vwap_weight *= 1.30
-                self.log.debug(f"[VWAP_BOOST] Régime TRENDING détecté → poids × 1.30 = {vwap_weight:.3f}")
-
-            # Boost +20% si score élevé (>0.75) et slope significative
-            elif vwap_weight >= 0.75:
-                slope = abs(float(vw_summary.get("slope_20", 0.0)))
-                if slope > 0.0001:  # Slope significative
-                    vwap_weight *= 1.20
-                    self.log.debug(f"[VWAP_BOOST] Score élevé + slope forte → poids × 1.20 = {vwap_weight:.3f}")
-
             votes.append(("vwap", n_vw["dir"], vwap_weight))
 
         pos = sum(w for _, d, w in votes if d > 0)

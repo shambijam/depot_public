@@ -1,0 +1,172 @@
+{
+  "_description": "Configuration adaptative VWAP selon régime de marché (06 DEC 2025)",
+  "_documentation": "Documents_MAJ/MAJ_dynamique_VWAP.MD",
+
+  "regimes": {
+    "TRENDING": {
+      "description": "Tendance institutionnelle forte - VWAP est l'indicateur principal",
+      "weights": {
+        "vwap": 0.50,
+        "orderflow": 0.30,
+        "footprint": 0.20
+      },
+      "windows": {
+        "slope_short": 50,
+        "slope_medium": 100,
+        "slope_long": 200,
+        "distance_lookback": 100,
+        "curvature": 100,
+        "velocity": 20
+      },
+      "thresholds": {
+        "min_slope_significance": 0.0008,
+        "min_confidence": 0.75,
+        "trend_strength_threshold": 0.80
+      },
+      "logic": "Fenêtres longues pour confirmer tendance institutionnelle, VWAP suit le trend fort"
+    },
+
+    "BALANCED": {
+      "description": "Marché équilibré - VWAP référence neutre",
+      "weights": {
+        "vwap": 0.30,
+        "orderflow": 0.35,
+        "footprint": 0.35
+      },
+      "windows": {
+        "slope_short": 30,
+        "slope_medium": 50,
+        "slope_long": 100,
+        "distance_lookback": 50,
+        "curvature": 50,
+        "velocity": 10
+      },
+      "thresholds": {
+        "min_slope_significance": 0.0005,
+        "min_confidence": 0.65,
+        "trend_strength_threshold": 0.60
+      },
+      "logic": "Fenêtres moyennes pour détection rapide de changement de phase"
+    },
+
+    "ACCUMULATION": {
+      "description": "Range avec accumulation/distribution - Micro-structure dominante",
+      "weights": {
+        "vwap": 0.25,
+        "orderflow": 0.35,
+        "footprint": 0.40
+      },
+      "windows": {
+        "slope_short": 20,
+        "slope_medium": 30,
+        "slope_long": 50,
+        "distance_lookback": 20,
+        "curvature": 30,
+        "velocity": 5
+      },
+      "thresholds": {
+        "min_slope_significance": 0.0003,
+        "min_confidence": 0.60,
+        "trend_strength_threshold": 0.50
+      },
+      "logic": "Fenêtres courtes pour réactivité en range, VWAP = support/résistance"
+    },
+
+    "TRANSITIONAL": {
+      "description": "Phase de transition (chaos/compression) - VWAP peu fiable",
+      "weights": {
+        "vwap": 0.20,
+        "orderflow": 0.40,
+        "footprint": 0.40
+      },
+      "windows": {
+        "slope_short": 20,
+        "slope_medium": 50,
+        "slope_long": 80,
+        "distance_lookback": 30,
+        "curvature": 40,
+        "velocity": 10
+      },
+      "thresholds": {
+        "min_slope_significance": 0.0010,
+        "min_confidence": 0.50,
+        "trend_strength_threshold": 0.40
+      },
+      "logic": "Fenêtres courtes-moyennes pour détecter sortie de transition, prudence maximale"
+    }
+  },
+
+  "special_cases": {
+    "BREAKOUT": {
+      "description": "Breakout détecté - Boost réactivité VWAP",
+      "weight_multiplier": 1.15,
+      "window_multiplier": 0.80,
+      "confidence_boost": 0.10,
+      "logic": "Windows plus courtes (×0.8) pour suivre breakout, boost confiance +10%"
+    },
+
+    "EXTREME_REVERSION": {
+      "description": "Distance extrême (>800 pips XAUUSD) - Attente retour VWAP",
+      "weight_multiplier": 1.10,
+      "veto_enabled": true,
+      "veto_conditions": {
+        "block_buy_if_distance_above": 800,
+        "block_sell_if_distance_below": -800
+      },
+      "logic": "VWAP modéré mais avec veto pour éviter extensions extrêmes"
+    },
+
+    "STRONG_TRENDING": {
+      "description": "Tendance très forte (ADX > 40) - VWAP boost maximal",
+      "weight_multiplier": 1.10,
+      "window_multiplier": 1.20,
+      "min_slope_multiplier": 1.50,
+      "logic": "Windows plus longues (×1.2) pour éviter faux signaux, VWAP principal"
+    }
+  },
+
+  "assets": {
+    "XAUUSD": {
+      "pip_value": 0.01,
+      "zones_pips": {
+        "neutral": 200,
+        "strong": 500,
+        "extreme": 800
+      },
+      "slope_multiplier": 1.0,
+      "volatility_factor": 1.0
+    },
+    "EURUSD": {
+      "pip_value": 0.0001,
+      "zones_pips": {
+        "neutral": 20,
+        "strong": 50,
+        "extreme": 80
+      },
+      "slope_multiplier": 0.10,
+      "volatility_factor": 0.30
+    },
+    "GBPUSD": {
+      "pip_value": 0.0001,
+      "zones_pips": {
+        "neutral": 25,
+        "strong": 60,
+        "extreme": 100
+      },
+      "slope_multiplier": 0.10,
+      "volatility_factor": 0.40
+    }
+  },
+
+  "meta": {
+    "version": "1.0.0",
+    "last_update": "2025-12-06",
+    "author": "SniperX Trading System",
+    "notes": [
+      "Poids adaptatifs remplacent le système de boost multiplicatif",
+      "Fenêtres adaptatives permettent granularité fine selon régime",
+      "Tous les paramètres sont normalisés et sommant à 1.0",
+      "Special cases appliquent des multiplicateurs sur les régimes de base"
+    ]
+  }
+}

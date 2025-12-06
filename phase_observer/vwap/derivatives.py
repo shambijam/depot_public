@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Tuple
 
 from .models import VWAPDerivatives, VWAPZone, VWAPRegime
-from .config import VWAPConfig
+from .config import VWAPConfig, get_regime_windows
 
 
 logger = logging.getLogger(__name__)
@@ -41,15 +41,18 @@ class VWAPDerivativesCalculator:
         self,
         vwap_array: np.ndarray,
         price_array: np.ndarray,
-        timestamp: pd.Timestamp = None
+        timestamp: pd.Timestamp = None,
+        market_regime: Optional[str] = None
     ) -> VWAPDerivatives:
         """
-        Calcule tous les dérivés VWAP
+        Calcule tous les dérivés VWAP avec fenêtres adaptatives
 
         Args:
             vwap_array: Array VWAP
             price_array: Array prix
             timestamp: Timestamp actuel
+            market_regime: Régime VWAP ("TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL")
+                          ✅ MAJ (06 DEC 2025): Fenêtres adaptatives selon régime
 
         Returns:
             VWAPDerivatives complet
@@ -58,17 +61,33 @@ class VWAPDerivativesCalculator:
             timestamp = pd.Timestamp.utcnow()
 
         try:
-            # 1. Slopes (différentes fenêtres)
-            slope_20 = self._calculate_slope(vwap_array, window=20)
-            slope_50 = self._calculate_slope(vwap_array, window=50)
-            slope_100 = self._calculate_slope(vwap_array, window=100)
+            # ✅ MAJ (06 DEC 2025): Récupérer fenêtres adaptatives selon régime
+            # Si pas de régime fourni, utiliser BALANCED par défaut
+            regime = market_regime or "BALANCED"
+            windows = get_regime_windows(regime)
 
-            # 2. Curvature (dérivée 2nde)
-            curvature = self._calculate_curvature(vwap_array, window=50)
+            slope_short_window = windows.get("slope_short", 30)
+            slope_medium_window = windows.get("slope_medium", 50)
+            slope_long_window = windows.get("slope_long", 100)
+            curvature_window = windows.get("curvature", 50)
+            velocity_window = windows.get("velocity", 10)
 
-            # 3. Velocity & Acceleration
-            velocity = self._calculate_velocity(vwap_array, window=10)
-            acceleration = self._calculate_acceleration(vwap_array, window=10)
+            self.logger.debug(
+                f"[VWAP_DERIVATIVES] Regime={regime} | "
+                f"Windows: short={slope_short_window} med={slope_medium_window} long={slope_long_window}"
+            )
+
+            # 1. Slopes (fenêtres adaptatives)
+            slope_20 = self._calculate_slope(vwap_array, window=slope_short_window)
+            slope_50 = self._calculate_slope(vwap_array, window=slope_medium_window)
+            slope_100 = self._calculate_slope(vwap_array, window=slope_long_window)
+
+            # 2. Curvature (dérivée 2nde) - fenêtre adaptive
+            curvature = self._calculate_curvature(vwap_array, window=curvature_window)
+
+            # 3. Velocity & Acceleration - fenêtre adaptive
+            velocity = self._calculate_velocity(vwap_array, window=velocity_window)
+            acceleration = self._calculate_acceleration(vwap_array, window=velocity_window)
 
             # 4. Distance prix/VWAP
             distance_pips, distance_percent = self._calculate_distance(

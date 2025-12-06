@@ -2823,17 +2823,31 @@ class Detectors:
 
     def detect_market_regime(self, df: pd.DataFrame) -> pd.Series:
         """
-        🏛️ Market Regime Detection - Version améliorée avec mémoire de phase.
+        🏛️ Market Regime Detection - Version OPTIMISÉE VWAP (06 DEC 2025)
 
-        Régimes détectés:
-        - trending_institutional_bull/bear | trending_retail_bull/bear
-        - range_accumulation/distribution | range_institutional | range_retail
-        - high_volatility_chaos | low_volatility_compression | transitional
+        Régimes détectés (16 régimes pour couverture VWAP complète):
 
-        Changements :
-        - Conserve la dernière phase si les signaux actuels sont ambigus
-        - Ne tombe pas dans "unknown" sauf données invalides
-        - Le changement de phase n'est validé que si les signaux dépassent un seuil de clarté
+        TRENDING (6):
+        - strong_trending_institutional_bull/bear (ADX > 40)
+        - trending_institutional_bull/bear (ADX 25-40)
+        - trending_retail_bull/bear
+
+        RANGE (4):
+        - range_accumulation/distribution (biais directionnel institutionnel)
+        - range_institutional/retail (neutre = BALANCED)
+
+        VOLATILITÉ & TRANSITIONS (6):
+        - breakout_bull/bear (range→trending + spike vol)
+        - compression (volatilité très basse, pré-breakout)
+        - high_volatility_chaos
+        - extreme_reversion (calculé côté VWAP via distance)
+        - transitional
+
+        Améliorations vs version précédente :
+        ✅ Détection BREAKOUT (critique pour timing VWAP)
+        ✅ Distinction STRONG_TRENDING (ADX > 40)
+        ✅ COMPRESSION comme régime propre (vs TRANSITIONAL)
+        ✅ Maintien mémoire de phase pour cohérence
         """
 
         self.logger.debug("Détection du régime de marché sophistiquée...")
@@ -2939,7 +2953,34 @@ class Detectors:
             volume_ratio = (df["tick_volume"] / volume_ma).fillna(0.0)
             institutional_activity = volume_ratio > institutional_threshold
 
-        # === 4. DÉTERMINATION DU RÉGIME ===
+        # === 4. DÉTECTION BREAKOUT (pré-calcul avant boucle) ===
+        # BREAKOUT = transition range → trending + spike volatilité
+        breakout_signals = pd.Series(False, index=df.index)
+        breakout_direction = pd.Series("NEUTRAL", index=df.index, dtype=object)
+
+        for i in range(5, len(df)):  # Besoin de 5 barres d'historique
+            # Détection BREAKOUT :
+            # 1. ADX était en range (< 30e percentile) sur les 3 dernières barres
+            # 2. ADX actuel passe au-dessus du 70e percentile (trending)
+            # 3. Spike de volatilité (> 80e percentile)
+            # 4. Volume institutionnel confirmé
+
+            was_ranging = all(
+                adx.iloc[i-j] <= range_q.iloc[i-j] for j in range(1, 4) if (i-j) >= 0
+            )
+            now_trending = adx.iloc[i] >= trend_q.iloc[i]
+            vol_spike = vol_percentiles.iloc[i] >= 80.0
+            vol_confirmed = institutional_activity.iloc[i]
+
+            if was_ranging and now_trending and vol_spike and vol_confirmed:
+                breakout_signals.iloc[i] = True
+                # Direction du breakout
+                if di_plus.iloc[i] > di_minus.iloc[i]:
+                    breakout_direction.iloc[i] = "BULL"
+                else:
+                    breakout_direction.iloc[i] = "BEAR"
+
+        # === 5. DÉTERMINATION DU RÉGIME ===
         regimes = pd.Series("unknown", index=df.index, dtype=object)
 
         for i in range(len(df)):
@@ -2956,9 +2997,35 @@ class Detectors:
                 else 50.0
             )
             is_institutional = bool(institutional_activity.iloc[i])
+            is_breakout = bool(breakout_signals.iloc[i])
+            breakout_dir = str(breakout_direction.iloc[i])
 
-            # --- Phase trending
-            if current_adx >= float(trend_q.iloc[i]):
+            # --- PRIORITÉ 1 : BREAKOUT (phase critique pour timing VWAP)
+            if is_breakout:
+                if breakout_dir == "BULL":
+                    regimes.iloc[i] = "breakout_bull"
+                elif breakout_dir == "BEAR":
+                    regimes.iloc[i] = "breakout_bear"
+                else:
+                    regimes.iloc[i] = "breakout_neutral"
+
+            # --- PRIORITÉ 2 : STRONG TRENDING (ADX > 40)
+            elif current_adx >= 40.0:
+                if current_di_plus > current_di_minus:
+                    regimes.iloc[i] = (
+                        "strong_trending_institutional_bull"
+                        if is_institutional
+                        else "strong_trending_retail_bull"
+                    )
+                else:
+                    regimes.iloc[i] = (
+                        "strong_trending_institutional_bear"
+                        if is_institutional
+                        else "strong_trending_retail_bear"
+                    )
+
+            # --- PRIORITÉ 3 : TRENDING normal (ADX >= 70e percentile)
+            elif current_adx >= float(trend_q.iloc[i]):
                 if current_di_plus > current_di_minus:
                     regimes.iloc[i] = (
                         "trending_institutional_bull"
@@ -2972,7 +3039,7 @@ class Detectors:
                         else "trending_retail_bear"
                     )
 
-            # --- Phase range
+            # --- PRIORITÉ 4 : RANGE (ADX <= 30e percentile)
             elif current_adx <= float(range_q.iloc[i]):
                 if is_institutional:
                     recent_closes = df["close"].iloc[max(0, i - 10) : i + 1]
@@ -2987,36 +3054,56 @@ class Detectors:
                 else:
                     regimes.iloc[i] = "range_retail"
 
-            # --- Volatilité / Transition
+            # --- PRIORITÉ 5 : COMPRESSION (volatilité très basse)
+            elif current_vol_percentile <= low_vol_percentile:
+                regimes.iloc[i] = "compression"
+
+            # --- PRIORITÉ 6 : HIGH VOLATILITY CHAOS
+            elif current_vol_percentile >= high_vol_percentile:
+                regimes.iloc[i] = "high_volatility_chaos"
+
+            # --- PRIORITÉ 7 : TRANSITIONAL (entre trending et range)
             else:
-                if current_vol_percentile >= high_vol_percentile:
-                    regimes.iloc[i] = "high_volatility_chaos"
-                elif current_vol_percentile <= low_vol_percentile:
-                    regimes.iloc[i] = "low_volatility_compression"
-                else:
-                    regimes.iloc[i] = "transitional"
+                regimes.iloc[i] = "transitional"
 
             # Mettre à jour la mémoire
             self._last_regime = regimes.iloc[i]
 
-        # === 5. QUALITÉ DU RÉGIME ===
+        # === 6. QUALITÉ DU RÉGIME (mise à jour pour nouveaux régimes) ===
         def calculate_regime_strength(
-            regime_series: pd.Series, adx_series: pd.Series
+            regime_series: pd.Series, adx_series: pd.Series, vol_percentile_series: pd.Series
         ) -> pd.Series:
             strength = pd.Series(0.5, index=regime_series.index, dtype=float)
             for i in range(len(regime_series)):
-                regime, adx_val = str(regime_series.iloc[i]), (
-                    float(adx_series.iloc[i]) if pd.notna(adx_series.iloc[i]) else 0.0
-                )
-                if "trending" in regime:
-                    if adx_val > 40:
+                regime = str(regime_series.iloc[i])
+                adx_val = float(adx_series.iloc[i]) if pd.notna(adx_series.iloc[i]) else 0.0
+                vol_pct = float(vol_percentile_series.iloc[i]) if pd.notna(vol_percentile_series.iloc[i]) else 50.0
+
+                # BREAKOUT : Force élevée (phase critique)
+                if "breakout" in regime:
+                    strength.iloc[i] = 0.95
+
+                # STRONG TRENDING : Force maximale
+                elif "strong_trending" in regime:
+                    if adx_val > 50:
+                        strength.iloc[i] = 1.0
+                    elif adx_val > 45:
+                        strength.iloc[i] = 0.95
+                    else:
                         strength.iloc[i] = 0.9
+
+                # TRENDING normal : Force haute
+                elif "trending" in regime:
+                    if adx_val > 35:
+                        strength.iloc[i] = 0.85
                     elif adx_val > 30:
                         strength.iloc[i] = 0.8
                     elif adx_val > 25:
                         strength.iloc[i] = 0.7
                     else:
                         strength.iloc[i] = 0.6
+
+                # RANGE : Force selon niveau ADX (plus bas = plus fort)
                 elif "range" in regime:
                     if adx_val < 15:
                         strength.iloc[i] = 0.9
@@ -3024,11 +3111,30 @@ class Detectors:
                         strength.iloc[i] = 0.8
                     else:
                         strength.iloc[i] = 0.6
-                elif "volatility" in regime:
-                    strength.iloc[i] = 0.8
+
+                # COMPRESSION : Force selon niveau volatilité (plus bas = plus fort)
+                elif "compression" in regime:
+                    if vol_pct < 15:
+                        strength.iloc[i] = 0.95  # Compression extrême
+                    elif vol_pct < 20:
+                        strength.iloc[i] = 0.85
+                    else:
+                        strength.iloc[i] = 0.75
+
+                # HIGH VOLATILITY CHAOS : Force moyenne-haute
+                elif "high_volatility" in regime or "chaos" in regime:
+                    if vol_pct > 90:
+                        strength.iloc[i] = 0.85  # Chaos extrême
+                    else:
+                        strength.iloc[i] = 0.75
+
+                # TRANSITIONAL : Force moyenne
+                elif "transitional" in regime:
+                    strength.iloc[i] = 0.5
+
             return strength
 
-        regime_strength = calculate_regime_strength(regimes, adx)
+        regime_strength = calculate_regime_strength(regimes, adx, vol_percentiles)
 
         # Ajouter au DF
         df["regime"] = regimes

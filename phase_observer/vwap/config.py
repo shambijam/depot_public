@@ -2,11 +2,14 @@
 """
 Configuration centralisée pour le module VWAP institutionnel
 Paramètres par asset avec fallbacks intelligents
+✅ MAJ (06 DEC 2025): Ajout configuration adaptative selon régime de marché
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 import logging
+import json
+from pathlib import Path
 
 
 @dataclass
@@ -281,3 +284,101 @@ def create_vwap_config(symbol: str, strategy_config: Optional[Dict] = None) -> V
             custom_config = vwap_section
 
     return VWAPConfig(symbol=symbol, custom_config=custom_config)
+
+
+# ==================== ADAPTIVE CONFIG (06 DEC 2025) ====================
+
+def load_adaptive_config() -> Dict[str, Any]:
+    """
+    Charge la configuration adaptative VWAP depuis JSON
+
+    Returns:
+        Dict avec configuration adaptative par régime
+    """
+    # Chemin vers config/vwap_adaptive_config.json (à la racine du projet)
+    config_path = Path(__file__).parent.parent.parent / "config" / "vwap_adaptive_config.json"
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"[VWAP_ADAPTIVE_CONFIG] Fichier non trouvé: {config_path}")
+        return _get_default_adaptive_config()
+    except json.JSONDecodeError as e:
+        logging.error(f"[VWAP_ADAPTIVE_CONFIG] Erreur JSON: {e}")
+        return _get_default_adaptive_config()
+
+
+def _get_default_adaptive_config() -> Dict[str, Any]:
+    """Configuration adaptative par défaut en fallback"""
+    return {
+        "regimes": {
+            "TRENDING": {
+                "windows": {"slope_short": 50, "slope_medium": 100, "slope_long": 200, "distance_lookback": 100},
+                "weights": {"vwap": 0.50, "orderflow": 0.30, "footprint": 0.20}
+            },
+            "BALANCED": {
+                "windows": {"slope_short": 30, "slope_medium": 50, "slope_long": 100, "distance_lookback": 50},
+                "weights": {"vwap": 0.30, "orderflow": 0.35, "footprint": 0.35}
+            },
+            "ACCUMULATION": {
+                "windows": {"slope_short": 20, "slope_medium": 30, "slope_long": 50, "distance_lookback": 20},
+                "weights": {"vwap": 0.25, "orderflow": 0.35, "footprint": 0.40}
+            },
+            "TRANSITIONAL": {
+                "windows": {"slope_short": 20, "slope_medium": 50, "slope_long": 80, "distance_lookback": 30},
+                "weights": {"vwap": 0.20, "orderflow": 0.40, "footprint": 0.40}
+            }
+        }
+    }
+
+
+def get_regime_windows(regime: str) -> Dict[str, int]:
+    """
+    Retourne les fenêtres adaptatives pour un régime donné
+
+    Args:
+        regime: "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
+
+    Returns:
+        Dict avec slope_short, slope_medium, slope_long, distance_lookback
+    """
+    config = load_adaptive_config()
+    regime_upper = str(regime).upper()
+
+    regime_config = config.get("regimes", {}).get(regime_upper)
+    if not regime_config:
+        # Fallback BALANCED par défaut
+        regime_config = config.get("regimes", {}).get("BALANCED", {})
+
+    return regime_config.get("windows", {
+        "slope_short": 30,
+        "slope_medium": 50,
+        "slope_long": 100,
+        "distance_lookback": 50
+    })
+
+
+def get_regime_weights(regime: str) -> Dict[str, float]:
+    """
+    Retourne les poids adaptatifs pour un régime donné
+
+    Args:
+        regime: "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
+
+    Returns:
+        Dict avec vwap, orderflow, footprint weights
+    """
+    config = load_adaptive_config()
+    regime_upper = str(regime).upper()
+
+    regime_config = config.get("regimes", {}).get(regime_upper)
+    if not regime_config:
+        # Fallback BALANCED par défaut
+        regime_config = config.get("regimes", {}).get("BALANCED", {})
+
+    return regime_config.get("weights", {
+        "vwap": 0.30,
+        "orderflow": 0.35,
+        "footprint": 0.35
+    })

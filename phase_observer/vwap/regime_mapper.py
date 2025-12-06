@@ -19,18 +19,30 @@ logger = logging.getLogger(__name__)
 
 class RegimeMapper:
     """
-    Mapper les 10 régimes PhaseObserver → 4 régimes VWAP
+    Mapper les 16 régimes PhaseObserver → 4 régimes VWAP
 
-    Mapping sémantique validé:
-    - TRENDING (4→1): trending_institutional_bull/bear, trending_retail_bull/bear
+    Mapping sémantique validé (MAJ 06 DEC 2025):
+    - TRENDING (10→1): breakout_*, strong_trending_*, trending_* (toutes tendances)
     - ACCUMULATION (2→1): range_accumulation, range_distribution (range avec biais directionnel)
     - BALANCED (2→1): range_institutional, range_retail (range neutre sans biais)
-    - TRANSITIONAL (3→1): high_volatility_chaos, low_volatility_compression, transitional
+    - TRANSITIONAL (4→1): high_volatility_chaos, compression, low_volatility_compression, transitional
     """
 
     # Mapping principal PhaseObserver → VWAP
     MAPPING = {
-        # TRENDING: Tendance claire, momentum fort
+        # TRENDING: Tendance claire, momentum fort (10 régimes)
+        # BREAKOUT = début de tendance (priorité 1)
+        "breakout_bull": VWAPRegime.TRENDING,
+        "breakout_bear": VWAPRegime.TRENDING,
+        "breakout_neutral": VWAPRegime.TRENDING,
+
+        # STRONG TRENDING = tendance très forte (ADX > 40)
+        "strong_trending_institutional_bull": VWAPRegime.TRENDING,
+        "strong_trending_institutional_bear": VWAPRegime.TRENDING,
+        "strong_trending_retail_bull": VWAPRegime.TRENDING,
+        "strong_trending_retail_bear": VWAPRegime.TRENDING,
+
+        # TRENDING normal (ADX 25-40)
         "trending_institutional_bull": VWAPRegime.TRENDING,
         "trending_institutional_bear": VWAPRegime.TRENDING,
         "trending_retail_bull": VWAPRegime.TRENDING,
@@ -46,35 +58,83 @@ class RegimeMapper:
 
         # TRANSITIONAL: Changement de phase, volatilité extrême
         "high_volatility_chaos": VWAPRegime.TRANSITIONAL,
+        "compression": VWAPRegime.TRANSITIONAL,            # Compression pré-breakout
         "low_volatility_compression": VWAPRegime.TRANSITIONAL,
         "transitional": VWAPRegime.TRANSITIONAL,
     }
 
     # Descriptions sémantiques de chaque régime PhaseObserver
     SEMANTIC_DESCRIPTIONS = {
+        # === BREAKOUT (nouveaux régimes 06 DEC 2025) ===
+        "breakout_bull": {
+            "description": "Breakout haussier - sortie de range vers tendance",
+            "characteristics": "Range→Trending + spike volatilité + volume institutionnel",
+            "vwap_behavior": "Prix s'éloigne rapidement de VWAP vers le haut",
+            "confidence_modifier": 0.95,  # Très haute confiance pour timing
+        },
+        "breakout_bear": {
+            "description": "Breakout baissier - sortie de range vers tendance",
+            "characteristics": "Range→Trending + spike volatilité + volume institutionnel",
+            "vwap_behavior": "Prix s'éloigne rapidement de VWAP vers le bas",
+            "confidence_modifier": 0.95,
+        },
+        "breakout_neutral": {
+            "description": "Breakout sans direction claire",
+            "characteristics": "Volatilité spike sans biais directionnel clair",
+            "vwap_behavior": "Prix volatile autour VWAP",
+            "confidence_modifier": 0.75,
+        },
+
+        # === STRONG TRENDING (nouveaux régimes 06 DEC 2025) ===
+        "strong_trending_institutional_bull": {
+            "description": "Tendance haussière institutionnelle TRÈS forte",
+            "characteristics": "ADX > 40, DI+ >> DI-, volume institutionnel élevé",
+            "vwap_behavior": "Prix très au-dessus VWAP, slope positive très forte",
+            "confidence_modifier": 1.0,  # Confiance maximale
+        },
+        "strong_trending_institutional_bear": {
+            "description": "Tendance baissière institutionnelle TRÈS forte",
+            "characteristics": "ADX > 40, DI- >> DI+, volume institutionnel élevé",
+            "vwap_behavior": "Prix très en-dessous VWAP, slope négative très forte",
+            "confidence_modifier": 1.0,
+        },
+        "strong_trending_retail_bull": {
+            "description": "Tendance haussière retail très forte",
+            "characteristics": "ADX > 40, DI+ >> DI-, volume retail dominant",
+            "vwap_behavior": "Prix très au-dessus VWAP, slope positive forte",
+            "confidence_modifier": 0.95,
+        },
+        "strong_trending_retail_bear": {
+            "description": "Tendance baissière retail très forte",
+            "characteristics": "ADX > 40, DI- >> DI+, volume retail dominant",
+            "vwap_behavior": "Prix très en-dessous VWAP, slope négative forte",
+            "confidence_modifier": 0.95,
+        },
+
+        # === TRENDING normal (régimes existants) ===
         "trending_institutional_bull": {
             "description": "Tendance haussière institutionnelle forte",
-            "characteristics": "ADX élevé, DI+ > DI-, volume institutionnel",
+            "characteristics": "ADX 25-40, DI+ > DI-, volume institutionnel",
             "vwap_behavior": "Prix au-dessus VWAP, slope positive forte",
-            "confidence_modifier": 1.0,  # Confiance max en trending
+            "confidence_modifier": 0.9,  # Légèrement moins que strong_trending
         },
         "trending_institutional_bear": {
             "description": "Tendance baissière institutionnelle forte",
-            "characteristics": "ADX élevé, DI- > DI+, volume institutionnel",
+            "characteristics": "ADX 25-40, DI- > DI+, volume institutionnel",
             "vwap_behavior": "Prix en-dessous VWAP, slope négative forte",
-            "confidence_modifier": 1.0,
+            "confidence_modifier": 0.9,
         },
         "trending_retail_bull": {
             "description": "Tendance haussière retail",
-            "characteristics": "ADX élevé, DI+ > DI-, volume retail",
+            "characteristics": "ADX 25-40, DI+ > DI-, volume retail",
             "vwap_behavior": "Prix au-dessus VWAP, slope positive",
-            "confidence_modifier": 0.9,  # Légèrement moins de confiance que institutional
+            "confidence_modifier": 0.85,  # Légèrement moins de confiance que institutional
         },
         "trending_retail_bear": {
             "description": "Tendance baissière retail",
-            "characteristics": "ADX élevé, DI- > DI+, volume retail",
+            "characteristics": "ADX 25-40, DI- > DI+, volume retail",
             "vwap_behavior": "Prix en-dessous VWAP, slope négative",
-            "confidence_modifier": 0.9,
+            "confidence_modifier": 0.85,
         },
         "range_accumulation": {
             "description": "Range avec accumulation (biais haussier)",
@@ -106,8 +166,14 @@ class RegimeMapper:
             "vwap_behavior": "Prix éloigné VWAP, slope instable",
             "confidence_modifier": 0.3,  # Faible confiance en chaos
         },
+        "compression": {
+            "description": "Compression extrême de volatilité (régime propre)",
+            "characteristics": "Volatilité ≤ 25e percentile, range très tight, pré-breakout",
+            "vwap_behavior": "Prix très proche VWAP, slope quasi-nulle",
+            "confidence_modifier": 0.6,  # Confiance moyenne - phase d'attente
+        },
         "low_volatility_compression": {
-            "description": "Compression de volatilité, breakout imminent",
+            "description": "Compression de volatilité, breakout imminent (legacy)",
             "characteristics": "Volatilité < 10e percentile, range tight",
             "vwap_behavior": "Prix proche VWAP, slope proche de zéro",
             "confidence_modifier": 0.4,  # Attente de breakout
@@ -247,15 +313,28 @@ class RegimeMapper:
             True si mapping complet
         """
         expected_regimes = {
+            # BREAKOUT (3 nouveaux)
+            "breakout_bull",
+            "breakout_bear",
+            "breakout_neutral",
+            # STRONG TRENDING (4 nouveaux)
+            "strong_trending_institutional_bull",
+            "strong_trending_institutional_bear",
+            "strong_trending_retail_bull",
+            "strong_trending_retail_bear",
+            # TRENDING normal (4 existants)
             "trending_institutional_bull",
             "trending_institutional_bear",
             "trending_retail_bull",
             "trending_retail_bear",
+            # RANGE (4 existants)
             "range_accumulation",
             "range_distribution",
             "range_institutional",
             "range_retail",
+            # VOLATILITÉ (4: 3 existants + 1 nouveau)
             "high_volatility_chaos",
+            "compression",
             "low_volatility_compression",
             "transitional",
         }
@@ -392,10 +471,10 @@ def validate_regime_mapper() -> bool:
         return False
 
     total_po_regimes = sum(len(regimes) for regimes in reverse.values())
-    if total_po_regimes != 11:  # 11 PhaseObserver regimes
+    if total_po_regimes != 19:  # 19 PhaseObserver regimes (11 originaux + 8 nouveaux)
         logger.error(
             f"[REGIME_MAPPER] Test 5 FAILED: "
-            f"Should map 11 PO regimes, got {total_po_regimes}"
+            f"Should map 19 PO regimes, got {total_po_regimes}"
         )
         return False
 
