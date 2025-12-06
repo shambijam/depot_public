@@ -79,6 +79,12 @@ class TradeLogger:
         # Contexte
         strategy: str = "scalping",
         burst_size: int = 1,
+        # ✅ MAJ (06 DEC 2025): Phase de marché pour analyse performance
+        market_phase: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        vwap_regime: Optional[str] = None,
+        phase_confidence: Optional[float] = None,
+        vwap_score: Optional[float] = None,
         **extra_params
     ) -> None:
         """
@@ -158,6 +164,13 @@ class TradeLogger:
 
             # === CATÉGORIE SCORING ===
             "score_category": self._categorize_score(score_final),
+
+            # === PHASE DE MARCHÉ (06 DEC 2025) ===
+            "market_phase": str(market_phase) if market_phase else None,  # Phase optimisée (liquidity_sweep, trending_institutional_bull, etc.)
+            "market_regime": str(market_regime) if market_regime else None,  # Régime PhaseObserver (trending_institutional_bull, range_accumulation, etc.)
+            "vwap_regime": str(vwap_regime) if vwap_regime else None,  # Régime VWAP (TRENDING, ACCUMULATION, BALANCED, TRANSITIONAL)
+            "phase_confidence": float(phase_confidence) if phase_confidence is not None else None,
+            "vwap_score": float(vwap_score) if vwap_score is not None else None,
 
             # === RÉSULTAT (à remplir à la sortie) ===
             "outcome": None,  # WIN / LOSS / BE (Break-Even)
@@ -395,6 +408,26 @@ class TradeLogger:
             f.write(f"| **Alignement 3/3** | {aligned} |\n")
             f.write(f"| **Conflits** | {conflicts} |\n")
             f.write("\n")
+
+            # ✅ Phase de marché (06 DEC 2025)
+            if td.get('market_phase') or td.get('market_regime') or td.get('vwap_regime'):
+                f.write(f"### 📈 Phase de Marché\n\n")
+                f.write(f"| Métrique | Valeur |\n")
+                f.write(f"|----------|--------|\n")
+
+                if td.get('market_phase'):
+                    f.write(f"| **Phase Optimisée** | {td.get('market_phase')} |\n")
+                if td.get('market_regime'):
+                    f.write(f"| **Régime PhaseObserver** | {td.get('market_regime')} |\n")
+                if td.get('vwap_regime'):
+                    vwap_regime_emoji = {"TRENDING": "📈", "ACCUMULATION": "📊", "BALANCED": "⚖️", "TRANSITIONAL": "🔄"}.get(td.get('vwap_regime'), "❓")
+                    f.write(f"| **Régime VWAP** | {vwap_regime_emoji} {td.get('vwap_regime')} |\n")
+                if td.get('phase_confidence') is not None:
+                    f.write(f"| **Confiance Phase** | {td.get('phase_confidence'):.1%} |\n")
+                if td.get('vwap_score') is not None:
+                    f.write(f"| **Score VWAP** | {td.get('vwap_score'):.1%} |\n")
+
+                f.write("\n")
 
             # Résultat
             if td.get('outcome'):

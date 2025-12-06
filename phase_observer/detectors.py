@@ -3286,12 +3286,16 @@ class Detectors:
         if "high_volatility" in regime or "high_vol" in regime:
             return "high_volatility_chaos"
 
-        # 2) Trending → bull/bear
+        # 2) Trending → bull/bear (✅ MAJ 06 DEC 2025: utiliser phases ALLOWED)
         if "trending" in regime:
+            # Déterminer institutional vs retail
+            is_institutional = "institutional" in regime
+
             if "bear" in regime:
-                return "trending_distribution"
+                return "trending_institutional_bear" if is_institutional else "trending_retail_bear"
             if "bull" in regime:
-                return "trending_accumulation"
+                return "trending_institutional_bull" if is_institutional else "trending_retail_bull"
+
             # Si pas explicite, tenter BOS/MSS → direction
             bos = row.get("bos_mss_details") or {}
             d = (
@@ -3300,15 +3304,15 @@ class Detectors:
                 else ""
             )
             if d in ("up", "bull", "bullish"):
-                return "trending_accumulation"
+                return "trending_institutional_bull" if is_institutional else "trending_retail_bull"
             if d in ("down", "bear", "bearish"):
-                return "trending_distribution"
+                return "trending_institutional_bear" if is_institutional else "trending_retail_bear"
+
             # Dernier recours trending : biais de clôture
-            return (
-                "trending_accumulation"
-                if float(row.get("close", 0)) >= float(row.get("open", 0))
-                else "trending_distribution"
-            )
+            if float(row.get("close", 0)) >= float(row.get("open", 0)):
+                return "trending_institutional_bull" if is_institutional else "trending_retail_bull"
+            else:
+                return "trending_institutional_bear" if is_institutional else "trending_retail_bear"
 
         # 3) Range → déterminisme accumulation vs distribution
         if (
@@ -3349,8 +3353,9 @@ class Detectors:
             return "range_accumulation" if vol_m >= 0 else "range_distribution"
 
         # 4) Setup institutionnel (OB/BOS/FVG) hors trending/range
+        # ✅ MAJ (06 DEC 2025): utiliser phase ALLOWED "institutional_setup"
         if bool(row.get("institutional_setup", False)):
-            return "institutional_drive"
+            return "institutional_setup"
 
         # 5) Défaut strictement déterministe (jamais 'unknown')
         return (

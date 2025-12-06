@@ -1165,13 +1165,27 @@ class PhaseObserver:
 
             # === PHASE 5: PHASE PRIMAIRE (déterministe) ===
  
+            # ✅ MAJ (06 DEC 2025): Ajout phases pour nouveaux régimes (BREAKOUT, STRONG_TRENDING, COMPRESSION)
             ALLOWED_PHASES = {
+                # TRENDING (normal + strong)
                 "trending_institutional_bull", "trending_institutional_bear",
                 "trending_retail_bull", "trending_retail_bear",
+                "strong_trending_institutional_bull", "strong_trending_institutional_bear",
+                "strong_trending_retail_bull", "strong_trending_retail_bear",
+
+                # RANGE
                 "range_accumulation", "range_distribution", "range_institutional", "range_retail",
-                "high_volatility_chaos", "low_volatility_compression",
+
+                # VOLATILITÉ & TRANSITIONS
+                "high_volatility_chaos", "low_volatility_compression", "compression",
+                "breakout_bull", "breakout_bear", "breakout_neutral",
+
+                # LIQUIDITY
                 "liquidity_eqh_eql", "liquidity_sweep", "liquidity_absorption",
-                "distribution_breakout", "accumulation_zone", "institutional_setup", "institutional_setup_premium",
+
+                # INSTITUTIONAL & AUTRES
+                "distribution_breakout", "accumulation_zone",
+                "institutional_setup", "institutional_setup_premium",
                 "volatility_breakout"
             }
             
@@ -1179,15 +1193,34 @@ class PhaseObserver:
                 """
                 Fallback déterministe basé sur le régime courant de la ligne.
                 Utilisé UNIQUEMENT si un label invalide remonte (sanitizer/PhaseGuard).
+                ✅ MAJ (06 DEC 2025): Support nouveaux régimes (BREAKOUT, STRONG_TRENDING, COMPRESSION)
                 """
                 regime = str(row.get("regime", "")).lower()
 
-                # Trending (bull/bear)
-                if "trending" in regime:
-                    if "bear" in regime:
-                        return "trending_institutional_bear"
+                # BREAKOUT (nouveau)
+                if "breakout" in regime:
                     if "bull" in regime:
-                        return "trending_institutional_bull"
+                        return "breakout_bull"
+                    elif "bear" in regime:
+                        return "breakout_bear"
+                    else:
+                        return "breakout_neutral"
+
+                # STRONG TRENDING (nouveau)
+                if "strong_trending" in regime:
+                    is_institutional = "institutional" in regime
+                    if "bear" in regime:
+                        return "strong_trending_institutional_bear" if is_institutional else "strong_trending_retail_bear"
+                    if "bull" in regime:
+                        return "strong_trending_institutional_bull" if is_institutional else "strong_trending_retail_bull"
+
+                # Trending normal (bull/bear)
+                if "trending" in regime:
+                    is_institutional = "institutional" in regime
+                    if "bear" in regime:
+                        return "trending_institutional_bear" if is_institutional else "trending_retail_bear"
+                    if "bull" in regime:
+                        return "trending_institutional_bull" if is_institutional else "trending_retail_bull"
 
                 # Range → tranche acc/dist via la position récente dans le range
                 if "range" in regime:
@@ -1195,6 +1228,8 @@ class PhaseObserver:
                     return "range_accumulation" if pos <= 0.5 else "range_distribution"
 
                 # Volatilité
+                if "compression" in regime:
+                    return "compression"
                 if "high_volatility" in regime or "high_vol" in regime:
                     return "high_volatility_chaos"
                 if "low_volatility" in regime or "low_vol" in regime:

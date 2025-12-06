@@ -195,6 +195,20 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
             matrix = coherence.get("matrix", {})
             conflicts_count = sum(1 for v in matrix.values() if v == "conflict")
 
+            # ✅ Phase de marché (06 DEC 2025)
+            # Extraire depuis td["context"] et fusion_data
+            context_data = td.get("context", {})
+            phase_data = context_data.get("phase", {})
+
+            market_phase = phase_data.get("phase") if isinstance(phase_data, dict) else None
+            market_regime = phase_data.get("regime") if isinstance(phase_data, dict) else None
+            phase_confidence = phase_data.get("confidence_score") if isinstance(phase_data, dict) else None
+
+            # Régime VWAP depuis components
+            n_vw = components.get("vwap", {})
+            vwap_regime = n_vw.get("regime")
+            vwap_score_value = n_vw.get("score")
+
             # Infos position
             symbol = str(base_request.get("symbol", "UNKNOWN"))
             direction = "BUY" if base_request.get("action") == "BUY" else "SELL"
@@ -233,6 +247,12 @@ def open_burst_basket(self, base_request: dict, burst_size: int) -> dict:
                 # Contexte
                 strategy="scalping",
                 burst_size=len(tickets),
+                # ✅ Phase de marché (06 DEC 2025)
+                market_phase=market_phase,
+                market_regime=market_regime,
+                vwap_regime=vwap_regime,
+                phase_confidence=phase_confidence,
+                vwap_score=vwap_score_value,
                 # Extra
                 tickets=tickets,
                 status=status
