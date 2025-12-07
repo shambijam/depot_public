@@ -1052,6 +1052,7 @@ class LiquidityStrategy(BaseStrategy):
                         return decision
 
                 # SELL Setup : BOS bearish + Absorption sell-side
+                elif "bear" in bos_type and abs_side == "sell":
                     bos_level = float(bos_mss.get("level", price))
                     body_ratio = float(absorption.get("body_ratio", 0.0))
 
@@ -1124,6 +1125,7 @@ class LiquidityStrategy(BaseStrategy):
                 # SELL Setup : Micro phase = distribution + Regime favorable
                 elif micro_phase == "distribution" and regime in ["trending_down", "transitional"]:
                     entry = price
+                    sl = entry + (30 * pip_size)  # SL 30 pips au-dessus
                     tp = entry - (60 * pip_size)  # TP 60 pips (RR 2.0)
 
                     sl_pips = abs(sl - entry) / pip_size

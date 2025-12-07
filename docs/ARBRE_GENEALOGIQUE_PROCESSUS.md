@@ -1718,4 +1718,1116 @@
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-(Continuer dans la partie 2...)
+#### D.3 BurstHandler (Gestion Paniers Scalping)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ BurstHandler - Gestion Baskets Burst                                   │
+│ Fichier: trader/trade_executor.py::open_burst_basket()                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│ INPUT:                                                                   │
+│   - order_request: Dict MT5 (from OrderBuilder)                         │
+│   - burst_size: 8 (nombre tickets dans panier)                          │
+│   - config: Configuration burst (SL commun, monitoring)                 │
+│                                                                          │
+│ PROCESSUS:                                                               │
+│                                                                          │
+│ 1. Génération Basket ID                                                 │
+│    basket_id = f"BURST_{asset}_{timestamp}_{random_suffix}"             │
+│    → "BURST_XAUUSD_20251206143200_A7F2"                                 │
+│                                                                          │
+│ 2. Division Volume                                                      │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ volume_total = order_request["volume"]  // 0.12 lots       │       │
+│    │ volume_per_ticket = volume_total / burst_size              │       │
+│    │ → 0.12 / 8 = 0.015 lots par ticket                         │       │
+│    │                                                             │       │
+│    │ Arrondi au lot_step:                                       │       │
+│    │   volume_per_ticket = round(0.015 / 0.01) × 0.01 = 0.01    │       │
+│    │   → Chaque ticket: 0.01 lots                               │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 3. SL/TP Commun vs Individuel                                           │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ IF config["burst_common_sl"]:                              │       │
+│    │     sl_price = order_request["sl"]  // Tous même SL        │       │
+│    │     tp_price = None  // Pas de TP (trailing global)        │       │
+│    │ ELSE:                                                      │       │
+│    │     # SL/TP individuel par ticket (rare)                   │       │
+│    │     sl_price = calculé par ticket                          │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 4. Envoi Séquentiel Tickets                                             │
+│    tickets = []                                                         │
+│    for i in range(burst_size):                                          │
+│        ┌───────────────────────────────────────────────────────┐       │
+│        │ ticket_request = {                                     │       │
+│        │     ...order_request,  // Copy base request            │       │
+│        │     "volume": volume_per_ticket,                       │       │
+│        │     "comment": f"{comment}_BURST_{basket_id}_{i+1}"    │       │
+│        │ }                                                      │       │
+│        │                                                         │       │
+│        │ result = mt5.order_send(ticket_request)                │       │
+│        │ IF result.retcode == mt5.TRADE_RETCODE_DONE:           │       │
+│        │     tickets.append({                                   │       │
+│        │         "ticket": result.order,                        │       │
+│        │         "entry_price": result.price,                   │       │
+│        │         "volume": volume_per_ticket,                   │       │
+│        │         "basket_id": basket_id                         │       │
+│        │     })                                                 │       │
+│        │     logger.info(f"Ticket {i+1}/{burst_size} OK")       │       │
+│        │ ELSE:                                                  │       │
+│        │     logger.error(f"Ticket {i+1} FAILED: {result.retcode}") │  │
+│        │     # Continue tentative autres tickets                │       │
+│        └───────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 5. Enregistrement Basket                                                │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ self._burst_baskets[basket_id] = {                         │       │
+│    │     "tickets": tickets,                                    │       │
+│    │     "asset": asset,                                        │       │
+│    │     "direction": action,  // "BUY" / "SELL"                │       │
+│    │     "entry_avg": avg([t["entry_price"] for t in tickets]), │       │
+│    │     "sl_common": sl_price,                                 │       │
+│    │     "created_at": datetime.now(UTC),                       │       │
+│    │     "status": "ACTIVE",                                    │       │
+│    │     "profit_target_pips": 15,  // +15 pips → close all     │       │
+│    │     "loss_guard_pips": 110,  // -110 pips → emergency stop │       │
+│    │     "metadata": {                                          │       │
+│    │         "strategy": "scalping",                            │       │
+│    │         "confidence": fused_confidence,                    │       │
+│    │         "cycle": cycle_count                               │       │
+│    │     }                                                      │       │
+│    │ }                                                          │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 6. Alerte Telegram                                                      │
+│    config_manager.send_alert(                                           │
+│        f"🎯 BURST BASKET OPENED\n"                                      │
+│        f"Asset: {asset}\n"                                              │
+│        f"Direction: {action}\n"                                         │
+│        f"Tickets: {len(tickets)}/{burst_size}\n"                        │
+│        f"Entry Avg: {entry_avg}\n"                                      │
+│        f"SL: {sl_price}\n"                                              │
+│        f"Basket ID: {basket_id}"                                        │
+│    )                                                                    │
+│                                                                          │
+│ OUTPUT:                                                                  │
+│   basket_result: {                                                      │
+│     success: bool,                                                      │
+│     basket_id: str,                                                     │
+│     tickets_opened: int,                                                │
+│     tickets_failed: int,                                                │
+│     entry_avg: float                                                    │
+│   }                                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### D.4 MT5 Execution (Envoi Ordres)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ MT5Connector.order_send()                                               │
+│ Fichier: mt5_connector.py::execute_order()                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│ INPUT: order_request (Dict MT5 formaté)                                 │
+│                                                                          │
+│ PROCESSUS:                                                               │
+│                                                                          │
+│ 1. Vérification Connexion MT5                                           │
+│    IF not self.is_connected:                                            │
+│        logger.error("MT5 not connected")                                │
+│        RETURN {"retcode": TRADE_RETCODE_CONNECTION_ERROR}               │
+│                                                                          │
+│ 2. Validation Symbol                                                    │
+│    symbol_info = mt5.symbol_info(order_request["symbol"])               │
+│    IF symbol_info is None:                                              │
+│        RETURN {"retcode": TRADE_RETCODE_INVALID_SYMBOL}                 │
+│                                                                          │
+│ 3. Préparation Ordre                                                    │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ # MT5 exige tuple/namedtuple pour order_send()            │       │
+│    │ from collections import namedtuple                         │       │
+│    │ OrderRequest = namedtuple('OrderRequest', [                │       │
+│    │     'action', 'symbol', 'volume', 'type', 'price',         │       │
+│    │     'sl', 'tp', 'deviation', 'magic', 'comment',           │       │
+│    │     'type_time', 'type_filling'                            │       │
+│    │ ])                                                         │       │
+│    │                                                             │       │
+│    │ request = OrderRequest(**order_request)                    │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 4. Envoi Ordre MT5                                                      │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ result = mt5.order_send(request)                           │       │
+│    │                                                             │       │
+│    │ # Result structure:                                        │       │
+│    │ # - retcode: Code retour (10009=SUCCESS, autres=ERRORS)    │       │
+│    │ # - order: Ticket number (si succès)                       │       │
+│    │ # - volume: Volume exécuté                                 │       │
+│    │ # - price: Prix exécution réel                             │       │
+│    │ # - bid/ask: Prix marché au moment exécution               │       │
+│    │ # - comment: Commentaire broker                            │       │
+│    │ # - request_id: ID requête                                 │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 5. Gestion Retcodes                                                     │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ RETCODE MAPPING:                                           │       │
+│    │ ├─ 10009 TRADE_RETCODE_DONE → Succès                      │       │
+│    │ ├─ 10004 TRADE_RETCODE_REQUOTE → Slippage, retry          │       │
+│    │ ├─ 10006 TRADE_RETCODE_REJECT → Rejeté broker             │       │
+│    │ ├─ 10007 TRADE_RETCODE_CANCEL → Annulé                    │       │
+│    │ ├─ 10013 TRADE_RETCODE_INVALID_VOLUME → Volume invalide   │       │
+│    │ ├─ 10014 TRADE_RETCODE_INVALID_PRICE → Prix invalide      │       │
+│    │ ├─ 10015 TRADE_RETCODE_INVALID_STOPS → SL/TP invalide     │       │
+│    │ ├─ 10018 TRADE_RETCODE_MARKET_CLOSED → Marché fermé       │       │
+│    │ ├─ 10019 TRADE_RETCODE_NO_MONEY → Marge insuffisante      │       │
+│    │ └─ 10027 TRADE_RETCODE_TIMEOUT → Timeout                  │       │
+│    │                                                             │       │
+│    │ IF result.retcode == TRADE_RETCODE_DONE:                   │       │
+│    │     logger.info(f"Order SUCCESS: Ticket {result.order}")   │       │
+│    │     self._last_order_ticket = result.order                 │       │
+│    │ ELSE:                                                      │       │
+│    │     logger.error(f"Order FAILED: {result.retcode} - {result.comment}") │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 6. Retry Logic (Requote uniquement)                                     │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ IF result.retcode == TRADE_RETCODE_REQUOTE:                │       │
+│    │     # Prix a changé entre validation et exécution          │       │
+│    │     new_price = result.bid if action=="SELL" else result.ask│      │
+│    │     IF abs(new_price - request.price) <= deviation:        │       │
+│    │         # Retry avec nouveau prix si dans tolérance        │       │
+│    │         request = request._replace(price=new_price)        │       │
+│    │         result = mt5.order_send(request)  // 1 retry max   │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 7. Logging Détaillé                                                     │
+│    logger.debug(f"Order sent: {request}")                               │
+│    logger.info(f"Result: retcode={result.retcode}, ticket={result.order}, "│
+│                f"price={result.price}, comment={result.comment}")       │
+│                                                                          │
+│ OUTPUT:                                                                  │
+│   result: MT5 OrderSendResult namedtuple                                │
+│   {                                                                     │
+│     retcode: int,                                                       │
+│     order: int (ticket),                                                │
+│     volume: float,                                                      │
+│     price: float,                                                       │
+│     bid: float,                                                         │
+│     ask: float,                                                         │
+│     comment: str                                                        │
+│   }                                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### D.5 Reconcile & Audit (Post-Execution)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Reconciliation & Audit Trail                                           │
+│ Fichier: trader/reconcile.py & core/audit_logger.py                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│ PROCESSUS:                                                               │
+│                                                                          │
+│ 1. Mise à Jour Cache Interne                                            │
+│    trader/trade_executor.py::_update_internal_state()                   │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ IF order SUCCESS:                                          │       │
+│    │     self._open_positions[ticket] = {                       │       │
+│    │         "ticket": result.order,                            │       │
+│    │         "asset": asset,                                    │       │
+│    │         "type": action,  // "BUY" / "SELL"                 │       │
+│    │         "volume": volume,                                  │       │
+│    │         "entry_price": result.price,                       │       │
+│    │         "sl": sl_price,                                    │       │
+│    │         "tp": tp_price,                                    │       │
+│    │         "magic": magic_number,                             │       │
+│    │         "strategy": strategy_name,                         │       │
+│    │         "basket_id": basket_id (if burst),                 │       │
+│    │         "opened_at": datetime.now(UTC),                    │       │
+│    │         "profit": 0.0,  // Mis à jour par monitoring       │       │
+│    │     }                                                      │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 2. Réconciliation avec Broker                                           │
+│    trader/reconcile.py::reconcile_state_with_broker()                   │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ # Source de vérité: Broker MT5                             │       │
+│    │ broker_positions = mt5.positions_get()                     │       │
+│    │                                                             │       │
+│    │ # Synchronisation bidirectionnelle:                        │       │
+│    │ FOR each broker_pos IN broker_positions:                   │       │
+│    │     IF broker_pos.ticket NOT IN self._open_positions:      │       │
+│    │         # Position ouverte hors bot → importer             │       │
+│    │         self._open_positions[ticket] = from_mt5(broker_pos)│       │
+│    │         logger.warning(f"Position {ticket} importée")      │       │
+│    │                                                             │       │
+│    │ FOR each ticket IN self._open_positions:                   │       │
+│    │     IF ticket NOT IN broker_positions:                     │       │
+│    │         # Position fermée côté broker → purger             │       │
+│    │         del self._open_positions[ticket]                   │       │
+│    │         logger.info(f"Position {ticket} purgée (closed)")  │       │
+│    │                                                             │       │
+│    │ # Mise à jour profits                                      │       │
+│    │ FOR each pos IN broker_positions:                          │       │
+│    │     self._open_positions[pos.ticket]["profit"] = pos.profit│       │
+│    │                                                             │       │
+│    │ self._last_reconciliation_time = datetime.now(UTC)         │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 3. Audit Logging                                                        │
+│    core/audit_logger.py::log_trade_execution()                          │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ audit_entry = {                                            │       │
+│    │     "timestamp": datetime.now(UTC).isoformat(),            │       │
+│    │     "event_type": "TRADE_EXECUTION",                       │       │
+│    │     "asset": asset,                                        │       │
+│    │     "action": action,                                      │       │
+│    │     "ticket": result.order,                                │       │
+│    │     "entry_price": result.price,                           │       │
+│    │     "volume": volume,                                      │       │
+│    │     "sl": sl_price,                                        │       │
+│    │     "tp": tp_price,                                        │       │
+│    │     "strategy": strategy_name,                             │       │
+│    │     "magic": magic_number,                                 │       │
+│    │     "basket_id": basket_id,                                │       │
+│    │     "confidence": fused_confidence,                        │       │
+│    │     "signal_type": signal_type,                            │       │
+│    │     "context": {                                           │       │
+│    │         "cycle": cycle_count,                              │       │
+│    │         "market_phase": phase_signal["phase"],             │       │
+│    │         "vwap_regime": vwap_regime,                        │       │
+│    │         "orderflow_score": orderflow_score,                │       │
+│    │         "footprint_score": footprint_score,                │       │
+│    │         "vwap_score": vwap_score                           │       │
+│    │     },                                                     │       │
+│    │     "execution_details": {                                 │       │
+│    │         "retcode": result.retcode,                         │       │
+│    │         "comment": result.comment,                         │       │
+│    │         "slippage": result.price - expected_price,         │       │
+│    │         "spread_at_execution": symbol_info.spread          │       │
+│    │     }                                                      │       │
+│    │ }                                                          │       │
+│    │                                                             │       │
+│    │ # Écriture fichier logs/audit_{date}.log (JSON Lines)      │       │
+│    │ with open(audit_file, 'a') as f:                           │       │
+│    │     f.write(json.dumps(audit_entry) + '\n')                │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 4. Trade Logging (Fichier dédié)                                        │
+│    trader/trade_logger.py::log_execution()                              │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ # Fichier: logs/trades_{date}.log                          │       │
+│    │ log_line = (                                               │       │
+│    │     f"{timestamp} | {asset} | {action} | "                 │       │
+│    │     f"Ticket: {ticket} | Entry: {entry_price} | "          │       │
+│    │     f"SL: {sl_price} | Volume: {volume} | "                │       │
+│    │     f"Strategy: {strategy_name} | Confidence: {confidence}"│       │
+│    │ )                                                          │       │
+│    │ trade_logger.info(log_line)                                │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ OUTPUT:                                                                  │
+│   - Cache interne à jour                                                │
+│   - Audit trail complet (JSON)                                          │
+│   - Logs lisibles (texte)                                               │
+│   - Réconciliation timestamp enregistré                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 7. CYCLE DE VIE COMPLET D'UN TRADE
+
+### 7.1 Exemple Concret: Trade XAUUSD Scalping Burst
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ CYCLE DE VIE COMPLET - TRADE XAUUSD SCALPING BURST                     │
+│ De la détection du signal à la fermeture avec profit                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+════════════════════════════════════════════════════════════════════════
+PHASE 1: DÉTECTION SIGNAL (Cycle #42 - 14:32:00 UTC)
+════════════════════════════════════════════════════════════════════════
+
+[14:32:00] Cycle démarre, récupération données marché
+           ├─ XAUUSD M1: 120 bougies
+           ├─ XAUUSD M5: 240 bougies
+           ├─ XAUUSD M15: 240 bougies
+           └─ Ticks M1: 387 ticks (coverage: 58s)
+
+[14:32:03] OrderFlow V6 Analysis
+           ├─ CVD slope: +2.8 (momentum haussier)
+           ├─ Delta total: +1842 (pression acheteuse)
+           ├─ Imbalance: 0.68 (68% buy volume)
+           ├─ VPOC: 2050.30 (prix institutionnel)
+           ├─ Pattern détecté: "volume_breakout" (conf: 0.85)
+           └─ Score: 78/100, Status: VALID, Bias: BUY
+
+[14:32:04] Footprint M1 Analysis
+           ├─ Buy volume: 8420, Sell volume: 4380
+           ├─ Delta total: +4040
+           ├─ POC: 2050.35
+           ├─ Tick rate: 6.7 ticks/s (activité soutenue)
+           └─ Score: 65/100, Status: VALID
+
+[14:32:05] VWAP Analysis
+           ├─ VWAP value: 2048.30
+           ├─ Distance: +22.0 pips (prix > VWAP)
+           ├─ Slope: +0.012 (tendance haussière)
+           ├─ Regime: TRENDING
+           ├─ Signal: "proximity" (proche VWAP, mean reversion possible)
+           └─ Score: 0.82/1.0, Status: VALID, Bias: BULLISH
+
+[14:32:06] FusionManager - Fusion Signaux
+           ├─ Normalisation:
+           │  ├─ OrderFlow: score=0.78, dir=+1
+           │  ├─ Footprint: score=0.65, dir=+1
+           │  └─ VWAP: score=0.82, dir=+1
+           │
+           ├─ Cohérence:
+           │  ├─ Votes: [("orderflow", "BUY", 0.78), ("footprint", "BUY", 0.65), ("vwap", "BUY", 0.82)]
+           │  ├─ Majorité: BUY (+1)
+           │  ├─ Agreement: 0.95 (95% consensus)
+           │  └─ Matrice: of_vs_fp=aligned, of_vs_vwap=aligned, fp_vs_vwap=aligned
+           │
+           ├─ Poids Adaptatifs (VWAP Regime = TRENDING):
+           │  ├─ VWAP: 50% (prioritaire en trending)
+           │  ├─ OrderFlow: 30%
+           │  └─ Footprint: 20%
+           │
+           ├─ Formule:
+           │  weighted_score = (0.78×0.30) + (0.65×0.20) + (0.82×0.50)
+           │                 = 0.234 + 0.130 + 0.410 = 0.774
+           │
+           ├─ Bonus Cohérence:
+           │  └─ Alignement 3/3: +0.05 → 0.774 + 0.05 = 0.824
+           │
+           └─ Décision: fused_confidence=0.82 → SIGNAL_TYPE: HIGH_CONVICTION_BUY
+
+════════════════════════════════════════════════════════════════════════
+PHASE 2: DÉCISION STRATÉGIE (14:32:07)
+════════════════════════════════════════════════════════════════════════
+
+[14:32:07] DecisionPipeline - Sélection Stratégie
+           ├─ Asset config: XAUUSD.json
+           ├─ Strategy name: "scalping"
+           └─ Appel ScalpingPipeline.run()
+
+[14:32:08] ScalpingStrategy.evaluate_entry()
+           ├─ Entry rules extraction:
+           │  ├─ min_confidence: 0.55 ✓ (0.82 >= 0.55)
+           │  ├─ burst_enabled: true
+           │  ├─ burst_size: 8
+           │  └─ max_spread_pips: 2.0
+           │
+           ├─ Validation Spread:
+           │  └─ Current spread: 1.2 pips ✓ (< 2.0)
+           │
+           ├─ Validation Consensus:
+           │  └─ Direction: BUY ✓ (majorité claire)
+           │
+           └─ Décision: ACTION=BUY, CONFIDENCE=0.82
+              execution_params: {
+                  burst_enabled: true,
+                  burst_size: 8,
+                  entry_mode: "MARKET",
+                  sl_method: "ATR",
+                  tp_method: None (trailing only)
+              }
+
+════════════════════════════════════════════════════════════════════════
+PHASE 3: VALIDATION PRÉ-EXÉCUTION (14:32:09)
+════════════════════════════════════════════════════════════════════════
+
+[14:32:09] Validators - Pre-flight Checks
+           ├─ ✓ Spread check: 1.2 pips < 2.0 (OK)
+           ├─ ✓ Portfolio exposure: 8 positions / 15 max (OK)
+           ├─ ✓ Risk exposure: $1200 / $5000 max (OK)
+           ├─ ✓ Trading hours: 14:32 in [08:00-17:00] (OK)
+           └─ ✓ Fat finger check: Volume 0.12 lots < 10.0 max (OK)
+
+           Validation: ALL CHECKS PASSED ✅
+
+════════════════════════════════════════════════════════════════════════
+PHASE 4: CONSTRUCTION ORDRE (14:32:10)
+════════════════════════════════════════════════════════════════════════
+
+[14:32:10] OrderBuilder - Sizing
+           ├─ Equity: $10,000
+           ├─ Risk per trade: 1.0% → $100
+           ├─ Entry price (Ask): 2050.50
+           ├─ SL calculation (ATR method):
+           │  ├─ ATR(14): 8.5 pips
+           │  ├─ k=1.5 → SL distance = 12.75 pips
+           │  └─ SL price = 2050.50 - 0.1275 = 2050.3725
+           ├─ Distance: 12.75 pips = $12.75 par lot
+           ├─ Volume = $100 / $12.75 = 7.84 lots
+           ├─ Floor to lot_step (0.01): 7.84 → 7.84 lots
+           └─ Volume final: 7.84 lots (TOTAL pour burst)
+
+[14:32:11] OrderBuilder - SLTP
+           ├─ SL: 2050.3725 (ATR 1.5x, -12.75 pips)
+           ├─ TP: None (scalping trailing, pas de TP fixe)
+           └─ RR achieved: N/A (no TP)
+
+[14:32:12] BurstHandler - Division Panier
+           ├─ Burst size: 8 tickets
+           ├─ Volume per ticket: 7.84 / 8 = 0.98 lots
+           ├─ Round to lot_step: 0.98 → 0.98 lots
+           ├─ SL commun: 2050.3725 (tous tickets)
+           └─ Basket ID: BURST_XAUUSD_20251206143212_A7F2
+
+════════════════════════════════════════════════════════════════════════
+PHASE 5: EXÉCUTION MT5 (14:32:13 - 14:32:18)
+════════════════════════════════════════════════════════════════════════
+
+[14:32:13] Ticket 1/8
+           ├─ Request: BUY 0.98 XAUUSD @ 2050.50, SL=2050.3725
+           ├─ mt5.order_send() → retcode: 10009 (DONE)
+           └─ Ticket: 123456781, Entry: 2050.51 (slippage +0.01)
+
+[14:32:14] Ticket 2/8
+           └─ Ticket: 123456782, Entry: 2050.50
+
+[14:32:15] Ticket 3/8
+           └─ Ticket: 123456783, Entry: 2050.52
+
+[14:32:16] Ticket 4/8
+           └─ Ticket: 123456784, Entry: 2050.51
+
+[14:32:17] Ticket 5/8
+           └─ Ticket: 123456785, Entry: 2050.50
+
+[14:32:17] Ticket 6/8
+           └─ Ticket: 123456786, Entry: 2050.51
+
+[14:32:18] Ticket 7/8
+           └─ Ticket: 123456787, Entry: 2050.50
+
+[14:32:18] Ticket 8/8
+           └─ Ticket: 123456788, Entry: 2050.52
+
+[14:32:19] Burst Basket Summary
+           ├─ Tickets opened: 8/8 ✅
+           ├─ Entry average: 2050.51
+           ├─ Total volume: 7.84 lots
+           ├─ SL common: 2050.3725 (-13.9 pips from avg)
+           └─ Status: ACTIVE
+
+[14:32:20] 📱 Telegram Alert
+           🎯 BURST BASKET OPENED
+           Asset: XAUUSD
+           Direction: BUY
+           Tickets: 8/8
+           Entry Avg: 2050.51
+           SL: 2050.3725
+           Basket ID: BURST_XAUUSD_20251206143212_A7F2
+
+════════════════════════════════════════════════════════════════════════
+PHASE 6: MONITORING (14:32:20 - 14:47:30, cycles #42-#57)
+════════════════════════════════════════════════════════════════════════
+
+[14:33:00] Cycle #43 - Monitoring Basket
+           ├─ Current price: 2050.68 (+17 pips from avg)
+           ├─ Unrealized P&L: +$133 (+1.33%)
+           ├─ Profit target: +15 pips → NOT YET (17 > 15 mais basket intact)
+           └─ Status: HOLDING
+
+[14:34:00] Cycle #44
+           ├─ Current price: 2050.82 (+31 pips)
+           ├─ P&L: +$243
+           └─ Status: HOLDING (profit monte)
+
+[14:35:00] Cycle #45
+           ├─ Current price: 2050.95 (+44 pips)
+           ├─ P&L: +$345
+           └─ Status: HOLDING
+
+[14:36:00] Cycle #46
+           ├─ Current price: 2051.12 (+61 pips) 📈
+           ├─ P&L: +$478
+           └─ Status: HOLDING (tendance forte)
+
+... (cycles #47-#56 omis, prix oscille entre 2051.00-2051.20)
+
+[14:47:00] Cycle #57 - Profit Target Check
+           ├─ Current price: 2050.66 (+15 pips exactly!)
+           ├─ P&L: +$118
+           ├─ Profit target atteint: +15 pips ✓
+           └─ DÉCISION: FERMETURE BASKET
+
+════════════════════════════════════════════════════════════════════════
+PHASE 7: FERMETURE BASKET (14:47:01)
+════════════════════════════════════════════════════════════════════════
+
+[14:47:01] BurstHandler.close_basket()
+           ├─ Basket ID: BURST_XAUUSD_20251206143212_A7F2
+           ├─ Raison: PROFIT_TARGET_REACHED (+15 pips)
+           └─ Fermeture séquentielle 8 tickets...
+
+[14:47:02] Close Ticket 123456781
+           ├─ Close price: 2050.66
+           ├─ Profit: +$14.70 (+15 pips)
+           └─ retcode: 10009 (DONE)
+
+[14:47:03] Close Ticket 123456782
+           └─ Profit: +$15.68 (+16 pips)
+
+... (tickets 3-7 omis)
+
+[14:47:06] Close Ticket 123456788
+           └─ Profit: +$13.72 (+14 pips)
+
+[14:47:07] Basket Closed Summary
+           ├─ Tickets closed: 8/8 ✅
+           ├─ Total profit: +$118.40
+           ├─ Avg profit per ticket: +$14.80
+           ├─ Duration: 15 minutes
+           └─ Final P&L: +1.18% (sur $10,000)
+
+[14:47:08] 📱 Telegram Alert
+           ✅ BURST BASKET CLOSED
+           Basket ID: BURST_XAUUSD_20251206143212_A7F2
+           Raison: PROFIT_TARGET_REACHED
+           Profit Total: +$118.40
+           Duration: 15 min
+           Return: +1.18%
+
+════════════════════════════════════════════════════════════════════════
+PHASE 8: AUDIT & RECONCILIATION (14:47:09)
+════════════════════════════════════════════════════════════════════════
+
+[14:47:09] Audit Logger - Trade Closed
+           ├─ Event: BASKET_CLOSED
+           ├─ Timestamp: 2025-12-06T14:47:09Z
+           ├─ Basket ID: BURST_XAUUSD_20251206143212_A7F2
+           ├─ Tickets: [123456781...123456788]
+           ├─ Entry avg: 2050.51
+           ├─ Exit avg: 2050.66
+           ├─ Profit: +$118.40
+           ├─ Duration: 15 min
+           └─ Reason: PROFIT_TARGET_REACHED
+
+[14:47:10] Reconciliation avec Broker
+           ├─ Récupération positions MT5: 0 (basket fermé)
+           ├─ Purge cache interne: 8 tickets supprimés
+           ├─ Update account_info:
+           │  ├─ Balance: $10,118.40 (was $10,000)
+           │  └─ Equity: $10,118.40
+           └─ Reconciliation OK ✅
+
+[14:47:11] Logs Finaux
+           ├─ logs/trades_20251206.log:
+           │  "14:47:09 | XAUUSD | CLOSE_BASKET | Profit: +$118.40 | Duration: 15min"
+           │
+           └─ logs/audit_20251206.log:
+              {"timestamp": "2025-12-06T14:47:09Z", "event": "BASKET_CLOSED",
+               "basket_id": "BURST_XAUUSD_20251206143212_A7F2",
+               "profit_usd": 118.40, "profit_pct": 1.18, ...}
+
+════════════════════════════════════════════════════════════════════════
+FIN DU CYCLE - BILAN TRADE
+════════════════════════════════════════════════════════════════════════
+
+✅ Trade réussi:
+   - Durée: 15 minutes (14:32 → 14:47)
+   - Profit: +$118.40 (+1.18% capital)
+   - Risk engagé: $100 (1% capital)
+   - Risk/Reward achieved: 1.18:1
+   - Slippage total: +0.01 pips (négligeable)
+   - Tickets executés: 8/8 (100%)
+   - Raison fermeture: Profit target atteint (+15 pips)
+
+📊 Métriques Stratégie:
+   - Signal confidence: 0.82 (HIGH_CONVICTION)
+   - Consensus: 95% (3/3 signaux alignés)
+   - VWAP regime: TRENDING (poids 50%)
+   - OrderFlow score: 78/100 (VALID)
+   - Footprint score: 65/100 (VALID)
+   - Spread execution: 1.2 pips (< 2.0 limit)
+
+🔄 Cycles impliqués:
+   - Cycle #42: Détection signal + Exécution
+   - Cycles #43-#56: Monitoring (14 cycles)
+   - Cycle #57: Fermeture profit target
+
+📝 Audit Trail:
+   - Tous événements loggés (JSON + texte)
+   - Réconciliation broker OK
+   - Alertes Telegram envoyées (2)
+```
+
+### 7.2 Scénario Alternatif: Loss Guard (-110 pips)
+
+```
+════════════════════════════════════════════════════════════════════════
+SCÉNARIO: MOUVEMENT ADVERSE - LOSS GUARD TRIGGERED
+════════════════════════════════════════════════════════════════════════
+
+[15:12:00] Cycle #82 - Trade ouvert (même setup que précédent)
+           Entry avg: 2048.30, SL: 2048.1725 (-12.75 pips ATR)
+
+[15:15:00] Prix descend: 2047.80 (-50 pips)
+           P&L: -$392 (douloureux mais dans tolérance)
+
+[15:18:00] Prix descend encore: 2047.20 (-110 pips)
+           P&L: -$862
+           ⚠️ LOSS GUARD TRIGGERED: -110 pips atteints
+
+[15:18:01] Emergency Close Basket
+           ├─ Raison: LOSS_GUARD_STOP (-110 pips)
+           ├─ Fermeture immédiate 8 tickets
+           └─ Loss total: -$862 (-8.62% capital)
+
+[15:18:05] 🚨 Telegram Alert
+           ❌ BURST BASKET EMERGENCY CLOSE
+           Raison: LOSS_GUARD_TRIGGERED
+           Loss: -$862 (-8.62%)
+           Note: SL normal (-12.75 pips) pas touché,
+                 mais loss guard (-110 pips) activé
+
+📊 Analyse Post-Mortem:
+   - SL ATR trop serré pour XAUUSD volatil
+   - Signal valid MAIS timing mauvais (news non anticipée)
+   - Loss guard a limité dégâts (sinon -$1500+)
+   - Lesson: Vérifier calendrier économique avant burst
+```
+
+---
+
+## 8. MODULES DE SUPPORT
+
+### 8.1 ConfigManager (Singleton Central)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ ConfigManager - Orchestration Centralisée Configuration                │
+│ Fichier: core/config_manager.py                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│ RESPONSABILITÉS:                                                         │
+│                                                                          │
+│ 1. Chargement Configs Statiques                                         │
+│    ├─ config/prod_config.json (config globale)                          │
+│    ├─ config/broker_accounts.json (credentials MT5)                     │
+│    ├─ config/assets/*.json (EURUSD, GBPUSD, XAUUSD)                     │
+│    └─ config/strategy/*.json (scalping, liquidity)                      │
+│                                                                          │
+│ 2. Configuration Dynamique Runtime                                      │
+│    ├─ Merge configs (prod + asset + strategy)                           │
+│    ├─ Cache runtime (évite I/O répétés)                                 │
+│    ├─ Hot-reload (watch file changes)                                   │
+│    └─ Validation schémas JSON                                           │
+│                                                                          │
+│ 3. Access Hiérarchisé (Dot Notation)                                    │
+│    config_manager.get("global_safety.max_open_positions")               │
+│    → 15                                                                  │
+│                                                                          │
+│ 4. Gestion Credentials                                                  │
+│    ├─ MT5: get_mt5_account_credentials(mode="DEMO"/"LIVE")              │
+│    ├─ Telegram: get("env_vars.TELEGRAM_BOT_TOKEN")                      │
+│    └─ Secrets masqués dans logs                                         │
+│                                                                          │
+│ 5. Alertes Telegram                                                     │
+│    send_alert(message, channel="telegram_critical")                     │
+│                                                                          │
+│ 6. Summaries Périodiques                                                │
+│    process_and_send_summary_alert(context={...})                        │
+│    → Résumé compte toutes les 4h                                        │
+│                                                                          │
+│ PATTERN SINGLETON:                                                       │
+│   _instance = None                                                      │
+│   def __new__(cls):                                                     │
+│       if cls._instance is None:                                         │
+│           cls._instance = super().__new__(cls)                          │
+│       return cls._instance                                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 AuditLogger (Trail Complet)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ AuditLogger - Audit Trail Exhaustif                                    │
+│ Fichier: core/audit_logger.py                                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│ ÉVÉNEMENTS LOGGÉS:                                                       │
+│                                                                          │
+│ 1. Configuration Changes                                                │
+│    log_config_change(change_info, source, snapshot)                     │
+│    → Toute modification config (strategy reload, param update)          │
+│                                                                          │
+│ 2. Trade Executions                                                     │
+│    log_trade_execution(trade_details)                                   │
+│    → Ouverture position (ticket, entry, SL/TP, strategy)                │
+│                                                                          │
+│ 3. Trade Closures                                                       │
+│    log_trade_closure(ticket, close_price, profit, reason)               │
+│    → Fermeture position (profit/loss, raison)                           │
+│                                                                          │
+│ 4. Basket Operations                                                    │
+│    log_basket_operation(basket_id, operation, details)                  │
+│    → Création/fermeture baskets burst                                   │
+│                                                                          │
+│ 5. Errors & Exceptions                                                  │
+│    log_error(error_type, message, traceback, context)                   │
+│    → Toutes erreurs runtime (MT5, validation, calcul)                   │
+│                                                                          │
+│ 6. System Events                                                        │
+│    log_system_event(event_type, details)                                │
+│    → Démarrage/arrêt bot, connexion/déconnexion MT5                     │
+│                                                                          │
+│ FORMAT FICHIER:                                                          │
+│   logs/audit_{YYYYMMDD}.log (JSON Lines)                                │
+│   {"timestamp": "...", "event_type": "...", "data": {...}}              │
+│                                                                          │
+│ ROTATION:                                                                │
+│   - Nouveau fichier chaque jour (minuit UTC)                            │
+│   - Compression archives après 7 jours                                  │
+│   - Rétention: 90 jours                                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 Mecano (Diagnostics Système)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Mecano - Diagnostics & Health Checks                                   │
+│ Fichier: mecanique_generale/mecano.py                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│ MÉTRIQUES SURVEILLÉES:                                                   │
+│                                                                          │
+│ 1. Ressources Système                                                   │
+│    ├─ CPU usage (%) - Alert si > 80%                                    │
+│    ├─ RAM usage (MB) - Alert si > 90% total                             │
+│    ├─ Disk usage (%) - Alert si > 85%                                   │
+│    └─ Process threads count                                             │
+│                                                                          │
+│ 2. Connexions                                                            │
+│    ├─ MT5 connection status (ping)                                      │
+│    ├─ Network latency (ms)                                              │
+│    └─ Last successful data fetch timestamp                              │
+│                                                                          │
+│ 3. Performance Bot                                                       │
+│    ├─ Cycle duration avg (secondes)                                     │
+│    ├─ Cycles completed today                                            │
+│    ├─ Errors count (last 24h)                                           │
+│    └─ Memory leaks detection                                            │
+│                                                                          │
+│ 4. Trading Metrics                                                       │
+│    ├─ Positions ouvertes count                                          │
+│    ├─ Daily trades count                                                │
+│    ├─ Daily P&L                                                         │
+│    └─ Exposure risk current                                             │
+│                                                                          │
+│ ACTIONS:                                                                 │
+│   - Health check toutes les 15 minutes                                  │
+│   - Alerte Telegram si anomalie détectée                                │
+│   - Auto-restart si deadlock détecté                                    │
+│   - Logs détaillés: logs/mecano_{date}.log                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 9. GESTION DES ERREURS ET RÉCUPÉRATION
+
+### 9.1 Hiérarchie des Erreurs
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ HIÉRARCHIE DES ERREURS - SNIPER_X                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ NIVEAU 1: ERREURS CRITIQUES (Bot Stop)                                  │
+│ ├─ MT5 Connection Lost (reconnect failed après 3 tentatives)            │
+│ ├─ ConfigManager initialization failed                                  │
+│ ├─ Corrupted critical config files                                      │
+│ ├─ Account credentials invalid                                          │
+│ └─ Insufficient permissions (file system, MT5)                          │
+│    → ACTION: STOP BOT, Alerte Telegram CRITICAL, Exit code 1            │
+│                                                                          │
+│ NIVEAU 2: ERREURS GRAVES (Skip Cycle)                                   │
+│ ├─ Market data fetch failed                                             │
+│ ├─ Strategy load error                                                  │
+│ ├─ Analysis module crash (OrderFlow, Footprint, VWAP)                   │
+│ ├─ Validation checks failed (spread, exposure)                          │
+│ └─ Order execution rejected (retcode != DONE)                           │
+│    → ACTION: LOG ERROR, Skip cycle, Continue bot, Alerte si répété 3x   │
+│                                                                          │
+│ NIVEAU 3: ERREURS MINEURES (Log Warning)                                │
+│ ├─ Ticks data incomplete (< 20 ticks)                                   │
+│ ├─ Footprint status SUSPECT                                             │
+│ ├─ Cache miss (performance hit, pas blocant)                            │
+│ ├─ Telegram send failed (retry 1x)                                      │
+│ └─ Reconciliation minor mismatch                                        │
+│    → ACTION: LOG WARNING, Continue normalement                          │
+│                                                                          │
+│ NIVEAU 4: INFO (Non-errors)                                             │
+│ ├─ No signal detected (HOLD decision)                                   │
+│ ├─ Position closed normally                                             │
+│ ├─ Config hot-reloaded successfully                                     │
+│ └─ Health check passed                                                  │
+│    → ACTION: LOG INFO                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Stratégies de Récupération
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STRATÉGIES DE RÉCUPÉRATION                                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ 1. MT5 Disconnection                                                    │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ DÉTECTION:                                                 │       │
+│    │   - mt5.terminal_info() returns None                       │       │
+│    │   - mt5.account_info() returns None                        │       │
+│    │   - Order send retcode: CONNECTION_ERROR                   │       │
+│    │                                                             │       │
+│    │ RÉCUPÉRATION:                                              │       │
+│    │   1. Log warning "MT5 connection lost"                     │       │
+│    │   2. Wait 5 seconds                                        │       │
+│    │   3. mt5.shutdown()                                        │       │
+│    │   4. mt5.initialize()                                      │       │
+│    │   5. mt5.login(account_details)                            │       │
+│    │   6. Vérifier account_info                                 │       │
+│    │   7. Réconciliation positions                              │       │
+│    │   8. If success: Resume bot                                │       │
+│    │   9. If failed after 3 attempts: CRITICAL STOP             │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 2. Market Data Fetch Failed                                             │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ DÉTECTION:                                                 │       │
+│    │   - mt5.copy_rates_from_pos() returns None                 │       │
+│    │   - DataFrame empty ou < 10 bougies                        │       │
+│    │                                                             │       │
+│    │ RÉCUPÉRATION:                                              │       │
+│    │   1. Log error avec asset + timeframe                      │       │
+│    │   2. Retry fetch 1x (délai 2s)                             │       │
+│    │   3. If still failed: Skip asset ce cycle                  │       │
+│    │   4. Use cached data si disponible (< 5 min)               │       │
+│    │   5. If repeated 3 cycles: Alert Telegram                  │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 3. Analysis Module Crash                                                │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ DÉTECTION:                                                 │       │
+│    │   - Exception in OrderFlowV6.analyze()                     │       │
+│    │   - Exception in FootprintAnalyzer.analyze()               │       │
+│    │   - Exception in VWAPAnalyzer.analyze()                    │       │
+│    │                                                             │       │
+│    │ RÉCUPÉRATION:                                              │       │
+│    │   1. Catch exception, log full traceback                   │       │
+│    │   2. Return degraded result:                               │       │
+│    │      {status: "INVALID", score: 0, error: "..."}           │       │
+│    │   3. FusionManager detects missing component               │       │
+│    │   4. Falls back to available components                    │       │
+│    │   5. If all 3 modules fail: Skip cycle entirely            │       │
+│    │   6. Alert if crash persists 5+ cycles                     │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 4. Order Execution Rejected                                             │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ DÉTECTION:                                                 │       │
+│    │   - result.retcode != TRADE_RETCODE_DONE                   │       │
+│    │                                                             │       │
+│    │ RÉCUPÉRATION (selon retcode):                              │       │
+│    │   ├─ REQUOTE (10004):                                      │       │
+│    │   │    → Retry 1x avec nouveau prix (si dans deviation)    │       │
+│    │   │                                                         │       │
+│    │   ├─ INVALID_VOLUME (10013):                               │       │
+│    │   │    → Ajuster volume au pas lot correct, retry 1x       │       │
+│    │   │                                                         │       │
+│    │   ├─ INVALID_STOPS (10015):                                │       │
+│    │   │    → Recalculer SL/TP avec stops_level min, retry 1x   │       │
+│    │   │                                                         │       │
+│    │   ├─ MARKET_CLOSED (10018):                                │       │
+│    │   │    → Skip trade, log warning, continue                 │       │
+│    │   │                                                         │       │
+│    │   ├─ NO_MONEY (10019):                                     │       │
+│    │   │    → Reduce volume 50%, retry 1x                       │       │
+│    │   │    → If still fail: Alert CRITICAL (marge insuffisante)│       │
+│    │   │                                                         │       │
+│    │   └─ AUTRES:                                               │       │
+│    │        → Log error, skip trade, alert si répété            │       │
+│    └───────────────────────────────────────────────────────────┘       │
+│                                                                          │
+│ 5. Config File Corruption                                               │
+│    ┌───────────────────────────────────────────────────────────┐       │
+│    │ DÉTECTION:                                                 │       │
+│    │   - JSON parse error                                       │       │
+│    │   - Schema validation failed                               │       │
+│    │                                                             │       │
+│    │ RÉCUPÉRATION:                                              │       │
+│    │   1. Log critical error avec path fichier                  │       │
+│    │   2. Try load backup file (.bak)                           │       │
+│    │   3. If backup OK: Use backup, alert user                  │       │
+│    │   4. If no backup: Use hardcoded defaults (safe mode)      │       │
+│    │   5. Alert Telegram CRITICAL                               │       │
+│    │   6. Create incident report                                │       │
+│    └───────────────────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 10. LOGS ET AUDIT TRAIL
+
+### 10.1 Structure des Logs
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ STRUCTURE COMPLÈTE DES LOGS                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ logs/                                                                    │
+│ ├── sniper_x_20251206.log          # Log principal (tout)               │
+│ │   Format: [TIMESTAMP] [MODULE] [LEVEL] Message                        │
+│ │   Rotation: Daily (minuit UTC)                                        │
+│ │   Rétention: 30 jours                                                 │
+│ │   Exemple:                                                            │
+│ │   2025-12-06 14:32:00 [main] INFO SNIPER_X Bot démarré en mode DEMO   │
+│ │   2025-12-06 14:32:03 [OrderFlowV6] DEBUG Score: 78, Bias: BUY        │
+│ │                                                                        │
+│ ├── trades_20251206.log             # Trades uniquement                 │
+│ │   Format: [TIME] | [ASSET] | [ACTION] | [DETAILS]                     │
+│ │   Rotation: Daily                                                     │
+│ │   Rétention: 90 jours                                                 │
+│ │   Exemple:                                                            │
+│ │   14:32:18 | XAUUSD | BUY | Ticket:123456781 | Entry:2050.51 | ...    │
+│ │   14:47:09 | XAUUSD | CLOSE_BASKET | Profit:+$118.40 | Duration:15min │
+│ │                                                                        │
+│ ├── audit_20251206.log              # Audit trail (JSON Lines)          │
+│ │   Format: 1 JSON object par ligne                                     │
+│ │   Rotation: Daily                                                     │
+│ │   Rétention: 365 jours (compliance)                                   │
+│ │   Exemple:                                                            │
+│ │   {"timestamp":"2025-12-06T14:32:18Z","event":"TRADE_EXECUTION",...}  │
+│ │   {"timestamp":"2025-12-06T14:47:09Z","event":"BASKET_CLOSED",...}    │
+│ │                                                                        │
+│ ├── mecano_20251206.log             # Diagnostics système               │
+│ │   Format: [TIME] [CHECK] [STATUS] Details                             │
+│ │   Rotation: Daily                                                     │
+│ │   Rétention: 7 jours                                                  │
+│ │   Exemple:                                                            │
+│ │   14:30:00 HEALTH_CHECK OK CPU:45% RAM:2.1GB Disk:62%                 │
+│ │   14:45:00 HEALTH_CHECK WARN CPU:82% (threshold exceeded)             │
+│ │                                                                        │
+│ ├── errors_20251206.log             # Erreurs uniquement                │
+│ │   Format: [TIME] [ERROR_TYPE] [SEVERITY] Message + Traceback          │
+│ │   Rotation: Daily                                                     │
+│ │   Rétention: 90 jours                                                 │
+│ │   Exemple:                                                            │
+│ │   14:35:22 MT5_ERROR CRITICAL Connection lost - attempting reconnect  │
+│ │   Traceback: ...                                                      │
+│ │                                                                        │
+│ └── strategy_manager_debug.log     # Debug stratégies (temp)            │
+│     Format: [TIME] [STRATEGY_KEY] Message                               │
+│     Rotation: Manuel (dev only)                                         │
+│     Exemple:                                                            │
+│     [2025-12-06T14:32:00Z] [scalping] Module 'scalping.py' exécuté OK   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 Exemple Audit Trail Complet (JSON)
+
+```json
+{
+  "timestamp": "2025-12-06T14:32:18.423Z",
+  "event_type": "TRADE_EXECUTION",
+  "asset": "XAUUSD",
+  "action": "BUY",
+  "ticket": 123456781,
+  "entry_price": 2050.51,
+  "volume": 0.98,
+  "sl": 2050.3725,
+  "tp": null,
+  "strategy": "scalping",
+  "magic": 52001,
+  "basket_id": "BURST_XAUUSD_20251206143212_A7F2",
+  "confidence": 0.82,
+  "signal_type": "HIGH_CONVICTION_BUY",
+  "context": {
+    "cycle": 42,
+    "market_phase": "TRENDING_BULLISH",
+    "vwap_regime": "TRENDING",
+    "orderflow_score": 78,
+    "footprint_score": 65,
+    "vwap_score": 0.82,
+    "fusion_weights": {
+      "orderflow": 0.30,
+      "footprint": 0.20,
+      "vwap": 0.50
+    },
+    "coherence": {
+      "majority": "BUY",
+      "agreement": 0.95,
+      "aligned_components": 3
+    }
+  },
+  "execution_details": {
+    "retcode": 10009,
+    "comment": "Done",
+    "slippage_pips": 0.01,
+    "spread_at_execution": 1.2,
+    "execution_time_ms": 87
+  },
+  "risk_metrics": {
+    "risk_amount_usd": 100.0,
+    "risk_percent": 1.0,
+    "sl_distance_pips": 12.75,
+    "potential_loss_usd": -99.75,
+    "account_equity_before": 10000.0
+  },
+  "metadata": {
+    "bot_version": "4.4-unblocked",
+    "mode": "DEMO",
+    "mt5_account": 12345678,
+    "server": "Broker-Demo",
+    "user_id": "admin"
+  }
+}
+```
+
+---
+
+## CONCLUSION
+
+Ce document décrit **l'intégralité du pipeline SNIPER_X**, depuis le démarrage du bot jusqu'à la fermeture d'un trade avec audit complet.
+
+### Points Clés à Retenir
+
+1. **Pipeline en 7 Étapes**: Data → Analysis → Fusion → Decision → Validation → Execution → Monitoring
+2. **3 Modules d'Analyse**: OrderFlow V6 (score 0-100) + Footprint M1 + VWAP (score 0-1)
+3. **Fusion Adaptative**: Poids dynamiques selon régime VWAP (TRENDING: 50% VWAP)
+4. **Burst Scalping**: 8 tickets parallèles, SL commun ATR, fermeture +15 pips
+5. **Sécurité Multi-Niveaux**: 5 validators pré-exécution + reconciliation post-trade
+6. **Audit Exhaustif**: Logs JSON + texte, rétention 90-365 jours
+
+### Fichiers Critiques
+
+- `main.py`: Point d'entrée (démarrage)
+- `run_bot.py`: Boucle principale (cycle 60s)
+- `decision_pipeline.py`: Orchestration décisions
+- `fusion_manager.py`: Fusion signaux (score final)
+- `trade_executor.py`: Exécution + monitoring
+- `config_manager.py`: Configuration centralisée
+
+### Prochaines Évolutions Possibles
+
+- Dashboard Streamlit temps réel (positions, P&L, signaux)
+- Backtesting moteur (replay historical ticks)
+- Machine Learning pour poids adaptatifs (optimisation continue)
+- Multi-broker support (IBKR, OANDA)
+
+---
+
+**Document Version**: 2.0 (Partie 2 complète)
+**Dernière Mise à Jour**: 6 Décembre 2025
+**Auteur**: Architecture Team SNIPER_X

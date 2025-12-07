@@ -108,56 +108,6 @@ def analyze_by_score_category(trades: List[Dict]) -> None:
         print(f"   Avg Duration: {avg_duration:>6.1f} min")
 
 
-def analyze_by_trigger_type(trades: List[Dict]) -> None:
-    """Analyse win rate par type de trigger."""
-    print("\n" + "="*80)
-    print("🎯 PERFORMANCE PAR TYPE DE TRIGGER")
-    print("="*80)
-
-    stats_by_trigger = defaultdict(lambda: {
-        "count": 0,
-        "wins": 0,
-        "losses": 0,
-        "total_pnl_pips": 0.0,
-        "avg_trigger_conf": []
-    })
-
-    for trade in trades:
-        trigger_type = trade.get("trigger_type", "none")
-        outcome = trade.get("outcome")
-        pnl_pips = trade.get("pnl_pips", 0.0)
-        trigger_conf = trade.get("trigger_confidence", 0.0)
-
-        stats = stats_by_trigger[trigger_type]
-        stats["count"] += 1
-        stats["total_pnl_pips"] += pnl_pips
-        stats["avg_trigger_conf"].append(trigger_conf)
-
-        if outcome == "WIN":
-            stats["wins"] += 1
-        elif outcome == "LOSS":
-            stats["losses"] += 1
-
-    # Trier par nombre de trades
-    sorted_triggers = sorted(stats_by_trigger.items(), key=lambda x: x[1]["count"], reverse=True)
-
-    for trigger_type, stats in sorted_triggers:
-        count = stats["count"]
-        wins = stats["wins"]
-        losses = stats["losses"]
-        win_rate = (wins / count * 100) if count > 0 else 0
-        avg_pnl = stats["total_pnl_pips"] / count if count > 0 else 0
-        avg_conf = sum(stats["avg_trigger_conf"]) / len(stats["avg_trigger_conf"]) if stats["avg_trigger_conf"] else 0
-
-        emoji = "🟢" if win_rate >= 65 else "🟡" if win_rate >= 50 else "🔴"
-
-        print(f"\n{emoji} {trigger_type:20}")
-        print(f"   Trades   : {count:>4}")
-        print(f"   Win Rate : {win_rate:>5.1f}% ({wins}W / {losses}L)")
-        print(f"   Avg PnL  : {avg_pnl:>+7.1f} pips")
-        print(f"   Avg Conf : {avg_conf:>5.1%}")
-
-
 def analyze_quality_impact(trades: List[Dict]) -> None:
     """Analyse l'impact des métriques de qualité sur la performance."""
     print("\n" + "="*80)
@@ -303,27 +253,40 @@ def generate_recommendations(trades: List[Dict]) -> None:
             print("   ✅ Les pénalités semblent justifiées (faible win rate)")
             print("   → Recommandation: MAINTENIR ou RENFORCER les pénalités")
 
-    # Analyser l'impact du trigger
-    with_trigger = [t for t in trades if t.get("has_real_trigger", False)]
-    without_trigger = [t for t in trades if not t.get("has_real_trigger", False)]
+    # Analyser l'impact du régime VWAP
+    regimes = defaultdict(list)
+    for t in trades:
+        regime = t.get("vwap_regime", "UNKNOWN")
+        regimes[regime].append(t)
 
-    if with_trigger and without_trigger:
-        with_trigger_wins = sum(1 for t in with_trigger if t.get("outcome") == "WIN")
-        without_trigger_wins = sum(1 for t in without_trigger if t.get("outcome") == "WIN")
+    if len(regimes) > 1:
+        print(f"\n🎯 Impact Régime VWAP:")
 
-        with_trigger_wr = (with_trigger_wins / len(with_trigger) * 100) if with_trigger else 0
-        without_trigger_wr = (without_trigger_wins / len(without_trigger) * 100) if without_trigger else 0
+        regime_stats = []
+        for regime, regime_trades in regimes.items():
+            wins = sum(1 for t in regime_trades if t.get("outcome") == "WIN")
+            wr = (wins / len(regime_trades) * 100) if regime_trades else 0
+            avg_pnl = sum(t.get("pnl_pips", 0) for t in regime_trades) / len(regime_trades) if regime_trades else 0
+            regime_stats.append((regime, len(regime_trades), wr, avg_pnl))
 
-        print(f"\n🎯 Impact du Trigger:")
-        print(f"   Avec trigger    : {len(with_trigger):>3} trades | {with_trigger_wr:>5.1f}% win rate")
-        print(f"   Sans trigger    : {len(without_trigger):>3} trades | {without_trigger_wr:>5.1f}% win rate")
+        # Trier par win rate décroissant
+        regime_stats.sort(key=lambda x: x[2], reverse=True)
 
-        if with_trigger_wr > without_trigger_wr + 10:
-            print("   ✅ Le trigger AMÉLIORE significativement la sélection (+10%+)")
-            print("   → Recommandation: AUGMENTER le bonus trigger")
-        elif with_trigger_wr < without_trigger_wr:
-            print("   ⚠️ Le trigger DÉGRADE la sélection")
-            print("   → Recommandation: RÉDUIRE le poids du trigger ou revoir les patterns")
+        for regime, count, wr, avg_pnl in regime_stats:
+            emoji = "🟢" if wr >= 65 else "🟡" if wr >= 50 else "🔴"
+            print(f"   {emoji} {regime:15} : {count:>3} trades | {wr:>5.1f}% win rate | {avg_pnl:>+7.1f} pips avg")
+
+        # Recommandations
+        best_regime = regime_stats[0]
+        worst_regime = regime_stats[-1]
+
+        if best_regime[2] > 70:
+            print(f"   ✅ Régime {best_regime[0]} très performant ({best_regime[2]:.1f}%)")
+            print(f"   → Recommandation: AUGMENTER poids VWAP en régime {best_regime[0]}")
+
+        if worst_regime[2] < 45:
+            print(f"   ⚠️ Régime {worst_regime[0]} sous-performant ({worst_regime[2]:.1f}%)")
+            print(f"   → Recommandation: FILTRER les trades en régime {worst_regime[0]} (seuil confiance +0.10)")
 
 
 def main():
@@ -346,7 +309,6 @@ def main():
 
     # Analyses
     analyze_by_score_category(trades)
-    analyze_by_trigger_type(trades)
     analyze_quality_impact(trades)
     analyze_score_correlation(trades)
     generate_recommendations(trades)

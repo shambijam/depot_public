@@ -136,8 +136,8 @@
     "adaptive_weights": true,
     "allow_conditional_entries": true,
     "seuils_entree": {
-      "min_confidence": 0.60,
-      "min_orderflow_score": 0.40,
+      "min_confidence": 0.70,
+      "min_orderflow_score": 0.50,
       "max_spread_pts": 30
     },
     "scoring_weights": {
@@ -147,10 +147,9 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "high": 0.60,
-      "moderate": 0.55,
-      "cautious": 0.50,
-      "conditional": 0.85
+      "high": 0.70,
+      "moderate": 0.65,
+      "cautious": 0.60
     },
     "momentum": {
       "enabled": false,
