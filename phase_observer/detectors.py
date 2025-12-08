@@ -1989,6 +1989,12 @@ class Detectors:
             # --- PATCH C4: clamp régimes (zéro 'unknown') ---
             regimes = regimes.replace("unknown", "range_retail")
 
+            # ✅ FIX (08 DEC 2025): Nettoyer TOUS les None/pd.NA/NaN (pas seulement "unknown")
+            # Certaines boucles peuvent assigner None au lieu d'une string
+            regimes = regimes.fillna("range_retail")
+            # Nettoyer aussi les string "None" issues de str(None)
+            regimes = regimes.replace(["None", "none", "", None], "range_retail")
+
         return regimes
 
     def detect_micro_phase_m1(

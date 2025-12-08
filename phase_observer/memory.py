@@ -241,14 +241,20 @@ class PhaseMemoryManager:
                 memory.last_phase = current_phase
 
             self.save_memory(asset_symbol, memory)
-            # ✅ GARDE-FOU FINAL : Ne jamais retourner None
+            # ✅ GARDE-FOU FINAL : Ne jamais retourner None ou "None" string
             final_phase = memory.last_phase or current_phase or "range_retail"
+            # ✅ FIX (08 DEC 2025): Rejeter aussi "None" string (conversion str(None))
+            if str(final_phase).lower() in ("none", ""):
+                final_phase = current_phase or "range_retail"
             return final_phase
 
         except Exception as e:
             self.logger.error(f"[Memory] apply_phase_memory failed: {e}", exc_info=True)
             # 🔥 fallback : jamais None
             final_phase = current_phase or self.get_last_phase(asset_symbol) or "range_retail"
+            # ✅ FIX (08 DEC 2025): Rejeter aussi "None" string dans exception handler
+            if str(final_phase).lower() in ("none", ""):
+                final_phase = "range_retail"
             return final_phase
         
     # === Gestion des Footprints (live & final) ===

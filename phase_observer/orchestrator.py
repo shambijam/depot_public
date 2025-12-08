@@ -1244,7 +1244,8 @@ class PhaseObserver:
             def _sanitize_phase_label(row: pd.Series, phase: str) -> str:
                 """Évite tout label indécis et remappe vers une phase autorisée."""
                 p = (phase or "").strip().lower()
-                if p in ("", "unknown", "uncertain", "no_clear_phase", None):
+                # ✅ FIX (08 DEC 2025): Ajouter "none" string pour gérer str(None) conversion
+                if p in ("", "unknown", "uncertain", "no_clear_phase", "none", None):
                     return _fallback_phase_from_regime(row)
                 PHASE_SYNONYM_MAP = {
                     "bullish": "trending_institutional_bull",
@@ -1289,10 +1290,34 @@ class PhaseObserver:
 
 
             def _determine_phase_no_ncp(row: pd.Series) -> str:
+                # ✅ VALIDATION PRÉVENTIVE : Vérifier que row est un pd.Series valide
+                if row is None or not isinstance(row, pd.Series):
+                    self.logger.warning(
+                        f"[PHASE_DETECTION_ERROR] Row invalide (type={type(row)}), "
+                        f"fallback vers régime"
+                    )
+                    return _fallback_phase_from_regime(row) if row is not None else "range_retail"
+
+                # ✅ VALIDATION : Vérifier que les colonnes critiques existent
+                if "regime" not in row or row.get("regime") is None or (isinstance(row.get("regime"), float) and pd.isna(row.get("regime"))):
+                    self.logger.warning(
+                        f"[PHASE_DETECTION_ERROR] Colonne 'regime' manquante ou None, "
+                        f"fallback déterministe appliqué"
+                    )
+                    return "range_retail"
+
                 # 1) détermination brute par la taxonomie existante
                 try:
                     raw = self.detectors.determine_optimized_phase(row)
-                except Exception:
+                except Exception as e:
+                    # ❌ PROBLÈME : Cette exception ne devrait JAMAIS arriver !
+                    # determine_optimized_phase() est conçu pour toujours retourner une phase valide
+                    # Si on arrive ici, c'est qu'il y a un problème de données en entrée
+                    self.logger.error(
+                        f"[PHASE_DETECTION_ERROR] determine_optimized_phase a échoué ! "
+                        f"Erreur: {e} | row type={type(row)} | row.index={getattr(row, 'index', 'N/A')}",
+                        exc_info=True
+                    )
                     raw = None
 
                 # 2) priorité Liquidity MAIS avec persistance minimale configurable
