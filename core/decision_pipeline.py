@@ -1285,11 +1285,19 @@ class DecisionPipeline:
 
             # -- 4) Appel fusion avec VWAP via MarketAnalyzer (03 DEC 2025) --
             if self.market_analyzer is not None and df_m1 is not None:
+                # ✅ CORRECTION (08 DEC 2025): Extraire latest depuis df_m1 si md_asset.latest vide
+                latest_row = md_asset.get("latest")
+                if not latest_row and df_m1 is not None and not df_m1.empty:
+                    try:
+                        latest_row = df_m1.iloc[-1]  # Dernière ligne du DataFrame
+                    except Exception:
+                        latest_row = {}
+
                 # Construire market_results compatible avec build_fused_decision()
                 market_results = {
                     "annotated_rates_df": df_m1,
                     "annotated_df": df_m1,  # Fallback
-                    "latest": md_asset.get("latest") or {},
+                    "latest": latest_row or {},
                     "patterns": {
                         "orderflow": orderflow or {}
                     }

@@ -206,10 +206,43 @@ class MarketAnalyzer:
 
         # ✅ AJOUT (08 DEC 2025): Transmettre position dans le range pour logique de retournement
         if latest is not None:
-            ctx["range_pos_pct"] = float(latest.get("range_pos_pct", 0.5))
-            ctx["in_upper_tercile"] = bool(latest.get("in_upper_tercile", False))
-            ctx["in_lower_tercile"] = bool(latest.get("in_lower_tercile", False))
-            ctx["phase_observer_regime"] = str(latest.get("regime", "unknown"))
+            try:
+                # Pandas Series utilise .get() mais peut retourner pd.NA ou NaN
+                import pandas as pd
+
+                # Extraire valeurs avec fallback robuste
+                range_pos = latest.get("range_pos_pct")
+                if range_pos is None or (isinstance(range_pos, float) and pd.isna(range_pos)):
+                    range_pos = 0.5
+
+                in_upper = latest.get("in_upper_tercile")
+                if in_upper is None or (hasattr(pd, 'isna') and pd.isna(in_upper)):
+                    in_upper = False
+
+                in_lower = latest.get("in_lower_tercile")
+                if in_lower is None or (hasattr(pd, 'isna') and pd.isna(in_lower)):
+                    in_lower = False
+
+                regime = latest.get("regime")
+                if regime is None or (hasattr(pd, 'isna') and pd.isna(regime)):
+                    regime = "unknown"
+
+                ctx["range_pos_pct"] = float(range_pos)
+                ctx["in_upper_tercile"] = bool(in_upper)
+                ctx["in_lower_tercile"] = bool(in_lower)
+                ctx["phase_observer_regime"] = str(regime)
+
+                # 🔍 DEBUG LOG
+                self.logger.debug(
+                    f"[RANGE_CONTEXT] {asset} | regime={regime} | pos={float(range_pos):.0%} | "
+                    f"upper={bool(in_upper)} | lower={bool(in_lower)}"
+                )
+            except Exception as e:
+                self.logger.warning(f"[RANGE_CONTEXT] Failed to extract range data: {e}")
+                ctx["range_pos_pct"] = 0.5
+                ctx["in_upper_tercile"] = False
+                ctx["in_lower_tercile"] = False
+                ctx["phase_observer_regime"] = "unknown"
 
         try:
             fused = self.fusion_manager.fuse(
