@@ -233,7 +233,7 @@ class MarketAnalyzer:
                 ctx["phase_observer_regime"] = str(regime)
 
                 # 🔍 DEBUG LOG
-                self.logger.debug(
+                self.logger.info(
                     f"[RANGE_CONTEXT] {asset} | regime={regime} | pos={float(range_pos):.0%} | "
                     f"upper={bool(in_upper)} | lower={bool(in_lower)}"
                 )
