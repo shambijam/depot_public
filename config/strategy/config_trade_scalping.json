@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.60
+        "min_confidence": 0.70
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -149,7 +149,7 @@
     "scoring_thresholds": {
       "high": 0.70,
       "moderate": 0.65,
-      "cautious": 0.60
+      "cautious": 0.65
     },
     "momentum": {
       "enabled": false,
