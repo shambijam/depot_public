@@ -65,10 +65,32 @@
                 "min_lot": 0.01,
                 "lot_step": 0.01
             }
+        },
+        {
+            "account_id": "dukascopy_demo",
+            "mode": "DEMO",
+            "broker_name": "Dukascopy",
+            "server_type": "Dukascopy-demo-mt5-1",
+            "login_env_var": "MT5_LOGIN_DEMO_DUKASCOPY",
+            "password_env_var": "MT5_PASSWORD_DEMO_DUKASCOPY",
+            "is_active": true,
+            "priority": 1,
+            "allowed_symbols": [
+                "EURUSD",
+                "GBPUSD",
+                "XAUUSD"
+            ],
+            "account_type": "STANDARD",
+            "trade_settings": {
+                "risk_per_trade_percent": 1.5,
+                "max_lot": 3.0,
+                "min_lot": 0.01,
+                "lot_step": 0.01
+            }
         }
     ],
     "default_live_account": "main_live_broker_A",
-    "default_demo_account": "main_demo_broker_A",
+    "default_demo_account": "dukascopy_demo",
     "symbols": {
         "EURUSD": {
             "enabled": true,
