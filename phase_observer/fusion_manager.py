@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, Tuple, List
 import time, logging, ast
+from phase_observer.vwap.config import get_regime_weights
 
 DirectionInt = int  # -1 SELL, 0 NEUTRAL, +1 BUY
 LOG = logging.getLogger(__name__)
@@ -183,37 +184,16 @@ def _adaptive_weights(
     if vwap_regime:
         vr = str(vwap_regime).upper()
 
-        if vr == "TRENDING":
-            # TRENDING: VWAP = 50%, OrderFlow = 30%, Footprint = 20%
-            # Logique : Tendance institutionnelle forte, VWAP = indicateur principal
-            w_vw = 0.50
-            w_of = 0.30
-            w_fp = 0.20
-            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=TRENDING → VWAP=50% OF=30% FP=20%")
+        # Lecture dynamique des poids depuis vwap_adaptive_config.json
+        weights = get_regime_weights(vr)
+        w_vw = weights["vwap"]
+        w_of = weights["orderflow"]
+        w_fp = weights["footprint"]
 
-        elif vr == "BALANCED":
-            # BALANCED: VWAP = 30%, OrderFlow = 35%, Footprint = 35%
-            # Logique : Équilibre, VWAP référence neutre
-            w_vw = 0.30
-            w_of = 0.35
-            w_fp = 0.35
-            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=BALANCED → VWAP=30% OF=35% FP=35%")
-
-        elif vr == "ACCUMULATION":
-            # ACCUMULATION (range): VWAP = 25%, OrderFlow = 35%, Footprint = 40%
-            # Logique : Micro-structure dominante (footprint), accumulation fine
-            w_vw = 0.25
-            w_of = 0.35
-            w_fp = 0.40
-            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=ACCUMULATION → VWAP=25% OF=35% FP=40%")
-
-        elif vr == "TRANSITIONAL":
-            # TRANSITIONAL: VWAP = 20%, OrderFlow = 40%, Footprint = 40%
-            # Logique : Chaos/Compression, VWAP peu fiable, focus OF+FP
-            w_vw = 0.20
-            w_of = 0.40
-            w_fp = 0.40
-            self.log.debug(f"[ADAPTIVE_WEIGHTS] VWAP_REGIME=TRANSITIONAL → VWAP=20% OF=40% FP=40%")
+        self.log.info(
+            f"[ADAPTIVE_WEIGHTS] 📊 VWAP_REGIME={vr} → "
+            f"VWAP={w_vw:.0%} OF={w_of:.0%} FP={w_fp:.0%}"
+        )
 
     # === PRIORITÉ 2 : Ajustements LEGACY (si pas de VWAP regime) ===
     else:

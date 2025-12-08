@@ -467,6 +467,7 @@ class ConfigManager:
         configs_to_load = {
             "paths.phase_observer_config": "phase_observer_config_schema.json",  # Le schéma n'est pas dans config/schemas/
             "paths.telegram_config": "telegram_config_schema.json",  # Le schéma n'est pas dans config/schemas/
+            "paths.vwap_adaptive_config": "vwap_adaptive_config_schema.json",  # ✅ MAJ (08 DEC 2025): Config VWAP dynamique
         }
         for config_key, schema_file_name in configs_to_load.items():
             config_file_path_str = self.get(config_key)

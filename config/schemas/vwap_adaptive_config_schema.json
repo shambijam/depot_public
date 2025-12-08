@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VWAP Adaptive Configuration Schema",
+  "description": "Configuration adaptative du VWAP selon les régimes de marché",
+  "type": "object",
+  "required": ["regimes"],
+  "properties": {
+    "_description": {
+      "type": "string"
+    },
+    "_documentation": {
+      "type": "string"
+    },
+    "regimes": {
+      "type": "object",
+      "required": ["TRENDING", "BALANCED", "ACCUMULATION", "TRANSITIONAL"],
+      "properties": {
+        "TRENDING": {
+          "$ref": "#/definitions/regime_config"
+        },
+        "BALANCED": {
+          "$ref": "#/definitions/regime_config"
+        },
+        "ACCUMULATION": {
+          "$ref": "#/definitions/regime_config"
+        },
+        "TRANSITIONAL": {
+          "$ref": "#/definitions/regime_config"
+        }
+      }
+    },
+    "special_cases": {
+      "type": "object"
+    },
+    "assets": {
+      "type": "object"
+    },
+    "meta": {
+      "type": "object"
+    }
+  },
+  "definitions": {
+    "regime_config": {
+      "type": "object",
+      "required": ["description", "weights", "windows", "thresholds"],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "weights": {
+          "type": "object",
+          "required": ["vwap", "orderflow", "footprint"],
+          "properties": {
+            "vwap": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "orderflow": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "footprint": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "windows": {
+          "type": "object",
+          "required": ["slope_short", "slope_medium", "slope_long", "distance_lookback", "curvature", "velocity"],
+          "properties": {
+            "slope_short": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slope_medium": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slope_long": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "distance_lookback": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "curvature": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "velocity": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "thresholds": {
+          "type": "object",
+          "required": ["min_slope_significance", "min_confidence", "trend_strength_threshold"],
+          "properties": {
+            "min_slope_significance": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "min_confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "trend_strength_threshold": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "logic": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

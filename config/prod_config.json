@@ -10,6 +10,7 @@
     "asset_configs": "config/assets_config/",
     "phase_observer_config": "config/phase_observer_config.json",
     "telegram_config": "config/telegram_config.json",
+    "vwap_adaptive_config": "config/vwap_adaptive_config.json",
     "backup_dir": "output/backups/"
   },
   "features": {
