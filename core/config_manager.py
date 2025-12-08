@@ -465,8 +465,8 @@ class ConfigManager:
             raise
 
         configs_to_load = {
-            "paths.phase_observer_config": "phase_observer_config_schema.json",  # Le schéma n'est pas dans config/schemas/
-            "paths.telegram_config": "telegram_config_schema.json",  # Le schéma n'est pas dans config/schemas/
+            "paths.phase_observer_config": "phase_observer_config_schema.json",
+            "paths.telegram_config": "telegram_config_schema.json",
             "paths.vwap_adaptive_config": "vwap_adaptive_config_schema.json",  # ✅ MAJ (08 DEC 2025): Config VWAP dynamique
         }
         for config_key, schema_file_name in configs_to_load.items():
@@ -475,15 +475,22 @@ class ConfigManager:
                 config_file_path = Path(config_file_path_str)
                 if config_file_path.exists():
                     try:
-                        # Pour phase_observer_config.json et telegram_config.json,
-                        # nous ne spécifions PAS de schema_name.
-                        # ConfigLoader.validate_config gérera cela en loguant un avertissement.
-                        self.logger.info(
-                            f"Chargement de {config_file_path.name} sans validation de schéma explicite (schéma {schema_file_name} non trouvé)."
-                        )
-                        supplemental_config = self.config_loader.load_dynamic_config(
-                            str(config_file_path)
-                        )  # Appel SANS schema_name
+                        # Vérifier si le schéma existe dans config/schemas/
+                        schema_path = Path("config/schemas") / schema_file_name
+                        if schema_path.exists():
+                            self.logger.info(
+                                f"Chargement de {config_file_path.name} avec validation schéma {schema_file_name}."
+                            )
+                            supplemental_config = self.config_loader.load_dynamic_config(
+                                str(config_file_path), schema_name=schema_file_name
+                            )
+                        else:
+                            self.logger.info(
+                                f"Chargement de {config_file_path.name} sans validation de schéma (schéma {schema_file_name} non trouvé)."
+                            )
+                            supplemental_config = self.config_loader.load_dynamic_config(
+                                str(config_file_path)
+                            )
 
                         self._dynamic_config = self._merge_dicts(
                             self._dynamic_config, supplemental_config
