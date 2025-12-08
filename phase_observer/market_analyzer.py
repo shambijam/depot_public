@@ -135,11 +135,17 @@ class MarketAnalyzer:
         Attend dans `market_results["patterns"]["orderflow"]` le dict OFv6.
         Tolère l’absence de footprint/trigger et comble anchor depuis POC si nécessaire.
         """
+        # 🔍 DEBUG ENTRY POINT (08 DEC 2025)
+        self.logger.info(f"[BUILD_FUSED_ENTRY] {asset} | function called | fusion_manager={self.fusion_manager is not None}")
+
         if self.fusion_manager is None:
             return {"status": "SUSPECT", "reason": "FusionManager unavailable"}
 
         of = (market_results or {}).get("patterns", {}).get("orderflow") or {}
         latest = (market_results or {}).get("latest")
+
+        # 🔍 DEBUG LATEST VALUE (08 DEC 2025)
+        self.logger.info(f"[BUILD_FUSED_LATEST] {asset} | latest type={type(latest)} | is_none={latest is None} | has_data={bool(latest)}")
 
         # Compat v6 → expose bias / poc au top-level pour la Fusion
         try:
