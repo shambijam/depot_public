@@ -141,11 +141,10 @@ class VWAPAnalyzer:
                         regime_strength=regime_strength
                     )
 
-                    self.logger.debug(
-                        f"[VWAP_ANALYZER] Regime mapping | "
-                        f"PhaseObserver={phase_observer_regime} → "
-                        f"VWAP={mapped_vwap_regime.value} | "
-                        f"Confidence={regime_confidence:.2f}"
+                    self.logger.info(
+                        f"[VWAP_REGIME_MAPPER] 🔄 PhaseObserver '{phase_observer_regime}' → "
+                        f"VWAP '{mapped_vwap_regime.value}' | "
+                        f"Confiance={regime_confidence:.2%}"
                     )
 
             # 5. Calcul dérivés (avec régime mappé si disponible)

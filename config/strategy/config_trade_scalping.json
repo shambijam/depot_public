@@ -37,7 +37,7 @@
           "rr_floor": 1.0,
           "rr_cap": 3.0,
           "sl": {
-            "pips": 300,
+            "pips": 400,
             "buffer_pips": 2,
             "atr_period": 14,
             "atr_multiplier": 0.0,
@@ -45,7 +45,7 @@
           },
           "tp": {
             "tp_method": "PIPS",
-            "pips": 300,
+            "pips": 400,
             "atr_period": 14,
             "atr_multiplier": 0.0,
             "execution": {
@@ -68,16 +68,16 @@
       },
       "footprint": {
         "enabled": true,
-        "m1_min_ticks": 50,
-        "m1_min_coverage_s": 15,
-        "tickrate_min": 2.0,
+        "m1_min_ticks": 100,
+        "m1_min_coverage_s": 30,
+        "tickrate_min": 3.0,
         "veto_absorption": true,
         "warn_absorption": false,
         "absorption_penalty": 0.25
       },
       "orderflow": {
         "enabled": true,
-        "delta_abs_min": 30.0
+        "delta_abs_min": 100.0
       },
       "vwap": {
         "enabled": true,
@@ -147,8 +147,8 @@
       "risk": 0.10
     },
     "scoring_thresholds": {
-      "high": 0.70,
-      "moderate": 0.65,
+      "high": 0.75,
+      "moderate": 0.70,
       "cautious": 0.65
     },
     "momentum": {

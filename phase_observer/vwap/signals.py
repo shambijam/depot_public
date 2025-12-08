@@ -97,15 +97,20 @@ class VWAPSignalGenerator:
             normalization_factor = (trend_weight * 15 + position_weight * 10) / 25.0
             total_score = min(25.0, total_raw / normalization_factor)
 
-            # Log adaptation si significative
-            if abs(trend_weight - 1.0) > 0.05 or abs(position_weight - 1.0) > 0.05:
-                self.logger.debug(
-                    f"[VWAP_SIGNALS] Adaptive scoring | "
-                    f"Regime={derivatives.regime.value} | "
-                    f"TrendW={trend_weight:.2f} | PositionW={position_weight:.2f} | "
-                    f"Raw={trend_score:.1f}+{position_score:.1f}={trend_score+position_score:.1f} → "
-                    f"Adjusted={total_score:.1f}"
-                )
+            # Log adaptation TOUJOURS (pour visibilité utilisateur)
+            self.logger.info(
+                f"[VWAP_REGIME] 🎯 {derivatives.regime.value} | "
+                f"Poids: trend={trend_weight:.2f}x position={position_weight:.2f}x"
+            )
+            self.logger.info(
+                f"[VWAP_SCORING] Bruts: trend={trend_score:.1f}/15 position={position_score:.1f}/10 total={trend_score+position_score:.1f}/25"
+            )
+            self.logger.info(
+                f"[VWAP_SCORING] Ajustés: trend={adjusted_trend_score:.1f}/15 position={adjusted_position_score:.1f}/10 total={total_score:.1f}/25"
+            )
+            self.logger.info(
+                f"[VWAP_SCORING] Score final normalisé: {total_score/25.0:.3f} ({total_score/25.0*100:.1f}%)"
+            )
 
             # 5. Détection type de signal
             signal_type = self._detect_signal_type(derivatives, current_price)
