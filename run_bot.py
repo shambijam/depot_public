@@ -1511,17 +1511,16 @@ def run_single_pipeline_cycle(
                                     # ✅ Enrichir contexte avec régime PhaseObserver
                                     vwap_ctx = ctx.copy() if ctx else {}
 
-                                    # Extraire régime PhaseObserver depuis annotated_rates_df
-                                    if 'annotated_rates_df' in locals() and annotated_rates_df is not None:
-                                        if not annotated_rates_df.empty and 'regime' in annotated_rates_df.columns:
-                                            try:
-                                                phase_observer_regime = str(annotated_rates_df['regime'].iloc[-1])
-                                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
-                                                logger.debug(
-                                                    f"[VWAP][{asset}] PhaseObserver regime: {phase_observer_regime}"
-                                                )
-                                            except Exception as e:
-                                                logger.debug(f"[VWAP][{asset}] Could not extract regime: {e}")
+                                    # Extraire régime PhaseObserver depuis df_vwap (qui contient la colonne 'regime')
+                                    if df_vwap is not None and not df_vwap.empty and 'regime' in df_vwap.columns:
+                                        try:
+                                            phase_observer_regime = str(df_vwap['regime'].iloc[-1])
+                                            vwap_ctx['phase_observer_regime'] = phase_observer_regime
+                                            logger.info(
+                                                f"[VWAP][{asset}] 🔄 PhaseObserver regime extracted: {phase_observer_regime}"
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"[VWAP][{asset}] Could not extract regime: {e}")
 
                                     # Créer analyseur VWAP et lancer analyse
                                     vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
