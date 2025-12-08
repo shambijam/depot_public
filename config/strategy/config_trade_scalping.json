@@ -13,7 +13,7 @@
       "name": "scalping_entry",
       "priority": 1,
       "conditions": {
-        "min_confidence": 0.70
+        "min_confidence": 0.75
       },
       "order_type": "MARKET",
       "action_logic": {
@@ -56,7 +56,7 @@
         "closure_rules": {
           "enabled": true,
           "enable_profit_close": true,
-          "target_profit_pips": 40.0,
+          "target_profit_pips": 45.0,
           "require_full_count_for_profit_close": true,
           "rt_fast_window_ms": 120000,
           "rt_poll_interval_ms": 100,
@@ -136,7 +136,7 @@
     "adaptive_weights": true,
     "allow_conditional_entries": true,
     "seuils_entree": {
-      "min_confidence": 0.70,
+      "min_confidence": 0.75,
       "min_orderflow_score": 0.50,
       "max_spread_pts": 30
     },
