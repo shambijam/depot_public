@@ -1160,6 +1160,13 @@ class FusionManager:
         vwap_regime = n_vw.get("regime", "").upper()
         phase_regime = ctx.get("phase_observer_regime", "").lower()
 
+        # 🔍 DEBUG: Log systématique pour diagnostiquer
+        _probe(
+            self.log,
+            f"[RANGE_CHECK] direction={direction} | vwap_regime={vwap_regime} | phase_regime={phase_regime} | "
+            f"upper={ctx.get('in_upper_tercile')} | lower={ctx.get('in_lower_tercile')} | pos={ctx.get('range_pos_pct', 0.5):.0%}"
+        )
+
         # Détection régime RANGE
         is_range_regime = (
             vwap_regime == "BALANCED" or
