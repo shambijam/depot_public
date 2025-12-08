@@ -205,7 +205,8 @@ class MarketAnalyzer:
         ctx["asset"] = asset  # ✅ AJOUTÉ: Transmettre l'asset pour le rapport consolidé
 
         # ✅ AJOUT (08 DEC 2025): Transmettre position dans le range pour logique de retournement
-        if latest is not None:
+        self.logger.info(f"[RANGE_CTX_DEBUG] {asset} | latest type={type(latest)} | is_none={latest is None} | bool={bool(latest)}")
+        if latest is not None and (isinstance(latest, dict) and latest or not isinstance(latest, dict)):
             try:
                 # Pandas Series utilise .get() mais peut retourner pd.NA ou NaN
                 import pandas as pd
