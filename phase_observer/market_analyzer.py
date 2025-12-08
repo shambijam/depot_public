@@ -204,6 +204,13 @@ class MarketAnalyzer:
         ctx.setdefault("now_ts", None)  # si absent, FusionManager utilise time.time()
         ctx["asset"] = asset  # ✅ AJOUTÉ: Transmettre l'asset pour le rapport consolidé
 
+        # ✅ AJOUT (08 DEC 2025): Transmettre position dans le range pour logique de retournement
+        if latest is not None:
+            ctx["range_pos_pct"] = float(latest.get("range_pos_pct", 0.5))
+            ctx["in_upper_tercile"] = bool(latest.get("in_upper_tercile", False))
+            ctx["in_lower_tercile"] = bool(latest.get("in_lower_tercile", False))
+            ctx["phase_observer_regime"] = str(latest.get("regime", "unknown"))
+
         try:
             fused = self.fusion_manager.fuse(
                 orderflow=of,

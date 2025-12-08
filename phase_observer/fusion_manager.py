@@ -410,7 +410,7 @@ class FusionManager:
             pass
 
         # 7) Génération décision (catégories + action BUY/SELL/HOLD)
-        decision = self._final_decision("AUTO", fused, n_vw, coherence, cfg)
+        decision = self._final_decision("AUTO", fused, n_vw, coherence, cfg, ctx)
 
         # 9) Rationale
         rationale = self._rationale(decision, n_of, n_fp, n_vw, coherence, rules_eval)
@@ -1131,21 +1131,94 @@ class FusionManager:
         # Retourner (score final, vwap_contribution)
         return (final_score, vwap_contribution)
 
+    # -------------- 5b) Range Reversal Logic --------------
+    def _apply_range_reversal_logic(
+        self, direction: str, ctx: Dict[str, Any], n_vw: Dict[str, Any]
+    ) -> Tuple[str, bool]:
+        """
+        ✅ AJOUT (08 DEC 2025): Logique de retournement en régime RANGE
+
+        En régime RANGE (BALANCED, range_retail, range_distribution, range_institutional, etc.),
+        le prix oscille entre support et résistance.
+
+        Règles de retournement :
+        - Si in_upper_tercile (haut du range) + signal BUY → INVERSER en SELL (rebond résistance)
+        - Si in_lower_tercile (bas du range) + signal SELL → INVERSER en BUY (rebond support)
+
+        Args:
+            direction: Direction calculée ("BUY", "SELL", "NEUTRAL")
+            ctx: Contexte avec range_pos_pct, in_upper_tercile, in_lower_tercile, phase_observer_regime
+            n_vw: VWAP normalisé avec régime
+
+        Returns:
+            Tuple (nouvelle_direction, inversé_bool)
+        """
+        if direction == "NEUTRAL":
+            return (direction, False)  # Pas d'inversion si NEUTRAL
+
+        # Vérifier si on est en régime RANGE
+        vwap_regime = n_vw.get("regime", "").upper()
+        phase_regime = ctx.get("phase_observer_regime", "").lower()
+
+        # Détection régime RANGE
+        is_range_regime = (
+            vwap_regime == "BALANCED" or
+            "range" in phase_regime or
+            "compression" in phase_regime or
+            "sideways" in phase_regime
+        )
+
+        if not is_range_regime:
+            return (direction, False)  # Pas en range, pas d'inversion
+
+        # Récupérer position dans le range
+        in_upper = ctx.get("in_upper_tercile", False)
+        in_lower = ctx.get("in_lower_tercile", False)
+        range_pos = ctx.get("range_pos_pct", 0.5)
+
+        # Logique de retournement
+        reversed_direction = direction
+        was_reversed = False
+
+        if in_upper and direction == "BUY":
+            # Haut du range + signal BUY → SELL (rebond sur résistance)
+            reversed_direction = "SELL"
+            was_reversed = True
+            _probe(
+                self.log,
+                f"[RANGE_REVERSAL] 🔄 INVERSION BUY→SELL | Raison: UPPER_TERCILE (pos={range_pos:.0%}) | "
+                f"Regime: {phase_regime} ({vwap_regime})"
+            )
+        elif in_lower and direction == "SELL":
+            # Bas du range + signal SELL → BUY (rebond sur support)
+            reversed_direction = "BUY"
+            was_reversed = True
+            _probe(
+                self.log,
+                f"[RANGE_REVERSAL] 🔄 INVERSION SELL→BUY | Raison: LOWER_TERCILE (pos={range_pos:.0%}) | "
+                f"Regime: {phase_regime} ({vwap_regime})"
+            )
+
+        return (reversed_direction, was_reversed)
+
     # -------------- 6) Decision Generator --------------
     def _final_decision(
-        self, mode: str, fused: float, n_vw, coherence, cfg
+        self, mode: str, fused: float, n_vw, coherence, cfg, ctx: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        ✅ MISE À JOUR (04 DEC 2025): Triggers supprimés, VWAP utilisé pour direction/anchor
+        ✅ MISE À JOUR (08 DEC 2025): Ajout logique retournement en range
 
         Direction finale :
         1. Majorité pondérée (OF + FP + VWAP)
         2. Si égalité → Fallback VWAP bias
         3. Si VWAP neutral → NEUTRAL
+        4. ✅ NOUVEAU: Application logique retournement si régime RANGE
 
         Anchor price :
         - Valeur VWAP (support/résistance dynamique)
         """
+        ctx = ctx or {}  # Assurer ctx existe
+
         # direction finale: majorité pondérée; sinon fallback VWAP bias
         maj = coherence["majority"]
 
@@ -1162,6 +1235,16 @@ class FusionManager:
                 direction = "SELL"
             else:
                 direction = "NEUTRAL"
+
+        # ✅ AJOUT (08 DEC 2025): Appliquer logique de retournement en range
+        original_direction = direction
+        direction, was_reversed = self._apply_range_reversal_logic(direction, ctx, n_vw)
+
+        if was_reversed:
+            _probe(
+                self.log,
+                f"[RANGE_REVERSAL] ✅ Direction finale inversée: {original_direction} → {direction}"
+            )
 
         # Anchor price = VWAP value (support/resistance dynamique)
         anchor_price = n_vw.get("value")  # Peut être None si VWAP non disponible
