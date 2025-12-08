@@ -195,6 +195,9 @@ def _adaptive_weights(
             f"VWAP={w_vw:.0%} OF={w_of:.0%} FP={w_fp:.0%}"
         )
 
+        # ✅ Retourner immédiatement (pas de normalisation car poids du JSON déjà normalisés)
+        return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw}
+
     # === PRIORITÉ 2 : Ajustements LEGACY (si pas de VWAP regime) ===
     else:
         # ✅ FALLBACK (06 DEC 2025): Poids par défaut + ajustements legacy
