@@ -698,7 +698,13 @@ class FusionManager:
 
         # Métriques VWAP
         zone = str(vw.get("zone", "NEUTRAL"))
-        regime = str(vw.get("regime", "BALANCED"))
+        # ✅ FIX (09 DEC 2025): Lire regime depuis vw["vwap"]["regime"] si structure to_dict()
+        # sinon fallback sur vw["regime"] (si dict direct depuis analyzer)
+        vwap_sub = vw.get("vwap", {})
+        if isinstance(vwap_sub, dict) and "regime" in vwap_sub:
+            regime = str(vwap_sub["regime"])
+        else:
+            regime = str(vw.get("regime", "BALANCED"))
         vwap_value = _to_float(vw.get("vwap_value"), 0.0)
         distance_pips = _to_float(vw.get("distance_pips"), 0.0)
         slope = _to_float(vw.get("slope"), 0.0)
