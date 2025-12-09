@@ -1,12 +1,12 @@
 {
     "accounts": [
         {
-            "account_id": "dukascopy_demo",
+            "account_id": "pepperstone_demo",
             "mode": "DEMO",
-            "broker_name": "Dukascopy",
-            "server_type": "Dukascopy-demo-mt5-1",
-            "login_env_var": "MT5_LOGIN_DEMO_DUKASCOPY",
-            "password_env_var": "MT5_PASSWORD_DEMO_DUKASCOPY",
+            "broker_name": "Pepperstone",
+            "server_type": "PepperstoneUK-Demo",
+            "login_env_var": "MT5_LOGIN_DEMO_PEPPERSTONE",
+            "password_env_var": "MT5_PASSWORD_DEMO_PEPPERSTONE",
             "is_active": true,
             "priority": 1,
             "allowed_symbols": [
@@ -23,8 +23,8 @@
             }
         }
     ],
-    "default_live_account": "dukascopy_demo",
-    "default_demo_account": "dukascopy_demo",
+    "default_live_account": "pepperstone_demo",
+    "default_demo_account": "pepperstone_demo",
     "symbols": {
         "EURUSD": {
             "enabled": true,
