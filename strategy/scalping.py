@@ -8,6 +8,7 @@ import uuid
 from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
+from phase_observer.vwap.config import get_regime_weights  # ✅ AJOUTÉ: Poids VWAP dynamiques
 
 class ScalpingStrategy(BaseStrategy):
     """
@@ -703,21 +704,39 @@ class ScalpingStrategy(BaseStrategy):
         final_score: float,
         action: Optional[str],
         vwap_score_pct: float = 0.0,
-        vwap_status: str = "N/A"
+        vwap_status: str = "N/A",
+        vwap_regime: Optional[str] = None  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
     ) -> None:
         """
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
 
         Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
+
+        ✅ MAJ (09 DEC 2025): Poids adaptatifs selon régime VWAP (vwap_adaptive_config.json)
         """
         try:
-            # ✅ Lire les pondérations depuis la config (dynamique)
-            fusion_cfg = self.strategy_config.get("fusion", {})
-            ponderations = fusion_cfg.get("ponderations", {})
-
-            w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100  # 30% -> 30
-            w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100  # 35% -> 35
-            w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100       # 35% -> 35
+            # ✅ POIDS DYNAMIQUES selon régime VWAP (vwap_adaptive_config.json)
+            if vwap_regime:
+                try:
+                    weights = get_regime_weights(vwap_regime.upper())
+                    w_of = weights["orderflow"] * 100  # 0.40 -> 40
+                    w_fp = weights["footprint"] * 100  # 0.40 -> 40
+                    w_vw = weights["vwap"] * 100       # 0.20 -> 20
+                except Exception as e:
+                    self.logger.warning(f"[{asset}] Erreur lecture poids VWAP regime '{vwap_regime}': {e}")
+                    # Fallback sur poids statiques de la config
+                    fusion_cfg = self.strategy_config.get("fusion", {})
+                    ponderations = fusion_cfg.get("ponderations", {})
+                    w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100
+                    w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100
+                    w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100
+            else:
+                # Fallback si pas de régime VWAP disponible
+                fusion_cfg = self.strategy_config.get("fusion", {})
+                ponderations = fusion_cfg.get("ponderations", {})
+                w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100
+                w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100
+                w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100
 
             sep = "=" * 70
 
@@ -1213,10 +1232,12 @@ class ScalpingStrategy(BaseStrategy):
                 # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
                 vwap_score_pct = 0.0
                 vwap_status = "N/A"
+                vwap_regime = None
                 try:
                     latest_signals = asset_signals.get("__latest__", {})
                     vwap_score_pct = float(latest_signals.get("vwap_score", 0.0)) * 100.0  # Convertir 0-1 → 0-100
                     vwap_status = str(latest_signals.get("vwap_status", "N/A"))
+                    vwap_regime = latest_signals.get("vwap_regime")  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
                 except Exception:
                     pass
 
@@ -1227,7 +1248,8 @@ class ScalpingStrategy(BaseStrategy):
                     final_score=final_score,
                     action=action,
                     vwap_score_pct=vwap_score_pct,
-                    vwap_status=vwap_status
+                    vwap_status=vwap_status,
+                    vwap_regime=vwap_regime  # ✅ AJOUTÉ: Passer le régime pour poids dynamiques
                 )
 
                 # ✅ AUCUN SEUIL ICI - FusionManager gère TOUT avec scoring_thresholds
