@@ -3399,7 +3399,8 @@ def scalping_fast_thread(
                 )
 
                 # ✅ RAPPORT ORDERFLOW V6 (restauré dans fast-lane)
-                if scalping_strategy and fusion_out:
+                # IMPORTANT: Généré À CHAQUE CYCLE pour monitoring, pas seulement si signal de trading
+                if scalping_strategy:
                     try:
                         # Extraire données VWAP depuis latest
                         vwap_score_pct = 0.0
@@ -3416,11 +3417,12 @@ def scalping_fast_thread(
                             logger.debug(f"[SCALPING_THREAD] Extraction VWAP failed: {e_vwap}")
 
                         # Calculer score final (fused_confidence en 0-1, convertir en 0-100)
-                        fused_confidence = fusion_out.get("fused_confidence", 0.0)
+                        # Si fusion_out est None, utiliser 0.0 par défaut
+                        fused_confidence = fusion_out.get("fused_confidence", 0.0) if fusion_out else 0.0
                         final_score = fused_confidence * 100.0
 
                         # Action recommandée
-                        action = fusion_out.get("action", "HOLD")
+                        action = fusion_out.get("action", "HOLD") if fusion_out else "HOLD"
 
                         # Appel rapport consolidé
                         scalping_strategy._log_orderflow_consolidated_report(
