@@ -3350,22 +3350,25 @@ def scalping_fast_thread(
                 # ✅ Construire asset_signals pour les analyses
                 latest = market_results.get("latest")
 
-                # 🔍 DEBUG: Voir ce que contient latest
-                if latest is not None:
-                    logger.info(f"[DEBUG_LATEST] Type: {type(latest)}")
-                    if hasattr(latest, 'keys'):
-                        logger.info(f"[DEBUG_LATEST] Keys: {list(latest.keys())[:20]}")  # Limiter à 20 clés
-                    logger.info(f"[DEBUG_LATEST] footprint_summary exists: {'footprint_summary' in latest if hasattr(latest, '__contains__') else 'N/A'}")
-                    logger.info(f"[DEBUG_LATEST] vwap_score exists: {'vwap_score' in latest if hasattr(latest, '__contains__') else 'N/A'}")
+                # ✅ CORRECTION: footprint_summary est dans market_results['footprint'], PAS dans latest
+                footprint_summary = market_results.get('footprint', {})
 
-                    # Voir footprint_summary
-                    fp_sum = latest.get("footprint_summary", {}) if hasattr(latest, 'get') else {}
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] Keys: {list(fp_sum.keys()) if hasattr(fp_sum, 'keys') else 'Not a dict'}")
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] buy_volume: {fp_sum.get('buy_volume', 'N/A') if hasattr(fp_sum, 'get') else 'N/A'}")
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] sell_volume: {fp_sum.get('sell_volume', 'N/A') if hasattr(fp_sum, 'get') else 'N/A'}")
+                # 🔍 DEBUG: Voir ce que contient footprint_summary
+                logger.info(f"[DEBUG_FOOTPRINT_SUM] Type: {type(footprint_summary)}")
+                logger.info(f"[DEBUG_FOOTPRINT_SUM] Keys: {list(footprint_summary.keys()) if isinstance(footprint_summary, dict) else 'Not a dict'}")
+                if isinstance(footprint_summary, dict):
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] buy_volume: {footprint_summary.get('buy_volume', 'N/A')}")
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] sell_volume: {footprint_summary.get('sell_volume', 'N/A')}")
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] tick_count: {footprint_summary.get('tick_count', 'N/A')}")
+
+                # 🔍 DEBUG: Voir VWAP dans latest
+                if latest is not None and hasattr(latest, 'get'):
+                    logger.info(f"[DEBUG_VWAP] vwap_score in latest: {'vwap_score' in latest if hasattr(latest, '__contains__') else 'N/A'}")
+                    logger.info(f"[DEBUG_VWAP] vwap_score value: {latest.get('vwap_score', 'N/A')}")
+                    logger.info(f"[DEBUG_VWAP] vwap_status value: {latest.get('vwap_status', 'N/A')}")
 
                 asset_signals = {
-                    "footprint_summary": latest.get("footprint_summary", {}) if latest is not None else {},
+                    "footprint_summary": footprint_summary,  # ✅ Depuis market_results['footprint']
                     "__latest__": latest if latest is not None else {}
                 }
 
