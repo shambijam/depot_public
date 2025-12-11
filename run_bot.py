@@ -3346,12 +3346,45 @@ def scalping_fast_thread(
                 logger.warning(f"[PRE-CALC] Erreur pré-calcul squelette: {e}")
 
             # Analyse fusion (si FusionManager disponible ET données présentes)
-            if fusion_mgr and market_results:
-                # Extraction inputs fusion
-                orderflow = market_results.get("orderflow_v6", {})
-                footprint = market_results.get("footprint", {})
-                triggers = market_results.get("footprint_trigger", {})  # ✅ MODIFIÉ: footprint_trigger au lieu de triggers
+            if fusion_mgr and scalping_strategy and market_results:
+                # ✅ Construire asset_signals pour les analyses
+                latest = market_results.get("latest")
+                asset_signals = {
+                    "footprint_summary": latest.get("footprint_summary", {}) if latest else {},
+                    "__latest__": latest if latest else {}
+                }
+
                 strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
+
+                # ✅ Récupérer M5 et M15 pour MTF alignment
+                try:
+                    import MetaTrader5 as mt5
+                    df_m5 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M5, bars=6)
+                    df_m15 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M15, bars=4)
+                except Exception as e:
+                    logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M5/M15: {e}")
+                    df_m5 = None
+                    df_m15 = None
+
+                # ✅ Appeler analyses OrderFlow V6 et Footprint V6
+                try:
+                    orderflow = scalping_strategy._analyze_orderflow_v6(
+                        asset='XAUUSD',
+                        df_m1=rates_df,
+                        df_m5=df_m5,
+                        df_m15=df_m15,
+                        asset_signals=asset_signals
+                    )
+
+                    footprint = scalping_strategy._analyze_footprint_v6(
+                        asset='XAUUSD',
+                        df_m1=rates_df,
+                        asset_signals=asset_signals
+                    )
+                except Exception as e:
+                    logger.error(f"[SCALPING_THREAD] Erreur analyses OF/FP: {e}", exc_info=True)
+                    orderflow = {}
+                    footprint = {}
 
                 ctx = {
                     "asset": "XAUUSD",
@@ -3360,7 +3393,6 @@ def scalping_fast_thread(
                 }
 
                 # ✅ AJOUT (08 DEC 2025): Extraire données de range depuis latest pour logique de retournement
-                latest = market_results.get("latest")
                 if latest is not None:
                     try:
                         import pandas as pd
