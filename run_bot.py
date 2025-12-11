@@ -3281,7 +3281,25 @@ def scalping_fast_thread(
                 logger.warning(
                     "⚠️ [SCALPING_THREAD] CACHE MISS | Fallback analyse complète (DataEngine lag?)"
                 )
-                market_results = market_analyzer.analyze(rates_df, "XAUUSD")  # Analyse normale avec ticks
+
+                # ✅ CORRECTION: Récupérer les ticks pour permettre l'analyse footprint
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                candle_start = now.replace(second=0, microsecond=0)
+                candle_end = now
+
+                try:
+                    ticks_df = mt5_connector.get_ticks_for_candle(
+                        symbol="XAUUSD",
+                        start_ts=candle_start,
+                        end_ts=candle_end
+                    )
+                    logger.info(f"[SCALPING_THREAD][CACHE_MISS] Récupéré {len(ticks_df) if ticks_df is not None else 0} ticks pour footprint")
+                except Exception as e:
+                    logger.error(f"[SCALPING_THREAD][CACHE_MISS] Erreur récupération ticks: {e}")
+                    ticks_df = None
+
+                market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=ticks_df)  # ✅ Avec ticks
                 market_results['_cache_hit'] = False
 
             # Stocker dans global_context (avec lock)
