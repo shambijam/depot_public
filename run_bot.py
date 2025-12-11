@@ -3359,8 +3359,8 @@ def scalping_fast_thread(
                 # ✅ Récupérer M5 et M15 pour MTF alignment
                 try:
                     import MetaTrader5 as mt5
-                    df_m5 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M5, bars=6)
-                    df_m15 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M15, bars=4)
+                    df_m5 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M5, count=6)
+                    df_m15 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M15, count=4)
                 except Exception as e:
                     logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M5/M15: {e}")
                     df_m5 = None
@@ -3430,10 +3430,25 @@ def scalping_fast_thread(
                         ctx["in_lower_tercile"] = False
                         ctx["phase_observer_regime"] = "unknown"
 
+                # ✅ Construire objet VWAP pour FusionManager
+                vwap_data = {}
+                if latest is not None:
+                    try:
+                        vwap_data = {
+                            "score": float(latest.get("vwap_score", 0.0)),  # 0.0-1.0
+                            "status": str(latest.get("vwap_status", "N/A")),
+                            "bias": str(latest.get("vwap_bias", "NEUTRAL")),
+                            "regime": str(latest.get("vwap_regime", "UNKNOWN")),
+                            "distance_pips": float(latest.get("vwap_distance_pips", 0.0))
+                        }
+                    except Exception as e:
+                        logger.warning(f"[SCALPING_THREAD] Erreur construction VWAP: {e}")
+
                 # Fusion decision
                 fusion_out = fusion_mgr.fuse(
                     orderflow=orderflow,
                     footprint=footprint,
+                    vwap=vwap_data,  # ✅ Ajout VWAP
                     strategy_config=strat_cfg,
                     context=ctx
                 )
