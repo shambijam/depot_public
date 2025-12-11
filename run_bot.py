@@ -3189,6 +3189,19 @@ def scalping_fast_thread(
 
     logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 5s) ⚡ MODE ULTRA-RAPIDE")
 
+    # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
+    try:
+        from strategy.scalping import ScalpingStrategy
+        scalping_strategy = ScalpingStrategy(
+            config_manager=config_manager,
+            strategy_manager=strategy_manager,
+            logger=logger
+        )
+        logger.info("✅ [SCALPING_THREAD] ScalpingStrategy instanciée pour rapports")
+    except Exception as e:
+        logger.warning(f"[SCALPING_THREAD] Impossible d'instancier ScalpingStrategy: {e}")
+        scalping_strategy = None
+
     # ⚡ OPTION 1: PRÉ-CALCUL — Squelette trade decision (parties statiques)
     # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
     trade_decision_skeleton = None
@@ -3381,6 +3394,44 @@ def scalping_fast_thread(
                     strategy_config=strat_cfg,
                     context=ctx
                 )
+
+                # ✅ RAPPORT ORDERFLOW V6 (restauré dans fast-lane)
+                if scalping_strategy and fusion_out:
+                    try:
+                        # Extraire données VWAP depuis latest
+                        vwap_score_pct = 0.0
+                        vwap_status = "N/A"
+                        vwap_regime = None
+                        try:
+                            latest_signals = market_results.get("__latest__", {})
+                            if not latest_signals and latest is not None:
+                                latest_signals = latest
+                            vwap_score_pct = float(latest_signals.get("vwap_score", 0.0)) * 100.0
+                            vwap_status = str(latest_signals.get("vwap_status", "N/A"))
+                            vwap_regime = latest_signals.get("vwap_regime")
+                        except Exception as e_vwap:
+                            logger.debug(f"[SCALPING_THREAD] Extraction VWAP failed: {e_vwap}")
+
+                        # Calculer score final (fused_confidence en 0-1, convertir en 0-100)
+                        fused_confidence = fusion_out.get("fused_confidence", 0.0)
+                        final_score = fused_confidence * 100.0
+
+                        # Action recommandée
+                        action = fusion_out.get("action", "HOLD")
+
+                        # Appel rapport consolidé
+                        scalping_strategy._log_orderflow_consolidated_report(
+                            asset="XAUUSD",
+                            orderflow_result=orderflow,
+                            footprint_result=footprint,
+                            final_score=final_score,
+                            action=action,
+                            vwap_score_pct=vwap_score_pct,
+                            vwap_status=vwap_status,
+                            vwap_regime=vwap_regime
+                        )
+                    except Exception as e_report:
+                        logger.warning(f"[SCALPING_THREAD] Erreur génération rapport OrderFlow V6: {e_report}")
 
                 # Si signal valide → Exécution
                 if fusion_out.get("ok") and trade_decision_skeleton is not None:
