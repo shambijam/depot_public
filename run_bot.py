@@ -3189,6 +3189,15 @@ def scalping_fast_thread(
 
     logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 5s) ⚡ MODE ULTRA-RAPIDE")
 
+    # ✅ Instancier FusionManager pour ce thread
+    try:
+        from phase_observer.fusion_manager import FusionManager
+        fusion_mgr = FusionManager(logger=logger)
+        logger.info("✅ [SCALPING_THREAD] FusionManager instancié")
+    except Exception as e:
+        logger.error(f"❌ [SCALPING_THREAD] Impossible de créer FusionManager: {e}")
+        fusion_mgr = None
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -3336,8 +3345,7 @@ def scalping_fast_thread(
             except Exception as e:
                 logger.warning(f"[PRE-CALC] Erreur pré-calcul squelette: {e}")
 
-            # FusionManager (si disponible)
-            fusion_mgr = getattr(mecano, "fusion_manager", None)
+            # Analyse fusion (si FusionManager disponible ET données présentes)
             if fusion_mgr and market_results:
                 # Extraction inputs fusion
                 orderflow = market_results.get("orderflow_v6", {})
@@ -3731,7 +3739,7 @@ def main(args: argparse.Namespace) -> None:
 
         # Instancier Mecano
         mecano = Mecano(config_manager_instance=config_manager)
-     
+
         # Instancier StrategyManager
         strategy_manager = StrategyManager(
             config_loader_instance=config_manager.config_loader,
