@@ -17,6 +17,7 @@ import logging
 from typing import List, Optional, Dict, Any
 
 from core.footprint_cache import footprint_cache
+from core.bars_cache import bars_cache  # ✅ PHASE 2: Cache barres historiques
 
 
 logger = logging.getLogger(__name__)
@@ -128,8 +129,16 @@ class DataEngine(threading.Thread):
         analysis_start = time.time()
 
         try:
-            # 1. Récupérer les barres M1 (nécessaire pour MarketAnalyzer)
-            rates_df = self.mt5_connector.get_rates(symbol, "M1", 50)
+            # ✅ PHASE 2: Utiliser cache barres (20 barres au lieu de 50)
+            # 95% du temps: récupère 1 barre seulement (bougie courante)
+            # Recharge complète toutes les 60s seulement
+            rates_df = bars_cache.get_or_fetch(
+                symbol=symbol,
+                timeframe="M1",
+                count=20,  # ✅ RÉDUIT: 50→20 (suffisant pour Volume MA 14)
+                mt5_connector=self.mt5_connector,
+                ttl_seconds=60.0,
+            )
             if rates_df is None or (hasattr(rates_df, 'empty') and rates_df.empty):
                 self.logger.debug(
                     f"⚠️ [DATA_ENGINE][{symbol}] Barres M1 indisponibles (marché fermé?)"

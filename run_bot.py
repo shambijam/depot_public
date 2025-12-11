@@ -3199,8 +3199,20 @@ def scalping_fast_thread(
         cycle_start = time.time()
 
         try:
-            # Analyse XAUUSD uniquement
-            rates_df = mt5_connector.get_rates("XAUUSD", "M1", 200)  # ✅ RÉDUIT: 500→200
+            # ✅ PHASE 2: Import cache multi-niveaux
+            from core.bars_cache import bars_cache
+            from phase_observer.regime_resolver import regime_resolver
+
+            # ✅ PHASE 2: Utiliser cache barres (30 barres au lieu de 200)
+            # 95% du temps: récupère 1 barre seulement (bougie courante)
+            # Recharge complète toutes les 60s seulement
+            rates_df = bars_cache.get_or_fetch(
+                symbol="XAUUSD",
+                timeframe="M1",
+                count=30,  # ✅ RÉDUIT: 200→30 (suffisant pour tous composants)
+                mt5_connector=mt5_connector,
+                ttl_seconds=60.0,
+            )
             if rates_df is None or rates_df.empty:
                 logger.warning("[SCALPING_THREAD] Données XAUUSD indisponibles")
                 time.sleep(cycle_interval)
