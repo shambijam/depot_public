@@ -516,6 +516,7 @@ def run_single_pipeline_cycle(
     is_dry_run: bool,
     cycle_count: int,
     daily_trade_count: int,
+    excluded_symbols: Optional[List[str]] = None,
 ) -> bool:
     """
     Exécute un cycle complet du pipeline de trading de SNIPER_X.
@@ -1116,6 +1117,15 @@ def run_single_pipeline_cycle(
                 tradeable_assets = [
                     a for a in tradeable_assets if a.upper() != "XAUUSD"
                 ]
+
+        # ✅ PHASE 1: Filtrage symboles exclus (pour LIQUIDITY Thread)
+        if excluded_symbols:
+            excluded_upper = {s.upper() for s in excluded_symbols}
+            tradeable_assets = [
+                a for a in tradeable_assets if a.upper() not in excluded_upper
+            ]
+            if excluded_symbols:
+                logger.info(f"🔒 [PIPELINE] Symboles exclus: {excluded_symbols}")
 
         print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
         if not tradeable_assets:
@@ -3490,7 +3500,7 @@ def liquidity_main_thread(
     Thread dédié à LIQUIDITY - Cycle standard 60 secondes.
 
     Responsabilités:
-    - Analyse M1+M5 (EURUSD, GBPUSD, XAUUSD)
+    - Analyse M1+M5 (EURUSD, GBPUSD) ← XAUUSD traité par SCALPING Thread
     - decision_pipeline.institutional_decision_pipeline()
     - LiquidityStrategy → EQH/EQL breakout
     - Exécution ordres LIMIT
@@ -3507,7 +3517,7 @@ def liquidity_main_thread(
 
         try:
             # Utiliser la fonction existante run_single_pipeline_cycle
-            # mais en mode "liquidity only"
+            # mais en mode "liquidity only" (XAUUSD exclu - traité par SCALPING Thread)
             trade_executed = run_single_pipeline_cycle(
                 mt5_connector,
                 decision_pipeline,
@@ -3518,6 +3528,7 @@ def liquidity_main_thread(
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
+                excluded_symbols=["XAUUSD"],  # ✅ PHASE 1: XAUUSD exclu (géré par SCALPING)
             )
 
             if trade_executed:
@@ -3759,9 +3770,9 @@ def main(args: argparse.Namespace) -> None:
     logger.info("=" * 80)
     logger.info("🚀 DÉMARRAGE DES THREADS SÉPARÉS")
     logger.info("=" * 80)
-    logger.info("  • DATAENGINE Thread     : Cycle 5s (Analyse Footprint asynchrone)")
-    logger.info("  • SCALPING Thread       : Cycle 10s (XAUUSD)")
-    logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD, XAUUSD)")
+    logger.info("  • DATAENGINE Thread     : Cycle 5s (Analyse Footprint asynchrone) [XAUUSD]")
+    logger.info("  • SCALPING Thread       : Cycle 5s (XAUUSD UNIQUEMENT) ⚡")
+    logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD) ← XAUUSD exclu")
     logger.info("  • BASKET MONITOR Thread : Surveillance continue (polling 100ms)")
     logger.info("=" * 80)
 
