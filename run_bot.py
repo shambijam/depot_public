@@ -3365,9 +3365,10 @@ def scalping_fast_thread(
                     df_m5 = None
                     df_m15 = None
 
-                # ✅ Appeler analyses OrderFlow V6 et Footprint V6
+                # ✅ Appeler analyses OrderFlow V6 et Footprint V6 (format FusionManager)
                 try:
-                    orderflow = scalping_strategy._analyze_orderflow_v6(
+                    # OrderFlow: Utiliser calculate_orderflow_v6_standalone() (format FusionManager)
+                    orderflow = scalping_strategy.calculate_orderflow_v6_standalone(
                         asset='XAUUSD',
                         df_m1=rates_df,
                         df_m5=df_m5,
@@ -3375,17 +3376,26 @@ def scalping_fast_thread(
                         asset_signals=asset_signals
                     )
 
-                    footprint = scalping_strategy._analyze_footprint_v6(
+                    # Footprint: Appeler _analyze_footprint_v6() et convertir au format FusionManager
+                    footprint_raw = scalping_strategy._analyze_footprint_v6(
                         asset='XAUUSD',
                         df_m1=rates_df,
                         asset_signals=asset_signals
                     )
 
+                    # Convertir footprint au format FusionManager
+                    footprint_total = footprint_raw.get("total_score", 0.0)
+                    footprint_score_pct = (footprint_total / 25.0) * 100.0  # 25 pts max footprint
+                    footprint = {
+                        "score": footprint_score_pct,
+                        "status": "VALID" if footprint_total >= 15.0 else "WEAK" if footprint_total >= 7.5 else "SUSPECT",
+                        "total_score": footprint_total,
+                        **footprint_raw  # Garder tous les champs originaux
+                    }
+
                     # 🔍 DEBUG: Afficher structure retournée
-                    logger.info(f"[DEBUG_OF] OrderFlow keys: {list(orderflow.keys()) if orderflow else 'None'}")
-                    logger.info(f"[DEBUG_OF] OrderFlow score: {orderflow.get('score') if orderflow else 'N/A'}")
-                    logger.info(f"[DEBUG_FP] Footprint keys: {list(footprint.keys()) if footprint else 'None'}")
-                    logger.info(f"[DEBUG_FP] Footprint score: {footprint.get('score') if footprint else 'N/A'}")
+                    logger.info(f"[DEBUG_OF] OrderFlow score: {orderflow.get('score')} status: {orderflow.get('status')}")
+                    logger.info(f"[DEBUG_FP] Footprint score: {footprint.get('score')} status: {footprint.get('status')}")
 
                 except Exception as e:
                     logger.error(f"[SCALPING_THREAD] Erreur analyses OF/FP: {e}", exc_info=True)
