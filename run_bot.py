@@ -3350,8 +3350,25 @@ def scalping_fast_thread(
                 # ✅ Construire asset_signals pour les analyses
                 latest = market_results.get("latest")
 
-                # ✅ CORRECTION: footprint_summary est dans market_results['footprint'], PAS dans latest
+                # ✅ CORRECTION: Extraire footprint_summary selon la source (CACHE HIT ou MISS)
+                # CACHE HIT: footprint_summary dans market_results['footprint']
+                # CACHE MISS: footprint_summary dans latest['footprint_summary']
                 footprint_summary = market_results.get('footprint', {})
+
+                if not footprint_summary and latest is not None and hasattr(latest, 'get'):
+                    # Fallback: chercher dans latest (CACHE MISS)
+                    fp_sum_raw = latest.get("footprint_summary")
+                    if isinstance(fp_sum_raw, str):
+                        # Parser JSON string
+                        try:
+                            import json
+                            footprint_summary = json.loads(fp_sum_raw)
+                        except:
+                            footprint_summary = {}
+                    elif isinstance(fp_sum_raw, dict):
+                        footprint_summary = fp_sum_raw
+                    else:
+                        footprint_summary = {}
 
                 # 🔍 DEBUG: Voir ce que contient footprint_summary
                 logger.info(f"[DEBUG_FOOTPRINT_SUM] Type: {type(footprint_summary)}")
@@ -3368,7 +3385,7 @@ def scalping_fast_thread(
                     logger.info(f"[DEBUG_VWAP] vwap_status value: {latest.get('vwap_status', 'N/A')}")
 
                 asset_signals = {
-                    "footprint_summary": footprint_summary,  # ✅ Depuis market_results['footprint']
+                    "footprint_summary": footprint_summary,
                     "__latest__": latest if latest is not None else {}
                 }
 
