@@ -3234,7 +3234,7 @@ def scalping_fast_thread(
             rates_df = bars_cache.get_or_fetch(
                 symbol="XAUUSD",
                 timeframe="M1",
-                count=30,  # ✅ RÉDUIT: 200→30 (suffisant pour tous composants)
+                count=50,  # ✅ AJUSTÉ: 30→50 (minimum requis pour PhaseObserver volume_zscore)
                 mt5_connector=mt5_connector,
                 ttl_seconds=60.0,
             )
@@ -3358,9 +3358,8 @@ def scalping_fast_thread(
 
                 # ✅ Récupérer M5 et M15 pour MTF alignment
                 try:
-                    import MetaTrader5 as mt5
-                    df_m5 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M5, count=6)
-                    df_m15 = mt5_connector.get_rates('XAUUSD', mt5.TIMEFRAME_M15, count=4)
+                    df_m5 = mt5_connector.get_rates('XAUUSD', 'M5', 6)
+                    df_m15 = mt5_connector.get_rates('XAUUSD', 'M15', 4)
                 except Exception as e:
                     logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M5/M15: {e}")
                     df_m5 = None
@@ -3381,6 +3380,13 @@ def scalping_fast_thread(
                         df_m1=rates_df,
                         asset_signals=asset_signals
                     )
+
+                    # 🔍 DEBUG: Afficher structure retournée
+                    logger.info(f"[DEBUG_OF] OrderFlow keys: {list(orderflow.keys()) if orderflow else 'None'}")
+                    logger.info(f"[DEBUG_OF] OrderFlow score: {orderflow.get('score') if orderflow else 'N/A'}")
+                    logger.info(f"[DEBUG_FP] Footprint keys: {list(footprint.keys()) if footprint else 'None'}")
+                    logger.info(f"[DEBUG_FP] Footprint score: {footprint.get('score') if footprint else 'N/A'}")
+
                 except Exception as e:
                     logger.error(f"[SCALPING_THREAD] Erreur analyses OF/FP: {e}", exc_info=True)
                     orderflow = {}
