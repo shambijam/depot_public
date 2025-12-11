@@ -3192,9 +3192,12 @@ def scalping_fast_thread(
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
+        # Récupérer la config de stratégie scalping
+        strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
         scalping_strategy = ScalpingStrategy(
             config_manager=config_manager,
-            strategy_manager=strategy_manager,
+            strategy_config=strat_cfg,
+            mt5_connector=mt5_connector,
             logger=logger
         )
         logger.info("✅ [SCALPING_THREAD] ScalpingStrategy instanciée pour rapports")
