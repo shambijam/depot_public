@@ -3349,6 +3349,21 @@ def scalping_fast_thread(
             if fusion_mgr and scalping_strategy and market_results:
                 # ✅ Construire asset_signals pour les analyses
                 latest = market_results.get("latest")
+
+                # 🔍 DEBUG: Voir ce que contient latest
+                if latest is not None:
+                    logger.info(f"[DEBUG_LATEST] Type: {type(latest)}")
+                    if hasattr(latest, 'keys'):
+                        logger.info(f"[DEBUG_LATEST] Keys: {list(latest.keys())[:20]}")  # Limiter à 20 clés
+                    logger.info(f"[DEBUG_LATEST] footprint_summary exists: {'footprint_summary' in latest if hasattr(latest, '__contains__') else 'N/A'}")
+                    logger.info(f"[DEBUG_LATEST] vwap_score exists: {'vwap_score' in latest if hasattr(latest, '__contains__') else 'N/A'}")
+
+                    # Voir footprint_summary
+                    fp_sum = latest.get("footprint_summary", {}) if hasattr(latest, 'get') else {}
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] Keys: {list(fp_sum.keys()) if hasattr(fp_sum, 'keys') else 'Not a dict'}")
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] buy_volume: {fp_sum.get('buy_volume', 'N/A') if hasattr(fp_sum, 'get') else 'N/A'}")
+                    logger.info(f"[DEBUG_FOOTPRINT_SUM] sell_volume: {fp_sum.get('sell_volume', 'N/A') if hasattr(fp_sum, 'get') else 'N/A'}")
+
                 asset_signals = {
                     "footprint_summary": latest.get("footprint_summary", {}) if latest is not None else {},
                     "__latest__": latest if latest is not None else {}
