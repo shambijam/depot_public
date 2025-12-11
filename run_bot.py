@@ -3350,25 +3350,34 @@ def scalping_fast_thread(
                 # ✅ Construire asset_signals pour les analyses
                 latest = market_results.get("latest")
 
-                # ✅ CORRECTION: Extraire footprint_summary selon la source (CACHE HIT ou MISS)
-                # CACHE HIT: footprint_summary dans market_results['footprint']
-                # CACHE MISS: footprint_summary dans latest['footprint_summary']
-                footprint_summary = market_results.get('footprint', {})
+                # ✅ CORRECTION: Extraire footprint_summary depuis annotated_df (dernière ligne)
+                # Car `latest` est une COPIE, pas une référence au DataFrame
+                footprint_summary = {}
 
-                if not footprint_summary and latest is not None and hasattr(latest, 'get'):
-                    # Fallback: chercher dans latest (CACHE MISS)
-                    fp_sum_raw = latest.get("footprint_summary")
-                    if isinstance(fp_sum_raw, str):
-                        # Parser JSON string
-                        try:
-                            import json
-                            footprint_summary = json.loads(fp_sum_raw)
-                        except:
-                            footprint_summary = {}
-                    elif isinstance(fp_sum_raw, dict):
-                        footprint_summary = fp_sum_raw
+                # D'abord essayer CACHE HIT
+                if 'footprint' in market_results and market_results['footprint']:
+                    footprint_summary = market_results['footprint']
+                    logger.info(f"[DEBUG_SOURCE] footprint_summary depuis CACHE HIT")
+                else:
+                    # CACHE MISS: Extraire depuis DataFrame annoté
+                    annotated_df = market_results.get('annotated_df')
+                    if annotated_df is not None and not annotated_df.empty and 'footprint_summary' in annotated_df.columns:
+                        fp_sum_raw = annotated_df.iloc[-1]['footprint_summary']
+                        if isinstance(fp_sum_raw, str):
+                            try:
+                                import json
+                                footprint_summary = json.loads(fp_sum_raw)
+                                logger.info(f"[DEBUG_SOURCE] footprint_summary depuis annotated_df (JSON parsed)")
+                            except:
+                                logger.warning(f"[DEBUG_SOURCE] Échec parsing JSON footprint_summary")
+                                footprint_summary = {}
+                        elif isinstance(fp_sum_raw, dict):
+                            footprint_summary = fp_sum_raw
+                            logger.info(f"[DEBUG_SOURCE] footprint_summary depuis annotated_df (dict)")
+                        else:
+                            logger.warning(f"[DEBUG_SOURCE] footprint_summary type inconnu: {type(fp_sum_raw)}")
                     else:
-                        footprint_summary = {}
+                        logger.warning(f"[DEBUG_SOURCE] annotated_df indisponible ou sans colonne footprint_summary")
 
                 # 🔍 DEBUG: Voir ce que contient footprint_summary
                 logger.info(f"[DEBUG_FOOTPRINT_SUM] Type: {type(footprint_summary)}")
