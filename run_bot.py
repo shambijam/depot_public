@@ -3350,8 +3350,8 @@ def scalping_fast_thread(
                 # ✅ Construire asset_signals pour les analyses
                 latest = market_results.get("latest")
                 asset_signals = {
-                    "footprint_summary": latest.get("footprint_summary", {}) if latest else {},
-                    "__latest__": latest if latest else {}
+                    "footprint_summary": latest.get("footprint_summary", {}) if latest is not None else {},
+                    "__latest__": latest if latest is not None else {}
                 }
 
                 strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
