@@ -3283,6 +3283,55 @@ def scalping_fast_thread(
                 market_results['footprint_df'] = cached_footprint.get('footprint_df')
                 market_results['_cache_hit'] = True
                 market_results['_cache_age_s'] = cache_age
+
+                # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE HIT aussi (sinon vwap_score = 0)
+                try:
+                    latest = market_results.get("latest", {})
+                    current_price = None
+                    if isinstance(latest, dict):
+                        current_price = latest.get("current_price") or latest.get("close")
+
+                    if rates_df is not None and not rates_df.empty and current_price is not None:
+                        # Préparer DataFrame pour VWAP
+                        df_vwap = rates_df.copy()
+                        if 'time' not in df_vwap.columns and df_vwap.index.name in ['time', None]:
+                            df_vwap = df_vwap.reset_index()
+                            if df_vwap.columns[0] != 'time':
+                                df_vwap = df_vwap.rename(columns={df_vwap.columns[0]: 'time'})
+
+                        # Extraire régime PhaseObserver si disponible
+                        vwap_ctx = {}
+                        if 'regime' in rates_df.columns:
+                            try:
+                                phase_observer_regime = str(rates_df['regime'].iloc[-1])
+                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
+                            except Exception:
+                                pass
+
+                        # Créer analyseur VWAP et analyser
+                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                        vwap_analyzer = create_vwap_analyzer("XAUUSD", scalping_config)
+                        vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
+                        vwap_result = vwap_analysis.to_dict()
+
+                        # Stocker dans latest
+                        latest["vwap_score"] = float(vwap_result.get('score', 0.0))
+                        latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
+                        latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
+                        latest["vwap_regime"] = str(vwap_result.get('regime', 'UNKNOWN'))
+
+                        # Mettre à jour market_results
+                        market_results["latest"] = latest
+
+                        logger.info(
+                            f"[SCALPING_THREAD][VWAP][CACHE_HIT] ✅ Calculé | "
+                            f"score={latest['vwap_score']:.3f} | "
+                            f"status={latest['vwap_status']} | "
+                            f"bias={latest['vwap_bias']}"
+                        )
+                except Exception as e_vwap:
+                    logger.error(f"[SCALPING_THREAD][VWAP][CACHE_HIT] Erreur calcul: {e_vwap}", exc_info=True)
+
             else:
                 # Cache MISS → Fallback analyse complète (rare)
                 logger.warning(
@@ -3315,6 +3364,60 @@ def scalping_fast_thread(
 
                 market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=ticks_df)  # ✅ Avec ticks
                 market_results['_cache_hit'] = False
+
+                # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE MISS aussi (sinon vwap_score = 0)
+                try:
+                    latest = market_results.get("latest", {})
+                    current_price = None
+                    if isinstance(latest, dict):
+                        current_price = latest.get("current_price") or latest.get("close")
+
+                    if rates_df is not None and not rates_df.empty and current_price is not None:
+                        # Préparer DataFrame pour VWAP (besoin de 'time' en colonne)
+                        df_vwap = rates_df.copy()
+                        if 'time' not in df_vwap.columns and df_vwap.index.name in ['time', None]:
+                            df_vwap = df_vwap.reset_index()
+                            if df_vwap.columns[0] != 'time':
+                                df_vwap = df_vwap.rename(columns={df_vwap.columns[0]: 'time'})
+
+                        # Extraire régime PhaseObserver si disponible
+                        vwap_ctx = {}
+                        if 'regime' in rates_df.columns:
+                            try:
+                                phase_observer_regime = str(rates_df['regime'].iloc[-1])
+                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
+                            except Exception:
+                                pass
+
+                        # Créer analyseur VWAP et analyser
+                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
+                        vwap_analyzer = create_vwap_analyzer("XAUUSD", scalping_config)
+                        vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
+                        vwap_result = vwap_analysis.to_dict()
+
+                        # Stocker dans latest
+                        latest["vwap_score"] = float(vwap_result.get('score', 0.0))
+                        latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
+                        latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
+                        latest["vwap_regime"] = str(vwap_result.get('regime', 'UNKNOWN'))
+
+                        logger.info(
+                            f"[SCALPING_THREAD][VWAP] ✅ Calculé | "
+                            f"score={latest['vwap_score']:.3f} | "
+                            f"status={latest['vwap_status']} | "
+                            f"bias={latest['vwap_bias']}"
+                        )
+
+                        # ✅ Mettre à jour market_results avec le latest enrichi
+                        market_results["latest"] = latest
+                    else:
+                        logger.warning(
+                            f"[SCALPING_THREAD][VWAP] ⚠️ Skipped | "
+                            f"df_available={rates_df is not None and not rates_df.empty} | "
+                            f"price_available={current_price is not None}"
+                        )
+                except Exception as e_vwap:
+                    logger.error(f"[SCALPING_THREAD][VWAP] Erreur calcul: {e_vwap}", exc_info=True)
 
             # Stocker dans global_context (avec lock)
             with context_lock:
