@@ -102,7 +102,7 @@
     "dry_run": false
   },
   "guardrails": {
-    "enabled": false,
+    "enabled": true,
     "allow_fallbacks": false,
     "volatility": {
       "enabled": true,
@@ -118,7 +118,7 @@
     },
     "spread": {
       "enabled": true,
-      "max_spread_pips": 999.0,
+      "max_spread_pips": 30.0,
       "max_spread_points": 30,
       "smart_spread_check_enabled": true
     },
