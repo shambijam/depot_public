@@ -145,9 +145,17 @@ class DataEngine(threading.Thread):
                 )
                 return
 
-            # 2. Récupérer les ticks de la bougie M1 en cours
-            # (depuis le début de la bougie jusqu'à maintenant)
-            ticks_data = self._get_current_m1_ticks(symbol)
+            # ✅ FIX CRITIQUE (12 Dec 2025): Calculer timestamp bougie courante AVANT récupération ticks
+            # Ne PAS utiliser datetime.now() car il y a un décalage timezone entre
+            # datetime.now(utc) et les timestamps MT5 (broker time)
+            import pandas as pd
+            from datetime import timedelta
+
+            last_candle_time = rates_df.iloc[-1]['time']
+            current_candle_start = last_candle_time + timedelta(minutes=1)
+
+            # 2. Récupérer les ticks de la bougie M1 en cours avec le BON timestamp
+            ticks_data = self._get_current_m1_ticks(symbol, current_candle_start=current_candle_start)
 
             # Vérifier si les ticks sont valides (DataFrame pandas)
             if ticks_data is None or (hasattr(ticks_data, 'empty') and ticks_data.empty):
@@ -159,14 +167,6 @@ class DataEngine(threading.Thread):
             # ✅ FIX (12 Dec 2025): Ajouter la bougie COURANTE au DataFrame
             # Sans ça, rates_df.iloc[-1] = bougie fermée précédente (N-1)
             # Mais ticks_data = ticks de bougie courante (N) → DÉCALAGE !
-            import pandas as pd
-            from datetime import timedelta
-
-            # ✅ FIX CRITIQUE: Utiliser timestamp de dernière barre + 1 minute
-            # Ne PAS utiliser datetime.now() car il y a un décalage timezone entre
-            # datetime.now(utc) et les timestamps MT5 (broker time)
-            last_candle_time = rates_df.iloc[-1]['time']
-            current_candle_start = last_candle_time + timedelta(minutes=1)
 
             # Créer bougie courante synthétique depuis les ticks
             if len(ticks_data) > 0:
@@ -234,12 +234,13 @@ class DataEngine(threading.Thread):
                 exc_info=True
             )
 
-    def _get_current_m1_ticks(self, symbol: str) -> Optional[Any]:
+    def _get_current_m1_ticks(self, symbol: str, current_candle_start=None) -> Optional[Any]:
         """
         Récupère les ticks de la bougie M1 en cours.
 
         Args:
             symbol: Symbole
+            current_candle_start: Timestamp de début de la bougie courante (si fourni)
 
         Returns:
             DataFrame des ticks, ou None si erreur
@@ -249,10 +250,15 @@ class DataEngine(threading.Thread):
             # jusqu'à maintenant (bougie incomplète mais fraîche)
             from datetime import datetime, timezone, timedelta
 
-            # Arrondir à la minute en cours
-            now = datetime.now(timezone.utc)
-            candle_start = now.replace(second=0, microsecond=0)
-            candle_end = now
+            # ✅ FIX: Si current_candle_start fourni, l'utiliser (= timestamp broker MT5)
+            # Sinon fallback sur datetime.now() (peut avoir décalage timezone !)
+            if current_candle_start is not None:
+                candle_start = current_candle_start
+                candle_end = current_candle_start + timedelta(minutes=1)
+            else:
+                now = datetime.now(timezone.utc)
+                candle_start = now.replace(second=0, microsecond=0)
+                candle_end = now
 
             # Appel MT5 pour récupérer les ticks de la bougie M1 en cours
             # Note: get_ticks_for_candle() attend normalement une bougie complète (60s)
