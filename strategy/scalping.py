@@ -478,13 +478,15 @@ class ScalpingStrategy(BaseStrategy):
             status = "SUSPECT"
 
         # Format final pour FusionManager
+        # ✅ FIX (12 Dec 2025): Aplatir raw_result pour que le rapport puisse lire les clés directement
         return {
+            **result,  # Aplatir toutes les clés de _analyze_orderflow_v6 (scores, details, etc.)
             "score": score_pct,  # 0-100 pour FusionManager._normalize_orderflow()
             "status": status,
             "summary": summary,
-            "total_score": total_score,  # 0-50 pour rapport consolidé
+            "total_score": total_score,  # 0-50 pour rapport consolidé (écrase result["total_score"] si identique)
             "details": details,  # Détails complets
-            "raw_result": result  # Résultat brut si besoin
+            "raw_result": result  # Résultat brut si besoin (pour debug)
         }
 
     def _analyze_footprint_v6(
