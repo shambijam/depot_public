@@ -113,12 +113,12 @@
     },
     "volume": {
       "enabled": true,
-      "min_tick_volume_m1": 80,
+      "min_tick_volume_m1": 110,
       "min_volume_zscore": -1.0
     },
     "spread": {
       "enabled": true,
-      "max_spread_pips": 30.0,
+      "max_spread_pips": 25.0,
       "max_spread_points": 30,
       "smart_spread_check_enabled": true
     },
