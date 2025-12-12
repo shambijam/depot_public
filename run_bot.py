@@ -1412,13 +1412,20 @@ def run_single_pipeline_cycle(
                             except Exception as e:
                                 logger.debug(f"[OF V6][{asset}] Impossible charger M5/M15: {e}")
 
+                            # ✅ FIX (12 Dec 2025): Construire asset_signals correctement avec footprint_summary
+                            # Ne PAS utiliser 'signals' qui n'existe pas ici, mais utiliser 'latest'
+                            asset_signals_orch = {
+                                "footprint_summary": latest.get("footprint_summary", {}),
+                                "__latest__": latest
+                            }
+
                             # Appeler la méthode standalone
                             of_v6_result = scalping_strategy.calculate_orderflow_v6_standalone(
                                 asset=asset,
                                 df_m1=df_m1,
                                 df_m5=df_m5,
                                 df_m15=df_m15,
-                                asset_signals=signals if 'signals' in locals() else {}
+                                asset_signals=asset_signals_orch
                             )
 
                             # Stocker dans latest pour FusionManager

@@ -209,20 +209,37 @@ class ScalpingStrategy(BaseStrategy):
             # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
             fp_raw = asset_signals.get("footprint_summary", {})
 
+            # 🔍 DEBUG: Voir ce qui arrive dans _analyze_orderflow_v6
+            self.logger.info(f"[DEBUG_OF_V6][{asset}] fp_raw type: {type(fp_raw)}")
+            if isinstance(fp_raw, dict):
+                self.logger.info(f"[DEBUG_OF_V6][{asset}] fp_raw keys: {list(fp_raw.keys())[:10]}")  # Premiers 10 clés
+                self.logger.info(f"[DEBUG_OF_V6][{asset}] 'summary' in fp_raw: {'summary' in fp_raw}")
+            else:
+                self.logger.warning(f"[DEBUG_OF_V6][{asset}] fp_raw n'est PAS un dict!")
+
             # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
             if isinstance(fp_raw, dict):
                 if "summary" in fp_raw:
                     # Structure complète (depuis fusion_manager ou autre source)
                     fp_summary = fp_raw["summary"]
+                    self.logger.info(f"[DEBUG_OF_V6][{asset}] Structure imbriquée détectée - utilise fp_raw['summary']")
                 else:
                     # Structure directe (depuis orchestrator)
                     fp_summary = fp_raw
+                    self.logger.info(f"[DEBUG_OF_V6][{asset}] Structure directe détectée - utilise fp_raw directement")
             else:
                 fp_summary = {}
+                self.logger.warning(f"[DEBUG_OF_V6][{asset}] fp_raw invalide - fp_summary = {{}}")
 
+            # Extraire delta_total
             delta_total = 0
             if isinstance(fp_summary, dict):
                 delta_total = float(fp_summary.get("delta_total", 0))
+                self.logger.info(f"[DEBUG_OF_V6][{asset}] delta_total extrait: {delta_total}")
+                self.logger.info(f"[DEBUG_OF_V6][{asset}] buy_volume: {fp_summary.get('buy_volume', 'N/A')}")
+                self.logger.info(f"[DEBUG_OF_V6][{asset}] sell_volume: {fp_summary.get('sell_volume', 'N/A')}")
+            else:
+                self.logger.warning(f"[DEBUG_OF_V6][{asset}] fp_summary n'est PAS un dict!")
 
             # Stocker delta_total TOUJOURS (pour le rapport)
             delta_details["delta_total"] = delta_total
