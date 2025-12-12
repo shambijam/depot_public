@@ -276,37 +276,60 @@ class DataEngine(threading.Thread):
                 ticks=ticks_data  # Ticks pour analyse footprint
             )
 
-            # Extraire footprint_summary depuis result['latest']
-            # (MarketAnalyzer stocke footprint_summary dans latest, pas au niveau racine)
-            latest = result.get('latest')
-            if latest is None:
-                self.logger.warning(
-                    f"⚠️ [DATA_ENGINE][{symbol}] 'latest' manquant dans résultat"
-                )
+            # ✅ FIX (12 Dec 2025): Extraire footprint_summary depuis annotated_df (pas latest)
+            # Raison: latest est une COPY (pandas Series), les modifications par MarketAnalyzer
+            # ne persist pas. Il faut lire depuis le DataFrame annoté directement.
+
+            self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] result keys: {list(result.keys())}")
+
+            annotated_df = result.get('annotated_df')
+            if annotated_df is None or (hasattr(annotated_df, 'empty') and annotated_df.empty):
+                self.logger.warning(f"⚠️ [DATA_ENGINE][{symbol}] annotated_df manquant ou vide")
                 return None
 
-            # Extraire footprint_summary depuis latest (peut être une Series pandas)
-            if hasattr(latest, 'get'):
-                footprint_summary = latest.get('footprint_summary', {})
+            self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] annotated_df shape: {annotated_df.shape}")
+            self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] 'footprint_summary' in columns: {'footprint_summary' in annotated_df.columns}")
 
-                # ✅ FIX (12 Dec 2025): Parser JSON string si nécessaire
-                # orchestrator.py stocke footprint_summary en JSON string (ligne 1154)
-                if isinstance(footprint_summary, str):
-                    try:
-                        import json
-                        footprint_summary = json.loads(footprint_summary)
-                        self.logger.debug(f"[DATA_ENGINE][{symbol}] footprint_summary parsé depuis JSON string")
-                    except Exception as e:
-                        self.logger.error(f"[DATA_ENGINE][{symbol}] Échec parsing JSON footprint_summary: {e}")
-                        footprint_summary = {}
+            if 'footprint_summary' not in annotated_df.columns:
+                self.logger.warning(f"⚠️ [DATA_ENGINE][{symbol}] Colonne footprint_summary absente")
+                self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] Colonnes disponibles: {list(annotated_df.columns)}")
+                return None
+
+            # Récupérer footprint_summary de la dernière ligne
+            fp_sum_raw = annotated_df.iloc[-1]['footprint_summary']
+
+            self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] fp_sum_raw type: {type(fp_sum_raw)}")
+            if isinstance(fp_sum_raw, str):
+                self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] fp_sum_raw (string) preview: {fp_sum_raw[:200] if len(fp_sum_raw) > 200 else fp_sum_raw}")
+            elif isinstance(fp_sum_raw, dict):
+                self.logger.info(f"🔍 [DEBUG_DATA_ENGINE][{symbol}] fp_sum_raw (dict) keys: {list(fp_sum_raw.keys())}")
+
+            # Parser JSON string si nécessaire (orchestrator.py stocke en JSON string ligne 1154)
+            if isinstance(fp_sum_raw, str):
+                try:
+                    import json
+                    footprint_summary = json.loads(fp_sum_raw)
+                    self.logger.info(f"✅ [DEBUG_DATA_ENGINE][{symbol}] JSON parsé - keys: {list(footprint_summary.keys())}")
+                except Exception as e:
+                    self.logger.error(f"❌ [DATA_ENGINE][{symbol}] Échec parsing JSON footprint_summary: {e}")
+                    footprint_summary = {}
+            elif isinstance(fp_sum_raw, dict):
+                footprint_summary = fp_sum_raw
+                self.logger.info(f"✅ [DEBUG_DATA_ENGINE][{symbol}] Dict direct - keys: {list(footprint_summary.keys())}")
             else:
-                # Si latest est None ou pas un dict/Series
                 footprint_summary = {}
+                self.logger.warning(f"⚠️ [DEBUG_DATA_ENGINE][{symbol}] Type inattendu: {type(fp_sum_raw)}")
+
+            # Vérifier les clés critiques
+            critical_keys = ['buy_volume', 'sell_volume', 'delta_total', 'poc']
+            missing_keys = [k for k in critical_keys if k not in footprint_summary]
+            if missing_keys:
+                self.logger.warning(f"⚠️ [DEBUG_DATA_ENGINE][{symbol}] Clés manquantes: {missing_keys}")
+            else:
+                self.logger.info(f"✅ [DEBUG_DATA_ENGINE][{symbol}] Toutes les clés critiques présentes!")
 
             if not footprint_summary:
-                self.logger.warning(
-                    f"⚠️ [DATA_ENGINE][{symbol}] footprint_summary vide ou manquant"
-                )
+                self.logger.warning(f"⚠️ [DATA_ENGINE][{symbol}] footprint_summary vide ou manquant")
                 return None
 
             return {
