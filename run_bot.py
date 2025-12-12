@@ -3283,10 +3283,14 @@ def scalping_fast_thread(
                 )
 
                 # ✅ CORRECTION: Récupérer les ticks pour permettre l'analyse footprint
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                candle_start = now.replace(second=0, microsecond=0)
-                candle_end = now
+                import pandas as pd
+                from datetime import timedelta
+
+                # ✅ FIX (12 Dec 2025): Utiliser timestamp MT5 (dernière barre + 1min)
+                # Ne PAS utiliser datetime.now(timezone.utc) car décalage timezone (04:xx vs 06:xx)
+                last_candle_time = rates_df.iloc[-1]['time']
+                candle_start = last_candle_time + timedelta(minutes=1)
+                candle_end = candle_start + timedelta(minutes=1)
 
                 try:
                     ticks_df = mt5_connector.get_ticks_for_candle(
@@ -3294,10 +3298,33 @@ def scalping_fast_thread(
                         start_ts=candle_start,
                         end_ts=candle_end
                     )
-                    logger.info(f"[SCALPING_THREAD][CACHE_MISS] Récupéré {len(ticks_df) if ticks_df is not None else 0} ticks pour footprint")
+                    logger.info(f"[SCALPING_THREAD][CACHE_MISS] Récupéré {len(ticks_df) if ticks_df is not None else 0} ticks pour footprint | fenêtre={candle_start}")
                 except Exception as e:
                     logger.error(f"[SCALPING_THREAD][CACHE_MISS] Erreur récupération ticks: {e}")
                     ticks_df = None
+
+                # ✅ FIX (12 Dec 2025): Ajouter bougie COURANTE au DataFrame (comme dans DataEngine)
+                # Sinon rates_df.iloc[-1] = bougie fermée N-1, mais ticks = bougie courante N
+                if ticks_df is not None and len(ticks_df) > 0:
+                    price_col = 'last' if 'last' in ticks_df.columns and ticks_df['last'].notna().any() else 'bid'
+                    current_candle = {
+                        'time': candle_start,
+                        'open': float(ticks_df.iloc[0][price_col]),
+                        'high': float(ticks_df[price_col].max()),
+                        'low': float(ticks_df[price_col].min()),
+                        'close': float(ticks_df.iloc[-1][price_col]),
+                        'tick_volume': len(ticks_df),
+                        'spread': 0,
+                        'real_volume': 0
+                    }
+                    # Copier métadonnées depuis dernière barre
+                    for col in ['point', 'trade_tick_size', 'trade_contract_size']:
+                        if col in rates_df.columns:
+                            current_candle[col] = rates_df.iloc[-1][col]
+
+                    current_candle_df = pd.DataFrame([current_candle])
+                    rates_df = pd.concat([rates_df, current_candle_df], ignore_index=True)
+                    logger.info(f"✅ [SCALPING_THREAD][CACHE_MISS] Bougie courante ajoutée | time={candle_start} | ticks={len(ticks_df)}")
 
                 market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=ticks_df)  # ✅ Avec ticks
                 market_results['_cache_hit'] = False
