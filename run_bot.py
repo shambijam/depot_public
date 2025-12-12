@@ -3328,7 +3328,13 @@ def scalping_fast_thread(
                         latest["vwap_score"] = float(vwap_result.get('score', 0.0))
                         latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
                         latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
-                        latest["vwap_regime"] = str(vwap_result.get('regime', 'UNKNOWN'))
+                        # ✅ FIX (12 Dec 2025): Régime est dans vwap_result['vwap']['regime']
+                        vwap_sub = vwap_result.get('vwap', {})
+                        latest["vwap_regime"] = str(vwap_sub.get('regime', 'UNKNOWN'))
+                        latest["vwap_value"] = float(vwap_sub.get('value', 0.0))
+                        latest["vwap_zone"] = str(vwap_sub.get('zone', 'NEUTRAL'))
+                        latest["vwap_slope"] = float(vwap_sub.get('slope', 0.0))
+                        latest["vwap_distance_pips"] = float(vwap_sub.get('distance_pips', 0.0))
 
                         # Mettre à jour market_results
                         market_results["latest"] = latest
@@ -3419,7 +3425,13 @@ def scalping_fast_thread(
                         latest["vwap_score"] = float(vwap_result.get('score', 0.0))
                         latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
                         latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
-                        latest["vwap_regime"] = str(vwap_result.get('regime', 'UNKNOWN'))
+                        # ✅ FIX (12 Dec 2025): Régime est dans vwap_result['vwap']['regime']
+                        vwap_sub = vwap_result.get('vwap', {})
+                        latest["vwap_regime"] = str(vwap_sub.get('regime', 'UNKNOWN'))
+                        latest["vwap_value"] = float(vwap_sub.get('value', 0.0))
+                        latest["vwap_zone"] = str(vwap_sub.get('zone', 'NEUTRAL'))
+                        latest["vwap_slope"] = float(vwap_sub.get('slope', 0.0))
+                        latest["vwap_distance_pips"] = float(vwap_sub.get('distance_pips', 0.0))
 
                         logger.info(
                             f"[SCALPING_THREAD][VWAP] ✅ Calculé | "
@@ -3632,7 +3644,11 @@ def scalping_fast_thread(
                             "status": str(latest.get("vwap_status", "N/A")),
                             "bias": str(latest.get("vwap_bias", "NEUTRAL")),
                             "regime": str(latest.get("vwap_regime", "UNKNOWN")),
-                            "distance_pips": float(latest.get("vwap_distance_pips", 0.0))
+                            "distance_pips": float(latest.get("vwap_distance_pips", 0.0)),
+                            # ✅ FIX (12 Dec 2025): Ajouter champs manquants pour _normalize_vwap()
+                            "zone": str(latest.get("vwap_zone", "NEUTRAL")),
+                            "vwap_value": float(latest.get("vwap_value", 0.0)),
+                            "slope": float(latest.get("vwap_slope", 0.0)),
                         }
                     except Exception as e:
                         logger.warning(f"[SCALPING_THREAD] Erreur construction VWAP: {e}")
