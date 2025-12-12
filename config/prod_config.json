@@ -107,7 +107,7 @@
     "volatility": {
       "enabled": true,
       "atr_period": 14,
-      "min_atr_m1_pips": 1.0,
+      "min_atr_m1_pips": 2.0,
       "soft_mode": true,
       "soft_floor_rr": 0.85
     },
