@@ -3688,59 +3688,80 @@ def scalping_fast_thread(
 
                 # Si signal valide → Exécution
                 if fusion_out.get("ok") and trade_decision_skeleton is not None:
-                    side = fusion_out["action"]  # BUY ou SELL
-                    conf = fusion_out.get("fused_confidence", 0.0)
-
-                    logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {side} (conf={conf:.2f})")
-
-                    # ⚡ OPTION 1: INJECTION RAPIDE — Utiliser squelette pré-calculé
+                    # ✅ BURST GUARD: Vérifier si un panier burst est déjà ouvert
+                    open_burst_ids = set()
                     try:
-                        # Copier squelette statique
-                        skeleton = trade_decision_skeleton["static"]
+                        import re
+                        current_positions = mt5_connector.get_positions() or []
+                        for p in current_positions:
+                            c = p.get("comment") if isinstance(p, dict) else getattr(p, "comment", "")
+                            m = re.search(r"bs_([a-f0-9]{8})", str(c or ""))
+                            if m:
+                                open_burst_ids.add(m.group(1))
 
-                        # ⚡ INJECTION valeurs dynamiques UNIQUEMENT (ultra-rapide)
-                        td = dict(skeleton)  # Shallow copy rapide
-                        td["action"] = side  # Dynamique
-                        td["side"] = side  # Dynamique
-                        td["confidence"] = conf  # Dynamique
-                        td["context"] = ctx  # Dynamique (phase, volatility)
-                        td["fusion_data"] = fusion_out  # Dynamique (scores OF/FP/triggers)
-                        td["order"] = {
-                            "action": side,
-                            "side": side,
-                            "type": "MARKET",
-                            "symbol": "XAUUSD",
-                        }
-                        td["trade"] = {"action": side, "side": side}
+                        if open_burst_ids:
+                            logger.warning(
+                                f"⛔ [SCALPING_THREAD][BURST_GUARD] Panier(s) déjà ouvert(s): {open_burst_ids} | "
+                                f"Signal {fusion_out.get('action')} IGNORÉ (single_burst_global)"
+                            )
+                    except Exception as e_guard:
+                        logger.error(f"❌ [SCALPING_THREAD][BURST_GUARD] Erreur vérification: {e_guard}")
 
-                        # Package décision - ✅ UTILISER global_context au lieu de ctx
-                        with context_lock:
-                            global_ctx_copy = dict(global_context)  # Copie thread-safe
+                    # Exécuter SEULEMENT si aucun panier ouvert
+                    if not open_burst_ids:
+                        side = fusion_out["action"]  # BUY ou SELL
+                        conf = fusion_out.get("fused_confidence", 0.0)
 
-                        decision_pkg = {
-                            "final_decision": td,
-                            "context": global_ctx_copy,  # ✅ CORRIGÉ - global_context complet
-                            "active_config": trade_decision_skeleton["merged_config"],
-                        }
-                        decision_pkg.setdefault("audit_context", {}).update({
-                            "intent_symbol": "XAUUSD",
-                            "intent_side": side,
-                            "intent_burst": trade_decision_skeleton["resolved_burst"],
-                        })
+                        logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {side} (conf={conf:.2f})")
 
-                        logger.info(f"⚡ [PRE-CALC] Exécution RAPIDE: {side} XAUUSD burst={trade_decision_skeleton['resolved_burst']}")
+                        # ⚡ OPTION 1: INJECTION RAPIDE — Utiliser squelette pré-calculé
+                        try:
+                            # Copier squelette statique
+                            skeleton = trade_decision_skeleton["static"]
 
-                        # Exécution
-                        res = run_trade_execution_pipeline(
-                            trade_executor, decision_pkg, is_dry_run=is_dry_run
-                        )
-                        if res:
-                            logger.info(f"✅ [SCALPING_THREAD] Trade exécuté: {res.get('status')}")
-                        else:
-                            logger.warning(f"⚠️ [SCALPING_THREAD] Trade non exécuté (res=None)")
+                            # ⚡ INJECTION valeurs dynamiques UNIQUEMENT (ultra-rapide)
+                            td = dict(skeleton)  # Shallow copy rapide
+                            td["action"] = side  # Dynamique
+                            td["side"] = side  # Dynamique
+                            td["confidence"] = conf  # Dynamique
+                            td["context"] = ctx  # Dynamique (phase, volatility)
+                            td["fusion_data"] = fusion_out  # Dynamique (scores OF/FP/triggers)
+                            td["order"] = {
+                                "action": side,
+                                "side": side,
+                                "type": "MARKET",
+                                "symbol": "XAUUSD",
+                            }
+                            td["trade"] = {"action": side, "side": side}
 
-                    except Exception as e:
-                        logger.error(f"[SCALPING_THREAD] Erreur exécution trade: {e}", exc_info=True)
+                            # Package décision - ✅ UTILISER global_context au lieu de ctx
+                            with context_lock:
+                                global_ctx_copy = dict(global_context)  # Copie thread-safe
+
+                            decision_pkg = {
+                                "final_decision": td,
+                                "context": global_ctx_copy,  # ✅ CORRIGÉ - global_context complet
+                                "active_config": trade_decision_skeleton["merged_config"],
+                            }
+                            decision_pkg.setdefault("audit_context", {}).update({
+                                "intent_symbol": "XAUUSD",
+                                "intent_side": side,
+                                "intent_burst": trade_decision_skeleton["resolved_burst"],
+                            })
+
+                            logger.info(f"⚡ [PRE-CALC] Exécution RAPIDE: {side} XAUUSD burst={trade_decision_skeleton['resolved_burst']}")
+
+                            # Exécution
+                            res = run_trade_execution_pipeline(
+                                trade_executor, decision_pkg, is_dry_run=is_dry_run
+                            )
+                            if res:
+                                logger.info(f"✅ [SCALPING_THREAD] Trade exécuté: {res.get('status')}")
+                            else:
+                                logger.warning(f"⚠️ [SCALPING_THREAD] Trade non exécuté (res=None)")
+
+                        except Exception as e:
+                            logger.error(f"[SCALPING_THREAD] Erreur exécution trade: {e}", exc_info=True)
 
             # Note: Surveillance baskets déléguée au basket_monitor_thread dédié
 
