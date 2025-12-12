@@ -456,19 +456,22 @@ def footprint_validator(
         candles["time"] = pd.Timestamp.now()
 
     candle = candles.iloc[candle_index]
-    # 🕐 FIX (24 Nov 2025): Retirer utc=True car MT5 retourne heure broker (pas UTC)
-    # Forcer UTC causait un décalage de 2h avec les ticks
+    # 🕐 FIX (12 Dec 2025): REMETTRE utc=True car MT5Connector retourne TOUT en UTC
+    # - MT5Connector.get_rates() retourne candles["time"] EN UTC (mt5_connector.py:1640)
+    # - MT5Connector.get_ticks_for_candle() retourne ticks["time"] EN UTC (mt5_connector.py:1811)
+    # - DONC start_ts/end_ts DOIVENT être UTC pour comparaison valide (ligne 582)
+    # - Le "fix" du 24 Nov qui retirait utc=True était FAUX
     start_ts = pd.to_datetime(
-        candle.get("time", candle.name), errors="coerce"
+        candle.get("time", candle.name), utc=True, errors="coerce"
     )
     if pd.isna(start_ts):
-        start_ts = pd.Timestamp.now()  # Heure locale (broker time)
+        start_ts = pd.Timestamp.now(tz='UTC')
 
     # fenêtre M1 stricte
     if candle_index + 1 < len(candles):
         nxt = candles.iloc[candle_index + 1]
         end_ts = pd.to_datetime(
-            nxt.get("time", candles.index[candle_index + 1]), errors="coerce"
+            nxt.get("time", candles.index[candle_index + 1]), utc=True, errors="coerce"
         )
         if pd.isna(end_ts) or end_ts <= start_ts:
             end_ts = start_ts + pd.Timedelta(minutes=1)
