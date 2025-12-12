@@ -798,7 +798,7 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"   ├─ Delta Momentum      : {delta_score:.1f}/25 pts")
             self.logger.info(f"   │  • Delta total       : {delta_details.get('delta_total', 0)}")
             self.logger.info(f"   │  • Cohérence         : {delta_details.get('coherence', 0)*100:.0f}%")
-            self.logger.info(f"   │  • Direction         : {delta_details.get('delta_direction', 'N/A').upper()}")
+            self.logger.info(f"   │  • Direction         : {delta_details.get('direction', 'N/A').upper()}")
 
             self.logger.info(f"   ├─ Volume Confirmation : {volume_score:.1f}/15 pts")
             self.logger.info(f"   │  • Volume ratio      : {volume_details.get('ratio', 0):.2f}x")
