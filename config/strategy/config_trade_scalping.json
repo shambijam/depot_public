@@ -134,7 +134,7 @@
   },
   "fusion": {
     "adaptive_weights": true,
-    "allow_conditional_entries": true,
+    "allow_conditional_entries": false,
     "seuils_entree": {
       "min_confidence": 0.75,
       "min_orderflow_score": 0.50,
