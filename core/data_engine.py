@@ -156,6 +156,43 @@ class DataEngine(threading.Thread):
                 )
                 return
 
+            # ✅ FIX (12 Dec 2025): Ajouter la bougie COURANTE au DataFrame
+            # Sans ça, rates_df.iloc[-1] = bougie fermée précédente (N-1)
+            # Mais ticks_data = ticks de bougie courante (N) → DÉCALAGE !
+            import pandas as pd
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            current_candle_start = now.replace(second=0, microsecond=0)
+
+            # Créer bougie courante synthétique depuis les ticks
+            if len(ticks_data) > 0:
+                current_candle = {
+                    'time': current_candle_start,
+                    'open': ticks_data.iloc[0]['last'] if 'last' in ticks_data.columns else ticks_data.iloc[0].get('bid', 0),
+                    'high': ticks_data['last'].max() if 'last' in ticks_data.columns else ticks_data['bid'].max(),
+                    'low': ticks_data['last'].min() if 'last' in ticks_data.columns else ticks_data['bid'].min(),
+                    'close': ticks_data.iloc[-1]['last'] if 'last' in ticks_data.columns else ticks_data.iloc[-1].get('bid', 0),
+                    'tick_volume': len(ticks_data),
+                    'spread': 0,
+                    'real_volume': 0
+                }
+
+                # Copier métadonnées (point, trade_tick_size, etc.) depuis dernière barre
+                if len(rates_df) > 0:
+                    for col in ['point', 'trade_tick_size', 'trade_contract_size']:
+                        if col in rates_df.columns:
+                            current_candle[col] = rates_df.iloc[-1][col]
+
+                # Ajouter au DataFrame
+                current_candle_df = pd.DataFrame([current_candle])
+                rates_df = pd.concat([rates_df, current_candle_df], ignore_index=True)
+
+                self.logger.info(f"✅ [DATA_ENGINE][{symbol}] Bougie courante ajoutée au DataFrame | time={current_candle_start} | ticks={len(ticks_data)}")
+            else:
+                self.logger.warning(f"⚠️ [DATA_ENGINE][{symbol}] Impossible de créer bougie courante (aucun tick)")
+                return
+
             # 3. Analyser le footprint avec MarketAnalyzer
             footprint_result = self._analyze_footprint(symbol, rates_df, ticks_data)
 
