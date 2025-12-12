@@ -288,6 +288,17 @@ class DataEngine(threading.Thread):
             # Extraire footprint_summary depuis latest (peut être une Series pandas)
             if hasattr(latest, 'get'):
                 footprint_summary = latest.get('footprint_summary', {})
+
+                # ✅ FIX (12 Dec 2025): Parser JSON string si nécessaire
+                # orchestrator.py stocke footprint_summary en JSON string (ligne 1154)
+                if isinstance(footprint_summary, str):
+                    try:
+                        import json
+                        footprint_summary = json.loads(footprint_summary)
+                        self.logger.debug(f"[DATA_ENGINE][{symbol}] footprint_summary parsé depuis JSON string")
+                    except Exception as e:
+                        self.logger.error(f"[DATA_ENGINE][{symbol}] Échec parsing JSON footprint_summary: {e}")
+                        footprint_summary = {}
             else:
                 # Si latest est None ou pas un dict/Series
                 footprint_summary = {}
