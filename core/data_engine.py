@@ -160,19 +160,25 @@ class DataEngine(threading.Thread):
             # Sans ça, rates_df.iloc[-1] = bougie fermée précédente (N-1)
             # Mais ticks_data = ticks de bougie courante (N) → DÉCALAGE !
             import pandas as pd
-            from datetime import datetime, timezone
+            from datetime import timedelta
 
-            now = datetime.now(timezone.utc)
-            current_candle_start = now.replace(second=0, microsecond=0)
+            # ✅ FIX CRITIQUE: Utiliser timestamp de dernière barre + 1 minute
+            # Ne PAS utiliser datetime.now() car il y a un décalage timezone entre
+            # datetime.now(utc) et les timestamps MT5 (broker time)
+            last_candle_time = rates_df.iloc[-1]['time']
+            current_candle_start = last_candle_time + timedelta(minutes=1)
 
             # Créer bougie courante synthétique depuis les ticks
             if len(ticks_data) > 0:
+                # Déterminer colonne prix (last, puis bid en fallback)
+                price_col = 'last' if 'last' in ticks_data.columns and ticks_data['last'].notna().any() else 'bid'
+
                 current_candle = {
                     'time': current_candle_start,
-                    'open': ticks_data.iloc[0]['last'] if 'last' in ticks_data.columns else ticks_data.iloc[0].get('bid', 0),
-                    'high': ticks_data['last'].max() if 'last' in ticks_data.columns else ticks_data['bid'].max(),
-                    'low': ticks_data['last'].min() if 'last' in ticks_data.columns else ticks_data['bid'].min(),
-                    'close': ticks_data.iloc[-1]['last'] if 'last' in ticks_data.columns else ticks_data.iloc[-1].get('bid', 0),
+                    'open': float(ticks_data.iloc[0][price_col]),
+                    'high': float(ticks_data[price_col].max()),
+                    'low': float(ticks_data[price_col].min()),
+                    'close': float(ticks_data.iloc[-1][price_col]),
                     'tick_volume': len(ticks_data),
                     'spread': 0,
                     'real_volume': 0
