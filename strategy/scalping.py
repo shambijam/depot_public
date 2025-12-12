@@ -693,6 +693,14 @@ class ScalpingStrategy(BaseStrategy):
                 f"→ Total={result['total_score']:.1f}/25"
             )
 
+            # ✅ FIX (12 Dec 2025): Ajouter champs footprint_summary pour FusionManager
+            # FusionManager._normalize_footprint() attend delta_total, buy_volume, sell_volume, poc
+            # Ces valeurs sont déjà lues depuis fp_summary (ligne 514), il faut juste les retourner
+            result["delta_total"] = fp_summary.get("delta_total", 0.0)
+            result["buy_volume"] = buy_vol
+            result["sell_volume"] = sell_vol
+            result["poc"] = fp_summary.get("poc")
+
         except Exception as e:
             self.logger.error(f"[{asset}] Footprint V6 analysis error: {e}", exc_info=True)
 
