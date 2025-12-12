@@ -3287,6 +3287,16 @@ def scalping_fast_thread(
                 # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE HIT aussi (sinon vwap_score = 0)
                 try:
                     latest = market_results.get("latest", {})
+
+                    # 🔍 DEBUG: Voir ce que contient latest
+                    logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] latest type: {type(latest)}")
+                    if isinstance(latest, dict):
+                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] latest keys: {list(latest.keys())[:15]}")
+                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] 'current_price' in latest: {'current_price' in latest}")
+                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] 'close' in latest: {'close' in latest}")
+                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] current_price value: {latest.get('current_price', 'N/A')}")
+                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] close value: {latest.get('close', 'N/A')}")
+
                     current_price = None
                     if isinstance(latest, dict):
                         current_price = latest.get("current_price") or latest.get("close")
@@ -3368,6 +3378,16 @@ def scalping_fast_thread(
                 # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE MISS aussi (sinon vwap_score = 0)
                 try:
                     latest = market_results.get("latest", {})
+
+                    # 🔍 DEBUG: Voir ce que contient latest
+                    logger.info(f"[SCALPING_THREAD][VWAP] latest type: {type(latest)}")
+                    if isinstance(latest, dict):
+                        logger.info(f"[SCALPING_THREAD][VWAP] latest keys: {list(latest.keys())[:15]}")
+                        logger.info(f"[SCALPING_THREAD][VWAP] 'current_price' in latest: {'current_price' in latest}")
+                        logger.info(f"[SCALPING_THREAD][VWAP] 'close' in latest: {'close' in latest}")
+                        logger.info(f"[SCALPING_THREAD][VWAP] current_price value: {latest.get('current_price', 'N/A')}")
+                        logger.info(f"[SCALPING_THREAD][VWAP] close value: {latest.get('close', 'N/A')}")
+
                     current_price = None
                     if isinstance(latest, dict):
                         current_price = latest.get("current_price") or latest.get("close")
@@ -3492,7 +3512,6 @@ def scalping_fast_thread(
                 # D'abord essayer CACHE HIT
                 if 'footprint' in market_results and market_results['footprint']:
                     footprint_summary = market_results['footprint']
-                    logger.info(f"[DEBUG_SOURCE] footprint_summary depuis CACHE HIT")
                 else:
                     # CACHE MISS: Extraire depuis DataFrame annoté
                     annotated_df = market_results.get('annotated_df')
@@ -3502,31 +3521,10 @@ def scalping_fast_thread(
                             try:
                                 import json
                                 footprint_summary = json.loads(fp_sum_raw)
-                                logger.info(f"[DEBUG_SOURCE] footprint_summary depuis annotated_df (JSON parsed)")
                             except:
-                                logger.warning(f"[DEBUG_SOURCE] Échec parsing JSON footprint_summary")
                                 footprint_summary = {}
                         elif isinstance(fp_sum_raw, dict):
                             footprint_summary = fp_sum_raw
-                            logger.info(f"[DEBUG_SOURCE] footprint_summary depuis annotated_df (dict)")
-                        else:
-                            logger.warning(f"[DEBUG_SOURCE] footprint_summary type inconnu: {type(fp_sum_raw)}")
-                    else:
-                        logger.warning(f"[DEBUG_SOURCE] annotated_df indisponible ou sans colonne footprint_summary")
-
-                # 🔍 DEBUG: Voir ce que contient footprint_summary
-                logger.info(f"[DEBUG_FOOTPRINT_SUM] Type: {type(footprint_summary)}")
-                logger.info(f"[DEBUG_FOOTPRINT_SUM] Keys: {list(footprint_summary.keys()) if isinstance(footprint_summary, dict) else 'Not a dict'}")
-                if isinstance(footprint_summary, dict):
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] buy_volume: {footprint_summary.get('buy_volume', 'N/A')}")
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] sell_volume: {footprint_summary.get('sell_volume', 'N/A')}")
-                    logger.info(f"[DEBUG_FOOTPRINT_SUM] tick_count: {footprint_summary.get('tick_count', 'N/A')}")
-
-                # 🔍 DEBUG: Voir VWAP dans latest
-                if latest is not None and hasattr(latest, 'get'):
-                    logger.info(f"[DEBUG_VWAP] vwap_score in latest: {'vwap_score' in latest if hasattr(latest, '__contains__') else 'N/A'}")
-                    logger.info(f"[DEBUG_VWAP] vwap_score value: {latest.get('vwap_score', 'N/A')}")
-                    logger.info(f"[DEBUG_VWAP] vwap_status value: {latest.get('vwap_status', 'N/A')}")
 
                 asset_signals = {
                     "footprint_summary": footprint_summary,
