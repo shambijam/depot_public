@@ -3288,18 +3288,18 @@ def scalping_fast_thread(
                 try:
                     latest = market_results.get("latest", {})
 
-                    # 🔍 DEBUG: Voir ce que contient latest
-                    logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] latest type: {type(latest)}")
-                    if isinstance(latest, dict):
-                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] latest keys: {list(latest.keys())[:15]}")
-                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] 'current_price' in latest: {'current_price' in latest}")
-                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] 'close' in latest: {'close' in latest}")
-                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] current_price value: {latest.get('current_price', 'N/A')}")
-                        logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] close value: {latest.get('close', 'N/A')}")
+                    # ✅ FIX: latest peut être une pandas Series, convertir en dict
+                    import pandas as pd
+                    if isinstance(latest, pd.Series):
+                        latest = latest.to_dict()
+                    elif not isinstance(latest, dict):
+                        latest = {}
 
                     current_price = None
                     if isinstance(latest, dict):
                         current_price = latest.get("current_price") or latest.get("close")
+
+                    logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] current_price={current_price}")
 
                     if rates_df is not None and not rates_df.empty and current_price is not None:
                         # Préparer DataFrame pour VWAP
@@ -3379,18 +3379,18 @@ def scalping_fast_thread(
                 try:
                     latest = market_results.get("latest", {})
 
-                    # 🔍 DEBUG: Voir ce que contient latest
-                    logger.info(f"[SCALPING_THREAD][VWAP] latest type: {type(latest)}")
-                    if isinstance(latest, dict):
-                        logger.info(f"[SCALPING_THREAD][VWAP] latest keys: {list(latest.keys())[:15]}")
-                        logger.info(f"[SCALPING_THREAD][VWAP] 'current_price' in latest: {'current_price' in latest}")
-                        logger.info(f"[SCALPING_THREAD][VWAP] 'close' in latest: {'close' in latest}")
-                        logger.info(f"[SCALPING_THREAD][VWAP] current_price value: {latest.get('current_price', 'N/A')}")
-                        logger.info(f"[SCALPING_THREAD][VWAP] close value: {latest.get('close', 'N/A')}")
+                    # ✅ FIX: latest peut être une pandas Series, convertir en dict
+                    import pandas as pd
+                    if isinstance(latest, pd.Series):
+                        latest = latest.to_dict()
+                    elif not isinstance(latest, dict):
+                        latest = {}
 
                     current_price = None
                     if isinstance(latest, dict):
                         current_price = latest.get("current_price") or latest.get("close")
+
+                    logger.info(f"[SCALPING_THREAD][VWAP] current_price={current_price}")
 
                     if rates_df is not None and not rates_df.empty and current_price is not None:
                         # Préparer DataFrame pour VWAP (besoin de 'time' en colonne)
