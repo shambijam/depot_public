@@ -8,7 +8,10 @@ import uuid
 from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
-from phase_observer.vwap.config import get_regime_weights  # ✅ AJOUTÉ: Poids VWAP dynamiques
+from phase_observer.vwap.config import (
+    get_regime_weights,
+)  # ✅ AJOUTÉ: Poids VWAP dynamiques
+
 
 class ScalpingStrategy(BaseStrategy):
     """
@@ -20,7 +23,6 @@ class ScalpingStrategy(BaseStrategy):
     ➤ Les tailles (volume) sont déléguées au TradeExecutor (risk-based).
     ➤ Les SL/TP sont gérés par le moteur SL/TP (RR dynamique) côté exécuteur.
     """
-
 
     def __init__(
         self,
@@ -89,7 +91,7 @@ class ScalpingStrategy(BaseStrategy):
         df_m1: pd.DataFrame,
         df_m5: Optional[pd.DataFrame],
         df_m15: Optional[pd.DataFrame],
-        asset_signals: Dict[str, Any]
+        asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         📈 OrderFlow Analysis V6 - Multi-Timeframe
@@ -120,7 +122,7 @@ class ScalpingStrategy(BaseStrategy):
             "imbalance_strength_score": 0.0,
             "total_score": 0.0,
             "mtf_alignment": {"m1": "neutral", "m5": "neutral", "m15": "neutral"},
-            "details": {}
+            "details": {},
         }
 
         try:
@@ -133,7 +135,9 @@ class ScalpingStrategy(BaseStrategy):
             if df_m1 is not None and len(df_m1) >= 8:
                 m1_closes = df_m1["close"].tail(8).values
                 m1_opens = df_m1["open"].tail(8).values
-                m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
+                m1_bullish = sum(
+                    1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i]
+                )
                 m1_bearish = 8 - m1_bullish
 
                 if m1_bullish >= 6:  # 6/8 haussier (75%)
@@ -146,14 +150,16 @@ class ScalpingStrategy(BaseStrategy):
                 mtf_details["m1"] = {
                     "bullish_bars": m1_bullish,
                     "bearish_bars": m1_bearish,
-                    "direction": result["mtf_alignment"]["m1"]
+                    "direction": result["mtf_alignment"]["m1"],
                 }
 
             # M5 : 6 bougies → Structure court terme
             if df_m5 is not None and len(df_m5) >= 6:
                 m5_closes = df_m5["close"].tail(6).values
                 m5_opens = df_m5["open"].tail(6).values
-                m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
+                m5_bullish = sum(
+                    1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i]
+                )
                 m5_bearish = 6 - m5_bullish
 
                 if m5_bullish >= 5:  # 5/6 haussier (83%)
@@ -166,14 +172,16 @@ class ScalpingStrategy(BaseStrategy):
                 mtf_details["m5"] = {
                     "bullish_bars": m5_bullish,
                     "bearish_bars": m5_bearish,
-                    "direction": result["mtf_alignment"]["m5"]
+                    "direction": result["mtf_alignment"]["m5"],
                 }
 
             # M15 : 4 bougies → Contexte moyen terme
             if df_m15 is not None and len(df_m15) >= 4:
                 m15_closes = df_m15["close"].tail(4).values
                 m15_opens = df_m15["open"].tail(4).values
-                m15_bullish = sum(1 for i in range(len(m15_closes)) if m15_closes[i] > m15_opens[i])
+                m15_bullish = sum(
+                    1 for i in range(len(m15_closes)) if m15_closes[i] > m15_opens[i]
+                )
                 m15_bearish = 4 - m15_bullish
 
                 if m15_bullish >= 3:  # 3/4 haussier
@@ -186,18 +194,24 @@ class ScalpingStrategy(BaseStrategy):
                 mtf_details["m15"] = {
                     "bullish_bars": m15_bullish,
                     "bearish_bars": m15_bearish,
-                    "direction": result["mtf_alignment"]["m15"]
+                    "direction": result["mtf_alignment"]["m15"],
                 }
 
             result["details"]["mtf"] = mtf_details
 
             # Vérifier alignement multi-timeframe (bonus potentiel)
             mtf_aligned = False
-            if (result["mtf_alignment"]["m1"] == result["mtf_alignment"]["m5"] == result["mtf_alignment"]["m15"]
-                and result["mtf_alignment"]["m1"] != "neutral"):
+            if (
+                result["mtf_alignment"]["m1"]
+                == result["mtf_alignment"]["m5"]
+                == result["mtf_alignment"]["m15"]
+                and result["mtf_alignment"]["m1"] != "neutral"
+            ):
                 mtf_aligned = True
                 result["mtf_aligned"] = True
-                self.logger.debug(f"[{asset}] 🎯 MTF Alignment: {result['mtf_alignment']['m1'].upper()}")
+                self.logger.debug(
+                    f"[{asset}] 🎯 MTF Alignment: {result['mtf_alignment']['m1'].upper()}"
+                )
 
             # ================================================================
             # 1. DELTA MOMENTUM (25 points max)
@@ -233,8 +247,12 @@ class ScalpingStrategy(BaseStrategy):
                 # Compter bougies avec delta cohérent
                 closes = df_m1["close"].tail(10).values
                 opens = df_m1["open"].tail(10).values
-                bullish_count = sum(1 for i in range(len(closes)) if closes[i] > opens[i])
-                bearish_count = sum(1 for i in range(len(closes)) if closes[i] < opens[i])
+                bullish_count = sum(
+                    1 for i in range(len(closes)) if closes[i] > opens[i]
+                )
+                bearish_count = sum(
+                    1 for i in range(len(closes)) if closes[i] < opens[i]
+                )
 
                 coherence = max(bullish_count, bearish_count) / 10.0  # 0.0 à 1.0
                 delta_details["coherence"] = coherence
@@ -250,13 +268,21 @@ class ScalpingStrategy(BaseStrategy):
                     # ✅ FIX (03 DEC 2025): Seuils adaptés SCALPING M1 (ticks temps réel sur 60s)
                     # Delta fort cohérent → 15-25 pts
                     if coherence >= 0.8:  # 8/10 bougies cohérentes
-                        if abs(delta_total) >= 50:  # ~28% déséquilibre (ex: 114 buy / 66 sell sur 180 ticks)
+                        if (
+                            abs(delta_total) >= 50
+                        ):  # ~28% déséquilibre (ex: 114 buy / 66 sell sur 180 ticks)
                             delta_momentum_score = 25.0  # Très fort
-                        elif abs(delta_total) >= 30:  # ~17% déséquilibre (ex: 105 buy / 75 sell)
+                        elif (
+                            abs(delta_total) >= 30
+                        ):  # ~17% déséquilibre (ex: 105 buy / 75 sell)
                             delta_momentum_score = 20.0  # Fort
-                        elif abs(delta_total) >= 15:  # ~8% déséquilibre (ex: 97 buy / 83 sell)
+                        elif (
+                            abs(delta_total) >= 15
+                        ):  # ~8% déséquilibre (ex: 97 buy / 83 sell)
                             delta_momentum_score = 18.0  # Moyen-Fort
-                        elif abs(delta_total) >= 5:   # ~3% déséquilibre (ex: 92 buy / 88 sell)
+                        elif (
+                            abs(delta_total) >= 5
+                        ):  # ~3% déséquilibre (ex: 92 buy / 88 sell)
                             delta_momentum_score = 15.0  # Moyen
                     # Delta modéré → 10-15 pts
                     elif coherence >= 0.7:  # 7/10 bougies cohérentes
@@ -279,7 +305,9 @@ class ScalpingStrategy(BaseStrategy):
                     delta_momentum_score = 5.0
 
             result["delta_momentum_score"] = delta_momentum_score
-            result["delta_momentum_details"] = delta_details  # FIX: Nom correct pour le rapport
+            result["delta_momentum_details"] = (
+                delta_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # 2. VOLUME CONFIRMATION (15 points max)
@@ -303,10 +331,16 @@ class ScalpingStrategy(BaseStrategy):
 
             if vol_col is not None and current_tick_count > 0:
                 # Prendre 14 bougies COMPLÈTES pour moyenne (exclure la dernière qui pourrait être en cours)
-                historical_volumes = df_m1[vol_col].tail(15).values[:-1]  # 14 dernières complètes
-                avg_volume = np.mean(historical_volumes) if len(historical_volumes) > 0 else 1.0
+                historical_volumes = (
+                    df_m1[vol_col].tail(15).values[:-1]
+                )  # 14 dernières complètes
+                avg_volume = (
+                    np.mean(historical_volumes) if len(historical_volumes) > 0 else 1.0
+                )
 
-                volume_ratio = current_tick_count / avg_volume if avg_volume > 0 else 1.0
+                volume_ratio = (
+                    current_tick_count / avg_volume if avg_volume > 0 else 1.0
+                )
                 volume_details["current_volume"] = float(current_tick_count)
                 volume_details["avg_volume"] = float(avg_volume)
                 volume_details["ratio"] = volume_ratio
@@ -332,7 +366,9 @@ class ScalpingStrategy(BaseStrategy):
                     volume_confirmation_score = 0.0
 
             result["volume_confirmation_score"] = volume_confirmation_score
-            result["volume_confirmation_details"] = volume_details  # FIX: Nom correct pour le rapport
+            result["volume_confirmation_details"] = (
+                volume_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # 3. IMBALANCE STRENGTH (10 points max)
@@ -348,8 +384,12 @@ class ScalpingStrategy(BaseStrategy):
 
                 imbalance_details["imbalance_buy"] = imbalance_buy
                 imbalance_details["imbalance_sell"] = imbalance_sell
-                imbalance_details["m1_count"] = total_imbalances  # Les imbalances footprint sont M1
-                imbalance_details["m5_count"] = 0  # TODO: Si besoin M5 séparé, ajouter au footprint_validator
+                imbalance_details["m1_count"] = (
+                    total_imbalances  # Les imbalances footprint sont M1
+                )
+                imbalance_details["m5_count"] = (
+                    0  # TODO: Si besoin M5 séparé, ajouter au footprint_validator
+                )
                 imbalance_details["total_count"] = total_imbalances
 
                 # Scoring basé sur les imbalances totales
@@ -363,15 +403,17 @@ class ScalpingStrategy(BaseStrategy):
                     imbalance_strength_score = 0.0
 
             result["imbalance_strength_score"] = imbalance_strength_score
-            result["imbalance_strength_details"] = imbalance_details  # FIX: Nom correct pour le rapport
+            result["imbalance_strength_details"] = (
+                imbalance_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # TOTAL ORDERFLOW SCORE
             # ================================================================
             result["total_score"] = (
-                delta_momentum_score +
-                volume_confirmation_score +
-                imbalance_strength_score
+                delta_momentum_score
+                + volume_confirmation_score
+                + imbalance_strength_score
             )
             result["mtf_aligned"] = mtf_aligned
 
@@ -384,7 +426,9 @@ class ScalpingStrategy(BaseStrategy):
             )
 
         except Exception as e:
-            self.logger.error(f"[{asset}] OrderFlow V6 analysis error: {e}", exc_info=True)
+            self.logger.error(
+                f"[{asset}] OrderFlow V6 analysis error: {e}", exc_info=True
+            )
 
         return result
 
@@ -394,7 +438,7 @@ class ScalpingStrategy(BaseStrategy):
         df_m1: pd.DataFrame,
         df_m5: Optional[pd.DataFrame],
         df_m15: Optional[pd.DataFrame],
-        asset_signals: Dict[str, Any]
+        asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         📈 Calcul OrderFlow V6 en mode standalone pour FusionManager.
@@ -425,7 +469,7 @@ class ScalpingStrategy(BaseStrategy):
             df_m1=df_m1,
             df_m5=df_m5,
             df_m15=df_m15,
-            asset_signals=asset_signals
+            asset_signals=asset_signals,
         )
 
         # Extraire le score total (0-50 points)
@@ -444,13 +488,15 @@ class ScalpingStrategy(BaseStrategy):
         delta_total = delta_details.get("delta_total", 0.0)
         summary = {
             "delta_total": delta_total,
-            "bias": "BUY" if delta_total > 0 else "SELL" if delta_total < 0 else "NEUTRAL",
+            "bias": (
+                "BUY" if delta_total > 0 else "SELL" if delta_total < 0 else "NEUTRAL"
+            ),
             "poc": volume_details.get("poc"),
             "vpoc_price": volume_details.get("poc"),  # Alias pour compatibilité
             "imbalance_count": imbalance_details.get("m1_count", 0),
             "volume_ratio": volume_details.get("ratio", 1.0),
             "mtf_alignment": result.get("mtf_alignment", {}),
-            "spike_detected": volume_details.get("spike_detected", False)
+            "spike_detected": volume_details.get("spike_detected", False),
         }
 
         # Déterminer status selon qualité du score
@@ -470,14 +516,11 @@ class ScalpingStrategy(BaseStrategy):
             "summary": summary,
             "total_score": total_score,  # 0-50 pour rapport consolidé (écrase result["total_score"] si identique)
             "details": details,  # Détails complets
-            "raw_result": result  # Résultat brut si besoin (pour debug)
+            "raw_result": result,  # Résultat brut si besoin (pour debug)
         }
 
     def _analyze_footprint_v6(
-        self,
-        asset: str,
-        df_m1: pd.DataFrame,
-        asset_signals: Dict[str, Any]
+        self, asset: str, df_m1: pd.DataFrame, asset_signals: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         👣 Footprint Analysis V6 - Ticks Temps Réel
@@ -505,7 +548,7 @@ class ScalpingStrategy(BaseStrategy):
             "order_clustering_score": 0.0,
             "price_rejection_score": 0.0,
             "total_score": 0.0,
-            "details": {}
+            "details": {},
         }
 
         try:
@@ -525,7 +568,6 @@ class ScalpingStrategy(BaseStrategy):
                 fp_summary = {}
 
             fp_status = asset_signals.get("footprint_status", "N/A").upper()
-
 
             # ================================================================
             # 1. ABSORPTION LEVELS (12.5 points max)
@@ -580,7 +622,9 @@ class ScalpingStrategy(BaseStrategy):
             )
 
             result["absorption_levels_score"] = absorption_score
-            result["absorption_details"] = absorption_details  # FIX: Nom correct pour le rapport
+            result["absorption_details"] = (
+                absorption_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # 2. ORDER CLUSTERING (8.5 points max)
@@ -606,7 +650,9 @@ class ScalpingStrategy(BaseStrategy):
                         cluster_count += 1
 
                 clustering_details["cluster_count"] = cluster_count
-                clustering_details["distribution"] = "concentrated" if cluster_count >= 2 else "dispersed"
+                clustering_details["distribution"] = (
+                    "concentrated" if cluster_count >= 2 else "dispersed"
+                )
 
                 # Log de debug
                 self.logger.debug(
@@ -626,7 +672,9 @@ class ScalpingStrategy(BaseStrategy):
                     clustering_score = 0.0
 
             result["order_clustering_score"] = clustering_score
-            result["clustering_details"] = clustering_details  # FIX: Nom correct pour le rapport
+            result["clustering_details"] = (
+                clustering_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # 3. PRICE REJECTION (4.0 points max)
@@ -652,7 +700,9 @@ class ScalpingStrategy(BaseStrategy):
                         upper_wick = high_val - max(open_val, close_val)
                         lower_wick = min(open_val, close_val) - low_val
 
-                        wick_ratio = max(upper_wick, lower_wick) / body if body > 0 else 0
+                        wick_ratio = (
+                            max(upper_wick, lower_wick) / body if body > 0 else 0
+                        )
 
                         # Rejet net si wick > 2x body
                         if wick_ratio >= 2.0:
@@ -675,15 +725,15 @@ class ScalpingStrategy(BaseStrategy):
                     rejection_details["strength"] = "none"
 
             result["price_rejection_score"] = rejection_score
-            result["rejection_details"] = rejection_details  # FIX: Nom correct pour le rapport
+            result["rejection_details"] = (
+                rejection_details  # FIX: Nom correct pour le rapport
+            )
 
             # ================================================================
             # TOTAL FOOTPRINT SCORE
             # ================================================================
             result["total_score"] = (
-                absorption_score +
-                clustering_score +
-                rejection_score
+                absorption_score + clustering_score + rejection_score
             )
 
             self.logger.debug(
@@ -702,170 +752,283 @@ class ScalpingStrategy(BaseStrategy):
             result["poc"] = fp_summary.get("poc")
 
         except Exception as e:
-            self.logger.error(f"[{asset}] Footprint V6 analysis error: {e}", exc_info=True)
+            self.logger.error(
+                f"[{asset}] Footprint V6 analysis error: {e}", exc_info=True
+            )
 
         return result
-
 
     def _log_orderflow_consolidated_report(
         self,
         asset: str,
         orderflow_result: Dict[str, Any],
         footprint_result: Dict[str, Any],
-        final_score: float,
+        final_score: float,  # ⚠️ Ce paramètre ne sera PLUS utilisé pour le total 100pts
         action: Optional[str],
         vwap_score_pct: float = 0.0,
         vwap_status: str = "N/A",
-        vwap_regime: Optional[str] = None  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
+        vwap_regime: Optional[
+            str
+        ] = None,  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
     ) -> None:
         """
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
 
         Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
+        ✅ CORRIGÉ (19 DEC 2025): Normalisation des scores pour échelle cohérente 0-100pts
 
-        ✅ MAJ (09 DEC 2025): Poids adaptatifs selon régime VWAP (vwap_adaptive_config.json)
+        SCORES BRUTS :
+        - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
+        - Footprint V6: 0-25 points (Absorption 0-12.5, Clustering 0-8.5, Rejection 0-4)
+        - VWAP: 0-100% → converti en 0-w_vw points
+
+        SCORES NORMALISÉS (pour total 100pts):
+        - OrderFlow_norm = (score_brut / 50) * poids_orderflow
+        - Footprint_norm = (score_brut / 25) * poids_footprint
+        - VWAP_norm = (score_pct / 100) * poids_vwap
+        - TOTAL = OrderFlow_norm + Footprint_norm + VWAP_norm (0-100pts)
         """
+
         try:
-            # ✅ POIDS DYNAMIQUES selon régime VWAP (vwap_adaptive_config.json)
+            # ================================================================
+            # 1. CALCUL DES POIDS (Dynamiques si régime VWAP, sinon statiques)
+            # ================================================================
+            # Poids par défaut (fallback statique)
+            fusion_cfg = self.strategy_config.get("fusion", {})
+            ponderations = fusion_cfg.get("ponderations", {})
+            w_of = (
+                float(ponderations.get("orderflow_weight", 0.30)) * 100
+            )  # 30% par défaut
+            w_fp = (
+                float(ponderations.get("footprint_weight", 0.35)) * 100
+            )  # 35% par défaut
+            w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100  # 35% par défaut
+
+            # Tenter d'appliquer les poids dynamiques si régime VWAP disponible
             if vwap_regime:
                 try:
                     weights = get_regime_weights(vwap_regime.upper())
-                    w_of = weights["orderflow"] * 100  # 0.40 -> 40
-                    w_fp = weights["footprint"] * 100  # 0.40 -> 40
-                    w_vw = weights["vwap"] * 100       # 0.20 -> 20
+                    w_of = weights["orderflow"] * 100
+                    w_fp = weights["footprint"] * 100
+                    w_vw = weights["vwap"] * 100
                 except Exception as e:
-                    self.logger.warning(f"[{asset}] Erreur lecture poids VWAP regime '{vwap_regime}': {e}")
-                    # Fallback sur poids statiques de la config
-                    fusion_cfg = self.strategy_config.get("fusion", {})
-                    ponderations = fusion_cfg.get("ponderations", {})
-                    w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100
-                    w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100
-                    w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100
-            else:
-                # Fallback si pas de régime VWAP disponible
-                fusion_cfg = self.strategy_config.get("fusion", {})
-                ponderations = fusion_cfg.get("ponderations", {})
-                w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100
-                w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100
-                w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100
+                    self.logger.warning(
+                        f"[{asset}] Erreur lecture poids VWAP regime '{vwap_regime}': {e}. "
+                        "Utilisation des poids statiques."
+                    )
 
+            # Vérification de cohérence (poids totaux = 100%)
+            total_weight = w_of + w_fp + w_vw
+            if abs(total_weight - 100.0) > 0.1:  # Tolérance 0.1%
+                self.logger.warning(
+                    f"[{asset}] Somme des poids anormale: {total_weight:.1f}% != 100%. "
+                    f"Normalisation automatique."
+                )
+                w_of = (w_of / total_weight) * 100
+                w_fp = (w_fp / total_weight) * 100
+                w_vw = (w_vw / total_weight) * 100
+
+            # ================================================================
+            # 2. EXTRACTION DES SCORES BRUTS
+            # ================================================================
+            # OrderFlow V6 - Scores bruts (échelle 0-50)
+            of_score_brut = orderflow_result.get("total_score", 0.0)  # 0-50 points
+            delta_score = orderflow_result.get("delta_momentum_score", 0.0)  # 0-25
+            volume_score = orderflow_result.get(
+                "volume_confirmation_score", 0.0
+            )  # 0-15
+            imbalance_score = orderflow_result.get(
+                "imbalance_strength_score", 0.0
+            )  # 0-10
+
+            # Footprint V6 - Scores bruts (échelle 0-25)
+            fp_score_brut = footprint_result.get("total_score", 0.0)  # 0-25 points
+            absorption_score = footprint_result.get(
+                "absorption_levels_score", 0.0
+            )  # 0-12.5
+            clustering_score = footprint_result.get(
+                "order_clustering_score", 0.0
+            )  # 0-8.5
+            rejection_score = footprint_result.get("price_rejection_score", 0.0)  # 0-4
+
+            # VWAP - Score déjà en pourcentage (0-100%)
+            vwap_score_pct_clamped = max(0.0, min(100.0, vwap_score_pct))
+
+            # ================================================================
+            # 3. NORMALISATION DES SCORES (pour total 100pts)
+            # ================================================================
+            # Conversion des scores bruts vers l'échelle des poids
+            of_score_norm = (
+                (of_score_brut / 50.0) * w_of if w_of > 0 else 0.0
+            )  # 0-w_of points
+            fp_score_norm = (
+                (fp_score_brut / 25.0) * w_fp if w_fp > 0 else 0.0
+            )  # 0-w_fp points
+            vwap_score_norm = (
+                (vwap_score_pct_clamped / 100.0) * w_vw if w_vw > 0 else 0.0
+            )  # 0-w_vw points
+
+            # Calcul du TOTAL NORMALISÉ (0-100 points)
+            total_normalise = of_score_norm + fp_score_norm + vwap_score_norm
+
+            # ================================================================
+            # 4. LOGGING DU RAPPORT CONSOLIDÉ
+            # ================================================================
             sep = "=" * 70
 
             self.logger.info(f"\n{sep}")
             self.logger.info(f"📊 ORDERFLOW V6 - ANALYSE BURST SCALPING [{asset}]")
             self.logger.info(f"{sep}")
 
-            # ================================================================
-            # 1. ANALYSE MULTI-TIMEFRAME
-            # ================================================================
+            # 4.1 ANALYSE MULTI-TIMEFRAME
             mtf_alignment = orderflow_result.get("mtf_alignment", {})
             m1_dir = mtf_alignment.get("m1", "N/A")
             m5_dir = mtf_alignment.get("m5", "N/A")
             m15_dir = mtf_alignment.get("m15", "N/A")
             mtf_aligned = orderflow_result.get("mtf_aligned", False)
 
-            self.logger.info(f"\n⏱️  PÉRIODES MULTI-TIMEFRAME :")
-            self.logger.info(f"   • M1  (8 bougies)  → Momentum : {m1_dir.upper()}")
-            self.logger.info(f"   • M5  (6 bougies)  → Structure : {m5_dir.upper()}")
-            self.logger.info(f"   • M15 (4 bougies)  → Contexte  : {m15_dir.upper()}")
+            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME :")
+            self.logger.info(f"   • M1  (8 bougies) → Momentum : {m1_dir.upper()}")
+            self.logger.info(f"   • M5  (6 bougies) → Structure : {m5_dir.upper()}")
+            self.logger.info(f"   • M15 (4 bougies) → Contexte  : {m15_dir.upper()}")
 
             if mtf_aligned:
                 self.logger.info(f"   ✅ ALIGNEMENT MTF DÉTECTÉ")
             else:
                 self.logger.info(f"   ⚠️  Pas d'alignement multi-timeframe")
 
-            # ================================================================
-            # 2. ORDERFLOW ANALYSIS (50% du score)
-            # ================================================================
-            of_score = orderflow_result.get("total_score", 0.0)
-            delta_score = orderflow_result.get("delta_momentum_score", 0.0)
-            volume_score = orderflow_result.get("volume_confirmation_score", 0.0)
-            imbalance_score = orderflow_result.get("imbalance_strength_score", 0.0)
-
+            # 4.2 ORDERFLOW ANALYSIS (avec scores bruts ET normalisés)
             delta_details = orderflow_result.get("delta_momentum_details", {})
             volume_details = orderflow_result.get("volume_confirmation_details", {})
             imbalance_details = orderflow_result.get("imbalance_strength_details", {})
 
-            self.logger.info(f"\n📈 ORDERFLOW ANALYSIS ({w_of:.0f}% du total) : {of_score:.1f}/{w_of:.0f} points")
+            self.logger.info(f"\n📈 ORDERFLOW ANALYSIS ({w_of:.0f}% du total) :")
+            self.logger.info(
+                f"   Score brut: {of_score_brut:.1f}/50 pts → Normalisé: {of_score_norm:.1f}/{w_of:.0f} pts"
+            )
             self.logger.info(f"   ├─ Delta Momentum      : {delta_score:.1f}/25 pts")
-            self.logger.info(f"   │  • Delta total       : {delta_details.get('delta_total', 0)}")
-            self.logger.info(f"   │  • Cohérence         : {delta_details.get('coherence', 0)*100:.0f}%")
-            self.logger.info(f"   │  • Direction         : {delta_details.get('direction', 'N/A').upper()}")
+            self.logger.info(
+                f"   │  • Delta total       : {delta_details.get('delta_total', 0)}"
+            )
+            self.logger.info(
+                f"   │  • Cohérence         : {delta_details.get('coherence', 0)*100:.0f}%"
+            )
+            self.logger.info(
+                f"   │  • Direction         : {delta_details.get('direction', 'N/A').upper()}"
+            )
 
             self.logger.info(f"   ├─ Volume Confirmation : {volume_score:.1f}/15 pts")
-            self.logger.info(f"   │  • Volume ratio      : {volume_details.get('ratio', 0):.2f}x")
-            self.logger.info(f"   │  • Spike détecté     : {'OUI' if volume_details.get('spike_detected') else 'NON'}")
-            poc_val = volume_details.get('poc')
+            self.logger.info(
+                f"   │  • Volume ratio      : {volume_details.get('ratio', 0):.2f}x"
+            )
+            self.logger.info(
+                f"   │  • Spike détecté     : {'OUI' if volume_details.get('spike_detected') else 'NON'}"
+            )
+            poc_val = volume_details.get("poc")
             poc_str = f"{poc_val:.2f}" if poc_val is not None else "N/A"
             self.logger.info(f"   │  • POC (Point of Control) : {poc_str}")
 
-            self.logger.info(f"   └─ Imbalance Strength  : {imbalance_score:.1f}/10 pts")
+            self.logger.info(
+                f"   └─ Imbalance Strength  : {imbalance_score:.1f}/10 pts"
+            )
             m1_count = imbalance_details.get("m1_count", 0)
             m5_count = imbalance_details.get("m5_count", 0)
             self.logger.info(f"      • Imbalances M1    : {m1_count} détectées")
             self.logger.info(f"      • Imbalances M5    : {m5_count} détectées")
 
-            # ================================================================
-            # 3. FOOTPRINT ANALYSIS (25% du score)
-            # ================================================================
-            fp_score = footprint_result.get("total_score", 0.0)
-            # ✅ FIX (2 Décembre 2025): Corriger clés pour matcher les vraies clés stockées
-            absorption_score = footprint_result.get("absorption_levels_score", 0.0)
-            clustering_score = footprint_result.get("order_clustering_score", 0.0)
-            rejection_score = footprint_result.get("price_rejection_score", 0.0)
-
+            # 4.3 FOOTPRINT ANALYSIS (avec scores bruts ET normalisés)
             absorption_details = footprint_result.get("absorption_details", {})
             clustering_details = footprint_result.get("clustering_details", {})
             rejection_details = footprint_result.get("rejection_details", {})
 
-            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS ({w_fp:.0f}% du total) : {fp_score:.1f}/{w_fp:.0f} points")
-            self.logger.info(f"   ├─ Absorption Levels   : {absorption_score:.1f}/12.5 pts")
-            self.logger.info(f"   │  • Biais absorption  : {absorption_details.get('bias', 'N/A')}")
-            self.logger.info(f"   │  • Buy ratio         : {absorption_details.get('buy_ratio', 0)*100:.0f}%")
-            self.logger.info(f"   │  • Sell ratio        : {absorption_details.get('sell_ratio', 0)*100:.0f}%")
+            self.logger.info(f"\n👣 FOOTPRINT ANALYSIS ({w_fp:.0f}% du total) :")
+            self.logger.info(
+                f"   Score brut: {fp_score_brut:.1f}/25 pts → Normalisé: {fp_score_norm:.1f}/{w_fp:.0f} pts"
+            )
+            self.logger.info(
+                f"   ├─ Absorption Levels   : {absorption_score:.1f}/12.5 pts"
+            )
+            self.logger.info(
+                f"   │  • Biais absorption  : {absorption_details.get('bias', 'N/A')}"
+            )
+            self.logger.info(
+                f"   │  • Buy ratio         : {absorption_details.get('buy_ratio', 0)*100:.0f}%"
+            )
+            self.logger.info(
+                f"   │  • Sell ratio        : {absorption_details.get('sell_ratio', 0)*100:.0f}%"
+            )
 
-            self.logger.info(f"   ├─ Order Clustering    : {clustering_score:.1f}/8.5 pts")
-            self.logger.info(f"   │  • Clusters détectés : {clustering_details.get('cluster_count', 0)}")
-            # ✅ FIX (2 Décembre 2025): Utiliser "distribution" (clé correcte)
-            self.logger.info(f"   │  • Distribution      : {clustering_details.get('distribution', 'N/A')}")
+            self.logger.info(
+                f"   ├─ Order Clustering    : {clustering_score:.1f}/8.5 pts"
+            )
+            self.logger.info(
+                f"   │  • Clusters détectés : {clustering_details.get('cluster_count', 0)}"
+            )
+            self.logger.info(
+                f"   │  • Distribution      : {clustering_details.get('distribution', 'N/A')}"
+            )
 
-            self.logger.info(f"   └─ Price Rejection     : {rejection_score:.1f}/4.0 pts")
-            # ✅ FIX (2 Décembre 2025): Utiliser "rejection_bars" et "strength" (clés correctes)
-            self.logger.info(f"      • Rejets détectés   : {rejection_details.get('rejection_bars', 0)}/3")
-            self.logger.info(f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}")
+            self.logger.info(
+                f"   └─ Price Rejection     : {rejection_score:.1f}/4.0 pts"
+            )
+            self.logger.info(
+                f"      • Rejets détectés   : {rejection_details.get('rejection_bars', 0)}/3"
+            )
+            self.logger.info(
+                f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}"
+            )
 
-            # ================================================================
-            # 4. VWAP MODULE - INSTITUTIONNEL (03 DEC 2025)
-            # ================================================================
-            # Calcul du score VWAP sur w_vw points (dynamique)
-            vwap_score_pts = (vwap_score_pct / 100.0) * w_vw  # Convertir 0-100% → 0-w_vw pts
-
+            # 4.4 VWAP MODULE - INSTITUTIONNEL
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
-            self.logger.info(f"   Score VWAP      : {vwap_score_pts:.1f}/{w_vw:.0f} pts ({vwap_score_pct:.1f}%)")
+            self.logger.info(
+                f"   Score VWAP      : {vwap_score_norm:.1f}/{w_vw:.0f} pts ({vwap_score_pct_clamped:.1f}%)"
+            )
             self.logger.info(f"   Status          : {vwap_status}")
+            if vwap_regime:
+                self.logger.info(f"   Régime détecté  : {vwap_regime.upper()}")
 
             # ================================================================
-            # 5. SCORE FINAL & DÉCISION
+            # 5. SCORE FINAL NORMALISÉ & DÉCISION
             # ================================================================
             self.logger.info(f"\n{sep}")
-            self.logger.info(f"🎯 SCORE FINAL BURST SCALPING")
+            self.logger.info(f"🎯 SCORE FINAL BURST SCALPING (Normalisé sur 100pts)")
             self.logger.info(f"{sep}")
-            self.logger.info(f"   OrderFlow ({w_of:.0f}%) : {of_score:.1f}/{w_of:.0f} pts")
-            self.logger.info(f"   Footprint ({w_fp:.0f}%) : {fp_score:.1f}/{w_fp:.0f} pts")
-            self.logger.info(f"   VWAP ({w_vw:.0f}%)      : {vwap_score_pts:.1f}/{w_vw:.0f} pts")
+            self.logger.info(
+                f"   OrderFlow ({w_of:.0f}%) : {of_score_norm:.1f}/{w_of:.0f} pts"
+            )
+            self.logger.info(
+                f"   Footprint ({w_fp:.0f}%) : {fp_score_norm:.1f}/{w_fp:.0f} pts"
+            )
+            self.logger.info(
+                f"   VWAP ({w_vw:.0f}%)      : {vwap_score_norm:.1f}/{w_vw:.0f} pts"
+            )
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {final_score + vwap_score_pts:.1f}/100 pts")
+            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {total_normalise:.1f}/100 pts")
+
+            # Ancien total (pour référence debug - à supprimer après validation)
+            ancien_total_erroné = final_score + vwap_score_norm
+            if abs(ancien_total_erroné - total_normalise) > 1.0:
+                self.logger.debug(
+                    f"[DEBUG] Ancien calcul (obsolète): {ancien_total_erroné:.1f}/100 pts"
+                )
 
             # Direction recommandée
             if action:
                 action_emoji = "🟢" if action == "BUY" else "🔴"
-                self.logger.info(f"\n   {action_emoji} Direction recommandée : {action}")
+                self.logger.info(
+                    f"\n   {action_emoji} Direction recommandée : {action}"
+                )
 
             self.logger.info(f"{sep}\n")
 
+        except ZeroDivisionError as e:
+            self.logger.error(
+                f"[{asset}] Erreur division par zéro dans normalisation: {e}"
+            )
         except Exception as e:
-            self.logger.error(f"[{asset}] Erreur rapport consolidé OrderFlow V6: {e}", exc_info=True)
-
+            self.logger.error(
+                f"[{asset}] Erreur rapport consolidé OrderFlow V6: {e}", exc_info=True
+            )
 
     def evaluate_entry(
         self,
@@ -886,7 +1049,7 @@ class ScalpingStrategy(BaseStrategy):
         try:
             # --- 0) Données & config ---
             ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-            
+
             # ✅ Résolution sûre (pas d'évaluation booléenne de DataFrame)
             df_m1 = None
             for __k in ("annotated_rates_df_m1", "annotated_rates_df", "df_m1", "df"):
@@ -952,7 +1115,11 @@ class ScalpingStrategy(BaseStrategy):
 
                 # Early entry si déséquilibre extrême (optionnel)
                 try:
-                    delta = float(fp_summary.get("delta_total", 0)) if isinstance(fp_summary, dict) else 0
+                    delta = (
+                        float(fp_summary.get("delta_total", 0))
+                        if isinstance(fp_summary, dict)
+                        else 0
+                    )
                 except Exception:
                     delta = None
                 if isinstance(delta, (int, float)) and abs(delta) >= 300:
@@ -962,7 +1129,7 @@ class ScalpingStrategy(BaseStrategy):
                     )
                 else:
                     asset_signals["early_entry_allowed"] = False
-                    
+
                 # --- 0d) Déduction robuste de l'action ---
                 # 1) indices directs depuis les signaux
                 action = (
@@ -990,22 +1157,24 @@ class ScalpingStrategy(BaseStrategy):
                             action = "SELL"
                 except Exception:
                     pass
-    
+
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
-           
+
             # --- 1) Métadonnées (pip_size, spread, etc.) ---
-            meta = self._safe_asset_meta(asset, asset_signals, analyzed_context, strat_cfg)
+            meta = self._safe_asset_meta(
+                asset, asset_signals, analyzed_context, strat_cfg
+            )
             pip_size = meta["pip_size"]
             if pip_size <= 0:
                 self.logger.warning(f"[{asset}] pip_size invalide.")
                 return {}
-           
+
             # --- 2) Prix courant ---
             price = self._safe_price_from_signals(asset_signals)
             if not price:
                 self.logger.info(f"[{asset}] Pas de prix exploitable dans les signaux.")
-                return {}                  
+                return {}
 
             # --- 5) Range Accumulation MTF ---
             try:
@@ -1021,36 +1190,84 @@ class ScalpingStrategy(BaseStrategy):
                     )
                     if mtf_decision:
                         return self._finalize_decision(mtf_decision, analyzed_context)
-                
-                          # --- 3) Momentum & Breakout (nouvelles règles) ---
+
+                        # --- 3) Momentum & Breakout (nouvelles règles) ---
                 try:
-                    mom_cfg = (strat_cfg.get("momentum") or {}) if isinstance(strat_cfg, dict) else {}
-                    pat_cfg = (strat_cfg.get("patterns") or {}) if isinstance(strat_cfg, dict) else {}
+                    mom_cfg = (
+                        (strat_cfg.get("momentum") or {})
+                        if isinstance(strat_cfg, dict)
+                        else {}
+                    )
+                    pat_cfg = (
+                        (strat_cfg.get("patterns") or {})
+                        if isinstance(strat_cfg, dict)
+                        else {}
+                    )
 
                     # ✅ Vérifier que momentum ET patterns sont enabled
-                    if not mom_cfg.get("enabled", False) and not pat_cfg.get("enabled", False):
-                        self.logger.debug(f"[{asset}] Momentum/Pattern désactivés dans config")
+                    if not mom_cfg.get("enabled", False) and not pat_cfg.get(
+                        "enabled", False
+                    ):
+                        self.logger.debug(
+                            f"[{asset}] Momentum/Pattern désactivés dans config"
+                        )
                     else:
-                        weights = (strat_cfg.get("scoring_weights") or {"context": 0.3, "technical": 0.4, "orderflow": 0.2, "risk": 0.1})
-                        thresholds = (strat_cfg.get("scoring_thresholds") or {"direct": 0.70, "conditional": 0.50})
+                        weights = strat_cfg.get("scoring_weights") or {
+                            "context": 0.3,
+                            "technical": 0.4,
+                            "orderflow": 0.2,
+                            "risk": 0.1,
+                        }
+                        thresholds = strat_cfg.get("scoring_thresholds") or {
+                            "direct": 0.70,
+                            "conditional": 0.50,
+                        }
 
                         candidates: List[Dict[str, Any]] = []
 
                         # Evaluer momentum patterns seulement si enabled
                         if mom_cfg.get("enabled", False):
-                            rb = self._rule_breakout_consolidation(df_work, asset, price, meta, mom_cfg.get("breakout", {}) or {})
-                            if rb: candidates.append(rb)
+                            rb = self._rule_breakout_consolidation(
+                                df_work,
+                                asset,
+                                price,
+                                meta,
+                                mom_cfg.get("breakout", {}) or {},
+                            )
+                            if rb:
+                                candidates.append(rb)
 
-                            tpull = self._rule_trend_pullback(df_work, asset, price, meta, mom_cfg.get("trend_pullback", {}) or {})
-                            if tpull: candidates.append(tpull)
+                            tpull = self._rule_trend_pullback(
+                                df_work,
+                                asset,
+                                price,
+                                meta,
+                                mom_cfg.get("trend_pullback", {}) or {},
+                            )
+                            if tpull:
+                                candidates.append(tpull)
 
-                            ign = self._rule_momentum_ignition(df_work, asset, price, meta, mom_cfg.get("ignition", {}) or {})
-                            if ign: candidates.append(ign)
+                            ign = self._rule_momentum_ignition(
+                                df_work,
+                                asset,
+                                price,
+                                meta,
+                                mom_cfg.get("ignition", {}) or {},
+                            )
+                            if ign:
+                                candidates.append(ign)
 
                         # Evaluer patterns seulement si enabled
                         if pat_cfg.get("enabled", False):
-                            ib = self._rule_inside_bar_breakout(df_work, asset, price, meta, (pat_cfg.get("inside_bar", {}) or {}))
-                            if ib: candidates.append(ib)
+                            ib = self._rule_inside_bar_breakout(
+                                df_work,
+                                asset,
+                                price,
+                                meta,
+                                (pat_cfg.get("inside_bar", {}) or {}),
+                            )
+                            if ib:
+                                candidates.append(ib)
 
                         if candidates:
                             best = self._choose_best_candidate(
@@ -1062,7 +1279,9 @@ class ScalpingStrategy(BaseStrategy):
                                 weights=weights,
                                 thresholds=thresholds,
                             )
-                            if best and float(best.get("score", 0.0)) >= float(thresholds.get("direct", 0.70)):
+                            if best and float(best.get("score", 0.0)) >= float(
+                                thresholds.get("direct", 0.70)
+                            ):
                                 return self._finalize_decision(best, analyzed_context)
                 except Exception as e:
                     self.logger.debug(f"[{asset}] Momentum/Pattern block skipped: {e}")
@@ -1174,8 +1393,12 @@ class ScalpingStrategy(BaseStrategy):
                 df_m15 = None
 
                 # ✅ DEBUG: Log structure analyzed_context
-                ctx_md = (analyzed_context.get("market_data") or {}).get(asset, {}) or {}
-                self.logger.debug(f"[OF V6][{asset}] market_data keys: {list(ctx_md.keys())}")
+                ctx_md = (analyzed_context.get("market_data") or {}).get(
+                    asset, {}
+                ) or {}
+                self.logger.debug(
+                    f"[OF V6][{asset}] market_data keys: {list(ctx_md.keys())}"
+                )
 
                 # Essayer de récupérer M5 depuis analyzed_context
                 try:
@@ -1183,7 +1406,9 @@ class ScalpingStrategy(BaseStrategy):
                         v = ctx_md.get(k)
                         if isinstance(v, pd.DataFrame) and len(v) >= 4:
                             df_m5 = v
-                            self.logger.debug(f"[OF V6][{asset}] M5 trouvé via clé '{k}' | len={len(df_m5)}")
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M5 trouvé via clé '{k}' | len={len(df_m5)}"
+                            )
                             break
                 except Exception as e:
                     self.logger.debug(f"[OF V6][{asset}] Erreur récupération M5: {e}")
@@ -1194,7 +1419,9 @@ class ScalpingStrategy(BaseStrategy):
                         v = ctx_md.get(k)
                         if isinstance(v, pd.DataFrame) and len(v) >= 4:
                             df_m15 = v
-                            self.logger.debug(f"[OF V6][{asset}] M15 trouvé via clé '{k}' | len={len(df_m15)}")
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M15 trouvé via clé '{k}' | len={len(df_m15)}"
+                            )
                             break
                 except Exception as e:
                     self.logger.debug(f"[OF V6][{asset}] Erreur récupération M15: {e}")
@@ -1203,20 +1430,34 @@ class ScalpingStrategy(BaseStrategy):
                 if df_m5 is None and self.mt5_connector:
                     try:
                         import MetaTrader5 as mt5
-                        df_m5 = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=20)
+
+                        df_m5 = self.mt5_connector.get_rates(
+                            asset, mt5.TIMEFRAME_M5, count=20
+                        )
                         if df_m5 is not None and len(df_m5) >= 4:
-                            self.logger.debug(f"[OF V6][{asset}] M5 récupéré via MT5 | len={len(df_m5)}")
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M5 récupéré via MT5 | len={len(df_m5)}"
+                            )
                     except Exception as e:
-                        self.logger.debug(f"[OF V6][{asset}] Impossible récupérer M5 via MT5: {e}")
+                        self.logger.debug(
+                            f"[OF V6][{asset}] Impossible récupérer M5 via MT5: {e}"
+                        )
 
                 if df_m15 is None and self.mt5_connector:
                     try:
                         import MetaTrader5 as mt5
-                        df_m15 = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M15, count=15)
+
+                        df_m15 = self.mt5_connector.get_rates(
+                            asset, mt5.TIMEFRAME_M15, count=15
+                        )
                         if df_m15 is not None and len(df_m15) >= 4:
-                            self.logger.debug(f"[OF V6][{asset}] M15 récupéré via MT5 | len={len(df_m15)}")
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M15 récupéré via MT5 | len={len(df_m15)}"
+                            )
                     except Exception as e:
-                        self.logger.debug(f"[OF V6][{asset}] Impossible récupérer M15 via MT5: {e}")
+                        self.logger.debug(
+                            f"[OF V6][{asset}] Impossible récupérer M15 via MT5: {e}"
+                        )
 
                 # ⚡ 1. OrderFlow Analysis (50% du score)
                 orderflow_result = self._analyze_orderflow_v6(
@@ -1224,20 +1465,33 @@ class ScalpingStrategy(BaseStrategy):
                     df_m1=df_work,
                     df_m5=df_m5,
                     df_m15=df_m15,
-                    asset_signals=asset_signals
+                    asset_signals=asset_signals,
                 )
 
                 # 👣 2. Footprint Analysis (25% du score)
                 footprint_result = self._analyze_footprint_v6(
-                    asset=asset,
-                    df_m1=df_work,
-                    asset_signals=asset_signals
+                    asset=asset, df_m1=df_work, asset_signals=asset_signals
                 )
 
-                # 📊 3. SCORING FINAL PONDÉRÉ
-                orderflow_score = orderflow_result.get("total_score", 0.0)
-                footprint_score = footprint_result.get("total_score", 0.0)
-                final_score = orderflow_score + footprint_score
+                # 📊 3. CALCUL DES POIDS ET NORMALISATION POUR LA DÉCISION
+                # Récupération des poids identique à _log_orderflow_consolidated_report
+                fusion_cfg = self.strategy_config.get("fusion", {})
+                ponderations = fusion_cfg.get("ponderations", {})
+                w_of = float(ponderations.get("orderflow_weight", 0.30)) * 100
+                w_fp = float(ponderations.get("footprint_weight", 0.35)) * 100
+                w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100
+
+                # Normalisation des scores pour la décision (sans VWAP)
+                orderflow_score = orderflow_result.get("total_score", 0.0)  # 0-50
+                footprint_score = footprint_result.get("total_score", 0.0)  # 0-25
+                score_normalized = (orderflow_score / 50.0) * w_of + (
+                    footprint_score / 25.0
+                ) * w_fp  # 0-100 (OF+FP seulement)
+
+                # Score final pour la décision (OF+FP+VWAP)
+                final_score_normalized = (
+                    score_normalized + (vwap_score_pct / 100.0) * w_vw
+                )  # 0-100
 
                 # 📋 5. RAPPORT CONSOLIDÉ
                 # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
@@ -1246,9 +1500,13 @@ class ScalpingStrategy(BaseStrategy):
                 vwap_regime = None
                 try:
                     latest_signals = asset_signals.get("__latest__", {})
-                    vwap_score_pct = float(latest_signals.get("vwap_score", 0.0)) * 100.0  # Convertir 0-1 → 0-100
+                    vwap_score_pct = (
+                        float(latest_signals.get("vwap_score", 0.0)) * 100.0
+                    )  # Convertir 0-1 → 0-100
                     vwap_status = str(latest_signals.get("vwap_status", "N/A"))
-                    vwap_regime = latest_signals.get("vwap_regime")  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
+                    vwap_regime = latest_signals.get(
+                        "vwap_regime"
+                    )  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
                 except Exception:
                     pass
 
@@ -1256,18 +1514,19 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
-                    final_score=final_score,
+                    final_score=0.0,  # On passe 0.0 car le score est recalculé dans la fonction
                     action=action,
                     vwap_score_pct=vwap_score_pct,
                     vwap_status=vwap_status,
-                    vwap_regime=vwap_regime  # ✅ AJOUTÉ: Passer le régime pour poids dynamiques
+                    vwap_regime=vwap_regime,
                 )
-
                 # ✅ AUCUN SEUIL ICI - FusionManager gère TOUT avec scoring_thresholds
                 # (high: 0.80, moderate: 0.75, cautious: 0.70, conditional: 0.40)
 
             except Exception as e:
-                self.logger.warning(f"[{asset}] OrderFlow V6 analysis failed: {e}", exc_info=True)
+                self.logger.warning(
+                    f"[{asset}] OrderFlow V6 analysis failed: {e}", exc_info=True
+                )
                 # Continuer sans OrderFlow V6 si erreur (fallback)
 
             # ================================================================
@@ -1283,22 +1542,31 @@ class ScalpingStrategy(BaseStrategy):
                 "execution_status": "ready",
                 "action": action,
                 "asset": asset,
-                "order_type": entry_mode,  # MARKET / BUY_LIMIT / SELL_LIMIT
+                "order_type": entry_mode,
                 "entry_price": (float(price) if entry_mode != "MARKET" else None),
-                "burst_size": burst_sz,  # virtuel (logique interne)
+                "burst_size": burst_sz,
                 "fusion_data": {
-                    "fused_confidence": final_score / 100.0 if 'final_score' in locals() else 0.0,
-                    "orderflow": orderflow_result if 'orderflow_result' in locals() else {},
-                    "footprint": footprint_result if 'footprint_result' in locals() else {},
+                    "fused_confidence": final_score_normalized
+                    / 100.0,  # ✅ Normalisé 0-1
+                    "orderflow": orderflow_result,
+                    "footprint": footprint_result,
+                    "score_details": {  # ✅ AJOUT : Détails pour debugging
+                        "orderflow_brut": orderflow_score,
+                        "footprint_brut": footprint_score,
+                        "vwap_pct": vwap_score_pct,
+                        "weights": {"of": w_of, "fp": w_fp, "vw": w_vw},
+                        "normalized": final_score_normalized,
+                    },
                 },
                 "meta": {
                     "burst": True,
                     "entry_source": "core_decision",
                     "per_leg_virtual": bool(sm_cfg.get("per_leg_virtual", True)),
                     "atr_m1_pips": atr_m1_pips,
-                    "orderflow_v6_score": final_score if 'final_score' in locals() else None,
+                    "orderflow_v6_score": final_score_normalized,  # ✅ Score normalisé 0-100
                 },
             }
+
             return self._finalize_decision(sm_decision, analyzed_context)
 
             # --- Aucun setup valide ---
@@ -1347,9 +1615,13 @@ class ScalpingStrategy(BaseStrategy):
         phase = str(asset_signals.get("phase", "") or "").lower()
         conf = float(asset_signals.get("confidence_score", 0.5) or 0.5)
         align = 0.5
-        if c.get("action") == "BUY" and any(k in phase for k in ("bull", "up", "accum", "trend")):
+        if c.get("action") == "BUY" and any(
+            k in phase for k in ("bull", "up", "accum", "trend")
+        ):
             align = 1.0
-        if c.get("action") == "SELL" and any(k in phase for k in ("bear", "down", "distrib", "trend")):
+        if c.get("action") == "SELL" and any(
+            k in phase for k in ("bear", "down", "distrib", "trend")
+        ):
             align = 1.0 if "trend" in phase or "bear" in phase else 0.8
         context_score = 0.5 * conf + 0.5 * align
         context_score = max(0.0, min(1.0, context_score))
@@ -1399,7 +1671,6 @@ class ScalpingStrategy(BaseStrategy):
     # - _rule_inside_bar_breakout (40 lignes)
     # - _rule_momentum_ignition (106 lignes)
     # Total supprimé : ~180 lignes de code mort
-
 
     def _get_atr_m1_pips(
         self,
@@ -1456,7 +1727,6 @@ class ScalpingStrategy(BaseStrategy):
                 f"[{asset}] Burst scalping: conversions ATR M1 pips échouées ({'; '.join(conversion_errors)})"
             )
         return None
-  
 
     # =====================================================
     # Tes règles scalping/liquidity existantes commencent ici
@@ -1482,9 +1752,11 @@ class ScalpingStrategy(BaseStrategy):
         if action not in ("BUY", "SELL"):
             return None
 
-        entry_mode = str(sm_cfg.get("entry_mode", "MARKET")).upper()   # MARKET / BUY_LIMIT / SELL_LIMIT
+        entry_mode = str(
+            sm_cfg.get("entry_mode", "MARKET")
+        ).upper()  # MARKET / BUY_LIMIT / SELL_LIMIT
         burst_size = int(sm_cfg.get("burst_size", 8) or 8)
-        basket_id  = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
+        basket_id = f"burst_{asset.upper()}_{uuid.uuid4().hex[:8]}"
 
         return {
             "strategy_type": "scalping",
@@ -1494,17 +1766,13 @@ class ScalpingStrategy(BaseStrategy):
             "asset": asset,
             "order_type": entry_mode,
             "entry_price": float(entry_price) if entry_mode != "MARKET" else None,
-            "burst_size": burst_size,                 # virtuel (utile pour ta logique interne)
+            "burst_size": burst_size,  # virtuel (utile pour ta logique interne)
             "basket_id": basket_id,
             "fusion_data": {
                 "fused_confidence": 1.0,  # Fallback pour ancienne règle sans fusion
             },
-            "meta": {
-                "burst": True,
-                "entry_source": "core_decision"
-            }
+            "meta": {"burst": True, "entry_source": "core_decision"},
         }
-
 
     def _get_bars(self, asset: str, timeframe: str, count: int):
         """
@@ -1593,11 +1861,11 @@ class ScalpingStrategy(BaseStrategy):
             if len(df) < int(lookback):
                 return None
 
-            recent = df.iloc[-int(lookback):]
+            recent = df.iloc[-int(lookback) :]
 
             # Cast robustes
             hi = pd.to_numeric(recent["high"], errors="coerce")
-            lo = pd.to_numeric(recent["low"],  errors="coerce")
+            lo = pd.to_numeric(recent["low"], errors="coerce")
             cl = pd.to_numeric(df["close"].iloc[-1], errors="coerce")
 
             hh = float(hi.max()) if np.isfinite(hi.max()) else float("nan")
@@ -1616,11 +1884,9 @@ class ScalpingStrategy(BaseStrategy):
         except Exception:
             return None
 
-
     # === [PATTERN MARUBOZU SUPPRIMÉ - Session 23 Nov 2025] ===
     # Fonction _rule_marubozu_range supprimée (215 lignes)
     # Raison : Pattern de bougie jamais utilisé, code mort
-
 
     def _rule_range_accumulation(
         self,
@@ -1680,7 +1946,6 @@ class ScalpingStrategy(BaseStrategy):
             dec.setdefault("meta", {})["pattern"] = latest_pat
 
         return dec
-
 
     def get_parameters(self) -> Dict[str, any]:
         """
@@ -1884,12 +2149,14 @@ class ScalpingStrategy(BaseStrategy):
                 return float("nan")
 
             h = pd.to_numeric(df["high"], errors="coerce")
-            l = pd.to_numeric(df["low"],  errors="coerce")
+            l = pd.to_numeric(df["low"], errors="coerce")
             c = pd.to_numeric(df["close"], errors="coerce")
             pc = c.shift(1)
 
             # True Range en Pandas → on garde une Series pour pouvoir .rolling()
-            tr = pd.concat([(h - l).abs(), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+            tr = pd.concat([(h - l).abs(), (h - pc).abs(), (l - pc).abs()], axis=1).max(
+                axis=1
+            )
 
             atr_series = tr.rolling(window=int(period), min_periods=int(period)).mean()
             atr = atr_series.iloc[-1]
