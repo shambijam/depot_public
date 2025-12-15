@@ -1142,35 +1142,27 @@ class FusionManager:
         self, direction: str, ctx: Dict[str, Any], n_vw: Dict[str, Any]
     ) -> Tuple[str, bool]:
         """
-        ✅ AJOUT (08 DEC 2025): Logique de retournement en régime RANGE
-
-        En régime RANGE (BALANCED, range_retail, range_distribution, range_institutional, etc.),
-        le prix oscille entre support et résistance.
-
-        Règles de retournement :
-        - Si in_upper_tercile (haut du range) + signal BUY → INVERSER en SELL (rebond résistance)
-        - Si in_lower_tercile (bas du range) + signal SELL → INVERSER en BUY (rebond support)
-
-        Args:
-            direction: Direction calculée ("BUY", "SELL", "NEUTRAL")
-            ctx: Contexte avec range_pos_pct, in_upper_tercile, in_lower_tercile, phase_observer_regime
-            n_vw: VWAP normalisé avec régime
-
-        Returns:
-            Tuple (nouvelle_direction, inversé_bool)
+        ✅ CORRIGÉ (15 DEC 2025): Logique de retournement intelligente
+        
+        Règles CORRIGÉES :
+        - Upper tercile (66%+) + signal BUY → VÉRIFIER avant d'inverser
+        - Lower tercile (33%-) + signal SELL → VÉRIFIER avant d'inverser
+        - Prendre en compte les confirmations des autres indicateurs
         """
         if direction == "NEUTRAL":
-            return (direction, False)  # Pas d'inversion si NEUTRAL
+            return (direction, False)
 
         # Vérifier si on est en régime RANGE
         vwap_regime = n_vw.get("regime", "").upper()
         phase_regime = ctx.get("phase_observer_regime", "").lower()
 
-        # 🔍 DEBUG: Log systématique pour diagnostiquer
+        # 🔍 DEBUG amélioré
+        range_pos = ctx.get("range_pos_pct", 0.5)
         _probe(
             self.log,
-            f"[RANGE_CHECK] direction={direction} | vwap_regime={vwap_regime} | phase_regime={phase_regime} | "
-            f"upper={ctx.get('in_upper_tercile')} | lower={ctx.get('in_lower_tercile')} | pos={ctx.get('range_pos_pct', 0.5):.0%}"
+            f"[RANGE_CHECK_DEBUG] direction={direction} | pos={range_pos:.0%} "
+            f"| upper={ctx.get('in_upper_tercile')} | lower={ctx.get('in_lower_tercile')} "
+            f"| vwap={vwap_regime} | phase={phase_regime}"
         )
 
         # Détection régime RANGE
@@ -1182,38 +1174,132 @@ class FusionManager:
         )
 
         if not is_range_regime:
-            return (direction, False)  # Pas en range, pas d'inversion
+            _probe(self.log, "[RANGE_REVERSAL] ❌ Pas en régime range - pas d'inversion")
+            return (direction, False)
 
-        # Récupérer position dans le range
+        # Récupérer les signaux de confirmation
+        orderflow_bias = ctx.get("orderflow_bias", "NEUTRAL")
+        absorption_bias = ctx.get("absorption_bias", "NEUTRAL")
+        momentum_m1 = ctx.get("momentum_m1", "NEUTRAL")
+        
+        # Récupérer les données footprint
+        footprint_data = ctx.get("footprint_data", {})
+        buy_ratio = footprint_data.get("buy_ratio", 0.5)
+        sell_ratio = footprint_data.get("sell_ratio", 0.5)
+        
+        # Récupérer les données OrderFlow
+        orderflow_data = ctx.get("orderflow_data", {})
+        delta_total = orderflow_data.get("delta_total", 0)
+        
+        # Seuils intelligents (configurables)
+        EXTREME_UPPER = 0.85  # 85% pour considérer comme extrême
+        EXTREME_LOWER = 0.15  # 15% pour considérer comme extrême
+        CONFIRMATION_THRESHOLD = 0.6  # 60% de confiance requise
+
         in_upper = ctx.get("in_upper_tercile", False)
         in_lower = ctx.get("in_lower_tercile", False)
-        range_pos = ctx.get("range_pos_pct", 0.5)
 
-        # Logique de retournement
+        # Logique de décision améliorée
         reversed_direction = direction
         was_reversed = False
+        reversal_reason = ""
 
+        # CAS 1: Haut du range + signal BUY
         if in_upper and direction == "BUY":
-            # Haut du range + signal BUY → SELL (rebond sur résistance)
-            reversed_direction = "SELL"
-            was_reversed = True
-            _probe(
-                self.log,
-                f"[RANGE_REVERSAL] 🔄 INVERSION BUY→SELL | Raison: UPPER_TERCILE (pos={range_pos:.0%}) | "
-                f"Regime: {phase_regime} ({vwap_regime})"
-            )
+            # Vérifier les confirmations avant d'inverser
+            confirmations = 0
+            total_checks = 4
+            
+            # Check 1: Ratio d'achat faible (< 45%)
+            if buy_ratio < 0.45:
+                confirmations += 1
+                reversal_reason += "Ratio achat faible, "
+            
+            # Check 2: OrderFlow bearish ou neutre
+            if orderflow_bias in ["BEARISH", "NEUTRAL"]:
+                confirmations += 1
+                reversal_reason += f"OrderFlow {orderflow_bias}, "
+            
+            # Check 3: Momentum M1 bearish
+            if momentum_m1 == "BEARISH":
+                confirmations += 1
+                reversal_reason += "Momentum bearish, "
+            
+            # Check 4: Position extrême (> 85%)
+            if range_pos > EXTREME_UPPER:
+                confirmations += 1
+                reversal_reason += f"Position extrême ({range_pos:.0%}), "
+            
+            # Décision
+            confidence = confirmations / total_checks
+            if confidence >= CONFIRMATION_THRESHOLD:
+                reversed_direction = "SELL"
+                was_reversed = True
+                _probe(
+                    self.log,
+                    f"[RANGE_REVERSAL] 🔄 INVERSION BUY→SELL | Confiance: {confidence:.0%} "
+                    f"| Raison: {reversal_reason} | Pos: {range_pos:.0%}"
+                )
+            else:
+                _probe(
+                    self.log,
+                    f"[RANGE_REVERSAL] ✅ MAINTIEN BUY | Confiance insuffisante: {confidence:.0%} "
+                    f"| Ratio achat: {buy_ratio:.0%} | OrderFlow: {orderflow_bias}"
+                )
+
+        # CAS 2: Bas du range + signal SELL
         elif in_lower and direction == "SELL":
-            # Bas du range + signal SELL → BUY (rebond sur support)
-            reversed_direction = "BUY"
-            was_reversed = True
+            confirmations = 0
+            total_checks = 4
+            
+            # Check 1: Ratio d'achat fort (> 55%)
+            if buy_ratio > 0.55:
+                confirmations += 1
+                reversal_reason += "Ratio achat fort, "
+            
+            # Check 2: OrderFlow bullish ou neutre
+            if orderflow_bias in ["BULLISH", "NEUTRAL"]:
+                confirmations += 1
+                reversal_reason += f"OrderFlow {orderflow_bias}, "
+            
+            # Check 3: Momentum M1 bullish
+            if momentum_m1 == "BULLISH":
+                confirmations += 1
+                reversal_reason += "Momentum bullish, "
+            
+            # Check 4: Position extrême (< 15%)
+            if range_pos < EXTREME_LOWER:
+                confirmations += 1
+                reversal_reason += f"Position extrême ({range_pos:.0%}), "
+            
+            # Décision
+            confidence = confirmations / total_checks
+            if confidence >= CONFIRMATION_THRESHOLD:
+                reversed_direction = "BUY"
+                was_reversed = True
+                _probe(
+                    self.log,
+                    f"[RANGE_REVERSAL] 🔄 INVERSION SELL→BUY | Confiance: {confidence:.0%} "
+                    f"| Raison: {reversal_reason} | Pos: {range_pos:.0%}"
+                )
+            else:
+                _probe(
+                    self.log,
+                    f"[RANGE_REVERSAL] ✅ MAINTIEN SELL | Confiance insuffisante: {confidence:.0%} "
+                    f"| Ratio achat: {buy_ratio:.0%} | OrderFlow: {orderflow_bias}"
+                )
+
+        # CAS 3: Position intermédiaire (33-66%) → JAMAIS d'inversion
+        elif not in_upper and not in_lower:
             _probe(
                 self.log,
-                f"[RANGE_REVERSAL] 🔄 INVERSION SELL→BUY | Raison: LOWER_TERCILE (pos={range_pos:.0%}) | "
-                f"Regime: {phase_regime} ({vwap_regime})"
+                f"[RANGE_REVERSAL] ❌ PAS D'INVERSION | Position intermédiaire: {range_pos:.0%} "
+                f"| Garder: {direction}"
             )
+            return (direction, False)
 
-        return (reversed_direction, was_reversed)
-
+        return (reversed_direction, was_reversed) 
+    
     # -------------- 6) Decision Generator --------------
     def _final_decision(
         self, mode: str, fused: float, n_vw, coherence, cfg, ctx: Optional[Dict[str, Any]] = None

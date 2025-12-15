@@ -597,22 +597,47 @@ class ScalpingStrategy(BaseStrategy):
                 absorption_details["buy_ratio"] = buy_ratio
                 absorption_details["sell_ratio"] = sell_ratio
 
+                # ✅ CORRIGÉ (15 DEC 2025): NOUVEAUX SEUILS + BONUS
                 # Déterminer absorption
-                if buy_ratio >= 0.75:  # 75%+ achats
+                if buy_ratio >= 0.75:  # 75%+ achats → Fort bullish
                     absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BULLISH"
-                elif buy_ratio >= 0.65:
+                elif buy_ratio >= 0.60:  # ✅ 60%+ achats (avant: 65%)
                     absorption_score = 10.0
                     absorption_details["bias"] = "BULLISH"
-                elif sell_ratio >= 0.75:
+                elif buy_ratio >= 0.53:  # ✅ 53%+ achats (nouveau seuil léger bullish)
+                    absorption_score = 7.5
+                    absorption_details["bias"] = "SLIGHTLY_BULLISH"
+                elif sell_ratio >= 0.75:  # 75%+ ventes → Fort bearish
                     absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BEARISH"
-                elif sell_ratio >= 0.65:
+                elif sell_ratio >= 0.60:  # ✅ 60%+ ventes (avant: 65%)
                     absorption_score = 10.0
                     absorption_details["bias"] = "BEARISH"
+                elif sell_ratio >= 0.53:  # ✅ 53%+ ventes (nouveau seuil léger bearish)
+                    absorption_score = 7.5
+                    absorption_details["bias"] = "SLIGHTLY_BEARISH"
                 else:
                     absorption_score = 4.0
                     absorption_details["bias"] = "NEUTRAL"
+
+                # ✅ BONUS VOLUME : Forte activité → signal plus fiable
+                if total_vol > 100:  # Fort volume
+                    absorption_score = min(12.5, absorption_score * 1.3)  # +30%
+                    absorption_details["volume_bonus"] = "high_volume"
+                elif total_vol > 50:
+                    absorption_score = min(12.5, absorption_score * 1.15)  # +15%
+                    absorption_details["volume_bonus"] = "medium_volume"
+
+                # ✅ BONUS TICK RATE : Activité récente forte
+                tick_rate = fp_summary.get("tick_rate", 0)
+                if isinstance(tick_rate, (int, float)):
+                    if tick_rate > 2.0:  # Forte activité ticks
+                        absorption_score = min(12.5, absorption_score * 1.2)  # +20%
+                        absorption_details["tick_bonus"] = "high_activity"
+                    elif tick_rate > 1.0:
+                        absorption_score = min(12.5, absorption_score * 1.1)  # +10%
+                        absorption_details["tick_bonus"] = "medium_activity"
 
             # ✅ FIX (2 Décembre 2025): Log de debug pour comprendre le calcul
             self.logger.debug(
