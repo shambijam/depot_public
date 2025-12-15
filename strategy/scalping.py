@@ -794,8 +794,10 @@ class ScalpingStrategy(BaseStrategy):
         vwap_status: str = "N/A",
         vwap_regime: Optional[
             str
-        ] = None,  # ✅ AJOUTÉ: Régime VWAP pour poids dynamiques
+        ] = None, 
+        context: Optional[Dict[str, Any]] = None,
     ) -> None:
+        
         """
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
 
@@ -916,6 +918,21 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"   • M1  (8 bougies) → Momentum : {m1_dir.upper()}")
             self.logger.info(f"   • M5  (6 bougies) → Structure : {m5_dir.upper()}")
             self.logger.info(f"   • M15 (4 bougies) → Contexte  : {m15_dir.upper()}")
+            
+            # ✅ AJOUT (15 DEC 2025): Momentum Bougies M1
+            momentum_m1 = "N/A"
+            if context:
+                momentum_m1 = context.get("momentum_m1", "N/A")
+            
+            self.logger.info(f"\n📊 MOMENTUM BOUGIES M1 :")
+            self.logger.info(f"   • Momentum calculé  : {momentum_m1}")
+            if momentum_m1 != "N/A":
+                # Récupérer le ratio de bougies vertes
+                green_ratio = 0.5
+                if hasattr(self, '_calculate_m1_momentum_from_candles'):
+                    # Vous pourriez recalculer ou stocker le ratio
+                    pass
+                self.logger.info(f"   • Basé sur 8 dernières bougies M1")
 
             if mtf_aligned:
                 self.logger.info(f"   ✅ ALIGNEMENT MTF DÉTECTÉ")
@@ -1088,6 +1105,21 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
+            # ✅ AJOUT (15 DEC 2025): Calcul du momentum M1 basé sur bougies récentes
+            momentum_m1 = "NEUTRAL"
+            if df_work is not None and len(df_work) >= 8:
+                momentum_m1 = self._calculate_m1_momentum_from_candles(df_work)
+                self.logger.debug(f"[{asset}] Momentum M1 calculé: {momentum_m1}")
+            
+            # ✅ AJOUTER au contexte pour FusionManager
+            if "context" not in analyzed_context:
+                analyzed_context["context"] = {}
+            
+            analyzed_context["momentum_m1"] = momentum_m1
+            
+            # ✅ AJOUTER aussi dans asset_signals pour usage immédiat
+            asset_signals["momentum_m1"] = momentum_m1
+            
             # --- 0b) Action hint (BUY/SELL) par défaut ---
             action = None
 
@@ -1497,7 +1529,30 @@ class ScalpingStrategy(BaseStrategy):
                 footprint_result = self._analyze_footprint_v6(
                     asset=asset, df_m1=df_work, asset_signals=asset_signals
                 )
-
+                # ✅ PRÉPARATION DU CONTEXTE POUR FUSIONMANAGER (15 DEC 2025)
+                # Créer un dictionnaire context avec TOUS les éléments nécessaires
+                fusion_context = {
+                    "momentum_m1": momentum_m1,
+                    "phase_observer_regime": asset_signals.get("phase", ""),
+                    "range_pos_pct": asset_signals.get("range_position", 0.5),
+                    "in_upper_tercile": asset_signals.get("in_upper_tercile", False),
+                    "in_lower_tercile": asset_signals.get("in_lower_tercile", False),
+                    "orderflow_bias": orderflow_result.get("mtf_alignment", {}).get("m1", "NEUTRAL"),
+                    "footprint_data": {
+                        "buy_ratio": footprint_result.get("absorption_details", {}).get("buy_ratio", 0.5),
+                        "sell_ratio": footprint_result.get("absorption_details", {}).get("sell_ratio", 0.5),
+                    },
+                    "orderflow_data": {
+                        "delta_total": orderflow_result.get("delta_momentum_details", {}).get("delta_total", 0),
+                        "buy_ratio": orderflow_result.get("delta_momentum_details", {}).get("buy_ratio", 0.5),
+                    },
+                    "asset": asset,
+                    "timestamp": time.time()
+                }
+                
+                # Stocker pour usage dans _log_orderflow_consolidated_report
+                analyzed_context["fusion_context"] = fusion_context
+                
                 # 📊 3. CALCUL DES POIDS ET NORMALISATION POUR LA DÉCISION
                 # Récupération des poids identique à _log_orderflow_consolidated_report
                 fusion_cfg = self.strategy_config.get("fusion", {})
@@ -1539,12 +1594,16 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
-                    final_score=0.0,  # On passe 0.0 car le score est recalculé dans la fonction
+                    final_score=0.0,
                     action=action,
                     vwap_score_pct=vwap_score_pct,
                     vwap_status=vwap_status,
                     vwap_regime=vwap_regime,
+                    # ✅ AJOUT (15 DEC 2025): Passer le contexte complet
+                    context=fusion_context if 'fusion_context' in locals() else {}
                 )
+                
+                
                 # ✅ AUCUN SEUIL ICI - FusionManager gère TOUT avec scoring_thresholds
                 # (high: 0.80, moderate: 0.75, cautious: 0.70, conditional: 0.40)
 
@@ -2149,6 +2208,59 @@ class ScalpingStrategy(BaseStrategy):
             v = float(v)
             return v * 100.0 if v <= 1.0 else v
         return 0.0
+    
+    def _calculate_m1_momentum_from_candles(self, bars: List[Dict]) -> str:
+        """
+        ✅ NOUVEAU (15 DEC 2025): Calcule le momentum basé sur les bougies M1 récentes
+        
+        Règles:
+        - 8 dernières bougies M1
+        - Compter bougies vertes (close > open)
+        - 5+ bougies vertes → BULLISH
+        - 3- bougies vertes → BEARISH
+        - 4 bougies vertes → NEUTRAL
+        
+        Arguments:
+            bars: Liste de dictionnaires avec ['open', 'close', 'high', 'low']
+                  ou DataFrame pandas
+        
+        Retourne: "BULLISH", "BEARISH", "NEUTRAL"
+        """
+        if bars is None or len(bars) < 3:
+            return "NEUTRAL"
+        
+        # 🔧 Convertir selon le type d'entrée
+        green_candles = 0
+        total_bars = min(8, len(bars))
+        
+        # Cas 1: Liste de dictionnaires
+        if isinstance(bars, list):
+            recent_bars = bars[-total_bars:]  # 8 dernières bougies
+            for bar in recent_bars:
+                if bar.get('close', 0) > bar.get('open', 0):
+                    green_candles += 1
+        
+        # Cas 2: DataFrame pandas (plus courant dans votre code)
+        elif hasattr(bars, 'iloc'):  # C'est un DataFrame
+            recent_bars = bars.tail(total_bars)
+            for idx, row in recent_bars.iterrows():
+                if row['close'] > row['open']:
+                    green_candles += 1
+        
+        # Cas 3: Autre structure (fallback)
+        else:
+            self.logger.warning(f"[M1_MOMENTUM] Type de bars non supporté: {type(bars)}")
+            return "NEUTRAL"
+        
+        # 🔍 DEBUG: Log du calcul
+        self.logger.debug(f"[M1_MOMENTUM] {total_bars} bars analysées → {green_candles} vertes")
+        
+        # Logique de décision
+        if green_candles >= 5:  # 5+ bougies vertes sur 8 = BULLISH
+            return "BULLISH"
+        elif green_candles <= 3:  # 3 ou moins bougies vertes = BEARISH
+            return "BEARISH"
+        return "NEUTRAL"  # 4 bougies vertes = équilibre
 
     # --- indicateurs génériques (utiles si tu veux enrichir plus tard)
     @staticmethod
