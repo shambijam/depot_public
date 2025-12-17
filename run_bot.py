@@ -4130,7 +4130,21 @@ def main(args: argparse.Namespace) -> None:
     logger.info("=" * 80)
 
     # Global context partagé avec lock
-    global_context_shared = {}
+    # ✅ FIX (17 DEC 2025): Initialiser avec active_broker_account pour sizing correct
+    try:
+        broker_account = config_manager.get_mt5_account_credentials(
+            account_id=None,  # None = utilise compte par défaut selon bot_mode
+            mode=bot_mode
+        )
+    except Exception as e:
+        logger.warning(f"[INIT] Impossible de récupérer active_broker_account: {e}")
+        broker_account = {}
+
+    global_context_shared = {
+        "active_broker_account": broker_account,
+        "account_info": {},  # Sera mis à jour par les threads
+        "open_positions": [],
+    }
     context_lock = threading.Lock()
 
     # Events pour arrêt propre
