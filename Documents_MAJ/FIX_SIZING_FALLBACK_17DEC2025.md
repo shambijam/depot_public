@@ -92,7 +92,9 @@ Le thread LIQUIDITY construit un `global_context` complet via `_build_global_con
 
 ---
 
-## ✅ SOLUTION
+## ✅ SOLUTION (2 FIXES REQUIS)
+
+### Fix #1 : Initialiser `global_context_shared` avec `active_broker_account`
 
 Initialiser `global_context_shared` avec `active_broker_account` **AVANT** de lancer les threads.
 
@@ -117,6 +119,38 @@ global_context_shared = {
 }
 context_lock = threading.Lock()
 ```
+
+---
+
+### Fix #2 : Utiliser la clé `"market_context"` au lieu de `"context"`
+
+**Problème** : Le thread SCALPING passait `"context"` dans `decision_pkg`, mais `order_builder.py` attend `"market_context"`.
+
+```python
+# trader/order_builder.py:214
+market_context = (decision_package or {}).get("market_context", {}) or {}
+#                                                ^^^^^^^^^^^^^^^^ Clé attendue
+```
+
+**Avant** (run_bot.py:3759 - INCORRECT) :
+```python
+decision_pkg = {
+    "final_decision": td,
+    "context": global_ctx_copy,  # ❌ Mauvaise clé
+    "active_config": trade_decision_skeleton["merged_config"],
+}
+```
+
+**Après** (run_bot.py:3759 - CORRIGÉ) :
+```python
+decision_pkg = {
+    "final_decision": td,
+    "market_context": global_ctx_copy,  # ✅ Clé correcte
+    "active_config": trade_decision_skeleton["merged_config"],
+}
+```
+
+---
 
 ### Logs après fix (ATTENDU)
 
@@ -173,7 +207,8 @@ Volume/trade:  0.20 lots
 
 | Fichier | Lignes | Modification |
 |---------|--------|--------------|
-| `run_bot.py` | 4133-4148 | Initialisation `global_context_shared` avec `active_broker_account` |
+| `run_bot.py` | 4133-4148 | **Fix #1**: Initialisation `global_context_shared` avec `active_broker_account` |
+| `run_bot.py` | 3759 | **Fix #2**: Clé `"context"` → `"market_context"` dans decision_pkg |
 
 ---
 
@@ -206,9 +241,12 @@ python cli.py start --mode DEMO
 **Nouveau système** (threads séparés) :
 - Thread SCALPING : Utilise `global_context_shared` (vide au démarrage)
 - Thread LIQUIDITY : Construit son propre `global_context` via `_build_global_context()`
-- **Problème** : Les deux threads ne partagent pas la même source de données
+- **Problème #1** : Les deux threads ne partagent pas la même source de données
+- **Problème #2** : Le thread SCALPING utilisait la mauvaise clé (`"context"` au lieu de `"market_context"`)
 
-**Solution** : Initialiser `global_context_shared` une seule fois au démarrage, partagé par tous les threads.
+**Solution** :
+1. Initialiser `global_context_shared` une seule fois au démarrage, partagé par tous les threads
+2. Corriger la clé du dict dans `decision_pkg` : `"context"` → `"market_context"`
 
 ---
 

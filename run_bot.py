@@ -3756,7 +3756,7 @@ def scalping_fast_thread(
 
                             decision_pkg = {
                                 "final_decision": td,
-                                "context": global_ctx_copy,  # ✅ CORRIGÉ - global_context complet
+                                "market_context": global_ctx_copy,  # ✅ FIX (17 DEC): Clé correcte pour order_builder
                                 "active_config": trade_decision_skeleton["merged_config"],
                             }
                             decision_pkg.setdefault("audit_context", {}).update({
