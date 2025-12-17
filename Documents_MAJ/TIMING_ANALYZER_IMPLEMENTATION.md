@@ -363,6 +363,40 @@ Le **Timing Analyzer** ajoute une dimension temporelle critique à l'analyse Foo
 
 ---
 
+## 🐛 BUGFIXES (17 DEC 2025)
+
+### Bugfix #1 : Ordre d'exécution (side_norm)
+
+**Problème initial** : Le timing analyzer n'était pas exécuté car appelé AVANT la création de la colonne `side_norm`.
+
+**Ligne problématique** : `detectors.py:617` (timing analyzer avant `df["side_norm"] = ...`)
+
+**Solution** : Déplacer le bloc timing analyzer (lignes 620-649) **APRÈS** la création de `side_norm` (ligne 618).
+
+### Bugfix #2 : Erreurs invisibles (log level)
+
+**Problème** : Les exceptions du timing analyzer étaient loggées en `DEBUG` (ligne 642), mais le bot tourne en mode `INFO` (prod_config.json).
+
+**Impact** : Les erreurs du timing analyzer étaient **invisibles** dans les logs de production.
+
+**Solution** : Changer le log level de `debug()` vers `warning()` :
+
+```python
+# AVANT
+except Exception as e:
+    logging.getLogger(__name__).debug(f"[TIMING] Échec analyse: {e}")  # ❌ Invisible en INFO
+
+# APRÈS
+except Exception as e:
+    logging.getLogger(__name__).warning(f"[TIMING] ⚠️ Échec analyse timing: {e}")  # ✅ Visible en INFO
+```
+
+**Test** : Vérifier dans les logs :
+- Succès : `[TIMING] ⏱️ Score=X.X/5 pts`
+- Erreur : `[WARNING] [TIMING] ⚠️ Échec analyse timing: ...`
+
+---
+
 **Auteur**: Claude Sonnet 4.5
 **Date**: 17 Décembre 2025
-**Statut**: ✅ PRODUCTION READY
+**Statut**: ✅ PRODUCTION READY (bugfix appliqué)

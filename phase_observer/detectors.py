@@ -614,6 +614,9 @@ def footprint_validator(
         else 0.0
     )
 
+    # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
+    df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
+
     # ========================================================================
     # ⏱️ TIMING ANALYZER (17 DEC 2025)
     # ========================================================================
@@ -621,7 +624,7 @@ def footprint_validator(
     try:
         from phase_observer.timing_analyzer import calculate_timing_metrics
         timing_metrics = calculate_timing_metrics(
-            ticks_df=df,          # DataFrame ticks filtrés [start_ts, end_ts)
+            ticks_df=df,          # DataFrame ticks filtrés [start_ts, end_ts) avec side_norm
             start_ts=start_ts,    # Timestamp début bougie M1
             coverage_s=coverage_s # Durée réelle des ticks
         )
@@ -636,7 +639,7 @@ def footprint_validator(
                 f"VelRatio={timing_metrics.get('velocity_ratio', 1.0):.2f}"
             )
     except Exception as e:
-        logging.getLogger(__name__).debug(f"[TIMING] Échec analyse: {e}")
+        logging.getLogger(__name__).warning(f"[TIMING] ⚠️ Échec analyse timing: {e}")
         timing_metrics = {
             "timing_score": 0.0,
             "timing_quality": "N/A",
@@ -644,9 +647,6 @@ def footprint_validator(
         }
         timing_score = 0.0
         timing_quality = "N/A"
-
-    # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
-    df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
 
     # 🔍 DEBUG: Log distribution des sides
     side_counts = df["side_norm"].value_counts().to_dict()
