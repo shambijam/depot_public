@@ -614,6 +614,37 @@ def footprint_validator(
         else 0.0
     )
 
+    # ========================================================================
+    # ⏱️ TIMING ANALYZER (17 DEC 2025)
+    # ========================================================================
+    timing_metrics = {}
+    try:
+        from phase_observer.timing_analyzer import calculate_timing_metrics
+        timing_metrics = calculate_timing_metrics(
+            ticks_df=df,          # DataFrame ticks filtrés [start_ts, end_ts)
+            start_ts=start_ts,    # Timestamp début bougie M1
+            coverage_s=coverage_s # Durée réelle des ticks
+        )
+        timing_score = float(timing_metrics.get("timing_score", 0.0))
+        timing_quality = timing_metrics.get("timing_quality", "N/A")
+
+        # Log timing analysis
+        if timing_score > 0:
+            logging.getLogger(__name__).info(
+                f"[TIMING] ⏱️ Score={timing_score:.1f}/5 pts | Quality={timing_quality} | "
+                f"BuyConc={timing_metrics.get('buy_concentration_q1', 0)*100:.0f}% | "
+                f"VelRatio={timing_metrics.get('velocity_ratio', 1.0):.2f}"
+            )
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"[TIMING] Échec analyse: {e}")
+        timing_metrics = {
+            "timing_score": 0.0,
+            "timing_quality": "N/A",
+            "timing_analysis_ms": 0.0
+        }
+        timing_score = 0.0
+        timing_quality = "N/A"
+
     # ---------- 4) AGRÉGATION & MÉTRIQUES ----------
     df["side_norm"] = df["side"].map({"buy": "buy", "sell": "sell"}).fillna("unknown")
 
@@ -778,6 +809,7 @@ def footprint_validator(
             "tick_count": int(tick_count),
             "coverage_s": float(coverage_s),
             "tick_rate": float(tick_count / max(coverage_s, 1.0)),
+            "timing_metrics": timing_metrics,  # ⏱️ AJOUTÉ (17 DEC 2025)
         },
         "fp_thresholds": {
             "min_ticks": MIN_TICKS,

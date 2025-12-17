@@ -523,12 +523,13 @@ class ScalpingStrategy(BaseStrategy):
         self, asset: str, df_m1: pd.DataFrame, asset_signals: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        👣 Footprint Analysis V6 - Ticks Temps Réel
+        👣 Footprint Analysis V6 - Ticks Temps Réel + ⏱️ Timing Analyzer
 
         Concentration sur bougie courante :
         • Analyse ticks en temps réel
         • Détection clusters d'ordres
         • Niveaux d'absorption critiques
+        • ⏱️ Qualité timing (distribution temporelle)
 
         Contexte immédiat :
         • 3 bougies précédentes pour confirmation
@@ -539,7 +540,8 @@ class ScalpingStrategy(BaseStrategy):
             "absorption_levels_score": 0-12.5,
             "order_clustering_score": 0-8.5,
             "price_rejection_score": 0-4.0,
-            "total_score": 0-25,
+            "timing_score": 0-5.0,  # ⏱️ NOUVEAU (17 DEC 2025)
+            "total_score": 0-30,    # ⏱️ MODIFIÉ (17 DEC 2025): 25→30
             "details": {...}
         }
         """
@@ -755,17 +757,30 @@ class ScalpingStrategy(BaseStrategy):
             )
 
             # ================================================================
-            # TOTAL FOOTPRINT SCORE
+            # TOTAL FOOTPRINT SCORE (Base 0-25 + Timing 0-5 = Max 30 pts)
             # ================================================================
-            result["total_score"] = (
-                absorption_score + clustering_score + rejection_score
-            )
+            # ⏱️ Récupérer timing_score depuis footprint_summary
+            timing_metrics = fp_summary.get("timing_metrics", {})
+            timing_score = float(timing_metrics.get("timing_score", 0.0))
+            timing_quality = timing_metrics.get("timing_quality", "N/A")
+
+            # Score de base (0-25 pts)
+            base_score = absorption_score + clustering_score + rejection_score
+
+            # Score total avec timing (0-30 pts)
+            result["total_score"] = base_score + timing_score
+
+            # Stocker timing dans result pour le rapport
+            result["timing_score"] = timing_score
+            result["timing_quality"] = timing_quality
+            result["timing_metrics"] = timing_metrics
 
             self.logger.debug(
                 f"[{asset}] Footprint V6: Absorption={absorption_score:.1f} "
                 f"Clustering={clustering_score:.1f} "
                 f"Rejection={rejection_score:.1f} "
-                f"→ Total={result['total_score']:.1f}/25"
+                f"Timing={timing_score:.1f} "
+                f"→ Total={result['total_score']:.1f}/30"
             )
 
             # ✅ FIX (12 Dec 2025): Ajouter champs footprint_summary pour FusionManager
@@ -801,15 +816,16 @@ class ScalpingStrategy(BaseStrategy):
 
         Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
         ✅ CORRIGÉ (19 DEC 2025): Normalisation des scores pour échelle cohérente 0-100pts
+        ⏱️ MODIFIÉ (17 DEC 2025): Ajout Timing Analyzer au Footprint (25→30 pts max)
 
         SCORES BRUTS :
         - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
-        - Footprint V6: 0-25 points (Absorption 0-12.5, Clustering 0-8.5, Rejection 0-4)
+        - Footprint V6: 0-30 points (Absorption 0-12.5, Clustering 0-8.5, Rejection 0-4, ⏱️ Timing 0-5)
         - VWAP: 0-100% → converti en 0-w_vw points
 
         SCORES NORMALISÉS (pour total 100pts):
         - OrderFlow_norm = (score_brut / 50) * poids_orderflow
-        - Footprint_norm = (score_brut / 25) * poids_footprint
+        - Footprint_norm = (score_brut / 30) * poids_footprint  # ⏱️ MODIFIÉ: /30 au lieu de /25
         - VWAP_norm = (score_pct / 100) * poids_vwap
         - TOTAL = OrderFlow_norm + Footprint_norm + VWAP_norm (0-100pts)
         """
@@ -887,8 +903,8 @@ class ScalpingStrategy(BaseStrategy):
                 (of_score_brut / 50.0) * w_of if w_of > 0 else 0.0
             )  # 0-w_of points
             fp_score_norm = (
-                (fp_score_brut / 25.0) * w_fp if w_fp > 0 else 0.0
-            )  # 0-w_fp points
+                (fp_score_brut / 30.0) * w_fp if w_fp > 0 else 0.0
+            )  # ⏱️ MODIFIÉ (17 DEC 2025): Diviser par 30 au lieu de 25 (inclut timing +5pts)
             vwap_score_norm = (
                 (vwap_score_pct_clamped / 100.0) * w_vw if w_vw > 0 else 0.0
             )  # 0-w_vw points
@@ -992,7 +1008,7 @@ class ScalpingStrategy(BaseStrategy):
 
             self.logger.info(f"\n👣 FOOTPRINT ANALYSIS ({w_fp:.0f}% du total) :")
             self.logger.info(
-                f"   Score brut: {fp_score_brut:.1f}/25 pts → Normalisé: {fp_score_norm:.1f}/{w_fp:.0f} pts"
+                f"   Score brut: {fp_score_brut:.1f}/30 pts → Normalisé: {fp_score_norm:.1f}/{w_fp:.0f} pts"
             )
             self.logger.info(
                 f"   ├─ Absorption Levels   : {absorption_score:.1f}/12.5 pts"
@@ -1026,6 +1042,34 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(
                 f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}"
             )
+
+            # ⏱️ 4.3bis TIMING QUALITY ANALYSIS (17 DEC 2025)
+            timing_score = footprint_result.get("timing_score", 0.0)
+            timing_quality = footprint_result.get("timing_quality", "N/A")
+            timing_metrics_full = footprint_result.get("timing_metrics", {})
+
+            if timing_score > 0:
+                self.logger.info(f"\n⏱️  TIMING QUALITY ({timing_score:.1f}/5.0 pts) :")
+                self.logger.info(f"   Score timing      : {timing_score:.1f}/5.0 pts")
+                self.logger.info(f"   Qualité           : {timing_quality}")
+
+                # Détails des métriques
+                buy_conc_q1 = timing_metrics_full.get("buy_concentration_q1", 0.0)
+                sell_conc_q1 = timing_metrics_full.get("sell_concentration_q1", 0.0)
+                vel_ratio = timing_metrics_full.get("velocity_ratio", 1.0)
+
+                if buy_conc_q1 > 0 or sell_conc_q1 > 0:
+                    self.logger.info(f"   ├─ Concentration Q1 :")
+                    self.logger.info(f"   │  • Buy  : {buy_conc_q1*100:.0f}%")
+                    self.logger.info(f"   │  • Sell : {sell_conc_q1*100:.0f}%")
+
+                if vel_ratio != 1.0:
+                    buy_vel = timing_metrics_full.get("buy_velocity", 0.0)
+                    sell_vel = timing_metrics_full.get("sell_velocity", 0.0)
+                    self.logger.info(f"   └─ Vitesse :")
+                    self.logger.info(f"      • Buy  : {buy_vel:.1f} ticks/sec")
+                    self.logger.info(f"      • Sell : {sell_vel:.1f} ticks/sec")
+                    self.logger.info(f"      • Ratio: {vel_ratio:.2f}x")
 
             # 4.4 VWAP MODULE - INSTITUTIONNEL
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
