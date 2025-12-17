@@ -3,6 +3,7 @@
 import logging
 import sys
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 # NOTE: L'import de ConfigManager est nécessaire pour accéder aux chemins dynamiques.
 # Il est préférable de le passer en argument pour éviter les imports circulaires.
@@ -42,8 +43,16 @@ def setup_production_logging(log_level: str = "INFO") -> None:
         for handler in list(root_logger.handlers):
             root_logger.removeHandler(handler)
 
-    # Configurer le handler pour le fichier log
-    file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+    # Configurer le handler pour le fichier log avec rotation
+    # ✅ FIX (17 DEC): RotatingFileHandler pour éviter disque plein
+    # Max 50 MB par fichier, 5 fichiers gardés = 250 MB total max
+    file_handler = RotatingFileHandler(
+        log_file_path,
+        mode="a",
+        maxBytes=50 * 1024 * 1024,  # 50 MB
+        backupCount=5,               # Garder 5 fichiers rotationnés
+        encoding="utf-8"
+    )
     file_formatter = logging.Formatter(
         "%(asctime)s - %(name)s - [%(levelname)s] - %(message)s"
     )

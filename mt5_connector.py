@@ -1431,16 +1431,16 @@ class MT5Connector:
             return None
 
         if len(positions) > 0:
-            self.logger.info(
+            self.logger.debug(
                 f"MT5: Récupéré {len(positions)} positions ouvertes ({'pour ' + symbol if symbol else 'total'})."
-            )  # Utilise self.logger
+            )  # ✅ FIX (17 DEC): INFO→DEBUG pour éviter spam logs (appelé en boucle 100ms)
             return list(
                 positions
             )  # Convertir le tuple de NamedTuple en liste pour plus de flexibilité
         else:
-            self.logger.info(
+            self.logger.debug(
                 f"MT5: Aucune position ouverte trouvée ({'pour ' + symbol if symbol else 'total'})."
-            )  # Utilise self.logger
+            )  # ✅ FIX (17 DEC): INFO→DEBUG pour éviter spam logs (appelé en boucle 100ms)
             return (
                 []
             )  # Retourne une liste vide au lieu de None pour la clarté et la facilité de manipulation
