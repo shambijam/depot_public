@@ -150,7 +150,7 @@
       "high": 0.80,
       "moderate": 0.75,
       "cautious": 0.75,
-      "conditional": 0.70
+      "conditional": 0.65
     },
     "momentum": {
       "enabled": false,
