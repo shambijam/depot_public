@@ -13,6 +13,131 @@ from phase_observer.vwap.config import (
 )  # ✅ AJOUTÉ: Poids VWAP dynamiques
 
 
+class XAUUSDTimingOptimizer:
+    """
+    ⏱️ Optimiseur spécifique pour XAUUSD Scalping Timing Analyzer
+
+    Date: 18 Décembre 2025
+    Objectif: Transformer le timing analyzer en filtre décisif via système multiplicateur + veto
+
+    Problème résolu:
+    - Impact linéaire trop faible (+1.9pts = +6% seulement)
+    - Absence de veto pour timing catastrophique
+    - Incohérence: trades exécutés avec POOR timing, rejetés avec EXCELLENT timing
+    """
+
+    # Configuration basée sur analyse des logs réels
+    CONFIG = {
+        "concentration": {
+            "excellent": 0.80,    # >80% = excellent
+            "good": 0.60,         # >60% = bon
+            "warning": 0.40,      # <40% = warning
+            "veto": 0.30,         # <30% = veto possible
+        },
+        "velocity": {
+            "buy_dominant": 1.8,  # ratio >1.8 = buy fort
+            "sell_dominant": 0.6, # ratio <0.6 = sell fort
+            "extreme": 3.0,       # ratio >3.0 = anomalie
+        },
+        "multipliers": {
+            "EXCELLENT": 1.20,    # +20% de boost
+            "GOOD": 1.10,         # +10% de boost
+            "FAIR": 1.00,         # neutre
+            "POOR": 0.80,         # -20% de pénalité
+            "VETO": 0.50,         # -50% pour timing catastrophique
+        }
+    }
+
+    def calculate_impact(self, timing_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Calcule l'impact réel du timing sur le score via système multiplicateur.
+
+        Args:
+            timing_metrics: Métriques du timing analyzer
+
+        Returns:
+            Dict avec multiplier, veto_triggered, raison
+        """
+        timing_score = timing_metrics.get("timing_score", 0)
+        timing_quality = timing_metrics.get("timing_quality", "FAIR")
+        buy_conc = timing_metrics.get("buy_concentration_q1", 0)
+        sell_conc = timing_metrics.get("sell_concentration_q1", 0)
+        velocity_ratio = timing_metrics.get("velocity_ratio", 1.0)
+
+        # ========================================================================
+        # 1️⃣ VÉRIFICATION VETO (conditions catastrophiques)
+        # ========================================================================
+        veto_conditions = [
+            timing_score < 2.0 and max(buy_conc, sell_conc) < 0.30,  # Timing faible + concentration très faible
+            timing_score < 2.5 and velocity_ratio > 3.0,              # Timing faible + ratio extrême
+            timing_quality == "POOR" and timing_score < 1.5           # POOR + score très faible
+        ]
+
+        if any(veto_conditions):
+            return {
+                "multiplier": self.CONFIG["multipliers"]["VETO"],
+                "veto_triggered": True,
+                "veto_reason": "Timing catastrophique: score faible + concentration insuffisante",
+                "adjustment_details": f"VETO appliqué (×{self.CONFIG['multipliers']['VETO']})"
+            }
+
+        # ========================================================================
+        # 2️⃣ MULTIPLICATEUR DE BASE selon qualité
+        # ========================================================================
+        base_multiplier = self.CONFIG["multipliers"].get(timing_quality, 1.0)
+
+        # ========================================================================
+        # 3️⃣ BONUS/MALUS SUPPLÉMENTAIRES
+        # ========================================================================
+        adjustment = 0.0
+        adjustment_reasons = []
+
+        # Bonus pour concentration forte
+        if max(buy_conc, sell_conc) > 0.80:
+            adjustment += 0.05  # +5%
+            adjustment_reasons.append(f"Concentration forte (>80%): +5%")
+
+        # Bonus pour cohérence directionnelle (concentration + velocity alignées)
+        if buy_conc > sell_conc and velocity_ratio > 1.5:
+            adjustment += 0.03  # +3%
+            adjustment_reasons.append(f"Cohérence buy (conc={buy_conc:.0%}, vel={velocity_ratio:.2f}): +3%")
+        elif sell_conc > buy_conc and velocity_ratio < 0.7:
+            adjustment += 0.03  # +3%
+            adjustment_reasons.append(f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): +3%")
+
+        # Malus pour concentration faible
+        if max(buy_conc, sell_conc) < 0.40:
+            adjustment -= 0.05  # -5%
+            adjustment_reasons.append(f"Concentration faible (<40%): -5%")
+
+        # Malus pour velocity ratio extrême (possible anomalie)
+        if velocity_ratio > 2.5:
+            adjustment -= 0.02  # -2%
+            adjustment_reasons.append(f"Velocity ratio extrême ({velocity_ratio:.2f}): -2%")
+
+        # ========================================================================
+        # 4️⃣ CALCUL FINAL
+        # ========================================================================
+        final_multiplier = base_multiplier + adjustment
+
+        # Clamp entre 0.5 et 1.5 (±50% max)
+        final_multiplier = max(0.5, min(1.5, final_multiplier))
+
+        adjustment_summary = (
+            f"Base: {timing_quality}(×{base_multiplier:.2f}), "
+            f"Ajustements: {adjustment:+.2f} → Final: ×{final_multiplier:.2f}"
+        )
+        if adjustment_reasons:
+            adjustment_summary += f" | {', '.join(adjustment_reasons)}"
+
+        return {
+            "multiplier": final_multiplier,
+            "veto_triggered": False,
+            "veto_reason": None,
+            "adjustment_details": adjustment_summary
+        }
+
+
 class ScalpingStrategy(BaseStrategy):
     """
     Stratégie SCALPING focalisée sur :
@@ -45,6 +170,9 @@ class ScalpingStrategy(BaseStrategy):
         # L'instance Detectors n'était JAMAIS utilisée (grep "self.detectors." → 0 résultats)
         # Scalping utilise FootprintAnalyzer qui importe les 7 fonctions standalone
         # Les 8 méthodes de classe Detectors sont réservées à LiquidityStrategy
+
+        # ⏱️ Timing Optimizer pour XAUUSD (18 Dec 2025)
+        self.xauusd_timing_optimizer = XAUUSDTimingOptimizer()
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
@@ -757,7 +885,7 @@ class ScalpingStrategy(BaseStrategy):
             )
 
             # ================================================================
-            # TOTAL FOOTPRINT SCORE (Base 0-25 + Timing 0-5 = Max 30 pts)
+            # TOTAL FOOTPRINT SCORE avec système multiplicateur timing (18 Dec 2025)
             # ================================================================
             # ⏱️ Récupérer timing_score depuis footprint_summary
             timing_metrics = fp_summary.get("timing_metrics", {})
@@ -767,13 +895,55 @@ class ScalpingStrategy(BaseStrategy):
             # Score de base (0-25 pts)
             base_score = absorption_score + clustering_score + rejection_score
 
-            # Score total avec timing (0-30 pts)
-            result["total_score"] = base_score + timing_score
+            # ========================================================================
+            # ⏱️ SYSTÈME MULTIPLICATEUR TIMING (XAUUSD uniquement)
+            # ========================================================================
+            # Problème résolu: Impact linéaire trop faible (avant: +1.9pts = +6%)
+            # Nouveau: Système multiplicateur avec veto (impact: ±15-25%)
+            timing_impact = None
+            timing_decision = "NO_TIMING"  # Par défaut
 
-            # Stocker timing dans result pour le rapport
+            if asset == "XAUUSD" and timing_metrics:
+                # Calculer impact timing via optimizer
+                timing_impact = self.xauusd_timing_optimizer.calculate_impact(timing_metrics)
+
+                # Appliquer multiplicateur
+                multiplier = timing_impact.get("multiplier", 1.0)
+                veto_triggered = timing_impact.get("veto_triggered", False)
+
+                if veto_triggered:
+                    # VETO: Timing catastrophique → score drastiquement réduit
+                    adjusted_score = base_score * multiplier
+                    timing_decision = "VETO"
+                    self.logger.warning(
+                        f"[{asset}] ⚠️ TIMING VETO | Base={base_score:.1f} × {multiplier:.2f} = {adjusted_score:.1f} | "
+                        f"Raison: {timing_impact.get('veto_reason', 'N/A')}"
+                    )
+                else:
+                    # Impact normal via multiplicateur
+                    adjusted_score = base_score * multiplier
+                    timing_decision = "MULTIPLIER"
+
+                # Cap à 30 points max
+                final_score = min(adjusted_score, 30.0)
+
+                self.logger.info(
+                    f"[{asset}] ⏱️ TIMING IMPACT | Base={base_score:.1f} × Mult={multiplier:.2f} = {final_score:.1f}/30 | "
+                    f"Quality={timing_quality} | {timing_impact.get('adjustment_details', 'N/A')}"
+                )
+            else:
+                # Pas de timing analyzer pour cet asset → score = base
+                final_score = base_score
+
+            result["total_score"] = final_score
+
+            # Stocker timing dans result pour le rapport (⚠️ GARDER POUR AFFICHAGE!)
             result["timing_score"] = timing_score
             result["timing_quality"] = timing_quality
             result["timing_metrics"] = timing_metrics
+            result["timing_impact"] = timing_impact or {}
+            result["timing_decision"] = timing_decision
+            result["base_score_before_timing"] = base_score
 
             self.logger.debug(
                 f"[{asset}] Footprint V6: Absorption={absorption_score:.1f} "
@@ -1043,10 +1213,13 @@ class ScalpingStrategy(BaseStrategy):
                 f"      • Force rejet       : {rejection_details.get('strength', 'N/A')}"
             )
 
-            # ⏱️ 4.3bis TIMING QUALITY ANALYSIS (17 DEC 2025)
+            # ⏱️ 4.3bis TIMING QUALITY ANALYSIS avec système multiplicateur (18 DEC 2025)
             timing_score = footprint_result.get("timing_score", 0.0)
             timing_quality = footprint_result.get("timing_quality", "N/A")
             timing_metrics_full = footprint_result.get("timing_metrics", {})
+            timing_impact = footprint_result.get("timing_impact", {})
+            timing_decision = footprint_result.get("timing_decision", "NO_TIMING")
+            base_score_before_timing = footprint_result.get("base_score_before_timing", 0.0)
 
             if timing_score > 0:
                 self.logger.info(f"\n⏱️  TIMING QUALITY ({timing_score:.1f}/5.0 pts) :")
@@ -1070,6 +1243,28 @@ class ScalpingStrategy(BaseStrategy):
                     self.logger.info(f"      • Buy  : {buy_vel:.1f} ticks/sec")
                     self.logger.info(f"      • Sell : {sell_vel:.1f} ticks/sec")
                     self.logger.info(f"      • Ratio: {vel_ratio:.2f}x")
+
+                # ⏱️ TIMING IMPACT (système multiplicateur 18 Dec 2025)
+                if timing_impact and timing_decision != "NO_TIMING":
+                    multiplier = timing_impact.get("multiplier", 1.0)
+                    veto_triggered = timing_impact.get("veto_triggered", False)
+                    adjustment_details = timing_impact.get("adjustment_details", "N/A")
+
+                    self.logger.info(f"\n   🎯 IMPACT SUR SCORE FOOTPRINT :")
+                    self.logger.info(f"      Score base       : {base_score_before_timing:.1f}/25 pts")
+
+                    if veto_triggered:
+                        veto_reason = timing_impact.get("veto_reason", "N/A")
+                        self.logger.warning(f"      ⚠️  VETO APPLIQUÉ  : ×{multiplier:.2f} (pénalité sévère)")
+                        self.logger.warning(f"      Raison           : {veto_reason}")
+                        self.logger.warning(f"      Score final      : {footprint_result.get('total_score', 0):.1f}/30 pts")
+                    else:
+                        impact_pct = (multiplier - 1.0) * 100
+                        impact_sign = "+" if impact_pct > 0 else ""
+                        self.logger.info(f"      Multiplicateur   : ×{multiplier:.2f} ({impact_sign}{impact_pct:.0f}%)")
+                        self.logger.info(f"      Score ajusté     : {footprint_result.get('total_score', 0):.1f}/30 pts")
+
+                    self.logger.info(f"      Détails          : {adjustment_details}")
 
             # 4.4 VWAP MODULE - INSTITUTIONNEL
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
