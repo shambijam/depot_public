@@ -1328,9 +1328,9 @@ class ScalpingStrategy(BaseStrategy):
         asset: str,
         orderflow_result: Dict[str, Any],
         footprint_result: Dict[str, Any],
-        momentum_result: Dict[str, Any],  # 📊 AJOUTÉ (18 DEC 2025): Momentum institutionnel
         final_score: float,  # ⚠️ Ce paramètre ne sera PLUS utilisé pour le total 100pts
         action: Optional[str],
+        momentum_result: Optional[Dict[str, Any]] = None,  # 📊 AJOUTÉ (18 DEC 2025): Optionnel!
         vwap_score_pct: float = 0.0,
         vwap_status: str = "N/A",
         vwap_regime: Optional[str] = None,
@@ -1402,6 +1402,22 @@ class ScalpingStrategy(BaseStrategy):
             )  # 0-15
 
             # 📊 Momentum Institutionnel - Score brut (échelle 0-100)
+            # Si momentum_result est None (appel depuis run_bot.py), utiliser valeurs par défaut
+            if momentum_result is None:
+                momentum_result = {
+                    "total_score": 0.0,
+                    "candle_score": 0.0,
+                    "volume_score": 0.0,
+                    "acceleration_score": 0.0,
+                    "mtf_score": 0.0,
+                    "direction": "N/A",
+                    "quality": "N/A",
+                    "candle_details": {},
+                    "volume_details": {},
+                    "acceleration_details": {},
+                    "mtf_details": {},
+                }
+
             mom_score_brut = momentum_result.get("total_score", 0.0)  # 0-100 points
             mom_candle_score = momentum_result.get("candle_score", 0.0)  # 0-30
             mom_volume_score = momentum_result.get("volume_score", 0.0)  # 0-25
@@ -2284,9 +2300,9 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
-                    momentum_result=momentum_result,  # 📊 AJOUTÉ: Momentum institutionnel
                     final_score=0.0,
                     action=action,
+                    momentum_result=momentum_result,  # 📊 AJOUTÉ: Momentum institutionnel
                     vwap_score_pct=vwap_score_pct,
                     vwap_status=vwap_status,
                     vwap_regime=vwap_regime,
