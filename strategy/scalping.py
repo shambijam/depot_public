@@ -174,8 +174,19 @@ class MomentumAnalyzerInstitutional:
         Returns:
             Dict avec score total, direction, force, détails
         """
-        if df_m1 is None or len(df_m1) < 20:
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if df_m1 is None:
+            logger.warning("[MOMENTUM] df_m1 is None → returning default result")
             return self._get_default_result()
+
+        if len(df_m1) < 20:
+            logger.warning(f"[MOMENTUM] df_m1 too short (len={len(df_m1)} < 20) → returning default result")
+            return self._get_default_result()
+
+        logger.info(f"[MOMENTUM] Starting analysis | df_m1_len={len(df_m1)} | df_m5_len={len(df_m5) if df_m5 is not None else 'N/A'} | df_m15_len={len(df_m15) if df_m15 is not None else 'N/A'}")
+        logger.info(f"[MOMENTUM] df_m1 columns: {list(df_m1.columns)}")
 
         try:
             # ====================================================================
@@ -233,6 +244,7 @@ class MomentumAnalyzerInstitutional:
             }
 
         except Exception as e:
+            logger.error(f"[MOMENTUM] Exception caught during analysis: {type(e).__name__}: {e}", exc_info=True)
             return self._get_default_result()
 
     def _analyze_candle_strength(
