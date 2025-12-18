@@ -634,12 +634,12 @@ def footprint_validator(
         timing_quality = timing_metrics.get("timing_quality", "N/A")
 
         # Log timing analysis
-        if timing_score > 0:
-            logging.getLogger(__name__).info(
-                f"[TIMING] ⏱️ Score={timing_score:.1f}/5 pts | Quality={timing_quality} | "
-                f"BuyConc={timing_metrics.get('buy_concentration_q1', 0)*100:.0f}% | "
-                f"VelRatio={timing_metrics.get('velocity_ratio', 1.0):.2f}"
-            )
+        # if timing_score > 0:
+        #     logging.getLogger(__name__).info(
+        #         f"[TIMING] ⏱️ Score={timing_score:.1f}/5 pts | Quality={timing_quality} | "
+        #         f"BuyConc={timing_metrics.get('buy_concentration_q1', 0)*100:.0f}% | "
+        #         f"VelRatio={timing_metrics.get('velocity_ratio', 1.0):.2f}"
+        #     )
     except Exception as e:
         logging.getLogger(__name__).warning(f"[TIMING] ⚠️ Échec analyse timing: {e}")
         timing_metrics = {
@@ -652,7 +652,7 @@ def footprint_validator(
 
     # 🔍 DEBUG: Log distribution des sides
     side_counts = df["side_norm"].value_counts().to_dict()
-    logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Side distribution: {side_counts} | total_ticks={len(df)}")
+    # logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Side distribution: {side_counts} | total_ticks={len(df)}")
 
     if price_step is None or price_step <= 0:
         uniq = np.sort(df["price"].dropna().unique())
@@ -792,7 +792,7 @@ def footprint_validator(
     buy_pct = (buy_volume / max(total_volume, 1.0)) * 100.0 if total_volume > 0 else 50.0
 
     # 🔍 DEBUG: Log volumes calculés
-    logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Volumes: buy={buy_volume}, sell={sell_volume}, unknown={unknown_volume}, total={total_volume}")
+    # logging.getLogger(__name__).info(f"[FOOTPRINT_DEBUG] Volumes: buy={buy_volume}, sell={sell_volume}, unknown={unknown_volume}, total={total_volume}")
 
     return {
         "summary": {
