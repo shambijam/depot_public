@@ -2235,9 +2235,16 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
                 # 📊 3. Momentum Institutionnel Analysis (20% du score) - 18 DEC 2025
+                print(f"🔴🔴🔴 [BEFORE MOMENTUM] About to call momentum_analyzer.analyze() for {asset}")
+                print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_work type={type(df_work)}, len={len(df_work) if hasattr(df_work, '__len__') else 'N/A'}")
+                print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_m5={'NOT None' if df_m5 is not None else 'None'}, df_m15={'NOT None' if df_m15 is not None else 'None'}")
+
                 momentum_result = self.momentum_analyzer.analyze(
                     df_m1=df_work, df_m5=df_m5, df_m15=df_m15
                 )
+
+                print(f"🔴🔴🔴 [AFTER MOMENTUM] momentum_result={momentum_result}")
+
                 self.logger.info(
                     f"[{asset}] 📊 MOMENTUM INSTITUTIONNEL | Score={momentum_result['total_score']:.1f}/100 | "
                     f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
