@@ -143,6 +143,141 @@
             }
           }
         }
+      },
+      "timing_analyzer": {
+        "enabled": true,
+        "gold_specific_params": {
+          "tick_rate_profile": "MODERATE",
+          "typical_spread_impact": "HIGH",
+          "session_sensitivity": "MEDIUM",
+          "volatility_profile": "HIGH_BETA"
+        },
+        "concentration_analysis": {
+          "q1_expected_min": 0.60,
+          "q1_strong": 0.80,
+          "q1_weak": 0.40,
+          "q1_weight": 0.60,
+          "q2_weight": 0.25,
+          "q3_q4_weight": 0.15,
+          "buy_concentration_bonus": {
+            "threshold": 0.70,
+            "multiplier": 1.3
+          },
+          "sell_concentration_bonus": {
+            "threshold": 0.70,
+            "multiplier": 1.4
+          }
+        },
+        "velocity_analysis": {
+          "expected_range": [0.2, 1.5],
+          "scoring_thresholds": {
+            "very_strong": 0.3,
+            "strong": 0.5,
+            "moderate": 0.8,
+            "neutral": 1.2,
+            "reversal_alert": 1.5
+          },
+          "velocity_weight": 0.25
+        },
+        "distribution_scoring": {
+          "ideal_quartile_count": 2,
+          "max_quartile_count": 3,
+          "penalty_4_quartiles": 0.7,
+          "quartile_significance_threshold": 0.15
+        },
+        "time_of_day_adjustments": {
+          "london_open": {
+            "hours_gmt": [7, 11],
+            "characteristics": {
+              "high_volatility": true,
+              "strong_q1_concentration": true,
+              "velocity_multiplier": 1.2
+            },
+            "scoring_adjustment": 1.1
+          },
+          "us_session": {
+            "hours_gmt": [13, 17],
+            "characteristics": {
+              "high_tick_rate": true,
+              "potential_reversals": true,
+              "require_confirmation": true
+            }
+          },
+          "asian_session": {
+            "hours_gmt": [0, 6],
+            "characteristics": {
+              "lower_activity": true,
+              "wider_spreads": true,
+              "relaxed_thresholds": true
+            },
+            "min_concentration": 0.50
+          }
+        },
+        "scoring_system": {
+          "max_score": 5.0,
+          "component_weights": {
+            "concentration_score": 0.50,
+            "velocity_score": 0.25,
+            "distribution_score": 0.15,
+            "consistency_score": 0.10
+          },
+          "quality_levels": {
+            "EXCELLENT": {
+              "min_score": 4.0,
+              "characteristics": ["q1_concentration >80%", "velocity_ratio <0.7"],
+              "trade_impact": "STRONG_CONFIRMATION"
+            },
+            "GOOD": {
+              "min_score": 3.0,
+              "characteristics": ["q1_concentration >60%"],
+              "trade_impact": "POSITIVE_CONFIRMATION"
+            },
+            "FAIR": {
+              "min_score": 2.0,
+              "characteristics": ["q1_concentration >40%"],
+              "trade_impact": "NEUTRAL"
+            },
+            "POOR": {
+              "min_score": 0.0,
+              "trade_impact": "WARNING"
+            }
+          }
+        },
+        "trade_decision_integration": {
+          "confidence_multipliers": {
+            "EXCELLENT": 1.15,
+            "GOOD": 1.05,
+            "FAIR": 1.0,
+            "POOR": 0.85
+          },
+          "minimum_scores_for_execution": {
+            "standard_entry": 3.0,
+            "aggressive_entry": 4.0,
+            "avoid_entry": 1.5
+          },
+          "signals_to_monitor": {
+            "strong_buy_timing": ["buy_concentration_q1 > 80%", "velocity_ratio > 1.3"],
+            "strong_sell_timing": ["sell_concentration_q1 > 80%", "velocity_ratio < 0.5"],
+            "warning_signals": ["concentration_q1 < 30%", "velocity_ratio > 2.0"]
+          }
+        },
+        "performance_optimization": {
+          "cache_duration_seconds": 2.0,
+          "min_ticks_for_analysis": 5,
+          "max_analysis_time_ms": 10,
+          "enable_pre_computation": true
+        },
+        "debug_and_monitoring": {
+          "log_level": "INFO",
+          "log_timing_metrics": true,
+          "save_samples_for_analysis": false,
+          "alert_on_anomalies": true,
+          "anomaly_detection": {
+            "unexpected_concentration": 0.95,
+            "extreme_velocity_ratio": 0.1,
+            "insufficient_coverage": 10.0
+          }
+        }
       }
     }
   }

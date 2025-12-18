@@ -626,7 +626,9 @@ def footprint_validator(
         timing_metrics = calculate_timing_metrics(
             ticks_df=df,          # DataFrame ticks filtrés [start_ts, end_ts) avec side_norm
             start_ts=start_ts,    # Timestamp début bougie M1
-            coverage_s=coverage_s # Durée réelle des ticks
+            coverage_s=coverage_s, # Durée réelle des ticks
+            asset=asset,          # Symbole asset (ex: "XAUUSD")
+            asset_config=fp_conf  # Config complète (contient overrides.scalping.timing_analyzer)
         )
         timing_score = float(timing_metrics.get("timing_score", 0.0))
         timing_quality = timing_metrics.get("timing_quality", "N/A")

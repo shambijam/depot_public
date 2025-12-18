@@ -18,11 +18,12 @@ Date: 17 Décembre 2025
 """
 
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
 import numpy as np
 import logging
 import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,9 @@ logger = logging.getLogger(__name__)
 def calculate_timing_metrics(
     ticks_df: pd.DataFrame,
     start_ts: pd.Timestamp,
-    coverage_s: float
+    coverage_s: float,
+    asset: Optional[str] = None,
+    asset_config: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     🎯 Calcule les métriques de timing pour une bougie M1
@@ -63,6 +66,65 @@ def calculate_timing_metrics(
         }
     """
     analysis_start = time.perf_counter()
+
+    # ========================================================================
+    # 0️⃣ CHARGEMENT CONFIGURATION TIMING ANALYZER
+    # ========================================================================
+    timing_config = {}
+    if asset_config:
+        # Charger depuis overrides.scalping.timing_analyzer
+        overrides = asset_config.get("overrides", {})
+        scalping_overrides = overrides.get("scalping", {})
+        timing_config = scalping_overrides.get("timing_analyzer", {})
+
+    # Paramètres par défaut si config absente
+    enabled = timing_config.get("enabled", True)
+    if not enabled:
+        return _get_default_timing_metrics(0.0)
+
+    # Charger les sections de config
+    concentration_cfg = timing_config.get("concentration_analysis", {})
+    velocity_cfg = timing_config.get("velocity_analysis", {})
+    distribution_cfg = timing_config.get("distribution_scoring", {})
+    time_of_day_cfg = timing_config.get("time_of_day_adjustments", {})
+    scoring_cfg = timing_config.get("scoring_system", {})
+    performance_cfg = timing_config.get("performance_optimization", {})
+
+    # Extraire les paramètres avec valeurs par défaut
+    # Concentration
+    q1_weight = concentration_cfg.get("q1_weight", 0.60)
+    q2_weight = concentration_cfg.get("q2_weight", 0.25)
+    q3_q4_weight = concentration_cfg.get("q3_q4_weight", 0.15)
+    q1_strong = concentration_cfg.get("q1_strong", 0.80)
+    q1_expected_min = concentration_cfg.get("q1_expected_min", 0.60)
+    q1_weak = concentration_cfg.get("q1_weak", 0.40)
+    buy_conc_bonus = concentration_cfg.get("buy_concentration_bonus", {})
+    sell_conc_bonus = concentration_cfg.get("sell_concentration_bonus", {})
+
+    # Velocity
+    vel_thresholds = velocity_cfg.get("scoring_thresholds", {})
+    vel_very_strong = vel_thresholds.get("very_strong", 0.3)
+    vel_strong = vel_thresholds.get("strong", 0.5)
+    vel_moderate = vel_thresholds.get("moderate", 0.8)
+    vel_neutral = vel_thresholds.get("neutral", 1.2)
+    vel_reversal = vel_thresholds.get("reversal_alert", 1.5)
+    velocity_weight = velocity_cfg.get("velocity_weight", 0.25)
+
+    # Distribution
+    ideal_quartile_count = distribution_cfg.get("ideal_quartile_count", 2)
+    max_quartile_count = distribution_cfg.get("max_quartile_count", 3)
+    penalty_4_quartiles = distribution_cfg.get("penalty_4_quartiles", 0.7)
+    quartile_significance_threshold = distribution_cfg.get("quartile_significance_threshold", 0.15)
+
+    # Scoring system weights
+    component_weights = scoring_cfg.get("component_weights", {})
+    weight_concentration = component_weights.get("concentration_score", 0.50)
+    weight_velocity = component_weights.get("velocity_score", 0.25)
+    weight_distribution = component_weights.get("distribution_score", 0.15)
+    weight_consistency = component_weights.get("consistency_score", 0.10)
+
+    # Performance
+    min_ticks = performance_cfg.get("min_ticks_for_analysis", 5)
 
     # ========================================================================
     # 1️⃣ VALIDATION DONNÉES
@@ -152,57 +214,156 @@ def calculate_timing_metrics(
     velocity_ratio = buy_velocity / sell_velocity if sell_velocity > 0 else 1.0
 
     # ========================================================================
-    # 6️⃣ SCORING TIMING (0-5 points)
+    # 6️⃣ SCORING TIMING (0-5 points normalisé par pondération)
     # ========================================================================
-    timing_score = 0.0
 
-    # --- 6.1 Concentration (0-2 pts) ---
-    # Détecter le quartile dominant (buy ou sell)
-    max_buy_conc = max(buy_q_distribution.values()) if buy_q_distribution else 0.0
-    max_sell_conc = max(sell_q_distribution.values()) if sell_q_distribution else 0.0
-    dominant_concentration = max(max_buy_conc, max_sell_conc)
+    # --- 6.1 Concentration Score (pondéré selon concentration_analysis) ---
+    # Analyse Q1 concentration (premier quartile = critique)
+    max_buy_conc_q1 = buy_q_distribution.get('Q1', 0.0)
+    max_sell_conc_q1 = sell_q_distribution.get('Q1', 0.0)
+    dominant_q1_concentration = max(max_buy_conc_q1, max_sell_conc_q1)
 
-    if dominant_concentration >= 0.70:
-        concentration_pts = 2.0  # Très concentré (bon signe)
-    elif dominant_concentration >= 0.50:
-        concentration_pts = 1.5
-    elif dominant_concentration >= 0.35:
-        concentration_pts = 1.0
+    # Score de base selon seuils configurés
+    if dominant_q1_concentration >= q1_strong:
+        concentration_score_raw = 5.0  # Très concentré (excellent)
+    elif dominant_q1_concentration >= q1_expected_min:
+        concentration_score_raw = 3.5  # Bon niveau
+    elif dominant_q1_concentration >= q1_weak:
+        concentration_score_raw = 2.0  # Faible
     else:
-        concentration_pts = 0.5  # Trop dispersé
+        concentration_score_raw = 0.5  # Très dispersé
 
-    timing_score += concentration_pts
+    # Appliquer les bonus de concentration buy/sell
+    buy_bonus_threshold = buy_conc_bonus.get("threshold", 0.70)
+    buy_bonus_multiplier = buy_conc_bonus.get("multiplier", 1.3)
+    sell_bonus_threshold = sell_conc_bonus.get("threshold", 0.70)
+    sell_bonus_multiplier = sell_conc_bonus.get("multiplier", 1.4)
 
-    # --- 6.2 Velocity Ratio (0-2 pts) ---
-    # Ratio élevé = mouvement directionnel fort
-    abs_velocity_ratio = max(velocity_ratio, 1/velocity_ratio) if velocity_ratio > 0 else 1.0
+    if max_buy_conc_q1 >= buy_bonus_threshold:
+        concentration_score_raw *= buy_bonus_multiplier
+    elif max_sell_conc_q1 >= sell_bonus_threshold:
+        concentration_score_raw *= sell_bonus_multiplier
 
-    if abs_velocity_ratio >= 2.0:
-        velocity_pts = 2.0  # Mouvement très fort
-    elif abs_velocity_ratio >= 1.5:
-        velocity_pts = 1.5
-    elif abs_velocity_ratio >= 1.2:
-        velocity_pts = 1.0
+    # Normaliser sur 5.0 max
+    concentration_score = min(5.0, concentration_score_raw)
+
+    # --- 6.2 Velocity Score (pondéré selon velocity_analysis) ---
+    # Pour XAUUSD: velocity_ratio < 1.0 est normal (sell dominant)
+    # Utiliser la distance depuis 1.0 comme indicateur de force directionnelle
+
+    # Calculer l'asymétrie (distance de 1.0 = équilibre)
+    if velocity_ratio < 1.0:
+        # Sell dominant
+        velocity_asymmetry = 1.0 / velocity_ratio if velocity_ratio > 0 else 999.0
+        direction_bias = "sell"
     else:
-        velocity_pts = 0.5  # Trop équilibré
+        # Buy dominant
+        velocity_asymmetry = velocity_ratio
+        direction_bias = "buy"
 
-    timing_score += velocity_pts
+    # Scoring selon thresholds configurés
+    # very_strong (0.3) signifie ratio <= 0.3 ou >= 1/0.3 = très déséquilibré
+    if velocity_ratio <= vel_very_strong or velocity_ratio >= (1.0 / vel_very_strong):
+        velocity_score = 5.0  # Très fort déséquilibre
+    elif velocity_ratio <= vel_strong or velocity_ratio >= (1.0 / vel_strong):
+        velocity_score = 4.0  # Fort déséquilibre
+    elif velocity_ratio <= vel_moderate or velocity_ratio >= (1.0 / vel_moderate):
+        velocity_score = 3.0  # Déséquilibre modéré
+    elif vel_moderate < velocity_ratio < vel_neutral:
+        velocity_score = 2.0  # Léger déséquilibre
+    else:
+        velocity_score = 1.0  # Quasi-équilibre (neutre)
 
-    # --- 6.3 Distribution (0-1 pt) ---
+    # --- 6.3 Distribution Score (pondéré selon distribution_scoring) ---
     # Bonus si mouvement concentré (pas uniforme sur 4 quartiles)
-    # Compter quartiles significatifs (>15% du volume)
-    buy_significant_quartiles = sum(1 for pct in buy_q_distribution.values() if pct > 0.15)
-    sell_significant_quartiles = sum(1 for pct in sell_q_distribution.values() if pct > 0.15)
-    min_significant = min(buy_significant_quartiles, sell_significant_quartiles)
+    # Utiliser quartile_significance_threshold configuré
+    buy_significant_quartiles = sum(
+        1 for pct in buy_q_distribution.values()
+        if pct > quartile_significance_threshold
+    )
+    sell_significant_quartiles = sum(
+        1 for pct in sell_q_distribution.values()
+        if pct > quartile_significance_threshold
+    )
+    # Prendre le max pour détecter concentration directionnelle
+    max_significant = max(buy_significant_quartiles, sell_significant_quartiles)
 
-    if min_significant <= 2:
-        distribution_pts = 1.0  # Concentré sur 1-2 quartiles
-    elif min_significant == 3:
-        distribution_pts = 0.5  # Modérément concentré
+    if max_significant <= ideal_quartile_count:
+        distribution_score = 5.0  # Idéal: concentré sur 1-2 quartiles
+    elif max_significant <= max_quartile_count:
+        distribution_score = 3.0  # Acceptable: 3 quartiles
     else:
-        distribution_pts = 0.0  # Trop uniforme (4 quartiles)
+        # Appliquer pénalité pour 4 quartiles (trop dispersé)
+        distribution_score = 5.0 * penalty_4_quartiles  # Ex: 5.0 * 0.7 = 3.5
 
-    timing_score += distribution_pts
+    # --- 6.4 Consistency Score (nouveau) ---
+    # Mesurer cohérence entre concentration et velocity
+    # Si Q1 concentré ET velocity alignée = bon signal
+    consistency_score = 2.5  # Score neutre par défaut
+
+    # Vérifier alignement direction
+    if dominant_q1_concentration >= q1_expected_min:
+        # Q1 est bien concentré
+        if (max_buy_conc_q1 > max_sell_conc_q1 and direction_bias == "buy") or \
+           (max_sell_conc_q1 > max_buy_conc_q1 and direction_bias == "sell"):
+            # Direction Q1 et velocity sont alignées
+            consistency_score = 5.0
+        else:
+            # Divergence entre Q1 et velocity
+            consistency_score = 1.0
+
+    # ========================================================================
+    # 6️⃣.5 CALCUL SCORE FINAL PONDÉRÉ
+    # ========================================================================
+    # Appliquer les poids configurés (total = 1.0)
+    timing_score_raw = (
+        concentration_score * weight_concentration +
+        velocity_score * weight_velocity +
+        distribution_score * weight_distribution +
+        consistency_score * weight_consistency
+    )
+
+    # ========================================================================
+    # 6️⃣.6 AJUSTEMENTS TIME OF DAY
+    # ========================================================================
+    time_of_day_multiplier = 1.0
+
+    # Extraire l'heure GMT du timestamp start_ts
+    if start_ts is not None and hasattr(start_ts, 'hour'):
+        current_hour_gmt = start_ts.hour
+
+        # Londres (7-11 GMT)
+        london_cfg = time_of_day_cfg.get("london_open", {})
+        london_hours = london_cfg.get("hours_gmt", [7, 11])
+        if london_hours[0] <= current_hour_gmt < london_hours[1]:
+            london_multiplier = london_cfg.get("scoring_adjustment", 1.1)
+            time_of_day_multiplier = london_multiplier
+            logger.debug(f"[TIMING] Session Londres détectée (heure {current_hour_gmt} GMT) - Multiplier: {london_multiplier}")
+
+        # US Session (13-17 GMT)
+        us_cfg = time_of_day_cfg.get("us_session", {})
+        us_hours = us_cfg.get("hours_gmt", [13, 17])
+        if us_hours[0] <= current_hour_gmt < us_hours[1]:
+            # Pour l'instant pas de multiplier pour US, juste marquage
+            logger.debug(f"[TIMING] Session US détectée (heure {current_hour_gmt} GMT)")
+
+        # Asian Session (0-6 GMT)
+        asian_cfg = time_of_day_cfg.get("asian_session", {})
+        asian_hours = asian_cfg.get("hours_gmt", [0, 6])
+        if asian_hours[0] <= current_hour_gmt < asian_hours[1]:
+            # Vérifier si concentration respecte min_concentration
+            asian_min_conc = asian_cfg.get("min_concentration", 0.50)
+            if dominant_q1_concentration < asian_min_conc:
+                # Pénalité pour concentration insuffisante en session asiatique
+                time_of_day_multiplier = 0.8
+                logger.debug(
+                    f"[TIMING] Session Asie (heure {current_hour_gmt} GMT) - "
+                    f"Concentration Q1 {dominant_q1_concentration:.2f} < {asian_min_conc} - "
+                    f"Pénalité appliquée"
+                )
+
+    # Appliquer le multiplicateur
+    timing_score = timing_score_raw * time_of_day_multiplier
 
     # Clamp final (0-5 pts)
     timing_score = float(max(0.0, min(5.0, timing_score)))
@@ -244,10 +405,12 @@ def calculate_timing_metrics(
         "sell_q3_pct": round(sell_q_distribution.get('Q3', 0.0), 3),
         "sell_q4_pct": round(sell_q_distribution.get('Q4', 0.0), 3),
 
-        # Scores détaillés
-        "concentration_pts": round(concentration_pts, 1),
-        "velocity_pts": round(velocity_pts, 1),
-        "distribution_pts": round(distribution_pts, 1),
+        # Scores détaillés (sur 5.0 chacun avant pondération)
+        "concentration_score": round(concentration_score, 2),
+        "velocity_score": round(velocity_score, 2),
+        "distribution_score": round(distribution_score, 2),
+        "consistency_score": round(consistency_score, 2),
+        "time_of_day_multiplier": round(time_of_day_multiplier, 2),
 
         # Score final
         "timing_score": round(timing_score, 2),
@@ -278,9 +441,11 @@ def _get_default_timing_metrics(analysis_ms: float = 0.0) -> Dict[str, Any]:
         "sell_q2_pct": 0.0,
         "sell_q3_pct": 0.0,
         "sell_q4_pct": 0.0,
-        "concentration_pts": 0.0,
-        "velocity_pts": 0.0,
-        "distribution_pts": 0.0,
+        "concentration_score": 0.0,
+        "velocity_score": 0.0,
+        "distribution_score": 0.0,
+        "consistency_score": 0.0,
+        "time_of_day_multiplier": 1.0,
         "timing_score": 0.0,
         "timing_quality": "N/A",
         "tick_count_buy": 0,
