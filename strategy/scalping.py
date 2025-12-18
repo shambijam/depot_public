@@ -985,8 +985,9 @@ class ScalpingStrategy(BaseStrategy):
         📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
 
         Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
-        ✅ CORRIGÉ (19 DEC 2025): Normalisation des scores pour échelle cohérente 0-100pts
+        ✅ CORRIGÉ (19 DIC 2025): Normalisation des scores pour échelle cohérente 0-100pts
         ⏱️ MODIFIÉ (17 DEC 2025): Ajout Timing Analyzer au Footprint (25→30 pts max)
+        🔒 RESTRICTION (18 DEC 2025): XAUUSD UNIQUEMENT
 
         SCORES BRUTS :
         - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
@@ -999,6 +1000,10 @@ class ScalpingStrategy(BaseStrategy):
         - VWAP_norm = (score_pct / 100) * poids_vwap
         - TOTAL = OrderFlow_norm + Footprint_norm + VWAP_norm (0-100pts)
         """
+
+        # 🔒 RESTRICTION: Ce rapport détaillé est UNIQUEMENT pour XAUUSD
+        if asset != "XAUUSD":
+            return
 
         try:
             # ================================================================
@@ -1689,7 +1694,15 @@ class ScalpingStrategy(BaseStrategy):
 
             # ================================================================
             # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M5/M15)
+            # 🔒 RESTRICTION (18 DEC 2025): XAUUSD UNIQUEMENT
             # ================================================================
+            # ⚠️ OrderFlow V6 + Footprint V6 + VWAP = XAUUSD SEULEMENT
+            if asset != "XAUUSD":
+                self.logger.debug(
+                    f"[{asset}] OrderFlow V6 analysis skipped (XAUUSD only)"
+                )
+                return {}  # Pas d'analyse pour les autres symboles
+
             try:
                 # Récupération des DataFrames multi-timeframe
                 df_m5 = None
