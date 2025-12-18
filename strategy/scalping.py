@@ -177,13 +177,22 @@ class MomentumAnalyzerInstitutional:
         import logging
         logger = logging.getLogger(__name__)
 
+        print(f"🔴 [MOMENTUM_DEBUG] analyze() called")
+
         if df_m1 is None:
+            print(f"🔴 [MOMENTUM_DEBUG] df_m1 is None → returning default")
             logger.warning("[MOMENTUM] df_m1 is None → returning default result")
             return self._get_default_result()
 
+        print(f"🔴 [MOMENTUM_DEBUG] df_m1 len={len(df_m1)}")
+
         if len(df_m1) < 20:
+            print(f"🔴 [MOMENTUM_DEBUG] df_m1 too short ({len(df_m1)} < 20) → returning default")
             logger.warning(f"[MOMENTUM] df_m1 too short (len={len(df_m1)} < 20) → returning default result")
             return self._get_default_result()
+
+        print(f"🔴 [MOMENTUM_DEBUG] Starting analysis | df_m1_len={len(df_m1)} | df_m5={df_m5 is not None} | df_m15={df_m15 is not None}")
+        print(f"🔴 [MOMENTUM_DEBUG] df_m1 columns: {list(df_m1.columns)[:10]}...")
 
         logger.info(f"[MOMENTUM] Starting analysis | df_m1_len={len(df_m1)} | df_m5_len={len(df_m5) if df_m5 is not None else 'N/A'} | df_m15_len={len(df_m15) if df_m15 is not None else 'N/A'}")
         logger.info(f"[MOMENTUM] df_m1 columns: {list(df_m1.columns)}")
@@ -244,6 +253,9 @@ class MomentumAnalyzerInstitutional:
             }
 
         except Exception as e:
+            print(f"🔴 [MOMENTUM_DEBUG] EXCEPTION: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             logger.error(f"[MOMENTUM] Exception caught during analysis: {type(e).__name__}: {e}", exc_info=True)
             return self._get_default_result()
 
