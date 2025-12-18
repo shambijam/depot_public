@@ -2235,6 +2235,9 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
                 # 📊 3. Momentum Institutionnel Analysis (20% du score) - 18 DEC 2025
+                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] About to call momentum_analyzer.analyze() for {asset}")
+                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] df_work type={type(df_work)}, len={len(df_work) if hasattr(df_work, '__len__') else 'N/A'}")
+                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] df_m5={'NOT None' if df_m5 is not None else 'None'}, df_m15={'NOT None' if df_m15 is not None else 'None'}")
                 print(f"🔴🔴🔴 [BEFORE MOMENTUM] About to call momentum_analyzer.analyze() for {asset}")
                 print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_work type={type(df_work)}, len={len(df_work) if hasattr(df_work, '__len__') else 'N/A'}")
                 print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_m5={'NOT None' if df_m5 is not None else 'None'}, df_m15={'NOT None' if df_m15 is not None else 'None'}")
@@ -2243,6 +2246,7 @@ class ScalpingStrategy(BaseStrategy):
                     df_m1=df_work, df_m5=df_m5, df_m15=df_m15
                 )
 
+                self.logger.critical(f"🔴🔴🔴 [AFTER MOMENTUM] momentum_result={momentum_result}")
                 print(f"🔴🔴🔴 [AFTER MOMENTUM] momentum_result={momentum_result}")
 
                 self.logger.info(
