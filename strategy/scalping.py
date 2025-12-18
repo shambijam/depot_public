@@ -138,6 +138,358 @@ class XAUUSDTimingOptimizer:
         }
 
 
+class MomentumAnalyzerInstitutional:
+    """
+    📊 Analyseur de Momentum Institutionnel M1
+
+    Date: 18 Décembre 2025
+    Objectif: Momentum de qualité institutionnelle pour filtrer les trades incohérents
+
+    Problème résolu:
+    - Momentum pathétique (juste comptage bougies vertes)
+    - Pas de volume, pas de force, pas d'accélération
+    - Trades pris contre le momentum (BUY sur 3 bougies rouges)
+
+    Score sur 100 points:
+    - Candle Strength (30pts): Force des bougies, body ratio, position close
+    - Volume Confirmation (25pts): Volume relatif, momentum volume
+    - Price Acceleration (25pts): Accélération du mouvement
+    - Multi-Timeframe Alignment (20pts): Concordance M1/M5/M15
+    """
+
+    def analyze(
+        self,
+        df_m1: pd.DataFrame,
+        df_m5: Optional[pd.DataFrame] = None,
+        df_m15: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, Any]:
+        """
+        Analyse le momentum institutionnel sur M1 avec confirmation MTF.
+
+        Args:
+            df_m1: DataFrame M1 (minimum 20 bougies)
+            df_m5: DataFrame M5 optionnel (pour confluence)
+            df_m15: DataFrame M15 optionnel (pour confluence)
+
+        Returns:
+            Dict avec score total, direction, force, détails
+        """
+        if df_m1 is None or len(df_m1) < 20:
+            return self._get_default_result()
+
+        try:
+            # ====================================================================
+            # 1️⃣ CANDLE STRENGTH ANALYSIS (0-30 pts)
+            # ====================================================================
+            candle_score, candle_details = self._analyze_candle_strength(df_m1)
+
+            # ====================================================================
+            # 2️⃣ VOLUME CONFIRMATION (0-25 pts)
+            # ====================================================================
+            volume_score, volume_details = self._analyze_volume_confirmation(df_m1)
+
+            # ====================================================================
+            # 3️⃣ PRICE ACCELERATION (0-25 pts)
+            # ====================================================================
+            acceleration_score, acceleration_details = self._analyze_price_acceleration(
+                df_m1
+            )
+
+            # ====================================================================
+            # 4️⃣ MULTI-TIMEFRAME ALIGNMENT (0-20 pts)
+            # ====================================================================
+            mtf_score, mtf_details = self._analyze_mtf_alignment(df_m1, df_m5, df_m15)
+
+            # ====================================================================
+            # 5️⃣ CALCUL SCORE TOTAL & DIRECTION
+            # ====================================================================
+            total_score = candle_score + volume_score + acceleration_score + mtf_score
+
+            # Déterminer direction dominante
+            direction = candle_details.get("direction", "NEUTRAL")
+
+            # Déterminer qualité
+            if total_score >= 70:
+                quality = "EXCELLENT"
+            elif total_score >= 55:
+                quality = "GOOD"
+            elif total_score >= 40:
+                quality = "FAIR"
+            else:
+                quality = "POOR"
+
+            return {
+                "total_score": round(total_score, 1),
+                "direction": direction,
+                "quality": quality,
+                "candle_score": round(candle_score, 1),
+                "volume_score": round(volume_score, 1),
+                "acceleration_score": round(acceleration_score, 1),
+                "mtf_score": round(mtf_score, 1),
+                "candle_details": candle_details,
+                "volume_details": volume_details,
+                "acceleration_details": acceleration_details,
+                "mtf_details": mtf_details,
+            }
+
+        except Exception as e:
+            return self._get_default_result()
+
+    def _analyze_candle_strength(
+        self, df_m1: pd.DataFrame
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Analyse la force des bougies récentes (8 dernières).
+
+        Critères:
+        - Body ratio (corps vs mèches)
+        - Range absolu
+        - Position de la fermeture
+        - Cohérence directionnelle
+        """
+        recent = df_m1.tail(8).copy()
+
+        # Calculs de base
+        recent["body"] = abs(recent["close"] - recent["open"])
+        recent["range"] = recent["high"] - recent["low"]
+        recent["body_ratio"] = recent["body"] / recent["range"].replace(0, 1e-9)
+        recent["is_green"] = recent["close"] > recent["open"]
+
+        # 1. Body Ratio moyen (0-10 pts)
+        avg_body_ratio = recent["body_ratio"].mean()
+        body_ratio_score = min(10.0, avg_body_ratio * 15)  # Ratio >0.66 = 10pts
+
+        # 2. Cohérence directionnelle (0-10 pts)
+        green_count = recent["is_green"].sum()
+        coherence = abs(green_count - 4) / 4.0  # Distance de 50%
+        coherence_score = coherence * 10  # Max quand tout vert ou tout rouge
+
+        # 3. Position de fermeture (0-5 pts)
+        # Close près du high (bullish) ou low (bearish)
+        def close_position(row):
+            rng = row["high"] - row["low"]
+            if rng < 1e-9:
+                return 0.5
+            if row["is_green"]:
+                return (row["close"] - row["low"]) / rng
+            else:
+                return (row["high"] - row["close"]) / rng
+
+        recent["close_pos"] = recent.apply(close_position, axis=1)
+        avg_close_pos = recent["close_pos"].mean()
+        close_pos_score = avg_close_pos * 5  # Max 5 pts
+
+        # 4. Force des 3 dernières bougies (0-5 pts)
+        last_3 = recent.tail(3)
+        last_3_strength = last_3["body_ratio"].mean()
+        last_3_score = min(5.0, last_3_strength * 7.5)
+
+        total_candle_score = (
+            body_ratio_score + coherence_score + close_pos_score + last_3_score
+        )
+
+        # Direction
+        if green_count >= 6:
+            direction = "BULLISH"
+        elif green_count <= 2:
+            direction = "BEARISH"
+        else:
+            direction = "NEUTRAL"
+
+        details = {
+            "green_candles": int(green_count),
+            "total_candles": 8,
+            "avg_body_ratio": round(avg_body_ratio, 2),
+            "coherence": round(coherence, 2),
+            "avg_close_position": round(avg_close_pos, 2),
+            "direction": direction,
+        }
+
+        return total_candle_score, details
+
+    def _analyze_volume_confirmation(
+        self, df_m1: pd.DataFrame
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Analyse la confirmation par le volume.
+
+        Critères:
+        - Volume relatif (vs moyenne)
+        - Momentum volume (croissant/décroissant)
+        - Volume sur dernières bougies
+        """
+        recent = df_m1.tail(20).copy()
+
+        # Volume moyen sur 20 bougies
+        if "tick_volume" in recent.columns:
+            vol_col = "tick_volume"
+        elif "real_volume" in recent.columns:
+            vol_col = "real_volume"
+        else:
+            # Pas de volume disponible
+            return 0.0, {"volume_available": False}
+
+        avg_volume = recent[vol_col].mean()
+        last_8 = recent.tail(8)
+        last_8_avg = last_8[vol_col].mean()
+
+        # 1. Volume relatif (0-15 pts)
+        volume_ratio = last_8_avg / max(avg_volume, 1.0)
+        volume_relative_score = min(15.0, (volume_ratio - 1.0) * 15)  # >2x = 15pts
+        volume_relative_score = max(0.0, volume_relative_score)
+
+        # 2. Momentum volume (0-10 pts)
+        # Volume croissant = bon signe
+        first_4_vol = last_8.iloc[:4][vol_col].mean()
+        last_4_vol = last_8.iloc[4:][vol_col].mean()
+        vol_acceleration = (last_4_vol / max(first_4_vol, 1.0)) - 1.0
+        vol_momentum_score = min(10.0, max(0.0, vol_acceleration * 20))
+
+        total_volume_score = volume_relative_score + vol_momentum_score
+
+        details = {
+            "volume_available": True,
+            "volume_ratio": round(volume_ratio, 2),
+            "volume_acceleration": round(vol_acceleration, 2),
+            "avg_volume_20": round(avg_volume, 1),
+            "avg_volume_8": round(last_8_avg, 1),
+        }
+
+        return total_volume_score, details
+
+    def _analyze_price_acceleration(
+        self, df_m1: pd.DataFrame
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Analyse l'accélération du prix.
+
+        Critères:
+        - Mouvement total
+        - Accélération (augmentation de vitesse)
+        - Régularité
+        """
+        recent = df_m1.tail(12).copy()
+
+        # Calcul mouvement cumulé
+        recent["price_change"] = recent["close"] - recent["open"]
+
+        # 1. Mouvement total (0-10 pts)
+        total_move = recent["price_change"].sum()
+        avg_price = recent["close"].mean()
+        move_pct = abs(total_move) / max(avg_price, 1.0) * 100  # En %
+
+        # Pour XAUUSD: 0.1% sur 12 bougies = bon
+        move_score = min(10.0, move_pct * 100)  # 0.1% = 10pts
+
+        # 2. Accélération (0-10 pts)
+        first_6_move = abs(recent.iloc[:6]["price_change"].sum())
+        last_6_move = abs(recent.iloc[6:]["price_change"].sum())
+        acceleration_ratio = last_6_move / max(first_6_move, 1e-9)
+        accel_score = min(10.0, max(0.0, (acceleration_ratio - 1.0) * 10))
+
+        # 3. Régularité (0-5 pts)
+        # Mouvement dans la même direction
+        same_direction = (
+            (recent["price_change"] > 0).sum()
+            if total_move > 0
+            else (recent["price_change"] < 0).sum()
+        )
+        regularity = same_direction / 12.0
+        regularity_score = regularity * 5
+
+        total_acceleration_score = move_score + accel_score + regularity_score
+
+        details = {
+            "total_move_pct": round(move_pct, 4),
+            "acceleration_ratio": round(acceleration_ratio, 2),
+            "regularity": round(regularity, 2),
+            "direction_consistent": same_direction,
+        }
+
+        return total_acceleration_score, details
+
+    def _analyze_mtf_alignment(
+        self,
+        df_m1: pd.DataFrame,
+        df_m5: Optional[pd.DataFrame],
+        df_m15: Optional[pd.DataFrame],
+    ) -> Tuple[float, Dict[str, Any]]:
+        """
+        Analyse l'alignement multi-timeframe.
+
+        Critères:
+        - Direction M1
+        - Direction M5 (si disponible)
+        - Direction M15 (si disponible)
+        - Concordance
+        """
+
+        def get_direction(df, n_candles=6):
+            if df is None or len(df) < n_candles:
+                return "NEUTRAL"
+            recent = df.tail(n_candles)
+            green = (recent["close"] > recent["open"]).sum()
+            if green >= n_candles * 0.67:
+                return "BULLISH"
+            elif green <= n_candles * 0.33:
+                return "BEARISH"
+            return "NEUTRAL"
+
+        m1_dir = get_direction(df_m1, 8)
+        m5_dir = get_direction(df_m5, 6) if df_m5 is not None else "N/A"
+        m15_dir = get_direction(df_m15, 4) if df_m15 is not None else "N/A"
+
+        # Calcul score
+        score = 0.0
+
+        # Base M1 (5 pts)
+        if m1_dir in ["BULLISH", "BEARISH"]:
+            score += 5.0
+
+        # Concordance M5 (7.5 pts)
+        if m5_dir != "N/A":
+            if m5_dir == m1_dir:
+                score += 7.5
+            elif m5_dir == "NEUTRAL":
+                score += 3.5
+
+        # Concordance M15 (7.5 pts)
+        if m15_dir != "N/A":
+            if m15_dir == m1_dir:
+                score += 7.5
+            elif m15_dir == "NEUTRAL":
+                score += 3.5
+
+        # Si tout aligné = bonus
+        if m1_dir != "NEUTRAL" and m1_dir == m5_dir == m15_dir:
+            score = 20.0  # Perfect alignment
+
+        details = {
+            "m1_direction": m1_dir,
+            "m5_direction": m5_dir,
+            "m15_direction": m15_dir,
+            "alignment": "FULL" if score >= 18 else "PARTIAL" if score >= 10 else "WEAK",
+        }
+
+        return score, details
+
+    def _get_default_result(self) -> Dict[str, Any]:
+        """Résultat par défaut en cas d'erreur."""
+        return {
+            "total_score": 0.0,
+            "direction": "NEUTRAL",
+            "quality": "N/A",
+            "candle_score": 0.0,
+            "volume_score": 0.0,
+            "acceleration_score": 0.0,
+            "mtf_score": 0.0,
+            "candle_details": {},
+            "volume_details": {},
+            "acceleration_details": {},
+            "mtf_details": {},
+        }
+
+
 class ScalpingStrategy(BaseStrategy):
     """
     Stratégie SCALPING focalisée sur :
@@ -173,6 +525,9 @@ class ScalpingStrategy(BaseStrategy):
 
         # ⏱️ Timing Optimizer pour XAUUSD (18 Dec 2025)
         self.xauusd_timing_optimizer = XAUUSDTimingOptimizer()
+
+        # 📊 Momentum Analyzer Institutionnel (18 Dec 2025)
+        self.momentum_analyzer = MomentumAnalyzerInstitutional()
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
@@ -973,6 +1328,7 @@ class ScalpingStrategy(BaseStrategy):
         asset: str,
         orderflow_result: Dict[str, Any],
         footprint_result: Dict[str, Any],
+        momentum_result: Dict[str, Any],  # 📊 AJOUTÉ (18 DEC 2025): Momentum institutionnel
         final_score: float,  # ⚠️ Ce paramètre ne sera PLUS utilisé pour le total 100pts
         action: Optional[str],
         vwap_score_pct: float = 0.0,
@@ -982,23 +1338,26 @@ class ScalpingStrategy(BaseStrategy):
         df_m1: Optional[pd.DataFrame] = None,
     ) -> None:
         """
-        📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 - BURST SCALPING
+        📋 RAPPORT CONSOLIDÉ ORDERFLOW V6 + MOMENTUM - BURST SCALPING
 
-        Affiche un bilan formaté OrderFlow + Footprint + VWAP et du score final
+        Affiche un bilan formaté OrderFlow + Footprint + Momentum + VWAP et du score final
         ✅ CORRIGÉ (19 DIC 2025): Normalisation des scores pour échelle cohérente 0-100pts
         ⏱️ MODIFIÉ (17 DEC 2025): Ajout Timing Analyzer au Footprint (25→30 pts max)
+        📊 MODIFIÉ (18 DEC 2025): Ajout Momentum Institutionnel - NOUVEAUX POIDS
         🔒 RESTRICTION (18 DEC 2025): XAUUSD UNIQUEMENT
 
         SCORES BRUTS :
         - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
         - Footprint V6: 0-30 points (Absorption 0-12.5, Clustering 0-8.5, Rejection 0-4, ⏱️ Timing 0-5)
+        - Momentum V1: 0-100 points (Candle 30, Volume 25, Acceleration 25, MTF 20)
         - VWAP: 0-100% → converti en 0-w_vw points
 
-        SCORES NORMALISÉS (pour total 100pts):
-        - OrderFlow_norm = (score_brut / 50) * poids_orderflow
-        - Footprint_norm = (score_brut / 30) * poids_footprint  # ⏱️ MODIFIÉ: /30 au lieu de /25
-        - VWAP_norm = (score_pct / 100) * poids_vwap
-        - TOTAL = OrderFlow_norm + Footprint_norm + VWAP_norm (0-100pts)
+        SCORES NORMALISÉS (pour total 100pts) - NOUVEAUX POIDS 18 DEC 2025:
+        - OrderFlow_norm = (score_brut / 50) * 30%  # 📉 RÉDUIT: 40%→30%
+        - Footprint_norm = (score_brut / 30) * 30%  # 📉 RÉDUIT: 40%→30%
+        - Momentum_norm = (score_brut / 100) * 20%  # 📊 NOUVEAU: 20%
+        - VWAP_norm = (score_pct / 100) * 20%       # 📉 RÉDUIT: 20%→20% (inchangé)
+        - TOTAL = OF_norm + FP_norm + MOM_norm + VWAP_norm (0-100pts)
         """
 
         # 🔒 RESTRICTION: Ce rapport détaillé est UNIQUEMENT pour XAUUSD
@@ -1007,34 +1366,21 @@ class ScalpingStrategy(BaseStrategy):
 
         try:
             # ================================================================
-            # 1. CALCUL DES POIDS (Dynamiques si régime VWAP, sinon statiques)
+            # 1. CALCUL DES POIDS - NOUVEAUX POIDS 18 DEC 2025
             # ================================================================
-            # Poids par défaut (fallback statique)
-            fusion_cfg = self.strategy_config.get("fusion", {})
-            ponderations = fusion_cfg.get("ponderations", {})
-            w_of = (
-                float(ponderations.get("orderflow_weight", 0.30)) * 100
-            )  # 30% par défaut
-            w_fp = (
-                float(ponderations.get("footprint_weight", 0.35)) * 100
-            )  # 35% par défaut
-            w_vw = float(ponderations.get("vwap_weight", 0.35)) * 100  # 35% par défaut
+            # 📊 NOUVEAUX POIDS AVEC MOMENTUM:
+            # OrderFlow: 30% | Footprint: 30% | Momentum: 20% | VWAP: 20%
+            w_of = 30.0  # 📉 RÉDUIT: 40%→30%
+            w_fp = 30.0  # 📉 RÉDUIT: 40%→30%
+            w_mom = 20.0  # 📊 NOUVEAU: 20%
+            w_vw = 20.0  # Inchangé: 20%
 
-            # Tenter d'appliquer les poids dynamiques si régime VWAP disponible
-            if vwap_regime:
-                try:
-                    weights = get_regime_weights(vwap_regime.upper())
-                    w_of = weights["orderflow"] * 100
-                    w_fp = weights["footprint"] * 100
-                    w_vw = weights["vwap"] * 100
-                except Exception as e:
-                    self.logger.warning(
-                        f"[{asset}] Erreur lecture poids VWAP regime '{vwap_regime}': {e}. "
-                        "Utilisation des poids statiques."
-                    )
+            # Note: Les poids dynamiques get_regime_weights ne connaissent pas encore momentum
+            # Donc on force les poids fixes pour l'instant
+            # TODO: Mettre à jour get_regime_weights dans vwap/config.py pour inclure momentum
 
             # Vérification de cohérence (poids totaux = 100%)
-            total_weight = w_of + w_fp + w_vw
+            total_weight = w_of + w_fp + w_mom + w_vw
             if abs(total_weight - 100.0) > 0.1:  # Tolérance 0.1%
                 self.logger.warning(
                     f"[{asset}] Somme des poids anormale: {total_weight:.1f}% != 100%. "
@@ -1042,6 +1388,7 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 w_of = (w_of / total_weight) * 100
                 w_fp = (w_fp / total_weight) * 100
+                w_mom = (w_mom / total_weight) * 100
                 w_vw = (w_vw / total_weight) * 100
 
             # ================================================================
@@ -1053,6 +1400,15 @@ class ScalpingStrategy(BaseStrategy):
             volume_score = orderflow_result.get(
                 "volume_confirmation_score", 0.0
             )  # 0-15
+
+            # 📊 Momentum Institutionnel - Score brut (échelle 0-100)
+            mom_score_brut = momentum_result.get("total_score", 0.0)  # 0-100 points
+            mom_candle_score = momentum_result.get("candle_score", 0.0)  # 0-30
+            mom_volume_score = momentum_result.get("volume_score", 0.0)  # 0-25
+            mom_accel_score = momentum_result.get("acceleration_score", 0.0)  # 0-25
+            mom_mtf_score = momentum_result.get("mtf_score", 0.0)  # 0-20
+            mom_direction = momentum_result.get("direction", "NEUTRAL")
+            mom_quality = momentum_result.get("quality", "N/A")
             imbalance_score = orderflow_result.get(
                 "imbalance_strength_score", 0.0
             )  # 0-10
@@ -1076,16 +1432,19 @@ class ScalpingStrategy(BaseStrategy):
             # Conversion des scores bruts vers l'échelle des poids
             of_score_norm = (
                 (of_score_brut / 50.0) * w_of if w_of > 0 else 0.0
-            )  # 0-w_of points
+            )  # 0-30 points
             fp_score_norm = (
                 (fp_score_brut / 30.0) * w_fp if w_fp > 0 else 0.0
-            )  # ⏱️ MODIFIÉ (17 DEC 2025): Diviser par 30 au lieu de 25 (inclut timing +5pts)
+            )  # 0-30 points (⏱️ /30 car inclut timing)
+            mom_score_norm = (
+                (mom_score_brut / 100.0) * w_mom if w_mom > 0 else 0.0
+            )  # 0-20 points (📊 NOUVEAU 18 DEC 2025)
             vwap_score_norm = (
                 (vwap_score_pct_clamped / 100.0) * w_vw if w_vw > 0 else 0.0
-            )  # 0-w_vw points
+            )  # 0-20 points
 
             # Calcul du TOTAL NORMALISÉ (0-100 points)
-            total_normalise = of_score_norm + fp_score_norm + vwap_score_norm
+            total_normalise = of_score_norm + fp_score_norm + mom_score_norm + vwap_score_norm
 
             # ================================================================
             # 4. LOGGING DU RAPPORT CONSOLIDÉ
@@ -1271,7 +1630,50 @@ class ScalpingStrategy(BaseStrategy):
 
                     self.logger.info(f"      Détails          : {adjustment_details}")
 
-            # 4.4 VWAP MODULE - INSTITUTIONNEL
+            # 4.4 MOMENTUM INSTITUTIONNEL ANALYSIS (18 DEC 2025)
+            self.logger.info(f"\n📊 MOMENTUM INSTITUTIONNEL ({w_mom:.0f}% du total) :")
+            self.logger.info(
+                f"   Score brut: {mom_score_brut:.1f}/100 pts → Normalisé: {mom_score_norm:.1f}/{w_mom:.0f} pts"
+            )
+            self.logger.info(f"   Direction       : {mom_direction}")
+            self.logger.info(f"   Qualité         : {mom_quality}")
+            self.logger.info(f"   ├─ Candle Strength     : {mom_candle_score:.1f}/30 pts")
+
+            # Détails candles si disponibles
+            candle_details = momentum_result.get("candle_details", {})
+            if candle_details:
+                green_candles = candle_details.get("green_candles", 0)
+                total_candles = candle_details.get("total_candles", 8)
+                self.logger.info(f"   │  • Bougies vertes  : {green_candles}/{total_candles} ({green_candles/total_candles*100:.0f}%)")
+                self.logger.info(f"   │  • Body ratio moyen: {candle_details.get('avg_body_ratio', 0):.2f}")
+
+            self.logger.info(f"   ├─ Volume Confirmation : {mom_volume_score:.1f}/25 pts")
+
+            # Détails volume si disponibles
+            volume_details = momentum_result.get("volume_details", {})
+            if volume_details and volume_details.get("volume_available"):
+                self.logger.info(f"   │  • Volume ratio    : {volume_details.get('volume_ratio', 1.0):.2f}x")
+                self.logger.info(f"   │  • Accélération vol: {volume_details.get('volume_acceleration', 0)*100:+.0f}%")
+
+            self.logger.info(f"   ├─ Price Acceleration  : {mom_accel_score:.1f}/25 pts")
+
+            # Détails accélération si disponibles
+            accel_details = momentum_result.get("acceleration_details", {})
+            if accel_details:
+                self.logger.info(f"   │  • Move total      : {accel_details.get('total_move_pct', 0)*100:.2f}%")
+                self.logger.info(f"   │  • Accel ratio     : {accel_details.get('acceleration_ratio', 1.0):.2f}x")
+
+            self.logger.info(f"   └─ MTF Alignment       : {mom_mtf_score:.1f}/20 pts")
+
+            # Détails MTF si disponibles
+            mtf_details = momentum_result.get("mtf_details", {})
+            if mtf_details:
+                self.logger.info(f"      • M1  direction  : {mtf_details.get('m1_direction', 'N/A')}")
+                self.logger.info(f"      • M5  direction  : {mtf_details.get('m5_direction', 'N/A')}")
+                self.logger.info(f"      • M15 direction  : {mtf_details.get('m15_direction', 'N/A')}")
+                self.logger.info(f"      • Alignment      : {mtf_details.get('alignment', 'N/A')}")
+
+            # 4.5 VWAP MODULE - INSTITUTIONNEL
             self.logger.info(f"\n📊 VWAP INSTITUTIONNEL ({w_vw:.0f}% du scoring)")
             self.logger.info(
                 f"   Score VWAP      : {vwap_score_norm:.1f}/{w_vw:.0f} pts ({vwap_score_pct_clamped:.1f}%)"
@@ -1293,10 +1695,13 @@ class ScalpingStrategy(BaseStrategy):
                 f"   Footprint ({w_fp:.0f}%) : {fp_score_norm:.1f}/{w_fp:.0f} pts"
             )
             self.logger.info(
+                f"   Momentum ({w_mom:.0f}%)  : {mom_score_norm:.1f}/{w_mom:.0f} pts"
+            )
+            self.logger.info(
                 f"   VWAP ({w_vw:.0f}%)      : {vwap_score_norm:.1f}/{w_vw:.0f} pts"
             )
             self.logger.info(f"   {'─' * 50}")
-            self.logger.info(f"   TOTAL (OF+FP+VWAP) : {total_normalise:.1f}/100 pts")
+            self.logger.info(f"   TOTAL (OF+FP+MOM+VWAP) : {total_normalise:.1f}/100 pts")
 
             # Ancien total (pour référence debug - à supprimer après validation)
             ancien_total_erroné = final_score + vwap_score_norm
@@ -1788,10 +2193,21 @@ class ScalpingStrategy(BaseStrategy):
                 footprint_result = self._analyze_footprint_v6(
                     asset=asset, df_m1=df_work, asset_signals=asset_signals
                 )
-                # ✅ PRÉPARATION DU CONTEXTE POUR FUSIONMANAGER (15 DEC 2025)
+
+                # 📊 3. Momentum Institutionnel Analysis (20% du score) - 18 DEC 2025
+                momentum_result = self.momentum_analyzer.analyze(
+                    df_m1=df_work, df_m5=df_m5, df_m15=df_m15
+                )
+                self.logger.info(
+                    f"[{asset}] 📊 MOMENTUM INSTITUTIONNEL | Score={momentum_result['total_score']:.1f}/100 | "
+                    f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
+                )
+
+                # ✅ PRÉPARATION DU CONTEXTE POUR FUSIONMANAGER (18 DEC 2025)
                 # Créer un dictionnaire context avec TOUS les éléments nécessaires
                 fusion_context = {
                     "momentum_m1": momentum_m1,
+                    "momentum_result": momentum_result,  # 📊 AJOUTÉ: Momentum institutionnel complet
                     "phase_observer_regime": asset_signals.get("phase", ""),
                     "range_pos_pct": asset_signals.get("range_position", 0.5),
                     "in_upper_tercile": asset_signals.get("in_upper_tercile", False),
@@ -1868,6 +2284,7 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset,
                     orderflow_result=orderflow_result,
                     footprint_result=footprint_result,
+                    momentum_result=momentum_result,  # 📊 AJOUTÉ: Momentum institutionnel
                     final_score=0.0,
                     action=action,
                     vwap_score_pct=vwap_score_pct,

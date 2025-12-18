@@ -1373,6 +1373,60 @@ class FusionManager:
             f"conditional={conditional_threshold} | allow_conditional={allow_conditional}"
         )
 
+        # ================================================================
+        # 🚨 FILTRE VETO MOMENTUM INSTITUTIONNEL (18 DEC 2025)
+        # ================================================================
+        # Bloquer trades incohérents avec le momentum (ex: BUY sur 3 bougies rouges)
+        momentum_result = ctx.get("momentum_result", {})
+        if momentum_result:
+            mom_score = momentum_result.get("total_score", 100)  # Default 100 si pas dispo
+            mom_direction = momentum_result.get("direction", "NEUTRAL")
+            mom_quality = momentum_result.get("quality", "N/A")
+
+            # Seuil VETO: Score momentum < 40/100 = POOR
+            MOMENTUM_VETO_THRESHOLD = 40.0
+
+            # VETO 1: BUY avec momentum BEARISH faible
+            if direction == "BUY" and mom_direction == "BEARISH" and mom_score < MOMENTUM_VETO_THRESHOLD:
+                _probe(
+                    self.log,
+                    f"[MOMENTUM_VETO] ❌ BUY BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 < {MOMENTUM_VETO_THRESHOLD} | "
+                    f"Quality={mom_quality} | Raison: Momentum bearish trop fort, incohérent avec signal BUY"
+                )
+                return {
+                    "action": "HOLD",
+                    "signal_type": "MOMENTUM_VETO_BUY",
+                    "direction": "NEUTRAL",
+                    "anchor_price": anchor_price,
+                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 incompatible avec BUY"
+                }
+
+            # VETO 2: SELL avec momentum BULLISH faible
+            if direction == "SELL" and mom_direction == "BULLISH" and mom_score < MOMENTUM_VETO_THRESHOLD:
+                _probe(
+                    self.log,
+                    f"[MOMENTUM_VETO] ❌ SELL BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 < {MOMENTUM_VETO_THRESHOLD} | "
+                    f"Quality={mom_quality} | Raison: Momentum bullish trop fort, incohérent avec signal SELL"
+                )
+                return {
+                    "action": "HOLD",
+                    "signal_type": "MOMENTUM_VETO_SELL",
+                    "direction": "NEUTRAL",
+                    "anchor_price": anchor_price,
+                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 incompatible avec SELL"
+                }
+
+            # Log si momentum OK
+            if mom_direction != "NEUTRAL":
+                _probe(
+                    self.log,
+                    f"[MOMENTUM_CHECK] ✅ Momentum OK | Direction={mom_direction} Score={mom_score:.1f}/100 "
+                    f"Quality={mom_quality} | Compatible avec {direction}"
+                )
+
+        # ================================================================
+        # DÉCISION FINALE PAR SEUILS
+        # ================================================================
         if fused >= high_threshold and direction in ("BUY", "SELL"):
             return {
                 "action": direction,
