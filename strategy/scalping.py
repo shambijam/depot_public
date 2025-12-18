@@ -177,25 +177,13 @@ class MomentumAnalyzerInstitutional:
         import logging
         logger = logging.getLogger(__name__)
 
-        print(f"🔴 [MOMENTUM_DEBUG] analyze() called")
-
         if df_m1 is None:
-            print(f"🔴 [MOMENTUM_DEBUG] df_m1 is None → returning default")
             logger.warning("[MOMENTUM] df_m1 is None → returning default result")
             return self._get_default_result()
 
-        print(f"🔴 [MOMENTUM_DEBUG] df_m1 len={len(df_m1)}")
-
         if len(df_m1) < 20:
-            print(f"🔴 [MOMENTUM_DEBUG] df_m1 too short ({len(df_m1)} < 20) → returning default")
             logger.warning(f"[MOMENTUM] df_m1 too short (len={len(df_m1)} < 20) → returning default result")
             return self._get_default_result()
-
-        print(f"🔴 [MOMENTUM_DEBUG] Starting analysis | df_m1_len={len(df_m1)} | df_m5={df_m5 is not None} | df_m15={df_m15 is not None}")
-        print(f"🔴 [MOMENTUM_DEBUG] df_m1 columns: {list(df_m1.columns)[:10]}...")
-
-        logger.info(f"[MOMENTUM] Starting analysis | df_m1_len={len(df_m1)} | df_m5_len={len(df_m5) if df_m5 is not None else 'N/A'} | df_m15_len={len(df_m15) if df_m15 is not None else 'N/A'}")
-        logger.info(f"[MOMENTUM] df_m1 columns: {list(df_m1.columns)}")
 
         try:
             # ====================================================================
@@ -253,10 +241,7 @@ class MomentumAnalyzerInstitutional:
             }
 
         except Exception as e:
-            print(f"🔴 [MOMENTUM_DEBUG] EXCEPTION: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            logger.error(f"[MOMENTUM] Exception caught during analysis: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"[MOMENTUM] Exception during analysis: {type(e).__name__}: {e}", exc_info=True)
             return self._get_default_result()
 
     def _analyze_candle_strength(
@@ -499,10 +484,6 @@ class MomentumAnalyzerInstitutional:
 
     def _get_default_result(self) -> Dict[str, Any]:
         """Résultat par défaut en cas d'erreur."""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.critical("🚨🚨🚨 MOMENTUM _get_default_result() CALLED - Returning zeros!")
-        print("🚨🚨🚨 MOMENTUM _get_default_result() CALLED - Returning zeros!")
         return {
             "total_score": 0.0,
             "direction": "N/A",
@@ -2239,20 +2220,9 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
                 # 📊 3. Momentum Institutionnel Analysis (20% du score) - 18 DEC 2025
-                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] About to call momentum_analyzer.analyze() for {asset}")
-                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] df_work type={type(df_work)}, len={len(df_work) if hasattr(df_work, '__len__') else 'N/A'}")
-                self.logger.critical(f"🔴🔴🔴 [BEFORE MOMENTUM] df_m5={'NOT None' if df_m5 is not None else 'None'}, df_m15={'NOT None' if df_m15 is not None else 'None'}")
-                print(f"🔴🔴🔴 [BEFORE MOMENTUM] About to call momentum_analyzer.analyze() for {asset}")
-                print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_work type={type(df_work)}, len={len(df_work) if hasattr(df_work, '__len__') else 'N/A'}")
-                print(f"🔴🔴🔴 [BEFORE MOMENTUM] df_m5={'NOT None' if df_m5 is not None else 'None'}, df_m15={'NOT None' if df_m15 is not None else 'None'}")
-
                 momentum_result = self.momentum_analyzer.analyze(
                     df_m1=df_work, df_m5=df_m5, df_m15=df_m15
                 )
-
-                self.logger.critical(f"🔴🔴🔴 [AFTER MOMENTUM] momentum_result={momentum_result}")
-                print(f"🔴🔴🔴 [AFTER MOMENTUM] momentum_result={momentum_result}")
-
                 self.logger.info(
                     f"[{asset}] 📊 MOMENTUM INSTITUTIONNEL | Score={momentum_result['total_score']:.1f}/100 | "
                     f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
