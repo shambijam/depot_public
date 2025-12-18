@@ -3653,6 +3653,28 @@ def scalping_fast_thread(
                     except Exception as e:
                         logger.warning(f"[SCALPING_THREAD] Erreur construction VWAP: {e}")
 
+                # 📊 Momentum Institutionnel Analysis (18 DEC 2025)
+                momentum_result = None
+                if scalping_strategy and hasattr(scalping_strategy, 'momentum_analyzer'):
+                    try:
+                        # Utiliser rates_df (DataFrame M1 nettoyé utilisé pour OrderFlow/Footprint)
+                        momentum_result = scalping_strategy.momentum_analyzer.analyze(
+                            df_m1=rates_df,
+                            df_m5=df_m5,  # Déjà récupéré ligne 3550
+                            df_m15=df_m15  # Déjà récupéré ligne 3551
+                        )
+                        logger.info(
+                            f"[SCALPING_THREAD] 📊 MOMENTUM | Score={momentum_result['total_score']:.1f}/100 | "
+                            f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
+                        )
+                    except Exception as e_mom:
+                        logger.warning(f"[SCALPING_THREAD] Erreur calcul momentum: {e_mom}")
+                        momentum_result = None
+
+                # ✅ Ajouter momentum_result au contexte pour FusionManager
+                if momentum_result:
+                    ctx["momentum_result"] = momentum_result
+
                 # Fusion decision
                 fusion_out = fusion_mgr.fuse(
                     orderflow=orderflow,
@@ -3695,6 +3717,7 @@ def scalping_fast_thread(
                             footprint_result=footprint,
                             final_score=final_score,
                             action=action,
+                            momentum_result=momentum_result,  # 📊 AJOUTÉ (18 DEC 2025)
                             vwap_score_pct=vwap_score_pct,
                             vwap_status=vwap_status,
                             vwap_regime=vwap_regime

@@ -499,9 +499,13 @@ class MomentumAnalyzerInstitutional:
 
     def _get_default_result(self) -> Dict[str, Any]:
         """Résultat par défaut en cas d'erreur."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.critical("🚨🚨🚨 MOMENTUM _get_default_result() CALLED - Returning zeros!")
+        print("🚨🚨🚨 MOMENTUM _get_default_result() CALLED - Returning zeros!")
         return {
             "total_score": 0.0,
-            "direction": "NEUTRAL",
+            "direction": "N/A",
             "quality": "N/A",
             "candle_score": 0.0,
             "volume_score": 0.0,
