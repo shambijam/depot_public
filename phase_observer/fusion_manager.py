@@ -40,13 +40,13 @@ def _get_thresholds(cfg: dict):
     if not th:
         th = cfg.get("scoring_thresholds", {}) if isinstance(cfg, dict) else {}
 
-    # ✅ FIX (2 Décembre 2025) : Fallback supprimés - le code doit planter si config manquante
+    # ✅ FIX (19 DEC 2025) : Aucun fallback - respecter config strictement
     return {
         "cautious": float(th["cautious"]),
         "moderate": float(th["moderate"]),
         "high": float(th["high"]),
-        "conditional": float(th.get("conditional", 0.40)),  # ✅ Fallback si absent
-        "allow_conditional": bool(fusion_cfg.get("allow_conditional_entries", True)),  # ✅ Fallback
+        "conditional": float(th["conditional"]),
+        "allow_conditional": bool(fusion_cfg.get("allow_conditional_entries", False)),
     }
 
 
@@ -424,10 +424,12 @@ class FusionManager:
         maj_str = "BUY" if maj > 0 else ("SELL" if maj < 0 else "TIE")
 
         # ok=True seulement si action != HOLD ET fused >= seuil minimum (depuis config)
-        # ✅ FIX (05 DEC 2025): Utiliser le seuil MINIMUM (conditional) au lieu de cautious
-        # Car CONDITIONAL_BUY est valide dès que score >= conditional
+        # ✅ FIX (19 DEC 2025): Respecter allow_conditional_entries dynamiquement
         thresholds = _get_thresholds(cfg)
-        min_threshold = thresholds.get("conditional", 0.28)  # Plus bas seuil
+        if thresholds["allow_conditional"]:
+            min_threshold = thresholds["conditional"]
+        else:
+            min_threshold = thresholds["cautious"]
         is_actionable = decision["action"] != "HOLD" and fused >= min_threshold
 
         # 📊 BILAN CONSOLIDÉ : Rapport unifié des 3 fonctions
@@ -1370,12 +1372,12 @@ class FusionManager:
 
         # Récupération des seuils dynamiques depuis la configuration
         thresholds = _get_thresholds(cfg)
-        # ✅ FIX (2 Décembre 2025) : Fallback supprimés - le code doit planter si config manquante
+        # ✅ FIX (19 DEC 2025) : Aucun fallback - respecter config strictement
         high_threshold = thresholds["high"]
         moderate_threshold = thresholds["moderate"]
         cautious_threshold = thresholds["cautious"]
-        conditional_threshold = thresholds.get("conditional", 0.35)
-        allow_conditional = thresholds.get("allow_conditional", True)
+        conditional_threshold = thresholds["conditional"]
+        allow_conditional = thresholds["allow_conditional"]
 
         # 🔍 DEBUG LOG CRITIQUE - Décision finale
         _probe(
