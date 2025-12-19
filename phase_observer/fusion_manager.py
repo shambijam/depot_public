@@ -25,20 +25,15 @@ def _get_thresholds(cfg: dict):
     """
     Récupère les seuils de confiance depuis la configuration.
 
-    Ordre de priorité :
-    1. cfg["fusion"]["scoring_thresholds"] (config_trade_scalping.json)
-    2. cfg["scoring_thresholds"] (fallback ancien format)
-    3. Valeurs par défaut hardcodées
+    ✅ FIX (19 DEC 2025): cfg passé est DÉJÀ la section "fusion"
+    (ligne 331 de fuse(): cfg = strategy_config["fusion"])
+
+    Donc on lit directement cfg["scoring_thresholds"] et cfg["allow_conditional_entries"]
     """
     cfg = cfg or {}
 
-    # Cherche d'abord dans fusion.scoring_thresholds (nouveau format)
-    fusion_cfg = cfg.get("fusion", {}) if isinstance(cfg, dict) else {}
-    th = fusion_cfg.get("scoring_thresholds", {}) if isinstance(fusion_cfg, dict) else {}
-
-    # Fallback sur ancien format (racine)
-    if not th:
-        th = cfg.get("scoring_thresholds", {}) if isinstance(cfg, dict) else {}
+    # cfg est DÉJÀ la section fusion, pas besoin de .get("fusion")
+    th = cfg.get("scoring_thresholds", {}) if isinstance(cfg, dict) else {}
 
     # ✅ FIX (19 DEC 2025) : Aucun fallback - respecter config strictement
     return {
@@ -46,7 +41,7 @@ def _get_thresholds(cfg: dict):
         "moderate": float(th["moderate"]),
         "high": float(th["high"]),
         "conditional": float(th["conditional"]),
-        "allow_conditional": bool(fusion_cfg["allow_conditional_entries"]),
+        "allow_conditional": bool(cfg["allow_conditional_entries"]),
     }
 
 
