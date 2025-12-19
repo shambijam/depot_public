@@ -380,8 +380,8 @@ class FusionManager:
         rules_eval = self._apply_business_rules(n_of, n_fp, n_vw, coherence, cfg, ctx)
 
         # 5) Confiance fusionnée (pondération + bonus cohérence − malus conflit)
-        # ✅ NOUVELLE FORMULE: OrderFlow 50% + Footprint 25% + VWAP 25%
-        fused, vwap_contribution = self._calculate_fused_confidence(
+        # ✅ MAJ (19 DEC 2025): OrderFlow + Footprint + VWAP + Momentum (poids adaptatifs)
+        fused, vwap_contribution, momentum_contribution = self._calculate_fused_confidence(
             n_of, n_fp, n_vw, coherence, quality, cfg, ctx, rules_eval
         )
 
@@ -471,6 +471,7 @@ class FusionManager:
             "direction": decision["direction"],
             "fused_confidence": round(float(fused), 3),
             "vwap_contribution": round(float(vwap_contribution), 3),  # ✅ Contribution VWAP
+            "momentum_contribution": round(float(momentum_contribution), 3),  # ✅ Contribution Momentum (19 DEC 2025)
             "trigger_boost": 0.0,  # DEPRECATED (gardé pour rétrocompat)
             "anchor_price": decision["anchor_price"],
             "rationale": rationale,
@@ -1046,29 +1047,39 @@ class FusionManager:
         fp_score = _to_float(n_fp.get("score"), 0.0)
         vw_score = _to_float(n_vw.get("score"), 0.0)
 
-        # ========== 2. POIDS ADAPTATIFS (système dynamique VWAP) ==========
-        # ✅ MAJ (06 DEC 2025): Utiliser _adaptive_weights au lieu de poids fixes JSON
+        # ✅ NOUVEAU (19 DEC 2025): Récupération score momentum
+        momentum_result = ctx.get("momentum_result", {})
+        momentum_score_raw = _to_float(momentum_result.get("total_score", 0.0), 0.0)  # 0-100
+        momentum_score = momentum_score_raw / 100.0  # Normaliser à 0-1
+        momentum_quality = momentum_result.get("quality", "N/A")
+        momentum_direction = momentum_result.get("direction", "NEUTRAL")
+
+        # ========== 2. POIDS ADAPTATIFS (système dynamique VWAP + MOMENTUM) ==========
+        # ✅ MAJ (19 DEC 2025): Poids adaptatifs incluent momentum
         vwap_regime = n_vw.get("regime")  # "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
         adaptive_w = self._adaptive_weights(
             ctx.get("regime"), ctx.get("volatility"), ctx.get("session"), cfg, vwap_regime
         )
 
         if adaptive_w:
-            # Poids adaptatifs calculés dynamiquement
+            # Poids adaptatifs calculés dynamiquement (incluent momentum)
             w_of = adaptive_w.get("orderflow", 0.30)
             w_fp = adaptive_w.get("footprint", 0.35)
-            w_vw = adaptive_w.get("vwap", 0.35)
+            w_vw = adaptive_w.get("vwap", 0.25)
+            w_mom = adaptive_w.get("momentum", 0.10)  # ✅ NOUVEAU: Poids momentum
         else:
             # Fallback: poids par défaut (si aucune adaptation possible)
             w_of = 0.30
             w_fp = 0.35
-            w_vw = 0.35
+            w_vw = 0.25
+            w_mom = 0.10
 
-        # ========== 3. FUSION PONDÉRÉE AVEC POIDS ADAPTATIFS ==========
-        weighted_score = (of_score * w_of) + (fp_score * w_fp) + (vw_score * w_vw)
+        # ========== 3. FUSION PONDÉRÉE AVEC POIDS ADAPTATIFS (4 COMPOSANTS) ==========
+        weighted_score = (of_score * w_of) + (fp_score * w_fp) + (vw_score * w_vw) + (momentum_score * w_mom)
 
-        # Contribution VWAP pour tracking
+        # Contributions pour tracking
         vwap_contribution = vw_score * w_vw
+        momentum_contribution = momentum_score * w_mom
 
         # ========== 2. MÉTRIQUES QUALITÉ (Capturées mais Sans Pénalité) ==========
 
@@ -1127,15 +1138,16 @@ class FusionManager:
             status_vw = n_vw.get("status", "SUSPECT")
             _probe(
                 self.log,
-                f"[VWAP_FUSION] OF={of_score:.3f}({w_of*100:.0f}%) + FP={fp_score:.3f}({w_fp*100:.0f}%) + VWAP={vw_score:.3f}({w_vw*100:.0f}%) = {weighted_score:.3f} | "
+                f"[MOMENTUM_FUSION] 📊 OF={of_score:.3f}({w_of*100:.0f}%) + FP={fp_score:.3f}({w_fp*100:.0f}%) + VWAP={vw_score:.3f}({w_vw*100:.0f}%) + MOM={momentum_score:.3f}({w_mom*100:.0f}%) = {weighted_score:.3f} | "
+                f"Mom: {momentum_direction} {momentum_quality} ({momentum_score_raw:.1f}/100) | "
                 f"ticks={tick_count} cov={coverage_s}s | "
                 f"status: OF={status_of} FP={status_fp} VWAP={status_vw} | "
                 f"conflicts={conflicts} alignments={alignments} | "
-                f"final={final_score:.3f} vwap_contrib={vwap_contribution:.3f}"
+                f"final={final_score:.3f} vwap_contrib={vwap_contribution:.3f} mom_contrib={momentum_contribution:.3f}"
             )
 
-        # Retourner (score final, vwap_contribution)
-        return (final_score, vwap_contribution)
+        # Retourner (score final, vwap_contribution, momentum_contribution)
+        return (final_score, vwap_contribution, momentum_contribution)
 
     # -------------- 5b) Range Reversal Logic --------------
     def _apply_range_reversal_logic(
@@ -1563,6 +1575,7 @@ class FusionManager:
             }
         if "fused" in kw:
             out["fused_confidence"] = float(kw["fused"])
+
         return out
 
 

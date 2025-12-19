@@ -4,11 +4,12 @@
 
   "regimes": {
     "TRENDING": {
-      "description": "Tendance institutionnelle forte - VWAP est l'indicateur principal",
+      "description": "Tendance institutionnelle forte - Momentum principal (accélération)",
       "weights": {
-        "vwap": 0.50,
-        "orderflow": 0.30,
-        "footprint": 0.20
+        "vwap": 0.20,
+        "orderflow": 0.25,
+        "footprint": 0.25,
+        "momentum": 0.30
       },
       "windows": {
         "slope_short": 50,
@@ -27,11 +28,12 @@
     },
 
     "BALANCED": {
-      "description": "Marché équilibré - VWAP référence neutre",
+      "description": "Marché équilibré - VWAP référence neutre, momentum confirmation",
       "weights": {
-        "vwap": 0.30,
+        "vwap": 0.20,
         "orderflow": 0.35,
-        "footprint": 0.35
+        "footprint": 0.35,
+        "momentum": 0.10
       },
       "windows": {
         "slope_short": 30,
@@ -50,11 +52,12 @@
     },
 
     "ACCUMULATION": {
-      "description": "Range avec accumulation/distribution - Micro-structure dominante",
+      "description": "Range avec accumulation/distribution - Micro-structure dominante, momentum pré-direction",
       "weights": {
-        "vwap": 0.25,
-        "orderflow": 0.35,
-        "footprint": 0.40
+        "vwap": 0.20,
+        "orderflow": 0.30,
+        "footprint": 0.35,
+        "momentum": 0.15
       },
       "windows": {
         "slope_short": 20,
@@ -73,11 +76,12 @@
     },
 
     "TRANSITIONAL": {
-      "description": "Phase de transition (chaos/compression) - VWAP peu fiable",
+      "description": "Phase de transition (chaos/compression) - VWAP ancrage, momentum alerte early",
       "weights": {
-        "vwap": 0.20,
-        "orderflow": 0.40,
-        "footprint": 0.40
+        "vwap": 0.30,
+        "orderflow": 0.30,
+        "footprint": 0.30,
+        "momentum": 0.10
       },
       "windows": {
         "slope_short": 20,
