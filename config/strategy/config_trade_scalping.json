@@ -3,9 +3,7 @@
   "description": "Scalping Burst institutionnel — SL/TP 300 pips fixes. Pas de veto, pas de gates bloquants.",
   "version": "4.4-unblocked",
   "tradeable_assets": [
-    "XAUUSD",
-    "EURUSD",
-    "GBPUSD"
+    "XAUUSD"
   ],
   "magic_number": 52001,
   "decision_rules": [

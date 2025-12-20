@@ -1177,57 +1177,63 @@ def run_single_pipeline_cycle(
                 ).copy()
 
                 # 🎯 Récupération des ticks MT5 pour footprint M1
-                # 🔧 FIX (24 Nov 2025): Récupérer ticks UNIQUEMENT pour la dernière bougie M1
-                # au lieu de 1000 ticks arbitraires (qui couvraient 6 minutes au lieu de 60 secondes)
+                # 🔧 FIX (20 DEC 2025): Récupérer ticks UNIQUEMENT pour XAUUSD (scalping)
+                # EURUSD/GBPUSD utilisent la stratégie liquidité (pas de footprint)
                 ticks_df = None
-                logger.info(f"[TICKS][DEBUG] Tentative récupération ticks pour {asset}...")
-                try:
-                    # Identifier la dernière bougie M1 (en cours)
-                    if subset_df is not None and not subset_df.empty:
-                        # ✅ BOUGIE COURANTE (n-1) : analyse en temps réel
-                        # On analyse TOUJOURS la bougie en cours de formation
-                        candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
 
-                        # Extraire les timestamps de la bougie M1 (60 secondes)
-                        # Utiliser la colonne 'time' si disponible, sinon l'index
-                        if 'time' in subset_df.columns:
-                            candle_start = pd.to_datetime(subset_df.iloc[candle_idx]['time'])
-                        elif isinstance(subset_df.index, pd.DatetimeIndex):
-                            candle_start = subset_df.index[candle_idx]
-                        else:
-                            # Fallback : convertir l'index en DatetimeIndex
-                            subset_df.index = pd.to_datetime(subset_df.index)
-                            candle_start = subset_df.index[candle_idx]
+                # ✅ FILTRE: Ticks uniquement pour XAUUSD (stratégie scalping)
+                if asset.upper() == "XAUUSD":
+                    logger.info(f"[TICKS][DEBUG] Tentative récupération ticks pour {asset}...")
+                    try:
+                        # Identifier la dernière bougie M1 (en cours)
+                        if subset_df is not None and not subset_df.empty:
+                            # ✅ BOUGIE COURANTE (n-1) : analyse en temps réel
+                            # On analyse TOUJOURS la bougie en cours de formation
+                            candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
 
-                        candle_end = candle_start + pd.Timedelta(minutes=1)
+                            # Extraire les timestamps de la bougie M1 (60 secondes)
+                            # Utiliser la colonne 'time' si disponible, sinon l'index
+                            if 'time' in subset_df.columns:
+                                candle_start = pd.to_datetime(subset_df.iloc[candle_idx]['time'])
+                            elif isinstance(subset_df.index, pd.DatetimeIndex):
+                                candle_start = subset_df.index[candle_idx]
+                            else:
+                                # Fallback : convertir l'index en DatetimeIndex
+                                subset_df.index = pd.to_datetime(subset_df.index)
+                                candle_start = subset_df.index[candle_idx]
 
-                        logger.info(
-                            f"[TICKS] Récupération ticks pour bougie M1 COURANTE (n-1) | "
-                            f"start={candle_start.isoformat()} | end={candle_end.isoformat()}"
-                        )
+                            candle_end = candle_start + pd.Timedelta(minutes=1)
 
-                        # Récupérer UNIQUEMENT les ticks de cette fenêtre de 60 secondes
-                        # ✅ FIX (24 Nov 2025): Utiliser get_ticks_for_candle() qui classifie les ticks (flags 16/32 + tick-rule)
-                        ticks_df = mt5_connector.get_ticks_for_candle(
-                            asset,
-                            candle_start.to_pydatetime(),
-                            candle_end.to_pydatetime()
-                        )
-
-                        if ticks_df is not None and not ticks_df.empty:
                             logger.info(
-                                f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset} | "
-                                f"fenêtre=[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                                f"[TICKS] Récupération ticks pour bougie M1 COURANTE (n-1) | "
+                                f"start={candle_start.isoformat()} | end={candle_end.isoformat()}"
                             )
+
+                            # Récupérer UNIQUEMENT les ticks de cette fenêtre de 60 secondes
+                            # ✅ FIX (24 Nov 2025): Utiliser get_ticks_for_candle() qui classifie les ticks (flags 16/32 + tick-rule)
+                            ticks_df = mt5_connector.get_ticks_for_candle(
+                                asset,
+                                candle_start.to_pydatetime(),
+                                candle_end.to_pydatetime()
+                            )
+
+                            if ticks_df is not None and not ticks_df.empty:
+                                logger.info(
+                                    f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset} | "
+                                    f"fenêtre=[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[TICKS] ⚠️ Aucun tick dans la fenêtre M1 pour {asset} | "
+                                    f"[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                                )
                         else:
-                            logger.warning(
-                                f"[TICKS] ⚠️ Aucun tick dans la fenêtre M1 pour {asset} | "
-                                f"[{candle_start.isoformat()} → {candle_end.isoformat()}]"
-                            )
-                    else:
-                        logger.warning(f"[TICKS] ⚠️ subset_df vide, impossible de déterminer fenêtre M1")
-                except Exception as e:
-                    logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
+                            logger.warning(f"[TICKS] ⚠️ subset_df vide, impossible de déterminer fenêtre M1")
+                    except Exception as e:
+                        logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
+                else:
+                    # EURUSD/GBPUSD : Pas de ticks (stratégie liquidité)
+                    logger.info(f"[TICKS] ✅ {asset} utilise stratégie liquidité → Ticks skip")
 
                 market_results = market_analyzer.analyze(subset_df, asset, ticks=ticks_df)
 

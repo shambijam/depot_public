@@ -4,8 +4,7 @@
     "description": "Liquidity strategy — SL/TP engine, no trailing, no candle-pattern rules",
     "tradeable_assets": [
         "EURUSD",
-        "GBPUSD",
-        "XAUUSD"
+        "GBPUSD"
     ],
     "magic_number": 53001,
     "confidence_threshold": 0.25,
