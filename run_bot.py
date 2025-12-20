@@ -2684,9 +2684,13 @@ def run_single_pipeline_cycle(
         if not scalping_decisions and not liquidity_decisions:
             try:
                 for asset, sig in all_assets_trading_signals.items():
+                    # ✅ FIX (20 DEC 2025): EURUSD/GBPUSD utilisent stratégie liquidité (pas fusion)
                     if asset.upper() != "XAUUSD":
-                        logger.info(f"[WHY_NO_TRADE][{asset}] fusion_off")
+                        # Ne PAS logger "fusion_off" - c'est NORMAL pour liquidité
+                        logger.debug(f"[WHY_NO_TRADE][{asset}] Stratégie liquidité - pas de diagnostic fusion")
                         continue
+
+                    # Diagnostic fusion UNIQUEMENT pour XAUUSD
                     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                         _latest = sig.get("__latest__") or {}
 
@@ -2704,10 +2708,10 @@ def run_single_pipeline_cycle(
                         fdec_diag = {"ok": False, "reason": "fusion_manager_missing"}
 
                     if fdec_diag and fdec_diag.get("ok"):
-                        logger.info(f"[WHY_NO_TRADE][{asset}] fusion_ok")
+                        logger.info(f"[WHY_NO_TRADE][XAUUSD] fusion_ok")
                     else:
                         logger.info(
-                            f"[WHY_NO_TRADE][{asset}] hold={(fdec_diag or {}).get('signal_type','WAIT_CONFIRMATION')}"
+                            f"[WHY_NO_TRADE][XAUUSD] hold={(fdec_diag or {}).get('signal_type','WAIT_CONFIRMATION')}"
                         )
 
             except Exception as _e:

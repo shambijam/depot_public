@@ -577,7 +577,7 @@ class PhaseObserver:
         if getattr(self, "debug_confidence_logging", False):
             try:
                 self.logger.debug(
-                    f"[CONF-clean] path='{cfg_path_used}' score={score:.3f} | candle={candle_score}"
+                    f"[CONF-clean] path='{cfg_path_used}' score={score:.3f}"
                 )
             except Exception:
                 pass

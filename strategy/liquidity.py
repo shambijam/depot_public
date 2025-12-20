@@ -715,16 +715,16 @@ class LiquidityStrategy(BaseStrategy):
 
             # Sélection sécurisée du DataFrame (évite les erreurs pandas en booléen)
             df_m1 = None
-            self.logger.info(f"[{asset}][DEBUG] ctx_md keys: {list(ctx_md.keys())}")
+            self.logger.debug(f"[{asset}] ctx_md keys: {list(ctx_md.keys())}")
             for key in ("df_m1", "rates_df", "annotated_rates_df", "df"):
                 val = ctx_md.get(key)
                 if isinstance(val, pd.DataFrame) and not val.empty:
-                    self.logger.info(f"[{asset}][DEBUG] Found DataFrame at key '{key}' | columns={list(val.columns)}")
+                    self.logger.debug(f"[{asset}] Found DataFrame at key '{key}' with {len(val.columns)} columns")
                     df_m1 = val
                     break
 
             if df_m1 is None:
-                self.logger.warning(f"[{asset}][DEBUG] No DataFrame found in market_data")
+                self.logger.warning(f"[{asset}] No DataFrame found in market_data")
 
             # Validation et copie sécurisée du DataFrame
             required_cols = ["open", "high", "low", "close", "tick_volume"]
@@ -790,16 +790,11 @@ class LiquidityStrategy(BaseStrategy):
             # 🔷 Afficher le bilan consolidé liquidity (TOUJOURS, même sans setup)
             self._log_liquidity_consolidated_report(asset, liquidity_signals, None, price, pip_size)
 
-            # --- 4) Biais directionnel ---
-            action = self._infer_action_from_signals(asset_signals)
-            if action is None:
-                self.logger.info(f"[{asset}] Aucune direction claire.")
-                return {}
-
-
             # ========================================================================
             # 🎯 LOGIQUE LIQUIDITÉ - Analyse des setups institutionnels
             # ========================================================================
+            # ✅ FIX (20 DEC 2025): Les setups déterminent leur PROPRE direction
+            # → PAS besoin de vérifier un "action" global qui bloque tout
             # ✅ Phase 1 : Implémentation minimale (Sweep + EQH/EQL)
             # Les 8 détecteurs ont retourné leurs signaux dans liquidity_signals
 
