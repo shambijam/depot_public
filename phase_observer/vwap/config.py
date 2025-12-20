@@ -367,7 +367,7 @@ def get_regime_weights(regime: str) -> Dict[str, float]:
         regime: "TRENDING", "ACCUMULATION", "BALANCED", "TRANSITIONAL"
 
     Returns:
-        Dict avec vwap, orderflow, footprint weights
+        Dict avec vwap, orderflow, footprint, momentum weights
     """
     config = load_adaptive_config()
     regime_upper = str(regime).upper()
@@ -380,5 +380,6 @@ def get_regime_weights(regime: str) -> Dict[str, float]:
     return regime_config.get("weights", {
         "vwap": 0.30,
         "orderflow": 0.35,
-        "footprint": 0.35
+        "footprint": 0.35,
+        "momentum": 0.10
     })

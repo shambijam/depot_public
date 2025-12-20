@@ -184,21 +184,23 @@ def _adaptive_weights(
         w_vw = weights["vwap"]
         w_of = weights["orderflow"]
         w_fp = weights["footprint"]
+        w_mom = weights["momentum"]
 
         self.log.info(
             f"[ADAPTIVE_WEIGHTS] 📊 VWAP_REGIME={vr} → "
-            f"VWAP={w_vw:.0%} OF={w_of:.0%} FP={w_fp:.0%}"
+            f"VWAP={w_vw:.0%} OF={w_of:.0%} FP={w_fp:.0%} MOM={w_mom:.0%}"
         )
 
         # ✅ Retourner immédiatement (pas de normalisation car poids du JSON déjà normalisés)
-        return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw}
+        return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw, "momentum": w_mom}
 
     # === PRIORITÉ 2 : Ajustements LEGACY (si pas de VWAP regime) ===
     else:
         # ✅ FALLBACK (06 DEC 2025): Poids par défaut + ajustements legacy
         w_of = 0.30
         w_fp = 0.35
-        w_vw = 0.35
+        w_vw = 0.25
+        w_mom = 0.10  # ✅ Momentum fixe à 10%
 
         # Volatilité élevée → renforcer orderflow +10%, réduire VWAP -10%
         if (volatility or "").lower() in ("high", "elevated", "high_volatility"):
@@ -226,11 +228,11 @@ def _adaptive_weights(
             w_of -= 0.03
             w_vw -= 0.02
 
-    # Normalise
-    total = max(1e-9, w_of + w_fp + w_vw)
-    w_of, w_fp, w_vw = w_of / total, w_fp / total, w_vw / total
+    # Normalise (incluant momentum)
+    total = max(1e-9, w_of + w_fp + w_vw + w_mom)
+    w_of, w_fp, w_vw, w_mom = w_of / total, w_fp / total, w_vw / total, w_mom / total
 
-    return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw}
+    return {"orderflow": w_of, "footprint": w_fp, "vwap": w_vw, "momentum": w_mom}
 
 
 # ---------- Maj métriques ----------
