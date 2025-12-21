@@ -813,9 +813,10 @@ class LiquidityStrategy(BaseStrategy):
                     sweep_price = float(sweep.get("price", price))
                     eql_price = float(eqh_eql.get("price", price))
 
-                    # Validation : EQL doit être proche (< 50 pips)
+                    # Validation : EQL doit être proche (configurable)
+                    max_distance = self._cfg("entry_rules.liquidity.setups.sweep_eqh_eql.max_distance_pips", 100)
                     distance_pips = abs(sweep_price - eql_price) / pip_size
-                    if distance_pips < 50:
+                    if distance_pips < max_distance:
                         entry = price  # Entrée au marché
                         sl = sweep_price - (15 * pip_size)  # Stop 15 pips sous le sweep
                         tp = eql_price  # Target = Equal Low
@@ -850,7 +851,7 @@ class LiquidityStrategy(BaseStrategy):
                     else:
                         self.logger.info(
                             f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
-                            f"sweep-eql={distance_pips:.1f}p (max 50p)"
+                            f"sweep-eql={distance_pips:.1f}p (max {max_distance}p)"
                         )
 
                 # SELL Setup : Sweep buy-side + Equal High
@@ -858,9 +859,10 @@ class LiquidityStrategy(BaseStrategy):
                     sweep_price = float(sweep.get("price", price))
                     eqh_price = float(eqh_eql.get("price", price))
 
-                    # Validation : EQH doit être proche (< 50 pips)
+                    # Validation : EQH doit être proche (configurable)
+                    max_distance = self._cfg("entry_rules.liquidity.setups.sweep_eqh_eql.max_distance_pips", 100)
                     distance_pips = abs(sweep_price - eqh_price) / pip_size
-                    if distance_pips < 50:
+                    if distance_pips < max_distance:
                         entry = price  # Entrée au marché
                         sl = sweep_price + (15 * pip_size)  # Stop 15 pips au-dessus du sweep
                         tp = eqh_price  # Target = Equal High
@@ -896,7 +898,7 @@ class LiquidityStrategy(BaseStrategy):
                     else:
                         self.logger.info(
                             f"[LIQUIDITY][{asset}] ⚠️ Distance trop grande | "
-                            f"sweep-eqh={distance_pips:.1f}p (max 50p)"
+                            f"sweep-eqh={distance_pips:.1f}p (max {max_distance}p)"
                         )
 
             # ========================================================================
@@ -927,7 +929,9 @@ class LiquidityStrategy(BaseStrategy):
                         # Validation : FVG au-dessus de l'OB (confluence)
                         if fvg_min >= ob_max:
                             distance_pips = (fvg_min - ob_max) / pip_size
-                            if distance_pips < 30:  # FVG proche de l'OB
+                            # ✅ FIX (20 DEC 2025): Distance configurable (30→60 pour EURUSD/GBPUSD)
+                            max_distance = self._cfg("entry_rules.liquidity.setups.ob_fvg.max_distance_pips", 60)
+                            if distance_pips < max_distance:  # FVG proche de l'OB
                                 entry = price
                                 sl = ob_min - (10 * pip_size)  # SL sous l'OB
                                 tp = fvg_max + (distance_pips * pip_size)  # TP au-dessus FVG
@@ -936,7 +940,9 @@ class LiquidityStrategy(BaseStrategy):
                                 tp_pips = abs(tp - entry) / pip_size
                                 rr = tp_pips / sl_pips if sl_pips > 0 else 0
 
-                                if rr >= 1.5:  # Filtre RR minimum
+                                # ✅ FIX (20 DEC 2025): RR configurable (1.5→1.2 pour EURUSD/GBPUSD)
+                                min_rr = self._cfg("entry_rules.liquidity.setups.ob_fvg.min_rr", 1.2)
+                                if rr >= min_rr:  # Filtre RR minimum
                                     self.logger.info(
                                         f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | ob_fvg_buy | "
                                         f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
@@ -971,7 +977,9 @@ class LiquidityStrategy(BaseStrategy):
                         # Validation : FVG en-dessous de l'OB
                         if fvg_max <= ob_min:
                             distance_pips = (ob_min - fvg_max) / pip_size
-                            if distance_pips < 30:
+                            # ✅ FIX (20 DEC 2025): Distance configurable (30→60 pour EURUSD/GBPUSD)
+                            max_distance = self._cfg("entry_rules.liquidity.setups.ob_fvg.max_distance_pips", 60)
+                            if distance_pips < max_distance:
                                 entry = price
                                 sl = ob_max + (10 * pip_size)  # SL au-dessus de l'OB
                                 tp = fvg_min - (distance_pips * pip_size)  # TP en-dessous FVG
@@ -980,7 +988,9 @@ class LiquidityStrategy(BaseStrategy):
                                 tp_pips = abs(entry - tp) / pip_size
                                 rr = tp_pips / sl_pips if sl_pips > 0 else 0
 
-                                if rr >= 1.5:
+                                # ✅ FIX (20 DEC 2025): RR configurable (1.5→1.2 pour EURUSD/GBPUSD)
+                                min_rr = self._cfg("entry_rules.liquidity.setups.ob_fvg.min_rr", 1.2)
+                                if rr >= min_rr:
                                     self.logger.info(
                                         f"[LIQUIDITY][{asset}] ⚡ SETUP VALIDE | ob_fvg_sell | "
                                         f"Entry={entry:.5f} | SL={sl:.5f} ({sl_pips:.1f}p) | "
@@ -1013,8 +1023,10 @@ class LiquidityStrategy(BaseStrategy):
                     bos_level = float(bos_mss.get("level", price))
                     body_ratio = float(absorption.get("body_ratio", 0.0))
 
-                    # Validation : Absorption forte (body_ratio >= 0.6)
-                    if body_ratio >= 0.6:
+                    # ✅ FIX (20 DEC 2025): Body ratio configurable (0.6→0.5 pour EURUSD/GBPUSD)
+                    min_body_ratio = self._cfg("entry_rules.liquidity.setups.bos_absorption.min_body_ratio", 0.5)
+                    # Validation : Absorption forte
+                    if body_ratio >= min_body_ratio:
                         entry = price
                         sl = bos_level - (20 * pip_size)  # SL sous le BOS
                         sl_pips = abs(entry - sl) / pip_size
@@ -1051,7 +1063,9 @@ class LiquidityStrategy(BaseStrategy):
                     bos_level = float(bos_mss.get("level", price))
                     body_ratio = float(absorption.get("body_ratio", 0.0))
 
-                    if body_ratio >= 0.6:
+                    # ✅ FIX (20 DEC 2025): Body ratio configurable (0.6→0.5 pour EURUSD/GBPUSD)
+                    min_body_ratio = self._cfg("entry_rules.liquidity.setups.bos_absorption.min_body_ratio", 0.5)
+                    if body_ratio >= min_body_ratio:
                         entry = price
                         sl = bos_level + (20 * pip_size)  # SL au-dessus du BOS
                         sl_pips = abs(sl - entry) / pip_size

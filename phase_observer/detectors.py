@@ -872,223 +872,108 @@ class Detectors:
         self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None
     ) -> List[Optional[Dict[str, Any]]]:
         """
-        🎯 Order Blocks ML Enhanced - Scoring sophistiqué avec confluence (non bloquant)
+        🎯 Order Blocks ICT Simplifié - PHASE 1 (21 DEC 2025)
 
-        Features ML:
-        - Impulse strength scoring
-        - Volume confirmation weighting
-        - Temporal context analysis
-        - Multi-factor confluence scoring
+        Remplace l'algo ML complexe par détection ICT simple:
+        1. Bougie avec corps > 40% du range (body_ratio)
+        2. Volume > moyenne (optionnel, seuil réduit à 1.3x)
+        3. Bougie suivante va dans direction opposée (impulse)
+        4. Utilise lookback réduit (20 bars au lieu de 200)
         """
-        self.logger.debug("Détection Order Blocks ML Enhanced...")
+        self.logger.debug("Détection Order Blocks ICT Simplifié...")
 
-        if df is None or df.empty:
+        if df is None or df.empty or len(df) < 3:
             return [None] * (0 if df is None else len(df))
 
-        # Configuration ML
-        ob_config = (
-            self.config_manager.get(
-                "phase_detection_defaults.order_block_ml_settings", {}
-            )
-            or {}
-        )
-        enable_ml = bool(ob_config.get("enable_ml_scoring", True))
-        confluence_config = ob_config.get("confluence_requirements", {}) or {}
-        impulse_weights = ob_config.get("impulse_strength_weights", {}) or {}
+        # ✅ PHASE 1 (21 DEC 2025): Paramètres ICT simplifiés
+        min_body_ratio = 0.4  # Corps > 40% du range
+        volume_spike_threshold = 1.3  # Volume > 1.3x moyenne (au lieu de 1.5)
+        lookback = 20  # Lookback pour identifier swing highs/lows
 
-        # Paramètres de base
-        impulse_threshold = float(
-            self.config_manager.get(
-                "phase_detection_defaults.impulse_threshold", 0.0005
-            )
-        )
-
-        # Pré-calcul des features pour ML
+        # Calcul body_ratio et autres métriques de base
         df = df.copy()
-        df["candle_move"] = df["close"] - df["open"]
-        df["candle_size"] = (df["high"] - df["low"]).replace(0, np.nan)
-        df["body_ratio"] = (df["candle_move"].abs() / df["candle_size"]).fillna(0.0)
+        candle_size = (df["high"] - df["low"]).replace(0, np.nan)
+        body_size = abs(df["close"] - df["open"])
+        df["body_ratio"] = (body_size / candle_size).fillna(0.0)
 
-        vol_ma = (
-            df["tick_volume"]
-            .rolling(window=20, min_periods=1)
-            .mean()
-            .replace(0, np.nan)
-        )
-        df["volume_ma"] = vol_ma
-        df["volume_ratio"] = (df["tick_volume"] / vol_ma).fillna(1.0)
+        # Volume ratio (optionnel)
+        if "tick_volume" in df.columns:
+            vol_ma = df["tick_volume"].rolling(window=20, min_periods=1).mean().replace(0, np.nan)
+            df["volume_ratio"] = (df["tick_volume"] / vol_ma).fillna(1.0)
+        else:
+            df["volume_ratio"] = 1.0  # Skip volume check si pas disponible
 
-        # Identification des OB potentiels
-        bullish_ob_mask = (df["candle_move"] > impulse_threshold) & (
-            df["candle_move"].shift(1) < 0
-        )
-        bearish_ob_mask = (df["candle_move"] < -impulse_threshold) & (
-            df["candle_move"].shift(1) > 0
-        )
-        potential_ob_mask = bullish_ob_mask | bearish_ob_mask
-
-        # Swing points pour confluence
-        swing_highs, swing_lows = _get_swing_points(self, df)
-
-        # Trend HTF si disponible
-        htf_trend = None
-        if df_htf is not None and not df_htf.empty:
-            try:
-                htf_trend = _get_trend(self, df_htf).iloc[-1]
-            except Exception:
-                htf_trend = None
+        # Direction des bougies
+        df["is_bullish"] = df["close"] > df["open"]
+        df["is_bearish"] = df["close"] < df["open"]
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(df)
-        ob_positions = df.index[potential_ob_mask].tolist()
 
-        for ob_timestamp in ob_positions:
+        # Parcourir chaque bougie pour détecter OB
+        for i in range(lookback, len(df) - 1):  # -1 pour avoir une bougie suivante
             try:
-                pos = int(df.index.get_loc(ob_timestamp))
-                if pos <= 0:
+                current = df.iloc[i]
+                next_candle = df.iloc[i + 1]
+
+                # ✅ Condition 1: Corps > 40% du range
+                if current["body_ratio"] < min_body_ratio:
                     continue
 
-                ob_candle_pos = pos - 1
-                if ob_candle_pos < 0 or pos >= len(df):
+                # ✅ Condition 2: Volume > 1.3x moyenne (optionnel)
+                if current["volume_ratio"] < volume_spike_threshold:
                     continue
 
-                ob_candle = df.iloc[ob_candle_pos]
-                impulse_candle = df.iloc[pos]
-                ob_zone = (float(ob_candle["low"]), float(ob_candle["high"]))
+                # ✅ Condition 3: Bougie suivante va dans direction opposée (impulse)
+                current_is_bullish = bool(current["is_bullish"])
+                next_is_bullish = bool(next_candle["is_bullish"])
 
-                # === ML FEATURE EXTRACTION ===
+                if current_is_bullish == next_is_bullish:
+                    continue  # Pas de reversal → pas d'OB
 
-                # 1. Impulse Strength Score
-                price_movement_strength = float(
-                    abs(impulse_candle["candle_move"]) / max(impulse_threshold, 1e-12)
-                )
-                volume_spike_strength = float(impulse_candle["volume_ratio"])
-                body_ratio_strength = float(impulse_candle["body_ratio"])
+                # ✅ Condition 4: C'est un swing point (high/low sur le lookback)
+                window_start = max(0, i - lookback)
+                window_highs = df["high"].iloc[window_start:i+1]
+                window_lows = df["low"].iloc[window_start:i+1]
 
-                # Time compression (placeholder)
-                time_compression = 1.0
+                is_swing_high = current["high"] == window_highs.max()
+                is_swing_low = current["low"] == window_lows.min()
 
-                # Calcul score impulse pondéré
-                impulse_score = (
-                    price_movement_strength
-                    * float(impulse_weights.get("price_movement", 0.4))
-                    + volume_spike_strength
-                    * float(impulse_weights.get("volume_spike", 0.3))
-                    + time_compression
-                    * float(impulse_weights.get("time_compression", 0.3))
-                )
+                if not (is_swing_high or is_swing_low):
+                    continue  # Pas un swing point → pas un OB significatif
 
-                # 2. Confluence Factors Scoring
-                confluence_score = 0.0
-                confluence_details: Dict[str, Any] = {}
+                # ✅ OB Bullish: Bougie bullish à un swing low + bougie suivante bearish
+                if current_is_bullish and is_swing_low and not next_is_bullish:
+                    ob_type = "bullish"
+                    ob_zone = [float(current["low"]), float(current["high"])]
 
-                # FVG Confluence
-                fvg_confluence = bool(pd.notna(impulse_candle.get("fvg_details")))
-                if fvg_confluence:
-                    confluence_score += 0.25
-                confluence_details["fvg_confluence"] = fvg_confluence
-
-                # Market Extreme Confluence (Swing points)
-                extreme_confluence = bool(
-                    (ob_candle.name in swing_highs.index)
-                    or (ob_candle.name in swing_lows.index)
-                )
-                if extreme_confluence:
-                    confluence_score += 0.30
-                confluence_details["extreme_confluence"] = extreme_confluence
-
-                # Volume Confirmation
-                volume_confirmation = True
-                if confluence_config.get("require_volume_confirmation", True):
-                    volume_confirmation = (
-                        volume_spike_strength > 1.2
-                    )  # 20% au-dessus de la moyenne
-                    if volume_confirmation:
-                        confluence_score += 0.20
-                confluence_details["volume_confirmation"] = volume_confirmation
-
-                # Trend Alignment
-                ob_is_bullish = bool(bullish_ob_mask.iloc[pos])
-                trend_alignment = True
-                if confluence_config.get("require_trend_alignment", True):
-                    current_trend = (
-                        df["trend"].iloc[pos] if "trend" in df.columns else "neutral"
-                    )
-                    if (ob_is_bullish and current_trend == "bullish") or (
-                        (not ob_is_bullish) and current_trend == "bearish"
-                    ):
-                        trend_alignment = True
-                        confluence_score += 0.15
-                    else:
-                        trend_alignment = False
-                    # HTF alignment bonus
-                    if htf_trend and (
-                        (ob_is_bullish and htf_trend == "bullish")
-                        or ((not ob_is_bullish) and htf_trend == "bearish")
-                    ):
-                        confluence_score += 0.10
-                confluence_details["trend_alignment"] = trend_alignment
-
-                # 3. Mitigation Analysis
-                unmitigated = True
-                future_candles = df.iloc[pos + 1 :]
-                if not future_candles.empty:
-                    mitigated = future_candles[
-                        (future_candles["high"] >= ob_zone[0])
-                        & (future_candles["low"] <= ob_zone[1])
-                    ]
-                    if not mitigated.empty:
-                        unmitigated = False
-
-                # 4. ML Score Final
-                if enable_ml:
-                    base_ml_score = min(1.0, (impulse_score + confluence_score) / 2.0)
-                    if unmitigated:
-                        base_ml_score *= 1.1
-                    if volume_confirmation and trend_alignment:
-                        base_ml_score *= 1.15
-                    ml_score = min(0.95, base_ml_score)  # Cap à 95%
+                # ✅ OB Bearish: Bougie bearish à un swing high + bougie suivante bullish
+                elif not current_is_bullish and is_swing_high and next_is_bullish:
+                    ob_type = "bearish"
+                    ob_zone = [float(current["low"]), float(current["high"])]
                 else:
-                    ml_score = float(confluence_score)
+                    continue  # Pas de setup OB valide
 
-                # 5. Filtrage par seuil de confluence
-                min_confluence = float(
-                    confluence_config.get("min_confluence_score", 0.6)
-                )
-
-                if ml_score >= min_confluence:
-                    results[pos] = {
-                        "type": "bullish" if ob_is_bullish else "bearish",
-                        "zone": [ob_zone[0], ob_zone[1]],
-                        "ml_score": round(ml_score, 3),
-                        "impulse_strength": round(impulse_score, 3),
-                        "confluence_score": round(confluence_score, 3),
-                        "confluence_details": confluence_details,
-                        "unmitigated": bool(unmitigated),
-                        "volume_spike": round(volume_spike_strength, 2),
-                        "formation_quality": (
-                            "high"
-                            if ml_score > 0.8
-                            else "medium" if ml_score > 0.6 else "low"
-                        ),
-                    }
+                # ✅ Créer le signal OB
+                results[i] = {
+                    "type": ob_type,
+                    "zone": ob_zone,
+                    "body_ratio": round(float(current["body_ratio"]), 2),
+                    "volume_ratio": round(float(current["volume_ratio"]), 2),
+                    "quality": "high" if current["volume_ratio"] > 1.5 else "medium",
+                }
 
             except Exception as e:
                 self.logger.warning(
-                    f"Erreur processing OB à l'index {ob_timestamp}: {e}",
+                    f"Erreur détection OB à l'index {i}: {e}",
                     exc_info=False,
                 )
                 continue
 
-        # Performance logging
+        # Logging performance
         valid_obs = [r for r in results if r is not None]
-        if valid_obs:
-            avg_ml_score = float(np.mean([ob["ml_score"] for ob in valid_obs]))
-            high_quality = len(
-                [ob for ob in valid_obs if ob["formation_quality"] == "high"]
-            )
-            self.logger.debug(
-                f"OB ML Enhanced: {len(valid_obs)} OB détectés, score ML moyen: {avg_ml_score:.3f}, haute qualité: {high_quality}"
-            )
+        self.logger.debug(
+            f"OB ICT Simplifié: {len(valid_obs)} Order Blocks détectés"
+        )
 
         return results
 
@@ -1114,12 +999,14 @@ class Detectors:
             )
             or {}
         )
+        # ✅ PHASE 1 (21 DEC 2025): Seuil réduit pour détecter plus de FVG (0.15%→0.05%)
         min_gap_magnitude = (
-            float(fvg_config.get("min_gap_magnitude_percent", 0.15)) / 100.0
+            float(fvg_config.get("min_gap_magnitude_percent", 0.05)) / 100.0  # 0.15→0.05
         )
         gap_fill_threshold = float(fvg_config.get("gap_fill_threshold", 0.8))
         enable_tracking = bool(fvg_config.get("enable_gap_tracking", True))
-        max_gap_age = int(fvg_config.get("max_gap_age_bars", 50))
+        # ✅ PHASE 1 (21 DEC 2025): FVG expire plus rapidement (50→20 bars)
+        max_gap_age = int(fvg_config.get("max_gap_age_bars", 20))  # 50→20
 
         # Détection vectorielle de base (optimisée)
         low_p0 = df["low"].to_numpy()
@@ -1274,12 +1161,13 @@ class Detectors:
         momentum_config = bos_config.get("momentum_confirmation", {}) or {}
         structure_config = bos_config.get("structure_validation", {}) or {}
 
+        # ✅ PHASE 1 (21 DEC 2025): Paramètres assouplis pour augmenter taux de détection
         enable_volume_conf = bool(volume_config.get("enable", True))
-        volume_multiplier = float(volume_config.get("volume_multiplier_threshold", 1.5))
-        volume_lookback = int(volume_config.get("lookback_period", 20))
+        volume_multiplier = float(volume_config.get("volume_multiplier_threshold", 1.3))  # 1.5→1.3
+        volume_lookback = int(volume_config.get("lookback_period", 10))  # 20→10 pour réduire lag
 
         enable_momentum_conf = bool(momentum_config.get("enable", True))
-        min_momentum = float(momentum_config.get("min_momentum_threshold", 0.0003))
+        min_momentum = float(momentum_config.get("min_momentum_threshold", 0.0002))  # 0.0003→0.0002 assoupli
 
         min_break_distance = float(structure_config.get("min_break_distance", 0.0002))
         require_close_beyond = bool(structure_config.get("require_close_beyond", True))
@@ -1515,10 +1403,11 @@ class Detectors:
             return []
 
         cfg = sweep_config or {}
-        lookback = int(cfg.get("sweep", {}).get("lookback_bars", 20))
-        wick_min = float(cfg.get("sweep", {}).get("wick_to_body_min_ratio", 1.5))
-        min_dist = float(cfg.get("sweep", {}).get("min_distance_pips", 3.0))
-        vol_sigma = float(cfg.get("sweep", {}).get("volume_spike_sigma", 1.5))
+        # ✅ PHASE 1 (21 DEC 2025): Paramètres assouplis pour augmenter taux de détection
+        lookback = int(cfg.get("sweep", {}).get("lookback_bars", 50))  # 20→50
+        wick_min = float(cfg.get("sweep", {}).get("wick_to_body_min_ratio", 0.8))  # 1.5→0.8
+        min_dist = float(cfg.get("sweep", {}).get("min_distance_pips", 1.0))  # 3.0→1.0
+        vol_sigma = float(cfg.get("sweep", {}).get("volume_spike_sigma", 1.0))  # 1.5→1.0
 
         eps = 1e-12
         pip_size = None
@@ -1583,46 +1472,92 @@ class Detectors:
         self, df: pd.DataFrame, abs_config: Optional[Dict[str, Any]] = None
     ) -> List[Optional[Dict[str, Any]]]:
         """
-        🛡️ Détection Absorption institutionnelle après sweep.
-        Retourne une liste alignée sur df avec détails ou None.
+        🛡️ Absorption Simplifiée - PHASE 1 (21 DEC 2025)
+
+        Nouvelle logique:
+        1. Fort volume relatif (> 1.3x bougie précédente)
+        2. Petit corps (compression) : body < 30% du range
+        3. Clôture au milieu : abs(close - mid) < 20% du range
+        4. Suivie par mouvement directionnel fort
         """
 
-        if df is None or df.empty:
+        if df is None or df.empty or len(df) < 2:
             return []
 
-        cfg = abs_config or {}
-        body_min = float(cfg.get("body_to_range_min", 0.5))
-        closes_mid = bool(cfg.get("closes_through_mid_of_sweep", True))
         eps = 1e-12
+        results: List[Optional[Dict[str, Any]]] = []
 
+        # Calculs de base
         body = (df["close"] - df["open"]).abs()
         full_range = (df["high"] - df["low"]).replace(0, eps)
         body_ratio = body / full_range
         mid_range = (df["high"] + df["low"]) / 2.0
+        close_to_mid_dist = abs(df["close"] - mid_range) / full_range
 
-        absorb_up = (
-            (df["close"] < df["open"])
-            & (body_ratio >= body_min)
-            & ((not closes_mid) | (df["close"] <= mid_range))
-        )
-        absorb_dn = (
-            (df["close"] > df["open"])
-            & (body_ratio >= body_min)
-            & ((not closes_mid) | (df["close"] >= mid_range))
-        )
+        # Volume ratio (si disponible)
+        if "tick_volume" in df.columns:
+            volume = df["tick_volume"].fillna(1000.0)
+        else:
+            volume = pd.Series([1000.0] * len(df), index=df.index)
 
-        results: List[Optional[Dict[str, Any]]] = []
-        for i in range(len(df)):
-            info = None
-            if absorb_up.iloc[i] or absorb_dn.iloc[i]:
+        volume_prev = volume.shift(1).fillna(volume.mean())
+        volume_ratio = (volume / volume_prev.replace(0, eps)).fillna(1.0)
+
+        for i in range(1, len(df) - 1):  # Besoin de prev et next
+            try:
+                current = df.iloc[i]
+                next_candle = df.iloc[i + 1]
+
+                # ✅ Condition 1: Fort volume relatif (> 1.3x précédent)
+                if volume_ratio.iloc[i] < 1.3:
+                    results.append(None)
+                    continue
+
+                # ✅ Condition 2: Petit corps (< 30% du range) = compression
+                if body_ratio.iloc[i] > 0.3:
+                    results.append(None)
+                    continue
+
+                # ✅ Condition 3: Clôture proche du milieu (< 20% du range)
+                if close_to_mid_dist.iloc[i] > 0.2:
+                    results.append(None)
+                    continue
+
+                # ✅ Condition 4: Bougie suivante est directionnelle
+                next_body_ratio = abs(next_candle["close"] - next_candle["open"]) / max(
+                    next_candle["high"] - next_candle["low"], eps
+                )
+                if next_body_ratio < 0.5:  # Bougie suivante pas assez directionnelle
+                    results.append(None)
+                    continue
+
+                # ✅ Déterminer la direction de l'absorption
+                if next_candle["close"] > current["close"]:
+                    side = "buy"  # Absorption bullish
+                else:
+                    side = "sell"  # Absorption bearish
+
                 info = {
                     "index": i,
                     "timestamp": str(df.index[i]),
                     "confirmed": True,
-                    "side": "buy" if absorb_dn.iloc[i] else "sell",
-                    "body_ratio": float(body_ratio.iloc[i]),
+                    "side": side,
+                    "body_ratio": round(float(body_ratio.iloc[i]), 2),
+                    "volume_ratio": round(float(volume_ratio.iloc[i]), 2),
                 }
-            results.append(info)
+                results.append(info)
+
+            except Exception as e:
+                self.logger.warning(
+                    f"Erreur détection Absorption à l'index {i}: {e}",
+                    exc_info=False,
+                )
+                results.append(None)
+
+        # Compléter la liste pour la première et dernière bougie
+        results.insert(0, None)  # Première bougie
+        results.append(None)  # Dernière bougie
+
         return results
 
     def detect_eqh_eql(
@@ -1641,8 +1576,10 @@ class Detectors:
             return [None] * (len(df) if df is not None else 0)
 
         cfg = eqh_config or {}
-        tolerance_pips = float(cfg.get("tolerance_pips", 2.0))
-        min_touches = int(cfg.get("min_touches", 2))
+        # ✅ PHASE 1 (21 DEC 2025): Paramètres assouplis pour détecter EQH/EQL institutionnels
+        tolerance_pips = float(cfg.get("tolerance_pips", 2.0))  # 2 pips = 20 points
+        min_touches = int(cfg.get("min_touches", 3))  # 2→3 touches minimum
+        lookback_bars = int(cfg.get("lookback_bars", 200))  # 120→200 bars pour structures significatives
 
         # Détermination taille pip
         try:
@@ -1656,34 +1593,45 @@ class Detectors:
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(df)
 
-        for i in range(min_touches - 1, len(df)):
+        for i in range(lookback_bars, len(df)):
             info = None
+            window_start = max(0, i - lookback_bars)
 
-            # Equal Highs
-            recent_highs = highs.iloc[i - min_touches + 1 : i + 1]
-            if recent_highs.max() - recent_highs.min() <= tolerance_pips * pip_size:
+            # Equal Highs - chercher sur toute la fenêtre lookback
+            window_highs = highs.iloc[window_start:i+1]
+            current_high = highs.iloc[i]
+
+            # Compter les touches du niveau actuel (dans la tolérance)
+            touches_high = sum(abs(window_highs - current_high) <= tolerance_pips * pip_size)
+
+            if touches_high >= min_touches:
                 info = {
                     "index": int(i),
                     "timestamp": str(df.index[i]),
                     "type": "eqh",
-                    "level": float(recent_highs.mean()),
-                    "touches": len(recent_highs),
+                    "level": float(current_high),
+                    "touches": int(touches_high),
                     "quality": (
-                        "high" if len(recent_highs) >= min_touches + 1 else "medium"
+                        "high" if touches_high >= min_touches + 2 else "medium"
                     ),
                 }
 
-            # Equal Lows
-            recent_lows = lows.iloc[i - min_touches + 1 : i + 1]
-            if recent_lows.max() - recent_lows.min() <= tolerance_pips * pip_size:
+            # Equal Lows - chercher sur toute la fenêtre lookback
+            window_lows = lows.iloc[window_start:i+1]
+            current_low = lows.iloc[i]
+
+            # Compter les touches du niveau actuel
+            touches_low = sum(abs(window_lows - current_low) <= tolerance_pips * pip_size)
+
+            if touches_low >= min_touches:
                 info = {
                     "index": int(i),
                     "timestamp": str(df.index[i]),
                     "type": "eql",
-                    "level": float(recent_lows.mean()),
-                    "touches": len(recent_lows),
+                    "level": float(current_low),
+                    "touches": int(touches_low),
                     "quality": (
-                        "high" if len(recent_lows) >= min_touches + 1 else "medium"
+                        "high" if touches_low >= min_touches + 2 else "medium"
                     ),
                 }
 
