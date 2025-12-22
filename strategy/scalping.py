@@ -1153,6 +1153,18 @@ class ScalpingStrategy(BaseStrategy):
             "details": {},
         }
 
+        # Charger config OrderFlow V6 pour absorption_ratios
+        of_config = self.strategy_config.get("orderflow_v6_config", {})
+        absorption_ratios = of_config.get("absorption_ratios", {
+            "very_bullish": 0.72,
+            "bullish": 0.58,
+            "slightly_bullish": 0.52,
+            "neutral": 0.50,
+            "slightly_bearish": 0.48,
+            "bearish": 0.42,
+            "very_bearish": 0.28
+        })
+
         try:
             # ✅ FIX (1er Décembre 2025): orchestrator stocke SEULEMENT "summary" (pas la structure complète)
             # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
