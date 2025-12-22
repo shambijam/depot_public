@@ -3665,20 +3665,26 @@ def scalping_fast_thread(
 
                 # 📊 Momentum Institutionnel Analysis (18 DEC 2025)
                 momentum_result = None
-                if scalping_strategy and hasattr(scalping_strategy, 'momentum_analyzer'):
+                if scalping_strategy and hasattr(scalping_strategy, 'momentum_analyzers'):
                     try:
+                        # Lazy-load l'analyseur spécifique à USDJPY
+                        if 'USDJPY' not in scalping_strategy.momentum_analyzers:
+                            from strategy.scalping import MomentumAnalyzerInstitutional
+                            scalping_strategy.momentum_analyzers['USDJPY'] = MomentumAnalyzerInstitutional('USDJPY')
+
                         # Utiliser rates_df (DataFrame M1 nettoyé utilisé pour OrderFlow/Footprint)
-                        momentum_result = scalping_strategy.momentum_analyzer.analyze(
+                        logger.info(f"[SCALPING_THREAD] 🔍 Appel Momentum (run_bot.py) | df_m1={'None' if rates_df is None else f'len={len(rates_df)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
+                        momentum_result = scalping_strategy.momentum_analyzers['USDJPY'].analyze(
                             df_m1=rates_df,
-                            df_m5=df_m5,  # Déjà récupéré ligne 3550
-                            df_m15=df_m15  # Déjà récupéré ligne 3551
+                            df_m5=df_m5,  # Déjà récupéré ligne 3558-3565
+                            df_m15=df_m15  # Déjà récupéré ligne 3558-3565
                         )
                         logger.info(
-                            f"[SCALPING_THREAD] 📊 MOMENTUM | Score={momentum_result['total_score']:.1f}/100 | "
+                            f"[SCALPING_THREAD] 📊 MOMENTUM (run_bot.py) | Score={momentum_result['total_score']:.1f}/100 | "
                             f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
                         )
                     except Exception as e_mom:
-                        logger.warning(f"[SCALPING_THREAD] Erreur calcul momentum: {e_mom}")
+                        logger.warning(f"[SCALPING_THREAD] Erreur calcul momentum: {e_mom}", exc_info=True)
                         momentum_result = None
 
                 # ✅ Ajouter momentum_result au contexte pour FusionManager
