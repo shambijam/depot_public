@@ -1,0 +1,249 @@
+{
+  "description": "Configuration optimisée USDJPY avec ajustements spécifiques pour paire JPY",
+  "symbol": "USDJPY",
+  "type": "forex",
+  "profile": "institutionnel",
+  "last_updated": "2025-12-22",
+  "symbol_info": {
+    "point": 0.001,
+    "digits": 3,
+    "pip_position": 2,
+    "pip_value": 0.01,
+    "comment": "Pour USDJPY: 1 pip = 0.01 (2ème décimale), vs 0.0001 pour EURUSD"
+  },
+  "volatility": {
+    "expected_daily_range_percent": {
+      "value": 0.8,
+      "adaptive_range": {
+        "min": 0.5,
+        "max": 1.2,
+        "adjustment_period_days": 7
+      }
+    },
+    "max_allowed_spread_points": {
+      "base": 3,
+      "session_multipliers": {
+        "tokyo": 1.0,
+        "london": 1.2,
+        "new_york": 1.1,
+        "asian": 1.0,
+        "weekend": 1.5
+      },
+      "news_spike_tolerance": 8,
+      "volatility_adjustment": true
+    },
+    "min_tradable_range_points": {
+      "value": 2,
+      "dynamic_adjustment": true
+    }
+  },
+  "risk_management": {
+    "base_lot_size": 0.10,
+    "daily_loss_limit_percent": {
+      "base": 2.0,
+      "aggressive_mode": 2.5,
+      "conservative_mode": 1.5,
+      "dynamic_adjustment": true
+    },
+    "weekly_loss_limit_percent": {
+      "base": 5.0,
+      "max_escalation": 6.0
+    },
+    "performance_based_adjustments": {
+      "winning_streak_bonus": 0.2,
+      "losing_streak_reduction": 0.3,
+      "streak_threshold": 3
+    }
+  },
+  "strategy_toggles": {
+    "enable_scalping_mode": {
+      "value": true,
+      "time_conditions": [
+        "00:00-03:00",
+        "07:00-09:00",
+        "13:00-16:00"
+      ],
+      "volatility_threshold": 0.5
+    },
+    "enable_grid_in_range_only": true,
+    "auto_blacklist_high_spread_assets": {
+      "value": true,
+      "threshold_multiplier": 2.0,
+      "blacklist_duration_minutes": 15
+    },
+    "scalping": {
+      "bollinger_midline_gate": {
+        "enabled": true,
+        "require_range_regime": true,
+        "block_on_expansion": true,
+        "entry_gate_ok_required": true,
+        "min_mid_distance_ratio": 0.10
+      },
+      "liquidity_sweep": {
+        "lookback_bars": 20
+      },
+      "execution": {
+        "min_sl_tp_distance_pips": 15,
+        "comment": "15 pips pour USDJPY = 0.15 points (vs 8 pips = 0.0008 pour EURUSD)"
+      },
+      "risk_filters": {
+        "cooldown": {
+          "enabled": true,
+          "mode": "bars",
+          "min_bars_between_trades": 5,
+          "min_cycles_between_trades": 0
+        },
+        "adaptive_lot_sizing": {
+          "enabled": true,
+          "based_on_volatility": true,
+          "based_on_account_performance": true
+        }
+      },
+      "smart_targets": {
+        "take_profit_multiplier": {
+          "base": 1.2,
+          "range_market": 1.0,
+          "trending_market": 1.6,
+          "high_volatility": 1.8
+        },
+        "stop_loss_multiplier": 1.0
+      },
+      "trade_frequency": {
+        "enabled": true,
+        "min_bars_between_trades": 3
+      }
+    }
+  },
+  "overrides": {
+    "scalping": {
+      "footprint": {
+        "m1_min_ticks": 50,
+        "m1_min_coverage_s": 20,
+        "burst_tolerance": {
+          "tickrate_min": 2.0,
+          "coverage_s_min_burst": 3
+        }
+      },
+      "fusion": {
+        "ttl_ms": 800,
+        "max_slippage_points": 50,
+        "comment": "50 points = 5 pips pour USDJPY"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 200,
+        "features": {
+          "delta": {
+            "abs_strong": 80.0,
+            "abs_extreme": 150.0
+          },
+          "imbalance": {
+            "min": 0.58,
+            "extreme": 0.75
+          },
+          "tickrate": {
+            "min": 3.0,
+            "burst_min": 6.0,
+            "coverage_s_min": 5
+          },
+          "vpoc": {
+            "drift_max_points": 20.0
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "pivot_window": 3,
+          "confirm_window": 10,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.75
+        },
+        "ncp_strong": {
+          "delta_abs_min": 80.0,
+          "tickrate_min": 6.0
+        }
+      },
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "use_orderflow_v6": true,
+            "of_v6_gate": {
+              "min_score": 0.70,
+              "require_ncp_strong": true,
+              "min_delta_abs": 80.0,
+              "min_imbalance": 0.65,
+              "min_tickrate": 3.5
+            },
+            "flow_vol_gate": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      "sltp": {
+        "exit_mode": "sl_tp_then_trail",
+        "sl_method": "PIPS",
+        "tp_method": "PIPS",
+        "rr_base": 1.5,
+        "rr_floor": 1.0,
+        "rr_cap": 3.0,
+        "sl": {
+          "pips": 50,
+          "buffer_pips": 2,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "swing_lookback": 0,
+          "comment": "50 pips USDJPY = 0.50 points (vs 400 pips trop grand)"
+        },
+        "tp": {
+          "pips": 75,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "execution": {
+            "min_sl_tp_distance_pips": 15
+          },
+          "comment": "75 pips USDJPY = 0.75 points (RR 1.5)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 60.0,
+        "require_full_count_for_profit_close": true,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 80.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "60 pips profit = 0.60 points, 80 pips loss = 0.80 points"
+      }
+    }
+  }
+}
