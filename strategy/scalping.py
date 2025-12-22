@@ -500,15 +500,16 @@ class MomentumAnalyzerInstitutional:
         - Direction M15 (si disponible)
         - Concordance
         """
+        # Charger config MTF une seule fois
+        mtf_cfg = self.config.get("mtf_alignment", {})
+        bullish_threshold = mtf_cfg.get("bullish_threshold", 0.67)
+        bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
 
         def get_direction(df, n_candles=6):
             if df is None or len(df) < n_candles:
                 return "NEUTRAL"
             recent = df.tail(n_candles)
             green = (recent["close"] > recent["open"]).sum()
-            mtf_cfg = self.config.get("mtf_alignment", {})
-            bullish_threshold = mtf_cfg.get("bullish_threshold", 0.67)
-            bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
             if green >= n_candles * bullish_threshold:
                 return "BULLISH"
             elif green <= n_candles * bearish_threshold:
