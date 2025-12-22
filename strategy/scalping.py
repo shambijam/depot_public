@@ -235,12 +235,14 @@ class MomentumAnalyzerInstitutional:
         import logging
         logger = logging.getLogger(__name__)
 
+        logger.info(f"[MOMENTUM][{self.asset}] 🔍 analyze() appelé | df_m1={'None' if df_m1 is None else f'len={len(df_m1)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
+
         if df_m1 is None:
-            logger.warning("[MOMENTUM] df_m1 is None → returning default result")
+            logger.warning(f"[MOMENTUM][{self.asset}] df_m1 is None → returning default result")
             return self._get_default_result()
 
         if len(df_m1) < 20:
-            logger.warning(f"[MOMENTUM] df_m1 too short (len={len(df_m1)} < 20) → returning default result")
+            logger.warning(f"[MOMENTUM][{self.asset}] df_m1 too short (len={len(df_m1)} < 20) → returning default result")
             return self._get_default_result()
 
         try:
@@ -2345,6 +2347,7 @@ class ScalpingStrategy(BaseStrategy):
                 if asset not in self.momentum_analyzers:
                     self.momentum_analyzers[asset] = MomentumAnalyzerInstitutional(asset)
 
+                self.logger.info(f"[{asset}] 🔍 Appel Momentum | df_work={'None' if df_work is None else f'len={len(df_work)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
                 momentum_result = self.momentum_analyzers[asset].analyze(
                     df_m1=df_work, df_m5=df_m5, df_m15=df_m15
                 )
