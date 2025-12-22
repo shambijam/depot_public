@@ -26,13 +26,13 @@ class USDJPYTimingOptimizer:
     - Incohérence: trades exécutés avec POOR timing, rejetés avec EXCELLENT timing
     """
 
-    # Configuration basée sur analyse des logs réels
+    # Configuration adaptée pour USDJPY (activité modérée vs XAUUSD haute activité)
     CONFIG = {
         "concentration": {
-            "excellent": 0.80,    # >80% = excellent
-            "good": 0.60,         # >60% = bon
-            "warning": 0.40,      # <40% = warning
-            "veto": 0.30,         # <30% = veto possible
+            "excellent": 0.50,    # >50% = excellent (USDJPY: ticks modérés)
+            "good": 0.35,         # >35% = bon
+            "warning": 0.25,      # <25% = warning
+            "veto": 0.20,         # <20% = veto possible (très dispersé)
         },
         "velocity": {
             "buy_dominant": 1.8,  # ratio >1.8 = buy fort
@@ -68,9 +68,9 @@ class USDJPYTimingOptimizer:
         # 1️⃣ VÉRIFICATION VETO (conditions catastrophiques)
         # ========================================================================
         veto_conditions = [
-            timing_score < 2.0 and max(buy_conc, sell_conc) < 0.30,  # Timing faible + concentration très faible
-            timing_score < 2.5 and velocity_ratio > 3.0,              # Timing faible + ratio extrême
-            timing_quality == "POOR" and timing_score < 1.5           # POOR + score très faible
+            timing_score < 1.5 and max(buy_conc, sell_conc) < 0.20,  # Timing très faible + concentration extrêmement faible
+            timing_score < 2.0 and velocity_ratio > 4.0,              # Timing faible + ratio très extrême
+            timing_quality == "POOR" and timing_score < 1.0           # POOR + score catastrophique
         ]
 
         if any(veto_conditions):
@@ -92,10 +92,10 @@ class USDJPYTimingOptimizer:
         adjustment = 0.0
         adjustment_reasons = []
 
-        # Bonus pour concentration forte
-        if max(buy_conc, sell_conc) > 0.80:
+        # Bonus pour concentration forte (adapté USDJPY)
+        if max(buy_conc, sell_conc) > 0.50:
             adjustment += 0.05  # +5%
-            adjustment_reasons.append(f"Concentration forte (>80%): +5%")
+            adjustment_reasons.append(f"Concentration forte (>50%): +5%")
 
         # Bonus pour cohérence directionnelle (concentration + velocity alignées)
         if buy_conc > sell_conc and velocity_ratio > 1.5:
@@ -105,10 +105,10 @@ class USDJPYTimingOptimizer:
             adjustment += 0.03  # +3%
             adjustment_reasons.append(f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): +3%")
 
-        # Malus pour concentration faible
-        if max(buy_conc, sell_conc) < 0.40:
+        # Malus pour concentration faible (adapté USDJPY)
+        if max(buy_conc, sell_conc) < 0.25:
             adjustment -= 0.05  # -5%
-            adjustment_reasons.append(f"Concentration faible (<40%): -5%")
+            adjustment_reasons.append(f"Concentration faible (<25%): -5%")
 
         # Malus pour velocity ratio extrême (possible anomalie)
         if velocity_ratio > 2.5:
@@ -140,15 +140,16 @@ class USDJPYTimingOptimizer:
 
 class MomentumAnalyzerInstitutional:
     """
-    📊 Analyseur de Momentum Institutionnel M1
+    📊 Analyseur de Momentum Institutionnel M1 (Scalping uniquement)
 
-    Date: 18 Décembre 2025
+    Date: 22 Décembre 2025
     Objectif: Momentum de qualité institutionnelle pour filtrer les trades incohérents
 
     Problème résolu:
     - Momentum pathétique (juste comptage bougies vertes)
     - Pas de volume, pas de force, pas d'accélération
     - Trades pris contre le momentum (BUY sur 3 bougies rouges)
+    - Seuils hardcodés → maintenant dans config/momentum_institutional_config.json
 
     Score sur 100 points:
     - Candle Strength (30pts): Force des bougies, body ratio, position close
@@ -156,6 +157,41 @@ class MomentumAnalyzerInstitutional:
     - Price Acceleration (25pts): Accélération du mouvement
     - Multi-Timeframe Alignment (20pts): Concordance M1/M5/M15
     """
+
+    def __init__(self, asset: str = "DEFAULT"):
+        """Initialise avec config spécifique à l'asset."""
+        self.asset = asset
+        self.config = self._load_config(asset)
+
+    def _load_config(self, asset: str) -> Dict[str, Any]:
+        """Charge config depuis momentum_institutional_config.json"""
+        import json
+        from pathlib import Path
+
+        config_path = Path(__file__).parent.parent / "config" / "momentum_institutional_config.json"
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+
+            asset_config = full_config.get("assets", {}).get(asset)
+            if asset_config:
+                return asset_config
+            else:
+                return full_config.get("default_thresholds", {})
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[MOMENTUM] Erreur chargement config: {e}. Fallback."
+            )
+            # Fallback universel
+            return {
+                "candle_strength": {"body_ratio_multiplier": 18.0},
+                "volume_confirmation": {"volume_ratio_multiplier": 18.75},
+                "price_acceleration": {"move_pct_multiplier": 66.67},
+                "quality_levels": {"excellent": 65, "good": 50, "fair": 35, "poor": 0}
+            }
 
     def analyze(
         self,
@@ -216,12 +252,13 @@ class MomentumAnalyzerInstitutional:
             # Déterminer direction dominante
             direction = candle_details.get("direction", "NEUTRAL")
 
-            # Déterminer qualité
-            if total_score >= 70:
+            # Déterminer qualité (depuis config)
+            quality_cfg = self.config.get("quality_levels", {})
+            if total_score >= quality_cfg.get("excellent", 65):
                 quality = "EXCELLENT"
-            elif total_score >= 55:
+            elif total_score >= quality_cfg.get("good", 50):
                 quality = "GOOD"
-            elif total_score >= 40:
+            elif total_score >= quality_cfg.get("fair", 35):
                 quality = "FAIR"
             else:
                 quality = "POOR"
@@ -266,7 +303,9 @@ class MomentumAnalyzerInstitutional:
 
         # 1. Body Ratio moyen (0-10 pts)
         avg_body_ratio = recent["body_ratio"].mean()
-        body_ratio_score = min(10.0, avg_body_ratio * 15)  # Ratio >0.66 = 10pts
+        candle_cfg = self.config.get("candle_strength", {})
+        body_multiplier = candle_cfg.get("body_ratio_multiplier", 18.0)
+        body_ratio_score = min(10.0, avg_body_ratio * body_multiplier)
 
         # 2. Cohérence directionnelle (0-10 pts)
         green_count = recent["is_green"].sum()
@@ -344,7 +383,9 @@ class MomentumAnalyzerInstitutional:
 
         # 1. Volume relatif (0-15 pts)
         volume_ratio = last_8_avg / max(avg_volume, 1.0)
-        volume_relative_score = min(15.0, (volume_ratio - 1.0) * 15)  # >2x = 15pts
+        vol_cfg = self.config.get("volume_confirmation", {})
+        vol_multiplier = vol_cfg.get("volume_ratio_multiplier", 18.75)
+        volume_relative_score = min(15.0, (volume_ratio - 1.0) * vol_multiplier)
         volume_relative_score = max(0.0, volume_relative_score)
 
         # 2. Momentum volume (0-10 pts)
@@ -387,8 +428,10 @@ class MomentumAnalyzerInstitutional:
         avg_price = recent["close"].mean()
         move_pct = abs(total_move) / max(avg_price, 1.0) * 100  # En %
 
-        # Pour USDJPY: 0.1% sur 12 bougies = bon
-        move_score = min(10.0, move_pct * 100)  # 0.1% = 10pts
+        # Mouvement % (depuis config)
+        accel_cfg = self.config.get("price_acceleration", {})
+        move_multiplier = accel_cfg.get("move_pct_multiplier", 66.67)
+        move_score = min(10.0, move_pct * move_multiplier)
 
         # 2. Accélération (0-10 pts)
         first_6_move = abs(recent.iloc[:6]["price_change"].sum())
@@ -535,8 +578,8 @@ class ScalpingStrategy(BaseStrategy):
         # ⏱️ Timing Optimizer pour USDJPY (18 Dec 2025)
         self.USDJPY_timing_optimizer = USDJPYTimingOptimizer()
 
-        # 📊 Momentum Analyzer Institutionnel (18 Dec 2025)
-        self.momentum_analyzer = MomentumAnalyzerInstitutional()
+        # 📊 Momentum Analyzer Institutionnel (22 Dec 2025) - Cache par asset
+        self.momentum_analyzers = {}  # Dict[asset] = MomentumAnalyzerInstitutional(asset)
 
         self.logger.info("Moteur de stratégie Scalping initialisé.")
 
@@ -2219,8 +2262,12 @@ class ScalpingStrategy(BaseStrategy):
                     asset=asset, df_m1=df_work, asset_signals=asset_signals
                 )
 
-                # 📊 3. Momentum Institutionnel Analysis (20% du score) - 18 DEC 2025
-                momentum_result = self.momentum_analyzer.analyze(
+                # 📊 3. Momentum Institutionnel Analysis (20% du score) - 22 DEC 2025
+                # Lazy-load l'analyseur spécifique à l'asset
+                if asset not in self.momentum_analyzers:
+                    self.momentum_analyzers[asset] = MomentumAnalyzerInstitutional(asset)
+
+                momentum_result = self.momentum_analyzers[asset].analyze(
                     df_m1=df_work, df_m5=df_m5, df_m15=df_m15
                 )
                 self.logger.info(

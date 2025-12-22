@@ -90,14 +90,14 @@ def calculate_timing_metrics(
     scoring_cfg = timing_config.get("scoring_system", {})
     performance_cfg = timing_config.get("performance_optimization", {})
 
-    # Extraire les paramètres avec valeurs par défaut
+    # Extraire les paramètres avec valeurs par défaut (adaptés pour trading général, pas spécifique XAUUSD)
     # Concentration
     q1_weight = concentration_cfg.get("q1_weight", 0.60)
     q2_weight = concentration_cfg.get("q2_weight", 0.25)
     q3_q4_weight = concentration_cfg.get("q3_q4_weight", 0.15)
-    q1_strong = concentration_cfg.get("q1_strong", 0.80)
-    q1_expected_min = concentration_cfg.get("q1_expected_min", 0.60)
-    q1_weak = concentration_cfg.get("q1_weak", 0.40)
+    q1_strong = concentration_cfg.get("q1_strong", 0.50)         # Fallback universel (modéré)
+    q1_expected_min = concentration_cfg.get("q1_expected_min", 0.35)  # Fallback universel
+    q1_weak = concentration_cfg.get("q1_weak", 0.25)            # Fallback universel
     buy_conc_bonus = concentration_cfg.get("buy_concentration_bonus", {})
     sell_conc_bonus = concentration_cfg.get("sell_concentration_bonus", {})
 

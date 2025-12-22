@@ -1,0 +1,148 @@
+{
+  "_description": "Configuration Momentum Institutionnel selon l'asset (22 DEC 2025)",
+  "_documentation": "Seuils adaptés pour scoring multi-composants : Candle Strength, Volume, Price Acceleration, MTF Alignment",
+
+  "default_thresholds": {
+    "description": "Seuils par défaut pour assets non configurés (basés sur forex standards)",
+    "candle_strength": {
+      "body_ratio_multiplier": 18.0,
+      "body_ratio_target": 0.55,
+      "coherence_threshold": 0.65,
+      "close_position_weight": 5.0,
+      "last_3_multiplier": 7.5
+    },
+    "volume_confirmation": {
+      "volume_ratio_multiplier": 18.75,
+      "volume_ratio_target": 1.8,
+      "momentum_multiplier": 20.0
+    },
+    "price_acceleration": {
+      "move_pct_multiplier": 66.67,
+      "move_pct_target": 0.15,
+      "acceleration_multiplier": 10.0,
+      "regularity_weight": 5.0
+    },
+    "quality_levels": {
+      "excellent": 65,
+      "good": 50,
+      "fair": 35,
+      "poor": 0
+    }
+  },
+
+  "assets": {
+    "USDJPY": {
+      "description": "Yen japonais - Activité modérée, mouvements % faibles",
+      "candle_strength": {
+        "body_ratio_multiplier": 18.0,
+        "body_ratio_target": 0.55,
+        "comment": "Body ratio 0.55 acceptable (moins volatile que XAUUSD)"
+      },
+      "volume_confirmation": {
+        "volume_ratio_multiplier": 18.75,
+        "volume_ratio_target": 1.8,
+        "comment": "Volume 1.8x = score max (vs 2.0x pour XAUUSD)"
+      },
+      "price_acceleration": {
+        "move_pct_multiplier": 66.67,
+        "move_pct_target": 0.15,
+        "comment": "0.15% sur 12 bougies = score max (0.24 points sur 157)"
+      },
+      "quality_levels": {
+        "excellent": 65,
+        "good": 50,
+        "fair": 35,
+        "poor": 0,
+        "comment": "Seuils légèrement assouplis pour USDJPY"
+      },
+      "session_adjustments": {
+        "tokyo": {
+          "hours_gmt": [0, 6],
+          "volume_multiplier": 1.1,
+          "comment": "Session domestique : volume plus élevé"
+        },
+        "london_ny": {
+          "hours_gmt": [7, 17],
+          "volume_multiplier": 1.0
+        }
+      }
+    },
+
+    "EURUSD": {
+      "description": "Euro dollar - Paire majeure, haute liquidité",
+      "candle_strength": {
+        "body_ratio_multiplier": 18.0,
+        "body_ratio_target": 0.55
+      },
+      "volume_confirmation": {
+        "volume_ratio_multiplier": 18.75,
+        "volume_ratio_target": 1.8
+      },
+      "price_acceleration": {
+        "move_pct_multiplier": 100.0,
+        "move_pct_target": 0.10,
+        "comment": "0.10% sur 12 bougies = score max (10 pips sur 1.1000)"
+      },
+      "quality_levels": {
+        "excellent": 65,
+        "good": 50,
+        "fair": 35,
+        "poor": 0
+      },
+      "session_adjustments": {
+        "london": {
+          "hours_gmt": [7, 11],
+          "volume_multiplier": 1.15,
+          "comment": "London open : volume pic"
+        },
+        "us_session": {
+          "hours_gmt": [13, 17],
+          "volume_multiplier": 1.1
+        }
+      }
+    },
+
+    "GBPUSD": {
+      "description": "Cable - Volatilité supérieure à EURUSD",
+      "candle_strength": {
+        "body_ratio_multiplier": 17.0,
+        "body_ratio_target": 0.58,
+        "comment": "Body ratio légèrement plus strict (plus volatile)"
+      },
+      "volume_confirmation": {
+        "volume_ratio_multiplier": 18.75,
+        "volume_ratio_target": 1.8
+      },
+      "price_acceleration": {
+        "move_pct_multiplier": 80.0,
+        "move_pct_target": 0.125,
+        "comment": "0.125% sur 12 bougies = score max (15 pips sur 1.2500)"
+      },
+      "quality_levels": {
+        "excellent": 65,
+        "good": 50,
+        "fair": 35,
+        "poor": 0
+      },
+      "session_adjustments": {
+        "london": {
+          "hours_gmt": [7, 11],
+          "volume_multiplier": 1.2,
+          "comment": "London open : très volatile"
+        }
+      }
+    }
+  },
+
+  "meta": {
+    "version": "1.0.0",
+    "last_update": "2025-12-22",
+    "author": "SniperX Trading System",
+    "notes": [
+      "Seuils adaptés par asset pour éviter hardcoding dans le code Python",
+      "Multipliers calculés pour atteindre le score max au target spécifié",
+      "Quality levels ajustés selon la volatilité de chaque asset",
+      "Session adjustments permettent fine-tuning par horaire de trading"
+    ]
+  }
+}

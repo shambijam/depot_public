@@ -117,12 +117,13 @@
   "overrides": {
     "scalping": {
       "footprint": {
-        "m1_min_ticks": 50,
-        "m1_min_coverage_s": 20,
+        "m1_min_ticks": 30,
+        "m1_min_coverage_s": 10,
         "burst_tolerance": {
-          "tickrate_min": 2.0,
+          "tickrate_min": 1.5,
           "coverage_s_min_burst": 3
-        }
+        },
+        "comment": "USDJPY : activité modérée (30 ticks vs 100 pour XAUUSD)"
       },
       "fusion": {
         "ttl_ms": 800,
@@ -142,20 +143,24 @@
         "lookback_bars": 200,
         "features": {
           "delta": {
-            "abs_strong": 80.0,
-            "abs_extreme": 150.0
+            "abs_strong": 15.0,
+            "abs_extreme": 30.0,
+            "comment": "USDJPY a des deltas beaucoup plus faibles que XAUUSD (15 vs 180)"
           },
           "imbalance": {
-            "min": 0.58,
-            "extreme": 0.75
+            "min": 0.55,
+            "extreme": 0.70,
+            "comment": "Seuils légèrement assouplis pour USDJPY"
           },
           "tickrate": {
-            "min": 3.0,
-            "burst_min": 6.0,
-            "coverage_s_min": 5
+            "min": 1.5,
+            "burst_min": 3.0,
+            "coverage_s_min": 3,
+            "comment": "USDJPY : 1.5-3 ticks/sec vs XAUUSD : 4-8 ticks/sec"
           },
           "vpoc": {
-            "drift_max_points": 20.0
+            "drift_max_points": 10.0,
+            "comment": "10 points = 1 pip pour USDJPY (vs 50 points pour XAUUSD)"
           },
           "cvd": {
             "slope_window": 10,
@@ -185,8 +190,9 @@
           "entry_threshold": 0.75
         },
         "ncp_strong": {
-          "delta_abs_min": 80.0,
-          "tickrate_min": 6.0
+          "delta_abs_min": 15.0,
+          "tickrate_min": 2.0,
+          "comment": "Seuils NCP ajustés pour USDJPY (delta faible, tickrate modéré)"
         }
       },
       "entry_rules": {
@@ -194,11 +200,12 @@
           "burst_scalping": {
             "use_orderflow_v6": true,
             "of_v6_gate": {
-              "min_score": 0.70,
+              "min_score": 0.65,
               "require_ncp_strong": true,
-              "min_delta_abs": 80.0,
-              "min_imbalance": 0.65,
-              "min_tickrate": 3.5
+              "min_delta_abs": 15.0,
+              "min_imbalance": 0.60,
+              "min_tickrate": 1.5,
+              "comment": "Seuils d'entrée assouplis pour USDJPY"
             },
             "flow_vol_gate": {
               "enabled": false
@@ -243,6 +250,153 @@
         "max_loss_pips": 80.0,
         "loss_guard_arming_ms": 3000,
         "comment": "60 pips profit = 0.60 points, 80 pips loss = 0.80 points"
+      },
+      "timing_analyzer": {
+        "enabled": true,
+        "usdjpy_specific_params": {
+          "tick_rate_profile": "MODERATE",
+          "typical_spread_impact": "LOW",
+          "session_sensitivity": "HIGH",
+          "volatility_profile": "MODERATE",
+          "comment": "USDJPY : activité modérée vs XAUUSD haute volatilité"
+        },
+        "concentration_analysis": {
+          "q1_expected_min": 0.35,
+          "q1_strong": 0.50,
+          "q1_weak": 0.25,
+          "q1_weight": 0.60,
+          "q2_weight": 0.25,
+          "q3_q4_weight": 0.15,
+          "buy_concentration_bonus": {
+            "threshold": 0.55,
+            "multiplier": 1.2
+          },
+          "sell_concentration_bonus": {
+            "threshold": 0.55,
+            "multiplier": 1.2
+          },
+          "comment": "Seuils TRÈS assouplis pour USDJPY (35% vs 60% pour OR)"
+        },
+        "velocity_analysis": {
+          "expected_range": [0.3, 1.2],
+          "scoring_thresholds": {
+            "very_strong": 0.4,
+            "strong": 0.6,
+            "moderate": 1.0,
+            "neutral": 1.5,
+            "reversal_alert": 2.0
+          },
+          "velocity_weight": 0.25
+        },
+        "distribution_scoring": {
+          "ideal_quartile_count": 2,
+          "max_quartile_count": 3,
+          "penalty_4_quartiles": 0.8,
+          "quartile_significance_threshold": 0.10
+        },
+        "time_of_day_adjustments": {
+          "tokyo_session": {
+            "hours_gmt": [0, 6],
+            "characteristics": {
+              "high_activity": true,
+              "home_market": true,
+              "strong_flows": true
+            },
+            "scoring_adjustment": 1.1,
+            "min_concentration": 0.30
+          },
+          "london_open": {
+            "hours_gmt": [7, 11],
+            "characteristics": {
+              "high_volatility": true,
+              "crossover_flows": true,
+              "velocity_multiplier": 1.15
+            },
+            "scoring_adjustment": 1.05
+          },
+          "us_session": {
+            "hours_gmt": [13, 17],
+            "characteristics": {
+              "moderate_activity": true,
+              "risk_sentiment_driven": true
+            },
+            "min_concentration": 0.30
+          },
+          "asian_late": {
+            "hours_gmt": [18, 23],
+            "characteristics": {
+              "lower_activity": true,
+              "wider_spreads": true,
+              "relaxed_thresholds": true
+            },
+            "min_concentration": 0.25
+          }
+        },
+        "scoring_system": {
+          "max_score": 5.0,
+          "component_weights": {
+            "concentration_score": 0.50,
+            "velocity_score": 0.25,
+            "distribution_score": 0.15,
+            "consistency_score": 0.10
+          },
+          "quality_levels": {
+            "EXCELLENT": {
+              "min_score": 3.5,
+              "characteristics": ["q1_concentration >50%", "velocity_ratio <0.8"],
+              "trade_impact": "STRONG_CONFIRMATION"
+            },
+            "GOOD": {
+              "min_score": 2.5,
+              "characteristics": ["q1_concentration >35%"],
+              "trade_impact": "POSITIVE_CONFIRMATION"
+            },
+            "FAIR": {
+              "min_score": 1.5,
+              "characteristics": ["q1_concentration >25%"],
+              "trade_impact": "NEUTRAL"
+            },
+            "POOR": {
+              "min_score": 0.0,
+              "trade_impact": "WARNING"
+            }
+          }
+        },
+        "trade_decision_integration": {
+          "confidence_multipliers": {
+            "EXCELLENT": 1.20,
+            "GOOD": 1.10,
+            "FAIR": 1.00,
+            "POOR": 0.85
+          },
+          "minimum_scores_for_execution": {
+            "standard_entry": 2.0,
+            "aggressive_entry": 3.0,
+            "avoid_entry": 1.0
+          },
+          "signals_to_monitor": {
+            "strong_buy_timing": ["buy_concentration_q1 > 50%", "velocity_ratio > 1.2"],
+            "strong_sell_timing": ["sell_concentration_q1 > 50%", "velocity_ratio < 0.7"],
+            "warning_signals": ["concentration_q1 < 20%", "velocity_ratio > 2.5"]
+          }
+        },
+        "performance_optimization": {
+          "cache_duration_seconds": 2.0,
+          "min_ticks_for_analysis": 5,
+          "max_analysis_time_ms": 10,
+          "enable_pre_computation": true
+        },
+        "debug_and_monitoring": {
+          "log_level": "INFO",
+          "log_timing_metrics": true,
+          "save_samples_for_analysis": false,
+          "alert_on_anomalies": true,
+          "anomaly_detection": {
+            "unexpected_concentration": 0.90,
+            "extreme_velocity_ratio": 0.15,
+            "insufficient_coverage": 15.0
+          }
+        }
       }
     }
   }

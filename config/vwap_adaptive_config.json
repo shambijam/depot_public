@@ -110,14 +110,24 @@
     },
 
     "EXTREME_REVERSION": {
-      "description": "Distance extrême (>800 pips XAUUSD) - Attente retour VWAP",
+      "description": "Distance extrême depuis VWAP - Attente retour VWAP (seuils par asset)",
       "weight_multiplier": 1.10,
       "veto_enabled": true,
-      "veto_conditions": {
-        "block_buy_if_distance_above": 800,
-        "block_sell_if_distance_below": -800
+      "veto_conditions_by_asset": {
+        "EURUSD": {
+          "block_buy_if_distance_above": 80,
+          "block_sell_if_distance_below": -80
+        },
+        "GBPUSD": {
+          "block_buy_if_distance_above": 100,
+          "block_sell_if_distance_below": -100
+        },
+        "USDJPY": {
+          "block_buy_if_distance_above": 120,
+          "block_sell_if_distance_below": -120
+        }
       },
-      "logic": "VWAP modéré mais avec veto pour éviter extensions extrêmes"
+      "logic": "VWAP modéré mais avec veto pour éviter extensions extrêmes (seuils adaptés par asset)"
     },
 
     "STRONG_TRENDING": {
@@ -130,16 +140,6 @@
   },
 
   "assets": {
-    "XAUUSD": {
-      "pip_value": 0.01,
-      "zones_pips": {
-        "neutral": 200,
-        "strong": 500,
-        "extreme": 800
-      },
-      "slope_multiplier": 1.0,
-      "volatility_factor": 1.0
-    },
     "EURUSD": {
       "pip_value": 0.0001,
       "zones_pips": {
@@ -159,18 +159,30 @@
       },
       "slope_multiplier": 0.10,
       "volatility_factor": 0.40
+    },
+    "USDJPY": {
+      "pip_value": 0.01,
+      "zones_pips": {
+        "neutral": 30,
+        "strong": 70,
+        "extreme": 120
+      },
+      "slope_multiplier": 0.15,
+      "volatility_factor": 0.50,
+      "_comment": "USDJPY : pip_value=0.01 (3 décimales), volatilité modérée entre EURUSD et XAUUSD"
     }
   },
 
   "meta": {
-    "version": "1.0.0",
-    "last_update": "2025-12-06",
+    "version": "1.1.0",
+    "last_update": "2025-12-22",
     "author": "SniperX Trading System",
     "notes": [
       "Poids adaptatifs remplacent le système de boost multiplicatif",
       "Fenêtres adaptatives permettent granularité fine selon régime",
       "Tous les paramètres sont normalisés et sommant à 1.0",
-      "Special cases appliquent des multiplicateurs sur les régimes de base"
+      "Special cases appliquent des multiplicateurs sur les régimes de base",
+      "v1.1.0 (22/12/2025): Ajout support USDJPY + seuils EXTREME_REVERSION par asset"
     ]
   }
 }
