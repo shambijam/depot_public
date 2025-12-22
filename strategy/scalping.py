@@ -26,27 +26,36 @@ class USDJPYTimingOptimizer:
     - Incohérence: trades exécutés avec POOR timing, rejetés avec EXCELLENT timing
     """
 
-    # Configuration adaptée pour USDJPY (activité modérée vs XAUUSD haute activité)
-    CONFIG = {
-        "concentration": {
-            "excellent": 0.50,    # >50% = excellent (USDJPY: ticks modérés)
-            "good": 0.35,         # >35% = bon
-            "warning": 0.25,      # <25% = warning
-            "veto": 0.20,         # <20% = veto possible (très dispersé)
-        },
-        "velocity": {
-            "buy_dominant": 1.8,  # ratio >1.8 = buy fort
-            "sell_dominant": 0.6, # ratio <0.6 = sell fort
-            "extreme": 3.0,       # ratio >3.0 = anomalie
-        },
-        "multipliers": {
-            "EXCELLENT": 1.20,    # +20% de boost
-            "GOOD": 1.10,         # +10% de boost
-            "FAIR": 1.00,         # neutre
-            "POOR": 0.80,         # -20% de pénalité
-            "VETO": 0.50,         # -50% pour timing catastrophique
-        }
-    }
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """Initialise avec config depuis config_trade_scalping.json"""
+        if config:
+            self.config = config
+        else:
+            self.config = self._load_config()
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Charge config depuis fichier JSON"""
+        import json
+        from pathlib import Path
+
+        config_path = Path(__file__).parent.parent / "config" / "strategy" / "config_trade_scalping.json"
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+            return full_config.get("timing_optimizer_config", {})
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[TIMING_OPTIMIZER] Erreur config: {e}")
+            # Fallback
+            return {
+                "concentration": {"excellent": 0.50, "good": 0.35, "warning": 0.25, "veto": 0.20},
+                "velocity": {"buy_dominant": 1.8, "sell_dominant": 0.6, "extreme": 3.0},
+                "multipliers": {"EXCELLENT": 1.20, "GOOD": 1.10, "FAIR": 1.00, "POOR": 0.80, "VETO": 0.50},
+                "veto_conditions": {"timing_score_threshold": 1.5, "concentration_threshold": 0.20, "velocity_ratio_extreme": 4.0, "poor_score_threshold": 1.0},
+                "bonuses_malus": {"concentration_strong_threshold": 0.50, "concentration_strong_bonus": 0.05, "concentration_weak_threshold": 0.25, "concentration_weak_malus": -0.05, "velocity_buy_coherent": 1.5, "velocity_sell_coherent": 0.7, "coherence_bonus": 0.03, "velocity_extreme": 2.5, "velocity_extreme_malus": -0.02},
+                "multiplier_clamp": {"min": 0.5, "max": 1.5}
+            }
 
     def calculate_impact(self, timing_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -65,63 +74,78 @@ class USDJPYTimingOptimizer:
         velocity_ratio = timing_metrics.get("velocity_ratio", 1.0)
 
         # ========================================================================
-        # 1️⃣ VÉRIFICATION VETO (conditions catastrophiques)
+        # 1️⃣ VÉRIFICATION VETO (conditions catastrophiques) - depuis config
         # ========================================================================
+        veto_cfg = self.config.get("veto_conditions", {})
         veto_conditions = [
-            timing_score < 1.5 and max(buy_conc, sell_conc) < 0.20,  # Timing très faible + concentration extrêmement faible
-            timing_score < 2.0 and velocity_ratio > 4.0,              # Timing faible + ratio très extrême
-            timing_quality == "POOR" and timing_score < 1.0           # POOR + score catastrophique
+            timing_score < veto_cfg.get("timing_score_threshold", 1.5) and max(buy_conc, sell_conc) < veto_cfg.get("concentration_threshold", 0.20),
+            timing_score < 2.0 and velocity_ratio > veto_cfg.get("velocity_ratio_extreme", 4.0),
+            timing_quality == "POOR" and timing_score < veto_cfg.get("poor_score_threshold", 1.0)
         ]
 
+        multipliers_cfg = self.config.get("multipliers", {})
         if any(veto_conditions):
             return {
-                "multiplier": self.CONFIG["multipliers"]["VETO"],
+                "multiplier": multipliers_cfg.get("VETO", 0.50),
                 "veto_triggered": True,
                 "veto_reason": "Timing catastrophique: score faible + concentration insuffisante",
-                "adjustment_details": f"VETO appliqué (×{self.CONFIG['multipliers']['VETO']})"
+                "adjustment_details": f"VETO appliqué (×{multipliers_cfg.get('VETO', 0.50)})"
             }
 
         # ========================================================================
-        # 2️⃣ MULTIPLICATEUR DE BASE selon qualité
+        # 2️⃣ MULTIPLICATEUR DE BASE selon qualité - depuis config
         # ========================================================================
-        base_multiplier = self.CONFIG["multipliers"].get(timing_quality, 1.0)
+        base_multiplier = multipliers_cfg.get(timing_quality, 1.0)
 
         # ========================================================================
-        # 3️⃣ BONUS/MALUS SUPPLÉMENTAIRES
+        # 3️⃣ BONUS/MALUS SUPPLÉMENTAIRES - depuis config
         # ========================================================================
         adjustment = 0.0
         adjustment_reasons = []
+        bonus_malus = self.config.get("bonuses_malus", {})
 
-        # Bonus pour concentration forte (adapté USDJPY)
-        if max(buy_conc, sell_conc) > 0.50:
-            adjustment += 0.05  # +5%
-            adjustment_reasons.append(f"Concentration forte (>50%): +5%")
+        # Bonus pour concentration forte
+        conc_strong = bonus_malus.get("concentration_strong_threshold", 0.50)
+        conc_strong_bonus = bonus_malus.get("concentration_strong_bonus", 0.05)
+        if max(buy_conc, sell_conc) > conc_strong:
+            adjustment += conc_strong_bonus
+            adjustment_reasons.append(f"Concentration forte (>{conc_strong:.0%}): {conc_strong_bonus:+.0%}")
 
         # Bonus pour cohérence directionnelle (concentration + velocity alignées)
-        if buy_conc > sell_conc and velocity_ratio > 1.5:
-            adjustment += 0.03  # +3%
-            adjustment_reasons.append(f"Cohérence buy (conc={buy_conc:.0%}, vel={velocity_ratio:.2f}): +3%")
-        elif sell_conc > buy_conc and velocity_ratio < 0.7:
-            adjustment += 0.03  # +3%
-            adjustment_reasons.append(f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): +3%")
+        vel_buy_coh = bonus_malus.get("velocity_buy_coherent", 1.5)
+        vel_sell_coh = bonus_malus.get("velocity_sell_coherent", 0.7)
+        coh_bonus = bonus_malus.get("coherence_bonus", 0.03)
+        if buy_conc > sell_conc and velocity_ratio > vel_buy_coh:
+            adjustment += coh_bonus
+            adjustment_reasons.append(f"Cohérence buy (conc={buy_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}")
+        elif sell_conc > buy_conc and velocity_ratio < vel_sell_coh:
+            adjustment += coh_bonus
+            adjustment_reasons.append(f"Cohérence sell (conc={sell_conc:.0%}, vel={velocity_ratio:.2f}): {coh_bonus:+.0%}")
 
-        # Malus pour concentration faible (adapté USDJPY)
-        if max(buy_conc, sell_conc) < 0.25:
-            adjustment -= 0.05  # -5%
-            adjustment_reasons.append(f"Concentration faible (<25%): -5%")
+        # Malus pour concentration faible
+        conc_weak = bonus_malus.get("concentration_weak_threshold", 0.25)
+        conc_weak_malus = bonus_malus.get("concentration_weak_malus", -0.05)
+        if max(buy_conc, sell_conc) < conc_weak:
+            adjustment += conc_weak_malus
+            adjustment_reasons.append(f"Concentration faible (<{conc_weak:.0%}): {conc_weak_malus:+.0%}")
 
         # Malus pour velocity ratio extrême (possible anomalie)
-        if velocity_ratio > 2.5:
-            adjustment -= 0.02  # -2%
-            adjustment_reasons.append(f"Velocity ratio extrême ({velocity_ratio:.2f}): -2%")
+        vel_extreme = bonus_malus.get("velocity_extreme", 2.5)
+        vel_extreme_malus = bonus_malus.get("velocity_extreme_malus", -0.02)
+        if velocity_ratio > vel_extreme:
+            adjustment += vel_extreme_malus
+            adjustment_reasons.append(f"Velocity ratio extrême ({velocity_ratio:.2f}): {vel_extreme_malus:+.0%}")
 
         # ========================================================================
-        # 4️⃣ CALCUL FINAL
+        # 4️⃣ CALCUL FINAL - avec clamp depuis config
         # ========================================================================
         final_multiplier = base_multiplier + adjustment
 
-        # Clamp entre 0.5 et 1.5 (±50% max)
-        final_multiplier = max(0.5, min(1.5, final_multiplier))
+        # Clamp depuis config
+        clamp_cfg = self.config.get("multiplier_clamp", {})
+        min_mult = clamp_cfg.get("min", 0.5)
+        max_mult = clamp_cfg.get("max", 1.5)
+        final_multiplier = max(min_mult, min(max_mult, final_multiplier))
 
         adjustment_summary = (
             f"Base: {timing_quality}(×{base_multiplier:.2f}), "
@@ -164,21 +188,18 @@ class MomentumAnalyzerInstitutional:
         self.config = self._load_config(asset)
 
     def _load_config(self, asset: str) -> Dict[str, Any]:
-        """Charge config depuis momentum_institutional_config.json"""
+        """Charge config depuis config_trade_scalping.json"""
         import json
         from pathlib import Path
 
-        config_path = Path(__file__).parent.parent / "config" / "momentum_institutional_config.json"
+        config_path = Path(__file__).parent.parent / "config" / "strategy" / "config_trade_scalping.json"
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 full_config = json.load(f)
 
-            asset_config = full_config.get("assets", {}).get(asset)
-            if asset_config:
-                return asset_config
-            else:
-                return full_config.get("default_thresholds", {})
+            # Charger config momentum_institutional_config (unique pour USDJPY actuellement)
+            return full_config.get("momentum_institutional_config", {})
 
         except Exception as e:
             import logging
@@ -187,9 +208,10 @@ class MomentumAnalyzerInstitutional:
             )
             # Fallback universel
             return {
-                "candle_strength": {"body_ratio_multiplier": 18.0},
-                "volume_confirmation": {"volume_ratio_multiplier": 18.75},
-                "price_acceleration": {"move_pct_multiplier": 66.67},
+                "candle_strength": {"body_ratio_multiplier": 18.0, "last_3_candles_multiplier": 7.5},
+                "volume_confirmation": {"volume_ratio_multiplier": 18.75, "volume_momentum_multiplier": 20.0},
+                "price_acceleration": {"move_pct_multiplier": 66.67, "acceleration_multiplier": 10.0},
+                "mtf_alignment": {"bullish_threshold": 0.67, "bearish_threshold": 0.33},
                 "quality_levels": {"excellent": 65, "good": 50, "fair": 35, "poor": 0}
             }
 
@@ -330,7 +352,8 @@ class MomentumAnalyzerInstitutional:
         # 4. Force des 3 dernières bougies (0-5 pts)
         last_3 = recent.tail(3)
         last_3_strength = last_3["body_ratio"].mean()
-        last_3_score = min(5.0, last_3_strength * 7.5)
+        last_3_multiplier = candle_cfg.get("last_3_candles_multiplier", 7.5)
+        last_3_score = min(5.0, last_3_strength * last_3_multiplier)
 
         total_candle_score = (
             body_ratio_score + coherence_score + close_pos_score + last_3_score
@@ -393,7 +416,8 @@ class MomentumAnalyzerInstitutional:
         first_4_vol = last_8.iloc[:4][vol_col].mean()
         last_4_vol = last_8.iloc[4:][vol_col].mean()
         vol_acceleration = (last_4_vol / max(first_4_vol, 1.0)) - 1.0
-        vol_momentum_score = min(10.0, max(0.0, vol_acceleration * 20))
+        vol_momentum_mult = vol_cfg.get("volume_momentum_multiplier", 20.0)
+        vol_momentum_score = min(10.0, max(0.0, vol_acceleration * vol_momentum_mult))
 
         total_volume_score = volume_relative_score + vol_momentum_score
 
@@ -437,7 +461,8 @@ class MomentumAnalyzerInstitutional:
         first_6_move = abs(recent.iloc[:6]["price_change"].sum())
         last_6_move = abs(recent.iloc[6:]["price_change"].sum())
         acceleration_ratio = last_6_move / max(first_6_move, 1e-9)
-        accel_score = min(10.0, max(0.0, (acceleration_ratio - 1.0) * 10))
+        accel_mult = accel_cfg.get("acceleration_multiplier", 10.0)
+        accel_score = min(10.0, max(0.0, (acceleration_ratio - 1.0) * accel_mult))
 
         # 3. Régularité (0-5 pts)
         # Mouvement dans la même direction
@@ -481,9 +506,12 @@ class MomentumAnalyzerInstitutional:
                 return "NEUTRAL"
             recent = df.tail(n_candles)
             green = (recent["close"] > recent["open"]).sum()
-            if green >= n_candles * 0.67:
+            mtf_cfg = self.config.get("mtf_alignment", {})
+            bullish_threshold = mtf_cfg.get("bullish_threshold", 0.67)
+            bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
+            if green >= n_candles * bullish_threshold:
                 return "BULLISH"
-            elif green <= n_candles * 0.33:
+            elif green <= n_candles * bearish_threshold:
                 return "BEARISH"
             return "NEUTRAL"
 
@@ -660,6 +688,35 @@ class ScalpingStrategy(BaseStrategy):
             "details": {},
         }
 
+        # Charger config OrderFlow V6
+        of_config = self.strategy_config.get("orderflow_v6_config", {})
+        coherence_thresholds = of_config.get("coherence_thresholds", {
+            "strong": 0.75,
+            "moderate": 0.65,
+            "weak": 0.55
+        })
+        volume_classification = of_config.get("volume_ratio_classification", {
+            "spike": 1.8,
+            "elevated": 1.4,
+            "above_average": 1.15,
+            "normal": 0.85,
+            "moderate": 0.6
+        })
+        score_status = of_config.get("total_score_status", {
+            "strong_threshold": 28.0,
+            "moderate_threshold": 14.0,
+            "max_score": 50.0
+        })
+        absorption_ratios = of_config.get("absorption_ratios", {
+            "very_bullish": 0.72,
+            "bullish": 0.58,
+            "slightly_bullish": 0.52,
+            "neutral": 0.50,
+            "slightly_bearish": 0.48,
+            "bearish": 0.42,
+            "very_bearish": 0.28
+        })
+
         try:
             # ================================================================
             # 0. ANALYSE MULTI-TIMEFRAME (M1/M5/M15)
@@ -802,7 +859,7 @@ class ScalpingStrategy(BaseStrategy):
 
                     # ✅ FIX (03 DEC 2025): Seuils adaptés SCALPING M1 (ticks temps réel sur 60s)
                     # Delta fort cohérent → 15-25 pts
-                    if coherence >= 0.8:  # 8/10 bougies cohérentes
+                    if coherence >= coherence_thresholds["strong"]:  # Strong coherence (config)
                         if (
                             abs(delta_total) >= 50
                         ):  # ~28% déséquilibre (ex: 114 buy / 66 sell sur 180 ticks)
@@ -820,7 +877,7 @@ class ScalpingStrategy(BaseStrategy):
                         ):  # ~3% déséquilibre (ex: 92 buy / 88 sell)
                             delta_momentum_score = 15.0  # Moyen
                     # Delta modéré → 10-15 pts
-                    elif coherence >= 0.7:  # 7/10 bougies cohérentes
+                    elif coherence >= coherence_thresholds["moderate"]:  # Moderate coherence (config)
                         if abs(delta_total) >= 30:
                             delta_momentum_score = 15.0
                         elif abs(delta_total) >= 15:
@@ -828,7 +885,7 @@ class ScalpingStrategy(BaseStrategy):
                         elif abs(delta_total) >= 5:
                             delta_momentum_score = 10.0
                     # Delta faible cohérence → 5-10 pts
-                    elif coherence >= 0.6:
+                    elif coherence >= coherence_thresholds["weak"]:  # Weak coherence (config)
                         if abs(delta_total) >= 15:
                             delta_momentum_score = 10.0
                         else:
@@ -885,19 +942,19 @@ class ScalpingStrategy(BaseStrategy):
                 if poc_price is not None and isinstance(poc_price, (int, float)):
                     volume_details["poc"] = float(poc_price)
 
-                # Scoring Volume (seuils adaptés à la réalité du marché)
-                if volume_ratio >= 2.0:  # Spike significatif
+                # Scoring Volume (seuils depuis config)
+                if volume_ratio >= volume_classification["spike"]:  # Spike significatif
                     volume_confirmation_score = 15.0
                     volume_details["spike_detected"] = True
-                elif volume_ratio >= 1.5:  # Volume élevé
+                elif volume_ratio >= volume_classification["elevated"]:  # Volume élevé
                     volume_confirmation_score = 12.0
-                elif volume_ratio >= 1.2:  # Volume au-dessus moyenne
+                elif volume_ratio >= volume_classification["above_average"]:  # Volume au-dessus moyenne
                     volume_confirmation_score = 10.0
-                elif volume_ratio >= 0.8:  # Volume normal (±20% de la moyenne)
+                elif volume_ratio >= volume_classification["normal"]:  # Volume normal
                     volume_confirmation_score = 7.0
-                elif volume_ratio >= 0.5:  # Volume modéré
+                elif volume_ratio >= volume_classification["moderate"]:  # Volume modéré
                     volume_confirmation_score = 3.0
-                else:  # Volume très faible (< 50% moyenne)
+                else:  # Volume très faible
                     volume_confirmation_score = 0.0
 
             result["volume_confirmation_score"] = volume_confirmation_score
@@ -1034,10 +1091,10 @@ class ScalpingStrategy(BaseStrategy):
             "spike_detected": volume_details.get("spike_detected", False),
         }
 
-        # Déterminer status selon qualité du score
-        if total_score >= 30.0:  # 60% de 50 points
+        # Déterminer status selon qualité du score (depuis config)
+        if total_score >= score_status["strong_threshold"]:  # Strong status (config)
             status = "VALID"
-        elif total_score >= 15.0:  # 30% de 50 points
+        elif total_score >= score_status["moderate_threshold"]:  # Moderate status (config)
             status = "WEAK"
         else:
             status = "SUSPECT"
@@ -1134,24 +1191,24 @@ class ScalpingStrategy(BaseStrategy):
                 absorption_details["buy_ratio"] = buy_ratio
                 absorption_details["sell_ratio"] = sell_ratio
 
-                # ✅ CORRIGÉ (15 DEC 2025): NOUVEAUX SEUILS + BONUS
-                # Déterminer absorption
-                if buy_ratio >= 0.75:  # 75%+ achats → Fort bullish
+                # ✅ SEUILS DEPUIS CONFIG (absorption_ratios)
+                # Déterminer absorption basé sur buy_ratio
+                if buy_ratio >= absorption_ratios["very_bullish"]:  # Fort bullish
                     absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BULLISH"
-                elif buy_ratio >= 0.60:  # ✅ 60%+ achats (avant: 65%)
+                elif buy_ratio >= absorption_ratios["bullish"]:  # Bullish
                     absorption_score = 10.0
                     absorption_details["bias"] = "BULLISH"
-                elif buy_ratio >= 0.53:  # ✅ 53%+ achats (nouveau seuil léger bullish)
+                elif buy_ratio >= absorption_ratios["slightly_bullish"]:  # Légèrement bullish
                     absorption_score = 7.5
                     absorption_details["bias"] = "SLIGHTLY_BULLISH"
-                elif sell_ratio >= 0.75:  # 75%+ ventes → Fort bearish
+                elif buy_ratio <= absorption_ratios["very_bearish"]:  # Fort bearish (sell_ratio >= very_bullish)
                     absorption_score = 12.5
                     absorption_details["bias"] = "STRONG BEARISH"
-                elif sell_ratio >= 0.60:  # ✅ 60%+ ventes (avant: 65%)
+                elif buy_ratio <= absorption_ratios["bearish"]:  # Bearish (sell_ratio >= bullish)
                     absorption_score = 10.0
                     absorption_details["bias"] = "BEARISH"
-                elif sell_ratio >= 0.53:  # ✅ 53%+ ventes (nouveau seuil léger bearish)
+                elif buy_ratio <= absorption_ratios["slightly_bearish"]:  # Légèrement bearish (sell_ratio >= slightly_bullish)
                     absorption_score = 7.5
                     absorption_details["bias"] = "SLIGHTLY_BEARISH"
                 else:

@@ -188,6 +188,105 @@
     "triple_confirmation_bonus": true,
     "weak_footprint_score_th": 0.60
   },
+  "timing_optimizer_config": {
+    "description": "Configuration du Timing Optimizer (anciennement USDJPYTimingOptimizer)",
+    "concentration": {
+      "excellent": 0.50,
+      "good": 0.35,
+      "warning": 0.25,
+      "veto": 0.20
+    },
+    "velocity": {
+      "buy_dominant": 1.8,
+      "sell_dominant": 0.6,
+      "extreme": 3.0
+    },
+    "multipliers": {
+      "EXCELLENT": 1.20,
+      "GOOD": 1.10,
+      "FAIR": 1.00,
+      "POOR": 0.80,
+      "VETO": 0.50
+    },
+    "veto_conditions": {
+      "timing_score_threshold": 1.5,
+      "concentration_threshold": 0.20,
+      "velocity_ratio_extreme": 4.0,
+      "poor_score_threshold": 1.0
+    },
+    "bonuses_malus": {
+      "concentration_strong_threshold": 0.50,
+      "concentration_strong_bonus": 0.05,
+      "concentration_weak_threshold": 0.25,
+      "concentration_weak_malus": -0.05,
+      "velocity_buy_coherent": 1.5,
+      "velocity_sell_coherent": 0.7,
+      "coherence_bonus": 0.03,
+      "velocity_extreme": 2.5,
+      "velocity_extreme_malus": -0.02
+    },
+    "multiplier_clamp": {
+      "min": 0.5,
+      "max": 1.5
+    }
+  },
+  "momentum_institutional_config": {
+    "description": "Configuration du Momentum Institutionnel - Seuils adaptés USDJPY",
+    "candle_strength": {
+      "body_ratio_multiplier": 18.0,
+      "last_3_candles_multiplier": 7.5,
+      "coherence_weight": 10.0,
+      "close_position_weight": 5.0
+    },
+    "volume_confirmation": {
+      "volume_ratio_multiplier": 18.75,
+      "volume_momentum_multiplier": 20.0
+    },
+    "price_acceleration": {
+      "move_pct_multiplier": 66.67,
+      "acceleration_multiplier": 10.0,
+      "regularity_weight": 5.0
+    },
+    "mtf_alignment": {
+      "bullish_threshold": 0.67,
+      "bearish_threshold": 0.33
+    },
+    "quality_levels": {
+      "excellent": 65,
+      "good": 50,
+      "fair": 35,
+      "poor": 0
+    }
+  },
+  "orderflow_v6_config": {
+    "description": "Configuration OrderFlow V6 - Seuils de classification adaptés USDJPY",
+    "coherence_thresholds": {
+      "strong": 0.75,
+      "moderate": 0.65,
+      "weak": 0.55
+    },
+    "volume_ratio_classification": {
+      "spike": 1.8,
+      "elevated": 1.4,
+      "above_average": 1.15,
+      "normal": 0.85,
+      "moderate": 0.6
+    },
+    "total_score_status": {
+      "strong_threshold": 28.0,
+      "moderate_threshold": 14.0,
+      "max_score": 50.0
+    },
+    "absorption_ratios": {
+      "very_bullish": 0.72,
+      "bullish": 0.58,
+      "slightly_bullish": 0.52,
+      "neutral": 0.50,
+      "slightly_bearish": 0.48,
+      "bearish": 0.42,
+      "very_bearish": 0.28
+    }
+  },
   "logging": {
     "footprint_mode": "verbose"
   },
