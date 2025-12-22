@@ -1055,6 +1055,14 @@ class ScalpingStrategy(BaseStrategy):
                 "details": dict  # Détails complets pour debugging
             }
         """
+        # Charger config OrderFlow V6 pour les seuils de statut
+        of_config = self.strategy_config.get("orderflow_v6_config", {})
+        score_status = of_config.get("total_score_status", {
+            "strong_threshold": 28.0,
+            "moderate_threshold": 14.0,
+            "max_score": 50.0
+        })
+
         # Appeler la fonction d'analyse existante
         result = self._analyze_orderflow_v6(
             asset=asset,
