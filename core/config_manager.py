@@ -120,7 +120,7 @@ class ConfigManager:
 
     def load_asset_config(self, asset: str) -> Dict[str, Any]:
         """
-        Charge et met en cache la config d'un actif (EURUSD.json, GBPUSD.json, XAUUSD.json).
+        Charge et met en cache la config d'un actif (EURUSD.json, GBPUSD.json, USDJPY.json).
         Lecture directe du JSON sans passer par import_config() pour éviter la validation
         stricte (compatible avec l'ancien comportement).
         """
@@ -182,7 +182,7 @@ class ConfigManager:
         Recharge :
         - prod_config.json (configuration principale)
         - Configs modulaires (phase_observer, telegram)
-        - Cache des assets (EURUSD, GBPUSD, XAUUSD)
+        - Cache des assets (EURUSD, GBPUSD, USDJPY)
         - Configs des stratégies (scalping, liquidity)
 
         Usage : Appelez cette méthode après modification manuelle des fichiers JSON.

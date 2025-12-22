@@ -1207,13 +1207,13 @@ class MT5Connector:
             Par défaut:
             - Forex 5 digits -> 1 pip = 10 points
             - Forex 3 digits -> 1 pip = 10 points
-            - Métaux (ex XAUUSD) -> override via config sinon heuristique: 1 pip = 10 points si tick=0.01 et pip=0.10
+            - Métaux (ex USDJPY) -> override via config sinon heuristique: 1 pip = 10 points si tick=0.01 et pip=0.10
             """
             point = float(symbol_info.point)
             # Override par config si dispo
             sym = symbol_info.name
             overrides = (getattr(self, "symbol_overrides", {}) or {}).get(sym, {})
-            pip_size = overrides.get("pip_size")  # ex: 0.10 pour XAUUSD
+            pip_size = overrides.get("pip_size")  # ex: 0.10 pour USDJPY
             if pip_size is None:
                 # Heuristiques propres: ajuste selon digits / tick
                 if "XAU" in sym and abs(point - 0.01) < 1e-12:
@@ -1949,7 +1949,7 @@ class MT5Connector:
         avec sélection automatique dans la Market Watch et fallback si MT5 ne fournit pas tout.
 
         Args:
-            symbol (str): Le symbole MT5 (ex: "EURUSD", "XAUUSD").
+            symbol (str): Le symbole MT5 (ex: "EURUSD", "USDJPY").
 
         Returns:
             SymbolInfoFallback ou MetaTrader5.SymbolInfo
@@ -2027,7 +2027,7 @@ class MT5Connector:
                 tick_value = getattr(info, "trade_tick_value", None)
                 if not tick_value or tick_value <= 0:
                     # Fallback calculé : tick_value ≈ (tick_size / point) * (point_value * contract_size)
-                    # Pour XAUUSD: tick_value = 1.0 (1 tick = 0.01$ = 1$ par lot standard)
+                    # Pour USDJPY: tick_value = 1.0 (1 tick = 0.01$ = 1$ par lot standard)
                     # Pour EURUSD: tick_value = 0.1 (1 pip = 10$ par lot standard)
                     tick_value = contract_size * point_val
                     self.logger.warning(

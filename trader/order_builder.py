@@ -753,7 +753,7 @@ def _prepare_order_sequential(self, decision_package: dict) -> dict:
 
         # === Cascade SIMPLIFIÉE (4 sources au lieu de 12) ===
         # 1. Broker account (priorité)
-        # 2. Asset override (ex: XAUUSD.json)
+        # 2. Asset override (ex: USDJPY.json)
         # 3. Global config (prod_config.json)
         # 4. Fallback documenté (0.30%)
 

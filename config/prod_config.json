@@ -77,7 +77,8 @@
         },
         "strategy_asset_mapping": {
           "scalping": [
-            "XAUUSD"
+            "USDJPY",
+            "USDJPY"
           ],
           "liquidity": [
             "EURUSD",
@@ -94,7 +95,8 @@
     "global_allowed_symbols": [
       "EURUSD",
       "GBPUSD",
-      "XAUUSD"
+      "USDJPY",
+      "USDJPY"
     ],
     "max_allowed_lot_size": 50.0
   },
@@ -167,7 +169,7 @@
       "avg_volume_lookback": 20,
       "max_volume_multiplier_from_avg": 5.0,
       "max_absolute_volume_for_asset": {
-        "XAUUSD": 1.1
+        "USDJPY": 1.1
       },
       "execution": {
         "allow_demo_send": true
@@ -180,7 +182,7 @@
       "min_risk_pct": 0.01,
       "max_risk_pct": 5.0,
       "per_asset_min_dollar_risk_per_lot_fallback": {
-        "XAUUSD": 25.0
+        "USDJPY": 25.0
       }
     },
     "news_settings": {

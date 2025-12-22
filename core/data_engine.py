@@ -46,7 +46,7 @@ class DataEngine(threading.Thread):
         Initialise le DataEngine.
 
         Args:
-            symbols: Liste des symboles à analyser (ex: ['XAUUSD', 'EURUSD'])
+            symbols: Liste des symboles à analyser (ex: ['USDJPY', 'EURUSD'])
             mt5_connector: Instance du connecteur MT5 pour récupérer les ticks
             market_analyzer: Instance du MarketAnalyzer pour analyser footprint
             update_interval_seconds: Intervalle entre chaque cycle (défaut: 2.5s) ⚡ MODE ULTRA-RAPIDE
@@ -124,7 +124,7 @@ class DataEngine(threading.Thread):
         Analyse le footprint pour un symbole et met à jour le cache.
 
         Args:
-            symbol: Symbole à analyser (ex: XAUUSD)
+            symbol: Symbole à analyser (ex: USDJPY)
         """
         analysis_start = time.time()
 

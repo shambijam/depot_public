@@ -71,7 +71,7 @@ class DecisionPipeline:
 
         # ✅ Cache local des configs assets
         self.asset_configs: Dict[str, Dict[str, Any]] = {}
-        for asset in ["EURUSD", "GBPUSD", "XAUUSD"]:
+        for asset in ["EURUSD", "GBPUSD", "USDJPY"]:
             try:
                 cfg = self.config_manager.load_asset_config(asset)
                 self.asset_configs[asset] = cfg
@@ -182,7 +182,7 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         Orchestration décisionnelle (Banque Privée)
-        - ScalpingStrategy -> XAUUSD
+        - ScalpingStrategy -> USDJPY
         - LiquidityStrategy -> EURUSD, GBPUSD
         - 1 trade max par cycle (on prend le premier valide)
         """
@@ -317,8 +317,8 @@ class DecisionPipeline:
                 if not dec.get("asset") or str(dec.get("asset")).upper() == "UNKNOWN":
                     dec["asset"] = fallback_asset
 
-            # --- SCALPING (XAUUSD only) ---
-            if "XAUUSD" in signals:
+            # --- SCALPING (USDJPY only) ---
+            if "USDJPY" in signals:
                 # --- PATCH B: PhaseObserver conditionnel pour scalping ---
                 inject_phase = (
                     self.phase_observer
@@ -327,7 +327,7 @@ class DecisionPipeline:
                 )
                 scalping = self.strategy_manager.get_strategy_instance(
                     "scalping",
-                    per_asset="XAUUSD",
+                    per_asset="USDJPY",
                     inject={
                         "mt5_connector": getattr(self, "mt5_connector", None),
                         "phase_observer": inject_phase,  # <-- conditionnel
@@ -341,7 +341,7 @@ class DecisionPipeline:
                 if scalping:
                     try:
                         dec = scalping.evaluate_entry(
-                            "XAUUSD", analyzed_context, signals["XAUUSD"]
+                            "USDJPY", analyzed_context, signals["USDJPY"]
                         )
                         if isinstance(dec, dict):
 
@@ -385,7 +385,7 @@ class DecisionPipeline:
                                     return False
 
                                 if basket_id and _ctx_has_basket(
-                                    analyzed_context, "XAUUSD", basket_id
+                                    analyzed_context, "USDJPY", basket_id
                                 ):
                                     print(
                                         f"⛔ [SCALPING] burst ignoré: panier déjà ouvert ({basket_id})"
@@ -394,7 +394,7 @@ class DecisionPipeline:
                                     # On pousse UNE décision maître uniquement
                                     master = sublist[0].copy()
                                     master["strategy_type"] = "scalping"
-                                    _ensure_asset(master, "XAUUSD")
+                                    _ensure_asset(master, "USDJPY")
                                     master.setdefault("execution_status", "ready")
                                     master.setdefault("rule_name", "burst_scalping")
                                     master["is_burst_trade"] = True
@@ -425,7 +425,7 @@ class DecisionPipeline:
                             # ====== CAS SCALPING NORMAL ======
                             else:
                                 dec["strategy_type"] = "scalping"
-                                _ensure_asset(dec, "XAUUSD")
+                                _ensure_asset(dec, "USDJPY")
                                 dec.setdefault("execution_status", "ready")
                                 if _is_valid(dec):
                                     scalping_decisions.append(dec)
@@ -1065,7 +1065,7 @@ class DecisionPipeline:
             return {}
 
         # --- Priorité 1 : Scalping via Pipeline (phase-free) ---
-        if "XAUUSD" in signals:
+        if "USDJPY" in signals:
             try:
                 if getattr(self, "scalping_pipeline", None) is None:
                     # Fallback ultra-sécurisé au cas où l'init a échoué
@@ -1078,14 +1078,14 @@ class DecisionPipeline:
                     )
 
                 decision = self.scalping_pipeline.run(
-                    asset="XAUUSD", context=context, current_config=current_config
+                    asset="USDJPY", context=context, current_config=current_config
                 )
                 if isinstance(decision, dict) and decision:
                     trade_decision = decision
                     self.logger.info(
-                        "[CORE] Signal scalping (pipeline) retenu sur XAUUSD"
+                        "[CORE] Signal scalping (pipeline) retenu sur USDJPY"
                     )
-                    print("✅ [CORE] Décision scalping (pipeline) détectée sur XAUUSD")
+                    print("✅ [CORE] Décision scalping (pipeline) détectée sur USDJPY")
             except Exception as e:
                 self.logger.error(f"[CORE] Erreur ScalpingPipeline.run: {e}")
 

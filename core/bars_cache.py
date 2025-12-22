@@ -70,7 +70,7 @@ class BarsCache:
            → Retourner historique (N-1) + courante (1)
 
         Args:
-            symbol: Symbole (ex: XAUUSD)
+            symbol: Symbole (ex: USDJPY)
             timeframe: Timeframe (ex: M1, M5)
             count: Nombre barres demandées
             mt5_connector: Instance MT5Connector

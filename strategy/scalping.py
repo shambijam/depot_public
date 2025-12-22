@@ -13,9 +13,9 @@ from phase_observer.vwap.config import (
 )  # ✅ AJOUTÉ: Poids VWAP dynamiques
 
 
-class XAUUSDTimingOptimizer:
+class USDJPYTimingOptimizer:
     """
-    ⏱️ Optimiseur spécifique pour XAUUSD Scalping Timing Analyzer
+    ⏱️ Optimiseur spécifique pour USDJPY Scalping Timing Analyzer
 
     Date: 18 Décembre 2025
     Objectif: Transformer le timing analyzer en filtre décisif via système multiplicateur + veto
@@ -387,7 +387,7 @@ class MomentumAnalyzerInstitutional:
         avg_price = recent["close"].mean()
         move_pct = abs(total_move) / max(avg_price, 1.0) * 100  # En %
 
-        # Pour XAUUSD: 0.1% sur 12 bougies = bon
+        # Pour USDJPY: 0.1% sur 12 bougies = bon
         move_score = min(10.0, move_pct * 100)  # 0.1% = 10pts
 
         # 2. Accélération (0-10 pts)
@@ -532,8 +532,8 @@ class ScalpingStrategy(BaseStrategy):
         # Scalping utilise FootprintAnalyzer qui importe les 7 fonctions standalone
         # Les 8 méthodes de classe Detectors sont réservées à LiquidityStrategy
 
-        # ⏱️ Timing Optimizer pour XAUUSD (18 Dec 2025)
-        self.xauusd_timing_optimizer = XAUUSDTimingOptimizer()
+        # ⏱️ Timing Optimizer pour USDJPY (18 Dec 2025)
+        self.USDJPY_timing_optimizer = USDJPYTimingOptimizer()
 
         # 📊 Momentum Analyzer Institutionnel (18 Dec 2025)
         self.momentum_analyzer = MomentumAnalyzerInstitutional()
@@ -1260,16 +1260,16 @@ class ScalpingStrategy(BaseStrategy):
             base_score = absorption_score + clustering_score + rejection_score
 
             # ========================================================================
-            # ⏱️ SYSTÈME MULTIPLICATEUR TIMING (XAUUSD uniquement)
+            # ⏱️ SYSTÈME MULTIPLICATEUR TIMING (USDJPY uniquement)
             # ========================================================================
             # Problème résolu: Impact linéaire trop faible (avant: +1.9pts = +6%)
             # Nouveau: Système multiplicateur avec veto (impact: ±15-25%)
             timing_impact = None
             timing_decision = "NO_TIMING"  # Par défaut
 
-            if asset == "XAUUSD" and timing_metrics:
+            if asset == "USDJPY" and timing_metrics:
                 # Calculer impact timing via optimizer
-                timing_impact = self.xauusd_timing_optimizer.calculate_impact(timing_metrics)
+                timing_impact = self.USDJPY_timing_optimizer.calculate_impact(timing_metrics)
 
                 # Appliquer multiplicateur
                 multiplier = timing_impact.get("multiplier", 1.0)
@@ -1353,7 +1353,7 @@ class ScalpingStrategy(BaseStrategy):
         ✅ CORRIGÉ (19 DIC 2025): Normalisation des scores pour échelle cohérente 0-100pts
         ⏱️ MODIFIÉ (17 DEC 2025): Ajout Timing Analyzer au Footprint (25→30 pts max)
         📊 MODIFIÉ (18 DEC 2025): Ajout Momentum Institutionnel - NOUVEAUX POIDS
-        🔒 RESTRICTION (18 DEC 2025): XAUUSD UNIQUEMENT
+        🔒 RESTRICTION (18 DEC 2025): USDJPY UNIQUEMENT
 
         SCORES BRUTS :
         - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
@@ -1369,8 +1369,8 @@ class ScalpingStrategy(BaseStrategy):
         - TOTAL = OF_norm + FP_norm + MOM_norm + VWAP_norm (0-100pts)
         """
 
-        # 🔒 RESTRICTION: Ce rapport détaillé est UNIQUEMENT pour XAUUSD
-        if asset != "XAUUSD":
+        # 🔒 RESTRICTION: Ce rapport détaillé est UNIQUEMENT pour USDJPY
+        if asset != "USDJPY":
             return
 
         try:
@@ -2124,12 +2124,12 @@ class ScalpingStrategy(BaseStrategy):
 
             # ================================================================
             # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M5/M15)
-            # 🔒 RESTRICTION (18 DEC 2025): XAUUSD UNIQUEMENT
+            # 🔒 RESTRICTION (18 DEC 2025): USDJPY UNIQUEMENT
             # ================================================================
-            # ⚠️ OrderFlow V6 + Footprint V6 + VWAP = XAUUSD SEULEMENT
-            if asset != "XAUUSD":
+            # ⚠️ OrderFlow V6 + Footprint V6 + VWAP = USDJPY SEULEMENT
+            if asset != "USDJPY":
                 self.logger.debug(
-                    f"[{asset}] OrderFlow V6 analysis skipped (XAUUSD only)"
+                    f"[{asset}] OrderFlow V6 analysis skipped (USDJPY only)"
                 )
                 return {}  # Pas d'analyse pour les autres symboles
 

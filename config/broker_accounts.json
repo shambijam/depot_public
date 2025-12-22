@@ -12,7 +12,7 @@
             "allowed_symbols": [
                 "EURUSD",
                 "GBPUSD",
-                "XAUUSD"
+                "USDJPY"
             ],
             "account_type": "STANDARD",
             "trade_settings": {
@@ -46,7 +46,7 @@
             "lot_step": 0.01,
             "spread_points": 20
         },
-        "XAUUSD": {
+        "USDJPY": {
             "enabled": true,
             "digits": 2,
             "point": 0.01,

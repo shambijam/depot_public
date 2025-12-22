@@ -525,7 +525,7 @@ def run_single_pipeline_cycle(
       - MarketAnalyzer (PhaseObserver + PatternEngine) → annotated_df + latest
       - Analyses d'entrée pour la fusion: Footprint M1 (ticks bougie) + Orderflow v5
       - Signals consolidés par actif
-      - FusionManager → décisions scalping (XAUUSD uniquement)
+      - FusionManager → décisions scalping (USDJPY uniquement)
       - Fast-lane d'exécution si décision Fusion valide (avec gardes panier/slippage)
       - decision_pipeline pour le reste (ex: Liquidity), mais scalping filtré Fusion-only
       - SLTP dynamique (trailing-only pour scalping), maintenance périodique
@@ -550,7 +550,7 @@ def run_single_pipeline_cycle(
     # === Moteurs d'analyse ===
     market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
 
-    # === FusionManager requis pour scalping XAUUSD ===
+    # === FusionManager requis pour scalping USDJPY ===
     try:
         from phase_observer.fusion_manager import FusionManager
 
@@ -610,7 +610,7 @@ def run_single_pipeline_cycle(
             ) or {}
 
             # --- Seuils depuis conf (avec défauts prudents) ---
-            sym_spread_max = {"EURUSD": 12.0, "GBPUSD": 18.0, "XAUUSD": 40.0}.get(
+            sym_spread_max = {"EURUSD": 12.0, "GBPUSD": 18.0, "USDJPY": 40.0}.get(
                 str(sym).upper(), 999.0
             )
 
@@ -1031,7 +1031,7 @@ def run_single_pipeline_cycle(
         LOG_FUSION_ONLY: bool = True
         REQUIRE_FUSION_MGR: bool = True
         REQUIRE_FUSION_MGR: bool = False  # DEBUG: autorise _quick_vote_fusion si Fusion reste en HOLD
-        FUSION_ASSETS = {"XAUUSD"}
+        FUSION_ASSETS = {"USDJPY"}
 
         def _fusion_applies(asset: str) -> bool:
             return asset.upper() in FUSION_ASSETS
@@ -1066,7 +1066,7 @@ def run_single_pipeline_cycle(
             except Exception:
                 s_burst = None
             try:
-                xa = config_manager.load_asset_config("XAUUSD") or {}
+                xa = config_manager.load_asset_config("USDJPY") or {}
             except Exception:
                 xa = {}
             xa_entry = _dig(
@@ -1085,7 +1085,7 @@ def run_single_pipeline_cycle(
             )
             xa_legacy = _dig(xa, ["overrides", "scalping", "burst", "burst_size"])
             logger.critical(
-                f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | XAUUSD.entry={xa_entry} | XAUUSD.override={xa_override} | XAUUSD.legacy={xa_legacy}"
+                f"[CFG@BOOT] burst_size global={g_burst} | strategy={s_burst} | USDJPY.entry={xa_entry} | USDJPY.override={xa_override} | USDJPY.legacy={xa_legacy}"
             )
 
         active_mt5_account_details = config_manager.get_mt5_account_credentials(
@@ -1108,14 +1108,14 @@ def run_single_pipeline_cycle(
             else all_symbols
         )
 
-        # Hard-gate: FusionManager requis pour XAUUSD
+        # Hard-gate: FusionManager requis pour USDJPY
         if REQUIRE_FUSION_MGR and (_fusion_mgr is None):
-            if "XAUUSD" in {a.upper() for a in tradeable_assets}:
+            if "USDJPY" in {a.upper() for a in tradeable_assets}:
                 logger.critical(
-                    "[FUSION] FusionManager requis pour le scalping XAUUSD — XAUUSD retiré du cycle (aucun fallback)."
+                    "[FUSION] FusionManager requis pour le scalping USDJPY — USDJPY retiré du cycle (aucun fallback)."
                 )
                 tradeable_assets = [
-                    a for a in tradeable_assets if a.upper() != "XAUUSD"
+                    a for a in tradeable_assets if a.upper() != "USDJPY"
                 ]
 
         # ✅ PHASE 1: Filtrage symboles exclus (pour LIQUIDITY Thread)
@@ -1177,12 +1177,12 @@ def run_single_pipeline_cycle(
                 ).copy()
 
                 # 🎯 Récupération des ticks MT5 pour footprint M1
-                # 🔧 FIX (20 DEC 2025): Récupérer ticks UNIQUEMENT pour XAUUSD (scalping)
+                # 🔧 FIX (20 DEC 2025): Récupérer ticks UNIQUEMENT pour USDJPY (scalping)
                 # EURUSD/GBPUSD utilisent la stratégie liquidité (pas de footprint)
                 ticks_df = None
 
-                # ✅ FILTRE: Ticks uniquement pour XAUUSD (stratégie scalping)
-                if asset.upper() == "XAUUSD":
+                # ✅ FILTRE: Ticks uniquement pour USDJPY (stratégie scalping)
+                if asset.upper() == "USDJPY":
                     logger.info(f"[TICKS][DEBUG] Tentative récupération ticks pour {asset}...")
                     try:
                         # Identifier la dernière bougie M1 (en cours)
@@ -1537,7 +1537,7 @@ def run_single_pipeline_cycle(
                     annotated_rates_df, symbol_info_mt5
                 )
 
-                # === Décision Fusion (XAUUSD seulement) ===
+                # === Décision Fusion (USDJPY seulement) ===
                 try:
                     if _fusion_applies(asset):
                         if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
@@ -1778,8 +1778,8 @@ def run_single_pipeline_cycle(
 
         for asset, sig in all_assets_trading_signals.items():
             try:
-                # Fusion uniquement pour XAUUSD
-                if asset.upper() != "XAUUSD":
+                # Fusion uniquement pour USDJPY
+                if asset.upper() != "USDJPY":
                     print(f"   {asset:<7} → n/a (fusion off)")
                     continue
 
@@ -1892,10 +1892,10 @@ def run_single_pipeline_cycle(
             else:
                 print(f"   {asset:<7} → {snap_line}")
 
-        # === GATECHECK XAUUSD (diagnostic) ===
+        # === GATECHECK USDJPY (diagnostic) ===
         try:
 
-            sig = (all_assets_trading_signals or {}).get("XAUUSD", {})
+            sig = (all_assets_trading_signals or {}).get("USDJPY", {})
             if sig:
                 # helpers
                 def _dig(d, path, default=None):
@@ -1939,7 +1939,7 @@ def run_single_pipeline_cycle(
                 spread = sig.get("current_spread_points", float("nan"))
 
                 # seuils depuis conf (priorité: asset overrides -> strategy scalping -> fallback)
-                xcfg = config_manager.load_asset_config("XAUUSD") or {}
+                xcfg = config_manager.load_asset_config("USDJPY") or {}
                 scalping_cfg = strategy_manager.get_strategy_config("scalping") or {}
 
                 # Footprint M1 (depuis config_trade_scalping.json)
@@ -2086,9 +2086,9 @@ def run_single_pipeline_cycle(
                 # ⚠️ DÉSACTIVÉ: Ce diagnostic bloquait les trades car il ne passait pas le VWAP
                 # try:
                 #     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                #         _syminfo = mt5_connector.get_symbol_info("XAUUSD")
+                #         _syminfo = mt5_connector.get_symbol_info("USDJPY")
                 #         of_i, fp_i, trig_i, strat_cfg_i, ctx_i = _mk_fusion_inputs(
-                #             sig, latest, _syminfo, mt5_connector, "XAUUSD"
+                #             sig, latest, _syminfo, mt5_connector, "USDJPY"
                 #         )
                 #         fdec_diag = _fusion_mgr.fuse(
                 #             orderflow=of_i,
@@ -2123,11 +2123,11 @@ def run_single_pipeline_cycle(
                     pass
 
                 if blocks:
-                    print("[BLOCKERS][XAUUSD] " + " | ".join(blocks))
+                    print("[BLOCKERS][USDJPY] " + " | ".join(blocks))
                 else:
-                    print("[BLOCKERS][XAUUSD] none")
+                    print("[BLOCKERS][USDJPY] none")
         except Exception as _e:
-            logger.debug(f"[GATECHECK][XAUUSD] skip: {_e}")
+            logger.debug(f"[GATECHECK][USDJPY] skip: {_e}")
 
         # === Contexte global ===
         global_context = _build_global_context(
@@ -2147,7 +2147,7 @@ def run_single_pipeline_cycle(
         # === FAST-LANE (exécuter immédiatement la meilleure décision Fusion valide) ===
         try:
             # ✅ FIX Bug #2: Filtrer par confidence minimum (respecte entry_threshold configuré)
-            # Lecture du seuil configuré (ex: entry_threshold: 0.70 dans XAUUSD.json)
+            # Lecture du seuil configuré (ex: entry_threshold: 0.70 dans USDJPY.json)
             # Si pas configuré, utilise seuil MODERATE par défaut (0.70)
             filtered_fusion_decisions = []
             for fd in fusion_scalping_decisions:
@@ -2289,7 +2289,7 @@ def run_single_pipeline_cycle(
                                     aconf = {}
                                 if prefer_asset:
                                     reads = [
-                                        # 1. Asset override (XAUUSD.json)
+                                        # 1. Asset override (USDJPY.json)
                                         _dig(
                                             aconf,
                                             [
@@ -2665,7 +2665,7 @@ def run_single_pipeline_cycle(
             )
             print("=" * 60 + "\n")
 
-        # === Filtre scalping: FUSION-ONLY + XAUUSD + fusion_data valide ===
+        # === Filtre scalping: FUSION-ONLY + USDJPY + fusion_data valide ===
         _all_scalping = decision_package.get("scalping_decisions") or []
         for d in _all_scalping:
             logger.info(f"[FILTER_DEBUG] Decision: rule={d.get('rule_name')} asset={d.get('asset')} has_fusion_data={bool(d.get('fusion_data'))} fused_conf={d.get('fusion_data', {}).get('fused_confidence', 0.0)}")
@@ -2674,7 +2674,7 @@ def run_single_pipeline_cycle(
             d
             for d in _all_scalping
             if str(d.get("rule_name", "")).lower() in ("fusion_scalping", "burst_scalping")
-            and str(d.get("asset", "")).upper() == "XAUUSD"
+            and str(d.get("asset", "")).upper() == "USDJPY"
             # ✅ BLOQUEUR CRITIQUE: Rejeter si fusion_data vide (pattern désactivé)
             and d.get("fusion_data")  # fusion_data doit exister et ne pas être vide
             and d.get("fusion_data", {}).get("fused_confidence", 0.0) > 0.0  # score > 0%
@@ -2685,12 +2685,12 @@ def run_single_pipeline_cycle(
             try:
                 for asset, sig in all_assets_trading_signals.items():
                     # ✅ FIX (20 DEC 2025): EURUSD/GBPUSD utilisent stratégie liquidité (pas fusion)
-                    if asset.upper() != "XAUUSD":
+                    if asset.upper() != "USDJPY":
                         # Ne PAS logger "fusion_off" - c'est NORMAL pour liquidité
                         logger.debug(f"[WHY_NO_TRADE][{asset}] Stratégie liquidité - pas de diagnostic fusion")
                         continue
 
-                    # Diagnostic fusion UNIQUEMENT pour XAUUSD
+                    # Diagnostic fusion UNIQUEMENT pour USDJPY
                     if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
                         _latest = sig.get("__latest__") or {}
 
@@ -2708,10 +2708,10 @@ def run_single_pipeline_cycle(
                         fdec_diag = {"ok": False, "reason": "fusion_manager_missing"}
 
                     if fdec_diag and fdec_diag.get("ok"):
-                        logger.info(f"[WHY_NO_TRADE][XAUUSD] fusion_ok")
+                        logger.info(f"[WHY_NO_TRADE][USDJPY] fusion_ok")
                     else:
                         logger.info(
-                            f"[WHY_NO_TRADE][XAUUSD] hold={(fdec_diag or {}).get('signal_type','WAIT_CONFIRMATION')}"
+                            f"[WHY_NO_TRADE][USDJPY] hold={(fdec_diag or {}).get('signal_type','WAIT_CONFIRMATION')}"
                         )
 
             except Exception as _e:
@@ -3196,7 +3196,7 @@ def scalping_fast_thread(
     Thread dédié au SCALPING - Cycle rapide 10 secondes.
 
     Responsabilités:
-    - Analyse M1 (XAUUSD uniquement)
+    - Analyse M1 (USDJPY uniquement)
     - PhaseObserver → global_context (partagé avec liquidity)
     - FusionManager → Signaux scalping
     - monitor_burst_baskets() → Fermeture +15 pips
@@ -3249,14 +3249,14 @@ def scalping_fast_thread(
             # 95% du temps: récupère 1 barre seulement (bougie courante)
             # Recharge complète toutes les 60s seulement
             rates_df = bars_cache.get_or_fetch(
-                symbol="XAUUSD",
+                symbol="USDJPY",
                 timeframe="M1",
                 count=50,  # ✅ AJUSTÉ: 30→50 (minimum requis pour PhaseObserver volume_zscore)
                 mt5_connector=mt5_connector,
                 ttl_seconds=60.0,
             )
             if rates_df is None or rates_df.empty:
-                logger.warning("[SCALPING_THREAD] Données XAUUSD indisponibles")
+                logger.warning("[SCALPING_THREAD] Données USDJPY indisponibles")
                 time.sleep(cycle_interval)
                 continue
 
@@ -3268,11 +3268,11 @@ def scalping_fast_thread(
             market_analyzer = MarketAnalyzer(config_manager, logger)
 
             # ✅ OPTIMISATION: Lire footprint depuis CACHE au lieu de le calculer
-            cached_footprint = footprint_cache.get("XAUUSD", max_age_seconds=15.0)
+            cached_footprint = footprint_cache.get("USDJPY", max_age_seconds=15.0)
 
             if cached_footprint:
                 # Cache HIT → Analyse ultra-rapide (sans calcul footprint)
-                cache_age = footprint_cache.get_age("XAUUSD")
+                cache_age = footprint_cache.get_age("USDJPY")
                 logger.debug(
                     f"⚡ [SCALPING_THREAD] CACHE HIT | age={cache_age:.1f}s | "
                     f"ticks={cached_footprint.get('footprint_summary', {}).get('tick_count', 0)}"
@@ -3282,7 +3282,7 @@ def scalping_fast_thread(
                 # Mais on passe le footprint_summary depuis le cache
                 market_results = market_analyzer.analyze(
                     rates_df,
-                    "XAUUSD",
+                    "USDJPY",
                     ticks=None,
                     footprint_summary=cached_footprint.get('footprint_summary', {})
                 )
@@ -3330,7 +3330,7 @@ def scalping_fast_thread(
 
                         # Créer analyseur VWAP et analyser
                         scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                        vwap_analyzer = create_vwap_analyzer("XAUUSD", scalping_config)
+                        vwap_analyzer = create_vwap_analyzer("USDJPY", scalping_config)
                         vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
                         vwap_result = vwap_analysis.to_dict()
 
@@ -3376,7 +3376,7 @@ def scalping_fast_thread(
 
                 try:
                     ticks_df = mt5_connector.get_ticks_for_candle(
-                        symbol="XAUUSD",
+                        symbol="USDJPY",
                         start_ts=candle_start,
                         end_ts=candle_end
                     )
@@ -3388,7 +3388,7 @@ def scalping_fast_thread(
                 # ✅ PAS besoin d'ajouter bougie - rates_df.iloc[-1] est déjà la bougie courante
                 # (get_rates from_pos=0 retourne jusqu'à maintenant, incluant bougie incomplète)
 
-                market_results = market_analyzer.analyze(rates_df, "XAUUSD", ticks=ticks_df)  # ✅ Avec ticks
+                market_results = market_analyzer.analyze(rates_df, "USDJPY", ticks=ticks_df)  # ✅ Avec ticks
                 market_results['_cache_hit'] = False
 
                 # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE MISS aussi (sinon vwap_score = 0)
@@ -3427,7 +3427,7 @@ def scalping_fast_thread(
 
                         # Créer analyseur VWAP et analyser
                         scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                        vwap_analyzer = create_vwap_analyzer("XAUUSD", scalping_config)
+                        vwap_analyzer = create_vwap_analyzer("USDJPY", scalping_config)
                         vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
                         vwap_result = vwap_analysis.to_dict()
 
@@ -3463,7 +3463,7 @@ def scalping_fast_thread(
 
             # Stocker dans global_context (avec lock)
             with context_lock:
-                global_context["XAUUSD"] = market_results
+                global_context["USDJPY"] = market_results
 
             # ⚡ OPTION 1: PRÉ-CALCUL — Mise à jour squelette si config changée
             try:
@@ -3504,7 +3504,7 @@ def scalping_fast_thread(
                     # ⚡ SQUELETTE PRÉ-CALCULÉ (parties statiques)
                     trade_decision_skeleton = {
                         "static": {
-                            "symbol": "XAUUSD",
+                            "symbol": "USDJPY",
                             "rule_name": "burst_scalping",
                             "burst_size": resolved_burst,
                             "burst_enabled": True,
@@ -3557,8 +3557,8 @@ def scalping_fast_thread(
 
                 # ✅ Récupérer M5 et M15 pour MTF alignment
                 try:
-                    df_m5 = mt5_connector.get_rates('XAUUSD', 'M5', 6)
-                    df_m15 = mt5_connector.get_rates('XAUUSD', 'M15', 4)
+                    df_m5 = mt5_connector.get_rates('USDJPY', 'M5', 6)
+                    df_m15 = mt5_connector.get_rates('USDJPY', 'M15', 4)
                 except Exception as e:
                     logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M5/M15: {e}")
                     df_m5 = None
@@ -3568,7 +3568,7 @@ def scalping_fast_thread(
                 try:
                     # OrderFlow: Utiliser calculate_orderflow_v6_standalone() (format FusionManager)
                     orderflow = scalping_strategy.calculate_orderflow_v6_standalone(
-                        asset='XAUUSD',
+                        asset='USDJPY',
                         df_m1=rates_df,
                         df_m5=df_m5,
                         df_m15=df_m15,
@@ -3577,7 +3577,7 @@ def scalping_fast_thread(
 
                     # Footprint: Appeler _analyze_footprint_v6() et convertir au format FusionManager
                     footprint_raw = scalping_strategy._analyze_footprint_v6(
-                        asset='XAUUSD',
+                        asset='USDJPY',
                         df_m1=rates_df,
                         asset_signals=asset_signals
                     )
@@ -3602,7 +3602,7 @@ def scalping_fast_thread(
                     footprint = {}
 
                 ctx = {
-                    "asset": "XAUUSD",
+                    "asset": "USDJPY",
                     "phase": market_results.get("phase", {}),
                     "volatility_pips": market_results.get("volatility_pips", 0.0),
                 }
@@ -3635,7 +3635,7 @@ def scalping_fast_thread(
                         ctx["phase_observer_regime"] = str(regime)
 
                         logger.info(
-                            f"[RANGE_CONTEXT][RUN_BOT] XAUUSD | regime={regime} | pos={float(range_pos):.0%} | "
+                            f"[RANGE_CONTEXT][RUN_BOT] USDJPY | regime={regime} | pos={float(range_pos):.0%} | "
                             f"upper={bool(in_upper)} | lower={bool(in_lower)}"
                         )
                     except Exception as e:
@@ -3722,7 +3722,7 @@ def scalping_fast_thread(
 
                         # Appel rapport consolidé
                         scalping_strategy._log_orderflow_consolidated_report(
-                            asset="XAUUSD",
+                            asset="USDJPY",
                             orderflow_result=orderflow,
                             footprint_result=footprint,
                             final_score=final_score,
@@ -3761,7 +3761,7 @@ def scalping_fast_thread(
                         side = fusion_out["action"]  # BUY ou SELL
                         conf = fusion_out.get("fused_confidence", 0.0)
 
-                        logger.info(f"🎯 [SCALPING_THREAD] Signal XAUUSD {side} (conf={conf:.2f})")
+                        logger.info(f"🎯 [SCALPING_THREAD] Signal USDJPY {side} (conf={conf:.2f})")
 
                         # ⚡ OPTION 1: INJECTION RAPIDE — Utiliser squelette pré-calculé
                         try:
@@ -3779,7 +3779,7 @@ def scalping_fast_thread(
                                 "action": side,
                                 "side": side,
                                 "type": "MARKET",
-                                "symbol": "XAUUSD",
+                                "symbol": "USDJPY",
                             }
                             td["trade"] = {"action": side, "side": side}
 
@@ -3793,12 +3793,12 @@ def scalping_fast_thread(
                                 "active_config": trade_decision_skeleton["merged_config"],
                             }
                             decision_pkg.setdefault("audit_context", {}).update({
-                                "intent_symbol": "XAUUSD",
+                                "intent_symbol": "USDJPY",
                                 "intent_side": side,
                                 "intent_burst": trade_decision_skeleton["resolved_burst"],
                             })
 
-                            logger.info(f"⚡ [PRE-CALC] Exécution RAPIDE: {side} XAUUSD burst={trade_decision_skeleton['resolved_burst']}")
+                            logger.info(f"⚡ [PRE-CALC] Exécution RAPIDE: {side} USDJPY burst={trade_decision_skeleton['resolved_burst']}")
 
                             # Exécution
                             res = run_trade_execution_pipeline(
@@ -3886,7 +3886,7 @@ def liquidity_main_thread(
     Thread dédié à LIQUIDITY - Cycle standard 60 secondes.
 
     Responsabilités:
-    - Analyse M1+M5 (EURUSD, GBPUSD) ← XAUUSD traité par SCALPING Thread
+    - Analyse M1+M5 (EURUSD, GBPUSD) ← USDJPY traité par SCALPING Thread
     - decision_pipeline.institutional_decision_pipeline()
     - LiquidityStrategy → EQH/EQL breakout
     - Exécution ordres LIMIT
@@ -3903,7 +3903,7 @@ def liquidity_main_thread(
 
         try:
             # Utiliser la fonction existante run_single_pipeline_cycle
-            # mais en mode "liquidity only" (XAUUSD exclu - traité par SCALPING Thread)
+            # mais en mode "liquidity only" (USDJPY exclu - traité par SCALPING Thread)
             trade_executed = run_single_pipeline_cycle(
                 mt5_connector,
                 decision_pipeline,
@@ -3914,7 +3914,7 @@ def liquidity_main_thread(
                 is_dry_run,
                 cycle_count,
                 daily_trade_count,
-                excluded_symbols=["XAUUSD"],  # ✅ PHASE 1: XAUUSD exclu (géré par SCALPING)
+                excluded_symbols=["USDJPY"],  # ✅ PHASE 1: USDJPY exclu (géré par SCALPING)
             )
 
             if trade_executed:
@@ -4156,9 +4156,9 @@ def main(args: argparse.Namespace) -> None:
     logger.info("=" * 80)
     logger.info("🚀 DÉMARRAGE DES THREADS SÉPARÉS")
     logger.info("=" * 80)
-    logger.info("  • DATAENGINE Thread     : Cycle 5s (Analyse Footprint asynchrone) [XAUUSD]")
-    logger.info("  • SCALPING Thread       : Cycle 5s (XAUUSD UNIQUEMENT) ⚡")
-    logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD) ← XAUUSD exclu")
+    logger.info("  • DATAENGINE Thread     : Cycle 5s (Analyse Footprint asynchrone) [USDJPY]")
+    logger.info("  • SCALPING Thread       : Cycle 5s (USDJPY UNIQUEMENT) ⚡")
+    logger.info("  • LIQUIDITY Thread      : Cycle 60s (EURUSD, GBPUSD) ← USDJPY exclu")
     logger.info("  • BASKET MONITOR Thread : Surveillance continue (polling 100ms)")
     logger.info("=" * 80)
 
@@ -4247,7 +4247,7 @@ def main(args: argparse.Namespace) -> None:
     market_analyzer_for_dataengine = MarketAnalyzer(config_manager, logger)
 
     data_engine = DataEngine(
-        symbols=['XAUUSD'],  # Symboles prioritaires pour le scalping
+        symbols=['USDJPY'],  # Symboles prioritaires pour le scalping
         mt5_connector=mt5_connector,
         market_analyzer=market_analyzer_for_dataengine,  # ✅ MarketAnalyzer dédié
         update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)

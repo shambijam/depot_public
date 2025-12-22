@@ -11,7 +11,7 @@ Contient un orchestrateur pour la stratégie *Scalping* (ScalpingPipeline).
 
 API:
     spipe = ScalpingPipeline(config_manager, arbiter=arbiter, logger=logger)
-    decision = spipe.run(asset="XAUUSD", context=context, current_config=current_config)
+    decision = spipe.run(asset="USDJPY", context=context, current_config=current_config)
 
 Retour:
     dict décision {action, asset, confidence?, rule_name?, ...} ou {}

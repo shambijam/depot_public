@@ -92,7 +92,7 @@ class TradeLogger:
 
         Args:
             basket_id: Identifiant unique du trade/basket
-            symbol: Asset tradé (XAUUSD, EURUSD, etc.)
+            symbol: Asset tradé (USDJPY, EURUSD, etc.)
             direction: BUY ou SELL
             entry_price: Prix d'entrée moyen
             volume: Volume total (somme des positions si burst)
@@ -134,7 +134,7 @@ class TradeLogger:
             "burst_size": int(burst_size),
             "sl_price": float(sl_price),
             "tp_price": float(tp_price),
-            "sl_distance_pips": abs(entry_price - sl_price) * 100,  # XAUUSD: 1 pip = 0.01
+            "sl_distance_pips": abs(entry_price - sl_price) * 100,  # USDJPY: 1 pip = 0.01
             "tp_distance_pips": abs(tp_price - entry_price) * 100,
             "risk_reward_ratio": abs(tp_price - entry_price) / abs(entry_price - sl_price) if abs(entry_price - sl_price) > 0 else 0.0,
 
