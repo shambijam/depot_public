@@ -1912,20 +1912,69 @@ class ScalpingStrategy(BaseStrategy):
                 if isinstance(df_m1, pd.DataFrame) and len(df_m1) >= 50
                 else None
             )
-            # ✅ AJOUT (15 DEC 2025): Calcul du momentum M1 basé sur bougies récentes
+
+            # ✅ RÉCUPÉRATION M3/M5 pour analyse momentum institutionnel (23 DEC 2025)
+            df_m3_momentum = None
+            df_m5_momentum = None
+
+            try:
+                for k in ("annotated_rates_df_m3", "df_m3", "rates_m3"):
+                    v = ctx_md.get(k)
+                    if isinstance(v, pd.DataFrame) and len(v) >= 6:
+                        df_m3_momentum = v
+                        break
+            except Exception:
+                pass
+
+            try:
+                for k in ("annotated_rates_df_m5", "df_m5", "rates_m5"):
+                    v = ctx_md.get(k)
+                    if isinstance(v, pd.DataFrame) and len(v) >= 4:
+                        df_m5_momentum = v
+                        break
+            except Exception:
+                pass
+
+            # Si non trouvés dans context, essayer via MT5
+            if df_m3_momentum is None and self.mt5_connector:
+                try:
+                    import MetaTrader5 as mt5
+                    df_m3_momentum = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M3, count=20)
+                except Exception:
+                    pass
+
+            if df_m5_momentum is None and self.mt5_connector:
+                try:
+                    import MetaTrader5 as mt5
+                    df_m5_momentum = self.mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=15)
+                except Exception:
+                    pass
+
+            # ✅ NOUVELLE MÉTHODE (23 DEC 2025): Analyse momentum institutionnel M1/M3/M5
             momentum_m1 = "NEUTRAL"
-            if df_work is not None and len(df_work) >= 8:
-                momentum_m1 = self._calculate_m1_momentum_from_candles(df_work)
-                self.logger.debug(f"[{asset}] Momentum M1 calculé: {momentum_m1}")
+            momentum_analysis = {}
+
+            if df_work is not None and len(df_work) >= 12:
+                momentum_analysis = self._calculate_institutional_momentum(df_work, df_m3_momentum, df_m5_momentum)
+                momentum_m1 = momentum_analysis.get('primary_direction', 'NEUTRAL')
+
+                self.logger.info(
+                    f"[{asset}] 🏦 Momentum Institutionnel | Direction={momentum_m1} | "
+                    f"Score={momentum_analysis.get('momentum_score', 0):.1f} | "
+                    f"Quality={momentum_analysis.get('momentum_quality', 'WEAK')} | "
+                    f"Entry={momentum_analysis.get('entry_quality', 'POOR')}"
+                )
 
             # ✅ AJOUTER au contexte pour FusionManager
             if "context" not in analyzed_context:
                 analyzed_context["context"] = {}
 
             analyzed_context["momentum_m1"] = momentum_m1
+            analyzed_context["momentum_analysis"] = momentum_analysis  # Ajout analyse complète
 
             # ✅ AJOUTER aussi dans asset_signals pour usage immédiat
             asset_signals["momentum_m1"] = momentum_m1
+            asset_signals["momentum_analysis"] = momentum_analysis  # Ajout analyse complète
 
             # --- 0b) Action hint (BUY/SELL) par défaut ---
             action = None
@@ -1975,6 +2024,70 @@ class ScalpingStrategy(BaseStrategy):
                     )
                     self.logger.info(
                         f"[{asset}] 📊 Footprint bearish → confiance renforcée"
+                    )
+
+                # ✅ BOOST DE CONFIANCE MOMENTUM INSTITUTIONNEL (23 DEC 2025)
+                momentum_analysis = asset_signals.get("momentum_analysis", {})
+                entry_quality = momentum_analysis.get('entry_quality', 'POOR')
+                primary_direction = momentum_analysis.get('primary_direction', 'NEUTRAL')
+                phase = str(asset_signals.get("phase", "")).lower()
+
+                # Boost confiance selon qualité d'entrée et cohérence direction
+                if entry_quality == 'EXCELLENT':
+                    if (primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase or 'accum' in phase)):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.20
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum EXCELLENT BULLISH → confiance ++20%"
+                        )
+                    elif (primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase or 'distrib' in phase)):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.20
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum EXCELLENT BEARISH → confiance ++20%"
+                        )
+
+                elif entry_quality == 'GOOD':
+                    if (primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase)):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.12
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum GOOD BULLISH → confiance ++12%"
+                        )
+                    elif (primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase)):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.12
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum GOOD BEARISH → confiance ++12%"
+                        )
+
+                elif entry_quality == 'FAIR':
+                    if primary_direction == 'BULLISH' and ('bull' in phase or 'up' in phase):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.05
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum FAIR BULLISH → confiance +5%"
+                        )
+                    elif primary_direction == 'BEARISH' and ('bear' in phase or 'down' in phase):
+                        asset_signals["confidence_score"] = min(
+                            1.0, float(asset_signals.get("confidence_score", 0.5)) + 0.05
+                        )
+                        self.logger.info(
+                            f"[{asset}] 🏦 Momentum FAIR BEARISH → confiance +5%"
+                        )
+
+                elif entry_quality == 'POOR':
+                    # POOR momentum = pénalité de confiance
+                    asset_signals["confidence_score"] = max(
+                        0.0, float(asset_signals.get("confidence_score", 0.5)) - 0.15
+                    )
+                    self.logger.warning(
+                        f"[{asset}] ⚠️ Momentum POOR → confiance -15%"
                     )
 
                 # Early entry si déséquilibre extrême (optionnel)
@@ -2496,6 +2609,32 @@ class ScalpingStrategy(BaseStrategy):
                     "orderflow_v6_score": final_score_normalized,  # ✅ Score normalisé 0-100
                 },
             }
+
+            # ✅ VETO MOMENTUM POOR (23 DEC 2025)
+            # Bloquer les setups avec momentum catastrophique
+            momentum_analysis = asset_signals.get("momentum_analysis", {})
+            entry_quality = momentum_analysis.get('entry_quality', 'POOR')
+            momentum_score = momentum_analysis.get('momentum_score', 0)
+            momentum_confidence = momentum_analysis.get('confidence', 0)
+
+            # VETO si momentum POOR ET score très faible ET confiance faible
+            if (entry_quality == 'POOR' and
+                momentum_score < 30 and
+                momentum_confidence < 0.4):
+
+                self.logger.warning(
+                    f"[{asset}] ❌ VETO MOMENTUM | Quality={entry_quality} | "
+                    f"Score={momentum_score:.1f} | Confidence={momentum_confidence:.2f} | "
+                    f"Setup REJETÉ - Conditions de momentum catastrophiques"
+                )
+                return {}
+
+            # AVERTISSEMENT si momentum POOR mais conditions limites acceptables
+            elif entry_quality == 'POOR':
+                self.logger.warning(
+                    f"[{asset}] ⚠️ WARNING | Momentum POOR mais setup accepté | "
+                    f"Score={momentum_score:.1f} | Confidence={momentum_confidence:.2f}"
+                )
 
             return self._finalize_decision(sm_decision, analyzed_context)
 
@@ -3055,77 +3194,796 @@ class ScalpingStrategy(BaseStrategy):
             return v * 100.0 if v <= 1.0 else v
         return 0.0
 
-    def _calculate_m1_momentum_from_candles(self, df_m1: pd.DataFrame) -> str:
+    def _calculate_institutional_momentum(self, df_m1: pd.DataFrame, df_m3: pd.DataFrame = None, df_m5: pd.DataFrame = None) -> dict:
         """
-        ✅ CORRIGÉ (15 DEC 2025): Calcule le momentum basé sur les 8 dernières bougies M1
-
-        Règles:
-        - 8 dernières bougies M1
-        - Compter bougies vertes (close > open)
-        - 5+ bougies vertes → BULLISH
-        - 3- bougies vertes → BEARISH
-        - 4 bougies vertes → NEUTRAL
+        🏦 ANALYSE MOMENTUM INSTITUTIONNELLE AVANCÉE - V2.0
+        Calcule le momentum multi-dimensionnel pour trading professionnel
+        
+        Returns:
+            dict: {
+                'primary_direction': 'BULLISH'|'BEARISH'|'NEUTRAL',
+                'momentum_score': float (0-100),
+                'momentum_quality': 'WEAK'|'MODERATE'|'STRONG'|'VERY_STRONG',
+                'breakdown': {
+                    'price_action': {...},
+                    'volume_profile': {...},
+                    'velocity_metrics': {...},
+                    'structure_analysis': {...}
+                },
+                'confidence': float (0-1),
+                'institutional_bias': 'ACCUMULATION'|'DISTRIBUTION'|'COMPRESSION',
+                'entry_quality': 'POOR'|'FAIR'|'GOOD'|'EXCELLENT'
+            }
         """
-        if df_m1 is None or len(df_m1) < 8:
-            return "NEUTRAL"
+        
+        if df_m1 is None or len(df_m1) < 12:
+            return self._get_neutral_momentum_response()
+        
+        try:
+            # ===================================================================
+            # 1. PRICE ACTION ANALYSIS (35% du score)
+            # ===================================================================
+            pa_score, pa_breakdown = self._analyze_price_action(df_m1.tail(12))
+            
+            # ===================================================================
+            # 2. VOLUME PROFILE ANALYSIS (25% du score)
+            # ===================================================================
+            vp_score, vp_breakdown = self._analyze_volume_profile(df_m1.tail(12))
+            
+            # ===================================================================
+            # 3. PRICE VELOCITY & ACCELERATION (20% du score)
+            # ===================================================================
+            va_score, va_breakdown = self._analyze_velocity_acceleration(df_m1.tail(8))
+            
+            # ===================================================================
+            # 4. MULTI-TIMEFRAME STRUCTURE (20% du score)
+            # ===================================================================
+            mtf_score, mtf_breakdown = self._analyze_multi_timeframe_structure(
+                df_m1, df_m3, df_m5
+            )
+            
+            # ===================================================================
+            # 5. CALCUL DU SCORE GLOBAL ET DIRECTION
+            # ===================================================================
+            weights = {
+                'price_action': 0.35,
+                'volume': 0.25,
+                'velocity': 0.20,
+                'structure': 0.20
+            }
+            
+            total_score = (
+                pa_score * weights['price_action'] +
+                vp_score * weights['volume'] +
+                va_score * weights['velocity'] +
+                mtf_score * weights['structure']
+            )
+            
+            # ===================================================================
+            # 6. DÉTERMINATION DE LA DIRECTION ET QUALITÉ
+            # ===================================================================
+            direction, quality, confidence = self._determine_direction_and_quality(
+                pa_breakdown, va_breakdown, total_score
+            )
+            
+            # ===================================================================
+            # 7. DÉTECTION DU BIAS INSTITUTIONNEL
+            # ===================================================================
+            institutional_bias = self._detect_institutional_bias(
+                pa_breakdown, vp_breakdown, mtf_breakdown
+            )
+            
+            # ===================================================================
+            # 8. QUALITÉ D'ENTRÉE POUR SCALPING
+            # ===================================================================
+            entry_quality = self._assess_entry_quality(
+                pa_breakdown, vp_breakdown, va_breakdown, total_score
+            )
+            
+            # ===================================================================
+            # 9. CONSTRUCTION DE LA RÉPONSE
+            # ===================================================================
+            response = {
+                'primary_direction': direction,
+                'momentum_score': round(total_score, 1),
+                'momentum_quality': quality,
+                'confidence': round(confidence, 3),
+                'institutional_bias': institutional_bias,
+                'entry_quality': entry_quality,
+                'breakdown': {
+                    'price_action': pa_breakdown,
+                    'volume_profile': vp_breakdown,
+                    'velocity_metrics': va_breakdown,
+                    'structure_analysis': mtf_breakdown
+                },
+                'timestamp': pd.Timestamp.now().isoformat(),
+                'version': 'Institutional Momentum Analyzer v2.0'
+            }
+            
+            self._log_momentum_analysis(response)
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"[INSTITUTIONAL_MOMENTUM] Error: {str(e)}", exc_info=True)
+            return self._get_neutral_momentum_response()
 
-        # Analyser 8 dernières bougies
-        recent = df_m1.tail(8)
-        green_candles = 0
 
-        # Compter bougies vertes
-        for idx, row in recent.iterrows():
-            if row["close"] > row["open"]:
-                green_candles += 1
+    def _analyze_price_action(self, df: pd.DataFrame) -> tuple:
+        """
+        Analyse institutionnelle de la price action
+        """
+        if len(df) < 8:
+            return 0, {}
+        
+        # 1. Bougie Pattern Recognition
+        patterns = self._detect_candle_patterns(df.tail(8))
+        
+        # 2. Body Ratio Analysis (force des bougies)
+        body_ratios = []
+        for i in range(len(df)):
+            high_low = df.iloc[i]['high'] - df.iloc[i]['low']
+            if high_low > 0:
+                body_size = abs(df.iloc[i]['close'] - df.iloc[i]['open'])
+                body_ratios.append(body_size / high_low)
+        
+        avg_body_ratio = np.mean(body_ratios) if body_ratios else 0
+        
+        # 3. Wicks Analysis (rejets)
+        upper_wicks, lower_wicks = [], []
+        for i in range(len(df)):
+            candle = df.iloc[i]
+            if candle['high'] - max(candle['open'], candle['close']) > 0:
+                upper_wicks.append(candle['high'] - max(candle['open'], candle['close']))
+            if min(candle['open'], candle['close']) - candle['low'] > 0:
+                lower_wicks.append(min(candle['open'], candle['close']) - candle['low'])
+        
+        # 4. Sequential Analysis
+        green_sequence = self._calculate_green_sequence(df)
+        close_sequence = self._calculate_close_sequence(df['close'].values)
+        
+        # 5. Score Calculation
+        score_components = {
+            'pattern_strength': patterns.get('pattern_score', 0),
+            'body_ratio': min(100, avg_body_ratio * 200),  # Normalisé 0-100
+            'wick_balance': self._calculate_wick_balance(upper_wicks, lower_wicks),
+            'sequence_momentum': green_sequence['score'],
+            'close_trend': close_sequence['score']
+        }
+        
+        total_score = np.mean(list(score_components.values()))
+        
+        breakdown = {
+            'patterns_detected': patterns.get('patterns', []),
+            'avg_body_ratio': round(avg_body_ratio, 3),
+            'body_ratio_class': self._classify_body_ratio(avg_body_ratio),
+            'upper_wick_avg': round(np.mean(upper_wicks) if upper_wicks else 0, 4),
+            'lower_wick_avg': round(np.mean(lower_wicks) if lower_wicks else 0, 4),
+            'green_streak': green_sequence['streak'],
+            'close_slope': round(close_sequence['slope'], 6),
+            'components': score_components
+        }
+        
+        return total_score, breakdown
 
-        # 🔍 DEBUG CRITIQUE
+
+    def _analyze_volume_profile(self, df: pd.DataFrame) -> tuple:
+        """
+        Analyse du profil de volume (si disponible)
+        """
+        # Si pas de volume dans les données, on utilise des approximations
+        if 'volume' not in df.columns:
+            # Approximation: volume ~ body size * range
+            df = df.copy()
+            df['volume'] = (abs(df['close'] - df['open']) * (df['high'] - df['low']))
+        
+        recent_volume = df['volume'].tail(8)
+        avg_volume = recent_volume.mean()
+        
+        if avg_volume == 0:
+            return 50, {'status': 'NO_VOLUME_DATA'}
+        
+        # 1. Volume Trend
+        volume_trend = self._calculate_volume_trend(recent_volume)
+        
+        # 2. Volume Spikes Detection
+        spikes = self._detect_volume_spikes(recent_volume, avg_volume)
+        
+        # 3. Volume-Price Correlation
+        vp_correlation = self._calculate_volume_price_correlation(
+            df['close'].tail(8).values,
+            recent_volume.values
+        )
+        
+        # 4. Score Calculation
+        score_components = {
+            'volume_trend': volume_trend['score'],
+            'spike_quality': spikes['score'],
+            'vp_correlation': vp_correlation['score']
+        }
+        
+        total_score = np.mean(list(score_components.values()))
+        
+        breakdown = {
+            'volume_avg': round(avg_volume, 2),
+            'volume_trend_direction': volume_trend['direction'],
+            'volume_acceleration': round(volume_trend['acceleration'], 3),
+            'spikes_detected': spikes['count'],
+            'last_spike_ratio': round(spikes['last_ratio'], 2),
+            'vp_correlation_strength': vp_correlation['strength'],
+            'vp_alignment': vp_correlation['alignment'],
+            'components': score_components
+        }
+        
+        return total_score, breakdown
+
+
+    def _analyze_velocity_acceleration(self, df: pd.DataFrame) -> tuple:
+        """
+        Analyse de la vélocité et accélération des prix
+        """
+        if len(df) < 6:
+            return 50, {'status': 'INSUFFICIENT_DATA'}
+        
+        closes = df['close'].values
+        
+        # 1. Velocity (vitesse instantanée)
+        velocity = np.diff(closes)
+        avg_velocity = np.mean(velocity) if len(velocity) > 0 else 0
+        
+        # 2. Acceleration (dérivée seconde)
+        if len(velocity) > 1:
+            acceleration = np.diff(velocity)
+            avg_acceleration = np.mean(acceleration)
+        else:
+            avg_acceleration = 0
+        
+        # 3. Jerk (dérivée troisième - changement d'accélération)
+        if len(velocity) > 2:
+            jerk = np.diff(acceleration) if len(acceleration) > 1 else 0
+            avg_jerk = np.mean(jerk) if len(jerk) > 0 else 0
+        else:
+            avg_jerk = 0
+        
+        # 4. Normalisation par ATR
+        atr = self._atr(df, period=14)
+        if pd.isna(atr) or atr == 0:
+            norm_factor = 1
+        else:
+            norm_factor = atr
+        
+        # 5. Score Calculation
+        velocity_score = self._normalize_velocity_score(avg_velocity, norm_factor)
+        acceleration_score = self._normalize_acceleration_score(avg_acceleration, norm_factor)
+        jerk_score = self._normalize_jerk_score(avg_jerk, norm_factor)
+        
+        total_score = (velocity_score * 0.5 + 
+                    acceleration_score * 0.3 + 
+                    jerk_score * 0.2)
+        
+        breakdown = {
+            'velocity_pips': round(avg_velocity * 10000, 2),  # Convertir en pips
+            'acceleration_pips': round(avg_acceleration * 10000, 2),
+            'jerk_pips': round(avg_jerk * 10000, 2),
+            'velocity_class': self._classify_velocity(avg_velocity, norm_factor),
+            'acceleration_class': self._classify_acceleration(avg_acceleration),
+            'trend_stability': self._assess_trend_stability(velocity, acceleration),
+            'atr_reference': round(atr * 10000, 2) if not pd.isna(atr) else 0,
+            'components': {
+                'velocity': round(velocity_score, 1),
+                'acceleration': round(acceleration_score, 1),
+                'jerk': round(jerk_score, 1)
+            }
+        }
+        
+        return total_score, breakdown
+
+
+    def _analyze_multi_timeframe_structure(self, df_m1, df_m3, df_m5) -> tuple:
+        """
+        Analyse structurelle multi-timeframe
+        """
+        # 1. M1 Structure Analysis
+        m1_structure = self._analyze_single_timeframe_structure(df_m1, 'M1')
+        
+        # 2. M3 Structure Analysis (si disponible)
+        m3_structure = {}
+        if df_m3 is not None and len(df_m3) >= 6:
+            m3_structure = self._analyze_single_timeframe_structure(df_m3.tail(6), 'M3')
+        
+        # 3. M5 Structure Analysis (si disponible)
+        m5_structure = {}
+        if df_m5 is not None and len(df_m5) >= 4:
+            m5_structure = self._analyze_single_timeframe_structure(df_m5.tail(4), 'M5')
+        
+        # 4. MTF Alignment Analysis
+        alignment = self._analyze_mtf_alignment(m1_structure, m3_structure, m5_structure)
+        
+        # 5. Score Calculation
+        scores = []
+        if m1_structure:
+            scores.append(m1_structure.get('score', 50))
+        if m3_structure:
+            scores.append(m3_structure.get('score', 50) * 0.7)  # Moins de poids
+        if m5_structure:
+            scores.append(m5_structure.get('score', 50) * 0.5)  # Encore moins de poids
+        
+        total_score = np.mean(scores) if scores else 50
+        
+        breakdown = {
+            'm1_structure': m1_structure,
+            'm3_structure': m3_structure,
+            'm5_structure': m5_structure,
+            'mtf_alignment': alignment,
+            'alignment_score': alignment.get('score', 0),
+            'alignment_quality': alignment.get('quality', 'NEUTRAL')
+        }
+        
+        return total_score, breakdown
+
+
+    def _determine_direction_and_quality(self, pa_breakdown, va_breakdown, total_score) -> tuple:
+        """
+        Détermine la direction et la qualité du momentum
+        """
+        # 1. Direction basée sur plusieurs facteurs
+        direction_indicators = []
+        
+        # Price Action direction
+        if 'patterns_detected' in pa_breakdown:
+            patterns = pa_breakdown['patterns_detected']
+            bullish_patterns = sum(1 for p in patterns if p['bias'] == 'BULLISH')
+            bearish_patterns = sum(1 for p in patterns if p['bias'] == 'BEARISH')
+            if bullish_patterns > bearish_patterns:
+                direction_indicators.append('BULLISH')
+            elif bearish_patterns > bullish_patterns:
+                direction_indicators.append('BEARISH')
+        
+        # Velocity direction
+        velocity_pips = va_breakdown.get('velocity_pips', 0)
+        if velocity_pips > 2:
+            direction_indicators.append('BULLISH')
+        elif velocity_pips < -2:
+            direction_indicators.append('BEARISH')
+        
+        # Détermination finale
+        if not direction_indicators:
+            direction = 'NEUTRAL'
+        else:
+            direction = max(set(direction_indicators), key=direction_indicators.count)
+        
+        # 2. Quality basée sur le score et la cohérence
+        if total_score >= 80:
+            quality = 'VERY_STRONG'
+            confidence = 0.9
+        elif total_score >= 70:
+            quality = 'STRONG'
+            confidence = 0.75
+        elif total_score >= 60:
+            quality = 'MODERATE'
+            confidence = 0.6
+        elif total_score >= 50:
+            quality = 'WEAK'
+            confidence = 0.45
+        else:
+            quality = 'VERY_WEAK'
+            confidence = 0.3
+        
+        return direction, quality, confidence
+
+
+    def _detect_institutional_bias(self, pa_breakdown, vp_breakdown, mtf_breakdown) -> str:
+        """
+        Détecte le biais institutionnel (accumulation/distribution)
+        """
+        bias_indicators = {
+            'accumulation': 0,
+            'distribution': 0,
+            'compression': 0
+        }
+        
+        # 1. Price Action Bias
+        if 'body_ratio_class' in pa_breakdown:
+            if pa_breakdown['body_ratio_class'] == 'SMALL':
+                bias_indicators['compression'] += 1
+            elif pa_breakdown['body_ratio_class'] == 'LARGE':
+                if pa_breakdown.get('green_streak', 0) > 3:
+                    bias_indicators['accumulation'] += 1
+                else:
+                    bias_indicators['distribution'] += 1
+        
+        # 2. Volume Bias
+        if 'vp_alignment' in vp_breakdown:
+            if vp_breakdown['vp_alignment'] == 'PRICE_UP_VOLUME_UP':
+                bias_indicators['accumulation'] += 2
+            elif vp_breakdown['vp_alignment'] == 'PRICE_DOWN_VOLUME_UP':
+                bias_indicators['distribution'] += 2
+        
+        # 3. Structure Bias
+        alignment_quality = mtf_breakdown.get('alignment_quality', 'NEUTRAL')
+        if alignment_quality == 'STRONG':
+            if mtf_breakdown.get('mtf_alignment', {}).get('direction') == 'BULLISH':
+                bias_indicators['accumulation'] += 1
+            else:
+                bias_indicators['distribution'] += 1
+        
+        # Détermination finale
+        max_bias = max(bias_indicators, key=bias_indicators.get)
+        max_value = bias_indicators[max_bias]
+        
+        if max_value == 0:
+            return 'NEUTRAL'
+        elif max_bias == 'accumulation' and max_value >= 2:
+            return 'ACCUMULATION'
+        elif max_bias == 'distribution' and max_value >= 2:
+            return 'DISTRIBUTION'
+        elif max_bias == 'compression' and max_value >= 2:
+            return 'COMPRESSION'
+        else:
+            return 'NEUTRAL'
+
+
+    def _assess_entry_quality(self, pa_breakdown, vp_breakdown, va_breakdown, total_score) -> str:
+        """
+        Évalue la qualité d'entrée pour le scalping
+        """
+        entry_score = 0
+        max_score = 0
+        
+        # 1. Price Action Quality (30 points max)
+        if 'body_ratio_class' in pa_breakdown:
+            body_class = pa_breakdown['body_ratio_class']
+            if body_class == 'MEDIUM':
+                entry_score += 20
+                max_score += 30
+            elif body_class == 'LARGE':
+                entry_score += 15
+                max_score += 30
+            elif body_class == 'VERY_LARGE':
+                entry_score += 10  # Trop volatile pour scalping
+                max_score += 30
+        
+        # 2. Volume Confirmation (30 points max)
+        if 'vp_alignment' in vp_breakdown:
+            alignment = vp_breakdown['vp_alignment']
+            if alignment == 'PRICE_UP_VOLUME_UP' or alignment == 'PRICE_DOWN_VOLUME_UP':
+                entry_score += 25
+                max_score += 30
+        
+        # 3. Velocity Stability (20 points max)
+        if 'trend_stability' in va_breakdown:
+            stability = va_breakdown['trend_stability']
+            if stability == 'STABLE':
+                entry_score += 15
+                max_score += 20
+            elif stability == 'ACCELERATING':
+                entry_score += 10
+                max_score += 20
+        
+        # 4. Momentum Score (20 points max)
+        momentum_points = (total_score / 100) * 20
+        entry_score += momentum_points
+        max_score += 20
+        
+        if max_score == 0:
+            return 'POOR'
+        
+        quality_percentage = (entry_score / max_score) * 100
+        
+        if quality_percentage >= 80:
+            return 'EXCELLENT'
+        elif quality_percentage >= 65:
+            return 'GOOD'
+        elif quality_percentage >= 50:
+            return 'FAIR'
+        else:
+            return 'POOR'
+
+
+    def _log_momentum_analysis(self, response: dict):
+        """
+        Log l'analyse de momentum de façon professionnelle
+        """
+        self.logger.info(
+            f"[INSTITUTIONAL_MOMENTUM] Direction: {response['primary_direction']} | "
+            f"Score: {response['momentum_score']}/100 | "
+            f"Quality: {response['momentum_quality']} | "
+            f"Confidence: {response['confidence']} | "
+            f"Bias: {response['institutional_bias']} | "
+            f"Entry: {response['entry_quality']}"
+        )
+        
+        # Log détaillé en debug
         self.logger.debug(
-            f"[M1_MOMENTUM] {green_candles}/8 bougies vertes "
-            f"→ ratio={green_candles/8:.0%}"
+            f"[MOMENTUM_BREAKDOWN] PriceAction: {response['breakdown']['price_action'].get('body_ratio_class', 'N/A')} | "
+            f"Volume: {response['breakdown']['volume_profile'].get('vp_alignment', 'N/A')} | "
+            f"Velocity: {response['breakdown']['velocity_metrics'].get('velocity_class', 'N/A')} | "
+            f"Structure: {response['breakdown']['structure_analysis'].get('alignment_quality', 'N/A')}"
         )
 
-        # Logique de décision
-        if green_candles >= 5:  # 62.5%+ bougies vertes
-            return "BULLISH"
-        elif green_candles <= 3:  # 37.5%- bougies vertes
-            return "BEARISH"
-        return "NEUTRAL"
 
-    # --- indicateurs génériques (utiles si tu veux enrichir plus tard)
-    @staticmethod
-    def _sma(series: pd.Series, period: int) -> pd.Series:
-        if series is None or period <= 1:
-            return series
-        return series.rolling(window=period, min_periods=1).mean()
-
-    @staticmethod
-    def _std(series: pd.Series, period: int) -> pd.Series:
-        if series is None or period <= 1:
-            return series * 0
-        return series.rolling(window=period, min_periods=1).std(ddof=0)
-
-    @staticmethod
-    def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    def _get_neutral_momentum_response(self) -> dict:
         """
-        ATR robuste sur Series Pandas (pas de numpy.reduce pour conserver .rolling()).
-        Retourne le dernier ATR (float) ou NaN si données insuffisantes.
+        Retourne une réponse neutre par défaut
         """
-        try:
-            if df is None or len(df) < max(2, int(period)):
-                return float("nan")
+        return {
+            'primary_direction': 'NEUTRAL',
+            'momentum_score': 50.0,
+            'momentum_quality': 'NEUTRAL',
+            'confidence': 0.5,
+            'institutional_bias': 'NEUTRAL',
+            'entry_quality': 'POOR',
+            'breakdown': {
+                'price_action': {'status': 'INSUFFICIENT_DATA'},
+                'volume_profile': {'status': 'INSUFFICIENT_DATA'},
+                'velocity_metrics': {'status': 'INSUFFICIENT_DATA'},
+                'structure_analysis': {'status': 'INSUFFICIENT_DATA'}
+            },
+            'timestamp': pd.Timestamp.now().isoformat(),
+            'version': 'Institutional Momentum Analyzer v2.0'
+        }
 
-            h = pd.to_numeric(df["high"], errors="coerce")
-            l = pd.to_numeric(df["low"], errors="coerce")
-            c = pd.to_numeric(df["close"], errors="coerce")
-            pc = c.shift(1)
 
-            # True Range en Pandas → on garde une Series pour pouvoir .rolling()
-            tr = pd.concat([(h - l).abs(), (h - pc).abs(), (l - pc).abs()], axis=1).max(
-                axis=1
-            )
+    # ===================================================================
+    # FONCTIONS AUXILIAIRES (à implémenter selon vos besoins)
+    # ===================================================================
 
-            atr_series = tr.rolling(window=int(period), min_periods=int(period)).mean()
-            atr = atr_series.iloc[-1]
-            return float(atr) if pd.notna(atr) and atr > 0 else float("nan")
-        except Exception:
-            return float("nan")
+    def _detect_candle_patterns(self, df: pd.DataFrame) -> dict:
+        """Détection avancée de patterns de bougies"""
+        patterns = []
+        pattern_score = 0
+        
+        # Implémentez votre logique de détection de patterns
+        # Ex: Hammer, Engulfing, Doji, etc.
+        
+        return {
+            'patterns': patterns,
+            'pattern_score': pattern_score
+        }
+
+    def _calculate_green_sequence(self, df: pd.DataFrame) -> dict:
+        """Analyse de séquence de bougies vertes"""
+        closes = df['close'].values
+        opens = df['open'].values
+        
+        green_streak = 0
+        current_streak = 0
+        
+        for i in range(len(closes)):
+            if closes[i] > opens[i]:
+                current_streak += 1
+                green_streak = max(green_streak, current_streak)
+            else:
+                current_streak = 0
+        
+        score = min(100, green_streak * 25)  # 4 bougies = 100
+        
+        return {
+            'streak': green_streak,
+            'score': score,
+            'consecutive': current_streak
+        }
+
+    def _calculate_close_sequence(self, closes: np.ndarray) -> dict:
+        """Analyse de séquence des closes"""
+        if len(closes) < 2:
+            return {'slope': 0, 'score': 50}
+        
+        x = np.arange(len(closes))
+        slope, intercept = np.polyfit(x, closes, 1)
+        
+        # Score basé sur la pente (normalisé)
+        slope_score = min(100, abs(slope) * 10000 * 10)  # Ajustez le multiplicateur
+        
+        return {
+            'slope': slope,
+            'intercept': intercept,
+            'score': slope_score,
+            'direction': 'UP' if slope > 0 else 'DOWN'
+        }
+
+    def _calculate_wick_balance(self, upper_wicks: list, lower_wicks: list) -> float:
+        """Calcule l'équilibre des mèches"""
+        if not upper_wicks and not lower_wicks:
+            return 50
+        
+        avg_upper = np.mean(upper_wicks) if upper_wicks else 0
+        avg_lower = np.mean(lower_wicks) if lower_wicks else 0
+        
+        if avg_upper + avg_lower == 0:
+            return 50
+        
+        # Score: plus de mèches basses = bullish, plus de mèches hautes = bearish
+        balance = (avg_lower - avg_upper) / (avg_upper + avg_lower)
+        return 50 + (balance * 50)  # Normalisé 0-100
+
+    def _classify_body_ratio(self, ratio: float) -> str:
+        """Classifie le ratio des corps de bougies"""
+        if ratio < 0.3:
+            return 'SMALL'
+        elif ratio < 0.5:
+            return 'MEDIUM'
+        elif ratio < 0.7:
+            return 'LARGE'
+        else:
+            return 'VERY_LARGE'
+
+    def _calculate_volume_trend(self, volume_series: pd.Series) -> dict:
+        """Analyse de tendance du volume"""
+        if len(volume_series) < 3:
+            return {'direction': 'NEUTRAL', 'score': 50, 'acceleration': 0}
+        
+        # Tendance linéaire
+        x = np.arange(len(volume_series))
+        slope, _ = np.polyfit(x, volume_series.values, 1)
+        
+        # Accélération (dérivée seconde)
+        if len(volume_series) >= 5:
+            acceleration = np.polyfit(x, volume_series.values, 2)[0] * 2
+        else:
+            acceleration = 0
+        
+        direction = 'UP' if slope > 0 else 'DOWN' if slope < 0 else 'FLAT'
+        score = min(100, abs(slope) * 100)  # Normalisé
+        
+        return {
+            'direction': direction,
+            'score': score,
+            'acceleration': acceleration
+        }
+
+    def _detect_volume_spikes(self, volume_series: pd.Series, avg_volume: float) -> dict:
+        """Détection des spikes de volume"""
+        spikes = []
+        spike_threshold = avg_volume * 1.5  # 50% au-dessus de la moyenne
+        
+        for i, vol in enumerate(volume_series):
+            if vol > spike_threshold:
+                spikes.append({
+                    'index': i,
+                    'volume': vol,
+                    'ratio': vol / avg_volume
+                })
+        
+        last_spike_ratio = spikes[-1]['ratio'] if spikes else 0
+        spike_score = min(100, len(spikes) * 20 + last_spike_ratio * 10)
+        
+        return {
+            'count': len(spikes),
+            'spikes': spikes,
+            'last_ratio': last_spike_ratio,
+            'score': spike_score
+        }
+
+    def _calculate_volume_price_correlation(self, prices: np.ndarray, volumes: np.ndarray) -> dict:
+        """Calcule la corrélation volume-prix"""
+        if len(prices) < 3 or len(volumes) < 3:
+            return {'correlation': 0, 'strength': 'WEAK', 'score': 50, 'alignment': 'NEUTRAL'}
+        
+        price_changes = np.diff(prices)
+        volume_changes = np.diff(volumes)
+        
+        correlation = np.corrcoef(price_changes, volume_changes)[0, 1]
+        
+        if np.isnan(correlation):
+            correlation = 0
+        
+        # Classification
+        if correlation > 0.7:
+            strength = 'VERY_STRONG'
+            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            score = 90
+        elif correlation > 0.4:
+            strength = 'STRONG'
+            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            score = 75
+        elif correlation > 0.2:
+            strength = 'MODERATE'
+            alignment = 'PRICE_UP_VOLUME_UP' if price_changes[-1] > 0 else 'PRICE_DOWN_VOLUME_UP'
+            score = 60
+        elif correlation > -0.2:
+            strength = 'WEAK'
+            alignment = 'NEUTRAL'
+            score = 50
+        else:
+            strength = 'NEGATIVE'
+            alignment = 'DIVERGENCE'
+            score = 30
+        
+        return {
+            'correlation': round(correlation, 3),
+            'strength': strength,
+            'score': score,
+            'alignment': alignment
+        }
+
+    def _normalize_velocity_score(self, velocity: float, atr: float) -> float:
+        """Normalise le score de vélocité par rapport à l'ATR"""
+        if atr == 0:
+            return 50
+        
+        velocity_in_pips = velocity * 10000
+        velocity_ratio = velocity_in_pips / atr
+        
+        # Score: 0-100, centré sur 50
+        score = 50 + (velocity_ratio * 100)
+        return max(0, min(100, score))
+
+    def _normalize_acceleration_score(self, acceleration: float) -> float:
+        """Normalise le score d'accélération"""
+        acceleration_in_pips = acceleration * 10000
+        
+        # Score basé sur l'accélération
+        if abs(acceleration_in_pips) < 0.5:
+            return 50  # Neutre
+        elif acceleration_in_pips > 0:
+            # Accélération positive
+            return min(100, 50 + acceleration_in_pips * 10)
+        else:
+            # Accélération négative
+            return max(0, 50 + acceleration_in_pips * 10)
+
+    def _normalize_jerk_score(self, jerk: float) -> float:
+        """Normalise le score de jerk"""
+        jerk_in_pips = jerk * 10000
+        
+        # Pour le scalping, un jerk modéré est mieux qu'un jerk fort
+        jerk_abs = abs(jerk_in_pips)
+        
+        if jerk_abs < 0.2:
+            return 60  # Légèrement positif pour stabilité
+        elif jerk_abs < 0.5:
+            return 50  # Neutre
+        elif jerk_abs < 1.0:
+            return 40  # Légèrement négatif
+        else:
+            return 30  # Négatif (trop instable)
+
+    def _classify_velocity(self, velocity: float, atr: float) -> str:
+        """Classifie la vélocité"""
+        if atr == 0:
+            return 'NEUTRAL'
+        
+        velocity_ratio = (velocity * 10000) / atr
+        
+        if abs(velocity_ratio) < 0.1:
+            return 'STAGNANT'
+        elif abs(velocity_ratio) < 0.3:
+            return 'SLOW'
+        elif abs(velocity_ratio) < 0.7:
+            return 'MODERATE'
+        elif abs(velocity_ratio) < 1.2:
+            return 'FAST'
+        else:
+            return 'VERY_FAST'
+
+    def _classify_acceleration(self, acceleration: float) -> str:
+        """Classifie l'accélération"""
+        acc_pips = acceleration * 10000
+        
+        if abs(acc_pips) < 0.1:
+            return 'CONSTANT'
+        elif acc_pips > 0.1:
+            return 'ACCELERATING'
+        elif acc_pips < -0.1:
+            return 'DECELERATING'
+        else:
+            return 'STABLE'
+
+    def _assess_trend_stability(self, velocity: np.ndarray, acceleration: np.ndarray) -> str:
+        """Évalue la stabilité de la tendance"""
+        if len(velocity) < 2:
+            return 'UNKNOWN'
+        
+        velocity_std = np.std(velocity)
+        acceleration_std = np.std(acceleration) if len(acceleration) > 0 else 0
+        
+        if velocity_std < 0.001 and acceleration_std < 0.0005:
+            return 'VERY_STABLE'
+        elif velocity_std < 0.002 and acceleration_std < 0.001:
+            return 'STABLE'
+        elif velocity_std < 0.005 and acceleration_std < 0.002:
+            return 'MODERATE'
+        elif velocity_std < 0.01 and acceleration_std < 0.005:
+            return 'VOLATILE'
+        else:
+            return 'VERY_VOLATILE'
