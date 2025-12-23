@@ -35,7 +35,7 @@
           "rr_floor": 1.0,
           "rr_cap": 3.0,
           "sl": {
-            "pips": 25,
+            "pips": 20,
             "buffer_pips": 2,
             "atr_period": 14,
             "atr_multiplier": 0.0,
@@ -43,7 +43,7 @@
           },
           "tp": {
             "tp_method": "PIPS",
-            "pips": 50,
+            "pips": 30,
             "atr_period": 14,
             "atr_multiplier": 0.0,
             "execution": {
@@ -54,7 +54,7 @@
         "closure_rules": {
           "enabled": true,
           "enable_profit_close": true,
-          "target_profit_pips": 20.0,
+          "target_profit_pips": 15.0,
           "require_full_count_for_profit_close": true,
           "rt_fast_window_ms": 120000,
           "rt_poll_interval_ms": 100,
