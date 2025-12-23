@@ -1403,20 +1403,20 @@ def run_single_pipeline_cycle(
                         if scalping_strategy and annotated_rates_df is not None and len(annotated_rates_df) >= 15:
                             # Préparer DataFrames multi-timeframe
                             df_m1 = annotated_rates_df
+                            df_m3 = None
                             df_m5 = None
-                            df_m15 = None
 
-                            # Essayer de charger M5/M15 depuis MT5 (optionnel)
+                            # Essayer de charger M3/M5 depuis MT5 (optionnel)
                             try:
                                 import MetaTrader5 as mt5
-                                df_m5 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=20)
-                                df_m15 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M15, count=15)
-                                if df_m5 is not None and len(df_m5) < 6:
+                                df_m3 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M3, count=20)
+                                df_m5 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=15)
+                                if df_m3 is not None and len(df_m3) < 6:
+                                    df_m3 = None
+                                if df_m5 is not None and len(df_m5) < 4:
                                     df_m5 = None
-                                if df_m15 is not None and len(df_m15) < 4:
-                                    df_m15 = None
                             except Exception as e:
-                                logger.debug(f"[OF V6][{asset}] Impossible charger M5/M15: {e}")
+                                logger.debug(f"[OF V6][{asset}] Impossible charger M3/M5: {e}")
 
                             # ✅ FIX (12 Dec 2025): Construire asset_signals correctement avec footprint_summary
                             # Ne PAS utiliser 'signals' qui n'existe pas ici, mais utiliser 'latest'
@@ -1429,8 +1429,8 @@ def run_single_pipeline_cycle(
                             of_v6_result = scalping_strategy.calculate_orderflow_v6_standalone(
                                 asset=asset,
                                 df_m1=df_m1,
+                                df_m3=df_m3,
                                 df_m5=df_m5,
-                                df_m15=df_m15,
                                 asset_signals=asset_signals_orch
                             )
 
@@ -3570,8 +3570,8 @@ def scalping_fast_thread(
                     orderflow = scalping_strategy.calculate_orderflow_v6_standalone(
                         asset='USDJPY',
                         df_m1=rates_df,
+                        df_m3=df_m3,
                         df_m5=df_m5,
-                        df_m15=df_m15,
                         asset_signals=asset_signals
                     )
 

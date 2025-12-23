@@ -179,7 +179,7 @@ class MomentumAnalyzerInstitutional:
     - Candle Strength (30pts): Force des bougies, body ratio, position close
     - Volume Confirmation (25pts): Volume relatif, momentum volume
     - Price Acceleration (25pts): Accélération du mouvement
-    - Multi-Timeframe Alignment (20pts): Concordance M1/M5/M15
+    - Multi-Timeframe Alignment (20pts): Concordance M1/M3/M5
     """
 
     def __init__(self, asset: str = "DEFAULT"):
@@ -690,7 +690,7 @@ class ScalpingStrategy(BaseStrategy):
             "volume_confirmation_score": 0.0,
             "imbalance_strength_score": 0.0,
             "total_score": 0.0,
-            "mtf_alignment": {"m1": "neutral", "m5": "neutral", "m15": "neutral"},
+            "mtf_alignment": {"m1": "neutral", "m3": "neutral", "m5": "neutral"},
             "details": {},
         }
 
@@ -725,7 +725,7 @@ class ScalpingStrategy(BaseStrategy):
 
         try:
             # ================================================================
-            # 0. ANALYSE MULTI-TIMEFRAME (M1/M5/M15)
+            # 0. ANALYSE MULTI-TIMEFRAME (M1/M3/M5)
             # ================================================================
             mtf_details = {}
 
@@ -773,26 +773,26 @@ class ScalpingStrategy(BaseStrategy):
                     "direction": result["mtf_alignment"]["m5"],
                 }
 
-            # M15 : 4 bougies → Contexte moyen terme
-            if df_m15 is not None and len(df_m15) >= 4:
-                m15_closes = df_m15["close"].tail(4).values
-                m15_opens = df_m15["open"].tail(4).values
-                m15_bullish = sum(
-                    1 for i in range(len(m15_closes)) if m15_closes[i] > m15_opens[i]
+            # M3 : 6 bougies → Structure burst scalping
+            if df_m3 is not None and len(df_m3) >= 6:
+                m3_closes = df_m3["close"].tail(6).values
+                m3_opens = df_m3["open"].tail(6).values
+                m3_bullish = sum(
+                    1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i]
                 )
-                m15_bearish = 4 - m15_bullish
+                m3_bearish = 6 - m3_bullish
 
-                if m15_bullish >= 3:  # 3/4 haussier
-                    result["mtf_alignment"]["m15"] = "bullish"
-                elif m15_bearish >= 3:  # 3/4 baissier
-                    result["mtf_alignment"]["m15"] = "bearish"
+                if m3_bullish >= 4:  # 4/6 haussier
+                    result["mtf_alignment"]["m3"] = "bullish"
+                elif m3_bearish >= 4:  # 4/6 baissier
+                    result["mtf_alignment"]["m3"] = "bearish"
                 else:
-                    result["mtf_alignment"]["m15"] = "neutral"
+                    result["mtf_alignment"]["m3"] = "neutral"
 
-                mtf_details["m15"] = {
-                    "bullish_bars": m15_bullish,
-                    "bearish_bars": m15_bearish,
-                    "direction": result["mtf_alignment"]["m15"],
+                mtf_details["m3"] = {
+                    "bullish_bars": m3_bullish,
+                    "bearish_bars": m3_bearish,
+                    "direction": result["mtf_alignment"]["m3"],
                 }
 
             result["details"]["mtf"] = mtf_details
@@ -801,8 +801,8 @@ class ScalpingStrategy(BaseStrategy):
             mtf_aligned = False
             if (
                 result["mtf_alignment"]["m1"]
+                == result["mtf_alignment"]["m3"]
                 == result["mtf_alignment"]["m5"]
-                == result["mtf_alignment"]["m15"]
                 and result["mtf_alignment"]["m1"] != "neutral"
             ):
                 mtf_aligned = True
@@ -1034,8 +1034,8 @@ class ScalpingStrategy(BaseStrategy):
         self,
         asset: str,
         df_m1: pd.DataFrame,
+        df_m3: Optional[pd.DataFrame],
         df_m5: Optional[pd.DataFrame],
-        df_m15: Optional[pd.DataFrame],
         asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
@@ -1073,8 +1073,8 @@ class ScalpingStrategy(BaseStrategy):
         result = self._analyze_orderflow_v6(
             asset=asset,
             df_m1=df_m1,
+            df_m3=df_m3,
             df_m5=df_m5,
-            df_m15=df_m15,
             asset_signals=asset_signals,
         )
 
@@ -2249,7 +2249,7 @@ class ScalpingStrategy(BaseStrategy):
                 return {}
 
             # ================================================================
-            # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M5/M15)
+            # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M3/M5)
             # 🔒 RESTRICTION (18 DEC 2025): USDJPY UNIQUEMENT
             # ================================================================
             # ⚠️ OrderFlow V6 + Footprint V6 + VWAP = USDJPY SEULEMENT
@@ -2261,8 +2261,8 @@ class ScalpingStrategy(BaseStrategy):
 
             try:
                 # Récupération des DataFrames multi-timeframe
+                df_m3 = None
                 df_m5 = None
-                df_m15 = None
 
                 # ✅ DEBUG: Log structure analyzed_context
                 ctx_md = (analyzed_context.get("market_data") or {}).get(
@@ -2271,6 +2271,19 @@ class ScalpingStrategy(BaseStrategy):
                 self.logger.debug(
                     f"[OF V6][{asset}] market_data keys: {list(ctx_md.keys())}"
                 )
+
+                # Essayer de récupérer M3 depuis analyzed_context
+                try:
+                    for k in ("annotated_rates_df_m3", "df_m3", "rates_m3"):
+                        v = ctx_md.get(k)
+                        if isinstance(v, pd.DataFrame) and len(v) >= 6:
+                            df_m3 = v
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M3 trouvé via clé '{k}' | len={len(df_m3)}"
+                            )
+                            break
+                except Exception as e:
+                    self.logger.debug(f"[OF V6][{asset}] Erreur récupération M3: {e}")
 
                 # Essayer de récupérer M5 depuis analyzed_context
                 try:
@@ -2285,26 +2298,29 @@ class ScalpingStrategy(BaseStrategy):
                 except Exception as e:
                     self.logger.debug(f"[OF V6][{asset}] Erreur récupération M5: {e}")
 
-                # Essayer de récupérer M15 depuis analyzed_context
-                try:
-                    for k in ("annotated_rates_df_m15", "df_m15", "rates_m15"):
-                        v = ctx_md.get(k)
-                        if isinstance(v, pd.DataFrame) and len(v) >= 4:
-                            df_m15 = v
-                            self.logger.debug(
-                                f"[OF V6][{asset}] M15 trouvé via clé '{k}' | len={len(df_m15)}"
-                            )
-                            break
-                except Exception as e:
-                    self.logger.debug(f"[OF V6][{asset}] Erreur récupération M15: {e}")
+                # Si M3/M5 non trouvés, essayer de les récupérer via MT5
+                if df_m3 is None and self.mt5_connector:
+                    try:
+                        import MetaTrader5 as mt5
 
-                # Si M5/M15 non trouvés, essayer de les récupérer via MT5
+                        df_m3 = self.mt5_connector.get_rates(
+                            asset, mt5.TIMEFRAME_M3, count=20
+                        )
+                        if df_m3 is not None and len(df_m3) >= 6:
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M3 récupéré via MT5 | len={len(df_m3)}"
+                            )
+                    except Exception as e:
+                        self.logger.debug(
+                            f"[OF V6][{asset}] Impossible récupérer M3 via MT5: {e}"
+                        )
+
                 if df_m5 is None and self.mt5_connector:
                     try:
                         import MetaTrader5 as mt5
 
                         df_m5 = self.mt5_connector.get_rates(
-                            asset, mt5.TIMEFRAME_M5, count=20
+                            asset, mt5.TIMEFRAME_M5, count=15
                         )
                         if df_m5 is not None and len(df_m5) >= 4:
                             self.logger.debug(
@@ -2315,28 +2331,12 @@ class ScalpingStrategy(BaseStrategy):
                             f"[OF V6][{asset}] Impossible récupérer M5 via MT5: {e}"
                         )
 
-                if df_m15 is None and self.mt5_connector:
-                    try:
-                        import MetaTrader5 as mt5
-
-                        df_m15 = self.mt5_connector.get_rates(
-                            asset, mt5.TIMEFRAME_M15, count=15
-                        )
-                        if df_m15 is not None and len(df_m15) >= 4:
-                            self.logger.debug(
-                                f"[OF V6][{asset}] M15 récupéré via MT5 | len={len(df_m15)}"
-                            )
-                    except Exception as e:
-                        self.logger.debug(
-                            f"[OF V6][{asset}] Impossible récupérer M15 via MT5: {e}"
-                        )
-
                 # ⚡ 1. OrderFlow Analysis (50% du score)
                 orderflow_result = self._analyze_orderflow_v6(
                     asset=asset,
                     df_m1=df_work,
+                    df_m3=df_m3,
                     df_m5=df_m5,
-                    df_m15=df_m15,
                     asset_signals=asset_signals,
                 )
 
@@ -2350,9 +2350,9 @@ class ScalpingStrategy(BaseStrategy):
                 if asset not in self.momentum_analyzers:
                     self.momentum_analyzers[asset] = MomentumAnalyzerInstitutional(asset)
 
-                self.logger.info(f"[{asset}] 🔍 Appel Momentum | df_work={'None' if df_work is None else f'len={len(df_work)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
+                self.logger.info(f"[{asset}] 🔍 Appel Momentum | df_work={'None' if df_work is None else f'len={len(df_work)}'} | df_m3={'None' if df_m3 is None else f'len={len(df_m3)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'}")
                 momentum_result = self.momentum_analyzers[asset].analyze(
-                    df_m1=df_work, df_m5=df_m5, df_m15=df_m15
+                    df_m1=df_work, df_m3=df_m3, df_m5=df_m5
                 )
                 self.logger.info(
                     f"[{asset}] 📊 MOMENTUM INSTITUTIONNEL | Score={momentum_result['total_score']:.1f}/100 | "
