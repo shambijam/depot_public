@@ -3555,14 +3555,14 @@ def scalping_fast_thread(
 
                 strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
 
-                # ✅ Récupérer M5 et M15 pour MTF alignment
+                # ✅ Récupérer M3 + M5 pour MTF alignment (burst scalping USDJPY)
                 try:
+                    df_m3 = mt5_connector.get_rates('USDJPY', 'M3', 8)
                     df_m5 = mt5_connector.get_rates('USDJPY', 'M5', 6)
-                    df_m15 = mt5_connector.get_rates('USDJPY', 'M15', 4)
                 except Exception as e:
-                    logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M5/M15: {e}")
+                    logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M3/M5: {e}")
+                    df_m3 = None
                     df_m5 = None
-                    df_m15 = None
 
                 # ✅ Appeler analyses OrderFlow V6 et Footprint V6 (format FusionManager)
                 try:
@@ -3672,12 +3672,12 @@ def scalping_fast_thread(
                             from strategy.scalping import MomentumAnalyzerInstitutional
                             scalping_strategy.momentum_analyzers['USDJPY'] = MomentumAnalyzerInstitutional('USDJPY')
 
-                        # Utiliser rates_df (DataFrame M1 nettoyé utilisé pour OrderFlow/Footprint)
-                        logger.info(f"[SCALPING_THREAD] 🔍 Appel Momentum (run_bot.py) | df_m1={'None' if rates_df is None else f'len={len(rates_df)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
+                        # Utiliser M1 + M3 + M5 pour burst scalping USDJPY
+                        logger.info(f"[SCALPING_THREAD] 🔍 Appel Momentum (run_bot.py) | df_m1={'None' if rates_df is None else f'len={len(rates_df)}'} | df_m3={'None' if df_m3 is None else f'len={len(df_m3)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'}")
                         momentum_result = scalping_strategy.momentum_analyzers['USDJPY'].analyze(
                             df_m1=rates_df,
-                            df_m5=df_m5,  # Déjà récupéré ligne 3558-3565
-                            df_m15=df_m15  # Déjà récupéré ligne 3558-3565
+                            df_m3=df_m3,  # M3 pour confirmation burst
+                            df_m5=df_m5   # M5 pour contexte
                         )
                         logger.info(
                             f"[SCALPING_THREAD] 📊 MOMENTUM (run_bot.py) | Score={momentum_result['total_score']:.1f}/100 | "

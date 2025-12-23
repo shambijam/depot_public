@@ -218,16 +218,16 @@ class MomentumAnalyzerInstitutional:
     def analyze(
         self,
         df_m1: pd.DataFrame,
+        df_m3: Optional[pd.DataFrame] = None,
         df_m5: Optional[pd.DataFrame] = None,
-        df_m15: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
         """
-        Analyse le momentum institutionnel sur M1 avec confirmation MTF.
+        Analyse le momentum institutionnel sur M1 avec confirmation M3+M5 (burst scalping).
 
         Args:
             df_m1: DataFrame M1 (minimum 20 bougies)
-            df_m5: DataFrame M5 optionnel (pour confluence)
-            df_m15: DataFrame M15 optionnel (pour confluence)
+            df_m3: DataFrame M3 optionnel (confirmation burst - prioritaire pour USDJPY)
+            df_m5: DataFrame M5 optionnel (contexte additionnel)
 
         Returns:
             Dict avec score total, direction, force, détails
@@ -235,7 +235,7 @@ class MomentumAnalyzerInstitutional:
         import logging
         logger = logging.getLogger(__name__)
 
-        logger.info(f"[MOMENTUM][{self.asset}] 🔍 analyze() appelé | df_m1={'None' if df_m1 is None else f'len={len(df_m1)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'} | df_m15={'None' if df_m15 is None else f'len={len(df_m15)}'}")
+        logger.info(f"[MOMENTUM][{self.asset}] 🔍 analyze() appelé | df_m1={'None' if df_m1 is None else f'len={len(df_m1)}'} | df_m3={'None' if df_m3 is None else f'len={len(df_m3)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'}")
 
         if df_m1 is None:
             logger.warning(f"[MOMENTUM][{self.asset}] df_m1 is None → returning default result")
@@ -266,7 +266,7 @@ class MomentumAnalyzerInstitutional:
             # ====================================================================
             # 4️⃣ MULTI-TIMEFRAME ALIGNMENT (0-20 pts)
             # ====================================================================
-            mtf_score, mtf_details = self._analyze_mtf_alignment(df_m1, df_m5, df_m15)
+            mtf_score, mtf_details = self._analyze_mtf_alignment(df_m1, df_m3, df_m5)
 
             # ====================================================================
             # 5️⃣ CALCUL SCORE TOTAL & DIRECTION
@@ -490,17 +490,19 @@ class MomentumAnalyzerInstitutional:
     def _analyze_mtf_alignment(
         self,
         df_m1: pd.DataFrame,
+        df_m3: Optional[pd.DataFrame],
         df_m5: Optional[pd.DataFrame],
-        df_m15: Optional[pd.DataFrame],
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Analyse l'alignement multi-timeframe.
+        Analyse l'alignement multi-timeframe pour BURST SCALPING (M1+M3+M5).
 
         Critères:
-        - Direction M1
-        - Direction M5 (si disponible)
-        - Direction M15 (si disponible)
-        - Concordance
+        - Direction M1 (timeframe primaire, 50% weight = 10 pts max)
+        - Direction M3 (confirmation burst, 35% weight = 7 pts max)
+        - Direction M5 (contexte, 15% weight = 3 pts max)
+        - Concordance entre timeframes
+
+        Total: 20 pts max
         """
         # Charger config MTF une seule fois
         mtf_cfg = self.config.get("mtf_alignment", {})
@@ -518,39 +520,40 @@ class MomentumAnalyzerInstitutional:
                 return "BEARISH"
             return "NEUTRAL"
 
-        m1_dir = get_direction(df_m1, 8)
-        m5_dir = get_direction(df_m5, 6) if df_m5 is not None else "N/A"
-        m15_dir = get_direction(df_m15, 4) if df_m15 is not None else "N/A"
+        # Directions par timeframe (adapté burst scalping)
+        m1_dir = get_direction(df_m1, 8)   # M1: 8 bougies
+        m3_dir = get_direction(df_m3, 6) if df_m3 is not None else "N/A"  # M3: 6 bougies
+        m5_dir = get_direction(df_m5, 5) if df_m5 is not None else "N/A"  # M5: 5 bougies
 
-        # Calcul score
+        # Calcul score avec pondération burst scalping
         score = 0.0
 
-        # Base M1 (5 pts)
+        # ✅ M1 Direction (50% = 10 pts max)
         if m1_dir in ["BULLISH", "BEARISH"]:
-            score += 5.0
+            score += 10.0  # M1 doit montrer une direction claire
 
-        # Concordance M5 (7.5 pts)
+        # ✅ M3 Concordance (35% = 7 pts max)
+        if m3_dir != "N/A":
+            if m3_dir == m1_dir:
+                score += 7.0   # Alignement parfait M1-M3
+            elif m3_dir == "NEUTRAL":
+                score += 3.0   # M3 neutre acceptable (pas contre M1)
+
+        # ✅ M5 Concordance (15% = 3 pts max)
         if m5_dir != "N/A":
             if m5_dir == m1_dir:
-                score += 7.5
+                score += 3.0   # M5 confirmé
             elif m5_dir == "NEUTRAL":
-                score += 3.5
+                score += 1.5   # M5 neutre acceptable
 
-        # Concordance M15 (7.5 pts)
-        if m15_dir != "N/A":
-            if m15_dir == m1_dir:
-                score += 7.5
-            elif m15_dir == "NEUTRAL":
-                score += 3.5
-
-        # Si tout aligné = bonus
-        if m1_dir != "NEUTRAL" and m1_dir == m5_dir == m15_dir:
-            score = 20.0  # Perfect alignment
+        # 🎯 Bonus alignement PARFAIT M1 = M3 = M5
+        if m1_dir != "NEUTRAL" and m1_dir == m3_dir == m5_dir:
+            score = 20.0  # Perfect alignment = score max
 
         details = {
             "m1_direction": m1_dir,
+            "m3_direction": m3_dir,
             "m5_direction": m5_dir,
-            "m15_direction": m15_dir,
             "alignment": "FULL" if score >= 18 else "PARTIAL" if score >= 10 else "WEAK",
         }
 
@@ -655,8 +658,8 @@ class ScalpingStrategy(BaseStrategy):
         self,
         asset: str,
         df_m1: pd.DataFrame,
+        df_m3: Optional[pd.DataFrame],
         df_m5: Optional[pd.DataFrame],
-        df_m15: Optional[pd.DataFrame],
         asset_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
@@ -664,13 +667,13 @@ class ScalpingStrategy(BaseStrategy):
 
         Périodes STRICTES :
         • M1 : 8 bougies → Momentum immédiat
-        • M5 : 6 bougies → Structure court terme
-        • M15 : 4 bougies → Contexte moyen terme
+        • M3 : 6 bougies → Structure burst scalping
+        • M5 : 4 bougies → Contexte court terme
 
         Focus principal :
         • Volume Profile : 15 bougies M1
         • Delta Analysis : 10 bougies M1
-        • Imbalances : 5 bougies M1 + 8 bougies M5
+        • Imbalances : 5 bougies M1 + 8 bougies M3
 
         Retourne :
         {
@@ -678,7 +681,7 @@ class ScalpingStrategy(BaseStrategy):
             "volume_confirmation_score": 0-15,
             "imbalance_strength_score": 0-10,
             "total_score": 0-50,
-            "mtf_alignment": {"m1": "", "m5": "", "m15": ""},
+            "mtf_alignment": {"m1": "", "m3": "", "m5": ""},
             "details": {...}
         }
         """
@@ -1603,17 +1606,17 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.info(f"📊 ORDERFLOW V6 - ANALYSE BURST SCALPING [{asset}]")
             self.logger.info(f"{sep}")
 
-            # 4.1 ANALYSE MULTI-TIMEFRAME
+            # 4.1 ANALYSE MULTI-TIMEFRAME (BURST SCALPING M1+M3+M5)
             mtf_alignment = orderflow_result.get("mtf_alignment", {})
             m1_dir = mtf_alignment.get("m1", "N/A")
+            m3_dir = mtf_alignment.get("m3", "N/A")  # ✅ M3 pour burst
             m5_dir = mtf_alignment.get("m5", "N/A")
-            m15_dir = mtf_alignment.get("m15", "N/A")
             mtf_aligned = orderflow_result.get("mtf_aligned", False)
 
-            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME :")
-            self.logger.info(f"   • M1  (8 bougies) → Momentum : {m1_dir.upper()}")
-            self.logger.info(f"   • M5  (6 bougies) → Structure : {m5_dir.upper()}")
-            self.logger.info(f"   • M15 (4 bougies) → Contexte  : {m15_dir.upper()}")
+            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING) :")
+            self.logger.info(f"   • M1 (8 bougies) → Momentum  : {m1_dir.upper()}")
+            self.logger.info(f"   • M3 (6 bougies) → Burst     : {m3_dir.upper()}")
+            self.logger.info(f"   • M5 (5 bougies) → Contexte  : {m5_dir.upper()}")
 
             # ✅ CORRIGÉ (15 DEC 2025): Momentum réel basé sur bougies
             momentum_m1 = "N/A"
@@ -1813,12 +1816,12 @@ class ScalpingStrategy(BaseStrategy):
 
             self.logger.info(f"   └─ MTF Alignment       : {mom_mtf_score:.1f}/20 pts")
 
-            # Détails MTF si disponibles
+            # Détails MTF si disponibles (BURST SCALPING M1+M3+M5)
             mtf_details = momentum_result.get("mtf_details", {})
             if mtf_details:
-                self.logger.info(f"      • M1  direction  : {mtf_details.get('m1_direction', 'N/A')}")
-                self.logger.info(f"      • M5  direction  : {mtf_details.get('m5_direction', 'N/A')}")
-                self.logger.info(f"      • M15 direction  : {mtf_details.get('m15_direction', 'N/A')}")
+                self.logger.info(f"      • M1 direction   : {mtf_details.get('m1_direction', 'N/A')}")
+                self.logger.info(f"      • M3 direction   : {mtf_details.get('m3_direction', 'N/A')}")
+                self.logger.info(f"      • M5 direction   : {mtf_details.get('m5_direction', 'N/A')}")
                 self.logger.info(f"      • Alignment      : {mtf_details.get('alignment', 'N/A')}")
 
             # 4.5 VWAP MODULE - INSTITUTIONNEL
