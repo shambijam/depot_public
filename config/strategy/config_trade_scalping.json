@@ -258,6 +258,33 @@
       "poor": 0
     }
   },
+  "veto_rules": {
+    "description": "Règles de VETO pour bloquer les setups de mauvaise qualité (23 DEC 2025)",
+    "momentum_veto": {
+      "enabled": true,
+      "description": "Bloque trades avec momentum opposé et fort (ex: BUY sur 7 bougies rouges)",
+      "strong_threshold": 45.0,
+      "comment": "Score > 45 = momentum significatif qui bloque si opposé à la direction",
+      "moderate_threshold": 30.0,
+      "comment_moderate": "Score 30-45 = warning seulement, pas de blocage"
+    },
+    "mtf_alignment_veto": {
+      "enabled": true,
+      "description": "Force l'alignement M1 et M3 pour confirmer les setups",
+      "require_m1_m3_aligned": true,
+      "comment": "M1 et M3 doivent être alignés OU l'un des deux NEUTRAL",
+      "allow_neutral": true,
+      "comment_neutral": "Si M1 ou M3 est NEUTRAL, le trade est accepté"
+    },
+    "entry_quality_veto": {
+      "enabled": true,
+      "description": "Bloque setups avec entry_quality POOR catastrophique",
+      "block_poor_quality": true,
+      "poor_score_threshold": 30.0,
+      "poor_confidence_threshold": 0.4,
+      "comment": "Bloque si entry_quality=POOR ET score<30 ET confidence<0.4"
+    }
+  },
   "orderflow_v6_config": {
     "description": "Configuration OrderFlow V6 - Seuils de classification adaptés USDJPY",
     "coherence_thresholds": {

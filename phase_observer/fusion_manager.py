@@ -1385,55 +1385,145 @@ class FusionManager:
         )
 
         # ================================================================
-        # 🚨 FILTRE VETO MOMENTUM INSTITUTIONNEL (18 DEC 2025)
+        # 🚨 FILTRE VETO MOMENTUM INSTITUTIONNEL (23 DEC 2025 - CORRIGÉ)
         # ================================================================
-        # Bloquer trades incohérents avec le momentum (ex: BUY sur 3 bougies rouges)
+        # Bloquer trades incohérents avec le momentum (ex: BUY sur 7 bougies rouges)
+        # ✅ FIX: Bloquer si momentum FORT et OPPOSÉ à la direction (logique inversée corrigée)
+
+        # Lire config veto_rules
+        veto_cfg = cfg.get("veto_rules", {})
+        momentum_veto_cfg = veto_cfg.get("momentum_veto", {})
+        momentum_veto_enabled = momentum_veto_cfg.get("enabled", True)
+
         momentum_result = ctx.get("momentum_result", {})
-        if momentum_result:
+        if momentum_result and momentum_veto_enabled:
             mom_score = momentum_result.get("total_score", 100)  # Default 100 si pas dispo
             mom_direction = momentum_result.get("direction", "NEUTRAL")
             mom_quality = momentum_result.get("quality", "N/A")
 
-            # Seuil VETO: Score momentum < 40/100 = POOR
-            MOMENTUM_VETO_THRESHOLD = 40.0
+            # ✅ SEUIL DEPUIS CONFIG: Bloquer si momentum opposé ET score > threshold
+            # Logique: Plus le momentum opposé est FORT, plus il doit bloquer le trade
+            MOMENTUM_VETO_THRESHOLD = momentum_veto_cfg.get("strong_threshold", 45.0)
+            MOMENTUM_MIN_OPPOSITE = momentum_veto_cfg.get("moderate_threshold", 30.0)
 
-            # VETO 1: BUY avec momentum BEARISH faible
-            if direction == "BUY" and mom_direction == "BEARISH" and mom_score < MOMENTUM_VETO_THRESHOLD:
+            # VETO 1: BUY avec momentum BEARISH FORT (LOGIQUE CORRIGÉE)
+            if direction == "BUY" and mom_direction == "BEARISH" and mom_score > MOMENTUM_VETO_THRESHOLD:
                 _probe(
                     self.log,
-                    f"[MOMENTUM_VETO] ❌ BUY BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 < {MOMENTUM_VETO_THRESHOLD} | "
-                    f"Quality={mom_quality} | Raison: Momentum bearish trop fort, incohérent avec signal BUY"
+                    f"[MOMENTUM_VETO] ❌ BUY BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 > {MOMENTUM_VETO_THRESHOLD} | "
+                    f"Quality={mom_quality} | Raison: Momentum bearish FORT, incohérent avec signal BUY (7+ bougies rouges)"
                 )
                 return {
                     "action": "HOLD",
                     "signal_type": "MOMENTUM_VETO_BUY",
                     "direction": "NEUTRAL",
                     "anchor_price": anchor_price,
-                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 incompatible avec BUY"
+                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 trop fort, incompatible avec BUY"
                 }
 
-            # VETO 2: SELL avec momentum BULLISH faible
-            if direction == "SELL" and mom_direction == "BULLISH" and mom_score < MOMENTUM_VETO_THRESHOLD:
+            # VETO 2: SELL avec momentum BULLISH FORT (LOGIQUE CORRIGÉE)
+            if direction == "SELL" and mom_direction == "BULLISH" and mom_score > MOMENTUM_VETO_THRESHOLD:
                 _probe(
                     self.log,
-                    f"[MOMENTUM_VETO] ❌ SELL BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 < {MOMENTUM_VETO_THRESHOLD} | "
-                    f"Quality={mom_quality} | Raison: Momentum bullish trop fort, incohérent avec signal SELL"
+                    f"[MOMENTUM_VETO] ❌ SELL BLOQUÉ | Momentum={mom_direction} Score={mom_score:.1f}/100 > {MOMENTUM_VETO_THRESHOLD} | "
+                    f"Quality={mom_quality} | Raison: Momentum bullish FORT, incohérent avec signal SELL (7+ bougies vertes)"
                 )
                 return {
                     "action": "HOLD",
                     "signal_type": "MOMENTUM_VETO_SELL",
                     "direction": "NEUTRAL",
                     "anchor_price": anchor_price,
-                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 incompatible avec SELL"
+                    "veto_reason": f"Momentum {mom_direction} {mom_score:.0f}/100 trop fort, incompatible avec SELL"
                 }
 
-            # Log si momentum OK
-            if mom_direction != "NEUTRAL":
+            # VETO 3: Directions opposées même si momentum faible/moyen (30-45 pts)
+            # Pour éviter les trades contre-tendance même sur momentum modéré
+            if (direction == "BUY" and mom_direction == "BEARISH" and mom_score >= MOMENTUM_MIN_OPPOSITE) or \
+               (direction == "SELL" and mom_direction == "BULLISH" and mom_score >= MOMENTUM_MIN_OPPOSITE):
                 _probe(
                     self.log,
-                    f"[MOMENTUM_CHECK] ✅ Momentum OK | Direction={mom_direction} Score={mom_score:.1f}/100 "
-                    f"Quality={mom_quality} | Compatible avec {direction}"
+                    f"[MOMENTUM_WARNING] ⚠️ {direction} avec momentum {mom_direction} modéré | Score={mom_score:.1f}/100 | "
+                    f"Quality={mom_quality} | Pénalité de confiance appliquée"
                 )
+                # Pas de VETO strict, mais attention logguée
+
+            # Log si momentum OK (aligné ou neutre)
+            if mom_direction != "NEUTRAL":
+                # Vérifier cohérence
+                is_coherent = (direction == "BUY" and mom_direction == "BULLISH") or \
+                              (direction == "SELL" and mom_direction == "BEARISH")
+
+                if is_coherent:
+                    _probe(
+                        self.log,
+                        f"[MOMENTUM_CHECK] ✅ Momentum ALIGNÉ | Direction={mom_direction} Score={mom_score:.1f}/100 "
+                        f"Quality={mom_quality} | Cohérent avec {direction}"
+                    )
+                elif mom_score <= MOMENTUM_MIN_OPPOSITE:
+                    _probe(
+                        self.log,
+                        f"[MOMENTUM_CHECK] ⚠️ Momentum opposé FAIBLE | Direction={mom_direction} Score={mom_score:.1f}/100 "
+                        f"Quality={mom_quality} | Trade {direction} accepté avec prudence"
+                    )
+
+        # ================================================================
+        # 🚨 VETO MTF ALIGNMENT M1/M3 (23 DEC 2025)
+        # ================================================================
+        # Forcer l'alignement M1 et M3 pour éviter les faux signaux
+        # M1 = micro momentum (8 bougies), M3 = confirmation burst (6 bougies)
+
+        # Lire config MTF alignment veto
+        mtf_veto_cfg = veto_cfg.get("mtf_alignment_veto", {})
+        mtf_veto_enabled = mtf_veto_cfg.get("enabled", True)
+        require_m1_m3_aligned = mtf_veto_cfg.get("require_m1_m3_aligned", True)
+        allow_neutral = mtf_veto_cfg.get("allow_neutral", True)
+
+        if momentum_result and mtf_veto_enabled and require_m1_m3_aligned:
+            mtf_details = momentum_result.get("mtf_details", {})
+            m1_direction = mtf_details.get("m1_direction", "NEUTRAL")
+            m3_direction = mtf_details.get("m3_direction", "NEUTRAL")
+            m5_direction = mtf_details.get("m5_direction", "NEUTRAL")
+
+            # VETO si M1 et M3 ne sont PAS alignés (et non neutres)
+            # Permet trades seulement si: M1=M3 OU l'un des deux est NEUTRAL (si allow_neutral=True)
+            if allow_neutral:
+                m1_m3_aligned = (
+                    m1_direction == m3_direction or  # Alignés
+                    m1_direction == "NEUTRAL" or     # M1 neutre
+                    m3_direction == "NEUTRAL"        # M3 neutre
+                )
+            else:
+                # Mode strict: M1 et M3 DOIVENT être identiques et non neutres
+                m1_m3_aligned = (m1_direction == m3_direction and m1_direction != "NEUTRAL")
+
+            if not m1_m3_aligned:
+                # M1 et M3 sont opposés → VETO
+                _probe(
+                    self.log,
+                    f"[MTF_VETO] ❌ {direction} BLOQUÉ | M1={m1_direction} ≠ M3={m3_direction} | "
+                    f"M5={m5_direction} | Raison: M1 et M3 doivent être alignés pour confirmer le setup"
+                )
+                return {
+                    "action": "HOLD",
+                    "signal_type": "MTF_ALIGNMENT_VETO",
+                    "direction": "NEUTRAL",
+                    "anchor_price": anchor_price,
+                    "veto_reason": f"M1 {m1_direction} ≠ M3 {m3_direction} - pas d'alignement"
+                }
+
+            # Log si alignement OK
+            if m1_direction != "NEUTRAL" or m3_direction != "NEUTRAL":
+                if m1_direction == m3_direction and m1_direction != "NEUTRAL":
+                    _probe(
+                        self.log,
+                        f"[MTF_CHECK] ✅ M1/M3 ALIGNÉS | M1={m1_direction} == M3={m3_direction} | M5={m5_direction} | "
+                        f"Confirmation setup solide"
+                    )
+                else:
+                    _probe(
+                        self.log,
+                        f"[MTF_CHECK] ⚠️ M1/M3 Accepté | M1={m1_direction} | M3={m3_direction} (un neutre) | M5={m5_direction}"
+                    )
 
         # ================================================================
         # DÉCISION FINALE PAR SEUILS

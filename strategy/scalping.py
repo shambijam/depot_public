@@ -2612,19 +2612,30 @@ class ScalpingStrategy(BaseStrategy):
 
             # ✅ VETO MOMENTUM POOR (23 DEC 2025)
             # Bloquer les setups avec momentum catastrophique
+
+            # Lire config veto_rules
+            veto_cfg = strat_cfg.get("veto_rules", {})
+            entry_quality_veto_cfg = veto_cfg.get("entry_quality_veto", {})
+            entry_quality_veto_enabled = entry_quality_veto_cfg.get("enabled", True)
+            block_poor_quality = entry_quality_veto_cfg.get("block_poor_quality", True)
+            poor_score_threshold = entry_quality_veto_cfg.get("poor_score_threshold", 30.0)
+            poor_confidence_threshold = entry_quality_veto_cfg.get("poor_confidence_threshold", 0.4)
+
             momentum_analysis = asset_signals.get("momentum_analysis", {})
             entry_quality = momentum_analysis.get('entry_quality', 'POOR')
             momentum_score = momentum_analysis.get('momentum_score', 0)
             momentum_confidence = momentum_analysis.get('confidence', 0)
 
-            # VETO si momentum POOR ET score très faible ET confiance faible
-            if (entry_quality == 'POOR' and
-                momentum_score < 30 and
-                momentum_confidence < 0.4):
+            # VETO si enabled ET momentum POOR ET score très faible ET confiance faible
+            if (entry_quality_veto_enabled and block_poor_quality and
+                entry_quality == 'POOR' and
+                momentum_score < poor_score_threshold and
+                momentum_confidence < poor_confidence_threshold):
 
                 self.logger.warning(
-                    f"[{asset}] ❌ VETO MOMENTUM | Quality={entry_quality} | "
-                    f"Score={momentum_score:.1f} | Confidence={momentum_confidence:.2f} | "
+                    f"[{asset}] ❌ VETO ENTRY_QUALITY | Quality={entry_quality} | "
+                    f"Score={momentum_score:.1f} < {poor_score_threshold} | "
+                    f"Confidence={momentum_confidence:.2f} < {poor_confidence_threshold} | "
                     f"Setup REJETÉ - Conditions de momentum catastrophiques"
                 )
                 return {}
