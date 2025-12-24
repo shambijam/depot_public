@@ -104,6 +104,74 @@ def _normalize_stops(
     return _r(sl_price), _r(tp_price)
 
 
+def calculate_pip_value_per_lot(
+    symbol: str,
+    symbol_info: Any = None,
+    current_rate: float = None
+) -> float:
+    """
+    Calcule la valeur d'un pip pour 1 lot standard dans la devise du compte (USD).
+
+    Args:
+        symbol: Nom du symbole (ex: "XAUUSD", "USDJPY", "EURUSD")
+        symbol_info: Infos MT5 du symbole (optionnel, pour méthode précise)
+        current_rate: Taux de change actuel (optionnel, pour fallback)
+
+    Returns:
+        float: Valeur d'un pip en USD pour 1 lot
+
+    Exemples:
+        - XAUUSD: 1.0 USD (100 oz × 0.01 = 1 USD)
+        - USDJPY @ 150: 6.67 USD (1000 JPY / 150 = 6.67 USD)
+        - EURUSD: 10.0 USD (100,000 × 0.0001 = 10 USD)
+    """
+    symbol = symbol.upper().strip()
+
+    # Méthode 1: Utiliser trade_tick_value et trade_tick_size de MT5 (PRÉCIS)
+    if symbol_info is not None:
+        try:
+            tick_value = float(getattr(symbol_info, "trade_tick_value", 0) or 0)
+            tick_size = float(getattr(symbol_info, "trade_tick_size", 0) or 0)
+            digits = int(getattr(symbol_info, "digits", 0) or 0)
+
+            if tick_value > 0 and tick_size > 0:
+                # Taille d'un pip selon les décimales
+                # digits 3/5 => pip = 10 points, sinon pip = 1 point
+                pip_multiplier = 10.0 if digits in (3, 5) else 1.0
+
+                # Valeur d'un pip = (pip_size / tick_size) × tick_value
+                pip_value = (pip_multiplier * tick_size / tick_size) * tick_value
+                pip_value = pip_multiplier * tick_value
+
+                return float(pip_value)
+        except Exception:
+            pass
+
+    # Méthode 2: Fallback basé sur des valeurs connues par symbole
+    if "XAU" in symbol:  # Or (Gold)
+        # XAUUSD: 100 oz × 0.01 USD = 1.00 USD par pip
+        return 1.0
+
+    elif "JPY" in symbol:  # Paires avec JPY
+        # USDJPY, EURJPY, etc: 100,000 unités × 0.01 JPY
+        # Besoin du taux de change pour convertir JPY → USD
+        if current_rate and current_rate > 0:
+            # 1 pip = 0.01 JPY sur 100,000 unités = 1,000 JPY
+            # Converti en USD: 1,000 / rate
+            return 1000.0 / float(current_rate)
+        else:
+            # Fallback conservateur basé sur USD/JPY ~ 150
+            return 6.67
+
+    elif symbol in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF"):
+        # Paires forex standard: 100,000 × 0.0001 = 10.00 USD par pip
+        return 10.0
+
+    else:
+        # Fallback générique (conservateur)
+        return 10.0
+
+
 def _get(sym: dict, *keys, default=None):
     for k in keys:
         if k in sym and sym[k] is not None:
@@ -1042,12 +1110,30 @@ def _resolve_basket_context_for_sltp(
 
                     # Calculer PnL total en pips
                     total_pnl_pips = 0.0
+
+                    # Récupérer symbol_info pour calcul précis
+                    symbol_info_obj = None
+                    current_rate = None
+                    try:
+                        symbol_info_obj = conn.get_symbol_info(symbol)
+                        # Obtenir le taux actuel pour les paires JPY
+                        if basket_positions:
+                            current_rate = float(basket_positions[0].get("price_current") if isinstance(basket_positions[0], dict) else getattr(basket_positions[0], "price_current", 0.0) or 0.0)
+                    except Exception:
+                        pass
+
                     for p in basket_positions:
                         profit = float(p.get("profit") if isinstance(p, dict) else getattr(p, "profit", 0.0) or 0.0)
                         volume = float(p.get("volume") if isinstance(p, dict) else getattr(p, "volume", 0.0) or 0.0)
-                        # Approximation: 1 pip = 10$ pour 1 lot (à ajuster selon le symbole)
-                        pip_value = 10.0 * volume if symbol == "XAUUSD" else 10.0 * volume
-                        pnl_pips = profit / pip_value if pip_value > 0 else 0.0
+
+                        # Calcul CORRECT de la valeur par pip (spécifique au symbole)
+                        pip_value_per_lot = calculate_pip_value_per_lot(
+                            symbol=symbol,
+                            symbol_info=symbol_info_obj,
+                            current_rate=current_rate
+                        )
+                        pip_value_total = pip_value_per_lot * volume
+                        pnl_pips = profit / pip_value_total if pip_value_total > 0 else 0.0
                         total_pnl_pips += pnl_pips
 
                     # Construire contexte minimal

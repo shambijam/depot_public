@@ -7,6 +7,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, List, Tuple
 
+# Import pour calcul correct de la valeur par pip
+from trader.sltp import calculate_pip_value_per_lot
+
 
 # ======================================================================================
 # Helpers génériques
@@ -759,16 +762,35 @@ def close_burst_basket(self, basket_id: str) -> Dict[str, Any]:
                 total_pnl_usd = 0.0
                 exit_prices = []
 
+                # Récupérer symbol_info pour calcul précis
+                symbol_info_obj = None
+                current_rate = None
+                try:
+                    if hasattr(self, 'mt5_connector') and symbol_hint:
+                        symbol_info_obj = self.mt5_connector.get_symbol_info(symbol_hint)
+                    if basket_pos:
+                        current_rate = _safe_float(_v(basket_pos[0], "price_current"), 0.0)
+                except Exception:
+                    pass
+
                 for p in basket_pos:
                     try:
                         # Profit en USD (directement depuis MT5)
                         profit_usd = _safe_float(_v(p, "profit"), 0.0)
                         total_pnl_usd += profit_usd
 
-                        # Calcul profit en pips (approximation)
-                        # Pour XAUUSD: 1 pip = 0.01, donc profit_pips = profit_usd / (volume * 10)
+                        # Calcul CORRECT du profit en pips (spécifique au symbole)
                         volume = _safe_float(_v(p, "volume"), 0.01)
-                        profit_pips = profit_usd / (volume * 10.0) if volume > 0 else 0.0
+                        if volume > 0 and symbol_hint:
+                            pip_value_per_lot = calculate_pip_value_per_lot(
+                                symbol=symbol_hint,
+                                symbol_info=symbol_info_obj,
+                                current_rate=current_rate
+                            )
+                            pip_value_total = pip_value_per_lot * volume
+                            profit_pips = profit_usd / pip_value_total if pip_value_total > 0 else 0.0
+                        else:
+                            profit_pips = 0.0
                         total_pnl_pips += profit_pips
 
                         # Prix de sortie (si disponible)
