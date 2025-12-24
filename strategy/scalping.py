@@ -570,10 +570,10 @@ class MomentumAnalyzerInstitutional:
         bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
 
         # ✅ Utilise fonction UNIFIÉE (pas de fonction locale)
-        # Directions par timeframe (adapté burst scalping)
-        m1_dir = calculate_mtf_direction_unified(df_m1, 8, bullish_threshold, bearish_threshold)
-        m3_dir = calculate_mtf_direction_unified(df_m3, 6, bullish_threshold, bearish_threshold) if df_m3 is not None else "N/A"
-        m5_dir = calculate_mtf_direction_unified(df_m5, 5, bullish_threshold, bearish_threshold) if df_m5 is not None else "N/A"
+        # Directions par timeframe (ULTRA-RÉACTIF pour scalping burst - 24 Dec 2025)
+        m1_dir = calculate_mtf_direction_unified(df_m1, 2, bullish_threshold, bearish_threshold)  # 2 min
+        m3_dir = calculate_mtf_direction_unified(df_m3, 2, bullish_threshold, bearish_threshold) if df_m3 is not None else "N/A"  # 6 min
+        m5_dir = calculate_mtf_direction_unified(df_m5, 2, bullish_threshold, bearish_threshold) if df_m5 is not None else "N/A"  # 10 min
 
         # Calcul score avec pondération burst scalping
         score = 0.0
@@ -1669,9 +1669,9 @@ class ScalpingStrategy(BaseStrategy):
             mtf_aligned = orderflow_result.get("mtf_aligned", False)
 
             self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING) :")
-            self.logger.info(f"   • M1 (8 bougies) → Momentum  : {m1_dir.upper()}")
-            self.logger.info(f"   • M3 (6 bougies) → Burst     : {m3_dir.upper()}")
-            self.logger.info(f"   • M5 (5 bougies) → Contexte  : {m5_dir.upper()}")
+            self.logger.info(f"   • M1 (8 bougies OF / 2 bougies MOM) → Momentum  : {m1_dir.upper()}")
+            self.logger.info(f"   • M3 (6 bougies OF / 2 bougies MOM) → Burst     : {m3_dir.upper()}")
+            self.logger.info(f"   • M5 (6 bougies OF / 2 bougies MOM) → Contexte  : {m5_dir.upper()}")
 
             # ✅ CORRIGÉ (15 DEC 2025): Momentum réel basé sur bougies
             momentum_m1 = "N/A"
