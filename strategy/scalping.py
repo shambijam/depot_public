@@ -13,6 +13,55 @@ from phase_observer.vwap.config import (
 )  # ✅ AJOUTÉ: Poids VWAP dynamiques
 
 
+# ================================================================
+# 🎯 FONCTION UNIFIÉE MTF - Fix 24 Décembre 2025
+# ================================================================
+def calculate_mtf_direction_unified(
+    df: Optional[pd.DataFrame],
+    n_candles: int,
+    bullish_threshold: float = 0.67,
+    bearish_threshold: float = 0.33,
+) -> str:
+    """
+    📊 Calcul UNIFIÉ de la direction Multi-Timeframe.
+
+    Utilisé par TOUS les composants (Momentum, OrderFlow V6, etc.)
+    pour éliminer les contradictions MTF entre rapports.
+
+    Args:
+        df: DataFrame avec colonnes 'open' et 'close'
+        n_candles: Nombre de bougies à analyser
+        bullish_threshold: Seuil haussier (défaut 67% = 0.67)
+        bearish_threshold: Seuil baissier (défaut 33% = 0.33)
+
+    Returns:
+        "BULLISH" si bougies vertes >= n_candles * bullish_threshold
+        "BEARISH" si bougies vertes <= n_candles * bearish_threshold
+        "NEUTRAL" sinon
+
+    Exemple M3 (6 bougies, seuils 67%/33%):
+        - 5 vertes/1 rouge  → 5/6=83.3% ≥ 67% → BULLISH
+        - 4 vertes/2 rouges → 4/6=66.7% < 67% et > 33% → NEUTRAL
+        - 2 vertes/4 rouges → 2/6=33.3% > 33% → NEUTRAL (pas BEARISH)
+        - 1 verte/5 rouges  → 1/6=16.7% ≤ 33% → BEARISH
+
+    Fix bug: Élimine contradiction où M3 2v/4r était NEUTRAL (Momentum)
+    mais BEARISH (OrderFlow V6 avec seuil hardcodé ≥4 rouges).
+    """
+    if df is None or len(df) < n_candles:
+        return "NEUTRAL"
+
+    recent = df.tail(n_candles)
+    green_count = (recent["close"] > recent["open"]).sum()
+
+    # Utilise pourcentages de la config (pas de hardcode)
+    if green_count >= n_candles * bullish_threshold:
+        return "BULLISH"
+    elif green_count <= n_candles * bearish_threshold:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 class USDJPYTimingOptimizer:
     """
     ⏱️ Optimiseur spécifique pour USDJPY Scalping Timing Analyzer
@@ -511,27 +560,20 @@ class MomentumAnalyzerInstitutional:
         - Concordance entre timeframes
 
         Total: 20 pts max
+
+        🔧 Fix 24 Décembre 2025: Utilise calculate_mtf_direction_unified()
+        pour cohérence avec OrderFlow V6.
         """
         # Charger config MTF une seule fois
         mtf_cfg = self.config.get("mtf_alignment", {})
         bullish_threshold = mtf_cfg.get("bullish_threshold", 0.67)
         bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
 
-        def get_direction(df, n_candles=6):
-            if df is None or len(df) < n_candles:
-                return "NEUTRAL"
-            recent = df.tail(n_candles)
-            green = (recent["close"] > recent["open"]).sum()
-            if green >= n_candles * bullish_threshold:
-                return "BULLISH"
-            elif green <= n_candles * bearish_threshold:
-                return "BEARISH"
-            return "NEUTRAL"
-
+        # ✅ Utilise fonction UNIFIÉE (pas de fonction locale)
         # Directions par timeframe (adapté burst scalping)
-        m1_dir = get_direction(df_m1, 8)   # M1: 8 bougies
-        m3_dir = get_direction(df_m3, 6) if df_m3 is not None else "N/A"  # M3: 6 bougies
-        m5_dir = get_direction(df_m5, 5) if df_m5 is not None else "N/A"  # M5: 5 bougies
+        m1_dir = calculate_mtf_direction_unified(df_m1, 8, bullish_threshold, bearish_threshold)
+        m3_dir = calculate_mtf_direction_unified(df_m3, 6, bullish_threshold, bearish_threshold) if df_m3 is not None else "N/A"
+        m5_dir = calculate_mtf_direction_unified(df_m5, 5, bullish_threshold, bearish_threshold) if df_m5 is not None else "N/A"
 
         # Calcul score avec pondération burst scalping
         score = 0.0
@@ -734,33 +776,35 @@ class ScalpingStrategy(BaseStrategy):
         try:
             # ================================================================
             # 0. ANALYSE MULTI-TIMEFRAME (M1/M3/M5)
+            # 🔧 Fix 24 Décembre 2025: Utilise calculate_mtf_direction_unified()
             # ================================================================
             mtf_details = {}
 
+            # Charger seuils MTF depuis config (comme Momentum)
+            mtf_cfg = self.strategy_config.get("momentum_institutional_config", {}).get("mtf_alignment", {})
+            if not mtf_cfg:
+                # Fallback vers config globale
+                mtf_cfg = {"bullish_threshold": 0.67, "bearish_threshold": 0.33}
+            bullish_threshold = mtf_cfg.get("bullish_threshold", 0.67)
+            bearish_threshold = mtf_cfg.get("bearish_threshold", 0.33)
+
+            import logging
+            logger = logging.getLogger(__name__)
+
             # M1 : 8 bougies → Momentum immédiat
             if df_m1 is not None and len(df_m1) >= 8:
+                m1_dir = calculate_mtf_direction_unified(df_m1, 8, bullish_threshold, bearish_threshold)
+                result["mtf_alignment"]["m1"] = m1_dir.lower()
+
+                # Compter bougies pour debug/détails
                 m1_closes = df_m1["close"].tail(8).values
                 m1_opens = df_m1["open"].tail(8).values
-                m1_bullish = sum(
-                    1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i]
-                )
+                m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
                 m1_bearish = 8 - m1_bullish
 
-                # 🔍 DEBUG: Log seuils MTF M1
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.critical(f"🔍 [MTF_M1_DEBUG] Bougies: {m1_bullish} vertes / {m1_bearish} rouges | "
-                               f"Seuils actuels: bullish>=6 bearish>=6 | "
-                               f"% vert={m1_bullish/8*100:.1f}% | % rouge={m1_bearish/8*100:.1f}%")
-
-                if m1_bullish >= 6:  # 6/8 haussier (75%)
-                    result["mtf_alignment"]["m1"] = "bullish"
-                elif m1_bearish >= 6:  # 6/8 baissier (75%)
-                    result["mtf_alignment"]["m1"] = "bearish"
-                else:
-                    result["mtf_alignment"]["m1"] = "neutral"
-
-                logger.critical(f"🔍 [MTF_M1_DEBUG] Direction calculée: {result['mtf_alignment']['m1'].upper()}")
+                logger.critical(f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
+                               f"Seuils: ≥{bullish_threshold*8:.1f}v BULL / ≤{bearish_threshold*8:.1f}v BEAR | "
+                               f"Direction: {m1_dir}")
 
                 mtf_details["m1"] = {
                     "bullish_bars": m1_bullish,
@@ -768,48 +812,42 @@ class ScalpingStrategy(BaseStrategy):
                     "direction": result["mtf_alignment"]["m1"],
                 }
 
-            # M5 : 6 bougies → Structure court terme
-            if df_m5 is not None and len(df_m5) >= 6:
-                m5_closes = df_m5["close"].tail(6).values
-                m5_opens = df_m5["open"].tail(6).values
-                m5_bullish = sum(
-                    1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i]
-                )
-                m5_bearish = 6 - m5_bullish
-
-                if m5_bullish >= 5:  # 5/6 haussier (83%)
-                    result["mtf_alignment"]["m5"] = "bullish"
-                elif m5_bearish >= 5:  # 5/6 baissier (83%)
-                    result["mtf_alignment"]["m5"] = "bearish"
-                else:
-                    result["mtf_alignment"]["m5"] = "neutral"
-
-                mtf_details["m5"] = {
-                    "bullish_bars": m5_bullish,
-                    "bearish_bars": m5_bearish,
-                    "direction": result["mtf_alignment"]["m5"],
-                }
-
             # M3 : 6 bougies → Structure burst scalping
             if df_m3 is not None and len(df_m3) >= 6:
+                m3_dir = calculate_mtf_direction_unified(df_m3, 6, bullish_threshold, bearish_threshold)
+                result["mtf_alignment"]["m3"] = m3_dir.lower()
+
+                # Compter bougies pour debug/détails
                 m3_closes = df_m3["close"].tail(6).values
                 m3_opens = df_m3["open"].tail(6).values
-                m3_bullish = sum(
-                    1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i]
-                )
+                m3_bullish = sum(1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i])
                 m3_bearish = 6 - m3_bullish
 
-                if m3_bullish >= 4:  # 4/6 haussier
-                    result["mtf_alignment"]["m3"] = "bullish"
-                elif m3_bearish >= 4:  # 4/6 baissier
-                    result["mtf_alignment"]["m3"] = "bearish"
-                else:
-                    result["mtf_alignment"]["m3"] = "neutral"
+                logger.critical(f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
+                               f"Seuils: ≥{bullish_threshold*6:.1f}v BULL / ≤{bearish_threshold*6:.1f}v BEAR | "
+                               f"Direction: {m3_dir}")
 
                 mtf_details["m3"] = {
                     "bullish_bars": m3_bullish,
                     "bearish_bars": m3_bearish,
                     "direction": result["mtf_alignment"]["m3"],
+                }
+
+            # M5 : 6 bougies → Structure court terme
+            if df_m5 is not None and len(df_m5) >= 6:
+                m5_dir = calculate_mtf_direction_unified(df_m5, 6, bullish_threshold, bearish_threshold)
+                result["mtf_alignment"]["m5"] = m5_dir.lower()
+
+                # Compter bougies pour debug/détails
+                m5_closes = df_m5["close"].tail(6).values
+                m5_opens = df_m5["open"].tail(6).values
+                m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
+                m5_bearish = 6 - m5_bullish
+
+                mtf_details["m5"] = {
+                    "bullish_bars": m5_bullish,
+                    "bearish_bars": m5_bearish,
+                    "direction": result["mtf_alignment"]["m5"],
                 }
 
             result["details"]["mtf"] = mtf_details
