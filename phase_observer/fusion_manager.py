@@ -743,27 +743,51 @@ class FusionManager:
         n_vw: Dict[str, Any],
         ctx: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """✅ MISE À JOUR (04 DEC 2025): Triggers supprimés, VWAP principal"""
+        """
+        ✅ MISE À JOUR (24 DEC 2025): Direction déterminée par MOMENTUM MTF
+
+        Changement majeur : La direction finale (BUY/SELL) vient du Momentum MTF,
+        pas du vote pondéré de OrderFlow/Footprint/VWAP.
+
+        Raison : Momentum analyse le MTF (M1/M3/M5) avec les vraies bougies,
+        tandis que OrderFlow/Footprint regardent seulement le delta court terme M1.
+
+        En phase BEARISH 1h, un delta M1 positif (+5 ticks) ne devrait PAS
+        donner un BUY. Le Momentum MTF (M3/M5 BEARISH) est plus fiable.
+        """
+        # ✅ NOUVEAU (24 DEC 2025): Direction depuis Momentum MTF
+        # Momentum regarde M1/M3/M5 avec vraies bougies, pas juste delta M1
+        momentum_result = ctx.get("momentum_result", {})
+        mom_direction = momentum_result.get("direction", "NEUTRAL")
+
+        # Convertir direction Momentum en vote numérique
+        if mom_direction == "BULLISH":
+            maj = 1  # BUY
+        elif mom_direction == "BEARISH":
+            maj = -1  # SELL
+        else:
+            maj = 0  # NEUTRAL (pas de direction claire)
+
+        # 🔍 LOG: Tracer l'origine de la direction
+        _probe(
+            self.log,
+            f"[COHERENCE] Direction finale depuis MOMENTUM MTF: {mom_direction} → maj={maj} | "
+            f"(OF delta ignoré pour direction, garde score seulement)"
+        )
+
+        # Garder les votes pour tracking (affichage seulement, ne détermine plus la direction)
         votes = []
         if n_of["dir"] != 0:
             votes.append(("orderflow", n_of["dir"], n_of["score"]))
         if n_fp["dir"] != 0:
             votes.append(("footprint", n_fp["dir"], n_fp["score"]))
-
-        # ✅ MAJ (06 DEC 2025): VWAP vote - boost supprimé, poids adaptatifs gérés par _adaptive_weights()
         if n_vw["dir"] != 0:
-            # Score VWAP brut (pas de boost - les poids adaptatifs sont dans _adaptive_weights)
             vwap_weight = n_vw["score"]
             votes.append(("vwap", n_vw["dir"], vwap_weight))
 
+        # Calculer agreement pour tracking (mais ne détermine plus la direction)
         pos = sum(w for _, d, w in votes if d > 0)
         neg = sum(w for _, d, w in votes if d < 0)
-        if pos > neg:
-            maj = 1
-        elif neg > pos:
-            maj = -1
-        else:
-            maj = 0
         total_w = sum(w for *_, w in votes) or 1.0
         agreement = (max(pos, neg)) / total_w if total_w > 0 else 0.0
 
