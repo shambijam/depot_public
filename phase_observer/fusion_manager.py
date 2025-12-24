@@ -1484,6 +1484,10 @@ class FusionManager:
             m3_direction = mtf_details.get("m3_direction", "NEUTRAL")
             m5_direction = mtf_details.get("m5_direction", "NEUTRAL")
 
+            # 🔍 DEBUG: Log MTF details
+            _probe(self.log, f"🔍 [MTF_DEBUG] M1={m1_direction} M3={m3_direction} M5={m5_direction} | "
+                           f"allow_neutral={allow_neutral} | Direction trade={direction}")
+
             # VETO si M1 et M3 ne sont PAS alignés (et non neutres)
             # Permet trades seulement si: M1=M3 OU l'un des deux est NEUTRAL (si allow_neutral=True)
             if allow_neutral:
@@ -1492,6 +1496,9 @@ class FusionManager:
                     m1_direction == "NEUTRAL" or     # M1 neutre
                     m3_direction == "NEUTRAL"        # M3 neutre
                 )
+                # 🔍 DEBUG: Log résultat check
+                if m1_direction == "NEUTRAL" and m3_direction != "NEUTRAL":
+                    _probe(self.log, f"🔍 [MTF_DEBUG] ⚠️ ACCEPTÉ PAR M1=NEUTRAL malgré M3={m3_direction} M5={m5_direction}")
             else:
                 # Mode strict: M1 et M3 DOIVENT être identiques et non neutres
                 m1_m3_aligned = (m1_direction == m3_direction and m1_direction != "NEUTRAL")

@@ -362,12 +362,20 @@ class MomentumAnalyzerInstitutional:
         )
 
         # Direction
+        # 🔍 DEBUG: Log avant calcul direction
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.critical(f"🔍 [MOMENTUM_INST_DEBUG] Bougies vertes: {green_count}/8 ({green_count/8*100:.1f}%) | "
+                       f"Seuils: BULLISH>=6 BEARISH<=2")
+
         if green_count >= 6:
             direction = "BULLISH"
         elif green_count <= 2:
             direction = "BEARISH"
         else:
             direction = "NEUTRAL"
+
+        logger.critical(f"🔍 [MOMENTUM_INST_DEBUG] Direction calculée: {direction}")
 
         details = {
             "green_candles": int(green_count),
@@ -738,12 +746,21 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 m1_bearish = 8 - m1_bullish
 
+                # 🔍 DEBUG: Log seuils MTF M1
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.critical(f"🔍 [MTF_M1_DEBUG] Bougies: {m1_bullish} vertes / {m1_bearish} rouges | "
+                               f"Seuils actuels: bullish>=6 bearish>=6 | "
+                               f"% vert={m1_bullish/8*100:.1f}% | % rouge={m1_bearish/8*100:.1f}%")
+
                 if m1_bullish >= 6:  # 6/8 haussier (75%)
                     result["mtf_alignment"]["m1"] = "bullish"
                 elif m1_bearish >= 6:  # 6/8 baissier (75%)
                     result["mtf_alignment"]["m1"] = "bearish"
                 else:
                     result["mtf_alignment"]["m1"] = "neutral"
+
+                logger.critical(f"🔍 [MTF_M1_DEBUG] Direction calculée: {result['mtf_alignment']['m1'].upper()}")
 
                 mtf_details["m1"] = {
                     "bullish_bars": m1_bullish,
