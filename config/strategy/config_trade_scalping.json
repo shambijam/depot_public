@@ -274,7 +274,9 @@
       "require_m1_m3_aligned": true,
       "comment": "M1 et M3 doivent être alignés OU l'un des deux NEUTRAL",
       "allow_neutral": true,
-      "comment_neutral": "Si M1 ou M3 est NEUTRAL, le trade est accepté"
+      "comment_neutral": "Si M1 ou M3 est NEUTRAL, le trade est accepté",
+      "block_all_neutral": true,
+      "comment_all_neutral": "✅ 24 DEC 2025: Bloquer si M1/M3/M5 TOUS NEUTRAL (pas de tendance claire)"
     },
     "entry_quality_veto": {
       "enabled": true,

@@ -1488,6 +1488,23 @@ class FusionManager:
             _probe(self.log, f"🔍 [MTF_DEBUG] M1={m1_direction} M3={m3_direction} M5={m5_direction} | "
                            f"allow_neutral={allow_neutral} | Direction trade={direction}")
 
+            # ✅ VETO si TOUS les MTF sont NEUTRAL (24 DEC 2025)
+            # Si aucune tendance claire sur aucun timeframe, bloquer le trade
+            block_all_neutral = mtf_veto_cfg.get("block_all_neutral", False)
+            if block_all_neutral and m1_direction == "NEUTRAL" and m3_direction == "NEUTRAL" and m5_direction == "NEUTRAL":
+                _probe(
+                    self.log,
+                    f"[MTF_VETO] ❌ {direction} BLOQUÉ | M1=NEUTRAL M3=NEUTRAL M5=NEUTRAL | "
+                    f"Raison: Aucune tendance claire sur aucun timeframe - setup trop faible"
+                )
+                return {
+                    "action": "HOLD",
+                    "signal_type": "MTF_ALL_NEUTRAL_VETO",
+                    "direction": "NEUTRAL",
+                    "anchor_price": anchor_price,
+                    "veto_reason": "M1/M3/M5 tous NEUTRAL - pas de tendance claire"
+                }
+
             # VETO si M1 et M3 ne sont PAS alignés (et non neutres)
             # Permet trades seulement si: M1=M3 OU l'un des deux est NEUTRAL (si allow_neutral=True)
             if allow_neutral:
