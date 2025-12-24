@@ -35,7 +35,7 @@
           "rr_floor": 1.0,
           "rr_cap": 3.0,
           "sl": {
-            "pips": 13,
+            "pips": 5,
             "buffer_pips": 2,
             "atr_period": 14,
             "atr_multiplier": 0.0,
@@ -43,7 +43,7 @@
           },
           "tp": {
             "tp_method": "PIPS",
-            "pips": 15,
+            "pips": 8,
             "atr_period": 14,
             "atr_multiplier": 0.0,
             "execution": {
