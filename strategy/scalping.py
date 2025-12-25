@@ -8,9 +8,7 @@ import uuid
 from .base_strategy import BaseStrategy
 import numpy as np
 import pandas as pd
-from phase_observer.vwap.config import (
-    get_regime_weights,
-)  # ✅ AJOUTÉ: Poids VWAP dynamiques
+
 
 
 # ================================================================
@@ -2174,13 +2172,8 @@ class ScalpingStrategy(BaseStrategy):
                 self._log_orderflow_consolidated_report(
                     asset=asset,
                     orderflow_result=orderflow_result,
-                    footprint_result=footprint_result,
                     final_score=0.0,
                     action=action,
-                    momentum_result=momentum_result,  # 📊 AJOUTÉ: Momentum institutionnel
-                    vwap_score_pct=vwap_score_pct,
-                    vwap_status=vwap_status,
-                    vwap_regime=vwap_regime,
                     context=report_context,
                     df_m1=df_work,  # ✅ AJOUT IMPORTANT
                 )
