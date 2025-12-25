@@ -25,8 +25,11 @@ from typing import Any, Dict, Optional, List, Tuple
 from core.diagnostics import DiagnosticTracker, get_tracker_from_context
 from core.strategy_manager import StrategyManager
 from phase_observer.market_analyzer import MarketAnalyzer
-from phase_observer.fusion_manager import FusionManager
-from phase_observer.vwap import create_vwap_analyzer  # ✅ VWAP Module (03 DEC 2025)
+# ❌ SUPPRIMÉ (25 DEC 2025): FusionManager, VWAP - Architecture minimaliste OrderFlow seul
+# from phase_observer.fusion_manager import FusionManager
+# from phase_observer.vwap import create_vwap_analyzer
+# ✅ AJOUTÉ (25 DEC 2025): Timing Gatekeeper pour filtrage binaire PASS/VETO
+from phase_observer.timing_analyzer import evaluate_trading_conditions
 
 
 load_dotenv()
@@ -35,7 +38,8 @@ try:
     # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
     # detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
     # from phase_observer.detect_orderflow_v6.orderflow_v6 import detect_orderflow_v6
-    from phase_observer.detectors import footprint_validator
+    # ❌ SUPPRIMÉ (25 DEC 2025): footprint_validator - Non utilisé dans pipeline minimaliste
+    # from phase_observer.detectors import footprint_validator
     from phase_observer.orchestrator import PhaseObserver
     from core.config_manager import ConfigManager
     from core.decision_pipeline import DecisionPipeline
@@ -550,13 +554,14 @@ def run_single_pipeline_cycle(
     # === Moteurs d'analyse ===
     market_analyzer = MarketAnalyzer(config_manager=config_manager, logger=logger)
 
+    # ❌ DÉSACTIVÉ (25 DEC 2025): FusionManager - Architecture minimaliste OrderFlow seul
     # === FusionManager requis pour scalping USDJPY ===
-    try:
-        from phase_observer.fusion_manager import FusionManager
-
-        _fusion_mgr = FusionManager(logger=logger)
-    except Exception:
-        _fusion_mgr = None
+    # try:
+    #     from phase_observer.fusion_manager import FusionManager
+    #     _fusion_mgr = FusionManager(logger=logger)
+    # except Exception:
+    #     _fusion_mgr = None
+    _fusion_mgr = None  # Désactivé - OrderFlow V6 seul maintenant
 
     # --- Fallback vote simple (jamais utilisé si REQUIRE_FUSION_MGR=True) ---
     def _quick_vote_fusion(
@@ -1537,225 +1542,136 @@ def run_single_pipeline_cycle(
                     annotated_rates_df, symbol_info_mt5
                 )
 
-                # === Décision Fusion (USDJPY seulement) ===
+                # ═══════════════════════════════════════════════════════════════
+                # 🎯 NOUVEAU PIPELINE MINIMALISTE (25 DEC 2025)
+                # OrderFlow V6 + Timing Gatekeeper SEULEMENT
+                # ═══════════════════════════════════════════════════════════════
                 try:
                     if _fusion_applies(asset):
-                        if _fusion_mgr and hasattr(_fusion_mgr, "fuse"):
-                            of, fp, trig, strat_cfg, ctx = _mk_fusion_inputs(
-                                signals, latest, symbol_info_mt5, mt5_connector, asset,
-                                footprint_trigger=footprint_trigger_result  # ✅ Vrai trigger si détecté
+                        # ========== ÉTAPE 1: TIMING GATEKEEPER (PASS/VETO) ==========
+                        timing_verdict = None
+                        try:
+                            # Récupérer ticks récents pour analyse liquidité
+                            ticks_for_timing = ticks_df if ticks_df is not None and not ticks_df.empty else None
+
+                            # Récupérer config asset
+                            asset_config_timing = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
+
+                            # Appel timing gatekeeper
+                            timing_verdict = evaluate_trading_conditions(
+                                asset=asset,
+                                current_time=pd.Timestamp.now(tz='UTC'),
+                                ticks_df=ticks_for_timing,
+                                market_context={},
+                                asset_config=asset_config_timing
                             )
 
-                            # === ✅ VWAP ANALYSIS (03 DEC 2025) - Module Institutionnel ===
-                            vwap_result = None
-                            try:
-                                # Récupérer DataFrame M1 (disponible depuis ligne 1348)
-                                df_vwap = annotated_rates_df if 'annotated_rates_df' in locals() else df_m1 if 'df_m1' in locals() else None
-
-                                # Récupérer current_price depuis latest
-                                current_price = None
-                                if isinstance(latest, dict):
-                                    current_price = latest.get("current_price") or latest.get("close")
-
-                                if df_vwap is not None and current_price is not None:
-                                    # Charger config scalping complète
-                                    try:
-                                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                                    except Exception:
-                                        scalping_config = strat_cfg or {}
-
-                                    # ✅ FIX: Reset index pour avoir 'time' en colonne (VWAP le requiert)
-                                    df_vwap_with_time = df_vwap.copy()
-                                    if 'time' not in df_vwap_with_time.columns and df_vwap_with_time.index.name in ['time', None]:
-                                        df_vwap_with_time = df_vwap_with_time.reset_index()
-                                        if df_vwap_with_time.columns[0] != 'time':
-                                            df_vwap_with_time = df_vwap_with_time.rename(columns={df_vwap_with_time.columns[0]: 'time'})
-
-                                    # ✅ Enrichir contexte avec régime PhaseObserver
-                                    vwap_ctx = ctx.copy() if ctx else {}
-
-                                    # Extraire régime PhaseObserver depuis df_vwap (qui contient la colonne 'regime')
-                                    if df_vwap is not None and not df_vwap.empty and 'regime' in df_vwap.columns:
-                                        try:
-                                            phase_observer_regime = str(df_vwap['regime'].iloc[-1])
-                                            vwap_ctx['phase_observer_regime'] = phase_observer_regime
-                                            logger.info(
-                                                f"[VWAP][{asset}] 🔄 PhaseObserver regime extracted: {phase_observer_regime}"
-                                            )
-                                        except Exception as e:
-                                            logger.warning(f"[VWAP][{asset}] Could not extract regime: {e}")
-
-                                    # Créer analyseur VWAP et lancer analyse
-                                    vwap_analyzer = create_vwap_analyzer(asset, scalping_config)
-                                    vwap_analysis = vwap_analyzer.analyze(df_vwap_with_time, current_price, vwap_ctx)
-                                    vwap_result = vwap_analysis.to_dict()
-
-                                    logger.info(
-                                        f"[VWAP][{asset}] ✅ Analysis complete | "
-                                        f"score={vwap_result.get('score', 0.0):.3f} | "
-                                        f"status={vwap_result.get('status', 'N/A')} | "
-                                        f"bias={vwap_result.get('bias', 'N/A')}"
-                                    )
-
-                                    # ✅ Stocker dans latest pour accès par scalping.py
-                                    latest["vwap_score"] = float(vwap_result.get('score', 0.0))
-                                    latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
-                                    latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
-
-                                    # ✅ Mettre à jour signals["__latest__"] pour que scalping.py voit vwap_score
-                                    if 'signals' in locals() and isinstance(signals, dict):
-                                        signals["__latest__"] = latest
-                                else:
-                                    logger.warning(
-                                        f"[VWAP][{asset}] ⚠️ Skipped | "
-                                        f"df_available={df_vwap is not None} | "
-                                        f"price_available={current_price is not None}"
-                                    )
-                                    # Fallback VWAP vide (score 0)
-                                    vwap_result = {
-                                        "score": 0.0,
-                                        "status": "INVALID",
-                                        "bias": "NEUTRAL",
-                                        "reason": "missing_data"
-                                    }
-                            except Exception as e:
-                                logger.error(f"[VWAP][{asset}] ❌ Analysis failed: {e}", exc_info=True)
-                                # Fallback VWAP vide (score 0)
-                                vwap_result = {
-                                    "score": 0.0,
-                                    "status": "INVALID",
-                                    "bias": "NEUTRAL",
-                                    "error": str(e)
-                                }
-
-                            # === FUSION avec VWAP (remplace triggers deprecated) ===
-                            out = _fusion_mgr.fuse(
-                                orderflow=of,
-                                footprint=fp,
-                                vwap=vwap_result,  # ✅ VWAP (25% du scoring)
-                                strategy_config=strat_cfg,
-                                context=ctx,
+                            logger.info(
+                                f"[TIMING_GATEKEEPER][{asset}] {timing_verdict['verdict']} | "
+                                f"session={timing_verdict.get('quality_metrics', {}).get('session', 'N/A')} | "
+                                f"tick_rate={timing_verdict.get('quality_metrics', {}).get('tick_rate', 0):.1f}/s"
                             )
-                            try:
-                                _fc = float(out.get("fused_confidence") or 0.0)
-                                # échelle 0..1 attendue par Fusion
-                                if 0.0 <= _fc <= 1.0:
-                                    pass
-                                else:
-                                    _fc = _fc / 100.0  # si jamais 0..100
+                        except Exception as e_timing:
+                            logger.error(f"[TIMING_GATEKEEPER][{asset}] Erreur: {e_timing}", exc_info=True)
+                            timing_verdict = {"verdict": "VETO", "veto_reason": f"Timing analysis error: {e_timing}"}
 
-                                # ❌ FALLBACK DÉGRADÉ SUPPRIMÉ - Respect strict des seuils FusionManager uniquement
-                                # Le code ne force plus jamais un trade si FusionManager dit WAIT_CONFIRMATION
-                            except Exception:
-                                pass
+                        # VETO immédiat si timing n'est pas PASS
+                        if timing_verdict and timing_verdict.get("verdict") != "PASS":
+                            logger.info(
+                                f"[TIMING_VETO][{asset}] {timing_verdict.get('veto_reason', 'Unknown')} - Skip trade cycle"
+                            )
+                            continue  # Passe au prochain asset (ou termine la boucle)
 
-                            try:
-                                logger.info(
-                                    "[TRACE] FUSION fused=%.3f | action=%s | signal=%s | consensus=%s",
-                                    float(out.get("fused_confidence") or 0.0),
-                                    out.get("action"),
-                                    out.get("signal_type"),
-                                    (out.get("consensus") or {}).get("maj"),
-                                )
+                        # ========== ÉTAPE 2: RÉCUPÉRATION ORDERFLOW V6 ==========
+                        # OrderFlow est déjà calculé par ScalpingStrategy et stocké dans latest
+                        orderflow_result = {
+                            "score": latest.get("orderflow_score", 0.0),
+                            "bias": latest.get("orderflow_bias", "NEUTRAL"),
+                            "summary": latest.get("orderflow_summary", {})
+                        }
 
-                            except Exception:
-                                pass
+                        logger.info(
+                            f"[ORDERFLOW][{asset}] score={orderflow_result['score']:.1f}/100 | "
+                            f"bias={orderflow_result['bias']}"
+                        )
 
-                            # TTL & slippage depuis la conf
-                            _fusion_cfg = (
-                                (base_config.get("entry_rules", {}) or {}).get(
-                                    "scalping", {}
-                                )
-                                or {}
-                            ).get("fusion", {}) or {}
-                            ttl_ms = int(_fusion_cfg.get("ttl_ms", 800))
-                            slippage_pts = float(
-                                _fusion_cfg.get("max_slippage_points", 10.0)
+                        # ========== ÉTAPE 3: DÉCISION DIRECTE via MarketAnalyzer ==========
+                        try:
+                            decision = market_analyzer.build_decision(
+                                orderflow_result=orderflow_result,
+                                min_score=75.0  # Seuil défini dans config
                             )
 
-                            # Confiance fusion → toujours 0..100 pour cohérence
-                            try:
-                                _fc = float(out.get("fused_confidence", 0.0) or 0.0)
-                                _score100 = _fc * 100.0 if 0.0 <= _fc <= 1.0 else _fc
-                            except Exception:
-                                _score100 = 0.0
+                            logger.info(
+                                f"[DECISION][{asset}] action={decision['action']} | "
+                                f"confidence={decision['confidence']:.2f} | "
+                                f"rationale={decision['rationale']}"
+                            )
+                        except Exception as e_decision:
+                            logger.error(f"[DECISION][{asset}] Erreur build_decision: {e_decision}", exc_info=True)
+                            decision = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                            # ✅ CORRECTION: Garder 'out' complet (avec components, trigger_boost, etc.)
-                            # puis ajouter les champs supplémentaires nécessaires
-                            fdec = dict(out)  # Copie de 'out' pour garder tous les champs FusionManager
+                        # ========== ÉTAPE 4: CONSTRUCTION SCALPING DECISION (si BUY/SELL) ==========
+                        if decision["action"] in ["BUY", "SELL"]:
+                            # Prix d'ancrage depuis OrderFlow VPOC
+                            anchor_price = decision.get("anchor_price") or latest.get("current_price") or latest.get("close")
 
-                            # Ajouter/surcharger les champs de configuration
-                            fdec.update({
-                                "score": float(_score100),
-                                "price": (
-                                    trig.get("anchor_price")
-                                    if isinstance(trig, dict)
-                                    else None
-                                ) if "price" not in fdec or not fdec["price"] else fdec["price"],
+                            # TTL et slippage depuis config
+                            scalping_cfg_entry = base_config.get("entry_rules", {}).get("scalping", {})
+                            decision_cfg = scalping_cfg_entry.get("decision", {})
+                            ttl_ms = int(decision_cfg.get("validity_ms", 800))
+                            slippage_pts = float(decision_cfg.get("max_spread_pts", 15))
+
+                            # Construire décision scalping compatible avec fast-lane
+                            fdec = {
+                                "ok": True,
+                                "action": decision["action"],
+                                "fused_confidence": decision["confidence"],  # 0.0-1.0
+                                "score": decision["confidence"] * 100.0,  # 0-100 pour compatibilité
+                                "price": anchor_price,
                                 "ttl_ms": ttl_ms,
                                 "slippage_guard_points": slippage_pts,
-                                "ts_created": __import__("pandas")
-                                .Timestamp.utcnow()
-                                .value
-                                // 1_000_000,
+                                "ts_created": pd.Timestamp.utcnow().value // 1_000_000,
+                                "signal_type": "MINIMALIST_ORDERFLOW",
+                                "rationale": decision["rationale"],
+                                "orderflow_score": orderflow_result["score"],
+                                "timing_quality": timing_verdict.get("quality_metrics", {})
+                            }
+
+                            # ========== ÉTAPE 5: AJOUTER À FUSION_SCALPING_DECISIONS ==========
+                            fusion_scalping_decisions.append({
+                                "rule_name": "minimalist_scalping",  # Nouveau nom pour différencier
+                                "action": fdec["action"],
+                                "asset": asset,
+                                "price": fdec.get("price"),
+                                "confidence": fdec.get("score", 0.0),  # 0-100
+                                "no_fallback": True,
+                                "entry_style": "MARKET",
+                                "validity_ms": int(fdec.get("ttl_ms", 800)),
+                                "slippage_guard_points": float(fdec.get("slippage_guard_points", 15.0)),
+                                "ts_created": int(fdec.get("ts_created")),
+                                "fusion_data": fdec,  # Pour compatibilité avec fast-lane
+                                "fusion_full": fdec   # Pour compatibilité avec logging
                             })
 
-                        elif REQUIRE_FUSION_MGR:
-                            fdec = {"ok": False, "reason": "fusion_manager_missing"}
-                        else:
-                            fdec = _quick_vote_fusion(
-                                signals=signals,
-                                latest=latest,
-                                base_cfg=base_config,
-                                sym=asset,
-                                mt5c=mt5_connector,
-                            )
-
-                        if (
-                            fdec
-                            and fdec.get("ok")
-                            and fdec.get("action") in {"BUY", "SELL"}
-                        ):
-                            fusion_scalping_decisions.append(
-                                {
-                                    "rule_name": "fusion_scalping",
-                                    "action": fdec["action"],
-                                    "asset": asset,
-                                    "price": fdec.get("price"),
-                                    "confidence": fdec.get("score", 0.7),
-                                    "no_fallback": True,
-                                    "entry_style": "MARKET",
-                                    "validity_ms": int(fdec.get("ttl_ms", 800)),
-                                    "slippage_guard_points": float(
-                                        fdec.get("slippage_guard_points", 10.0)
-                                    ),
-                                    "ts_created": int(fdec.get("ts_created")),
-                                    # ✅ CORRECTION: fusion_full contient déjà tout (signal_type, consensus, quality, etc.)
-                                    # Pas besoin de fusion_meta qui créait un doublon vide
-                                    "fusion_full": fdec,
-                                }
-                            )
                             logger.info(
-                                "[FUSION][%s] %s score=%.2f ttl=%dms | price=%s | meta=%s",
-                                asset,
-                                fdec.get("action", "?"),
-                                float(fdec.get("score", 0.0)),
-                                int(fdec.get("ttl_ms", 0)),
-                                fdec.get("price"),
-                                fdec.get("meta", {}),
+                                f"[MINIMALIST][{asset}] ✅ {fdec['action']} | "
+                                f"score={fdec['score']:.1f}/100 | "
+                                f"OF={orderflow_result['score']:.1f} | "
+                                f"price={fdec.get('price')} | "
+                                f"rationale={fdec.get('rationale', 'N/A')}"
                             )
                         else:
+                            # HOLD - OrderFlow score insuffisant
                             logger.info(
-                                "[FUSION][%s] hold: %s",
-                                asset,
-                                (out if isinstance(out, dict) else {}).get(
-                                    "signal_type",
-                                    (fdec or {}).get("reason", "WAIT_CONFIRMATION"),
-                                ),
+                                f"[MINIMALIST][{asset}] HOLD | "
+                                f"action={decision['action']} | "
+                                f"confidence={decision['confidence']:.2f} | "
+                                f"rationale={decision['rationale']}"
                             )
 
                 except Exception as _e:
-                    logger.warning(f"[FUSION] erreur: {_e}")
+                    logger.warning(f"[MINIMALIST_PIPELINE] erreur: {_e}", exc_info=True)
 
             except Exception as e:
                 logger.error(f"Erreur collecte données {asset}: {e}", exc_info=True)
@@ -3193,27 +3109,40 @@ def scalping_fast_thread(
     logger
 ):
     """
-    Thread dédié au SCALPING - Cycle rapide 10 secondes.
+    🎯 Thread dédié au SCALPING - Cycle rapide 5 secondes (MINIMALISTE - 25 DEC 2025)
 
-    Responsabilités:
+    Architecture simplifiée:
     - Analyse M1 (USDJPY uniquement)
-    - PhaseObserver → global_context (partagé avec liquidity)
-    - FusionManager → Signaux scalping
+    - Timing Gatekeeper → PASS/VETO (filtre session + liquidité)
+    - OrderFlow V6 → Source unique de signaux (score 0-100)
+    - MarketAnalyzer.build_decision() → BUY/SELL/HOLD direct
     - monitor_burst_baskets() → Fermeture +15 pips
+
+    ❌ SUPPRIMÉ: FusionManager, VWAP, Footprint, Momentum
     """
-    cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes (au lieu de 10s) pour capturer mouvements rapides
+    cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes pour capturer mouvements rapides
     cycle_count = 0
 
-    logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 5s) ⚡ MODE ULTRA-RAPIDE")
+    logger.info("🚀 [SCALPING_THREAD] Démarré (cycle 5s) ⚡ PIPELINE MINIMALISTE")
 
-    # ✅ Instancier FusionManager pour ce thread
+    # ❌ DÉSACTIVÉ (25 DEC 2025): FusionManager - Architecture minimaliste
+    # # ✅ Instancier FusionManager pour ce thread
+    # try:
+    #     from phase_observer.fusion_manager import FusionManager
+    #     fusion_mgr = FusionManager(logger=logger)
+    #     logger.info("✅ [SCALPING_THREAD] FusionManager instancié")
+    # except Exception as e:
+    #     logger.error(f"❌ [SCALPING_THREAD] Impossible de créer FusionManager: {e}")
+    #     fusion_mgr = None
+    fusion_mgr = None  # Désactivé - OrderFlow V6 seul
+
+    # ✅ Instancier MarketAnalyzer pour décisions minimalistes
     try:
-        from phase_observer.fusion_manager import FusionManager
-        fusion_mgr = FusionManager(logger=logger)
-        logger.info("✅ [SCALPING_THREAD] FusionManager instancié")
+        market_analyzer_thread = MarketAnalyzer(config_manager=config_manager, logger=logger)
+        logger.info("✅ [SCALPING_THREAD] MarketAnalyzer instancié (pipeline minimaliste)")
     except Exception as e:
-        logger.error(f"❌ [SCALPING_THREAD] Impossible de créer FusionManager: {e}")
-        fusion_mgr = None
+        logger.error(f"❌ [SCALPING_THREAD] Impossible de créer MarketAnalyzer: {e}")
+        market_analyzer_thread = None
 
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
@@ -3262,204 +3191,27 @@ def scalping_fast_thread(
 
             # MarketAnalyzer (phase + patterns + features)
             from phase_observer.market_analyzer import MarketAnalyzer
-            from core.footprint_cache import footprint_cache  # ✅ AJOUTÉ: Import cache
+            # ❌ DÉSACTIVÉ (25 DEC 2025): footprint_cache - Architecture minimaliste
+            # from core.footprint_cache import footprint_cache
 
             # Signature: MarketAnalyzer(config_manager, logger)
             market_analyzer = MarketAnalyzer(config_manager, logger)
 
-            # ✅ OPTIMISATION: Lire footprint depuis CACHE au lieu de le calculer
-            cached_footprint = footprint_cache.get("USDJPY", max_age_seconds=15.0)
-
-            if cached_footprint:
-                # Cache HIT → Analyse ultra-rapide (sans calcul footprint)
-                cache_age = footprint_cache.get_age("USDJPY")
-                logger.debug(
-                    f"⚡ [SCALPING_THREAD] CACHE HIT | age={cache_age:.1f}s | "
-                    f"ticks={cached_footprint.get('footprint_summary', {}).get('tick_count', 0)}"
-                )
-
-                # Analyse SANS ticks (plus rapide, utilise seulement OrderFlow)
-                # Mais on passe le footprint_summary depuis le cache
+            # 🎯 PIPELINE SIMPLIFIÉ (25 DEC 2025): Analyse directe sans cache
+            # OrderFlow V6 calculé en direct par market_analyzer.analyze()
+            try:
+                # Analyser rates_df (OHLC M1) - market_analyzer calcule OrderFlow en interne
                 market_results = market_analyzer.analyze(
-                    rates_df,
-                    "USDJPY",
-                    ticks=None,
-                    footprint_summary=cached_footprint.get('footprint_summary', {})
+                    asset="USDJPY",
+                    df=rates_df,
+                    ticks=None  # Pas de ticks nécessaires - OrderFlow déjà dans rates_df
                 )
 
-                # Injecter les données footprint depuis le cache
-                market_results['footprint'] = cached_footprint.get('footprint_summary', {})
-                market_results['footprint_trigger'] = cached_footprint.get('trigger_data', {})
-                market_results['footprint_df'] = cached_footprint.get('footprint_df')
-                market_results['_cache_hit'] = True
-                market_results['_cache_age_s'] = cache_age
-
-                # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE HIT aussi (sinon vwap_score = 0)
-                try:
-                    latest = market_results.get("latest", {})
-
-                    # ✅ FIX: latest peut être une pandas Series, convertir en dict
-                    import pandas as pd
-                    if isinstance(latest, pd.Series):
-                        latest = latest.to_dict()
-                    elif not isinstance(latest, dict):
-                        latest = {}
-
-                    current_price = None
-                    if isinstance(latest, dict):
-                        current_price = latest.get("current_price") or latest.get("close")
-
-                    logger.info(f"[SCALPING_THREAD][VWAP][CACHE_HIT] current_price={current_price}")
-
-                    if rates_df is not None and not rates_df.empty and current_price is not None:
-                        # Préparer DataFrame pour VWAP
-                        df_vwap = rates_df.copy()
-                        if 'time' not in df_vwap.columns and df_vwap.index.name in ['time', None]:
-                            df_vwap = df_vwap.reset_index()
-                            if df_vwap.columns[0] != 'time':
-                                df_vwap = df_vwap.rename(columns={df_vwap.columns[0]: 'time'})
-
-                        # Extraire régime PhaseObserver si disponible
-                        vwap_ctx = {}
-                        if 'regime' in rates_df.columns:
-                            try:
-                                phase_observer_regime = str(rates_df['regime'].iloc[-1])
-                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
-                            except Exception:
-                                pass
-
-                        # Créer analyseur VWAP et analyser
-                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                        vwap_analyzer = create_vwap_analyzer("USDJPY", scalping_config)
-                        vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
-                        vwap_result = vwap_analysis.to_dict()
-
-                        # Stocker dans latest
-                        latest["vwap_score"] = float(vwap_result.get('score', 0.0))
-                        latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
-                        latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
-                        # ✅ FIX (12 Dec 2025): Régime est dans vwap_result['vwap']['regime']
-                        vwap_sub = vwap_result.get('vwap', {})
-                        latest["vwap_regime"] = str(vwap_sub.get('regime', 'UNKNOWN'))
-                        latest["vwap_value"] = float(vwap_sub.get('value', 0.0))
-                        latest["vwap_zone"] = str(vwap_sub.get('zone', 'NEUTRAL'))
-                        latest["vwap_slope"] = float(vwap_sub.get('slope', 0.0))
-                        latest["vwap_distance_pips"] = float(vwap_sub.get('distance_pips', 0.0))
-
-                        # Mettre à jour market_results
-                        market_results["latest"] = latest
-
-                        logger.info(
-                            f"[SCALPING_THREAD][VWAP][CACHE_HIT] ✅ Calculé | "
-                            f"score={latest['vwap_score']:.3f} | "
-                            f"status={latest['vwap_status']} | "
-                            f"bias={latest['vwap_bias']}"
-                        )
-                except Exception as e_vwap:
-                    logger.error(f"[SCALPING_THREAD][VWAP][CACHE_HIT] Erreur calcul: {e_vwap}", exc_info=True)
-
-            else:
-                # Cache MISS → Fallback analyse complète (rare)
-                logger.warning(
-                    "⚠️ [SCALPING_THREAD] CACHE MISS | Fallback analyse complète (DataEngine lag?)"
-                )
-
-                # ✅ CORRECTION: Récupérer les ticks pour permettre l'analyse footprint
-                import pandas as pd
-                from datetime import timedelta
-
-                # La dernière barre de rates_df (get_rates from_pos 0, count=50) contient
-                # déjà la bougie EN COURS (incomplète). On récupère ses ticks.
-                last_candle_time = rates_df.iloc[-1]['time']
-                candle_start = last_candle_time
-                candle_end = last_candle_time + timedelta(minutes=1)
-
-                try:
-                    ticks_df = mt5_connector.get_ticks_for_candle(
-                        symbol="USDJPY",
-                        start_ts=candle_start,
-                        end_ts=candle_end
-                    )
-                    logger.info(f"[SCALPING_THREAD][CACHE_MISS] Récupéré {len(ticks_df) if ticks_df is not None else 0} ticks pour footprint | fenêtre={candle_start}")
-                except Exception as e:
-                    logger.error(f"[SCALPING_THREAD][CACHE_MISS] Erreur récupération ticks: {e}")
-                    ticks_df = None
-
-                # ✅ PAS besoin d'ajouter bougie - rates_df.iloc[-1] est déjà la bougie courante
-                # (get_rates from_pos=0 retourne jusqu'à maintenant, incluant bougie incomplète)
-
-                market_results = market_analyzer.analyze(rates_df, "USDJPY", ticks=ticks_df)  # ✅ Avec ticks
-                market_results['_cache_hit'] = False
-
-                # ✅ FIX (12 Dec 2025): Calculer VWAP dans CACHE MISS aussi (sinon vwap_score = 0)
-                try:
-                    latest = market_results.get("latest", {})
-
-                    # ✅ FIX: latest peut être une pandas Series, convertir en dict
-                    import pandas as pd
-                    if isinstance(latest, pd.Series):
-                        latest = latest.to_dict()
-                    elif not isinstance(latest, dict):
-                        latest = {}
-
-                    current_price = None
-                    if isinstance(latest, dict):
-                        current_price = latest.get("current_price") or latest.get("close")
-
-                    logger.info(f"[SCALPING_THREAD][VWAP] current_price={current_price}")
-
-                    if rates_df is not None and not rates_df.empty and current_price is not None:
-                        # Préparer DataFrame pour VWAP (besoin de 'time' en colonne)
-                        df_vwap = rates_df.copy()
-                        if 'time' not in df_vwap.columns and df_vwap.index.name in ['time', None]:
-                            df_vwap = df_vwap.reset_index()
-                            if df_vwap.columns[0] != 'time':
-                                df_vwap = df_vwap.rename(columns={df_vwap.columns[0]: 'time'})
-
-                        # Extraire régime PhaseObserver si disponible
-                        vwap_ctx = {}
-                        if 'regime' in rates_df.columns:
-                            try:
-                                phase_observer_regime = str(rates_df['regime'].iloc[-1])
-                                vwap_ctx['phase_observer_regime'] = phase_observer_regime
-                            except Exception:
-                                pass
-
-                        # Créer analyseur VWAP et analyser
-                        scalping_config = strategy_manager.get_strategy_config("scalping") or {}
-                        vwap_analyzer = create_vwap_analyzer("USDJPY", scalping_config)
-                        vwap_analysis = vwap_analyzer.analyze(df_vwap, current_price, vwap_ctx)
-                        vwap_result = vwap_analysis.to_dict()
-
-                        # Stocker dans latest
-                        latest["vwap_score"] = float(vwap_result.get('score', 0.0))
-                        latest["vwap_status"] = str(vwap_result.get('status', 'INVALID'))
-                        latest["vwap_bias"] = str(vwap_result.get('bias', 'NEUTRAL'))
-                        # ✅ FIX (12 Dec 2025): Régime est dans vwap_result['vwap']['regime']
-                        vwap_sub = vwap_result.get('vwap', {})
-                        latest["vwap_regime"] = str(vwap_sub.get('regime', 'UNKNOWN'))
-                        latest["vwap_value"] = float(vwap_sub.get('value', 0.0))
-                        latest["vwap_zone"] = str(vwap_sub.get('zone', 'NEUTRAL'))
-                        latest["vwap_slope"] = float(vwap_sub.get('slope', 0.0))
-                        latest["vwap_distance_pips"] = float(vwap_sub.get('distance_pips', 0.0))
-
-                        logger.info(
-                            f"[SCALPING_THREAD][VWAP] ✅ Calculé | "
-                            f"score={latest['vwap_score']:.3f} | "
-                            f"status={latest['vwap_status']} | "
-                            f"bias={latest['vwap_bias']}"
-                        )
-
-                        # ✅ Mettre à jour market_results avec le latest enrichi
-                        market_results["latest"] = latest
-                    else:
-                        logger.warning(
-                            f"[SCALPING_THREAD][VWAP] ⚠️ Skipped | "
-                            f"df_available={rates_df is not None and not rates_df.empty} | "
-                            f"price_available={current_price is not None}"
-                        )
-                except Exception as e_vwap:
-                    logger.error(f"[SCALPING_THREAD][VWAP] Erreur calcul: {e_vwap}", exc_info=True)
+                logger.debug(f"⚡ [SCALPING_THREAD] market_analyzer.analyze() OK")
+            except Exception as e_analysis:
+                logger.error(f"[SCALPING_THREAD] Erreur market_analyzer.analyze(): {e_analysis}", exc_info=True)
+                # Continuer avec market_results vide pour ne pas crasher le thread
+                market_results = {"latest": {}, "annotated_df": rates_df if rates_df is not None else pd.DataFrame()}
 
             # Stocker dans global_context (avec lock)
             with context_lock:
@@ -3645,101 +3397,141 @@ def scalping_fast_thread(
                         ctx["in_lower_tercile"] = False
                         ctx["phase_observer_regime"] = "unknown"
 
-                # ✅ Construire objet VWAP pour FusionManager
-                vwap_data = {}
-                if latest is not None:
-                    try:
-                        vwap_data = {
-                            "score": float(latest.get("vwap_score", 0.0)),  # 0.0-1.0
-                            "status": str(latest.get("vwap_status", "N/A")),
-                            "bias": str(latest.get("vwap_bias", "NEUTRAL")),
-                            "regime": str(latest.get("vwap_regime", "UNKNOWN")),
-                            "distance_pips": float(latest.get("vwap_distance_pips", 0.0)),
-                            # ✅ FIX (12 Dec 2025): Ajouter champs manquants pour _normalize_vwap()
-                            "zone": str(latest.get("vwap_zone", "NEUTRAL")),
-                            "vwap_value": float(latest.get("vwap_value", 0.0)),
-                            "slope": float(latest.get("vwap_slope", 0.0)),
-                        }
-                    except Exception as e:
-                        logger.warning(f"[SCALPING_THREAD] Erreur construction VWAP: {e}")
+                # ═══════════════════════════════════════════════════════════════
+                # 🎯 PIPELINE MINIMALISTE (25 DEC 2025) - OrderFlow V6 seul
+                # ═══════════════════════════════════════════════════════════════
 
-                # 📊 Momentum Institutionnel Analysis (18 DEC 2025)
-                momentum_result = None
-                if scalping_strategy and hasattr(scalping_strategy, 'momentum_analyzers'):
-                    try:
-                        # Lazy-load l'analyseur spécifique à USDJPY
-                        if 'USDJPY' not in scalping_strategy.momentum_analyzers:
-                            from strategy.scalping import MomentumAnalyzerInstitutional
-                            scalping_strategy.momentum_analyzers['USDJPY'] = MomentumAnalyzerInstitutional('USDJPY')
+                # ========== ÉTAPE 1: TIMING GATEKEEPER ==========
+                timing_verdict = None
+                try:
+                    # Récupérer ticks pour analyse liquidité (depuis cache ou ticks_df)
+                    ticks_for_timing = None
+                    if 'ticks_df' in locals() and ticks_df is not None and not ticks_df.empty:
+                        ticks_for_timing = ticks_df
 
-                        # Utiliser M1 + M3 + M5 pour burst scalping USDJPY
-                        logger.info(f"[SCALPING_THREAD] 🔍 Appel Momentum (run_bot.py) | df_m1={'None' if rates_df is None else f'len={len(rates_df)}'} | df_m3={'None' if df_m3 is None else f'len={len(df_m3)}'} | df_m5={'None' if df_m5 is None else f'len={len(df_m5)}'}")
-                        momentum_result = scalping_strategy.momentum_analyzers['USDJPY'].analyze(
-                            df_m1=rates_df,
-                            df_m3=df_m3,  # M3 pour confirmation burst
-                            df_m5=df_m5   # M5 pour contexte
-                        )
+                    # Config asset
+                    asset_config_timing = config_manager.get_asset_config("USDJPY") if hasattr(config_manager, 'get_asset_config') else {}
+
+                    # Appel gatekeeper
+                    timing_verdict = evaluate_trading_conditions(
+                        asset="USDJPY",
+                        current_time=pd.Timestamp.now(tz='UTC'),
+                        ticks_df=ticks_for_timing,
+                        market_context={},
+                        asset_config=asset_config_timing
+                    )
+
+                    logger.info(
+                        f"[TIMING_GATEKEEPER][USDJPY] {timing_verdict['verdict']} | "
+                        f"session={timing_verdict.get('quality_metrics', {}).get('session', 'N/A')} | "
+                        f"tick_rate={timing_verdict.get('quality_metrics', {}).get('tick_rate', 0):.1f}/s"
+                    )
+                except Exception as e_timing:
+                    logger.error(f"[TIMING_GATEKEEPER] Erreur: {e_timing}", exc_info=True)
+                    timing_verdict = {"verdict": "VETO", "veto_reason": f"Timing error: {e_timing}"}
+
+                # VETO immédiat si timing n'est pas PASS
+                if timing_verdict and timing_verdict.get("verdict") != "PASS":
+                    logger.info(
+                        f"[TIMING_VETO] {timing_verdict.get('veto_reason', 'Unknown')} - Skip cycle"
+                    )
+                    # Créer fusion_out HOLD pour compatibilité avec le code existant
+                    fusion_out = {
+                        "ok": False,
+                        "action": "HOLD",
+                        "fused_confidence": 0.0,
+                        "signal_type": "TIMING_VETO",
+                        "veto_reason": timing_verdict.get("veto_reason")
+                    }
+                else:
+                    # ========== ÉTAPE 2: RÉCUPÉRATION ORDERFLOW ==========
+                    # OrderFlow déjà calculé et dans 'latest'
+                    orderflow_result_mini = {
+                        "score": latest.get("orderflow_score", 0.0) if latest else 0.0,
+                        "bias": latest.get("orderflow_bias", "NEUTRAL") if latest else "NEUTRAL",
+                        "summary": latest.get("orderflow_summary", {}) if latest else {}
+                    }
+
+                    logger.info(
+                        f"[ORDERFLOW][USDJPY] score={orderflow_result_mini['score']:.1f}/100 | "
+                        f"bias={orderflow_result_mini['bias']}"
+                    )
+
+                    # ========== ÉTAPE 3: DÉCISION DIRECTE ==========
+                    try:
+                        decision_mini = market_analyzer_thread.build_decision(
+                            orderflow_result=orderflow_result_mini,
+                            min_score=75.0  # Seuil depuis config
+                        ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+
                         logger.info(
-                            f"[SCALPING_THREAD] 📊 MOMENTUM (run_bot.py) | Score={momentum_result['total_score']:.1f}/100 | "
-                            f"Direction={momentum_result['direction']} | Quality={momentum_result['quality']}"
+                            f"[DECISION][USDJPY] action={decision_mini['action']} | "
+                            f"confidence={decision_mini['confidence']:.2f} | "
+                            f"rationale={decision_mini['rationale']}"
                         )
-                    except Exception as e_mom:
-                        logger.warning(f"[SCALPING_THREAD] Erreur calcul momentum: {e_mom}", exc_info=True)
-                        momentum_result = None
+                    except Exception as e_decision:
+                        logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
+                        decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                # ✅ Ajouter momentum_result au contexte pour FusionManager
-                if momentum_result:
-                    ctx["momentum_result"] = momentum_result
+                    # ========== ÉTAPE 4: CONSTRUCTION FUSION_OUT ==========
+                    # Format compatible avec le code existant (fast-lane attend fusion_out)
+                    if decision_mini["action"] in ["BUY", "SELL"]:
+                        anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
 
-                # Fusion decision
-                fusion_out = fusion_mgr.fuse(
-                    orderflow=orderflow,
-                    footprint=footprint,
-                    vwap=vwap_data,  # ✅ Ajout VWAP
-                    strategy_config=strat_cfg,
-                    context=ctx
-                )
+                        fusion_out = {
+                            "ok": True,
+                            "action": decision_mini["action"],
+                            "fused_confidence": decision_mini["confidence"],  # 0.0-1.0
+                            "signal_type": "MINIMALIST_ORDERFLOW",
+                            "rationale": decision_mini["rationale"],
+                            "orderflow_score": orderflow_result_mini["score"],
+                            "timing_quality": timing_verdict.get("quality_metrics", {}),
+                            "price": anchor_price,
+                            "context": ctx  # Pour compatibilité
+                        }
 
-                # ✅ RAPPORT ORDERFLOW V6 (restauré dans fast-lane)
-                # IMPORTANT: Généré À CHAQUE CYCLE pour monitoring, pas seulement si signal de trading
-                if scalping_strategy:
-                    try:
-                        # Extraire données VWAP depuis latest
-                        vwap_score_pct = 0.0
-                        vwap_status = "N/A"
-                        vwap_regime = None
-                        try:
-                            latest_signals = market_results.get("__latest__", {})
-                            if not latest_signals and latest is not None:
-                                latest_signals = latest
-                            vwap_score_pct = float(latest_signals.get("vwap_score", 0.0)) * 100.0
-                            vwap_status = str(latest_signals.get("vwap_status", "N/A"))
-                            vwap_regime = latest_signals.get("vwap_regime")
-                        except Exception as e_vwap:
-                            logger.debug(f"[SCALPING_THREAD] Extraction VWAP failed: {e_vwap}")
-
-                        # Calculer score final (fused_confidence en 0-1, convertir en 0-100)
-                        # Si fusion_out est None, utiliser 0.0 par défaut
-                        fused_confidence = fusion_out.get("fused_confidence", 0.0) if fusion_out else 0.0
-                        final_score = fused_confidence * 100.0
-
-                        # Action recommandée
-                        action = fusion_out.get("action", "HOLD") if fusion_out else "HOLD"
-
-                        # Appel rapport consolidé
-                        scalping_strategy._log_orderflow_consolidated_report(
-                            asset="USDJPY",
-                            orderflow_result=orderflow,
-                            footprint_result=footprint,
-                            final_score=final_score,
-                            action=action,
-                            momentum_result=momentum_result,  # 📊 AJOUTÉ (18 DEC 2025)
-                            vwap_score_pct=vwap_score_pct,
-                            vwap_status=vwap_status,
-                            vwap_regime=vwap_regime
+                        logger.info(
+                            f"🎯 [MINIMALIST][USDJPY] ✅ {fusion_out['action']} | "
+                            f"confidence={fusion_out['fused_confidence']:.2f} | "
+                            f"OF_score={orderflow_result_mini['score']:.1f}"
                         )
-                    except Exception as e_report:
-                        logger.warning(f"[SCALPING_THREAD] Erreur génération rapport OrderFlow V6: {e_report}")
+                    else:
+                        # HOLD
+                        fusion_out = {
+                            "ok": False,
+                            "action": "HOLD",
+                            "fused_confidence": 0.0,
+                            "signal_type": "MINIMALIST_HOLD",
+                            "rationale": decision_mini["rationale"]
+                        }
+
+                        logger.info(
+                            f"[MINIMALIST][USDJPY] HOLD | rationale={decision_mini['rationale']}"
+                        )
+
+                # ❌ DÉSACTIVÉ (25 DEC 2025): Rapport consolidé avec VWAP/Footprint/Momentum
+                # Le rapport est désormais simplifié - uniquement OrderFlow V6
+                # if scalping_strategy:
+                #     try:
+                #         # Calculer score final
+                #         fused_confidence = fusion_out.get("fused_confidence", 0.0) if fusion_out else 0.0
+                #         final_score = fused_confidence * 100.0
+                #         action = fusion_out.get("action", "HOLD") if fusion_out else "HOLD"
+                #
+                #         # Rapport simplifié (OrderFlow seul)
+                #         scalping_strategy._log_orderflow_consolidated_report(
+                #             asset="USDJPY",
+                #             orderflow_result=orderflow,
+                #             footprint_result=None,  # Désactivé
+                #             final_score=final_score,
+                #             action=action,
+                #             momentum_result=None,  # Désactivé
+                #             vwap_score_pct=0.0,  # Désactivé
+                #             vwap_status="N/A",
+                #             vwap_regime=None
+                #         )
+                #     except Exception as e_report:
+                #         logger.warning(f"[SCALPING_THREAD] Erreur génération rapport: {e_report}")
 
                 # Si signal valide → Exécution
                 if fusion_out.get("ok") and trade_decision_skeleton is not None:
@@ -4190,7 +3982,7 @@ def main(args: argparse.Namespace) -> None:
     scalping_stop_event = threading.Event()
     liquidity_stop_event = threading.Event()
     basket_monitor_stop_event = threading.Event()
-    data_engine_stop_event = threading.Event()  # ✅ AJOUTÉ pour DataEngine
+    # data_engine_stop_event = threading.Event()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
 
     # Créer les threads
     scalping_thread = threading.Thread(
@@ -4244,24 +4036,24 @@ def main(args: argparse.Namespace) -> None:
         name="BasketMonitorThread"
     )
 
-    # ✅ AJOUTÉ: DataEngine Thread pour analyse footprint asynchrone
-    from core.data_engine import DataEngine
-    from phase_observer.market_analyzer import MarketAnalyzer
-
-    # Créer un MarketAnalyzer dédié pour le DataEngine
-    # Signature: MarketAnalyzer(config_manager, logger)
-    market_analyzer_for_dataengine = MarketAnalyzer(config_manager, logger)
-
-    data_engine = DataEngine(
-        symbols=['USDJPY'],  # Symboles prioritaires pour le scalping
-        mt5_connector=mt5_connector,
-        market_analyzer=market_analyzer_for_dataengine,  # ✅ MarketAnalyzer dédié
-        update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)
-        stop_event=data_engine_stop_event
-    )
+    # ❌ DÉSACTIVÉ (25 DEC 2025): DataEngine - Architecture minimaliste (footprint supprimé)
+    # from core.data_engine import DataEngine
+    # from phase_observer.market_analyzer import MarketAnalyzer
+    #
+    # # Créer un MarketAnalyzer dédié pour le DataEngine
+    # # Signature: MarketAnalyzer(config_manager, logger)
+    # market_analyzer_for_dataengine = MarketAnalyzer(config_manager, logger)
+    #
+    # data_engine = DataEngine(
+    #     symbols=['USDJPY'],  # Symboles prioritaires pour le scalping
+    #     mt5_connector=mt5_connector,
+    #     market_analyzer=market_analyzer_for_dataengine,  # ✅ MarketAnalyzer dédié
+    #     update_interval_seconds=5.0,  # Cycle 5s (plus réactif que cycle scalping 10s)
+    #     stop_event=data_engine_stop_event
+    # )
 
     # Démarrer les threads
-    data_engine.start()  # ✅ Démarrer DataEngine AVANT scalping (pour pré-remplir le cache)
+    # data_engine.start()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
     scalping_thread.start()
     liquidity_thread.start()
     basket_monitor.start()
@@ -4295,12 +4087,12 @@ def main(args: argparse.Namespace) -> None:
         logger.info("🛑 Arrêt des threads en cours...")
 
         try:
-            data_engine_stop_event.set()  # ✅ AJOUTÉ: Arrêter DataEngine
+            # data_engine_stop_event.set()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
             scalping_stop_event.set()
             liquidity_stop_event.set()
             basket_monitor_stop_event.set()
 
-            data_engine.join(timeout=5.0)  # ✅ AJOUTÉ: Attendre DataEngine
+            # data_engine.join(timeout=5.0)  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
             scalping_thread.join(timeout=5.0)
             liquidity_thread.join(timeout=5.0)
             basket_monitor.join(timeout=5.0)
