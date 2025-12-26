@@ -610,6 +610,13 @@ class ScalpingStrategy(BaseStrategy):
 
                     candle_end = candle_start + pd.Timedelta(minutes=1)
 
+                    # 🔍 LOG (26 DEC 2025): Afficher quelle bougie est analysée
+                    candle_color = "🟢 VERTE" if last_candle["close"] > last_candle["open"] else "🔴 ROUGE"
+                    self.logger.critical(
+                        f"[ORDERFLOW_CANDLE_ANALYZED][{asset}] Bougie M1 analysée: {candle_start} | "
+                        f"O={last_candle['open']:.3f} C={last_candle['close']:.3f} | {candle_color}"
+                    )
+
                     # Charger ticks pour cette fenêtre M1
                     ticks_df = self.mt5_connector.get_ticks_for_candle(
                         asset,
@@ -656,14 +663,19 @@ class ScalpingStrategy(BaseStrategy):
                             "imbalance": imbalance,
                             "imbalance_buy": imbalance_buy,
                             "imbalance_sell": imbalance_sell,
-                            "tick_count": len(ticks_df)
+                            "tick_count": len(ticks_df),
+                            "buy_ratio": buy_ratio,
+                            "sell_ratio": sell_ratio
                         }
+
+                        # Déterminer direction delta
+                        delta_direction_calc = "BULLISH" if delta_total > 0 else "BEARISH" if delta_total < 0 else "NEUTRAL"
 
                         self.logger.critical(
                             f"[ORDERFLOW_TICKS_CALC][{asset}] ✅ Ticks calculés: {len(ticks_df)} ticks | "
                             f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
-                            f"Delta={delta_total:.0f} | Imbalance={imbalance:.2f} | "
-                            f"Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
+                            f"Delta={delta_total:.0f} → Direction={delta_direction_calc} | "
+                            f"Imbalance={imbalance:.2f} | Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
                     else:
                         self.logger.critical(f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
@@ -805,7 +817,8 @@ class ScalpingStrategy(BaseStrategy):
                 )
                 volume_details["current_volume"] = float(current_tick_count)
                 volume_details["avg_volume"] = float(avg_volume)
-                volume_details["ratio"] = volume_ratio
+                volume_details["volume_ratio"] = volume_ratio  # FIX: Clé pour rapport
+                volume_details["total_ticks"] = int(current_tick_count)  # FIX: Clé pour rapport
 
                 # ✅ POC depuis footprint_summary (VRAI POC calculé depuis profil de volume)
                 poc_price = fp_summary.get("poc")
@@ -861,6 +874,20 @@ class ScalpingStrategy(BaseStrategy):
                     0  # TODO: Si besoin M5 séparé, ajouter au footprint_validator
                 )
                 imbalance_details["total_count"] = total_imbalances
+
+                # FIX (26 DEC 2025): Ajouter buy_ratio et sell_ratio pour rapport
+                buy_ratio_pct = fp_summary.get("buy_ratio", 0.5) * 100  # Convertir en %
+                sell_ratio_pct = fp_summary.get("sell_ratio", 0.5) * 100
+                imbalance_details["buy_ratio"] = buy_ratio_pct
+                imbalance_details["sell_ratio"] = sell_ratio_pct
+
+                # Direction basée sur le ratio dominant
+                if buy_ratio_pct > 55:
+                    imbalance_details["direction"] = "BUY"
+                elif sell_ratio_pct > 55:
+                    imbalance_details["direction"] = "SELL"
+                else:
+                    imbalance_details["direction"] = "NEUTRAL"
 
                 # Scoring basé sur les imbalances totales
                 if total_imbalances >= 5:  # Beaucoup d'imbalances
