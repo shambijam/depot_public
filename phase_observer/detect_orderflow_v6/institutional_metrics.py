@@ -421,52 +421,57 @@ def calculate_volume_profile(
     """
 
     # =======================
-    #  LRU cache robuste
+    #  ❌ CACHE DÉSACTIVÉ (26 DEC 2025 - Rapport Institutionnel)
     # =======================
-    cache: "OrderedDict[tuple, Dict[str, Any]]" = globals().setdefault(
-        "_VP_CACHE", OrderedDict()
-    )
-    MAX_CACHE = 128
+    # Raison : En scalping M1, 90% des données sont nouvelles → cache hit rate < 10%
+    # Recommandation : Désactiver _VP_CACHE complexe (BLAKE2b fingerprint inutile)
+    # Garder seulement _VOL_METRICS_CACHE basique dans volume_analyzer.py
+    #
+    # cache: "OrderedDict[tuple, Dict[str, Any]]" = globals().setdefault(
+    #     "_VP_CACHE", OrderedDict()
+    # )
+    # MAX_CACHE = 128
 
     def _cache_get(key: tuple):
-        v = cache.get(key)
-        if v is not None:
-            cache.move_to_end(key)
-        return v
+        # ❌ DÉSACTIVÉ : Retourne toujours None (pas de cache)
+        return None
 
     def _cache_put(key: tuple, value: Dict[str, Any]):
-        cache[key] = value
-        cache.move_to_end(key)
-        while len(cache) > MAX_CACHE:
-            cache.popitem(last=False)
+        # ❌ DÉSACTIVÉ : Ne stocke rien
+        pass
 
+    # def _fingerprint_df(d: pd.DataFrame, sample_rows: int = 2048) -> str:
+    #     """Empreinte légère sur colonnes clés (OHLC + volumes), tronquée aux N dernières lignes."""
+    #     cols_bytes = []
+    #     for col in (
+    #         "open",
+    #         "high",
+    #         "low",
+    #         "close",
+    #         "ask_volume",
+    #         "bid_volume",
+    #         "real_volume",
+    #         "tick_volume",
+    #     ):
+    #         if col in d.columns:
+    #             a = (
+    #                 pd.to_numeric(d[col], errors="coerce")
+    #                 .fillna(0.0)
+    #                 .to_numpy(dtype=np.float64)
+    #             )
+    #             if a.size > sample_rows:
+    #                 a = a[-sample_rows:]
+    #             cols_bytes.append(a.tobytes())
+    #     h = hashlib.blake2b(digest_size=16)
+    #     for b in cols_bytes:
+    #         h.update(b)
+    #     h.update(str(len(d)).encode())
+    #     return h.hexdigest()
+
+    # ❌ FINGERPRINT DÉSACTIVÉ : Plus besoin sans cache
     def _fingerprint_df(d: pd.DataFrame, sample_rows: int = 2048) -> str:
-        """Empreinte légère sur colonnes clés (OHLC + volumes), tronquée aux N dernières lignes."""
-        cols_bytes = []
-        for col in (
-            "open",
-            "high",
-            "low",
-            "close",
-            "ask_volume",
-            "bid_volume",
-            "real_volume",
-            "tick_volume",
-        ):
-            if col in d.columns:
-                a = (
-                    pd.to_numeric(d[col], errors="coerce")
-                    .fillna(0.0)
-                    .to_numpy(dtype=np.float64)
-                )
-                if a.size > sample_rows:
-                    a = a[-sample_rows:]
-                cols_bytes.append(a.tobytes())
-        h = hashlib.blake2b(digest_size=16)
-        for b in cols_bytes:
-            h.update(b)
-        h.update(str(len(d)).encode())
-        return h.hexdigest()
+        """Stub - Fingerprint désactivé (cache _VP_CACHE supprimé)"""
+        return "no_cache"
 
     # =======================
     #  Clé de cache

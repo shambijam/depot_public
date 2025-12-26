@@ -3314,7 +3314,7 @@ def scalping_fast_thread(
                     try:
                         decision_mini = market_analyzer_thread.build_decision(
                             orderflow_result=orderflow_result_mini,
-                            min_score=75.0  # Seuil depuis config
+                            min_score=70.0  # Seuil institutionnel: accepte GOOD (70) et EXCELLENT (90)
                         ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
 
                         logger.info(
@@ -3394,7 +3394,8 @@ def scalping_fast_thread(
                     logger.info("-" * 80)
                     of_score = orderflow_result_mini.get("score", 0.0)
                     of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
-                    of_status = "VALID" if of_score >= 75 else "WEAK" if of_score >= 50 else "SUSPECT"
+                    of_quality = of_summary.get("signal_quality", "N/A") if of_summary else "N/A"  # EXCELLENT/GOOD/NO_TRADE
+                    of_status = f"{of_quality}" if of_quality != "N/A" else ("VALID" if of_score >= 75 else "WEAK" if of_score >= 50 else "SUSPECT")
 
                     # Scores détaillés (depuis latest ou summary)
                     delta_score = of_summary.get("delta_momentum_score", latest.get("delta_momentum_score", 0.0) if latest else 0.0)

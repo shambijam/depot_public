@@ -641,21 +641,49 @@ class ScalpingStrategy(BaseStrategy):
             )
 
             # ================================================================
-            # TOTAL ORDERFLOW SCORE
+            # TOTAL ORDERFLOW SCORE (BRUT pour diagnostic)
             # ================================================================
-            result["total_score"] = (
+            total_score_brut = (
                 delta_momentum_score
                 + volume_confirmation_score
                 + imbalance_strength_score
             )
+            result["total_score_brut"] = total_score_brut  # Diagnostic uniquement
             result["mtf_aligned"] = mtf_aligned
 
+            # ================================================================
+            # 🎯 SCORING BINAIRE INSTITUTIONNEL (Rapport 26 DEC 2025)
+            # ================================================================
+            # Critères selon rapport institutionnel ligne 101-123
+
+            # CRITÈRE 1: LIQUIDITÉ IMMÉDIATE
+            liquid = volume_confirmation_score >= 10.0  # Volume fort (≥10/15)
+
+            # CRITÈRE 2: DÉSÉQUILIBRE FORT
+            strong_imbalance = delta_momentum_score >= 18.0  # Delta fort (≥18/25)
+
+            # CRITÈRE 3: CONFIRMATION (imbalance persistant)
+            confirmation = imbalance_strength_score >= 6.0  # ≥6/10
+
+            # DÉCISION BINAIRE INSTITUTIONNELLE
+            if liquid and strong_imbalance and confirmation:
+                # Setup A : Tous critères présents
+                result["total_score"] = 90.0
+                result["signal_quality"] = "EXCELLENT"
+            elif liquid and strong_imbalance:
+                # Setup B : Liquidité + Déséquilibre (sans confirmation)
+                result["total_score"] = 70.0
+                result["signal_quality"] = "GOOD"
+            else:
+                # Pas de setup valide
+                result["total_score"] = 0.0
+                result["signal_quality"] = "NO_TRADE"
+
             self.logger.debug(
-                f"[{asset}] OrderFlow V6: Delta={delta_momentum_score:.1f} "
-                f"Volume={volume_confirmation_score:.1f} "
-                f"Imbalance={imbalance_strength_score:.1f} "
-                f"MTF={mtf_aligned} "
-                f"→ Total={result['total_score']:.1f}/50"
+                f"[{asset}] OrderFlow V6 INSTITUTIONAL: "
+                f"Liquid={liquid} | StrongDelta={strong_imbalance} | Confirm={confirmation} "
+                f"→ Score={result['total_score']:.0f}/100 ({result['signal_quality']}) "
+                f"[Brut: Delta={delta_momentum_score:.1f} Vol={volume_confirmation_score:.1f} Imb={imbalance_strength_score:.1f}]"
             )
 
         except Exception as e:

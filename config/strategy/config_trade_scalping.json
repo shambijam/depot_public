@@ -69,12 +69,12 @@
 
       "timing_gatekeeper": {
         "enabled": true,
-        "description": "Filtre binaire PASS/VETO basé sur horaires optimaux + liquidité",
+        "description": "Filtre binaire PASS/VETO - Config institutionnelle USDJPY (Rapport 26 DEC 2025)",
         "optimal_hours_gmt": {
-          "asian_liquid": [2, 6],
-          "london_fix": [14, 16]
+          "asian_liquid": [0, 9],
+          "london_fix": [13, 17]
         },
-        "veto_hours_gmt": [6, 7, 11, 12, 13, 17, 18],
+        "veto_hours_gmt": [9, 10, 11, 12, 17, 18, 19, 20, 21, 22, 23],
         "min_tick_rate": 5.0,
         "min_coverage_s": 40.0,
         "max_tick_rate": 200.0,
