@@ -913,13 +913,24 @@ class ScalpingStrategy(BaseStrategy):
                 result["total_score"] = 0.0
                 result["signal_quality"] = "NO_TRADE"
 
+            # 🎯 CALCUL DU BIAS (26 DEC 2025)
+            # Basé sur la direction du delta momentum
+            delta_direction = delta_details.get("direction", "neutral")
+            if delta_direction == "bullish":
+                result["bias"] = "BUY"
+            elif delta_direction == "bearish":
+                result["bias"] = "SELL"
+            else:
+                result["bias"] = "NEUTRAL"
+
             # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final
             self.logger.critical(
                 f"[ORDERFLOW_SCORING_BINAIRE][{asset}] "
                 f"liquid={liquid} (vol_score={volume_confirmation_score:.1f}>=10.0) | "
                 f"strong_imbalance={strong_imbalance} (delta_score={delta_momentum_score:.1f}>=18.0) | "
                 f"confirmation={confirmation} (imb_score={imbalance_strength_score:.1f}>=6.0) | "
-                f"→ total_score={result['total_score']:.0f}/100 ({result['signal_quality']})"
+                f"→ total_score={result['total_score']:.0f}/100 ({result['signal_quality']}) | "
+                f"bias={result['bias']}"
             )
 
             self.logger.debug(
