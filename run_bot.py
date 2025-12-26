@@ -3273,13 +3273,38 @@ def scalping_fast_thread(
                         "veto_reason": veto_reason
                     }
                 else:
-                    # ========== ÉTAPE 2: RÉCUPÉRATION ORDERFLOW ==========
-                    # OrderFlow déjà calculé et dans 'latest'
-                    orderflow_result_mini = {
-                        "score": latest.get("orderflow_score", 0.0) if latest else 0.0,
-                        "bias": latest.get("orderflow_bias", "NEUTRAL") if latest else "NEUTRAL",
-                        "summary": latest.get("orderflow_summary", {}) if latest else {}
-                    }
+                    # ========== ÉTAPE 2: CALCUL ORDERFLOW V6 ==========
+                    orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
+
+                    # 🎯 Calcul OrderFlow V6 en direct (26 DEC 2025)
+                    if scalping_strategy:
+                        try:
+                            # Préparer asset_signals avec données requises par OrderFlow
+                            asset_signals_for_of = {
+                                "footprint_summary": {},  # Non utilisé (supprimé)
+                                "orderflow_summary": {}   # À remplir par _analyze_orderflow_v6
+                            }
+
+                            # Appel direct à _analyze_orderflow_v6()
+                            of_v6_result = scalping_strategy._analyze_orderflow_v6(
+                                asset="USDJPY",
+                                df_m1=rates_df,  # DataFrame M1 OHLC
+                                asset_signals=asset_signals_for_of,
+                                mtf_aligned=True  # Assume aligned pour simplification
+                            )
+
+                            logger.critical(f"[DEBUG_ORDERFLOW_CALL] OrderFlow V6 called | result={of_v6_result}")
+
+                            # Extraire résultats
+                            orderflow_result_mini = {
+                                "score": of_v6_result.get("total_score", 0.0),
+                                "bias": of_v6_result.get("bias", "NEUTRAL"),
+                                "summary": of_v6_result
+                            }
+
+                        except Exception as e_of:
+                            logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur calcul OrderFlow: {e_of}", exc_info=True)
+                            orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
 
                     logger.info(
                         f"[ORDERFLOW][USDJPY] score={orderflow_result_mini['score']:.1f}/100 | "
