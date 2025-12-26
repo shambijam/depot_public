@@ -3289,8 +3289,9 @@ def scalping_fast_thread(
                             of_v6_result = scalping_strategy._analyze_orderflow_v6(
                                 asset="USDJPY",
                                 df_m1=rates_df,  # DataFrame M1 OHLC
-                                asset_signals=asset_signals_for_of,
-                                mtf_aligned=True  # Assume aligned pour simplification
+                                df_m3=None,      # Pas de M3 dans pipeline minimaliste
+                                df_m5=None,      # Pas de M5 dans pipeline minimaliste
+                                asset_signals=asset_signals_for_of
                             )
 
                             logger.critical(f"[DEBUG_ORDERFLOW_CALL] OrderFlow V6 called | result={of_v6_result}")
