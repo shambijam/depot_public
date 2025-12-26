@@ -449,13 +449,18 @@ class ScalpingStrategy(BaseStrategy):
         # ================================================================
         # 🚫 VETO RANGE/ACCUMULATION - 26 Décembre 2025
         # Filtre pré-trade ultra-rapide avant calculs lourds
+        # UNIQUEMENT pour stratégie SCALPING (USDJPY)
         # ================================================================
         veto_config = of_config.get("market_condition_veto", {})
         range_veto_enabled = veto_config.get("range_veto_enabled", True)
         accum_veto_enabled = veto_config.get("accumulation_veto_enabled", True)
 
-        # VETO 1: Range étroit (< 3 pips USDJPY)
-        if range_veto_enabled:
+        # ⚠️ IMPORTANT: Veto UNIQUEMENT pour USDJPY (stratégie scalping)
+        # EURUSD/GBPUSD (stratégie liquidité) ne doivent PAS être vetoés par range
+        is_scalping_asset = asset.upper() == "USDJPY"
+
+        # VETO 1: Range étroit (< 3 pips USDJPY) - SCALPING UNIQUEMENT
+        if range_veto_enabled and is_scalping_asset:
             range_threshold = veto_config.get("range_threshold_pips", 0.0003)
             range_lookback = veto_config.get("range_lookback_bars", 5)
 
@@ -466,7 +471,7 @@ class ScalpingStrategy(BaseStrategy):
             )
 
             if veto_range:
-                self.logger.info(f"[ORDERFLOW_VETO] 🚫 Range: {range_reason}")
+                self.logger.info(f"[ORDERFLOW_VETO][{asset}] 🚫 Range: {range_reason}")
                 return {
                     "delta_momentum_score": 0.0,
                     "volume_confirmation_score": 0.0,

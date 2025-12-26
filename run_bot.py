@@ -1343,79 +1343,21 @@ def run_single_pipeline_cycle(
                         )
                         last_candles_df.set_index("time", inplace=True)
 
-                    # === [ORDERFLOW V6 CALCULÉ POUR FUSIONMANAGER - 2 Déc 2025] ===
-                    # Calcul OrderFlow V6 en mode standalone pour FusionManager
-                    # → Utilise ScalpingStrategy.calculate_orderflow_v6_standalone()
+                    # === [ORDERFLOW V6 DÉSACTIVÉ - 26 Déc 2025] ===
+                    # ❌ SUPPRIMÉ: OrderFlow V6 ne doit PAS être calculé pour EURUSD/GBPUSD
+                    # Ces assets utilisent LiquidityStrategy avec leurs propres indicateurs :
+                    # - Sweeps de liquidité
+                    # - EQH/EQL
+                    # - Order Blocks
+                    # - FVG
+                    # - BOS/MSS
+                    # - Absorption
+                    # OrderFlow V6 est réservé à USDJPY (ScalpingStrategy) uniquement.
                     latest = dict(latest)
 
-                    # Calculer OrderFlow V6 si applicable
-                    try:
-                        # Récupérer la stratégie scalping
-                        scalping_strategy = strategy_manager.get_strategy_instance("scalping")
-
-                        if scalping_strategy and annotated_rates_df is not None and len(annotated_rates_df) >= 15:
-                            # Préparer DataFrames multi-timeframe
-                            df_m1 = annotated_rates_df
-                            df_m3 = None
-                            df_m5 = None
-
-                            # Essayer de charger M3/M5 depuis MT5 (optionnel)
-                            try:
-                                import MetaTrader5 as mt5
-                                df_m3 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M3, count=20)
-                                df_m5 = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=15)
-                                if df_m3 is not None and len(df_m3) < 6:
-                                    df_m3 = None
-                                if df_m5 is not None and len(df_m5) < 4:
-                                    df_m5 = None
-                            except Exception as e:
-                                logger.debug(f"[OF V6][{asset}] Impossible charger M3/M5: {e}")
-
-                            # ✅ FIX (12 Dec 2025): Construire asset_signals correctement avec footprint_summary
-                            # Ne PAS utiliser 'signals' qui n'existe pas ici, mais utiliser 'latest'
-                            asset_signals_orch = {
-                                "footprint_summary": latest.get("footprint_summary", {}),
-                                "__latest__": latest
-                            }
-
-                            # Appeler la méthode standalone
-                            of_v6_result = scalping_strategy.calculate_orderflow_v6_standalone(
-                                asset=asset,
-                                df_m1=df_m1,
-                                df_m3=df_m3,
-                                df_m5=df_m5,
-                                asset_signals=asset_signals_orch
-                            )
-
-                            # Stocker dans latest pour FusionManager
-                            latest["orderflow_score"] = of_v6_result.get("score", 0.0)  # 0-100
-                            latest["orderflow_status"] = of_v6_result.get("status", "SUSPECT")
-                            latest["orderflow_summary"] = of_v6_result.get("summary", {})
-                            latest["orderflow_patterns"] = []
-
-                            logger.info(
-                                f"[OF V6][{asset}] ✅ Score calculé: {of_v6_result['score']:.1f}/100 "
-                                f"({of_v6_result['total_score']:.1f}/50 pts) | "
-                                f"Status={of_v6_result['status']} | "
-                                f"Bias={of_v6_result['summary'].get('bias', 'N/A')}"
-                            )
-                        else:
-                            # Fallback si stratégie ou données indisponibles
-                            logger.warning(f"[OF V6][{asset}] Stratégie scalping ou données insuffisantes, fallback à 0")
-                            latest["orderflow_score"] = 0
-                            latest["orderflow_status"] = "N/A"
-                            latest["orderflow_summary"] = {}
-                            latest["orderflow_patterns"] = []
-                    except Exception as e:
-                        logger.error(f"[OF V6][{asset}] Erreur calcul OrderFlow V6: {e}", exc_info=True)
-                        # Fallback en cas d'erreur
-                        latest["orderflow_score"] = 0
-                        latest["orderflow_status"] = "ERROR"
-                        latest["orderflow_summary"] = {}
-                        latest["orderflow_patterns"] = []
                 except Exception as e:
                     logger.error(
-                        f"[ORDERFLOW][{asset}] Erreur traitement latest: {e}",
+                        f"[LIQUIDITY][{asset}] Erreur traitement latest: {e}",
                         exc_info=True,
                     )
 
