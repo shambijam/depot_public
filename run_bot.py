@@ -3140,6 +3140,40 @@ def scalping_fast_thread(
                 time.sleep(cycle_interval)
                 continue
 
+            # ✅ CHARGEMENT TICKS (26 DEC 2025): Requis pour timing_gatekeeper liquidité analysis
+            # Récupérer ticks de la dernière bougie M1 pour évaluation tick_rate et coverage
+            ticks_df = None
+            try:
+                # Utiliser avant-dernière bougie (fermée) pour éviter données incomplètes
+                last_candle = rates_df.iloc[-2] if len(rates_df) >= 2 else rates_df.iloc[-1]
+
+                # Extraire timestamp de la bougie
+                if "time" in rates_df.columns:
+                    candle_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                else:
+                    candle_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+
+                # Fallback si timestamp invalide
+                if pd.isna(candle_start):
+                    candle_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=1)
+
+                candle_end = candle_start + pd.Timedelta(minutes=1)
+
+                # Charger ticks pour cette fenêtre M1
+                ticks_df = mt5_connector.get_ticks_for_candle(
+                    "USDJPY",
+                    candle_start.to_pydatetime(),
+                    candle_end.to_pydatetime()
+                )
+
+                if ticks_df is not None and not ticks_df.empty:
+                    logger.debug(f"[SCALPING_THREAD] ✅ Ticks chargés: {len(ticks_df)} ticks pour bougie {candle_start}")
+                else:
+                    logger.debug(f"[SCALPING_THREAD] ⚠️ Aucun tick reçu pour bougie {candle_start}")
+            except Exception as e_ticks:
+                logger.warning(f"[SCALPING_THREAD] Erreur chargement ticks: {e_ticks}")
+                ticks_df = None
+
             # MarketAnalyzer (phase + patterns + features)
             # Import déplacé au début de la fonction (ligne 3124)
             # ❌ DÉSACTIVÉ (25 DEC 2025): footprint_cache - Architecture minimaliste
@@ -3151,11 +3185,11 @@ def scalping_fast_thread(
             # 🎯 PIPELINE SIMPLIFIÉ (25 DEC 2025): Analyse directe sans cache
             # OrderFlow V6 calculé en direct par market_analyzer.analyze()
             try:
-                # Analyser rates_df (OHLC M1) - market_analyzer calcule OrderFlow en interne
+                # Analyser rates_df (OHLC M1) + ticks pour timing_gatekeeper
                 market_results = market_analyzer.analyze(
                     asset="USDJPY",
                     df=rates_df,
-                    ticks=None  # Pas de ticks nécessaires - OrderFlow déjà dans rates_df
+                    ticks=ticks_df  # ✅ Ticks requis pour timing_gatekeeper liquidité analysis
                 )
 
                 logger.debug(f"⚡ [SCALPING_THREAD] market_analyzer.analyze() OK")
@@ -3436,6 +3470,19 @@ def scalping_fast_thread(
                         logger.info(f"      • Buy Ratio     : {imbalance_details.get('buy_ratio', 0.0):.1f}%")
                         logger.info(f"      • Sell Ratio    : {imbalance_details.get('sell_ratio', 0.0):.1f}%")
                         logger.info(f"      • Direction     : {imbalance_details.get('direction', 'N/A').upper()}")
+
+                    # ========== VETO RANGE/ACCUMULATION (26 DEC 2025) ==========
+                    veto_applied = of_summary.get("veto_applied", latest.get("veto_applied", False) if latest else False)
+                    if veto_applied:
+                        veto_type = of_summary.get("veto_type", latest.get("veto_type", "unknown") if latest else "unknown")
+                        veto_details = of_summary.get("details", latest.get("details", {}) if latest else {})
+                        veto_reason = veto_details.get("veto_reason", "Non spécifié")
+
+                        logger.info("")
+                        logger.info("   🚫 VETO MARCHÉ")
+                        logger.info(f"      • Type          : {veto_type.upper()}")
+                        logger.info(f"      • Raison        : {veto_reason}")
+                        logger.info("      ⚠️  Trade annulé - Conditions de marché non favorables")
 
                     logger.info("")
 

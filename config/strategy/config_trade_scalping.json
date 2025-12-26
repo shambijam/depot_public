@@ -119,6 +119,20 @@
           "slightly_bearish": 0.48,
           "bearish": 0.42,
           "very_bearish": 0.28
+        },
+        "market_condition_veto": {
+          "description": "Veto pré-trade pour éviter ranges/accumulation (26 DEC 2025)",
+          "range_veto_enabled": true,
+          "range_threshold_pips": 0.0003,
+          "range_lookback_bars": 5,
+          "accumulation_veto_enabled": false,
+          "accumulation_va_ratio_threshold": 0.6,
+          "notes": [
+            "range_threshold_pips: 0.0003 = ~3 pips USDJPY",
+            "range_lookback_bars: Nombre de bougies M1 pour calcul range moyen",
+            "accumulation_veto_enabled: false par défaut (nécessite VP complet)",
+            "accumulation_va_ratio_threshold: 0.6 = 60% du range en Value Area"
+          ]
         }
       },
 
