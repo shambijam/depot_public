@@ -880,9 +880,7 @@ def monitor_burst_baskets(
     logger = getattr(self, "logger", None)
 
     if not enabled:
-        if logger:
-            logger.warning("⛔ [BASKET_MONITOR] closure_rules.enabled=False → surveillance désactivée")
-        # totalement passif si non activé
+        # totalement passif si non activé - pas de log pour éviter flood (100ms polling)
         return
 
     # 📊 LOG CONFIG AU DÉMARRAGE DU MONITOR

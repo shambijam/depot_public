@@ -1240,7 +1240,7 @@ def run_single_pipeline_cycle(
                     # EURUSD/GBPUSD : Pas de ticks (stratégie liquidité)
                     logger.info(f"[TICKS] ✅ {asset} utilise stratégie liquidité → Ticks skip")
 
-                market_results = market_analyzer.analyze(subset_df, asset, ticks=ticks_df)
+                market_results = market_analyzer.analyze(asset, subset_df, ticks=ticks_df)
 
                 # 🎯 Analyse footprint triggers SUPPRIMÉE (03 DEC 2025)
                 # Les triggers ont été supprimés du pipeline de décision.
@@ -3120,6 +3120,9 @@ def scalping_fast_thread(
 
     ❌ SUPPRIMÉ: FusionManager, VWAP, Footprint, Momentum
     """
+    # Import MarketAnalyzer au début pour éviter conflit de portée avec variable locale
+    from phase_observer.market_analyzer import MarketAnalyzer
+
     cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes pour capturer mouvements rapides
     cycle_count = 0
 
@@ -3190,7 +3193,7 @@ def scalping_fast_thread(
                 continue
 
             # MarketAnalyzer (phase + patterns + features)
-            from phase_observer.market_analyzer import MarketAnalyzer
+            # Import déplacé au début de la fonction (ligne 3124)
             # ❌ DÉSACTIVÉ (25 DEC 2025): footprint_cache - Architecture minimaliste
             # from core.footprint_cache import footprint_cache
 
@@ -3654,6 +3657,13 @@ def basket_monitor_thread(
     except Exception as merge_err:
         logger.warning(f"⚠️ [BASKET_MONITOR] Fusion config échouée: {merge_err}")
         merged_config = config_manager.get_current_dynamic_config()
+
+    # Vérifier l'état des closure_rules une seule fois au démarrage
+    closure_enabled = merged_config.get("entry_rules", {}).get("scalping", {}).get("burst_scalping", {}).get("closure_rules", {}).get("enabled", False)
+    if closure_enabled:
+        logger.info("✅ [BASKET_MONITOR] closure_rules.enabled=True → Surveillance active")
+    else:
+        logger.info("⛔ [BASKET_MONITOR] closure_rules.enabled=False → Surveillance désactivée (retour immédiat)")
 
     while not stop_event.is_set():
         try:

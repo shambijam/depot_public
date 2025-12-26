@@ -1,5 +1,5 @@
 {
-  "strategy_name": "scalping_minimalist_usdjpy",
+  "strategy_name": "scalping",
   "description": "Stratégie minimaliste 2 composants : OrderFlow V6 (signal unique) + Timing Gatekeeper (filtre PASS/VETO)",
   "version": "5.0-minimalist",
   "tradeable_assets": [
