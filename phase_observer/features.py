@@ -378,7 +378,7 @@ def _clean_dataframe(self, df: pd.DataFrame, asset: str = "UNKNOWN") -> pd.DataF
     - Supprime les timestamps dupliqués (FIFO : garde la plus récente)
     - Ajoute contract_size / tick_size si manquants
     """
-    self.logger.info("PhaseObserver: Nettoyage et standardisation du DataFrame...")
+    # Log supprimé - trop verbeux (appelé à chaque cycle)
 
     if df is None or df.empty:
         self.logger.warning("PhaseObserver: DataFrame vide fourni. Retour vide.")
@@ -486,7 +486,7 @@ def _clean_dataframe(self, df: pd.DataFrame, asset: str = "UNKNOWN") -> pd.DataF
         df["trade_tick_size"] = tick_size
         self.logger.debug(f"[CLEAN] tick_size injecté pour {asset}")
 
-    self.logger.info("PhaseObserver: Nettoyage du DataFrame terminé.")
+    # Log supprimé - trop verbeux (appelé à chaque cycle)
     return df
 
 
