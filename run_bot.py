@@ -3225,134 +3225,24 @@ def scalping_fast_thread(
             except Exception as e:
                 logger.warning(f"[PRE-CALC] Erreur pré-calcul squelette: {e}")
 
-            # Analyse fusion (si FusionManager disponible ET données présentes)
-            if fusion_mgr and scalping_strategy and market_results:
-                # ✅ Construire asset_signals pour les analyses
+            # 🎯 PIPELINE MINIMALISTE (26 DEC 2025) - S'exécute TOUJOURS si données disponibles
+            if market_results:
+                # Pipeline minimaliste : extraire latest depuis market_results
                 latest = market_results.get("latest")
 
-                # ✅ CORRECTION: Extraire footprint_summary depuis annotated_df (dernière ligne)
-                # Car `latest` est une COPIE, pas une référence au DataFrame
-                footprint_summary = {}
-
-                # D'abord essayer CACHE HIT
-                if 'footprint' in market_results and market_results['footprint']:
-                    footprint_summary = market_results['footprint']
-                else:
-                    # CACHE MISS: Extraire depuis DataFrame annoté
-                    annotated_df = market_results.get('annotated_df')
-                    if annotated_df is not None and not annotated_df.empty and 'footprint_summary' in annotated_df.columns:
-                        fp_sum_raw = annotated_df.iloc[-1]['footprint_summary']
-                        if isinstance(fp_sum_raw, str):
-                            try:
-                                import json
-                                footprint_summary = json.loads(fp_sum_raw)
-                            except:
-                                footprint_summary = {}
-                        elif isinstance(fp_sum_raw, dict):
-                            footprint_summary = fp_sum_raw
-
-                asset_signals = {
-                    "footprint_summary": footprint_summary,
-                    "__latest__": latest if latest is not None else {}
-                }
-
-                strat_cfg = strategy_manager.get_strategy_config("scalping") or {}
-
-                # ✅ Récupérer M3 + M5 pour MTF alignment (burst scalping USDJPY)
-                try:
-                    df_m3 = mt5_connector.get_rates('USDJPY', 'M3', 8)
-                    df_m5 = mt5_connector.get_rates('USDJPY', 'M5', 6)
-                except Exception as e:
-                    logger.warning(f"[SCALPING_THREAD] Impossible de récupérer M3/M5: {e}")
-                    df_m3 = None
-                    df_m5 = None
-
-                # ✅ Appeler analyses OrderFlow V6 et Footprint V6 (format FusionManager)
-                try:
-                    # OrderFlow: Utiliser calculate_orderflow_v6_standalone() (format FusionManager)
-                    orderflow = scalping_strategy.calculate_orderflow_v6_standalone(
-                        asset='USDJPY',
-                        df_m1=rates_df,
-                        df_m3=df_m3,
-                        df_m5=df_m5,
-                        asset_signals=asset_signals
-                    )
-
-                    # Footprint: Appeler _analyze_footprint_v6() et convertir au format FusionManager
-                    footprint_raw = scalping_strategy._analyze_footprint_v6(
-                        asset='USDJPY',
-                        df_m1=rates_df,
-                        asset_signals=asset_signals
-                    )
-
-                    # Convertir footprint au format FusionManager
-                    footprint_total = footprint_raw.get("total_score", 0.0)
-                    footprint_score_pct = (footprint_total / 25.0) * 100.0  # 25 pts max footprint
-                    footprint = {
-                        "score": footprint_score_pct,
-                        "status": "VALID" if footprint_total >= 15.0 else "WEAK" if footprint_total >= 7.5 else "SUSPECT",
-                        "total_score": footprint_total,
-                        **footprint_raw  # Garder tous les champs originaux
-                    }
-
-                    # 🔍 DEBUG: Afficher structure retournée
-                    logger.info(f"[DEBUG_OF] OrderFlow score: {orderflow.get('score')} status: {orderflow.get('status')}")
-                    logger.info(f"[DEBUG_FP] Footprint score: {footprint.get('score')} status: {footprint.get('status')}")
-
-                except Exception as e:
-                    logger.error(f"[SCALPING_THREAD] Erreur analyses OF/FP: {e}", exc_info=True)
-                    orderflow = {}
-                    footprint = {}
-
+                # Context minimal pour compatibilité
                 ctx = {
                     "asset": "USDJPY",
                     "phase": market_results.get("phase", {}),
                     "volatility_pips": market_results.get("volatility_pips", 0.0),
                 }
 
-                # ✅ AJOUT (08 DEC 2025): Extraire données de range depuis latest pour logique de retournement
-                if latest is not None:
-                    try:
-                        import pandas as pd
-
-                        # Extraire valeurs avec fallback robuste (gérer pd.NA et None)
-                        range_pos = latest.get("range_pos_pct")
-                        if range_pos is None or (isinstance(range_pos, float) and pd.isna(range_pos)):
-                            range_pos = 0.5
-
-                        in_upper = latest.get("in_upper_tercile")
-                        if in_upper is None or (hasattr(pd, 'isna') and pd.isna(in_upper)):
-                            in_upper = False
-
-                        in_lower = latest.get("in_lower_tercile")
-                        if in_lower is None or (hasattr(pd, 'isna') and pd.isna(in_lower)):
-                            in_lower = False
-
-                        regime = latest.get("regime")
-                        if regime is None or (hasattr(pd, 'isna') and pd.isna(regime)):
-                            regime = "unknown"
-
-                        ctx["range_pos_pct"] = float(range_pos)
-                        ctx["in_upper_tercile"] = bool(in_upper)
-                        ctx["in_lower_tercile"] = bool(in_lower)
-                        ctx["phase_observer_regime"] = str(regime)
-
-                        logger.info(
-                            f"[RANGE_CONTEXT][RUN_BOT] USDJPY | regime={regime} | pos={float(range_pos):.0%} | "
-                            f"upper={bool(in_upper)} | lower={bool(in_lower)}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[RANGE_CONTEXT][RUN_BOT] Failed to extract range data: {e}")
-                        ctx["range_pos_pct"] = 0.5
-                        ctx["in_upper_tercile"] = False
-                        ctx["in_lower_tercile"] = False
-                        ctx["phase_observer_regime"] = "unknown"
-
                 # ═══════════════════════════════════════════════════════════════
-                # 🎯 PIPELINE MINIMALISTE (25 DEC 2025) - OrderFlow V6 seul
+                # 🎯 PIPELINE MINIMALISTE (26 DEC 2025) - OrderFlow V6 seul
                 # ═══════════════════════════════════════════════════════════════
+                logger.info(f"🎯 [SCALPING_CYCLE_{cycle_count}] Début analyse USDJPY")
 
-                # ========== ÉTAPE 1: TIMING GATEKEEPER ==========
+                # ========== ÉTAPE 1: TIMING GATEKEEPER (GO/NOGO) ==========
                 timing_verdict = None
                 try:
                     # Récupérer ticks pour analyse liquidité (depuis cache ou ticks_df)
@@ -3460,29 +3350,102 @@ def scalping_fast_thread(
                             f"[MINIMALIST][USDJPY] HOLD | rationale={decision_mini['rationale']}"
                         )
 
-                # ❌ DÉSACTIVÉ (25 DEC 2025): Rapport consolidé avec VWAP/Footprint/Momentum
-                # Le rapport est désormais simplifié - uniquement OrderFlow V6
-                # if scalping_strategy:
-                #     try:
-                #         # Calculer score final
-                #         fused_confidence = fusion_out.get("fused_confidence", 0.0) if fusion_out else 0.0
-                #         final_score = fused_confidence * 100.0
-                #         action = fusion_out.get("action", "HOLD") if fusion_out else "HOLD"
-                #
-                #         # Rapport simplifié (OrderFlow seul)
-                #         scalping_strategy._log_orderflow_consolidated_report(
-                #             asset="USDJPY",
-                #             orderflow_result=orderflow,
-                #             footprint_result=None,  # Désactivé
-                #             final_score=final_score,
-                #             action=action,
-                #             momentum_result=None,  # Désactivé
-                #             vwap_score_pct=0.0,  # Désactivé
-                #             vwap_status="N/A",
-                #             vwap_regime=None
-                #         )
-                #     except Exception as e_report:
-                #         logger.warning(f"[SCALPING_THREAD] Erreur génération rapport: {e_report}")
+                # ═══════════════════════════════════════════════════════════════
+                # 📊 RAPPORT SCALPING DÉTAILLÉ (26 DEC 2025)
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    qm = timing_verdict.get("quality_metrics", {})
+                    of_summary = latest.get("orderflow_summary", {}) if latest else {}
+
+                    logger.info("=" * 80)
+                    logger.info(f"📊 RAPPORT SCALPING USDJPY | Cycle #{cycle_count}")
+                    logger.info("=" * 80)
+                    logger.info("")
+
+                    # ========== TIMING GATEKEEPER ==========
+                    logger.info("🕐 TIMING GATEKEEPER (GO/NOGO)")
+                    logger.info("-" * 80)
+                    verdict_icon = "✅" if timing_verdict.get("verdict") == "PASS" else "❌"
+                    logger.info(f"   Verdict          : {verdict_icon} {timing_verdict.get('verdict')}")
+                    if timing_verdict.get("veto_reason"):
+                        logger.info(f"   Raison VETO      : {timing_verdict.get('veto_reason')}")
+                    logger.info(f"   Heure GMT        : {qm.get('hour_gmt', 'N/A')}h")
+                    logger.info(f"   Session          : {qm.get('session', 'N/A')}")
+                    logger.info(f"   Tick Count       : {qm.get('tick_count', 0)} ticks")
+                    logger.info(f"   Tick Rate        : {qm.get('tick_rate', 0.0):.1f} ticks/s")
+                    logger.info(f"   Coverage         : {qm.get('coverage_s', 0.0):.1f} secondes")
+                    logger.info(f"   Liquidité Score  : {qm.get('liquidity_score', 0.0):.2f}/1.0")
+                    logger.info("")
+
+                    # ========== ORDERFLOW V6 ==========
+                    logger.info("📈 ORDERFLOW V6 (Score Principal)")
+                    logger.info("-" * 80)
+                    of_score = orderflow_result_mini.get("score", 0.0)
+                    of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+                    of_status = "VALID" if of_score >= 75 else "WEAK" if of_score >= 50 else "SUSPECT"
+
+                    # Scores détaillés (depuis latest ou summary)
+                    delta_score = of_summary.get("delta_momentum_score", latest.get("delta_momentum_score", 0.0) if latest else 0.0)
+                    volume_score = of_summary.get("volume_confirmation_score", latest.get("volume_confirmation_score", 0.0) if latest else 0.0)
+                    imbalance_score = of_summary.get("imbalance_strength_score", latest.get("imbalance_strength_score", 0.0) if latest else 0.0)
+
+                    logger.info(f"   Score Total      : {of_score:.1f}/100 ({of_status})")
+                    logger.info(f"   Bias             : {of_bias}")
+                    logger.info("")
+                    logger.info("   Composants:")
+                    logger.info(f"      • Delta Momentum      : {delta_score:.1f}/25 pts")
+                    logger.info(f"      • Volume Confirmation : {volume_score:.1f}/15 pts")
+                    logger.info(f"      • Imbalance Strength  : {imbalance_score:.1f}/10 pts")
+
+                    # Détails Delta
+                    delta_details = of_summary.get("delta_momentum_details", latest.get("delta_momentum_details", {}) if latest else {})
+                    if delta_details:
+                        logger.info("")
+                        logger.info("   📊 Détails Delta:")
+                        logger.info(f"      • Delta Total   : {delta_details.get('delta_total', 0)}")
+                        logger.info(f"      • Direction     : {delta_details.get('direction', 'N/A').upper()}")
+                        logger.info(f"      • Cohérence     : {delta_details.get('coherence', 0.0):.2f}")
+
+                    # Détails Volume
+                    volume_details = of_summary.get("volume_confirmation_details", latest.get("volume_confirmation_details", {}) if latest else {})
+                    if volume_details:
+                        logger.info("")
+                        logger.info("   📊 Détails Volume:")
+                        logger.info(f"      • Volume Ratio  : {volume_details.get('volume_ratio', 0.0):.2f}x")
+                        logger.info(f"      • Spike Détecté : {'✅' if volume_details.get('spike_detected') else '❌'}")
+                        logger.info(f"      • Total Ticks   : {volume_details.get('total_ticks', 0)}")
+
+                    # Détails Imbalance
+                    imbalance_details = of_summary.get("imbalance_strength_details", latest.get("imbalance_strength_details", {}) if latest else {})
+                    if imbalance_details:
+                        logger.info("")
+                        logger.info("   📊 Détails Imbalance:")
+                        logger.info(f"      • Buy Ratio     : {imbalance_details.get('buy_ratio', 0.0):.1f}%")
+                        logger.info(f"      • Sell Ratio    : {imbalance_details.get('sell_ratio', 0.0):.1f}%")
+                        logger.info(f"      • Direction     : {imbalance_details.get('direction', 'N/A').upper()}")
+
+                    logger.info("")
+
+                    # ========== DÉCISION FINALE ==========
+                    logger.info("🎯 DÉCISION FINALE")
+                    logger.info("-" * 80)
+                    action = decision_mini.get("action", "HOLD")
+                    confidence = decision_mini.get("confidence", 0.0)
+                    rationale = decision_mini.get("rationale", "N/A")
+                    anchor_price = decision_mini.get("anchor_price")
+
+                    action_icon = "🟢" if action == "BUY" else "🔴" if action == "SELL" else "⚪"
+                    logger.info(f"   Action           : {action_icon} {action}")
+                    logger.info(f"   Confidence       : {confidence:.2f} ({confidence*100:.0f}%)")
+                    logger.info(f"   Rationale        : {rationale}")
+                    if anchor_price:
+                        logger.info(f"   Prix Ancrage     : {anchor_price}")
+
+                    logger.info("")
+                    logger.info("=" * 80)
+
+                except Exception as e_report:
+                    logger.warning(f"[SCALPING_THREAD] Erreur génération rapport: {e_report}", exc_info=True)
 
                 # Si signal valide → Exécution
                 if fusion_out.get("ok") and trade_decision_skeleton is not None:
