@@ -3242,6 +3242,10 @@ def scalping_fast_thread(
                 # ═══════════════════════════════════════════════════════════════
                 logger.info(f"🎯 [SCALPING_CYCLE_{cycle_count}] Début analyse USDJPY")
 
+                # ========== INITIALISATION VARIABLES (pour rapport) ==========
+                orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
+                decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": "Non analysé", "anchor_price": None}
+
                 # ========== ÉTAPE 1: TIMING GATEKEEPER (GO/NOGO) ==========
                 timing_verdict = None
                 try:
@@ -3273,16 +3277,24 @@ def scalping_fast_thread(
 
                 # VETO immédiat si timing n'est pas PASS
                 if timing_verdict and timing_verdict.get("verdict") != "PASS":
-                    logger.info(
-                        f"[TIMING_VETO] {timing_verdict.get('veto_reason', 'Unknown')} - Skip cycle"
-                    )
+                    veto_reason = timing_verdict.get('veto_reason', 'Unknown')
+                    logger.info(f"[TIMING_VETO] {veto_reason} - Skip cycle")
+
+                    # Mettre à jour decision_mini avec raison VETO
+                    decision_mini = {
+                        "action": "HOLD",
+                        "confidence": 0.0,
+                        "rationale": f"TIMING VETO: {veto_reason}",
+                        "anchor_price": None
+                    }
+
                     # Créer fusion_out HOLD pour compatibilité avec le code existant
                     fusion_out = {
                         "ok": False,
                         "action": "HOLD",
                         "fused_confidence": 0.0,
                         "signal_type": "TIMING_VETO",
-                        "veto_reason": timing_verdict.get("veto_reason")
+                        "veto_reason": veto_reason
                     }
                 else:
                     # ========== ÉTAPE 2: RÉCUPÉRATION ORDERFLOW ==========
