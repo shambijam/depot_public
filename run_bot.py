@@ -3369,7 +3369,8 @@ def scalping_fast_thread(
                 # ═══════════════════════════════════════════════════════════════
                 try:
                     qm = timing_verdict.get("quality_metrics", {})
-                    of_summary = latest.get("orderflow_summary", {}) if latest else {}
+                    # 🔧 FIX (26 DEC 2025): Utiliser orderflow_result_mini.summary au lieu de latest
+                    of_summary = orderflow_result_mini.get("summary", {})
 
                     logger.info("=" * 80)
                     logger.info(f"📊 RAPPORT SCALPING USDJPY | Cycle #{cycle_count}")
@@ -3399,10 +3400,10 @@ def scalping_fast_thread(
                     of_quality = of_summary.get("signal_quality", "N/A") if of_summary else "N/A"  # EXCELLENT/GOOD/NO_TRADE
                     of_status = f"{of_quality}" if of_quality != "N/A" else ("VALID" if of_score >= 75 else "WEAK" if of_score >= 50 else "SUSPECT")
 
-                    # Scores détaillés (depuis latest ou summary)
-                    delta_score = of_summary.get("delta_momentum_score", latest.get("delta_momentum_score", 0.0) if latest else 0.0)
-                    volume_score = of_summary.get("volume_confirmation_score", latest.get("volume_confirmation_score", 0.0) if latest else 0.0)
-                    imbalance_score = of_summary.get("imbalance_strength_score", latest.get("imbalance_strength_score", 0.0) if latest else 0.0)
+                    # Scores détaillés (depuis of_summary qui contient of_v6_result)
+                    delta_score = of_summary.get("delta_momentum_score", 0.0)
+                    volume_score = of_summary.get("volume_confirmation_score", 0.0)
+                    imbalance_score = of_summary.get("imbalance_strength_score", 0.0)
 
                     logger.info(f"   Score Total      : {of_score:.1f}/100 ({of_status})")
                     logger.info(f"   Bias             : {of_bias}")
@@ -3413,7 +3414,7 @@ def scalping_fast_thread(
                     logger.info(f"      • Imbalance Strength  : {imbalance_score:.1f}/10 pts")
 
                     # Détails Delta
-                    delta_details = of_summary.get("delta_momentum_details", latest.get("delta_momentum_details", {}) if latest else {})
+                    delta_details = of_summary.get("delta_momentum_details", {})
                     if delta_details:
                         logger.info("")
                         logger.info("   📊 Détails Delta:")
@@ -3422,7 +3423,7 @@ def scalping_fast_thread(
                         logger.info(f"      • Cohérence     : {delta_details.get('coherence', 0.0):.2f}")
 
                     # Détails Volume
-                    volume_details = of_summary.get("volume_confirmation_details", latest.get("volume_confirmation_details", {}) if latest else {})
+                    volume_details = of_summary.get("volume_confirmation_details", {})
                     if volume_details:
                         logger.info("")
                         logger.info("   📊 Détails Volume:")
@@ -3431,7 +3432,7 @@ def scalping_fast_thread(
                         logger.info(f"      • Total Ticks   : {volume_details.get('total_ticks', 0)}")
 
                     # Détails Imbalance
-                    imbalance_details = of_summary.get("imbalance_strength_details", latest.get("imbalance_strength_details", {}) if latest else {})
+                    imbalance_details = of_summary.get("imbalance_strength_details", {})
                     if imbalance_details:
                         logger.info("")
                         logger.info("   📊 Détails Imbalance:")
@@ -3440,10 +3441,10 @@ def scalping_fast_thread(
                         logger.info(f"      • Direction     : {imbalance_details.get('direction', 'N/A').upper()}")
 
                     # ========== VETO RANGE/ACCUMULATION (26 DEC 2025) ==========
-                    veto_applied = of_summary.get("veto_applied", latest.get("veto_applied", False) if latest else False)
+                    veto_applied = of_summary.get("veto_applied", False)
                     if veto_applied:
-                        veto_type = of_summary.get("veto_type", latest.get("veto_type", "unknown") if latest else "unknown")
-                        veto_details = of_summary.get("details", latest.get("details", {}) if latest else {})
+                        veto_type = of_summary.get("veto_type", "unknown")
+                        veto_details = of_summary.get("details", {})
                         veto_reason = veto_details.get("veto_reason", "Non spécifié")
 
                         logger.info("")
