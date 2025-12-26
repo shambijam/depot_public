@@ -251,6 +251,18 @@
         "loss_guard_arming_ms": 3000,
         "comment": "60 pips profit = 0.60 points, 80 pips loss = 0.80 points"
       },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "optimal_hours_gmt": {
+          "asian_liquid": [0, 9],
+          "london_fix": [13, 17]
+        },
+        "veto_hours_gmt": [9, 10, 11, 12, 17, 18, 19, 20, 21, 22, 23],
+        "min_tick_rate": 1.0,
+        "min_coverage_s": 40.0,
+        "max_tick_rate": 200.0,
+        "max_spread_pips": 1.5
+      },
       "timing_analyzer": {
         "enabled": true,
         "usdjpy_specific_params": {

@@ -581,25 +581,85 @@ class ScalpingStrategy(BaseStrategy):
                 )
 
             # ================================================================
+            # 🎯 CALCUL TICKS DIRECTEMENT (26 DEC 2025) - REMPLACEMENT FOOTPRINT
+            # ================================================================
+            fp_summary = {}
+
+            # Charger les ticks de la dernière bougie M1 fermée
+            if self.mt5_connector and df_m1 is not None and len(df_m1) >= 2:
+                try:
+                    import pandas as pd
+
+                    # Utiliser avant-dernière bougie (fermée)
+                    last_candle = df_m1.iloc[-2]
+
+                    # Extraire timestamp de la bougie
+                    if "time" in df_m1.columns:
+                        candle_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
+                    else:
+                        candle_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
+
+                    candle_end = candle_start + pd.Timedelta(minutes=1)
+
+                    # Charger ticks pour cette fenêtre M1
+                    ticks_df = self.mt5_connector.get_ticks_for_candle(
+                        asset,
+                        candle_start.to_pydatetime(),
+                        candle_end.to_pydatetime()
+                    )
+
+                    if ticks_df is not None and len(ticks_df) > 0:
+                        # Calculer buy/sell volume depuis la colonne 'side'
+                        buy_ticks = ticks_df[ticks_df['side'] == 'buy']
+                        sell_ticks = ticks_df[ticks_df['side'] == 'sell']
+
+                        buy_volume = buy_ticks['volume'].sum() if len(buy_ticks) > 0 else 0.0
+                        sell_volume = sell_ticks['volume'].sum() if len(sell_ticks) > 0 else 0.0
+                        total_volume = buy_volume + sell_volume
+
+                        delta_total = buy_volume - sell_volume
+                        imbalance = buy_volume / total_volume if total_volume > 0 else 0.5
+
+                        # Calculer imbalances buy/sell (proxy: ticks avec fort déséquilibre)
+                        # Imbalance BUY: tick BUY avec volume > moyenne
+                        # Imbalance SELL: tick SELL avec volume > moyenne
+                        avg_tick_volume = ticks_df['volume'].mean() if len(ticks_df) > 0 else 1.0
+                        imbalance_buy = len(buy_ticks[buy_ticks['volume'] > avg_tick_volume * 1.5])
+                        imbalance_sell = len(sell_ticks[sell_ticks['volume'] > avg_tick_volume * 1.5])
+
+                        # Construire fp_summary avec les données calculées
+                        fp_summary = {
+                            "delta_total": delta_total,
+                            "buy_volume": buy_volume,
+                            "sell_volume": sell_volume,
+                            "total_volume": total_volume,
+                            "imbalance": imbalance,
+                            "imbalance_buy": imbalance_buy,
+                            "imbalance_sell": imbalance_sell,
+                            "tick_count": len(ticks_df)
+                        }
+
+                        self.logger.debug(
+                            f"[{asset}] 🎯 Ticks calculés: {len(ticks_df)} ticks | "
+                            f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
+                            f"Delta={delta_total:.0f} | Imbalance={imbalance:.2f} | "
+                            f"Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
+                        )
+                    else:
+                        self.logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
+
+                except Exception as e_ticks:
+                    self.logger.error(f"[{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
+
+            # ================================================================
             # 1. DELTA MOMENTUM (25 points max)
             # ================================================================
             delta_momentum_score = 0.0
             delta_details = {}
 
-            # ✅ FIX (1er Décembre 2025): orchestrator stocke SEULEMENT "summary" (pas la structure complète)
-            # Donc fp_raw contient directement {delta_total, buy_volume, ...} sans imbrication
-            fp_raw = asset_signals.get("footprint_summary", {})
-
-            # Vérifier si c'est une structure imbriquée (avec "summary") ou directe
-            if isinstance(fp_raw, dict):
-                if "summary" in fp_raw:
-                    # Structure complète (depuis fusion_manager ou autre source)
-                    fp_summary = fp_raw["summary"]
-                else:
-                    # Structure directe (depuis orchestrator)
-                    fp_summary = fp_raw
-            else:
-                fp_summary = {}
+            # ❌ ANCIEN SYSTÈME (Footprint supprimé) - Remplacé par calcul ticks ci-dessus
+            # fp_raw = asset_signals.get("footprint_summary", {})
+            # fp_summary maintenant calculé directement depuis ticks (lignes 584-642)
 
             # Extraire delta_total
             delta_total = 0
