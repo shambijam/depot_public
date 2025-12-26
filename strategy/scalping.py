@@ -638,11 +638,16 @@ class ScalpingStrategy(BaseStrategy):
 
                         # Calculer imbalances buy/sell
                         # En Forex, volume=1.0 pour tous les ticks → utiliser le ratio de ticks
-                        # Imbalance BUY: nombre de ticks BUY qui dépassent le ratio moyen
-                        # Imbalance SELL: nombre de ticks SELL qui dépassent le ratio moyen
                         buy_count = len(buy_ticks)
                         sell_count = len(sell_ticks)
                         total_count = len(ticks_df)
+                        unknown_count = total_count - buy_count - sell_count
+
+                        # 🔍 LOG (26 DEC 2025): Détecter ticks non classés
+                        if unknown_count > 0:
+                            self.logger.warning(
+                                f"[ORDERFLOW_TICKS_UNKNOWN][{asset}] {unknown_count} ticks non classés (total={total_count})"
+                            )
 
                         # Ratio moyen attendu = 50/50
                         # Si > 60% buy → imbalance buy
@@ -932,10 +937,11 @@ class ScalpingStrategy(BaseStrategy):
             liquid = volume_confirmation_score >= 10.0  # Volume fort (≥10/15)
 
             # CRITÈRE 2: DÉSÉQUILIBRE FORT
-            strong_imbalance = delta_momentum_score >= 18.0  # Delta fort (≥18/25)
+            # 26 DEC 2025: Seuils assouplis pour USDJPY (activité modérée vs XAUUSD)
+            strong_imbalance = delta_momentum_score >= 12.0  # Delta fort (≥12/25) - assoupli de 18.0
 
             # CRITÈRE 3: CONFIRMATION (imbalance persistant)
-            confirmation = imbalance_strength_score >= 6.0  # ≥6/10
+            confirmation = imbalance_strength_score >= 5.0  # ≥5/10 - assoupli de 6.0
 
             # DÉCISION BINAIRE INSTITUTIONNELLE
             if liquid and strong_imbalance and confirmation:
@@ -965,9 +971,9 @@ class ScalpingStrategy(BaseStrategy):
             self.logger.critical(
                 f"[ORDERFLOW_SCORING_BINAIRE][{asset}] "
                 f"liquid={liquid} (vol_score={volume_confirmation_score:.1f}>=10.0) | "
-                f"strong_imbalance={strong_imbalance} (delta_score={delta_momentum_score:.1f}>=18.0) | "
-                f"confirmation={confirmation} (imb_score={imbalance_strength_score:.1f}>=6.0) | "
-                f"→ total_score={result['total_score']:.0f}/100 ({result['signal_quality']}) | "
+                f"strong_imbalance={strong_imbalance} (delta_score={delta_momentum_score:.1f}>=12.0) | "
+                f"confirmation={confirmation} (imb_score={imbalance_strength_score:.1f}>=5.0) | "
+                f"score_brut={total_score_brut:.1f}/50 → total_score={result['total_score']:.0f}/100 ({result['signal_quality']}) | "
                 f"bias={result['bias']}"
             )
 
