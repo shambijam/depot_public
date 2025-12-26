@@ -639,8 +639,8 @@ class ScalpingStrategy(BaseStrategy):
                             "tick_count": len(ticks_df)
                         }
 
-                        self.logger.debug(
-                            f"[{asset}] 🎯 Ticks calculés: {len(ticks_df)} ticks | "
+                        self.logger.critical(
+                            f"[ORDERFLOW_TICKS_CALC][{asset}] ✅ Ticks calculés: {len(ticks_df)} ticks | "
                             f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
                             f"Delta={delta_total:.0f} | Imbalance={imbalance:.2f} | "
                             f"Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
@@ -736,6 +736,13 @@ class ScalpingStrategy(BaseStrategy):
                 delta_details  # FIX: Nom correct pour le rapport
             )
 
+            # 🔍 LOG (26 DEC 2025): Afficher delta momentum score
+            self.logger.critical(
+                f"[ORDERFLOW_DELTA][{asset}] delta_total={delta_details.get('delta_total', 0):.0f} | "
+                f"coherence={delta_details.get('coherence', 0):.2f} | "
+                f"delta_momentum_score={delta_momentum_score:.1f}/25"
+            )
+
             # ================================================================
             # 2. VOLUME CONFIRMATION (15 points max)
             # ================================================================
@@ -797,6 +804,14 @@ class ScalpingStrategy(BaseStrategy):
                 volume_details  # FIX: Nom correct pour le rapport
             )
 
+            # 🔍 LOG (26 DEC 2025): Afficher volume confirmation score
+            self.logger.critical(
+                f"[ORDERFLOW_VOLUME][{asset}] tick_count={volume_details.get('current_tick_count', 0)} | "
+                f"avg={volume_details.get('avg_volume', 0):.0f} | "
+                f"ratio={volume_details.get('volume_ratio', 0):.2f} | "
+                f"volume_confirmation_score={volume_confirmation_score:.1f}/15"
+            )
+
             # ================================================================
             # 3. IMBALANCE STRENGTH (10 points max)
             # ================================================================
@@ -832,6 +847,14 @@ class ScalpingStrategy(BaseStrategy):
             result["imbalance_strength_score"] = imbalance_strength_score
             result["imbalance_strength_details"] = (
                 imbalance_details  # FIX: Nom correct pour le rapport
+            )
+
+            # 🔍 LOG (26 DEC 2025): Afficher imbalance strength score
+            self.logger.critical(
+                f"[ORDERFLOW_IMBALANCE][{asset}] imb_buy={imbalance_details.get('imbalance_buy', 0)} | "
+                f"imb_sell={imbalance_details.get('imbalance_sell', 0)} | "
+                f"total={imbalance_details.get('total_count', 0)} | "
+                f"imbalance_strength_score={imbalance_strength_score:.1f}/10"
             )
 
             # ================================================================
@@ -872,6 +895,15 @@ class ScalpingStrategy(BaseStrategy):
                 # Pas de setup valide
                 result["total_score"] = 0.0
                 result["signal_quality"] = "NO_TRADE"
+
+            # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final
+            self.logger.critical(
+                f"[ORDERFLOW_SCORING_BINAIRE][{asset}] "
+                f"liquid={liquid} (vol_score={volume_confirmation_score:.1f}>=10.0) | "
+                f"strong_imbalance={strong_imbalance} (delta_score={delta_momentum_score:.1f}>=18.0) | "
+                f"confirmation={confirmation} (imb_score={imbalance_strength_score:.1f}>=6.0) | "
+                f"→ total_score={result['total_score']:.0f}/100 ({result['signal_quality']})"
+            )
 
             self.logger.debug(
                 f"[{asset}] OrderFlow V6 INSTITUTIONAL: "

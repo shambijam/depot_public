@@ -68,6 +68,16 @@ def evaluate_trading_conditions(
         scalping_overrides = overrides.get("scalping", {})
         timing_config = scalping_overrides.get("timing_gatekeeper", {})
 
+        # 🔍 DEBUG (26 DEC 2025): Log pour tracer le chargement de la config
+        logger.critical(
+            f"[TIMING_GATEKEEPER_CONFIG][{asset}] "
+            f"asset_config present={asset_config is not None} | "
+            f"overrides present={bool(overrides)} | "
+            f"scalping present={bool(scalping_overrides)} | "
+            f"timing_gatekeeper present={bool(timing_config)} | "
+            f"min_tick_rate={timing_config.get('min_tick_rate', 'NOT_FOUND')}"
+        )
+
     enabled = timing_config.get("enabled", True)
     if not enabled:
         return {
@@ -79,9 +89,15 @@ def evaluate_trading_conditions(
         }
 
     # Seuils
-    min_tick_rate = timing_config.get("min_tick_rate", 5.0)  # ticks/sec
+    min_tick_rate = timing_config.get("min_tick_rate", 1.0)  # ticks/sec (26 DEC: 5.0 → 1.0)
     min_coverage_s = timing_config.get("min_coverage_s", 40.0)  # secondes
     max_tick_rate = timing_config.get("max_tick_rate", 200.0)  # détection problème feed
+
+    # 🔍 LOG (26 DEC 2025): Afficher les seuils chargés
+    logger.critical(
+        f"[TIMING_SEUILS][{asset}] min_tick_rate={min_tick_rate} | "
+        f"min_coverage_s={min_coverage_s} | max_tick_rate={max_tick_rate}"
+    )
 
     # Heures optimales et veto
     optimal_hours_cfg = timing_config.get("optimal_hours_gmt", {})
@@ -189,6 +205,13 @@ def evaluate_trading_conditions(
     # ========================================================================
     veto_reason = None
 
+    # 🔍 LOG (26 DEC 2025): Afficher les métriques avant test VETO
+    logger.critical(
+        f"[TIMING_TEST_VETO][{asset}] "
+        f"tick_count={tick_count} | coverage_s={coverage_s:.1f} | tick_rate={tick_rate:.1f} | "
+        f"TEST: tick_rate({tick_rate:.1f}) < min_tick_rate({min_tick_rate}) = {tick_rate < min_tick_rate}"
+    )
+
     # A) Coverage insuffisante
     if coverage_s < min_coverage_s:
         veto_reason = f"Coverage insuffisante ({coverage_s:.1f}s < {min_coverage_s}s)"
@@ -196,6 +219,7 @@ def evaluate_trading_conditions(
     # B) Tick rate trop bas (toute session)
     elif tick_rate < min_tick_rate:
         veto_reason = f"Tick rate trop faible ({tick_rate:.1f} < {min_tick_rate} ticks/sec)"
+        logger.critical(f"[TIMING_VETO_TRIGGERED][{asset}] VETO déclenché: {veto_reason}")
 
     # C) Session asiatique précoce avec faible liquidité
     elif session == "ASIAN_EARLY" and tick_rate < 8.0:
@@ -234,6 +258,14 @@ def evaluate_trading_conditions(
         },
         "timing_analysis_ms": round(analysis_ms, 2)
     }
+
+    # 🔍 LOG (26 DEC 2025): Verdict final CRITICAL
+    logger.critical(
+        f"[TIMING_VERDICT_FINAL][{asset}] verdict={verdict} | "
+        f"veto_reason={veto_reason or 'None'} | "
+        f"session={session} ({session_quality}) | GMT={hour_gmt:02d}h | "
+        f"tick_rate={tick_rate:.1f}/s | min_required={min_tick_rate}/s"
+    )
 
     # Log pour debug
     if verdict == "VETO":
