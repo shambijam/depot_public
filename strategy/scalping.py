@@ -585,6 +585,15 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             fp_summary = {}
 
+            # 🔍 DEBUG (26 DEC 2025): Vérifier les conditions avant calcul ticks
+            self.logger.critical(
+                f"[ORDERFLOW_PRE_CHECK][{asset}] "
+                f"mt5_connector={self.mt5_connector is not None} | "
+                f"df_m1={df_m1 is not None} | "
+                f"df_m1_len={len(df_m1) if df_m1 is not None else 0} | "
+                f"condition_ok={(self.mt5_connector and df_m1 is not None and len(df_m1) >= 2)}"
+            )
+
             # Charger les ticks de la dernière bougie M1 fermée
             if self.mt5_connector and df_m1 is not None and len(df_m1) >= 2:
                 try:
@@ -646,10 +655,18 @@ class ScalpingStrategy(BaseStrategy):
                             f"Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
                     else:
-                        self.logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
+                        self.logger.critical(f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
 
                 except Exception as e_ticks:
-                    self.logger.error(f"[{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
+                    self.logger.critical(f"[ORDERFLOW_TICKS_CALC][{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
+            else:
+                # 🔍 DEBUG (26 DEC 2025): Log si la condition échoue
+                self.logger.critical(
+                    f"[ORDERFLOW_SKIP][{asset}] ⚠️ Calcul ticks SKIP - Raison: "
+                    f"mt5_connector={'OK' if self.mt5_connector else 'MISSING'} | "
+                    f"df_m1={'OK' if df_m1 is not None else 'NONE'} | "
+                    f"df_m1_len={'OK (>= 2)' if (df_m1 is not None and len(df_m1) >= 2) else f'TOO SHORT ({len(df_m1) if df_m1 is not None else 0})'}"
+                )
 
             # ================================================================
             # 1. DELTA MOMENTUM (25 points max)
