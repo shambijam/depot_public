@@ -629,12 +629,23 @@ class ScalpingStrategy(BaseStrategy):
                         delta_total = buy_volume - sell_volume
                         imbalance = buy_volume / total_volume if total_volume > 0 else 0.5
 
-                        # Calculer imbalances buy/sell (proxy: ticks avec fort déséquilibre)
-                        # Imbalance BUY: tick BUY avec volume > moyenne
-                        # Imbalance SELL: tick SELL avec volume > moyenne
-                        avg_tick_volume = ticks_df['volume'].mean() if len(ticks_df) > 0 else 1.0
-                        imbalance_buy = len(buy_ticks[buy_ticks['volume'] > avg_tick_volume * 1.5])
-                        imbalance_sell = len(sell_ticks[sell_ticks['volume'] > avg_tick_volume * 1.5])
+                        # Calculer imbalances buy/sell
+                        # En Forex, volume=1.0 pour tous les ticks → utiliser le ratio de ticks
+                        # Imbalance BUY: nombre de ticks BUY qui dépassent le ratio moyen
+                        # Imbalance SELL: nombre de ticks SELL qui dépassent le ratio moyen
+                        buy_count = len(buy_ticks)
+                        sell_count = len(sell_ticks)
+                        total_count = len(ticks_df)
+
+                        # Ratio moyen attendu = 50/50
+                        # Si > 60% buy → imbalance buy
+                        # Si > 60% sell → imbalance sell
+                        buy_ratio = buy_count / total_count if total_count > 0 else 0.5
+                        sell_ratio = sell_count / total_count if total_count > 0 else 0.5
+
+                        # Score basé sur le déséquilibre
+                        imbalance_buy = max(0, int((buy_ratio - 0.5) * 20))  # 0-10 scale
+                        imbalance_sell = max(0, int((sell_ratio - 0.5) * 20))  # 0-10 scale
 
                         # Construire fp_summary avec les données calculées
                         fp_summary = {
