@@ -3468,19 +3468,19 @@ def scalping_fast_thread(
                         m1_dir = mtf_align.get("m1", "N/A").upper()
                         m1_icon = "🟢" if m1_dir == "BULLISH" else "🔴" if m1_dir == "BEARISH" else "⚪"
                         m1_det = mtf_details.get("m1", {})
-                        logger.info(f"      • M1 (8 bars)    : {m1_icon} {m1_dir} ({m1_det.get('bullish_bars', 0)}v / {m1_det.get('bearish_bars', 0)}r)")
+                        logger.info(f"      • M1 (2 bars)    : {m1_icon} {m1_dir} ({m1_det.get('bullish_bars', 0)}v / {m1_det.get('bearish_bars', 0)}r)")
 
                         # M3
                         m3_dir = mtf_align.get("m3", "N/A").upper()
                         m3_icon = "🟢" if m3_dir == "BULLISH" else "🔴" if m3_dir == "BEARISH" else "⚪"
                         m3_det = mtf_details.get("m3", {})
-                        logger.info(f"      • M3 (6 bars)    : {m3_icon} {m3_dir} ({m3_det.get('bullish_bars', 0)}v / {m3_det.get('bearish_bars', 0)}r)")
+                        logger.info(f"      • M3 (2 bars)    : {m3_icon} {m3_dir} ({m3_det.get('bullish_bars', 0)}v / {m3_det.get('bearish_bars', 0)}r)")
 
                         # M5
                         m5_dir = mtf_align.get("m5", "N/A").upper()
                         m5_icon = "🟢" if m5_dir == "BULLISH" else "🔴" if m5_dir == "BEARISH" else "⚪"
                         m5_det = mtf_details.get("m5", {})
-                        logger.info(f"      • M5 (6 bars)    : {m5_icon} {m5_dir} ({m5_det.get('bullish_bars', 0)}v / {m5_det.get('bearish_bars', 0)}r)")
+                        logger.info(f"      • M5 (2 bars)    : {m5_icon} {m5_dir} ({m5_det.get('bullish_bars', 0)}v / {m5_det.get('bearish_bars', 0)}r)")
 
                         # Alignement total
                         mtf_aligned = of_summary.get("mtf_aligned", False)
