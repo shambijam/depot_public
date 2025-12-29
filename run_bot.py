@@ -3012,6 +3012,7 @@ def scalping_fast_thread(
     """
     # Import MarketAnalyzer au début pour éviter conflit de portée avec variable locale
     from phase_observer.market_analyzer import MarketAnalyzer
+    import pandas as pd  # Import local pour éviter problèmes de portée dans le thread
 
     cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes pour capturer mouvements rapides
     cycle_count = 0
