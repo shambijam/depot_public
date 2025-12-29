@@ -3110,11 +3110,12 @@ def scalping_fast_thread(
                 )
 
                 if ticks_df is not None and not ticks_df.empty:
-                    logger.debug(f"[SCALPING_THREAD] ✅ Ticks chargés: {len(ticks_df)} ticks pour bougie {candle_start}")
+                    logger.info(f"[TICKS_LOAD] ✅ {len(ticks_df)} ticks chargés pour bougie {candle_start.strftime('%H:%M')}")
                 else:
-                    logger.debug(f"[SCALPING_THREAD] ⚠️ Aucun tick reçu pour bougie {candle_start}")
+                    logger.warning(f"[TICKS_LOAD] ⚠️ AUCUN tick reçu pour bougie {candle_start.strftime('%H:%M')}")
+                    ticks_df = None
             except Exception as e_ticks:
-                logger.warning(f"[SCALPING_THREAD] Erreur chargement ticks: {e_ticks}")
+                logger.error(f"[TICKS_LOAD] ❌ Erreur chargement: {e_ticks}", exc_info=True)
                 ticks_df = None
 
             # MarketAnalyzer (phase + patterns + features)
@@ -3292,9 +3293,13 @@ def scalping_fast_thread(
                 timing_verdict = None
                 try:
                     # Récupérer ticks pour analyse liquidité
-                    ticks_for_timing = None
-                    if 'ticks_df' in locals() and ticks_df is not None and not ticks_df.empty:
-                        ticks_for_timing = ticks_df
+                    # 🔧 FIX (29 DEC 2025): Simplifier check et logger le résultat
+                    ticks_for_timing = ticks_df if (ticks_df is not None and not ticks_df.empty) else None
+
+                    if ticks_for_timing is not None:
+                        logger.info(f"[TIMING_PREP] ✅ Passage {len(ticks_for_timing)} ticks au gatekeeper")
+                    else:
+                        logger.warning(f"[TIMING_PREP] ⚠️ AUCUN tick disponible pour gatekeeper → tick_rate=0")
 
                     asset_config_timing = config_manager.get_asset_config("USDJPY") if hasattr(config_manager, 'get_asset_config') else {}
 
