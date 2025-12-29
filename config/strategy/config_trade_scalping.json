@@ -69,16 +69,25 @@
 
       "timing_gatekeeper": {
         "enabled": true,
-        "description": "Filtre binaire PASS/VETO - Config institutionnelle USDJPY (Rapport 26 DEC 2025)",
+        "description": "Filtre binaire PASS/VETO - Config institutionnelle (29 DEC 2025)",
+        "allowed_hours_gmt": [0, 1, 2, 3, 4, 5, 14, 15, 16],
+        "comment_allowed_hours": "Whitelist stricte: 0-5h=Asie | 14-16h=Londres | 6h,17h=transitions exclus",
         "optimal_hours_gmt": {
-          "asian_liquid": [0, 9],
-          "london_fix": [13, 17]
+          "asian_liquid": [0, 6],
+          "london_fix": [14, 17]
         },
         "veto_hours_gmt": [9, 10, 11, 12, 17, 18, 19, 20, 21, 22, 23],
         "min_tick_rate": 1.0,
         "min_coverage_s": 40.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.5
+      },
+
+      "blocked_phases": {
+        "enabled": true,
+        "description": "Phases de marché interdites pour le trading (scoring continue mais exécution bloquée)",
+        "phases": ["range", "accumulation", "range_accumulation", "range_distribution"],
+        "comment": "Ces phases sont trop imprévisibles pour le scalping - Ne trader que sur tendances claires"
       },
 
       "orderflow_v6": {

@@ -25,7 +25,8 @@ def evaluate_trading_conditions(
     current_time: pd.Timestamp,
     ticks_df: pd.DataFrame,
     market_context: Dict[str, Any],
-    asset_config: Optional[Dict[str, Any]] = None
+    asset_config: Optional[Dict[str, Any]] = None,
+    scalping_config: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     🚪 GATEKEEPER: Évalue si les conditions de trading sont acceptables
@@ -40,7 +41,8 @@ def evaluate_trading_conditions(
         current_time: Timestamp actuel (pour vérif heure GMT)
         ticks_df: DataFrame des ticks récents
         market_context: Contexte marché (non utilisé pour l'instant)
-        asset_config: Config spécifique asset
+        asset_config: Config spécifique asset (fallback, optionnel)
+        scalping_config: Config stratégie scalping globale (prioritaire)
 
     Returns:
         {
@@ -60,13 +62,23 @@ def evaluate_trading_conditions(
     analysis_start = time.perf_counter()
 
     # ========================================================================
-    # 0️⃣ CONFIGURATION
+    # 0️⃣ CONFIGURATION (29 DEC 2025 - Priorité config scalping globale)
     # ========================================================================
     timing_config = {}
-    if asset_config:
+
+    # PRIORITÉ 1: Config scalping globale (nouveau système)
+    if scalping_config:
+        entry_rules = scalping_config.get("entry_rules", {})
+        scalping_rules = entry_rules.get("scalping", {})
+        timing_config = scalping_rules.get("timing_gatekeeper", {})
+        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config SCALPING GLOBALE utilisée")
+
+    # PRIORITÉ 2: Config asset (ancien système, fallback)
+    elif asset_config:
         overrides = asset_config.get("overrides", {})
         scalping_overrides = overrides.get("scalping", {})
         timing_config = scalping_overrides.get("timing_gatekeeper", {})
+        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config ASSET utilisée (fallback)")
 
         # 🔍 DEBUG (26 DEC 2025): Log pour tracer le chargement de la config
         logger.critical(
@@ -100,41 +112,26 @@ def evaluate_trading_conditions(
     )
 
     # ========================================================================
-    # 🚨 NIVEAU 1 : VETO HORAIRE EN DUR (29 DEC 2025)
+    # 1️⃣ VÉRIFICATION HEURE GMT + WHITELIST DYNAMIQUE (29 DEC 2025)
     # ========================================================================
-    # WHITELIST STRICTE : Seules ces heures GMT sont autorisées
-    # - 0h-6h GMT : Session Asiatique
-    # - 14h-17h GMT : Session Londres (13h = NY-Londres overlap exclus)
+    # Heures autorisées depuis config (dynamique)
+    allowed_hours = timing_config.get("allowed_hours_gmt", [0, 1, 2, 3, 4, 5, 14, 15, 16])  # Défaut si config absente
 
-    HARDCODED_ALLOWED_HOURS = [0, 1, 2, 3, 4, 5, 14, 15, 16]  # 6h et 17h exclus (transitions)
-
-    hour_gmt = current_time.hour if hasattr(current_time, 'hour') else 12
-
-    # VETO IMMÉDIAT si heure NON autorisée (ne peut PAS être bypassé par config)
-    if hour_gmt not in HARDCODED_ALLOWED_HOURS:
-        logger.critical(
-            f"[TIMING_HARDCODED_VETO][{asset}] 🚫 HEURE {hour_gmt:02d}h GMT NON AUTORISÉE ! "
-            f"Whitelist: 0-5h (Asie) et 14-16h (Londres)"
-        )
-        return {
-            "verdict": "VETO",
-            "veto_reason": f"🚫 HARDCODED: Heure {hour_gmt:02d}h GMT NON autorisée (whitelist: 0-5h, 14-16h uniquement)",
-            "quality_metrics": {
-                "hour_gmt": hour_gmt,
-                "session": "BLOCKED",
-                "session_quality": "HARDCODED_VETO"
-            },
-            "timing_analysis_ms": (time.perf_counter() - analysis_start) * 1000.0
-        }
-
-    # ========================================================================
-    # 1️⃣ VÉRIFICATION HEURE GMT (après passage whitelist)
-    # ========================================================================
     # Heures optimales et veto (config - pour fine-tuning uniquement)
     optimal_hours_cfg = timing_config.get("optimal_hours_gmt", {})
     asian_liquid_hours = optimal_hours_cfg.get("asian_liquid", [0, 6])
     london_fix_hours = optimal_hours_cfg.get("london_fix", [14, 17])
-    veto_hours = timing_config.get("veto_hours_gmt", [])  # Pas utilisé (remplacé par whitelist)
+
+    hour_gmt = current_time.hour if hasattr(current_time, 'hour') else 12
+
+    # Vérifier si heure autorisée (mais on continue l'analyse !)
+    hour_is_allowed = hour_gmt in allowed_hours
+
+    # 🔍 LOG: Config chargée
+    logger.critical(
+        f"[TIMING_CONFIG_CHECK][{asset}] allowed_hours={allowed_hours} | "
+        f"current_hour={hour_gmt} | is_allowed={hour_is_allowed}"
+    )
 
     # Déterminer session
     session = "UNKNOWN"
@@ -211,7 +208,7 @@ def evaluate_trading_conditions(
         liquidity_score += 0.1  # Marginal
 
     # ========================================================================
-    # 3️⃣ CONDITIONS DE VETO
+    # 3️⃣ CONDITIONS DE VETO (29 DEC 2025 - Analyse complète PUIS veto)
     # ========================================================================
     veto_reason = None
 
@@ -222,28 +219,33 @@ def evaluate_trading_conditions(
         f"TEST: tick_rate({tick_rate:.1f}) < min_tick_rate({min_tick_rate}) = {tick_rate < min_tick_rate}"
     )
 
-    # A) Coverage insuffisante
-    if coverage_s < min_coverage_s:
+    # 🚨 A) HEURE NON AUTORISÉE (depuis config) - Priorité #1
+    if not hour_is_allowed:
+        veto_reason = f"🚫 Heure {hour_gmt:02d}h GMT NON autorisée (whitelist config: {allowed_hours})"
+        logger.critical(f"[TIMING_HOUR_VETO][{asset}] {veto_reason}")
+
+    # B) Coverage insuffisante
+    elif coverage_s < min_coverage_s:
         veto_reason = f"Coverage insuffisante ({coverage_s:.1f}s < {min_coverage_s}s)"
 
-    # B) Tick rate trop bas (toute session)
+    # C) Tick rate trop bas (toute session)
     elif tick_rate < min_tick_rate:
         veto_reason = f"Tick rate trop faible ({tick_rate:.1f} < {min_tick_rate} ticks/sec)"
         logger.critical(f"[TIMING_VETO_TRIGGERED][{asset}] VETO déclenché: {veto_reason}")
 
-    # C) Session asiatique précoce avec faible liquidité
+    # D) Session asiatique précoce avec faible liquidité
     elif session == "ASIAN_EARLY" and tick_rate < 8.0:
         veto_reason = f"Session asiatique précoce + tick rate insuffisant ({tick_rate:.1f} < 8.0)"
 
-    # D) Tick rate suspicieusement élevé (problème feed)
+    # E) Tick rate suspicieusement élevé (problème feed)
     elif tick_rate > max_tick_rate:
         veto_reason = f"Tick rate anormalement élevé ({tick_rate:.1f} > {max_tick_rate}) - possible problème feed"
 
-    # E) Liquidity score global trop faible
+    # F) Liquidity score global trop faible
     elif liquidity_score < 0.3:
         veto_reason = f"Score de liquidité trop faible ({liquidity_score:.2f} < 0.30)"
 
-    # F) Session Off-Peak
+    # G) Session Off-Peak
     elif session_quality == "POOR":
         veto_reason = f"Session off-peak (GMT {hour_gmt:02d}h) - liquidité généralement insuffisante"
 

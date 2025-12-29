@@ -1444,7 +1444,8 @@ def run_single_pipeline_cycle(
                             # Récupérer ticks récents pour analyse liquidité
                             ticks_for_timing = ticks_df if ticks_df is not None and not ticks_df.empty else None
 
-                            # Récupérer config asset
+                            # 🔧 29 DEC 2025: Passer la config scalping GLOBALE (prioritaire) + asset config (fallback)
+                            scalping_config_global = strategy_manager.get_strategy_config("scalping") if strategy_manager else {}
                             asset_config_timing = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
 
                             # Appel timing gatekeeper
@@ -1453,7 +1454,8 @@ def run_single_pipeline_cycle(
                                 current_time=pd.Timestamp.now(tz='UTC'),
                                 ticks_df=ticks_for_timing,
                                 market_context={},
-                                asset_config=asset_config_timing
+                                asset_config=asset_config_timing,
+                                scalping_config=scalping_config_global
                             )
 
                             logger.info(
@@ -3301,6 +3303,8 @@ def scalping_fast_thread(
                     else:
                         logger.warning(f"[TIMING_PREP] ⚠️ AUCUN tick disponible pour gatekeeper → tick_rate=0")
 
+                    # 🔧 29 DEC 2025: Passer la config scalping GLOBALE (prioritaire) + asset config (fallback)
+                    scalping_config_global = strategy_manager.get_strategy_config("scalping") if strategy_manager else {}
                     asset_config_timing = config_manager.get_asset_config("USDJPY") if hasattr(config_manager, 'get_asset_config') else {}
 
                     # Appel gatekeeper
@@ -3309,7 +3313,8 @@ def scalping_fast_thread(
                         current_time=pd.Timestamp.now(tz='UTC'),
                         ticks_df=ticks_for_timing,
                         market_context={},
-                        asset_config=asset_config_timing
+                        asset_config=asset_config_timing,
+                        scalping_config=scalping_config_global
                     )
 
                     verdict_str = "✅ PASS" if timing_verdict['verdict'] == "PASS" else f"❌ VETO ({timing_verdict.get('veto_reason', 'N/A')})"
@@ -3349,21 +3354,30 @@ def scalping_fast_thread(
                     # PASS timing → Vérifier phase avant de décider
 
                     # ========================================================================
-                    # 🚨 NIVEAU 2 : VETO PHASE DE MARCHÉ EN DUR (29 DEC 2025)
+                    # 🚨 NIVEAU 2 : VETO PHASE DE MARCHÉ DYNAMIQUE (29 DEC 2025)
                     # ========================================================================
                     # INTERDICTION STRICTE : NE JAMAIS TRADER en phase RANGE ou ACCUMULATION
-                    HARDCODED_BLOCKED_PHASES = ["range", "accumulation", "range_accumulation", "range_distribution"]
+                    # Lecture depuis config SCALPING GLOBALE (dynamique)
+                    blocked_phases_config = scalping_config_global.get("entry_rules", {}).get("scalping", {}).get("blocked_phases", {})
+                    blocked_phases_enabled = blocked_phases_config.get("enabled", True)
+                    blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution"])
 
                     current_phase = market_results.get("phase", "unknown")
                     phase_str = str(current_phase).lower() if current_phase else "unknown"
 
                     # Vérifier si phase contient un mot-clé bloqué
-                    phase_is_blocked = any(blocked in phase_str for blocked in HARDCODED_BLOCKED_PHASES)
+                    phase_is_blocked = blocked_phases_enabled and any(blocked in phase_str for blocked in blocked_phases_list)
+
+                    # 🔍 LOG: Config phase veto
+                    logger.critical(
+                        f"[PHASE_CONFIG_CHECK][USDJPY] blocked_phases={blocked_phases_list} | "
+                        f"enabled={blocked_phases_enabled} | current_phase={phase_str} | is_blocked={phase_is_blocked}"
+                    )
 
                     if phase_is_blocked:
                         logger.critical(
-                            f"[PHASE_HARDCODED_VETO][USDJPY] 🚫 PHASE '{phase_str}' INTERDITE ! "
-                            f"Phases bloquées: {HARDCODED_BLOCKED_PHASES}"
+                            f"[PHASE_CONFIG_VETO][USDJPY] 🚫 PHASE '{phase_str}' INTERDITE ! "
+                            f"Phases bloquées (config): {blocked_phases_list}"
                         )
 
                         decision_mini = {
