@@ -99,36 +99,46 @@ def evaluate_trading_conditions(
         f"min_coverage_s={min_coverage_s} | max_tick_rate={max_tick_rate}"
     )
 
-    # Heures optimales et veto
-    optimal_hours_cfg = timing_config.get("optimal_hours_gmt", {})
-    asian_liquid_hours = optimal_hours_cfg.get("asian_liquid", [2, 6])
-    london_fix_hours = optimal_hours_cfg.get("london_fix", [14, 16])
-    veto_hours = timing_config.get("veto_hours_gmt", [6, 7, 11, 12, 13, 17, 18])
+    # ========================================================================
+    # 🚨 NIVEAU 1 : VETO HORAIRE EN DUR (29 DEC 2025)
+    # ========================================================================
+    # WHITELIST STRICTE : Seules ces heures GMT sont autorisées
+    # - 0h-6h GMT : Session Asiatique
+    # - 14h-17h GMT : Session Londres (13h = NY-Londres overlap exclus)
+
+    HARDCODED_ALLOWED_HOURS = [0, 1, 2, 3, 4, 5, 14, 15, 16]  # 6h et 17h exclus (transitions)
+
+    hour_gmt = current_time.hour if hasattr(current_time, 'hour') else 12
+
+    # VETO IMMÉDIAT si heure NON autorisée (ne peut PAS être bypassé par config)
+    if hour_gmt not in HARDCODED_ALLOWED_HOURS:
+        logger.critical(
+            f"[TIMING_HARDCODED_VETO][{asset}] 🚫 HEURE {hour_gmt:02d}h GMT NON AUTORISÉE ! "
+            f"Whitelist: 0-5h (Asie) et 14-16h (Londres)"
+        )
+        return {
+            "verdict": "VETO",
+            "veto_reason": f"🚫 HARDCODED: Heure {hour_gmt:02d}h GMT NON autorisée (whitelist: 0-5h, 14-16h uniquement)",
+            "quality_metrics": {
+                "hour_gmt": hour_gmt,
+                "session": "BLOCKED",
+                "session_quality": "HARDCODED_VETO"
+            },
+            "timing_analysis_ms": (time.perf_counter() - analysis_start) * 1000.0
+        }
 
     # ========================================================================
-    # 1️⃣ VÉRIFICATION HEURE GMT
+    # 1️⃣ VÉRIFICATION HEURE GMT (après passage whitelist)
     # ========================================================================
-    hour_gmt = current_time.hour if hasattr(current_time, 'hour') else 12
+    # Heures optimales et veto (config - pour fine-tuning uniquement)
+    optimal_hours_cfg = timing_config.get("optimal_hours_gmt", {})
+    asian_liquid_hours = optimal_hours_cfg.get("asian_liquid", [0, 6])
+    london_fix_hours = optimal_hours_cfg.get("london_fix", [14, 17])
+    veto_hours = timing_config.get("veto_hours_gmt", [])  # Pas utilisé (remplacé par whitelist)
 
     # Déterminer session
     session = "UNKNOWN"
     session_quality = "UNKNOWN"
-
-    # Veto immédiat si transition de session
-    if hour_gmt in veto_hours:
-        session = "TRANSITION"
-        session_quality = "VETO"
-
-        return {
-            "verdict": "VETO",
-            "veto_reason": f"Transition de session (GMT {hour_gmt:02d}h) - éviter spreads élevés",
-            "quality_metrics": {
-                "hour_gmt": hour_gmt,
-                "session": session,
-                "session_quality": session_quality
-            },
-            "timing_analysis_ms": (time.perf_counter() - analysis_start) * 1000.0
-        }
 
     # Sessions optimales
     if asian_liquid_hours[0] <= hour_gmt < asian_liquid_hours[1]:

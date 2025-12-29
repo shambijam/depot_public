@@ -3346,56 +3346,96 @@ def scalping_fast_thread(
                         "orderflow_score": orderflow_result_mini["score"]  # Score présent même en VETO
                     }
                 else:
-                    # PASS timing → Décision basée sur OrderFlow
-                    try:
-                        decision_mini = market_analyzer_thread.build_decision(
-                            orderflow_result=orderflow_result_mini,
-                            min_score=70.0
-                        ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+                    # PASS timing → Vérifier phase avant de décider
 
-                        logger.info(
-                            f"[DECISION][USDJPY] action={decision_mini['action']} | "
-                            f"confidence={decision_mini['confidence']:.2f} | "
-                            f"rationale={decision_mini['rationale']}"
+                    # ========================================================================
+                    # 🚨 NIVEAU 2 : VETO PHASE DE MARCHÉ EN DUR (29 DEC 2025)
+                    # ========================================================================
+                    # INTERDICTION STRICTE : NE JAMAIS TRADER en phase RANGE ou ACCUMULATION
+                    HARDCODED_BLOCKED_PHASES = ["range", "accumulation", "range_accumulation", "range_distribution"]
+
+                    current_phase = market_results.get("phase", "unknown")
+                    phase_str = str(current_phase).lower() if current_phase else "unknown"
+
+                    # Vérifier si phase contient un mot-clé bloqué
+                    phase_is_blocked = any(blocked in phase_str for blocked in HARDCODED_BLOCKED_PHASES)
+
+                    if phase_is_blocked:
+                        logger.critical(
+                            f"[PHASE_HARDCODED_VETO][USDJPY] 🚫 PHASE '{phase_str}' INTERDITE ! "
+                            f"Phases bloquées: {HARDCODED_BLOCKED_PHASES}"
                         )
-                    except Exception as e_decision:
-                        logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
-                        decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                    # Construction fusion_out
-                    if decision_mini["action"] in ["BUY", "SELL"]:
-                        anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
-
-                        fusion_out = {
-                            "ok": True,
-                            "action": decision_mini["action"],
-                            "fused_confidence": decision_mini["confidence"],
-                            "signal_type": "MINIMALIST_ORDERFLOW",
-                            "rationale": decision_mini["rationale"],
-                            "orderflow_score": orderflow_result_mini["score"],
-                            "timing_quality": timing_verdict.get("quality_metrics", {}),
-                            "price": anchor_price,
-                            "context": ctx
+                        decision_mini = {
+                            "action": "HOLD",
+                            "confidence": 0.0,
+                            "rationale": f"PHASE VETO: Phase '{phase_str}' interdite (range/accumulation bloqué)",
+                            "anchor_price": None
                         }
 
-                        logger.info(
-                            f"🎯 [MINIMALIST][USDJPY] ✅ {fusion_out['action']} | "
-                            f"confidence={fusion_out['fused_confidence']:.2f} | "
-                            f"OF_score={orderflow_result_mini['score']:.1f}"
-                        )
-                    else:
                         fusion_out = {
                             "ok": False,
                             "action": "HOLD",
                             "fused_confidence": 0.0,
-                            "signal_type": "MINIMALIST_HOLD",
-                            "rationale": decision_mini["rationale"],
+                            "signal_type": "PHASE_VETO",
+                            "veto_reason": f"Phase '{phase_str}' interdite",
                             "orderflow_score": orderflow_result_mini["score"]
                         }
 
                         logger.info(
-                            f"[MINIMALIST][USDJPY] HOLD | rationale={decision_mini['rationale']}"
+                            f"[MINIMALIST][USDJPY] HOLD | rationale=PHASE VETO: {phase_str}"
                         )
+                    else:
+                        # PASS timing + PASS phase → Décision basée sur OrderFlow
+                        try:
+                            decision_mini = market_analyzer_thread.build_decision(
+                                orderflow_result=orderflow_result_mini,
+                                min_score=70.0
+                            ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+
+                            logger.info(
+                                f"[DECISION][USDJPY] action={decision_mini['action']} | "
+                                f"confidence={decision_mini['confidence']:.2f} | "
+                                f"rationale={decision_mini['rationale']}"
+                            )
+                        except Exception as e_decision:
+                            logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
+                            decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
+
+                        # Construction fusion_out
+                        if decision_mini["action"] in ["BUY", "SELL"]:
+                            anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
+
+                            fusion_out = {
+                                "ok": True,
+                                "action": decision_mini["action"],
+                                "fused_confidence": decision_mini["confidence"],
+                                "signal_type": "MINIMALIST_ORDERFLOW",
+                                "rationale": decision_mini["rationale"],
+                                "orderflow_score": orderflow_result_mini["score"],
+                                "timing_quality": timing_verdict.get("quality_metrics", {}),
+                                "price": anchor_price,
+                                "context": ctx
+                            }
+
+                            logger.info(
+                                f"🎯 [MINIMALIST][USDJPY] ✅ {fusion_out['action']} | "
+                                f"confidence={fusion_out['fused_confidence']:.2f} | "
+                                f"OF_score={orderflow_result_mini['score']:.1f}"
+                            )
+                        else:
+                            fusion_out = {
+                                "ok": False,
+                                "action": "HOLD",
+                                "fused_confidence": 0.0,
+                                "signal_type": "MINIMALIST_HOLD",
+                                "rationale": decision_mini["rationale"],
+                                "orderflow_score": orderflow_result_mini["score"]
+                            }
+
+                            logger.info(
+                                f"[MINIMALIST][USDJPY] HOLD | rationale={decision_mini['rationale']}"
+                            )
 
                 # ═══════════════════════════════════════════════════════════════
                 # 📊 RAPPORT SCALPING DÉTAILLÉ (26 DEC 2025)
