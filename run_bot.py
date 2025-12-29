@@ -3617,19 +3617,6 @@ def scalping_fast_thread(
                         logger.info(f"      • Type           : {rev_icon} {reversal_type}")
                         logger.info(f"      • Bias Override  : {'✅ OUI' if reversal_override else '❌ NON'}")
 
-                    # ========== VETO RANGE/ACCUMULATION (26 DEC 2025) ==========
-                    veto_applied = of_summary.get("veto_applied", False)
-                    if veto_applied:
-                        veto_type = of_summary.get("veto_type", "unknown")
-                        veto_details = of_summary.get("details", {})
-                        veto_reason = veto_details.get("veto_reason", "Non spécifié")
-
-                        logger.info("")
-                        logger.info("   🚫 VETO MARCHÉ")
-                        logger.info(f"      • Type          : {veto_type.upper()}")
-                        logger.info(f"      • Raison        : {veto_reason}")
-                        logger.info("      ⚠️  Trade annulé - Conditions de marché non favorables")
-
                     logger.info("")
 
                     # ========== DÉCISION FINALE ==========
