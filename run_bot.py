@@ -3245,7 +3245,6 @@ def scalping_fast_thread(
                             raise ValueError("rates_df vide")
 
                         # 🔍 LOG: Vérifier rafraîchissement bougies
-                        import pandas as pd
                         now_utc = pd.Timestamp.now(tz='UTC')
                         last_candle_time = rates_df_fresh.iloc[-1]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-1]
                         prev_candle_time = rates_df_fresh.iloc[-2]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-2]

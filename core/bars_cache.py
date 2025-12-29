@@ -101,14 +101,30 @@ class BarsCache:
                     "PARAMÈTRES CHANGÉS",
                 )
 
-            # --- CACHE HIT → Recharger seulement bougie courante ---
+            # --- CACHE HIT → Vérifier si nouvelle bougie M1 créée ---
             current_bar = mt5_connector.get_rates(symbol, timeframe, 1)  # 1 barre
 
             if current_bar is None or current_bar.empty:
                 # Fallback : retourner cache ancien (mieux que rien)
                 return cached["bars"]
 
-            # Remplacer dernière barre (incomplète) par courante
+            # 🔍 DÉTECTION NOUVELLE BOUGIE (29 DEC 2025)
+            # Si la timestamp de current_bar != dernière bougie cache → nouvelle bougie M1 créée
+            cached_last_time = cached["bars"].iloc[-1]['time'] if 'time' in cached["bars"].columns else cached["bars"].index[-1]
+            current_time = current_bar.iloc[0]['time'] if 'time' in current_bar.columns else current_bar.index[0]
+
+            # Convertir en timestamp pour comparaison
+            import pandas as pd
+            cached_last_ts = pd.to_datetime(cached_last_time, utc=True, errors='coerce')
+            current_ts = pd.to_datetime(current_time, utc=True, errors='coerce')
+
+            if current_ts > cached_last_ts:
+                # Nouvelle bougie détectée → Full reload pour ne pas perdre les bougies intermédiaires
+                return self._full_reload(
+                    symbol, timeframe, count, mt5_connector, now, f"NOUVELLE BOUGIE {current_ts}"
+                )
+
+            # Même bougie (en cours de formation) → Remplacer dernière barre
             historical = cached["bars"].iloc[:-1]  # N-1 barres complètes
             updated_df = pd.concat([historical, current_bar], ignore_index=True)
 

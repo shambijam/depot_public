@@ -655,9 +655,10 @@ class ScalpingStrategy(BaseStrategy):
                         buy_ratio = buy_count / total_count if total_count > 0 else 0.5
                         sell_ratio = sell_count / total_count if total_count > 0 else 0.5
 
-                        # Score basé sur le déséquilibre
-                        imbalance_buy = max(0, int((buy_ratio - 0.5) * 20))  # 0-10 scale
-                        imbalance_sell = max(0, int((sell_ratio - 0.5) * 20))  # 0-10 scale
+                        # Score basé sur le déséquilibre (29 DEC 2025: * 40 pour USDJPY sensibilité)
+                        # 50% → 0, 52.5% → 1, 55% → 2, 60% → 4, 65% → 6, 70% → 8, 75% → 10
+                        imbalance_buy = max(0, int((buy_ratio - 0.5) * 40))  # 0-10 scale (doublé de 20 → 40)
+                        imbalance_sell = max(0, int((sell_ratio - 0.5) * 40))  # 0-10 scale (doublé de 20 → 40)
 
                         # Construire fp_summary avec les données calculées
                         fp_summary = {
