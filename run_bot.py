@@ -3362,28 +3362,31 @@ def scalping_fast_thread(
                     blocked_phases_enabled = blocked_phases_config.get("enabled", True)
                     blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution"])
 
-                    current_phase = market_results.get("phase", "unknown")
-                    phase_str = str(current_phase).lower() if current_phase else "unknown"
+                    # 🔧 FIX (29 DEC 2025): Récupérer le régime depuis latest["regime"], pas "phase"
+                    # PhaseObserver stocke le régime dans annotated_df["regime"] → latest["regime"]
+                    latest_candle = market_results.get("latest", {})
+                    current_regime = latest_candle.get("regime", "unknown")
+                    phase_str = str(current_regime).lower() if current_regime else "unknown"
 
-                    # Vérifier si phase contient un mot-clé bloqué
+                    # Vérifier si régime contient un mot-clé bloqué
                     phase_is_blocked = blocked_phases_enabled and any(blocked in phase_str for blocked in blocked_phases_list)
 
                     # 🔍 LOG: Config phase veto
                     logger.critical(
                         f"[PHASE_CONFIG_CHECK][USDJPY] blocked_phases={blocked_phases_list} | "
-                        f"enabled={blocked_phases_enabled} | current_phase={phase_str} | is_blocked={phase_is_blocked}"
+                        f"enabled={blocked_phases_enabled} | current_regime={phase_str} | is_blocked={phase_is_blocked}"
                     )
 
                     if phase_is_blocked:
                         logger.critical(
-                            f"[PHASE_CONFIG_VETO][USDJPY] 🚫 PHASE '{phase_str}' INTERDITE ! "
-                            f"Phases bloquées (config): {blocked_phases_list}"
+                            f"[REGIME_CONFIG_VETO][USDJPY] 🚫 RÉGIME '{phase_str}' INTERDIT ! "
+                            f"Régimes bloqués (config): {blocked_phases_list}"
                         )
 
                         decision_mini = {
                             "action": "HOLD",
                             "confidence": 0.0,
-                            "rationale": f"PHASE VETO: Phase '{phase_str}' interdite (range/accumulation bloqué)",
+                            "rationale": f"REGIME VETO: Régime '{phase_str}' interdit (range/accumulation bloqué)",
                             "anchor_price": None
                         }
 
@@ -3391,13 +3394,13 @@ def scalping_fast_thread(
                             "ok": False,
                             "action": "HOLD",
                             "fused_confidence": 0.0,
-                            "signal_type": "PHASE_VETO",
-                            "veto_reason": f"Phase '{phase_str}' interdite",
+                            "signal_type": "REGIME_VETO",
+                            "veto_reason": f"Régime '{phase_str}' interdit",
                             "orderflow_score": orderflow_result_mini["score"]
                         }
 
                         logger.info(
-                            f"[MINIMALIST][USDJPY] HOLD | rationale=PHASE VETO: {phase_str}"
+                            f"[MINIMALIST][USDJPY] HOLD | rationale=REGIME VETO: {phase_str}"
                         )
                     else:
                         # PASS timing + PASS phase → Décision basée sur OrderFlow
