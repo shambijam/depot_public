@@ -3279,6 +3279,32 @@ def scalping_fast_thread(
                     # 🎯 Calcul OrderFlow V6 en direct (26 DEC 2025)
                     if scalping_strategy:
                         try:
+                            # 🔄 FIX (26 DEC 2025): Utiliser bars_cache pour éviter lectures MT5 répétées
+                            # Le cache est mis à jour par le thread en arrière-plan
+                            from core.bars_cache import bars_cache
+                            rates_df_fresh = bars_cache.get_or_fetch(
+                                symbol="USDJPY",
+                                timeframe="M1",
+                                count=50,
+                                mt5_connector=mt5_connector
+                            )
+                            if rates_df_fresh is None or rates_df_fresh.empty:
+                                logger.warning("[ORDERFLOW] Impossible de récupérer rates_df M1 depuis cache, skip cycle")
+                                raise ValueError("rates_df vide")
+
+                            # 🔍 LOG (26 DEC 2025): Vérifier si rates_df est bien rafraîchi
+                            import pandas as pd
+                            now_utc = pd.Timestamp.now(tz='UTC')
+                            last_candle_time = rates_df_fresh.iloc[-1]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-1]
+                            prev_candle_time = rates_df_fresh.iloc[-2]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-2]
+                            last_candle_color = "🟢" if rates_df_fresh.iloc[-1]['close'] > rates_df_fresh.iloc[-1]['open'] else "🔴"
+                            prev_candle_color = "🟢" if rates_df_fresh.iloc[-2]['close'] > rates_df_fresh.iloc[-2]['open'] else "🔴"
+                            logger.critical(
+                                f"[RATES_REFRESH][USDJPY] now={now_utc.strftime('%H:%M:%S')} | "
+                                f"last_candle={last_candle_time} {last_candle_color} | "
+                                f"prev_candle={prev_candle_time} {prev_candle_color} (celle analysée)"
+                            )
+
                             # Préparer asset_signals avec données requises par OrderFlow
                             asset_signals_for_of = {
                                 "footprint_summary": {},  # Non utilisé (supprimé)
@@ -3288,7 +3314,7 @@ def scalping_fast_thread(
                             # Appel direct à _analyze_orderflow_v6()
                             of_v6_result = scalping_strategy._analyze_orderflow_v6(
                                 asset="USDJPY",
-                                df_m1=rates_df,  # DataFrame M1 OHLC
+                                df_m1=rates_df_fresh,  # DataFrame M1 OHLC RAFRAÎCHI
                                 df_m3=None,      # Pas de M3 dans pipeline minimaliste
                                 df_m5=None,      # Pas de M5 dans pipeline minimaliste
                                 asset_signals=asset_signals_for_of
@@ -3404,8 +3430,10 @@ def scalping_fast_thread(
                     delta_score = of_summary.get("delta_momentum_score", 0.0)
                     volume_score = of_summary.get("volume_confirmation_score", 0.0)
                     imbalance_score = of_summary.get("imbalance_strength_score", 0.0)
+                    score_brut = of_summary.get("total_score_brut", 0.0)
 
                     logger.info(f"   Score Total      : {of_score:.1f}/100 ({of_status})")
+                    logger.info(f"   Score Brut       : {score_brut:.1f}/50 (Delta+Volume+Imbalance)")
                     logger.info(f"   Bias             : {of_bias}")
                     logger.info("")
                     logger.info("   Composants:")
