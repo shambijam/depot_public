@@ -3222,15 +3222,80 @@ def scalping_fast_thread(
                 orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
                 decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": "Non analysé", "anchor_price": None}
 
-                # ========== ÉTAPE 1: TIMING GATEKEEPER (GO/NOGO) ==========
+                # ═══════════════════════════════════════════════════════════════
+                # ✨ REFACTOR (29 DEC 2025): Calcul OrderFlow AVANT timing gatekeeper
+                # OBJECTIF: Scorer TOUJOURS (même hors heures optimales)
+                #           Mais TRADER seulement si timing PASS
+                # ═══════════════════════════════════════════════════════════════
+
+                # ========== ÉTAPE 1: CALCUL ORDERFLOW V6 (TOUJOURS) ==========
+                # 🎯 Calcul OrderFlow V6 en direct - TOUJOURS exécuté pour avoir le scoring
+                if scalping_strategy:
+                    try:
+                        # 🔄 FIX (26 DEC 2025): Utiliser bars_cache pour éviter lectures MT5 répétées
+                        from core.bars_cache import bars_cache
+                        rates_df_fresh = bars_cache.get_or_fetch(
+                            symbol="USDJPY",
+                            timeframe="M1",
+                            count=50,
+                            mt5_connector=mt5_connector
+                        )
+                        if rates_df_fresh is None or rates_df_fresh.empty:
+                            logger.warning("[ORDERFLOW] Impossible de récupérer rates_df M1 depuis cache")
+                            raise ValueError("rates_df vide")
+
+                        # 🔍 LOG: Vérifier rafraîchissement bougies
+                        import pandas as pd
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        last_candle_time = rates_df_fresh.iloc[-1]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-1]
+                        prev_candle_time = rates_df_fresh.iloc[-2]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-2]
+                        last_candle_color = "🟢" if rates_df_fresh.iloc[-1]['close'] > rates_df_fresh.iloc[-1]['open'] else "🔴"
+                        prev_candle_color = "🟢" if rates_df_fresh.iloc[-2]['close'] > rates_df_fresh.iloc[-2]['open'] else "🔴"
+                        logger.critical(
+                            f"[RATES_REFRESH][USDJPY] now={now_utc.strftime('%H:%M:%S')} | "
+                            f"last_candle={last_candle_time} {last_candle_color} | "
+                            f"prev_candle={prev_candle_time} {prev_candle_color} (analysée)"
+                        )
+
+                        # Préparer asset_signals
+                        asset_signals_for_of = {
+                            "footprint_summary": {},
+                            "orderflow_summary": {}
+                        }
+
+                        # Appel OrderFlow V6
+                        of_v6_result = scalping_strategy._analyze_orderflow_v6(
+                            asset="USDJPY",
+                            df_m1=rates_df_fresh,
+                            df_m3=None,
+                            df_m5=None,
+                            asset_signals=asset_signals_for_of
+                        )
+
+                        # Extraire résultats
+                        orderflow_result_mini = {
+                            "score": of_v6_result.get("total_score", 0.0),
+                            "bias": of_v6_result.get("bias", "NEUTRAL"),
+                            "summary": of_v6_result
+                        }
+
+                        logger.info(
+                            f"[ORDERFLOW][USDJPY] score={orderflow_result_mini['score']:.1f}/100 | "
+                            f"bias={orderflow_result_mini['bias']}"
+                        )
+
+                    except Exception as e_of:
+                        logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur: {e_of}", exc_info=True)
+                        orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
+
+                # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 try:
-                    # Récupérer ticks pour analyse liquidité (depuis cache ou ticks_df)
+                    # Récupérer ticks pour analyse liquidité
                     ticks_for_timing = None
                     if 'ticks_df' in locals() and ticks_df is not None and not ticks_df.empty:
                         ticks_for_timing = ticks_df
 
-                    # Config asset
                     asset_config_timing = config_manager.get_asset_config("USDJPY") if hasattr(config_manager, 'get_asset_config') else {}
 
                     # Appel gatekeeper
@@ -3242,107 +3307,45 @@ def scalping_fast_thread(
                         asset_config=asset_config_timing
                     )
 
+                    verdict_str = "✅ PASS" if timing_verdict['verdict'] == "PASS" else f"❌ VETO ({timing_verdict.get('veto_reason', 'N/A')})"
                     logger.info(
-                        f"[TIMING_GATEKEEPER][USDJPY] {timing_verdict['verdict']} | "
+                        f"[TIMING_GATEKEEPER][USDJPY] {verdict_str} | "
                         f"session={timing_verdict.get('quality_metrics', {}).get('session', 'N/A')} | "
                         f"tick_rate={timing_verdict.get('quality_metrics', {}).get('tick_rate', 0):.1f}/s"
                     )
                 except Exception as e_timing:
                     logger.error(f"[TIMING_GATEKEEPER] Erreur: {e_timing}", exc_info=True)
-                    timing_verdict = {"verdict": "VETO", "veto_reason": f"Timing error: {e_timing}"}
+                    timing_verdict = {"verdict": "VETO", "veto_reason": f"Timing error: {e_timing}", "quality_metrics": {}}
 
-                # VETO immédiat si timing n'est pas PASS
+                # ========== ÉTAPE 3: DÉCISION (combine OrderFlow + Timing) ==========
+                # Si VETO timing → HOLD même si bon score OrderFlow
+                # Si PASS timing + bon score OrderFlow → TRADE
                 if timing_verdict and timing_verdict.get("verdict") != "PASS":
+                    # VETO timing → Pas de trade mais on a quand même le score OrderFlow
                     veto_reason = timing_verdict.get('veto_reason', 'Unknown')
-                    logger.info(f"[TIMING_VETO] {veto_reason} - Skip cycle")
+                    logger.info(f"⚠️  [TIMING_VETO] {veto_reason} → HOLD (OrderFlow score={orderflow_result_mini['score']:.1f} ignoré)")
 
-                    # Mettre à jour decision_mini avec raison VETO
                     decision_mini = {
                         "action": "HOLD",
                         "confidence": 0.0,
-                        "rationale": f"TIMING VETO: {veto_reason}",
+                        "rationale": f"TIMING VETO: {veto_reason} (OrderFlow {orderflow_result_mini['score']:.0f}/100 ignoré)",
                         "anchor_price": None
                     }
 
-                    # Créer fusion_out HOLD pour compatibilité avec le code existant
                     fusion_out = {
                         "ok": False,
                         "action": "HOLD",
                         "fused_confidence": 0.0,
                         "signal_type": "TIMING_VETO",
-                        "veto_reason": veto_reason
+                        "veto_reason": veto_reason,
+                        "orderflow_score": orderflow_result_mini["score"]  # Score présent même en VETO
                     }
                 else:
-                    # ========== ÉTAPE 2: CALCUL ORDERFLOW V6 ==========
-                    orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
-
-                    # 🎯 Calcul OrderFlow V6 en direct (26 DEC 2025)
-                    if scalping_strategy:
-                        try:
-                            # 🔄 FIX (26 DEC 2025): Utiliser bars_cache pour éviter lectures MT5 répétées
-                            # Le cache est mis à jour par le thread en arrière-plan
-                            from core.bars_cache import bars_cache
-                            rates_df_fresh = bars_cache.get_or_fetch(
-                                symbol="USDJPY",
-                                timeframe="M1",
-                                count=50,
-                                mt5_connector=mt5_connector
-                            )
-                            if rates_df_fresh is None or rates_df_fresh.empty:
-                                logger.warning("[ORDERFLOW] Impossible de récupérer rates_df M1 depuis cache, skip cycle")
-                                raise ValueError("rates_df vide")
-
-                            # 🔍 LOG (26 DEC 2025): Vérifier si rates_df est bien rafraîchi
-                            import pandas as pd
-                            now_utc = pd.Timestamp.now(tz='UTC')
-                            last_candle_time = rates_df_fresh.iloc[-1]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-1]
-                            prev_candle_time = rates_df_fresh.iloc[-2]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-2]
-                            last_candle_color = "🟢" if rates_df_fresh.iloc[-1]['close'] > rates_df_fresh.iloc[-1]['open'] else "🔴"
-                            prev_candle_color = "🟢" if rates_df_fresh.iloc[-2]['close'] > rates_df_fresh.iloc[-2]['open'] else "🔴"
-                            logger.critical(
-                                f"[RATES_REFRESH][USDJPY] now={now_utc.strftime('%H:%M:%S')} | "
-                                f"last_candle={last_candle_time} {last_candle_color} | "
-                                f"prev_candle={prev_candle_time} {prev_candle_color} (celle analysée)"
-                            )
-
-                            # Préparer asset_signals avec données requises par OrderFlow
-                            asset_signals_for_of = {
-                                "footprint_summary": {},  # Non utilisé (supprimé)
-                                "orderflow_summary": {}   # À remplir par _analyze_orderflow_v6
-                            }
-
-                            # Appel direct à _analyze_orderflow_v6()
-                            of_v6_result = scalping_strategy._analyze_orderflow_v6(
-                                asset="USDJPY",
-                                df_m1=rates_df_fresh,  # DataFrame M1 OHLC RAFRAÎCHI
-                                df_m3=None,      # Pas de M3 dans pipeline minimaliste
-                                df_m5=None,      # Pas de M5 dans pipeline minimaliste
-                                asset_signals=asset_signals_for_of
-                            )
-
-                            logger.critical(f"[DEBUG_ORDERFLOW_CALL] OrderFlow V6 called | result={of_v6_result}")
-
-                            # Extraire résultats
-                            orderflow_result_mini = {
-                                "score": of_v6_result.get("total_score", 0.0),
-                                "bias": of_v6_result.get("bias", "NEUTRAL"),
-                                "summary": of_v6_result
-                            }
-
-                        except Exception as e_of:
-                            logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur calcul OrderFlow: {e_of}", exc_info=True)
-                            orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
-
-                    logger.info(
-                        f"[ORDERFLOW][USDJPY] score={orderflow_result_mini['score']:.1f}/100 | "
-                        f"bias={orderflow_result_mini['bias']}"
-                    )
-
-                    # ========== ÉTAPE 3: DÉCISION DIRECTE ==========
+                    # PASS timing → Décision basée sur OrderFlow
                     try:
                         decision_mini = market_analyzer_thread.build_decision(
                             orderflow_result=orderflow_result_mini,
-                            min_score=70.0  # Seuil institutionnel: accepte GOOD (70) et EXCELLENT (90)
+                            min_score=70.0
                         ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
 
                         logger.info(
@@ -3354,21 +3357,20 @@ def scalping_fast_thread(
                         logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
                         decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
-                    # ========== ÉTAPE 4: CONSTRUCTION FUSION_OUT ==========
-                    # Format compatible avec le code existant (fast-lane attend fusion_out)
+                    # Construction fusion_out
                     if decision_mini["action"] in ["BUY", "SELL"]:
                         anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
 
                         fusion_out = {
                             "ok": True,
                             "action": decision_mini["action"],
-                            "fused_confidence": decision_mini["confidence"],  # 0.0-1.0
+                            "fused_confidence": decision_mini["confidence"],
                             "signal_type": "MINIMALIST_ORDERFLOW",
                             "rationale": decision_mini["rationale"],
                             "orderflow_score": orderflow_result_mini["score"],
                             "timing_quality": timing_verdict.get("quality_metrics", {}),
                             "price": anchor_price,
-                            "context": ctx  # Pour compatibilité
+                            "context": ctx
                         }
 
                         logger.info(
@@ -3377,13 +3379,13 @@ def scalping_fast_thread(
                             f"OF_score={orderflow_result_mini['score']:.1f}"
                         )
                     else:
-                        # HOLD
                         fusion_out = {
                             "ok": False,
                             "action": "HOLD",
                             "fused_confidence": 0.0,
                             "signal_type": "MINIMALIST_HOLD",
-                            "rationale": decision_mini["rationale"]
+                            "rationale": decision_mini["rationale"],
+                            "orderflow_score": orderflow_result_mini["score"]
                         }
 
                         logger.info(
@@ -3423,50 +3425,120 @@ def scalping_fast_thread(
                     logger.info("-" * 80)
                     of_score = orderflow_result_mini.get("score", 0.0)
                     of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
-                    of_quality = of_summary.get("signal_quality", "N/A") if of_summary else "N/A"  # EXCELLENT/GOOD/NO_TRADE
-                    of_status = f"{of_quality}" if of_quality != "N/A" else ("VALID" if of_score >= 75 else "WEAK" if of_score >= 50 else "SUSPECT")
+                    of_quality = of_summary.get("signal_quality", "N/A") if of_summary else "N/A"
+                    score_brut = of_summary.get("total_score_brut", 0.0)
 
-                    # Scores détaillés (depuis of_summary qui contient of_v6_result)
+                    # Scores composants
                     delta_score = of_summary.get("delta_momentum_score", 0.0)
                     volume_score = of_summary.get("volume_confirmation_score", 0.0)
                     imbalance_score = of_summary.get("imbalance_strength_score", 0.0)
-                    score_brut = of_summary.get("total_score_brut", 0.0)
 
-                    logger.info(f"   Score Total      : {of_score:.1f}/100 ({of_status})")
-                    logger.info(f"   Score Brut       : {score_brut:.1f}/50 (Delta+Volume+Imbalance)")
-                    logger.info(f"   Bias             : {of_bias}")
+                    # Scoring binaire institutionnel
+                    logger.info(f"   🎯 SCORING INSTITUTIONNEL")
+                    logger.info(f"      Score Final      : {of_score:.0f}/100 ({of_quality})")
+                    logger.info(f"      Score Brut       : {score_brut:.1f}/50 pts")
+                    logger.info(f"      Bias             : {of_bias}")
+
+                    # Critères institutionnels (liquid / strong_imbalance / confirmation)
+                    liquid = volume_score >= 10.0
+                    strong_imb = delta_score >= 12.0
+                    confirm = imbalance_score >= 5.0
+                    logger.info(f"      Critères Instit  : {'✅' if liquid else '❌'} Liquid | {'✅' if strong_imb else '❌'} StrongDelta | {'✅' if confirm else '❌'} Confirm")
                     logger.info("")
-                    logger.info("   Composants:")
+
+                    # Composants détaillés
+                    logger.info("   📊 COMPOSANTS (50 pts max)")
                     logger.info(f"      • Delta Momentum      : {delta_score:.1f}/25 pts")
                     logger.info(f"      • Volume Confirmation : {volume_score:.1f}/15 pts")
                     logger.info(f"      • Imbalance Strength  : {imbalance_score:.1f}/10 pts")
 
-                    # Détails Delta
+                    # ========== 1. MTF ALIGNMENT (Multi-Timeframe) ==========
+                    mtf_align = of_summary.get("mtf_alignment", {})
+                    mtf_details = of_summary.get("details", {}).get("mtf", {})
+                    if mtf_align:
+                        logger.info("")
+                        logger.info("   🕐 MTF ALIGNMENT (Multi-Timeframe)")
+
+                        # M1
+                        m1_dir = mtf_align.get("m1", "N/A").upper()
+                        m1_icon = "🟢" if m1_dir == "BULLISH" else "🔴" if m1_dir == "BEARISH" else "⚪"
+                        m1_det = mtf_details.get("m1", {})
+                        logger.info(f"      • M1 (8 bars)    : {m1_icon} {m1_dir} ({m1_det.get('bullish_bars', 0)}v / {m1_det.get('bearish_bars', 0)}r)")
+
+                        # M3
+                        m3_dir = mtf_align.get("m3", "N/A").upper()
+                        m3_icon = "🟢" if m3_dir == "BULLISH" else "🔴" if m3_dir == "BEARISH" else "⚪"
+                        m3_det = mtf_details.get("m3", {})
+                        logger.info(f"      • M3 (6 bars)    : {m3_icon} {m3_dir} ({m3_det.get('bullish_bars', 0)}v / {m3_det.get('bearish_bars', 0)}r)")
+
+                        # M5
+                        m5_dir = mtf_align.get("m5", "N/A").upper()
+                        m5_icon = "🟢" if m5_dir == "BULLISH" else "🔴" if m5_dir == "BEARISH" else "⚪"
+                        m5_det = mtf_details.get("m5", {})
+                        logger.info(f"      • M5 (6 bars)    : {m5_icon} {m5_dir} ({m5_det.get('bullish_bars', 0)}v / {m5_det.get('bearish_bars', 0)}r)")
+
+                        # Alignement total
+                        mtf_aligned = of_summary.get("mtf_aligned", False)
+                        logger.info(f"      • Aligné Total   : {'✅ OUI' if mtf_aligned else '❌ NON'}")
+
+                    # ========== 2. DELTA MOMENTUM DÉTAILS ==========
                     delta_details = of_summary.get("delta_momentum_details", {})
                     if delta_details:
                         logger.info("")
-                        logger.info("   📊 Détails Delta:")
-                        logger.info(f"      • Delta Total   : {delta_details.get('delta_total', 0)}")
-                        logger.info(f"      • Direction     : {delta_details.get('direction', 'N/A').upper()}")
-                        logger.info(f"      • Cohérence     : {delta_details.get('coherence', 0.0):.2f}")
+                        logger.info("   📊 DELTA MOMENTUM (Déséquilibre Buy/Sell)")
+                        delta_total = delta_details.get('delta_total', 0)
+                        delta_dir = delta_details.get('direction', 'N/A').upper()
+                        coherence = delta_details.get('coherence', 0.0)
+                        bull_bars = delta_details.get('bullish_bars', 0)
+                        bear_bars = delta_details.get('bearish_bars', 0)
 
-                    # Détails Volume
+                        logger.info(f"      • Delta Total    : {delta_total:.0f} ({delta_dir})")
+                        logger.info(f"      • Cohérence 10M1 : {coherence:.2f} ({bull_bars}v / {bear_bars}r)")
+
+                    # ========== 3. VOLUME CONFIRMATION DÉTAILS ==========
                     volume_details = of_summary.get("volume_confirmation_details", {})
                     if volume_details:
                         logger.info("")
-                        logger.info("   📊 Détails Volume:")
-                        logger.info(f"      • Volume Ratio  : {volume_details.get('volume_ratio', 0.0):.2f}x")
-                        logger.info(f"      • Spike Détecté : {'✅' if volume_details.get('spike_detected') else '❌'}")
-                        logger.info(f"      • Total Ticks   : {volume_details.get('total_ticks', 0)}")
+                        logger.info("   📊 VOLUME CONFIRMATION (Liquidité)")
+                        curr_vol = volume_details.get('current_volume', 0)
+                        avg_vol = volume_details.get('avg_volume', 0)
+                        vol_ratio = volume_details.get('volume_ratio', 0.0)
+                        spike = volume_details.get('spike_detected', False)
+                        poc = volume_details.get('poc')
 
-                    # Détails Imbalance
+                        logger.info(f"      • Tick Count     : {curr_vol:.0f} (avg: {avg_vol:.0f})")
+                        logger.info(f"      • Volume Ratio   : {vol_ratio:.2f}x")
+                        logger.info(f"      • Spike Détecté  : {'✅ OUI' if spike else '❌ NON'}")
+                        if poc:
+                            logger.info(f"      • POC Price      : {poc:.5f}")
+
+                    # ========== 4. IMBALANCE STRENGTH DÉTAILS ==========
                     imbalance_details = of_summary.get("imbalance_strength_details", {})
                     if imbalance_details:
                         logger.info("")
-                        logger.info("   📊 Détails Imbalance:")
-                        logger.info(f"      • Buy Ratio     : {imbalance_details.get('buy_ratio', 0.0):.1f}%")
-                        logger.info(f"      • Sell Ratio    : {imbalance_details.get('sell_ratio', 0.0):.1f}%")
-                        logger.info(f"      • Direction     : {imbalance_details.get('direction', 'N/A').upper()}")
+                        logger.info("   📊 IMBALANCE STRENGTH (Ratios Buy/Sell)")
+                        buy_ratio = imbalance_details.get('buy_ratio', 0.0)
+                        sell_ratio = imbalance_details.get('sell_ratio', 0.0)
+                        imb_dir = imbalance_details.get('direction', 'N/A').upper()
+                        imb_buy = imbalance_details.get('imbalance_buy', 0)
+                        imb_sell = imbalance_details.get('imbalance_sell', 0)
+
+                        logger.info(f"      • Buy Ratio      : {buy_ratio:.1f}%")
+                        logger.info(f"      • Sell Ratio     : {sell_ratio:.1f}%")
+                        logger.info(f"      • Direction      : {imb_dir}")
+                        logger.info(f"      • Imbalances     : Buy={imb_buy} Sell={imb_sell}")
+
+                    # ========== 5. REVERSAL DETECTION (26 DEC 2025) ==========
+                    reversal_detected = of_summary.get("reversal_detected", False)
+                    reversal_type = of_summary.get("reversal_type")
+                    reversal_override = of_summary.get("reversal_override", False)
+
+                    if reversal_detected:
+                        logger.info("")
+                        logger.info("   ⚠️  REVERSAL DETECTION")
+                        rev_icon = "🔴→🟢" if reversal_type == "BULLISH_REVERSAL" else "🟢→🔴" if reversal_type == "BEARISH_REVERSAL" else "?"
+                        logger.info(f"      • Type           : {rev_icon} {reversal_type}")
+                        logger.info(f"      • Bias Override  : {'✅ OUI' if reversal_override else '❌ NON'}")
 
                     # ========== VETO RANGE/ACCUMULATION (26 DEC 2025) ==========
                     veto_applied = of_summary.get("veto_applied", False)
