@@ -989,6 +989,10 @@ class ScalpingStrategy(BaseStrategy):
                 # Setup B : Liquidité + Déséquilibre (sans confirmation)
                 result["total_score"] = 70.0
                 result["signal_quality"] = "GOOD"
+            elif liquid and confirmation:
+                # Setup C : Liquidité + Confirmation (marché calme sans fort delta)
+                result["total_score"] = 50.0
+                result["signal_quality"] = "FAIR"
             else:
                 # Pas de setup valide
                 result["total_score"] = 0.0
