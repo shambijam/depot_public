@@ -3467,6 +3467,21 @@ def scalping_fast_thread(
                     logger.info("=" * 80)
                     logger.info("")
 
+                    # ========== RÉGIME DE MARCHÉ (29 DEC 2025) ==========
+                    logger.info("📊 RÉGIME DE MARCHÉ (Temps Réel)")
+                    logger.info("-" * 80)
+
+                    # Récupérer régime depuis latest (market_results)
+                    latest_candle = market_results.get("latest", {}) if market_results else {}
+                    current_regime = latest_candle.get("regime", "unknown")
+                    regime_strength = latest_candle.get("regime_strength", 0.0)
+
+                    # Affichage
+                    regime_display = str(current_regime).upper() if current_regime else "UNKNOWN"
+                    logger.info(f"   Régime actuel    : {regime_display}")
+                    logger.info(f"   Force régime     : {regime_strength:.2f}/1.0")
+                    logger.info("")
+
                     # ========== TIMING GATEKEEPER ==========
                     logger.info("🕐 TIMING GATEKEEPER (GO/NOGO)")
                     logger.info("-" * 80)
