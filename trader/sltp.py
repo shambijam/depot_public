@@ -573,30 +573,15 @@ def _calculate_sl_tp_prices(
         dyn_sl.get("swing_lookback", legacy.get("sl_swing_lookback_period", 10))
     )
     sl_pips_default = float(
-        dyn_sl.get(
-            "pips", legacy.get("stop_loss_pips", config.get("stop_loss_pips", 10))
-        )
+        dyn_sl.get("pips") or legacy.get("stop_loss_pips")
     )
-    # DEBUG: Tracer d'où vient sl_pips_default
-    try:
-        self.logger.critical(
-            f"🔍 [SL_DEBUG] sl_pips_default={sl_pips_default} | "
-            f"dyn_sl.pips={dyn_sl.get('pips')} | "
-            f"legacy.stop_loss_pips={legacy.get('stop_loss_pips')} | "
-            f"config.stop_loss_pips={config.get('stop_loss_pips')}"
-        )
-    except Exception:
-        pass
 
-    # Paramètres TP dyn -> legacy -> défauts
     tp_atr_period = int(dyn_tp.get("atr_period", legacy.get("tp_atr_period", 14)))
     tp_atr_multiplier = float(
         dyn_tp.get("atr_multiplier", legacy.get("tp_atr_multiplier", 2.0))
     )
     tp_pips_default = float(
-        dyn_tp.get(
-            "pips", legacy.get("take_profit_pips", config.get("take_profit_pips", 20))
-        )
+        dyn_tp.get("pips") or legacy.get("take_profit_pips")
     )
 
     # RR effectif (hint + facteurs)

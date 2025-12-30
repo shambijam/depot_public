@@ -543,46 +543,10 @@ class ScalpingStrategy(BaseStrategy):
                         # Déterminer direction delta
                         delta_direction_calc = "BULLISH" if delta_total > 0 else "BEARISH" if delta_total < 0 else "NEUTRAL"
 
-                        # 🎯 DÉTECTION DE RETOURNEMENT (26 DEC 2025)
-                        # Analyser la dernière bougie pour détecter un changement de momentum
-                        reversal_detected = False
-                        reversal_type = None
-
-                        if df_m1 is not None and len(df_m1) >= 3:
-                            # Dernière bougie fermée (celle qu'on vient d'analyser)
-                            current_candle = df_m1.iloc[-2]
-                            # Bougie précédente
-                            prev_candle = df_m1.iloc[-3]
-
-                            current_is_green = current_candle["close"] > current_candle["open"]
-                            prev_is_green = prev_candle["close"] > prev_candle["open"]
-
-                            # Retournement BEARISH : Delta positif MAIS dernière bougie rouge après une verte
-                            if delta_total > 0 and not current_is_green and prev_is_green:
-                                reversal_detected = True
-                                reversal_type = "BEARISH_REVERSAL"
-                                self.logger.warning(
-                                    f"[ORDERFLOW_REVERSAL][{asset}] ⚠️ RETOURNEMENT BEARISH détecté ! "
-                                    f"Delta={delta_total:.0f} (BULL) mais bougie 🔴 ROUGE après 🟢 VERTE"
-                                )
-
-                            # Retournement BULLISH : Delta négatif MAIS dernière bougie verte après une rouge
-                            elif delta_total < 0 and current_is_green and not prev_is_green:
-                                reversal_detected = True
-                                reversal_type = "BULLISH_REVERSAL"
-                                self.logger.warning(
-                                    f"[ORDERFLOW_REVERSAL][{asset}] ⚠️ RETOURNEMENT BULLISH détecté ! "
-                                    f"Delta={delta_total:.0f} (BEAR) mais bougie 🟢 VERTE après 🔴 ROUGE"
-                                )
-
-                        fp_summary["reversal_detected"] = reversal_detected
-                        fp_summary["reversal_type"] = reversal_type
-
                         self.logger.critical(
                             f"[ORDERFLOW_TICKS_CALC][{asset}] ✅ Ticks calculés: {len(ticks_df)} ticks | "
                             f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
                             f"Delta={delta_total:.0f} → Direction={delta_direction_calc} | "
-                            f"Reversal={reversal_type or 'None'} | "
                             f"Imbalance={imbalance:.2f} | Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
                     else:
@@ -864,39 +828,14 @@ class ScalpingStrategy(BaseStrategy):
                 result["total_score"] = 0.0
                 result["signal_quality"] = "NO_TRADE"
 
-            # 🎯 CALCUL DU BIAS (26 DEC 2025)
-            # Basé sur la direction du delta momentum + détection de retournement
             delta_direction = delta_details.get("direction", "neutral")
-            reversal_detected = fp_summary.get("reversal_detected", False)
-            reversal_type = fp_summary.get("reversal_type")
 
-            # Logique de base
             if delta_direction == "bullish":
                 result["bias"] = "BUY"
             elif delta_direction == "bearish":
                 result["bias"] = "SELL"
             else:
                 result["bias"] = "NEUTRAL"
-
-            # ⚠️ CORRECTION SI RETOURNEMENT DÉTECTÉ
-            if reversal_detected:
-                if reversal_type == "BEARISH_REVERSAL":
-                    # Delta positif mais bougie rouge → VETO le BUY ou inverse en SELL
-                    self.logger.warning(
-                        f"[ORDERFLOW_BIAS_OVERRIDE][{asset}] Retournement BEARISH : "
-                        f"Bias inversé de {result['bias']} → SELL (ou VETO)"
-                    )
-                    result["bias"] = "SELL"  # Ou "NEUTRAL" pour VETO
-                    result["reversal_override"] = True
-
-                elif reversal_type == "BULLISH_REVERSAL":
-                    # Delta négatif mais bougie verte → VETO le SELL ou inverse en BUY
-                    self.logger.warning(
-                        f"[ORDERFLOW_BIAS_OVERRIDE][{asset}] Retournement BULLISH : "
-                        f"Bias inversé de {result['bias']} → BUY (ou VETO)"
-                    )
-                    result["bias"] = "BUY"  # Ou "NEUTRAL" pour VETO
-                    result["reversal_override"] = True
 
             # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final
             self.logger.critical(
