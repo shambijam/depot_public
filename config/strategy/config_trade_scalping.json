@@ -25,7 +25,7 @@
       "burst_scalping": {
         "enabled": true,
         "entry_mode": "MARKET",
-        "burst_size": 16,
+        "burst_size": 21,
         "enforce_single_basket": true,
         "per_leg_virtual": false,
         "sltp": {
@@ -35,7 +35,7 @@
           "rr_floor": 1.0,
           "rr_cap": 3.0,
           "sl": {
-            "pips": 3.5,
+            "pips": 3.0,
             "buffer_pips": 2,
             "atr_period": 14,
             "atr_multiplier": 0.0,
@@ -54,7 +54,7 @@
         "closure_rules": {
           "enabled": true,
           "enable_profit_close": true,
-          "target_profit_pips": 2.4,
+          "target_profit_pips": 2.3,
           "require_full_count_for_profit_close": false,
           "rt_fast_window_ms": 120000,
           "rt_poll_interval_ms": 100,
