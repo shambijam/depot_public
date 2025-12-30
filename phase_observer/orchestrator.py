@@ -1173,6 +1173,9 @@ class PhaseObserver:
                 "strong_trending_institutional_bull", "strong_trending_institutional_bear",
                 "strong_trending_retail_bull", "strong_trending_retail_bear",
 
+                # CONSOLIDATION (bull/bear flags)
+                "consolidation_bull", "consolidation_bear",
+
                 # RANGE
                 "range_accumulation", "range_distribution", "range_institutional", "range_retail",
 
@@ -1213,6 +1216,17 @@ class PhaseObserver:
                         return "strong_trending_institutional_bear" if is_institutional else "strong_trending_retail_bear"
                     if "bull" in regime:
                         return "strong_trending_institutional_bull" if is_institutional else "strong_trending_retail_bull"
+
+                # CONSOLIDATION (bull/bear flags)
+                if "consolidation" in regime:
+                    if "bull" in regime:
+                        return "consolidation_bull"
+                    elif "bear" in regime:
+                        return "consolidation_bear"
+                    # Fallback si direction non détectée
+                    close_ = float(row.get("close", 0.0))
+                    open_ = float(row.get("open", 0.0))
+                    return "consolidation_bull" if close_ >= open_ else "consolidation_bear"
 
                 # Trending normal (bull/bear)
                 if "trending" in regime:

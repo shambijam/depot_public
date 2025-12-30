@@ -1349,6 +1349,51 @@ class Detectors:
                         else "trending_retail_bear"
                     )
 
+            # --- PRIORITÉ 3.5 : CONSOLIDATION (pause dans tendance - bull/bear flag)
+            # Détecte les consolidations avant continuation de tendance
+            elif 20.0 <= current_adx < float(trend_q.iloc[i]):
+                # Lookback pour détecter tendance précédente
+                lookback = min(20, i)
+                if lookback >= 10:
+                    # ADX moyen sur les 10-20 dernières bougies
+                    recent_adx = adx.iloc[max(0, i-lookback):i].mean()
+
+                    # Volume en baisse (signe de consolidation)
+                    if "tick_volume" in df.columns:
+                        current_vol = df["tick_volume"].iloc[i]
+                        recent_vol = df["tick_volume"].iloc[max(0, i-lookback):i].mean()
+                        vol_decreasing = current_vol < (recent_vol * 0.8)
+                    else:
+                        vol_decreasing = False
+
+                    # Range serré (volatilité réduite mais pas compression)
+                    candle_range = df["high"].iloc[i] - df["low"].iloc[i]
+                    atr_val = volatility.iloc[i] if pd.notna(volatility.iloc[i]) else 0.0
+                    tight_range = candle_range < (atr_val * 0.5) if atr_val > 0 else False
+
+                    # Tendance précédente forte (ADX > 25 récemment)
+                    was_trending = recent_adx >= 25.0
+
+                    # Direction de la tendance précédente
+                    recent_di_plus = di_plus.iloc[max(0, i-lookback):i].mean()
+                    recent_di_minus = di_minus.iloc[max(0, i-lookback):i].mean()
+                    prev_trend_bull = recent_di_plus > recent_di_minus
+
+                    # CONSOLIDATION détectée si :
+                    # 1. Tendance forte récente (ADX > 25)
+                    # 2. ADX actuel entre 20 et seuil trending (pause)
+                    # 3. Volume en baisse OU range serré
+                    if was_trending and (vol_decreasing or tight_range):
+                        if prev_trend_bull:
+                            regimes.iloc[i] = "consolidation_bull"
+                        else:
+                            regimes.iloc[i] = "consolidation_bear"
+                    else:
+                        # Pas de consolidation détectée, fallback transitional
+                        regimes.iloc[i] = "transitional"
+                else:
+                    regimes.iloc[i] = "transitional"
+
             # --- PRIORITÉ 4 : RANGE (ADX <= 30e percentile)
             elif current_adx <= float(range_q.iloc[i]):
                 if is_institutional:
@@ -1412,6 +1457,16 @@ class Detectors:
                         strength.iloc[i] = 0.7
                     else:
                         strength.iloc[i] = 0.6
+
+                # CONSOLIDATION (bull/bear flags) : Force très élevée (continuation probable)
+                elif "consolidation" in regime:
+                    # Plus l'ADX est proche de 25 (pause dans tendance forte), plus c'est fort
+                    if 22 <= adx_val <= 28:
+                        strength.iloc[i] = 0.9  # Zone idéale de consolidation
+                    elif 20 <= adx_val <= 30:
+                        strength.iloc[i] = 0.85
+                    else:
+                        strength.iloc[i] = 0.75
 
                 # RANGE : Force selon niveau ADX (plus bas = plus fort)
                 elif "range" in regime:
