@@ -139,12 +139,12 @@
           "burst_scalping": {
             "use_orderflow_v6": true,
             "of_v6_gate": {
-              "min_score": 0.72,
+              "min_score": 0.67,
               "require_ncp_strong": true,
               "min_delta_abs": 120.0,
-              "min_imbalance": 0.64,
+              "min_imbalance": 0.62,
               "min_tickrate": 3.5,
-              "comment": "Seuils d'entrée plus stricts pour GBPUSD (volatilité élevée)"
+              "comment": "Seuils assouplis pour GBPUSD (Option B - 31 DEC 2025)"
             },
             "flow_vol_gate": {
               "enabled": false
