@@ -3078,6 +3078,7 @@ def scalping_worker(
     asset: str,
     global_state: GlobalScalpingState,
     display_queue: queue.Queue,
+    context_lock: threading.Lock,
     offset_seconds: float,
     mt5_connector,
     decision_pipeline,
@@ -4211,6 +4212,7 @@ def main(args: argparse.Namespace) -> None:
             "USDJPY",                    # asset
             global_scalping_state,       # global state
             display_queue,               # display queue (31 DEC 2025)
+            context_lock,                # context lock (31 DEC 2025)
             0.0,                         # offset: démarre immédiatement
             mt5_connector,
             decision_pipeline,
@@ -4232,6 +4234,7 @@ def main(args: argparse.Namespace) -> None:
             "EURUSD",                    # asset
             global_scalping_state,       # global state
             display_queue,               # display queue (31 DEC 2025)
+            context_lock,                # context lock (31 DEC 2025)
             1.5,                         # offset: 1.5s après USDJPY
             mt5_connector,
             decision_pipeline,
@@ -4253,6 +4256,7 @@ def main(args: argparse.Namespace) -> None:
             "GBPUSD",                    # asset
             global_scalping_state,       # global state
             display_queue,               # display queue (31 DEC 2025)
+            context_lock,                # context lock (31 DEC 2025)
             3.0,                         # offset: 3.0s après USDJPY
             mt5_connector,
             decision_pipeline,

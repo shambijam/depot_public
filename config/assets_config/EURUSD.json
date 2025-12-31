@@ -160,35 +160,35 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 4.0,
+          "pips": 15.0,
           "buffer_pips": 1,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "swing_lookback": 0,
-          "comment": "8 pips SL pour EURUSD (spread serré)"
+          "comment": "15 pips SL pour EURUSD (Option A - Conservateur, 31 DEC 2025)"
         },
         "tp": {
-          "pips": 5.0,
+          "pips": 23.0,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
-            "min_sl_tp_distance_pips": 8
+            "min_sl_tp_distance_pips": 12
           },
-          "comment": "12 pips TP pour EURUSD (RR 1.5)"
+          "comment": "23 pips TP pour EURUSD (RR 1.5, Option A - Conservateur)"
         }
       },
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 3.0,
+        "target_profit_pips": 15.0,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
         "enable_loss_guard": true,
-        "max_loss_pips": 15.0,
+        "max_loss_pips": 25.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "8 pips profit target, 15 pips max loss"
+        "comment": "15 pips profit target, 25 pips max loss (Option A - Conservateur, 31 DEC 2025)"
       },
       "timing_gatekeeper": {
         "enabled": true,
