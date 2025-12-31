@@ -12,6 +12,7 @@ import json
 import time
 import math
 import threading
+import queue
 import re
 import signal
 import platform
@@ -3076,6 +3077,7 @@ class GlobalScalpingState:
 def scalping_worker(
     asset: str,
     global_state: GlobalScalpingState,
+    display_queue: queue.Queue,
     offset_seconds: float,
     mt5_connector,
     decision_pipeline,
@@ -3610,187 +3612,48 @@ def scalping_worker(
                     logger.error(f"[{asset}] Erreur update global_state: {e_update}")
 
                 # ═══════════════════════════════════════════════════════════════
-                # 📊 RAPPORT SCALPING DÉTAILLÉ (26 DEC 2025)
+                # 📊 SOUMETTRE RAPPORT À LA QUEUE (31 DEC 2025 - Solution B)
                 # ═══════════════════════════════════════════════════════════════
                 try:
-                    qm = timing_verdict.get("quality_metrics", {})
-                    # 🔧 FIX (26 DEC 2025): Utiliser orderflow_result_mini.summary au lieu de latest
-                    of_summary = orderflow_result_mini.get("summary", {})
-
-                    logger.info("=" * 80)
-                    logger.info(f"📊 RAPPORT SCALPING {asset} | Cycle #{cycle_count}")
-                    logger.info("=" * 80)
-                    logger.info("")
-
-                    # ========== RÉGIME DE MARCHÉ (29 DEC 2025) ==========
-                    logger.info("📊 RÉGIME DE MARCHÉ (Temps Réel)")
-                    logger.info("-" * 80)
-
-                    # Récupérer régime depuis latest (market_results)
+                    # Extraire les données importantes
                     latest_candle = market_results.get("latest", {}) if market_results else {}
-                    current_regime = latest_candle.get("regime", "unknown")
+                    current_regime = latest_candle.get("regime", "UNKNOWN")
                     regime_strength = latest_candle.get("regime_strength", 0.0)
 
-                    # Affichage
-                    regime_display = str(current_regime).upper() if current_regime else "UNKNOWN"
-                    logger.info(f"   Régime actuel    : {regime_display}")
-                    logger.info(f"   Force régime     : {regime_strength:.2f}/1.0")
-                    logger.info("")
-
-                    # ========== TIMING GATEKEEPER ==========
-                    logger.info("🕐 TIMING GATEKEEPER (GO/NOGO)")
-                    logger.info("-" * 80)
-                    verdict_icon = "✅" if timing_verdict.get("verdict") == "PASS" else "❌"
-                    logger.info(f"   Verdict          : {verdict_icon} {timing_verdict.get('verdict')}")
-                    if timing_verdict.get("veto_reason"):
-                        logger.info(f"   Raison VETO      : {timing_verdict.get('veto_reason')}")
-                    logger.info(f"   Heure GMT        : {qm.get('hour_gmt', 'N/A')}h")
-                    logger.info(f"   Session          : {qm.get('session', 'N/A')}")
-                    logger.info(f"   Tick Count       : {qm.get('tick_count', 0)} ticks")
-                    logger.info(f"   Tick Rate        : {qm.get('tick_rate', 0.0):.1f} ticks/s")
-                    logger.info(f"   Coverage         : {qm.get('coverage_s', 0.0):.1f} secondes")
-                    logger.info(f"   Liquidité Score  : {qm.get('liquidity_score', 0.0):.2f}/1.0")
-                    logger.info("")
-
-                    # ========== ORDERFLOW V6 ==========
-                    logger.info("📈 ORDERFLOW V6 (Score Principal)")
-                    logger.info("-" * 80)
                     of_score = orderflow_result_mini.get("score", 0.0)
                     of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
-                    of_quality = of_summary.get("signal_quality", "N/A") if of_summary else "N/A"
-                    score_brut = of_summary.get("total_score_brut", 0.0)
 
-                    # Scores composants
-                    delta_score = of_summary.get("delta_momentum_score", 0.0)
-                    volume_score = of_summary.get("volume_confirmation_score", 0.0)
-                    imbalance_score = of_summary.get("imbalance_strength_score", 0.0)
+                    timing_status = timing_verdict.get("verdict", "UNKNOWN")
+                    timing_reason = timing_verdict.get("veto_reason", "")
+                    qm = timing_verdict.get("quality_metrics", {})
+                    tick_count = qm.get("tick_count", 0)
 
-                    # Scoring binaire institutionnel
-                    logger.info(f"   🎯 SCORING INSTITUTIONNEL")
-                    logger.info(f"      Score Final      : {of_score:.0f}/100 ({of_quality})")
-                    logger.info(f"      Score Brut       : {score_brut:.1f}/50 pts")
-                    logger.info(f"      Bias             : {of_bias}")
-
-                    # Critères institutionnels (liquid / strong_imbalance / confirmation)
-                    liquid = volume_score >= 10.0
-                    strong_imb = delta_score >= 12.0
-                    confirm = imbalance_score >= 5.0
-                    logger.info(f"      Critères Instit  : {'✅' if liquid else '❌'} Liquid | {'✅' if strong_imb else '❌'} StrongDelta | {'✅' if confirm else '❌'} Confirm")
-                    logger.info("")
-
-                    # Composants détaillés
-                    logger.info("   📊 COMPOSANTS (50 pts max)")
-                    logger.info(f"      • Delta Momentum      : {delta_score:.1f}/25 pts")
-                    logger.info(f"      • Volume Confirmation : {volume_score:.1f}/15 pts")
-                    logger.info(f"      • Imbalance Strength  : {imbalance_score:.1f}/10 pts")
-
-                    # ========== 1. MTF ALIGNMENT (Multi-Timeframe) ==========
-                    mtf_align = of_summary.get("mtf_alignment", {})
-                    mtf_details = of_summary.get("details", {}).get("mtf", {})
-                    if mtf_align:
-                        logger.info("")
-                        logger.info("   🕐 MTF ALIGNMENT (Multi-Timeframe)")
-
-                        # M1
-                        m1_dir = mtf_align.get("m1", "N/A").upper()
-                        m1_icon = "🟢" if m1_dir == "BULLISH" else "🔴" if m1_dir == "BEARISH" else "⚪"
-                        m1_det = mtf_details.get("m1", {})
-                        logger.info(f"      • M1 (2 bars)    : {m1_icon} {m1_dir} ({m1_det.get('bullish_bars', 0)}v / {m1_det.get('bearish_bars', 0)}r)")
-
-                        # M3
-                        m3_dir = mtf_align.get("m3", "N/A").upper()
-                        m3_icon = "🟢" if m3_dir == "BULLISH" else "🔴" if m3_dir == "BEARISH" else "⚪"
-                        m3_det = mtf_details.get("m3", {})
-                        logger.info(f"      • M3 (2 bars)    : {m3_icon} {m3_dir} ({m3_det.get('bullish_bars', 0)}v / {m3_det.get('bearish_bars', 0)}r)")
-
-                        # M5
-                        m5_dir = mtf_align.get("m5", "N/A").upper()
-                        m5_icon = "🟢" if m5_dir == "BULLISH" else "🔴" if m5_dir == "BEARISH" else "⚪"
-                        m5_det = mtf_details.get("m5", {})
-                        logger.info(f"      • M5 (2 bars)    : {m5_icon} {m5_dir} ({m5_det.get('bullish_bars', 0)}v / {m5_det.get('bearish_bars', 0)}r)")
-
-                        # Alignement total
-                        mtf_aligned = of_summary.get("mtf_aligned", False)
-                        logger.info(f"      • Aligné Total   : {'✅ OUI' if mtf_aligned else '❌ NON'}")
-
-                    # ========== 2. DELTA MOMENTUM DÉTAILS ==========
-                    delta_details = of_summary.get("delta_momentum_details", {})
-                    if delta_details:
-                        logger.info("")
-                        logger.info("   📊 DELTA MOMENTUM (Déséquilibre Buy/Sell)")
-                        delta_total = delta_details.get('delta_total', 0)
-                        delta_dir = delta_details.get('direction', 'N/A').upper()
-                        coherence = delta_details.get('coherence', 0.0)
-                        bull_bars = delta_details.get('bullish_bars', 0)
-                        bear_bars = delta_details.get('bearish_bars', 0)
-
-                        logger.info(f"      • Delta Total    : {delta_total:.0f} ({delta_dir})")
-                        logger.info(f"      • Cohérence 10M1 : {coherence:.2f} ({bull_bars}v / {bear_bars}r)")
-
-                    # ========== 3. VOLUME CONFIRMATION DÉTAILS ==========
-                    volume_details = of_summary.get("volume_confirmation_details", {})
-                    if volume_details:
-                        logger.info("")
-                        logger.info("   📊 VOLUME CONFIRMATION (Liquidité)")
-                        curr_vol = volume_details.get('current_volume', 0)
-                        avg_vol = volume_details.get('avg_volume', 0)
-                        vol_ratio = volume_details.get('volume_ratio', 0.0)
-                        spike = volume_details.get('spike_detected', False)
-                        poc = volume_details.get('poc')
-
-                        logger.info(f"      • Tick Count     : {curr_vol:.0f} (avg: {avg_vol:.0f})")
-                        logger.info(f"      • Volume Ratio   : {vol_ratio:.2f}x")
-                        logger.info(f"      • Spike Détecté  : {'✅ OUI' if spike else '❌ NON'}")
-                        if poc:
-                            logger.info(f"      • POC Price      : {poc:.5f}")
-
-                    # ========== 4. IMBALANCE STRENGTH DÉTAILS ==========
-                    imbalance_details = of_summary.get("imbalance_strength_details", {})
-                    if imbalance_details:
-                        logger.info("")
-                        logger.info("   📊 IMBALANCE STRENGTH (Ratios Buy/Sell)")
-                        buy_ratio = imbalance_details.get('buy_ratio', 0.0)
-                        sell_ratio = imbalance_details.get('sell_ratio', 0.0)
-                        imb_dir = imbalance_details.get('direction', 'N/A').upper()
-                        imb_buy = imbalance_details.get('imbalance_buy', 0)
-                        imb_sell = imbalance_details.get('imbalance_sell', 0)
-
-                        logger.info(f"      • Buy Ratio      : {buy_ratio:.1f}%")
-                        logger.info(f"      • Sell Ratio     : {sell_ratio:.1f}%")
-                        logger.info(f"      • Direction      : {imb_dir}")
-                        logger.info(f"      • Imbalances     : Buy={imb_buy} Sell={imb_sell}")
-
-                    # ========== 5. REVERSAL DETECTION (26 DEC 2025) ==========
-                    reversal_detected = of_summary.get("reversal_detected", False)
-                    reversal_type = of_summary.get("reversal_type")
-                    reversal_override = of_summary.get("reversal_override", False)
-
-                    if reversal_detected:
-                        logger.info("")
-                        logger.info("   ⚠️  REVERSAL DETECTION")
-                        rev_icon = "🔴→🟢" if reversal_type == "BULLISH_REVERSAL" else "🟢→🔴" if reversal_type == "BEARISH_REVERSAL" else "?"
-                        logger.info(f"      • Type           : {rev_icon} {reversal_type}")
-                        logger.info(f"      • Bias Override  : {'✅ OUI' if reversal_override else '❌ NON'}")
-
-                    logger.info("")
-
-                    # ========== DÉCISION FINALE ==========
-                    logger.info("🎯 DÉCISION FINALE")
-                    logger.info("-" * 80)
                     action = decision_mini.get("action", "HOLD")
                     confidence = decision_mini.get("confidence", 0.0)
                     rationale = decision_mini.get("rationale", "N/A")
-                    anchor_price = decision_mini.get("anchor_price")
 
-                    action_icon = "🟢" if action == "BUY" else "🔴" if action == "SELL" else "⚪"
-                    logger.info(f"   Action           : {action_icon} {action}")
-                    logger.info(f"   Confidence       : {confidence:.2f} ({confidence*100:.0f}%)")
-                    logger.info(f"   Rationale        : {rationale}")
-                    if anchor_price:
-                        logger.info(f"   Prix Ancrage     : {anchor_price}")
+                    # Construire le rapport
+                    report_data = {
+                        "asset": asset,
+                        "cycle": cycle_count,
+                        "timestamp": time.time(),
+                        "regime": str(current_regime).upper(),
+                        "regime_strength": regime_strength,
+                        "of_score": of_score,
+                        "of_bias": of_bias,
+                        "timing": timing_status,
+                        "timing_reason": timing_reason,
+                        "action": action,
+                        "confidence": confidence,
+                        "tick_count": tick_count,
+                        "rationale": rationale
+                    }
 
-                    logger.info("")
-                    logger.info("=" * 80)
+                    # Soumettre à la queue (non-bloquant)
+                    try:
+                        display_queue.put(report_data, block=False)
+                    except queue.Full:
+                        logger.warning(f"[{asset}] Display queue pleine, rapport ignoré")
 
                 except Exception as e_report:
                     logger.warning(f"[{asset}] Erreur génération rapport: {e_report}", exc_info=True)
@@ -3892,78 +3755,146 @@ def scalping_worker(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def dashboard_worker(
-    global_state: GlobalScalpingState,
+    display_queue: queue.Queue,
     stop_event: threading.Event,
     logger
 ):
     """
-    Thread dashboard: affiche état agrégé des 3 assets toutes les 30 secondes.
+    Thread dashboard: consomme la queue et affiche tableau consolidé toutes les 5 secondes.
 
-    Format table:
-    ╔══════════════════════════════════════════════════════════════╗
-    ║ DASHBOARD SCALPING - 31 DEC 2025 03:58:45 GMT               ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║ USDJPY │ RANGE(0.7) │ OF:65/BUY │ PASS │ →BUY   │ C:142     ║
-    ║ EURUSD │ TREND(0.8) │ OF:45/SEL │ VETO │ →HOLD  │ C:141     ║
-    ║ GBPUSD │ UNKN(0.0)  │ OF:0/NEU  │ VETO │ →HOLD  │ C:140     ║
-    ╚══════════════════════════════════════════════════════════════╝
+    Attend de recevoir les 3 rapports (USDJPY, EURUSD, GBPUSD) puis affiche:
+    ═══════════════════════════════════════════════════════════════════════════════
+    📊 SCALPING MULTI-ACTIFS - 31 Dec 2025 14:30:05
+    ───────────────────────────────────────────────────────────────────────────────
+    USDJPY  │ TREND(0.8)   │ 🟢 85/BUY  │ ✅ GO   │ 📈 BUY   │ 75%  │ 137 ticks
+    EURUSD  │ RANGE(0.6)   │ 🟡 45/SEL  │ ❌ VETO │ ⏸️ HOLD  │ 30%  │ 148 ticks
+    GBPUSD  │ CONS(0.7)    │ 🔴 15/NEU  │ ❌ VETO │ ⏸️ HOLD  │ 10%  │ 162 ticks
+    ───────────────────────────────────────────────────────────────────────────────
+    📈 Signaux: 1 BUY | ⚠️ Veto: EURUSD, GBPUSD (Heure non autorisée)
+    ═══════════════════════════════════════════════════════════════════════════════
     """
     import pandas as pd
 
-    dashboard_interval = 30  # 30 secondes
+    display_interval = 5.0  # 5 secondes (synchronisé avec workers)
+    timeout_collect = 2.0   # Timeout pour collecter les 3 rapports
 
-    logger.info("📊 [DASHBOARD] Thread démarré (affichage 30s)")
+    logger.info("📊 [DASHBOARD] Thread démarré (affichage 5s)")
 
     while not stop_event.is_set():
         try:
-            time.sleep(dashboard_interval)
+            # Collecter les rapports de la queue
+            reports = {}
+            start_collect = time.time()
 
-            # Récupérer états
-            all_states = global_state.get_all_states()
+            # Collecter jusqu'à 3 rapports ou timeout
+            while len(reports) < 3 and (time.time() - start_collect) < timeout_collect:
+                try:
+                    report = display_queue.get(timeout=0.1)
+                    reports[report["asset"]] = report
+                    display_queue.task_done()
+                except queue.Empty:
+                    continue
 
-            # Header
-            now_gmt = pd.Timestamp.utcnow().strftime("%d %b %Y %H:%M:%S GMT")
-            logger.info("=" * 80)
-            logger.info(f"📊 DASHBOARD SCALPING - {now_gmt}")
-            logger.info("=" * 80)
+            # Afficher seulement si on a au moins 1 rapport
+            if reports:
+                # Header
+                now = pd.Timestamp.now().strftime("%d %b %Y %H:%M:%S")
+                print("\n" + "═" * 90)
+                print(f"📊 SCALPING MULTI-ACTIFS - {now}")
+                print("─" * 90)
 
-            # Table header
-            logger.info(
-                f"{'ASSET':<8} │ {'REGIME':<11} │ {'ORDERFLOW':<12} │ "
-                f"{'TIM':<4} │ {'ACTION':<6} │ {'CYCLES':<8}"
-            )
-            logger.info("─" * 80)
+                # Table header
+                print(f"{'ASSET':<7} │ {'RÉGIME':<12} │ {'ORDERFLOW':<10} │ {'TIMING':<7} │ {'ACTION':<8} │ {'CONF':<4} │ {'TICKS':<10}")
+                print("─" * 90)
 
-            # Lignes par asset
-            for asset_name in ["USDJPY", "EURUSD", "GBPUSD"]:
-                state = all_states.get(asset_name, {})
+                # Lignes par asset (ordre fixe)
+                for asset_name in ["USDJPY", "EURUSD", "GBPUSD"]:
+                    if asset_name in reports:
+                        r = reports[asset_name]
 
-                regime = state.get("regime", "UNKNOWN")[:4]
-                regime_force = state.get("regime_force", 0.0)
-                of_score = state.get("of_score", 0.0)
-                of_bias = state.get("of_bias", "NEUTRAL")[:3]
-                timing = state.get("timing_status", "UNKNOWN")[:4]
-                action = state.get("action", "HOLD")
-                cycles = state.get("cycle_count", 0)
-                errors = state.get("errors_count", 0)
+                        # Format régime
+                        regime_short = r["regime"][:4] if r["regime"] else "UNKN"
+                        regime_str = f"{regime_short}({r['regime_strength']:.1f})"
 
-                # Format ligne
-                regime_str = f"{regime}({regime_force:.1f})"
-                of_str = f"{of_score:.0f}/{of_bias}"
-                action_str = f"→{action}"
-                cycle_str = f"C:{cycles}"
-                if errors > 0:
-                    cycle_str += f" E:{errors}"
+                        # Icône + score OrderFlow
+                        of_score = r["of_score"]
+                        if of_score >= 70:
+                            of_icon = "🟢"
+                        elif of_score >= 40:
+                            of_icon = "🟡"
+                        else:
+                            of_icon = "🔴"
+                        bias_short = r["of_bias"][:3]
+                        of_str = f"{of_icon} {of_score:.0f}/{bias_short}"
 
-                logger.info(
-                    f"{asset_name:<8} │ {regime_str:<11} │ {of_str:<12} │ "
-                    f"{timing:<4} │ {action_str:<6} │ {cycle_str:<8}"
-                )
+                        # Icône timing
+                        timing = r["timing"]
+                        if timing == "PASS":
+                            timing_str = "✅ GO"
+                        elif timing == "VETO":
+                            timing_str = "❌ VETO"
+                        else:
+                            timing_str = "⏸️ HOLD"
 
-            logger.info("=" * 80)
+                        # Icône action
+                        action = r["action"]
+                        if action == "BUY":
+                            action_str = "📈 BUY"
+                        elif action == "SELL":
+                            action_str = "📉 SELL"
+                        else:
+                            action_str = "⏸️ HOLD"
+
+                        # Confidence
+                        conf_str = f"{r['confidence']*100:.0f}%"
+
+                        # Ticks
+                        ticks_str = f"{r['tick_count']} ticks"
+
+                        # Affichage ligne
+                        print(f"{asset_name:<7} │ {regime_str:<12} │ {of_str:<10} │ {timing_str:<7} │ {action_str:<8} │ {conf_str:<4} │ {ticks_str:<10}")
+
+                # Footer avec résumé
+                print("─" * 90)
+
+                # Compter signaux
+                buy_count = sum(1 for r in reports.values() if r["action"] == "BUY")
+                sell_count = sum(1 for r in reports.values() if r["action"] == "SELL")
+
+                # Lister vetos
+                veto_assets = [asset for asset, r in reports.items() if r["timing"] == "VETO"]
+                veto_reason = ""
+                if veto_assets:
+                    # Prendre la raison du premier veto
+                    first_veto = reports[veto_assets[0]]
+                    reason = first_veto.get("timing_reason", "")
+                    if reason:
+                        # Extraire juste "Heure Xh GMT NON autorisée"
+                        if "Heure" in reason and "GMT" in reason:
+                            veto_reason = f" ({reason.split('(')[0].strip()})"
+                        else:
+                            veto_reason = f" ({reason[:40]}...)" if len(reason) > 40 else f" ({reason})"
+
+                # Résumé
+                summary_parts = []
+                if buy_count > 0:
+                    summary_parts.append(f"📈 {buy_count} BUY")
+                if sell_count > 0:
+                    summary_parts.append(f"📉 {sell_count} SELL")
+                if veto_assets:
+                    summary_parts.append(f"⚠️ Veto: {', '.join(veto_assets)}{veto_reason}")
+
+                if summary_parts:
+                    print(" | ".join(summary_parts))
+
+                print("═" * 90)
+
+            # Attendre jusqu'au prochain affichage
+            time.sleep(display_interval)
 
         except Exception as e:
-            logger.error(f"[DASHBOARD] Erreur affichage: {e}")
+            logger.error(f"[DASHBOARD] Erreur affichage: {e}", exc_info=True)
+            time.sleep(display_interval)
 
     logger.info("🛑 [DASHBOARD] Thread arrêté")
 
@@ -4265,6 +4196,9 @@ def main(args: argparse.Namespace) -> None:
     assets = ["USDJPY", "EURUSD", "GBPUSD"]
     global_scalping_state = GlobalScalpingState(assets)
 
+    # ✅ Créer Display Queue (31 DEC 2025 - Solution B)
+    display_queue = queue.Queue(maxsize=100)
+
     # Events pour arrêt propre
     scalping_stop_event = threading.Event()
     dashboard_stop_event = threading.Event()
@@ -4276,6 +4210,7 @@ def main(args: argparse.Namespace) -> None:
         args=(
             "USDJPY",                    # asset
             global_scalping_state,       # global state
+            display_queue,               # display queue (31 DEC 2025)
             0.0,                         # offset: démarre immédiatement
             mt5_connector,
             decision_pipeline,
@@ -4296,6 +4231,7 @@ def main(args: argparse.Namespace) -> None:
         args=(
             "EURUSD",                    # asset
             global_scalping_state,       # global state
+            display_queue,               # display queue (31 DEC 2025)
             1.5,                         # offset: 1.5s après USDJPY
             mt5_connector,
             decision_pipeline,
@@ -4316,6 +4252,7 @@ def main(args: argparse.Namespace) -> None:
         args=(
             "GBPUSD",                    # asset
             global_scalping_state,       # global state
+            display_queue,               # display queue (31 DEC 2025)
             3.0,                         # offset: 3.0s après USDJPY
             mt5_connector,
             decision_pipeline,
@@ -4331,11 +4268,11 @@ def main(args: argparse.Namespace) -> None:
         name="ScalpingWorker-GBPUSD"
     )
 
-    # ✅ Créer thread dashboard
+    # ✅ Créer thread dashboard (31 DEC 2025 - Solution B)
     thread_dashboard = threading.Thread(
         target=dashboard_worker,
         args=(
-            global_scalping_state,
+            display_queue,               # display queue au lieu de global_state
             dashboard_stop_event,
             logger
         ),
