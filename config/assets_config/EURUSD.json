@@ -52,5 +52,152 @@
   },
   "strategy_whitelist": [
     "scalping"
-  ]
+  ],
+  "overrides": {
+    "scalping": {
+      "footprint": {
+        "m1_min_ticks": 50,
+        "m1_min_coverage_s": 15,
+        "burst_tolerance": {
+          "tickrate_min": 3.0,
+          "coverage_s_min_burst": 5
+        },
+        "comment": "EURUSD : activité élevée (50 ticks vs 30 pour USDJPY)"
+      },
+      "fusion": {
+        "ttl_ms": 600,
+        "max_slippage_points": 20,
+        "comment": "20 points = 2 pips pour EURUSD"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 200,
+        "features": {
+          "delta": {
+            "abs_strong": 100.0,
+            "abs_extreme": 200.0,
+            "comment": "EURUSD a des deltas moyens (100 vs 15 pour USDJPY)"
+          },
+          "imbalance": {
+            "min": 0.58,
+            "extreme": 0.72,
+            "comment": "Seuils standards pour EURUSD"
+          },
+          "tickrate": {
+            "min": 3.0,
+            "burst_min": 5.0,
+            "coverage_s_min": 5,
+            "comment": "EURUSD : 3-5 ticks/sec (activité élevée)"
+          },
+          "vpoc": {
+            "drift_max_points": 15.0,
+            "comment": "15 points = 1.5 pips pour EURUSD"
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "pivot_window": 3,
+          "confirm_window": 10,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.75
+        },
+        "ncp_strong": {
+          "delta_abs_min": 100.0,
+          "tickrate_min": 3.0,
+          "comment": "Seuils NCP standards pour EURUSD"
+        }
+      },
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "use_orderflow_v6": true,
+            "of_v6_gate": {
+              "min_score": 0.70,
+              "require_ncp_strong": true,
+              "min_delta_abs": 100.0,
+              "min_imbalance": 0.62,
+              "min_tickrate": 3.0,
+              "comment": "Seuils d'entrée standards pour EURUSD"
+            },
+            "flow_vol_gate": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      "sltp": {
+        "exit_mode": "sl_tp_then_trail",
+        "sl_method": "PIPS",
+        "tp_method": "PIPS",
+        "rr_base": 1.5,
+        "rr_floor": 1.0,
+        "rr_cap": 3.0,
+        "sl": {
+          "pips": 8.0,
+          "buffer_pips": 1,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "swing_lookback": 0,
+          "comment": "8 pips SL pour EURUSD (spread serré)"
+        },
+        "tp": {
+          "pips": 12.0,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "execution": {
+            "min_sl_tp_distance_pips": 8
+          },
+          "comment": "12 pips TP pour EURUSD (RR 1.5)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 8.0,
+        "require_full_count_for_profit_close": false,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 15.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "8 pips profit target, 15 pips max loss"
+      },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "min_tick_rate": 2.0,
+        "min_coverage_s": 40.0,
+        "max_tick_rate": 200.0,
+        "max_spread_pips": 1.2,
+        "comment": "Spread max 1.2 pips pour EURUSD (paire serrée)"
+      }
+    }
+  }
 }

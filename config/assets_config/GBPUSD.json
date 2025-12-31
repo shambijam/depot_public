@@ -52,5 +52,152 @@
   },
   "strategy_whitelist": [
     "scalping"
-  ]
+  ],
+  "overrides": {
+    "scalping": {
+      "footprint": {
+        "m1_min_ticks": 60,
+        "m1_min_coverage_s": 15,
+        "burst_tolerance": {
+          "tickrate_min": 3.5,
+          "coverage_s_min_burst": 5
+        },
+        "comment": "GBPUSD : activité très élevée (60 ticks, paire volatile)"
+      },
+      "fusion": {
+        "ttl_ms": 700,
+        "max_slippage_points": 25,
+        "comment": "25 points = 2.5 pips pour GBPUSD (slippage plus élevé)"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 200,
+        "features": {
+          "delta": {
+            "abs_strong": 120.0,
+            "abs_extreme": 250.0,
+            "comment": "GBPUSD a des deltas élevés (120 vs 100 pour EURUSD, paire plus volatile)"
+          },
+          "imbalance": {
+            "min": 0.60,
+            "extreme": 0.74,
+            "comment": "Seuils légèrement plus stricts pour GBPUSD (volatilité)"
+          },
+          "tickrate": {
+            "min": 3.5,
+            "burst_min": 6.0,
+            "coverage_s_min": 5,
+            "comment": "GBPUSD : 3.5-6 ticks/sec (activité très élevée)"
+          },
+          "vpoc": {
+            "drift_max_points": 18.0,
+            "comment": "18 points = 1.8 pips pour GBPUSD (plus de tolérance)"
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "pivot_window": 3,
+          "confirm_window": 10,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0001,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.75
+        },
+        "ncp_strong": {
+          "delta_abs_min": 120.0,
+          "tickrate_min": 3.5,
+          "comment": "Seuils NCP plus élevés pour GBPUSD (paire volatile)"
+        }
+      },
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "use_orderflow_v6": true,
+            "of_v6_gate": {
+              "min_score": 0.72,
+              "require_ncp_strong": true,
+              "min_delta_abs": 120.0,
+              "min_imbalance": 0.64,
+              "min_tickrate": 3.5,
+              "comment": "Seuils d'entrée plus stricts pour GBPUSD (volatilité élevée)"
+            },
+            "flow_vol_gate": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      "sltp": {
+        "exit_mode": "sl_tp_then_trail",
+        "sl_method": "PIPS",
+        "tp_method": "PIPS",
+        "rr_base": 1.5,
+        "rr_floor": 1.0,
+        "rr_cap": 3.0,
+        "sl": {
+          "pips": 10.0,
+          "buffer_pips": 1,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "swing_lookback": 0,
+          "comment": "10 pips SL pour GBPUSD (paire volatile, spread plus large)"
+        },
+        "tp": {
+          "pips": 15.0,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "execution": {
+            "min_sl_tp_distance_pips": 10
+          },
+          "comment": "15 pips TP pour GBPUSD (RR 1.5)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 10.0,
+        "require_full_count_for_profit_close": false,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 18.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "10 pips profit target, 18 pips max loss"
+      },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "min_tick_rate": 2.5,
+        "min_coverage_s": 40.0,
+        "max_tick_rate": 200.0,
+        "max_spread_pips": 1.8,
+        "comment": "Spread max 1.8 pips pour GBPUSD (paire plus large)"
+      }
+    }
+  }
 }

@@ -276,116 +276,19 @@ class PhaseObserverReporter:
     # --------------- Collectors (évènements) ---------------
 
     def _collect_ob(self, symbol: str, tf: str, df: pd.DataFrame) -> List[OBRecord]:
-        out: List[OBRecord] = []
-        try:
-            detections = self.detectors.detect_order_block_ml_enhanced(df) or []
-            for d in detections:
-                if not d:
-                    continue
-                ts = self._match_ts(df, d)
-                out.append(
-                    OBRecord(
-                        ts=ts,
-                        symbol=symbol,
-                        timeframe=tf,
-                        kind=str(d.get("type", "unknown")),
-                        zone_high=float(
-                            d.get("zone_high", d.get("high", float("nan")))
-                        ),
-                        zone_low=float(d.get("zone_low", d.get("low", float("nan")))),
-                        quality=d.get("quality"),
-                        score=self._safe_float(d.get("score")),
-                        meta={
-                            k: d.get(k)
-                            for k in d.keys()
-                            if k
-                            not in {"type", "zone_high", "zone_low", "quality", "score"}
-                        },
-                    )
-                )
-        except Exception as e:
-            self._swallow("OB", symbol, tf, e)
-        return out
+        # === [ICT DETECTOR SUPPRIMÉ - 31 DEC 2025] ===
+        # detect_order_block_ml_enhanced retiré
+        return []
 
     def _collect_fvg(self, symbol: str, tf: str, df: pd.DataFrame) -> List[FVGRecord]:
-        out: List[FVGRecord] = []
-        try:
-            detections = self.detectors.detect_fvg_enhanced(df) or []
-            for d in detections:
-                if not d:
-                    continue
-                ts = self._match_ts(df, d)
-                out.append(
-                    FVGRecord(
-                        ts=ts,
-                        symbol=symbol,
-                        timeframe=tf,
-                        direction=str(d.get("direction", "unknown")),
-                        gap_top=float(d.get("gap_top", d.get("high", float("nan")))),
-                        gap_bottom=float(
-                            d.get("gap_bottom", d.get("low", float("nan")))
-                        ),
-                        quality=d.get("quality"),
-                        score=self._safe_float(d.get("score")),
-                        meta={
-                            k: d.get(k)
-                            for k in d.keys()
-                            if k
-                            not in {
-                                "direction",
-                                "gap_top",
-                                "gap_bottom",
-                                "quality",
-                                "score",
-                            }
-                        },
-                    )
-                )
-        except Exception as e:
-            self._swallow("FVG", symbol, tf, e)
-        return out
+        # === [ICT DETECTOR SUPPRIMÉ - 31 DEC 2025] ===
+        # detect_fvg_enhanced retiré
+        return []
 
     def _collect_bos(self, symbol: str, tf: str, df: pd.DataFrame) -> List[BOSRecord]:
-        out: List[BOSRecord] = []
-        try:
-            detections = self.detectors.detect_bos_mss_enhanced(df) or []
-            for d in detections:
-                if not d:
-                    continue
-                ts = self._match_ts(df, d)
-                out.append(
-                    BOSRecord(
-                        ts=ts,
-                        symbol=symbol,
-                        timeframe=tf,
-                        type=str(d.get("type", "unknown")),
-                        level_broken=float(d.get("level_broken", float("nan"))),
-                        confirmation_score=self._safe_float(
-                            d.get("confirmation_score")
-                        ),
-                        volume_ratio=self._safe_float(d.get("volume_ratio")),
-                        momentum=self._safe_float(d.get("momentum")),
-                        structure_type=d.get("structure_type"),
-                        quality=d.get("quality"),
-                        meta={
-                            k: d.get(k)
-                            for k in d.keys()
-                            if k
-                            not in {
-                                "type",
-                                "level_broken",
-                                "confirmation_score",
-                                "volume_ratio",
-                                "momentum",
-                                "structure_type",
-                                "quality",
-                            }
-                        },
-                    )
-                )
-        except Exception as e:
-            self._swallow("BOS/MSS", symbol, tf, e)
-        return out
+        # === [ICT DETECTOR SUPPRIMÉ - 31 DEC 2025] ===
+        # detect_bos_mss_enhanced retiré
+        return []
 
     def _collect_regime_series(
         self, symbol: str, tf: str, df: pd.DataFrame

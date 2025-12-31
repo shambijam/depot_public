@@ -80,11 +80,12 @@ class PhaseObserver:
         self.base_confidence = 0.25
         self.signal_weights = {}
         self.confluence_bonus = {}
-        self.detect_fvg = True
-        self.detect_order_block = True
-        self.detect_bos_mss = True
-        self.detect_liquidity_grab = True
-        self.detect_eqh_eql = True
+        # === [ICT DETECTORS DÉSACTIVÉS - 31 DEC 2025] ===
+        self.detect_fvg = False  # detect_fvg_enhanced supprimé
+        self.detect_order_block = False  # detect_order_block_ml_enhanced supprimé
+        self.detect_bos_mss = False  # detect_bos_mss_enhanced supprimé
+        self.detect_liquidity_grab = True  # Sweep/absorption vectorisés (pas de détecteur)
+        self.detect_eqh_eql = False  # detect_eqh_eql supprimé
         self.detect_volume_anomaly = True
 
         # CHARGER LA CONFIG SI DISPONIBLE (écrasera les valeurs par défaut)
@@ -801,34 +802,14 @@ class PhaseObserver:
                 df_an["regime_detected"] = False
                 df_an["regime_strength"] = 0.5
 
-            if toggles.get("detect_fvg", True):
-                df_an["fvg_details"] = self.detectors.detect_fvg_enhanced(df_an)
-                df_an["fvg_detected"] = df_an["fvg_details"].apply(
-                    lambda x: x is not None
-                )
-            else:
-                df_an["fvg_details"] = [None] * len(df_an)
-                df_an["fvg_detected"] = False
-
-            if toggles.get("detect_order_block", True):
-                df_an["ob_details"] = self.detectors.detect_order_block_ml_enhanced(
-                    df_an
-                )
-                df_an["ob_detected"] = df_an["ob_details"].apply(
-                    lambda x: x is not None
-                )
-            else:
-                df_an["ob_details"] = [None] * len(df_an)
-                df_an["ob_detected"] = False
-
-            if toggles.get("detect_bos_mss", True):
-                df_an["bos_mss_details"] = self.detectors.detect_bos_mss_enhanced(df_an)
-                df_an["bos_mss_detected"] = df_an["bos_mss_details"].apply(
-                    lambda x: x is not None
-                )
-            else:
-                df_an["bos_mss_details"] = [None] * len(df_an)
-                df_an["bos_mss_detected"] = False
+            # === [ICT DETECTORS SUPPRIMÉS - 31 DEC 2025] ===
+            # detect_fvg_enhanced, detect_order_block_ml_enhanced, detect_bos_mss_enhanced retirés
+            df_an["fvg_details"] = [None] * len(df_an)
+            df_an["fvg_detected"] = False
+            df_an["ob_details"] = [None] * len(df_an)
+            df_an["ob_detected"] = False
+            df_an["bos_mss_details"] = [None] * len(df_an)
+            df_an["bos_mss_detected"] = False
 
                 # === [CANDLE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
                 # Bloc détection candle_patterns retiré (21 lignes)
@@ -1082,21 +1063,13 @@ class PhaseObserver:
 
             # --- LIQUIDITY: Equal Highs / Equal Lows ---
             try:
-                eqh_cfg = (
-                    self.config_manager.get("eqh_eql_settings", {})
-                    if getattr(self, "config_manager", None)
-                    else {}
-                )
-                eqh_signals = self.detectors.detect_eqh_eql(df_an, eqh_cfg)
-                if eqh_signals:
-                    df_an["eqh_eql_details"] = eqh_signals
-                    df_an["eqh_eql_detected"] = [s is not None for s in eqh_signals]
-                else:
-                    df_an["eqh_eql_details"] = None
-                    df_an["eqh_eql_detected"] = False
+                # === [ICT DETECTOR SUPPRIMÉ - 31 DEC 2025] ===
+                # detect_eqh_eql retiré (Equal Highs/Equal Lows)
+                df_an["eqh_eql_details"] = None
+                df_an["eqh_eql_detected"] = False
             except Exception as e:
                 self.logger.warning(
-                    f"[{current_asset_symbol}] Erreur detect_eqh_eql: {e}"
+                    f"[{current_asset_symbol}] Erreur phase detection: {e}"
                 )
                 df_an["eqh_eql_details"] = None
                 df_an["eqh_eql_detected"] = False
@@ -1534,35 +1507,14 @@ class PhaseObserver:
         # === [CANDLE PATTERNS SUPPRIMÉ - Session 23 Nov 2025] ===
         # Bloc détection candle_pattern dans analyze_last_bar retiré (7 lignes)
 
-        try:
-            fvg_details = self.detectors.detect_fvg_enhanced(df_an)
-            res["fvg_details"] = (
-                fvg_details[i_last] if isinstance(fvg_details, list) else None
-            )
-            res["fvg_detected"] = bool(res["fvg_details"])
-        except Exception:
-            res["fvg_details"] = None
-            res["fvg_detected"] = False
-
-        try:
-            ob_details = self.detectors.detect_order_block_ml_enhanced(df_an)
-            res["ob_details"] = (
-                ob_details[i_last] if isinstance(ob_details, list) else None
-            )
-            res["ob_detected"] = bool(res["ob_details"])
-        except Exception:
-            res["ob_details"] = None
-            res["ob_detected"] = False
-
-        try:
-            bos_details = self.detectors.detect_bos_mss_enhanced(df_an)
-            res["bos_mss_details"] = (
-                bos_details[i_last] if isinstance(bos_details, list) else None
-            )
-            res["bos_mss_detected"] = bool(res["bos_mss_details"])
-        except Exception:
-            res["bos_mss_details"] = None
-            res["bos_mss_detected"] = False
+        # === [ICT DETECTORS SUPPRIMÉS - 31 DEC 2025] ===
+        # detect_fvg_enhanced, detect_order_block_ml_enhanced, detect_bos_mss_enhanced retirés
+        res["fvg_details"] = None
+        res["fvg_detected"] = False
+        res["ob_details"] = None
+        res["ob_detected"] = False
+        res["bos_mss_details"] = None
+        res["bos_mss_detected"] = False
 
         # Liquidity light (sweep/absorption)
         try:
