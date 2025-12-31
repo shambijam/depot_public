@@ -3,7 +3,9 @@
   "description": "Stratégie minimaliste 2 composants : OrderFlow V6 (signal unique) + Timing Gatekeeper (filtre PASS/VETO)",
   "version": "5.0-minimalist",
   "tradeable_assets": [
-    "USDJPY"
+    "USDJPY",
+    "EURUSD",
+    "GBPUSD"
   ],
   "magic_number": 52001,
   "decision_rules": [

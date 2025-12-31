@@ -47,10 +47,10 @@
     "trade_tick_size": 0.00001
   },
   "strategy_toggles": {
-    "scalping": false,
-    "liquidity": true
+    "scalping": true,
+    "liquidity": false
   },
   "strategy_whitelist": [
-    "liquidity"
+    "scalping"
   ]
 }

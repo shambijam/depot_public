@@ -13,7 +13,6 @@ from pathlib import Path
 # Import AIInterface retiré (module supprimé)
 from core.utils import ConfigValidationError, TradeStatus
 from strategy.scalping import ScalpingStrategy
-from strategy.liquidity import LiquidityStrategy
 from phase_observer.market_analyzer import MarketAnalyzer
 # === [ORDERFLOW V6 SUPPRIMÉ - Session 28 Nov 2025] ===
 # detect_orderflow_v6 supprimé → analyse intégrée dans ScalpingStrategy
@@ -182,8 +181,7 @@ class DecisionPipeline:
     ) -> Dict[str, Any]:
         """
         Orchestration décisionnelle (Banque Privée)
-        - ScalpingStrategy -> USDJPY
-        - LiquidityStrategy -> EURUSD, GBPUSD
+        - ScalpingStrategy -> USDJPY, EURUSD, GBPUSD
         - 1 trade max par cycle (on prend le premier valide)
         """
         import logging
@@ -216,7 +214,6 @@ class DecisionPipeline:
                     "context": analyzed_context,
                     "config_used": base_cfg,
                     "scalping_decisions": [],
-                    "liquidity_decisions": [],
                     "final_decisions": [],
                     "final_decision": {},
                     "execution_context": {"sessions": {"blocked": True, "reason": "outside_trading_hours"}},
@@ -283,7 +280,6 @@ class DecisionPipeline:
 
             # Conteneurs séparés (séparation stricte des domaines)
             scalping_decisions: list = []
-            liquidity_decisions: list = []
 
             # --- Helpers locaux ---
             def _norm_action(x: str) -> str:
@@ -438,128 +434,81 @@ class DecisionPipeline:
                             f"[DECISION] Erreur scalping: {e}", exc_info=True
                         )
 
-            # --- LIQUIDITY (EURUSD/GBPUSD) ---
-            liq_assets = [a for a in ("EURUSD", "GBPUSD") if a in signals]
-            if liq_assets:
-                liquidity = self.strategy_manager.get_strategy_instance(
-                    "liquidity",
-                    inject={
-                        "mt5_connector": getattr(self, "mt5_connector", None),
-                        "phase_observer": getattr(self, "phase_observer", None),
-                      
-                        "risk_manager": getattr(self, "risk_manager", None),
-                        "audit_logger": logging.getLogger("AuditLogger"),
-                    },
-                    strict=False,
-                )
-                if liquidity:
-                    try:
-                        dec = liquidity.evaluate_entry(
-                            analyzed_context, {a: signals[a] for a in liq_assets}
-                        )
-                        decs = (
-                            dec
-                            if isinstance(dec, list)
-                            else ([dec] if isinstance(dec, dict) else [])
-                        )
-                        for d in decs:
-                            d["strategy_type"] = "liquidity"
-                            _ensure_asset(d, liq_assets[0])
-                            d.setdefault("execution_status", "ready")
-                            if _is_valid(d):
-                                liquidity_decisions.append(d)
-                    except Exception as e:
-                        self.logger.error(
-                            f"[DECISION] Erreur liquidity: {e}", exc_info=True
-                        )
-
-                    # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
-                    print(
-                        f"📦 scalping_decisions={len(scalping_decisions)} | liquidity_decisions={len(liquidity_decisions)}"
-                    )
-                    if scalping_decisions:
-                        print(
-                            f"   ↳ top scalping: {scalping_decisions[0].get('action')} {scalping_decisions[0].get('asset')}"
-                        )
-                    if liquidity_decisions:
-                        print(
-                            f"   ↳ top liquidity: {liquidity_decisions[0].get('action')} {liquidity_decisions[0].get('asset')}"
-                        )
-
-                    final_decisions = scalping_decisions + liquidity_decisions
-
-                    # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
-                    td = final_decisions[0] if final_decisions else {}
-                    chosen_strategy = td.get("strategy_type") if td else None
-                    chosen_asset = td.get("asset") if td else None
-
-                    # 🔥 PATCH: Intégrer les footprints dans la décision finale
-                    try:
-                        if td and chosen_asset and chosen_asset in signals:
-                            # 1) Récupère l'historique footprints poussé par analyze_last_bar / MTF
-                            fph = (
-                                signals[chosen_asset].get("footprints_history", [])
-                                or []
-                            )
-                            td["footprints_history"] = fph[
-                                -5:
-                            ]  # garde une fenêtre courte pour décision
-
-                            # 2) Calcule un biais footprint simple sur les 3 derniers deltas
-                            last3 = [
-                                fp.get("delta", 0.0)
-                                for fp in fph[-3:]
-                                if isinstance(fp, dict)
-                            ]
-                            bias = "neutral"
-                            if len(last3) == 3:
-                                if all(d > 0 for d in last3):
-                                    bias = "long"
-                                elif all(d < 0 for d in last3):
-                                    bias = "short"
-                            td["footprint_bias"] = bias
-
-                            # 3) Micro-boost de confiance si cohérence action ↔ biais footprint
-                            try:
-                                act = (td.get("action") or "").upper()
-                                old_conf = float(
-                                    td.get(
-                                        "confidence_score",
-                                        signals[chosen_asset].get(
-                                            "confidence_score", 0.5
-                                        ),
-                                    )
-                                )
-                                new_conf = old_conf
-                                if (bias == "long" and act == "BUY") or (
-                                    bias == "short" and act == "SELL"
-                                ):
-                                    new_conf = min(1.0, old_conf + 0.05)  # +5 bps
-                                td["confidence_score"] = new_conf
-                            except Exception:
-                                pass
-
-                            # 4) Propage aussi le flag early_entry si le signal l’autorise déjà
-                            if signals[chosen_asset].get("early_entry_allowed", False):
-                                td["early_entry_allowed"] = True
-
-                            # 5) Log clair pour traçabilité
-                            self.logger.info(
-                                f"[Decision] Footprints: asset={chosen_asset} bias={bias} "
-                                f"last3={last3} conf→{td.get('confidence_score')}"
-                            )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"[Decision] Intégration footprints impossible: {e}"
-                        )
-
             # === Fusion pour compat héritage (tout en gardant les listes séparées) ===
-            final_decisions = scalping_decisions + liquidity_decisions
+            print(
+                f"📦 scalping_decisions={len(scalping_decisions)}"
+            )
+            if scalping_decisions:
+                print(
+                    f"   ↳ top scalping: {scalping_decisions[0].get('action')} {scalping_decisions[0].get('asset')}"
+                )
+
+            final_decisions = scalping_decisions
 
             # === ÉTAPE 3: Choix principal (1 trade max / cycle) ===
             td = final_decisions[0] if final_decisions else {}
             chosen_strategy = td.get("strategy_type") if td else None
             chosen_asset = td.get("asset") if td else None
+
+            # 🔥 PATCH: Intégrer les footprints dans la décision finale
+            try:
+                if td and chosen_asset and chosen_asset in signals:
+                    # 1) Récupère l'historique footprints poussé par analyze_last_bar / MTF
+                    fph = (
+                        signals[chosen_asset].get("footprints_history", [])
+                        or []
+                    )
+                    td["footprints_history"] = fph[
+                        -5:
+                    ]  # garde une fenêtre courte pour décision
+
+                    # 2) Calcule un biais footprint simple sur les 3 derniers deltas
+                    last3 = [
+                        fp.get("delta", 0.0)
+                        for fp in fph[-3:]
+                        if isinstance(fp, dict)
+                    ]
+                    bias = "neutral"
+                    if len(last3) == 3:
+                        if all(d > 0 for d in last3):
+                            bias = "long"
+                        elif all(d < 0 for d in last3):
+                            bias = "short"
+                    td["footprint_bias"] = bias
+
+                    # 3) Micro-boost de confiance si cohérence action ↔ biais footprint
+                    try:
+                        act = (td.get("action") or "").upper()
+                        old_conf = float(
+                            td.get(
+                                "confidence_score",
+                                signals[chosen_asset].get(
+                                    "confidence_score", 0.5
+                                ),
+                            )
+                        )
+                        new_conf = old_conf
+                        if (bias == "long" and act == "BUY") or (
+                            bias == "short" and act == "SELL"
+                        ):
+                            new_conf = min(1.0, old_conf + 0.05)  # +5 bps
+                        td["confidence_score"] = new_conf
+                    except Exception:
+                        pass
+
+                    # 4) Propage aussi le flag early_entry si le signal l'autorise déjà
+                    if signals[chosen_asset].get("early_entry_allowed", False):
+                        td["early_entry_allowed"] = True
+
+                    # 5) Log clair pour traçabilité
+                    self.logger.info(
+                        f"[Decision] Footprints: asset={chosen_asset} bias={bias} "
+                        f"last3={last3} conf→{td.get('confidence_score')}"
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"[Decision] Intégration footprints impossible: {e}"
+                )
 
             # === ÉTAPE 4: Adaptation config (base + config stratégie choisie) ===
             if chosen_strategy:
@@ -610,7 +559,6 @@ class DecisionPipeline:
                 "config_used": adapted_config,
                 # Listes séparées pour exécution indépendante dans run_single_pipeline_cycle
                 "scalping_decisions": scalping_decisions,
-                "liquidity_decisions": liquidity_decisions,
                 # Compat héritage
                 "final_decisions": final_decisions,
                 "final_decision": td,
@@ -1058,9 +1006,8 @@ class DecisionPipeline:
 
         try:
             from strategy.scalping import ScalpingStrategy
-            from strategy.liquidity import LiquidityStrategy
         except Exception as e:
-            self.logger.error(f"[CORE] Impossible d'importer les stratégies: {e}")
+            self.logger.error(f"[CORE] Impossible d'importer ScalpingStrategy: {e}")
             print(f"⚠️ [CORE] Erreur import stratégie: {e}")
             return {}
 
@@ -1089,29 +1036,9 @@ class DecisionPipeline:
             except Exception as e:
                 self.logger.error(f"[CORE] Erreur ScalpingPipeline.run: {e}")
 
-        # --- Priorité 2 : Liquidity sur EURUSD / GBPUSD ---
-        if not trade_decision:
-            liq_assets = [a for a in ["EURUSD", "GBPUSD"] if a in signals]
-            if liq_assets:
-                try:
-                    strat = LiquidityStrategy(self.config_manager, current_config)
-                    decision = strat.evaluate_entry(
-                        context, {a: signals[a] for a in liq_assets}
-                    )
-                    if decision:
-                        trade_decision = decision
-                        self.logger.info(
-                            f"[CORE] Signal liquidity retenu sur {decision.get('asset')}"
-                        )
-                        print(
-                            f"✅ [CORE] Décision liquidity détectée sur {decision.get('asset')}"
-                        )
-                except Exception as e:
-                    self.logger.error(f"[CORE] Erreur evaluate_entry liquidity: {e}")
-
         # --- Aucun signal ---
         if not trade_decision:
-            self.logger.info("[CORE] Aucun signal exploitable (scalping/liquidity)")
+            self.logger.info("[CORE] Aucun signal exploitable (scalping)")
             print("⚠️ [CORE] Aucun trade décidé ce cycle.")
             return {}
 

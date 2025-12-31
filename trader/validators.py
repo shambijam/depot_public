@@ -580,41 +580,14 @@ def validate_burst_and_sltp_config(self, config: dict) -> dict:
     return {"ok": ok, "errors": errors, "warnings": warnings}
 
 
-def validate_liquidity_config(self, config: dict) -> dict:
-    """
-    Validation légère pour la stratégie liquidity (rien de spécifique trailing).
-    Cible: présence de la liste d'actifs, risk_per_trade_percent > 0, quelques clés d'entry.
-    """
-    errors: List[str] = []
-    warnings: List[str] = []
-
-    assets = config.get("tradeable_assets", [])
-    if not isinstance(assets, list) or not assets:
-        errors.append("tradeable_assets must be a non-empty list")
-
-    r = config.get("risk_per_trade_percent", None)
-    if not _is_number(r) or float(r) <= 0:
-        errors.append("risk_per_trade_percent must be > 0")
-
-    # Exemple de présence minimale de blocs attendus
-    entry_rules = config.get("entry_rules", {})
-    if not isinstance(entry_rules, dict) or not entry_rules:
-        warnings.append("entry_rules not provided (using defaults may degrade results)")
-
-    return {"ok": not errors, "errors": errors, "warnings": warnings}
-
-
 def validate_config(self, strategy_name: str, config: dict) -> dict:
     """
-    Point d’entrée générique pour valider une config de stratégie.
+    Point d'entrée générique pour valider une config de stratégie.
     - Scalping: contrôle SL/TP & Burst (sans trailing)
-    - Liquidity: contrôle minimal (risque/actifs)
     """
     strat = (strategy_name or "").strip().lower()
     if strat == "scalping":
         return validate_burst_and_sltp_config(self, config)
-    if strat == "liquidity":
-        return validate_liquidity_config(self, config)
     # Default: pas de blocage, mais avertissement
     self.logger.warning(
         f"[VALIDATORS] Unknown strategy '{strategy_name}', no strict validation applied."

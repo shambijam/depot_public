@@ -14,8 +14,7 @@
     "backup_dir": "output/backups/"
   },
   "features": {
-    "scalping_phase_observer": false,
-    "liquidity_phase_observer": true
+    "scalping_phase_observer": false
   },
   "data_collection": {
     "default_timeframe": "M1",
@@ -56,7 +55,6 @@
   "strategies": {
     "default_strategy": "scalping",
     "config_mapping": {
-      "liquidity": "config_trade_liquidity.json",
       "scalping": "config_trade_scalping.json"
     },
     "selection_policy": {
@@ -68,19 +66,11 @@
             "range",
             "low_vol",
             "neutral"
-          ],
-          "liquidity": [
-            "impulse",
-            "sweep",
-            "breakout"
           ]
         },
         "strategy_asset_mapping": {
           "scalping": [
             "USDJPY",
-            "USDJPY"
-          ],
-          "liquidity": [
             "EURUSD",
             "GBPUSD"
           ]

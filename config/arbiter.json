@@ -1,13 +1,11 @@
 {
   "priority": [
-    "scalping",
-    "liquidity"
+    "scalping"
   ],
   "exclusive_symbol": true,
   "cooldown_after_trade_s": 30,
   "flip_flop_block_s": 60,
   "max_trades_per_hour": {
-    "scalping": 12,
-    "liquidity": 6
+    "scalping": 20
   }
 }

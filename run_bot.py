@@ -1345,7 +1345,7 @@ def run_single_pipeline_cycle(
 
                     # === [ORDERFLOW V6 DÉSACTIVÉ - 26 Déc 2025] ===
                     # ❌ SUPPRIMÉ: OrderFlow V6 ne doit PAS être calculé pour EURUSD/GBPUSD
-                    # Ces assets utilisent LiquidityStrategy avec leurs propres indicateurs :
+                    # Ces assets utilisent ScalpingStrategy :
                     # - Sweeps de liquidité
                     # - EQH/EQL
                     # - Order Blocks
@@ -2948,30 +2948,6 @@ def run_single_pipeline_cycle(
                     if res is None or res not in ("failed", False):
                         trade_executed_successfully = True
 
-        # === EXIT Liquidity forcés ===
-        try:
-            current_positions = mt5_connector.get_positions()
-            if current_positions:
-                from strategy.liquidity import LiquidityStrategy
-
-                liq_cfg = (
-                    config_manager.get("strategies", {}).get("liquidity", {}) or {}
-                )
-                liqui = LiquidityStrategy(config_manager, liq_cfg)
-                exit_decisions = liqui.evaluate_exit(global_context, current_positions)
-                if exit_decisions:
-                    trade_executor.execute_exit_orders(
-                        exit_decisions, is_dry_run=is_dry_run
-                    )
-                    logger.info(
-                        f"[LIQUIDITY] {len(exit_decisions)} sortie(s) exécutée(s)."
-                    )
-                    print(
-                        f"💧 [PIPELINE] EXIT Liquidity exécuté: {len(exit_decisions)} trades fermés."
-                    )
-        except Exception as e:  # <-- AJOUT
-            logger.error(f"[PIPELINE] Erreur exit Liquidity: {e}", exc_info=True)
-
     except Exception as e:  # try GLOBAL (inchangé)
         logger.error(f"Erreur pipeline: {e}", exc_info=True)
         trade_executed_successfully = False
@@ -3781,75 +3757,6 @@ def basket_monitor_thread(
     logger.info("🛑 [BASKET_MONITOR_THREAD] Arrêté proprement")
 
 
-def liquidity_main_thread(
-    mt5_connector,
-    decision_pipeline,
-    trade_executor,
-    config_manager,
-    mecano,
-    strategy_manager,
-    is_dry_run,
-    stop_event: threading.Event,
-    global_context: dict,
-    context_lock: threading.Lock,
-    logger
-):
-    """
-    Thread dédié à LIQUIDITY - Cycle standard 60 secondes.
-
-    Responsabilités:
-    - Analyse M1+M5 (EURUSD, GBPUSD) ← USDJPY traité par SCALPING Thread
-    - decision_pipeline.institutional_decision_pipeline()
-    - LiquidityStrategy → EQH/EQL breakout
-    - Exécution ordres LIMIT
-    """
-    cycle_interval = 60  # 60 secondes
-    cycle_count = 0
-    daily_trade_count = 0
-
-    logger.info("🚀 [LIQUIDITY_THREAD] Démarré (cycle 60s)")
-
-    while not stop_event.is_set():
-        cycle_count += 1
-        cycle_start = time.time()
-
-        try:
-            # Utiliser la fonction existante run_single_pipeline_cycle
-            # mais en mode "liquidity only" (USDJPY exclu - traité par SCALPING Thread)
-            trade_executed = run_single_pipeline_cycle(
-                mt5_connector,
-                decision_pipeline,
-                trade_executor,
-                config_manager,
-                mecano,
-                strategy_manager,
-                is_dry_run,
-                cycle_count,
-                daily_trade_count,
-                excluded_symbols=["USDJPY"],  # ✅ PHASE 1: USDJPY exclu (géré par SCALPING)
-            )
-
-            if trade_executed:
-                daily_trade_count += 1
-
-            # Surveillance ordres LIMIT pending
-            try:
-                trade_executor.monitor_pending_orders()
-            except Exception as e:
-                logger.warning(f"[LIQUIDITY_THREAD] monitor_pending_orders error: {e}")
-
-        except Exception as e:
-            logger.error(f"[LIQUIDITY_THREAD] Erreur cycle #{cycle_count}: {e}", exc_info=True)
-
-        # Sleep dynamique
-        elapsed = time.time() - cycle_start
-        sleep_time = max(0, cycle_interval - elapsed)
-        if sleep_time > 0:
-            stop_event.wait(timeout=sleep_time)
-
-    logger.info("🛑 [LIQUIDITY_THREAD] Arrêté proprement")
-
-
 def main(args: argparse.Namespace) -> None:
     """
     Fonction principale pour initialiser le bot, gérer les arguments de la CLI,
@@ -4094,7 +4001,6 @@ def main(args: argparse.Namespace) -> None:
 
     # Events pour arrêt propre
     scalping_stop_event = threading.Event()
-    liquidity_stop_event = threading.Event()
     basket_monitor_stop_event = threading.Event()
     # data_engine_stop_event = threading.Event()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
 
@@ -4116,25 +4022,6 @@ def main(args: argparse.Namespace) -> None:
         ),
         daemon=True,
         name="ScalpingThread-10s"
-    )
-
-    liquidity_thread = threading.Thread(
-        target=liquidity_main_thread,
-        args=(
-            mt5_connector,
-            decision_pipeline,
-            trade_executor,
-            config_manager,
-            mecano,
-            strategy_manager,
-            is_dry_run,
-            liquidity_stop_event,
-            global_context_shared,
-            context_lock,
-            logger
-        ),
-        daemon=True,
-        name="LiquidityThread-60s"
     )
 
     basket_monitor = threading.Thread(
@@ -4169,7 +4056,6 @@ def main(args: argparse.Namespace) -> None:
     # Démarrer les threads
     # data_engine.start()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
     scalping_thread.start()
-    liquidity_thread.start()
     basket_monitor.start()
 
     logger.info("✅ Threads démarrés avec succès")
@@ -4203,23 +4089,16 @@ def main(args: argparse.Namespace) -> None:
         try:
             # data_engine_stop_event.set()  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
             scalping_stop_event.set()
-            liquidity_stop_event.set()
             basket_monitor_stop_event.set()
 
             # data_engine.join(timeout=5.0)  # ❌ DÉSACTIVÉ: DataEngine (footprint supprimé)
             scalping_thread.join(timeout=5.0)
-            liquidity_thread.join(timeout=5.0)
             basket_monitor.join(timeout=5.0)
 
             if scalping_thread.is_alive():
                 logger.warning("⚠️ Thread scalping n'a pas terminé dans les 5s")
             else:
                 logger.info("✅ Thread scalping arrêté proprement")
-
-            if liquidity_thread.is_alive():
-                logger.warning("⚠️ Thread liquidity n'a pas terminé dans les 5s")
-            else:
-                logger.info("✅ Thread liquidity arrêté proprement")
 
             if basket_monitor.is_alive():
                 logger.warning("⚠️ Thread basket_monitor n'a pas terminé dans les 5s")
