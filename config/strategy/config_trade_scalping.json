@@ -164,10 +164,10 @@
         }
       },
       "decision": {
-        "min_orderflow_score": 70,
+        "min_orderflow_score": 65,
         "require_timing_pass": true,
         "max_spread_pts": 15,
-        "min_confidence": 0.70
+        "min_confidence": 0.65
       }
     }
   },
