@@ -295,10 +295,10 @@ class ScalpingStrategy(BaseStrategy):
         """
         📈 OrderFlow Analysis V6 - Multi-Timeframe
 
-        Périodes STRICTES (29 DEC 2025 - Réduites pour réactivité):
-        • M1 : 2 bougies → Momentum immédiat (avant: 8)
-        • M3 : 2 bougies → Structure burst scalping (avant: 6)
-        • M5 : 2 bougies → Contexte court terme (avant: 4)
+        Périodes STRICTES (31 DEC 2025 - Ultra-réactivité MAXIMALE):
+        • M1 : 1 bougie → Momentum INSTANTANÉ (avant: 2)
+        • M3 : 1 bougie → Structure burst INSTANTANÉE (avant: 2)
+        • M5 : 1 bougie → Contexte INSTANTANÉ (avant: 2)
 
         Focus principal :
         • Volume Profile : 15 bougies M1
@@ -371,19 +371,19 @@ class ScalpingStrategy(BaseStrategy):
             import logging
             logger = logging.getLogger(__name__)
 
-            # M1 : 2 bougies → Momentum immédiat (29 DEC 2025: Réduit de 8→2 pour réactivité)
-            if df_m1 is not None and len(df_m1) >= 2:
-                m1_dir = calculate_mtf_direction_unified(df_m1, 2, bullish_threshold, bearish_threshold)
+            # M1 : 1 bougie → Momentum INSTANTANÉ (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
+            if df_m1 is not None and len(df_m1) >= 1:
+                m1_dir = calculate_mtf_direction_unified(df_m1, 1, bullish_threshold, bearish_threshold)
                 result["mtf_alignment"]["m1"] = m1_dir.lower()
 
                 # Compter bougies pour debug/détails
-                m1_closes = df_m1["close"].tail(2).values
-                m1_opens = df_m1["open"].tail(2).values
+                m1_closes = df_m1["close"].tail(1).values
+                m1_opens = df_m1["open"].tail(1).values
                 m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
-                m1_bearish = 2 - m1_bullish
+                m1_bearish = 1 - m1_bullish
 
                 logger.critical(f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
-                               f"Seuils: ≥{bullish_threshold*2:.1f}v BULL / ≤{bearish_threshold*2:.1f}v BEAR | "
+                               f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
                                f"Direction: {m1_dir}")
 
                 mtf_details["m1"] = {
@@ -392,19 +392,19 @@ class ScalpingStrategy(BaseStrategy):
                     "direction": result["mtf_alignment"]["m1"],
                 }
 
-            # M3 : 2 bougies → Structure burst scalping (29 DEC 2025: Réduit de 6→2 pour réactivité)
-            if df_m3 is not None and len(df_m3) >= 2:
-                m3_dir = calculate_mtf_direction_unified(df_m3, 2, bullish_threshold, bearish_threshold)
+            # M3 : 1 bougie → Structure burst INSTANTANÉE (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
+            if df_m3 is not None and len(df_m3) >= 1:
+                m3_dir = calculate_mtf_direction_unified(df_m3, 1, bullish_threshold, bearish_threshold)
                 result["mtf_alignment"]["m3"] = m3_dir.lower()
 
                 # Compter bougies pour debug/détails
-                m3_closes = df_m3["close"].tail(2).values
-                m3_opens = df_m3["open"].tail(2).values
+                m3_closes = df_m3["close"].tail(1).values
+                m3_opens = df_m3["open"].tail(1).values
                 m3_bullish = sum(1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i])
-                m3_bearish = 2 - m3_bullish
+                m3_bearish = 1 - m3_bullish
 
                 logger.critical(f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
-                               f"Seuils: ≥{bullish_threshold*2:.1f}v BULL / ≤{bearish_threshold*2:.1f}v BEAR | "
+                               f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
                                f"Direction: {m3_dir}")
 
                 mtf_details["m3"] = {
@@ -413,16 +413,16 @@ class ScalpingStrategy(BaseStrategy):
                     "direction": result["mtf_alignment"]["m3"],
                 }
 
-            # M5 : 2 bougies → Structure court terme (29 DEC 2025: Réduit de 6→2 pour réactivité)
-            if df_m5 is not None and len(df_m5) >= 2:
-                m5_dir = calculate_mtf_direction_unified(df_m5, 2, bullish_threshold, bearish_threshold)
+            # M5 : 1 bougie → Contexte INSTANTANÉ (31 DEC 2025: Réduit de 2→1 pour ultra-réactivité)
+            if df_m5 is not None and len(df_m5) >= 1:
+                m5_dir = calculate_mtf_direction_unified(df_m5, 1, bullish_threshold, bearish_threshold)
                 result["mtf_alignment"]["m5"] = m5_dir.lower()
 
                 # Compter bougies pour debug/détails
-                m5_closes = df_m5["close"].tail(2).values
-                m5_opens = df_m5["open"].tail(2).values
+                m5_closes = df_m5["close"].tail(1).values
+                m5_opens = df_m5["open"].tail(1).values
                 m5_bullish = sum(1 for i in range(len(m5_closes)) if m5_closes[i] > m5_opens[i])
-                m5_bearish = 2 - m5_bullish
+                m5_bearish = 1 - m5_bullish
 
                 mtf_details["m5"] = {
                     "bullish_bars": m5_bullish,
@@ -1453,10 +1453,10 @@ class ScalpingStrategy(BaseStrategy):
             m5_dir = mtf_alignment.get("m5", "N/A")
             mtf_aligned = orderflow_result.get("mtf_aligned", False)
 
-            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING) :")
-            self.logger.info(f"   • M1 (2 bougies OF / 2 bougies MOM) → Momentum  : {m1_dir.upper()}")
-            self.logger.info(f"   • M3 (2 bougies OF / 2 bougies MOM) → Burst     : {m3_dir.upper()}")
-            self.logger.info(f"   • M5 (2 bougies OF / 2 bougies MOM) → Contexte  : {m5_dir.upper()}")
+            self.logger.info(f"\n⏱️ PÉRIODES MULTI-TIMEFRAME (BURST SCALPING - ULTRA RÉACTIF) :")
+            self.logger.info(f"   • M1 (1 bougie OF / 1 bougie MOM) → Momentum  : {m1_dir.upper()}")
+            self.logger.info(f"   • M3 (1 bougie OF / 1 bougie MOM) → Burst     : {m3_dir.upper()}")
+            self.logger.info(f"   • M5 (1 bougie OF / 1 bougie MOM) → Contexte  : {m5_dir.upper()}")
 
             # ✅ CORRIGÉ (15 DEC 2025): Momentum réel basé sur bougies
             momentum_m1 = "N/A"
