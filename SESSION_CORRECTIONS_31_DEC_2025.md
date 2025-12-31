@@ -216,6 +216,45 @@ else:
 
 **✅ STATUT**: IMPLÉMENTÉ - Syntaxe Python validée
 
+**⚠️ CORRECTION SUPPLÉMENTAIRE (31 DEC après analyse logs):**
+
+Le dashboard affichait `UNKN(0.0)` pour tous les assets car le `global_state` n'était jamais mis à jour.
+
+**Fichier modifié**: `run_bot.py`
+
+**Lignes ajoutées**: 3557-3610
+
+**Code ajouté**:
+```python
+# UPDATE GLOBAL STATE POUR DASHBOARD
+global_state.update_asset_state(asset, {
+    "regime": str(current_regime).upper(),
+    "regime_force": regime_strength,
+    "of_score": of_score,
+    "of_bias": of_bias,
+    "of_quality": of_quality,
+    "timing_status": timing_status,
+    "tick_rate": tick_rate,
+    "coverage_s": coverage_s,
+    "action": action,
+    "confidence": confidence
+})
+
+# LOG COMPACT (1 ligne pour lisibilité)
+logger.info(
+    f"[{asset}] "
+    f"R:{regime_short}({regime_strength:.1f}) | "
+    f"OF:{of_score:.0f}/{bias_short} | "
+    f"T:{timing_short} | "
+    f"→{action}"
+)
+```
+
+**Impact**:
+- Dashboard affiche maintenant les vraies valeurs
+- Logs compacts (1 ligne) pour chaque cycle
+- Console beaucoup plus lisible
+
 ---
 
 ## 🎯 PROCHAINES ÉTAPES RECOMMANDÉES

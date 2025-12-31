@@ -3555,6 +3555,61 @@ def scalping_worker(
                             )
 
                 # ═══════════════════════════════════════════════════════════════
+                # 🔄 UPDATE GLOBAL STATE POUR DASHBOARD (31 DEC 2025)
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    # Extraire régime
+                    latest_candle = market_results.get("latest", {}) if market_results else {}
+                    current_regime = latest_candle.get("regime", "UNKNOWN")
+                    regime_strength = latest_candle.get("regime_strength", 0.0)
+
+                    # Extraire OrderFlow
+                    of_score = orderflow_result_mini.get("score", 0.0)
+                    of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
+                    of_summary = orderflow_result_mini.get("summary", {})
+                    of_quality = of_summary.get("signal_quality", "NO_TRADE")
+
+                    # Extraire Timing
+                    timing_status = timing_verdict.get("verdict", "UNKNOWN") if timing_verdict else "UNKNOWN"
+                    qm = timing_verdict.get("quality_metrics", {}) if timing_verdict else {}
+                    tick_rate = qm.get("tick_rate", 0.0)
+                    coverage_s = qm.get("coverage_s", 0.0)
+
+                    # Extraire Décision
+                    action = decision_mini.get("action", "HOLD")
+                    confidence = decision_mini.get("confidence", 0.0)
+
+                    # UPDATE THREAD-SAFE
+                    global_state.update_asset_state(asset, {
+                        "regime": str(current_regime).upper() if current_regime else "UNKNOWN",
+                        "regime_force": regime_strength,
+                        "of_score": of_score,
+                        "of_bias": of_bias,
+                        "of_quality": of_quality,
+                        "timing_status": timing_status,
+                        "tick_rate": tick_rate,
+                        "coverage_s": coverage_s,
+                        "action": action,
+                        "confidence": confidence
+                    })
+
+                    # LOG COMPACT (1 ligne pour lisibilité console)
+                    regime_short = str(current_regime)[:4].upper() if current_regime else "UNKN"
+                    bias_short = of_bias[:3] if of_bias else "NEU"
+                    timing_short = timing_status[:4] if timing_status else "UNKN"
+
+                    logger.info(
+                        f"[{asset}] "
+                        f"R:{regime_short}({regime_strength:.1f}) | "
+                        f"OF:{of_score:.0f}/{bias_short} | "
+                        f"T:{timing_short} | "
+                        f"→{action}"
+                    )
+
+                except Exception as e_update:
+                    logger.error(f"[{asset}] Erreur update global_state: {e_update}")
+
+                # ═══════════════════════════════════════════════════════════════
                 # 📊 RAPPORT SCALPING DÉTAILLÉ (26 DEC 2025)
                 # ═══════════════════════════════════════════════════════════════
                 try:
