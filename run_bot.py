@@ -3707,13 +3707,13 @@ def scalping_worker(
                             }
                             td["trade"] = {"action": side, "side": side}
 
-                            # Package décision - ✅ UTILISER global_context au lieu de ctx
+                            # Package décision - ✅ UTILISER ctx (market context local)
                             with context_lock:
-                                global_ctx_copy = dict(global_context)  # Copie thread-safe
+                                ctx_copy = dict(ctx)  # Copie thread-safe du market context
 
                             decision_pkg = {
                                 "final_decision": td,
-                                "market_context": global_ctx_copy,  # ✅ FIX (17 DEC): Clé correcte pour order_builder
+                                "market_context": ctx_copy,  # ✅ FIX (31 DEC): Utiliser ctx au lieu de global_context
                                 "active_config": trade_decision_skeleton["merged_config"],
                             }
                             decision_pkg.setdefault("audit_context", {}).update({
