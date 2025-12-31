@@ -254,8 +254,8 @@
       "timing_gatekeeper": {
         "comment": "⚠️ DÉPRÉCIÉ: allowed_hours_gmt déplacé vers config/strategy/config_trade_scalping.json (29 DEC 2025)",
         "enabled": true,
-        "min_tick_rate": 1.0,
-        "min_coverage_s": 40.0,
+        "min_tick_rate": 0.5,
+        "min_coverage_s": 30.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.5
       },

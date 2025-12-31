@@ -810,21 +810,30 @@ class ScalpingStrategy(BaseStrategy):
             # CRITÈRE 3: CONFIRMATION (imbalance persistant)
             confirmation = imbalance_strength_score >= 5.0  # ≥5/10 - assoupli de 6.0
 
-            # DÉCISION BINAIRE INSTITUTIONNELLE
-            if liquid and strong_imbalance and confirmation:
-                # Setup A : Tous critères présents
+            # DÉCISION 2/3 CRITÈRES (31 DEC 2025)
+            # Comptage critères valides
+            criteria_met = sum([liquid, strong_imbalance, confirmation])
+
+            if criteria_met == 3:
+                # Setup A : Tous critères (3/3) - Signal institutionnel parfait
                 result["total_score"] = 90.0
                 result["signal_quality"] = "EXCELLENT"
-            elif liquid and strong_imbalance:
-                # Setup B : Liquidité + Déséquilibre (sans confirmation)
-                result["total_score"] = 70.0
-                result["signal_quality"] = "GOOD"
-            elif liquid and confirmation:
-                # Setup C : Liquidité + Confirmation (marché calme sans fort delta)
-                result["total_score"] = 50.0
-                result["signal_quality"] = "FAIR"
+            elif criteria_met == 2:
+                # Setup B : 2 critères sur 3 - Signal fort mais incomplet
+                if liquid and strong_imbalance:
+                    # Liquidité + Delta fort (sans confirmation persistante)
+                    result["total_score"] = 75.0
+                    result["signal_quality"] = "GOOD"
+                elif liquid and confirmation:
+                    # Liquidité + Confirmation (delta modéré mais persistant)
+                    result["total_score"] = 65.0
+                    result["signal_quality"] = "GOOD"
+                else:
+                    # strong_imbalance + confirmation (sans liquidité immédiate)
+                    result["total_score"] = 55.0
+                    result["signal_quality"] = "FAIR"
             else:
-                # Pas de setup valide
+                # Setup C : 0 ou 1 critère - Signal insuffisant
                 result["total_score"] = 0.0
                 result["signal_quality"] = "NO_TRADE"
 
