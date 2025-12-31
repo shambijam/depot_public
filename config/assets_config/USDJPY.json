@@ -221,7 +221,7 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 50,
+          "pips": 2.5,
           "buffer_pips": 2,
           "atr_period": 14,
           "atr_multiplier": 0.0,
@@ -229,7 +229,7 @@
           "comment": "50 pips USDJPY = 0.50 points (vs 400 pips trop grand)"
         },
         "tp": {
-          "pips": 75,
+          "pips": 3.0,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
@@ -241,8 +241,8 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 60.0,
-        "require_full_count_for_profit_close": true,
+        "target_profit_pips": 2.1,
+        "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
@@ -286,7 +286,10 @@
           "comment": "Seuils TRÈS assouplis pour USDJPY (35% vs 60% pour OR)"
         },
         "velocity_analysis": {
-          "expected_range": [0.3, 1.2],
+          "expected_range": [
+            0.3,
+            1.2
+          ],
           "scoring_thresholds": {
             "very_strong": 0.4,
             "strong": 0.6,
@@ -304,7 +307,10 @@
         },
         "time_of_day_adjustments": {
           "tokyo_session": {
-            "hours_gmt": [0, 6],
+            "hours_gmt": [
+              0,
+              6
+            ],
             "characteristics": {
               "high_activity": true,
               "home_market": true,
@@ -314,7 +320,10 @@
             "min_concentration": 0.30
           },
           "london_open": {
-            "hours_gmt": [7, 11],
+            "hours_gmt": [
+              7,
+              11
+            ],
             "characteristics": {
               "high_volatility": true,
               "crossover_flows": true,
@@ -323,7 +332,10 @@
             "scoring_adjustment": 1.05
           },
           "us_session": {
-            "hours_gmt": [13, 17],
+            "hours_gmt": [
+              13,
+              17
+            ],
             "characteristics": {
               "moderate_activity": true,
               "risk_sentiment_driven": true
@@ -331,7 +343,10 @@
             "min_concentration": 0.30
           },
           "asian_late": {
-            "hours_gmt": [18, 23],
+            "hours_gmt": [
+              18,
+              23
+            ],
             "characteristics": {
               "lower_activity": true,
               "wider_spreads": true,
@@ -351,17 +366,24 @@
           "quality_levels": {
             "EXCELLENT": {
               "min_score": 3.5,
-              "characteristics": ["q1_concentration >50%", "velocity_ratio <0.8"],
+              "characteristics": [
+                "q1_concentration >50%",
+                "velocity_ratio <0.8"
+              ],
               "trade_impact": "STRONG_CONFIRMATION"
             },
             "GOOD": {
               "min_score": 2.5,
-              "characteristics": ["q1_concentration >35%"],
+              "characteristics": [
+                "q1_concentration >35%"
+              ],
               "trade_impact": "POSITIVE_CONFIRMATION"
             },
             "FAIR": {
               "min_score": 1.5,
-              "characteristics": ["q1_concentration >25%"],
+              "characteristics": [
+                "q1_concentration >25%"
+              ],
               "trade_impact": "NEUTRAL"
             },
             "POOR": {
@@ -383,9 +405,18 @@
             "avoid_entry": 1.0
           },
           "signals_to_monitor": {
-            "strong_buy_timing": ["buy_concentration_q1 > 50%", "velocity_ratio > 1.2"],
-            "strong_sell_timing": ["sell_concentration_q1 > 50%", "velocity_ratio < 0.7"],
-            "warning_signals": ["concentration_q1 < 20%", "velocity_ratio > 2.5"]
+            "strong_buy_timing": [
+              "buy_concentration_q1 > 50%",
+              "velocity_ratio > 1.2"
+            ],
+            "strong_sell_timing": [
+              "sell_concentration_q1 > 50%",
+              "velocity_ratio < 0.7"
+            ],
+            "warning_signals": [
+              "concentration_q1 < 20%",
+              "velocity_ratio > 2.5"
+            ]
           }
         },
         "performance_optimization": {

@@ -160,7 +160,7 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 10.0,
+          "pips": 4.0,
           "buffer_pips": 1,
           "atr_period": 14,
           "atr_multiplier": 0.0,
@@ -168,7 +168,7 @@
           "comment": "10 pips SL pour GBPUSD (paire volatile, spread plus large)"
         },
         "tp": {
-          "pips": 15.0,
+          "pips": 4.0,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
@@ -180,7 +180,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 10.0,
+        "target_profit_pips": 2.1,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
