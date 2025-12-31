@@ -3275,7 +3275,7 @@ def scalping_worker(
                             .get("sltp", {})
                         ) or {}
 
-                    # Fusionner config scalping avec base_config
+                    # Fusionner config scalping avec base_config + asset overrides (31 DEC 2025)
                     try:
                         scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
                         merged_config = dict(base_config)
@@ -3283,6 +3283,23 @@ def scalping_worker(
                             merged_config.setdefault("entry_rules", {}).update(
                                 scalping_strategy_config["entry_rules"]
                             )
+
+                        # ✅ FIX (31 DEC 2025): Fusionner asset-specific overrides (target_profit_pips, etc.)
+                        asset_config = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
+                        asset_overrides = asset_config.get("overrides", {}).get("scalping", {})
+                        if asset_overrides:
+                            # Fusionner deep les overrides d'actif dans entry_rules.scalping.burst_scalping
+                            burst_scalping_path = merged_config.setdefault("entry_rules", {}).setdefault("scalping", {}).setdefault("burst_scalping", {})
+
+                            # Fusionner closure_rules si présent dans asset overrides
+                            if "closure_rules" in asset_overrides:
+                                burst_scalping_path.setdefault("closure_rules", {}).update(asset_overrides["closure_rules"])
+
+                            # Fusionner sltp si présent dans asset overrides
+                            if "sltp" in asset_overrides:
+                                burst_scalping_path.setdefault("sltp", {}).update(asset_overrides["sltp"])
+
+                            logger.info(f"✅ [CONFIG_MERGE] Asset overrides appliqués pour {asset}")
                     except Exception as e:
                         logger.warning(f"[{asset}] Fusion config échouée: {e}")
                         merged_config = base_config
@@ -3313,11 +3330,20 @@ def scalping_worker(
                 # Pipeline minimaliste : extraire latest depuis market_results
                 latest = market_results.get("latest")
 
-                # Context minimal pour compatibilité
+                # Context minimal pour compatibilité + account_info pour sizing (31 DEC 2025)
+                account_info_dict = {}
+                try:
+                    acct = mt5_connector.get_account_info()
+                    if acct:
+                        account_info_dict = acct._asdict() if hasattr(acct, '_asdict') else (dict(acct) if hasattr(acct, '__dict__') else {})
+                except Exception as e_acct:
+                    logger.warning(f"[{asset}] Erreur récupération account_info: {e_acct}")
+
                 ctx = {
                     "asset": asset,
                     "phase": market_results.get("phase", {}),
                     "volatility_pips": market_results.get("volatility_pips", 0.0),
+                    "account_info": account_info_dict,  # ✅ FIX (31 DEC): Ajouter account_info pour calcul sizing
                 }
 
                 # ═══════════════════════════════════════════════════════════════

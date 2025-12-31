@@ -353,6 +353,12 @@ class ScalpingStrategy(BaseStrategy):
             "very_bearish": 0.28
         })
 
+        # ✅ FIX (31 DEC 2025): Fenêtres d'analyse DYNAMIQUES depuis config
+        # Rapport scalping burst: coherence 10→3, volume 14→6, lookback 20→10
+        analysis_windows = of_config.get("analysis_windows", {})
+        delta_coherence_bars = int(analysis_windows.get("delta_coherence_bars", 3))  # Default 3 (optimisé burst)
+        volume_avg_bars = int(analysis_windows.get("volume_avg_bars", 6))  # Default 6 (optimisé burst)
+
         try:
             # ================================================================
             # 0. ANALYSE MULTI-TIMEFRAME (M1/M3/M5)
@@ -581,11 +587,11 @@ class ScalpingStrategy(BaseStrategy):
             # Stocker delta_total TOUJOURS (pour le rapport)
             delta_details["delta_total"] = delta_total
 
-            # Analyser cohérence delta sur 10 bougies M1
-            if df_m1 is not None and len(df_m1) >= 10:
+            # ✅ FIX (31 DEC 2025): Cohérence delta DYNAMIQUE (config: 10→3 bars pour scalping burst)
+            if df_m1 is not None and len(df_m1) >= delta_coherence_bars:
                 # Compter bougies avec delta cohérent
-                closes = df_m1["close"].tail(10).values
-                opens = df_m1["open"].tail(10).values
+                closes = df_m1["close"].tail(delta_coherence_bars).values
+                opens = df_m1["open"].tail(delta_coherence_bars).values
                 bullish_count = sum(
                     1 for i in range(len(closes)) if closes[i] > opens[i]
                 )
@@ -593,7 +599,7 @@ class ScalpingStrategy(BaseStrategy):
                     1 for i in range(len(closes)) if closes[i] < opens[i]
                 )
 
-                coherence = max(bullish_count, bearish_count) / 10.0  # 0.0 à 1.0
+                coherence = max(bullish_count, bearish_count) / float(delta_coherence_bars)  # 0.0 à 1.0
                 delta_details["coherence"] = coherence
                 delta_details["bullish_bars"] = bullish_count
                 delta_details["bearish_bars"] = bearish_count
@@ -676,10 +682,10 @@ class ScalpingStrategy(BaseStrategy):
                     vol_col = "volume"
 
             if vol_col is not None and current_tick_count > 0:
-                # Prendre 14 bougies COMPLÈTES pour moyenne (exclure la dernière qui pourrait être en cours)
+                # ✅ FIX (31 DEC 2025): Fenêtre volume DYNAMIQUE (config: 14→6 bars pour scalping burst)
                 historical_volumes = (
-                    df_m1[vol_col].tail(15).values[:-1]
-                )  # 14 dernières complètes
+                    df_m1[vol_col].tail(volume_avg_bars + 1).values[:-1]
+                )  # N dernières complètes (exclure bougie en cours)
                 avg_volume = (
                     np.mean(historical_volumes) if len(historical_volumes) > 0 else 1.0
                 )
@@ -839,12 +845,36 @@ class ScalpingStrategy(BaseStrategy):
 
             delta_direction = delta_details.get("direction", "neutral")
 
+            # ✅ FIX (31 DEC 2025): Valider bias avec alignement MTF M1+M3
+            # Éviter signaux contradictoires (delta BUY mais M1/M3 BEARISH)
+            m1_dir = result["mtf_alignment"].get("m1", "neutral")
+            m3_dir = result["mtf_alignment"].get("m3", "neutral")
+
             if delta_direction == "bullish":
-                result["bias"] = "BUY"
+                # Pour BUY : M1 ET M3 doivent être BULLISH
+                if m1_dir == "bullish" and m3_dir == "bullish":
+                    result["bias"] = "BUY"
+                    result["mtf_conflict"] = False
+                else:
+                    result["bias"] = "NEUTRAL"
+                    result["mtf_conflict"] = True
+                    self.logger.warning(
+                        f"[MTF_CONFLICT][{asset}] Delta=BULLISH mais MTF M1={m1_dir} M3={m3_dir} → BIAS=NEUTRAL"
+                    )
             elif delta_direction == "bearish":
-                result["bias"] = "SELL"
+                # Pour SELL : M1 ET M3 doivent être BEARISH
+                if m1_dir == "bearish" and m3_dir == "bearish":
+                    result["bias"] = "SELL"
+                    result["mtf_conflict"] = False
+                else:
+                    result["bias"] = "NEUTRAL"
+                    result["mtf_conflict"] = True
+                    self.logger.warning(
+                        f"[MTF_CONFLICT][{asset}] Delta=BEARISH mais MTF M1={m1_dir} M3={m3_dir} → BIAS=NEUTRAL"
+                    )
             else:
                 result["bias"] = "NEUTRAL"
+                result["mtf_conflict"] = False
 
             # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final
             self.logger.critical(

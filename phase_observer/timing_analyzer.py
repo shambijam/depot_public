@@ -62,33 +62,33 @@ def evaluate_trading_conditions(
     analysis_start = time.perf_counter()
 
     # ========================================================================
-    # 0️⃣ CONFIGURATION (29 DEC 2025 - Priorité config scalping globale)
+    # 0️⃣ CONFIGURATION (31 DEC 2025 - Priorité CONFIG ASSET)
     # ========================================================================
     timing_config = {}
 
-    # PRIORITÉ 1: Config scalping globale (nouveau système)
-    if scalping_config:
-        entry_rules = scalping_config.get("entry_rules", {})
-        scalping_rules = entry_rules.get("scalping", {})
-        timing_config = scalping_rules.get("timing_gatekeeper", {})
-        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config SCALPING GLOBALE utilisée")
-
-    # PRIORITÉ 2: Config asset (ancien système, fallback)
-    elif asset_config:
+    # PRIORITÉ 1: Config asset spécifique (EURUSD.json, GBPUSD.json, etc.)
+    if asset_config:
         overrides = asset_config.get("overrides", {})
         scalping_overrides = overrides.get("scalping", {})
         timing_config = scalping_overrides.get("timing_gatekeeper", {})
-        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config ASSET utilisée (fallback)")
+        if timing_config:
+            logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] ✅ Config ASSET utilisée (prioritaire)")
+            # 🔍 DEBUG: Log pour tracer le chargement de la config asset
+            logger.critical(
+                f"[TIMING_GATEKEEPER_CONFIG][{asset}] "
+                f"asset_config present={asset_config is not None} | "
+                f"overrides present={bool(overrides)} | "
+                f"scalping present={bool(scalping_overrides)} | "
+                f"timing_gatekeeper present={bool(timing_config)} | "
+                f"allowed_hours_gmt={timing_config.get('allowed_hours_gmt', 'NOT_FOUND')}"
+            )
 
-        # 🔍 DEBUG (26 DEC 2025): Log pour tracer le chargement de la config
-        logger.critical(
-            f"[TIMING_GATEKEEPER_CONFIG][{asset}] "
-            f"asset_config present={asset_config is not None} | "
-            f"overrides present={bool(overrides)} | "
-            f"scalping present={bool(scalping_overrides)} | "
-            f"timing_gatekeeper present={bool(timing_config)} | "
-            f"min_tick_rate={timing_config.get('min_tick_rate', 'NOT_FOUND')}"
-        )
+    # PRIORITÉ 2: Config scalping globale (fallback si asset n'a pas de config)
+    if not timing_config and scalping_config:
+        entry_rules = scalping_config.get("entry_rules", {})
+        scalping_rules = entry_rules.get("scalping", {})
+        timing_config = scalping_rules.get("timing_gatekeeper", {})
+        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config SCALPING GLOBALE utilisée (fallback)")
 
     enabled = timing_config.get("enabled", True)
     if not enabled:

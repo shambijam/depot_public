@@ -140,7 +140,7 @@
           "cvd_slope_key": "cvd_slope",
           "vwap_key": "vwap"
         },
-        "lookback_bars": 200,
+        "lookback_bars": 20,
         "features": {
           "delta": {
             "abs_strong": 15.0,

@@ -141,6 +141,12 @@
           "moderate": 0.65,
           "weak": 0.55
         },
+        "analysis_windows": {
+          "delta_coherence_bars": 3,
+          "volume_avg_bars": 6,
+          "lookback_bars": 10,
+          "comment": "Fenêtres OPTIMISÉES scalping burst - Rapport 31 DEC 2025 (coherence 10→3, volume 14→6, lookback 20→10)"
+        },
         "volume_ratio_classification": {
           "spike": 1.8,
           "elevated": 1.4,

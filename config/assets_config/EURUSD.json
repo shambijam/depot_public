@@ -79,7 +79,7 @@
           "cvd_slope_key": "cvd_slope",
           "vwap_key": "vwap"
         },
-        "lookback_bars": 200,
+        "lookback_bars": 20,
         "features": {
           "delta": {
             "abs_strong": 100.0,
@@ -192,6 +192,8 @@
       },
       "timing_gatekeeper": {
         "enabled": true,
+        "allowed_hours_gmt": [7, 8, 9, 10, 13, 14, 15, 16],
+        "comment_hours": "Londres 7h-10h GMT + Overlap Londres/NY 13h-16h GMT (31 DEC 2025)",
         "min_tick_rate": 2.0,
         "min_coverage_s": 40.0,
         "max_tick_rate": 200.0,
