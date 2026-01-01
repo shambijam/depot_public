@@ -3639,6 +3639,49 @@ def scalping_worker(
                     logger.error(f"[{asset}] Erreur update global_state: {e_update}")
 
                 # ═══════════════════════════════════════════════════════════════
+                # 📊 AFFICHAGE TABLEAU CONDENSÉ ORDERFLOW + TIMING (01 JAN 2026)
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    # Extraire détails OrderFlow pour tableau
+                    of_details = orderflow_result_mini.get("summary", {})
+                    delta_details = of_details.get("delta_momentum_details", {})
+                    volume_details = of_details.get("volume_confirmation_details", {})
+                    imbalance_details = of_details.get("imbalance_strength_details", {})
+
+                    delta_total = delta_details.get("delta_total", 0)
+                    coherence = delta_details.get("coherence", 0)
+                    volume_ratio = volume_details.get("volume_ratio", 0)
+                    imbalance_buy = imbalance_details.get("imbalance_buy", 0)
+                    imbalance_sell = imbalance_details.get("imbalance_sell", 0)
+
+                    # Extraire métriques timing pour tableau
+                    qm = timing_verdict.get("quality_metrics", {})
+                    tick_rate = qm.get("tick_rate", 0)
+                    coverage_s = qm.get("coverage_s", 0)
+                    tick_count_timing = qm.get("tick_count", 0)
+                    session = qm.get("session", "UNKNOWN")
+                    hour_gmt = pd.Timestamp.now(tz='UTC').hour
+
+                    # Afficher tableau condensé
+                    print("\n" + "─" * 90)
+                    print(f"📊 [{asset}] ANALYSE CYCLE {cycle_count}")
+                    print("─" * 90)
+                    print("📈 ORDERFLOW V6:")
+                    print(f"  Delta: {delta_total:>6.0f} | Coherence: {coherence:>4.0%} | "
+                          f"Volume: {volume_ratio:>4.2f}x | Imb: {imbalance_buy}↑/{imbalance_sell}↓")
+                    print(f"  → Score: {orderflow_result_mini.get('score', 0):.0f}/100 | Bias: {orderflow_result_mini.get('bias', 'NEUTRAL')}")
+
+                    print("\n⏰ TIMING GATEKEEPER:")
+                    print(f"  Ticks: {tick_count_timing:>4} | Rate: {tick_rate:>4.1f}/s | "
+                          f"Coverage: {coverage_s:>4.1f}s | GMT: {hour_gmt:02d}h | Session: {session}")
+                    print(f"  → Verdict: {timing_verdict.get('verdict', 'UNKNOWN')} "
+                          f"({timing_verdict.get('veto_reason', 'N/A') if timing_verdict.get('verdict') != 'PASS' else 'OK'})")
+                    print("─" * 90)
+
+                except Exception as e_display:
+                    logger.warning(f"[{asset}] Erreur affichage tableau: {e_display}")
+
+                # ═══════════════════════════════════════════════════════════════
                 # 📊 SOUMETTRE RAPPORT À LA QUEUE (31 DEC 2025 - Solution B)
                 # ═══════════════════════════════════════════════════════════════
                 try:
