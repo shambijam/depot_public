@@ -3383,7 +3383,7 @@ def scalping_worker(
                         prev_candle_time = rates_df_fresh.iloc[-2]['time'] if 'time' in rates_df_fresh.columns else rates_df_fresh.index[-2]
                         last_candle_color = "🟢" if rates_df_fresh.iloc[-1]['close'] > rates_df_fresh.iloc[-1]['open'] else "🔴"
                         prev_candle_color = "🟢" if rates_df_fresh.iloc[-2]['close'] > rates_df_fresh.iloc[-2]['open'] else "🔴"
-                        logger.critical(
+                        logger.debug(
                             f"[RATES_REFRESH][{asset}] now={now_utc.strftime('%H:%M:%S')} | "
                             f"last_candle={last_candle_time} {last_candle_color} | "
                             f"prev_candle={prev_candle_time} {prev_candle_color} (analysée)"

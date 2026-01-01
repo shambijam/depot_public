@@ -388,7 +388,7 @@ class ScalpingStrategy(BaseStrategy):
                 m1_bullish = sum(1 for i in range(len(m1_closes)) if m1_closes[i] > m1_opens[i])
                 m1_bearish = 1 - m1_bullish
 
-                logger.critical(f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
+                logger.debug(f"🔍 [MTF_M1_UNIFIED] Bougies: {m1_bullish}v/{m1_bearish}r | "
                                f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
                                f"Direction: {m1_dir}")
 
@@ -409,7 +409,7 @@ class ScalpingStrategy(BaseStrategy):
                 m3_bullish = sum(1 for i in range(len(m3_closes)) if m3_closes[i] > m3_opens[i])
                 m3_bearish = 1 - m3_bullish
 
-                logger.critical(f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
+                logger.debug(f"🔍 [MTF_M3_UNIFIED] Bougies: {m3_bullish}v/{m3_bearish}r | "
                                f"Seuils: ≥{bullish_threshold*1:.1f}v BULL / ≤{bearish_threshold*1:.1f}v BEAR | "
                                f"Direction: {m3_dir}")
 
@@ -457,8 +457,8 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             fp_summary = {}
 
-            # 🔍 DEBUG (26 DEC 2025): Vérifier les conditions avant calcul ticks
-            self.logger.critical(
+            # 🔍 DEBUG (26 DEC 2025): Vérifier conditions (01 JAN 2026: DEBUG pour console propre)
+            self.logger.debug(
                 f"[ORDERFLOW_PRE_CHECK][{asset}] "
                 f"mt5_connector={self.mt5_connector is not None} | "
                 f"df_m1={df_m1 is not None} | "
@@ -482,9 +482,9 @@ class ScalpingStrategy(BaseStrategy):
 
                     candle_end = candle_start + pd.Timedelta(minutes=1)
 
-                    # 🔍 LOG (26 DEC 2025): Afficher quelle bougie est analysée
+                    # 🔍 LOG (26 DEC 2025): Afficher bougie analysée (01 JAN 2026: DEBUG pour console propre)
                     candle_color = "🟢 VERTE" if last_candle["close"] > last_candle["open"] else "🔴 ROUGE"
-                    self.logger.critical(
+                    self.logger.debug(
                         f"[ORDERFLOW_CANDLE_ANALYZED][{asset}] Bougie M1 analysée: {candle_start} | "
                         f"O={last_candle['open']:.3f} C={last_candle['close']:.3f} | {candle_color}"
                     )
@@ -549,20 +549,20 @@ class ScalpingStrategy(BaseStrategy):
                         # Déterminer direction delta
                         delta_direction_calc = "BULLISH" if delta_total > 0 else "BEARISH" if delta_total < 0 else "NEUTRAL"
 
-                        self.logger.critical(
+                        self.logger.debug(
                             f"[ORDERFLOW_TICKS_CALC][{asset}] ✅ Ticks calculés: {len(ticks_df)} ticks | "
                             f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
                             f"Delta={delta_total:.0f} → Direction={delta_direction_calc} | "
                             f"Imbalance={imbalance:.2f} | Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
                     else:
-                        self.logger.critical(f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
+                        self.logger.warning(f"[ORDERFLOW_TICKS_CALC][{asset}] ⚠️ Aucun tick récupéré pour calcul OrderFlow")
 
                 except Exception as e_ticks:
-                    self.logger.critical(f"[ORDERFLOW_TICKS_CALC][{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
+                    self.logger.error(f"[ORDERFLOW_TICKS_CALC][{asset}] ❌ Erreur calcul ticks: {e_ticks}", exc_info=True)
             else:
-                # 🔍 DEBUG (26 DEC 2025): Log si la condition échoue
-                self.logger.critical(
+                # 🔍 DEBUG (26 DEC 2025): Log si condition échoue (01 JAN 2026: DEBUG pour console propre)
+                self.logger.debug(
                     f"[ORDERFLOW_SKIP][{asset}] ⚠️ Calcul ticks SKIP - Raison: "
                     f"mt5_connector={'OK' if self.mt5_connector else 'MISSING'} | "
                     f"df_m1={'OK' if df_m1 is not None else 'NONE'} | "
@@ -654,8 +654,8 @@ class ScalpingStrategy(BaseStrategy):
                 delta_details  # FIX: Nom correct pour le rapport
             )
 
-            # 🔍 LOG (26 DEC 2025): Afficher delta momentum score
-            self.logger.critical(
+            # 🔍 LOG (26 DEC 2025): Afficher delta momentum score (31 DEC: DEBUG pour console propre)
+            self.logger.debug(
                 f"[ORDERFLOW_DELTA][{asset}] delta_total={delta_details.get('delta_total', 0):.0f} | "
                 f"coherence={delta_details.get('coherence', 0):.2f} | "
                 f"delta_momentum_score={delta_momentum_score:.1f}/25"
@@ -723,8 +723,8 @@ class ScalpingStrategy(BaseStrategy):
                 volume_details  # FIX: Nom correct pour le rapport
             )
 
-            # 🔍 LOG (26 DEC 2025): Afficher volume confirmation score
-            self.logger.critical(
+            # 🔍 LOG (26 DEC 2025): Afficher volume confirmation score (31 DEC: DEBUG pour console propre)
+            self.logger.debug(
                 f"[ORDERFLOW_VOLUME][{asset}] tick_count={volume_details.get('current_tick_count', 0)} | "
                 f"avg={volume_details.get('avg_volume', 0):.0f} | "
                 f"ratio={volume_details.get('volume_ratio', 0):.2f} | "
@@ -782,8 +782,8 @@ class ScalpingStrategy(BaseStrategy):
                 imbalance_details  # FIX: Nom correct pour le rapport
             )
 
-            # 🔍 LOG (26 DEC 2025): Afficher imbalance strength score
-            self.logger.critical(
+            # 🔍 LOG (26 DEC 2025): Afficher imbalance strength score (31 DEC: DEBUG pour console propre)
+            self.logger.debug(
                 f"[ORDERFLOW_IMBALANCE][{asset}] imb_buy={imbalance_details.get('imbalance_buy', 0)} | "
                 f"imb_sell={imbalance_details.get('imbalance_sell', 0)} | "
                 f"total={imbalance_details.get('total_count', 0)} | "
@@ -876,8 +876,8 @@ class ScalpingStrategy(BaseStrategy):
                 result["bias"] = "NEUTRAL"
                 result["mtf_conflict"] = False
 
-            # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final
-            self.logger.critical(
+            # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final (31 DEC: DEBUG pour console propre)
+            self.logger.debug(
                 f"[ORDERFLOW_SCORING_BINAIRE][{asset}] "
                 f"liquid={liquid} (vol_score={volume_confirmation_score:.1f}>=10.0) | "
                 f"strong_imbalance={strong_imbalance} (delta_score={delta_momentum_score:.1f}>=12.0) | "

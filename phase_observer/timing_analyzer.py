@@ -105,8 +105,8 @@ def evaluate_trading_conditions(
     min_coverage_s = timing_config.get("min_coverage_s", 40.0)  # secondes
     max_tick_rate = timing_config.get("max_tick_rate", 200.0)  # détection problème feed
 
-    # 🔍 LOG (26 DEC 2025): Afficher les seuils chargés
-    logger.critical(
+    # 🔍 LOG (26 DEC 2025): Afficher les seuils chargés (31 DEC: DEBUG pour console propre)
+    logger.debug(
         f"[TIMING_SEUILS][{asset}] min_tick_rate={min_tick_rate} | "
         f"min_coverage_s={min_coverage_s} | max_tick_rate={max_tick_rate}"
     )
@@ -127,8 +127,8 @@ def evaluate_trading_conditions(
     # Vérifier si heure autorisée (mais on continue l'analyse !)
     hour_is_allowed = hour_gmt in allowed_hours
 
-    # 🔍 LOG: Config chargée
-    logger.critical(
+    # 🔍 LOG: Config chargée (31 DEC: DEBUG pour console propre)
+    logger.debug(
         f"[TIMING_CONFIG_CHECK][{asset}] allowed_hours={allowed_hours} | "
         f"current_hour={hour_gmt} | is_allowed={hour_is_allowed}"
     )
@@ -212,8 +212,8 @@ def evaluate_trading_conditions(
     # ========================================================================
     veto_reason = None
 
-    # 🔍 LOG (26 DEC 2025): Afficher les métriques avant test VETO
-    logger.critical(
+    # 🔍 LOG (26 DEC 2025): Métriques test VETO (01 JAN 2026: DEBUG pour console propre)
+    logger.debug(
         f"[TIMING_TEST_VETO][{asset}] "
         f"tick_count={tick_count} | coverage_s={coverage_s:.1f} | tick_rate={tick_rate:.1f} | "
         f"TEST: tick_rate({tick_rate:.1f}) < min_tick_rate({min_tick_rate}) = {tick_rate < min_tick_rate}"
@@ -222,7 +222,7 @@ def evaluate_trading_conditions(
     # 🚨 A) HEURE NON AUTORISÉE (depuis config) - Priorité #1
     if not hour_is_allowed:
         veto_reason = f"🚫 Heure {hour_gmt:02d}h GMT NON autorisée (whitelist config: {allowed_hours})"
-        logger.critical(f"[TIMING_HOUR_VETO][{asset}] {veto_reason}")
+        logger.debug(f"[TIMING_HOUR_VETO][{asset}] {veto_reason}")
 
     # B) Coverage insuffisante
     elif coverage_s < min_coverage_s:
@@ -271,8 +271,8 @@ def evaluate_trading_conditions(
         "timing_analysis_ms": round(analysis_ms, 2)
     }
 
-    # 🔍 LOG (26 DEC 2025): Verdict final CRITICAL
-    logger.critical(
+    # 🔍 LOG (26 DEC 2025): Verdict final (31 DEC: DEBUG pour console propre)
+    logger.debug(
         f"[TIMING_VERDICT_FINAL][{asset}] verdict={verdict} | "
         f"veto_reason={veto_reason or 'None'} | "
         f"session={session} ({session_quality}) | GMT={hour_gmt:02d}h | "

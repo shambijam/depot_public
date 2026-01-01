@@ -134,11 +134,11 @@ class MarketAnalyzer:
                 "patterns": {}
             }
 
-        # PhaseObserver annotation
+        # PhaseObserver annotation (01 JAN 2026: FIX - Passer asset_symbol)
         annotated_df = df.copy()
         if self.phase_observer:
             try:
-                annotated_df = self.phase_observer.analyze(annotated_df)
+                annotated_df = self.phase_observer.analyze(annotated_df, asset_symbol=asset)
             except Exception as e:
                 self.logger.error(f"[MarketAnalyzer] PhaseObserver.analyze() error: {e}")
 
