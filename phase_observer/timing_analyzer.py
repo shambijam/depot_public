@@ -79,22 +79,9 @@ def evaluate_trading_conditions(
 
     # Charger config ASSET (écrase global)
     if asset_config:
-        # 🔍 DEBUG (02 JAN 2026): Tracer la structure exacte de asset_config reçue
-        logger.critical(
-            f"[TIMING_DEBUG][{asset}] asset_config reçue = "
-            f"type={type(asset_config).__name__} | "
-            f"keys={list(asset_config.keys()) if isinstance(asset_config, dict) else 'NOT_DICT'} | "
-            f"has_overrides={('overrides' in asset_config) if isinstance(asset_config, dict) else False}"
-        )
-
         overrides = asset_config.get("overrides", {})
-        logger.critical(f"[TIMING_DEBUG][{asset}] overrides = type={type(overrides).__name__} | keys={list(overrides.keys()) if isinstance(overrides, dict) else 'NOT_DICT'}")
-
         scalping_overrides = overrides.get("scalping", {})
-        logger.critical(f"[TIMING_DEBUG][{asset}] scalping_overrides = type={type(scalping_overrides).__name__} | keys={list(scalping_overrides.keys()) if isinstance(scalping_overrides, dict) else 'NOT_DICT'}")
-
         timing_config_asset = scalping_overrides.get("timing_gatekeeper", {})
-        logger.critical(f"[TIMING_DEBUG][{asset}] timing_config_asset = {timing_config_asset}")
 
         if timing_config_asset:
             logger.debug(f"[TIMING_CONFIG][{asset}] ✅ Config ASSET chargée (écrasera global)")
@@ -104,14 +91,6 @@ def evaluate_trading_conditions(
     # MERGE: Start avec global, puis écrase avec asset
     timing_config = dict(timing_config_global)  # Copie base globale
     timing_config.update(timing_config_asset)   # Écrase avec params asset-specific
-
-    # 🔍 DEBUG: Log config finale (02 JAN 2026)
-    logger.critical(
-        f"[TIMING_CONFIG_FINAL][{asset}] "
-        f"allowed_hours_gmt={timing_config.get('allowed_hours_gmt', 'NOT_SET')} | "
-        f"min_tick_rate={timing_config.get('min_tick_rate', 'NOT_SET')} | "
-        f"source={'ASSET' if timing_config_asset else 'GLOBAL'}"
-    )
 
     enabled = timing_config.get("enabled", True)
     if not enabled:
