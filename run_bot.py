@@ -413,9 +413,11 @@ def _execute_single_decision(
             return False
 
         # --- Paquet standard pour l'exécuteur (sera ajusté plus bas si burst) ---
+        # ✅ FIX (02 JAN 2026): Utiliser decision_package["market_context"] au lieu de global_context
+        # pour préserver active_broker_account du worker thread (nécessaire pour risk_per_trade_percent)
         base_pkg = {
             "active_config": decision_package.get("config_used", {}) or {},
-            "market_context": global_context,
+            "market_context": decision_package.get("market_context", global_context),
         }
 
         # --- Détection (et normalisation d'alias) du mode burst ---
