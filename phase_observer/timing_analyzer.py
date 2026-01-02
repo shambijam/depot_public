@@ -62,33 +62,56 @@ def evaluate_trading_conditions(
     analysis_start = time.perf_counter()
 
     # ========================================================================
-    # 0️⃣ CONFIGURATION (31 DEC 2025 - Priorité CONFIG ASSET)
+    # 0️⃣ CONFIGURATION (02 JAN 2026 - MERGE ASSET + GLOBAL avec priorité ASSET)
     # ========================================================================
-    timing_config = {}
+    # 🐛 FIX BUG #1 & #2: Merge granulaire paramètre par paramètre
+    # Asset-specific params écrasent les params globaux
+    timing_config_global = {}
+    timing_config_asset = {}
 
-    # PRIORITÉ 1: Config asset spécifique (EURUSD.json, GBPUSD.json, etc.)
-    if asset_config:
-        overrides = asset_config.get("overrides", {})
-        scalping_overrides = overrides.get("scalping", {})
-        timing_config = scalping_overrides.get("timing_gatekeeper", {})
-        if timing_config:
-            logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] ✅ Config ASSET utilisée (prioritaire)")
-            # 🔍 DEBUG: Log pour tracer le chargement de la config asset
-            logger.critical(
-                f"[TIMING_GATEKEEPER_CONFIG][{asset}] "
-                f"asset_config present={asset_config is not None} | "
-                f"overrides present={bool(overrides)} | "
-                f"scalping present={bool(scalping_overrides)} | "
-                f"timing_gatekeeper present={bool(timing_config)} | "
-                f"allowed_hours_gmt={timing_config.get('allowed_hours_gmt', 'NOT_FOUND')}"
-            )
-
-    # PRIORITÉ 2: Config scalping globale (fallback si asset n'a pas de config)
-    if not timing_config and scalping_config:
+    # Charger config GLOBALE d'abord (base)
+    if scalping_config:
         entry_rules = scalping_config.get("entry_rules", {})
         scalping_rules = entry_rules.get("scalping", {})
-        timing_config = scalping_rules.get("timing_gatekeeper", {})
-        logger.debug(f"[TIMING_CONFIG_SOURCE][{asset}] Config SCALPING GLOBALE utilisée (fallback)")
+        timing_config_global = scalping_rules.get("timing_gatekeeper", {})
+        if timing_config_global:
+            logger.debug(f"[TIMING_CONFIG][{asset}] Config globale chargée")
+
+    # Charger config ASSET (écrase global)
+    if asset_config:
+        # 🔍 DEBUG (02 JAN 2026): Tracer la structure exacte de asset_config reçue
+        logger.critical(
+            f"[TIMING_DEBUG][{asset}] asset_config reçue = "
+            f"type={type(asset_config).__name__} | "
+            f"keys={list(asset_config.keys()) if isinstance(asset_config, dict) else 'NOT_DICT'} | "
+            f"has_overrides={('overrides' in asset_config) if isinstance(asset_config, dict) else False}"
+        )
+
+        overrides = asset_config.get("overrides", {})
+        logger.critical(f"[TIMING_DEBUG][{asset}] overrides = type={type(overrides).__name__} | keys={list(overrides.keys()) if isinstance(overrides, dict) else 'NOT_DICT'}")
+
+        scalping_overrides = overrides.get("scalping", {})
+        logger.critical(f"[TIMING_DEBUG][{asset}] scalping_overrides = type={type(scalping_overrides).__name__} | keys={list(scalping_overrides.keys()) if isinstance(scalping_overrides, dict) else 'NOT_DICT'}")
+
+        timing_config_asset = scalping_overrides.get("timing_gatekeeper", {})
+        logger.critical(f"[TIMING_DEBUG][{asset}] timing_config_asset = {timing_config_asset}")
+
+        if timing_config_asset:
+            logger.debug(f"[TIMING_CONFIG][{asset}] ✅ Config ASSET chargée (écrasera global)")
+        else:
+            logger.warning(f"[TIMING_CONFIG][{asset}] ⚠️ timing_config_asset est VIDE → config globale sera utilisée")
+
+    # MERGE: Start avec global, puis écrase avec asset
+    timing_config = dict(timing_config_global)  # Copie base globale
+    timing_config.update(timing_config_asset)   # Écrase avec params asset-specific
+
+    # 🔍 DEBUG: Log config finale (02 JAN 2026)
+    logger.critical(
+        f"[TIMING_CONFIG_FINAL][{asset}] "
+        f"allowed_hours_gmt={timing_config.get('allowed_hours_gmt', 'NOT_SET')} | "
+        f"min_tick_rate={timing_config.get('min_tick_rate', 'NOT_SET')} | "
+        f"source={'ASSET' if timing_config_asset else 'GLOBAL'}"
+    )
 
     enabled = timing_config.get("enabled", True)
     if not enabled:
@@ -100,8 +123,8 @@ def evaluate_trading_conditions(
             "note": "Gatekeeper désactivé"
         }
 
-    # Seuils
-    min_tick_rate = timing_config.get("min_tick_rate", 1.0)  # ticks/sec (26 DEC: 5.0 → 1.0)
+    # Seuils (avec fallback hardcodé si absent)
+    min_tick_rate = timing_config.get("min_tick_rate", 1.0)  # ticks/sec
     min_coverage_s = timing_config.get("min_coverage_s", 40.0)  # secondes
     max_tick_rate = timing_config.get("max_tick_rate", 200.0)  # détection problème feed
 

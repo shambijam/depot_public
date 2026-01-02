@@ -1449,7 +1449,8 @@ def run_single_pipeline_cycle(
 
                             # 🔧 29 DEC 2025: Passer la config scalping GLOBALE (prioritaire) + asset config (fallback)
                             scalping_config_global = strategy_manager.get_strategy_config("scalping") if strategy_manager else {}
-                            asset_config_timing = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
+                            # 🐛 FIX (02 JAN 2026): Utiliser load_asset_config au lieu de get_asset_config
+                            asset_config_timing = config_manager.load_asset_config(asset)
 
                             # Appel timing gatekeeper
                             timing_verdict = evaluate_trading_conditions(
@@ -3287,7 +3288,8 @@ def scalping_worker(
                             )
 
                         # ✅ FIX (31 DEC 2025): Fusionner asset-specific overrides (target_profit_pips, etc.)
-                        asset_config = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
+                        # 🐛 FIX (02 JAN 2026): Utiliser load_asset_config au lieu de get_asset_config
+                        asset_config = config_manager.load_asset_config(asset)
                         asset_overrides = asset_config.get("overrides", {}).get("scalping", {})
                         if asset_overrides:
                             # Fusionner deep les overrides d'actif dans entry_rules.scalping.burst_scalping
@@ -3450,7 +3452,8 @@ def scalping_worker(
 
                     # 🔧 29 DEC 2025: Passer la config scalping GLOBALE (prioritaire) + asset config (fallback)
                     scalping_config_global = strategy_manager.get_strategy_config("scalping") if strategy_manager else {}
-                    asset_config_timing = config_manager.get_asset_config(asset) if hasattr(config_manager, 'get_asset_config') else {}
+                    # 🐛 FIX (02 JAN 2026): Utiliser load_asset_config au lieu de get_asset_config
+                    asset_config_timing = config_manager.load_asset_config(asset)
 
                     # Appel gatekeeper
                     timing_verdict = evaluate_trading_conditions(
