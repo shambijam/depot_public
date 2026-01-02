@@ -845,36 +845,43 @@ class ScalpingStrategy(BaseStrategy):
 
             delta_direction = delta_details.get("direction", "neutral")
 
-            # ✅ FIX (31 DEC 2025): Valider bias avec alignement MTF M1+M3
-            # Éviter signaux contradictoires (delta BUY mais M1/M3 BEARISH)
+            # ✅ BONUS MTF (02 JAN 2026): +10 points si M1+M3 alignés avec delta
+            # Le bias suit le delta, pas de VETO
             m1_dir = result["mtf_alignment"].get("m1", "neutral")
             m3_dir = result["mtf_alignment"].get("m3", "neutral")
 
             if delta_direction == "bullish":
-                # Pour BUY : M1 ET M3 doivent être BULLISH
+                result["bias"] = "BUY"
+                result["mtf_conflict"] = False
+
+                # BONUS +10 si M1 et M3 alignés BULLISH
                 if m1_dir == "bullish" and m3_dir == "bullish":
-                    result["bias"] = "BUY"
-                    result["mtf_conflict"] = False
-                else:
-                    result["bias"] = "NEUTRAL"
-                    result["mtf_conflict"] = True
-                    self.logger.warning(
-                        f"[MTF_CONFLICT][{asset}] Delta=BULLISH mais MTF M1={m1_dir} M3={m3_dir} → BIAS=NEUTRAL"
+                    result["total_score"] = min(100.0, result["total_score"] + 10)
+                    result["mtf_bonus"] = True
+                    self.logger.info(
+                        f"[MTF_BONUS][{asset}] M1+M3 alignés BULLISH → +10 points (score={result['total_score']}/100)"
                     )
+                else:
+                    result["mtf_bonus"] = False
+
             elif delta_direction == "bearish":
-                # Pour SELL : M1 ET M3 doivent être BEARISH
+                result["bias"] = "SELL"
+                result["mtf_conflict"] = False
+
+                # BONUS +10 si M1 et M3 alignés BEARISH
                 if m1_dir == "bearish" and m3_dir == "bearish":
-                    result["bias"] = "SELL"
-                    result["mtf_conflict"] = False
-                else:
-                    result["bias"] = "NEUTRAL"
-                    result["mtf_conflict"] = True
-                    self.logger.warning(
-                        f"[MTF_CONFLICT][{asset}] Delta=BEARISH mais MTF M1={m1_dir} M3={m3_dir} → BIAS=NEUTRAL"
+                    result["total_score"] = min(100.0, result["total_score"] + 10)
+                    result["mtf_bonus"] = True
+                    self.logger.info(
+                        f"[MTF_BONUS][{asset}] M1+M3 alignés BEARISH → +10 points (score={result['total_score']}/100)"
                     )
+                else:
+                    result["mtf_bonus"] = False
+
             else:
                 result["bias"] = "NEUTRAL"
                 result["mtf_conflict"] = False
+                result["mtf_bonus"] = False
 
             # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final (31 DEC: DEBUG pour console propre)
             self.logger.debug(
