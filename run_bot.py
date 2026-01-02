@@ -3339,11 +3339,22 @@ def scalping_worker(
                 except Exception as e_acct:
                     logger.warning(f"[{asset}] Erreur récupération account_info: {e_acct}")
 
+                # ✅ FIX (02 JAN 2026): Récupérer active_broker_account pour calcul risk_per_trade_percent
+                broker_account = {}
+                try:
+                    broker_account = config_manager.get_mt5_account_credentials(
+                        account_id=None,  # None = compte par défaut selon mode
+                        mode=config_manager.get("mode_execution", "DEMO")
+                    )
+                except Exception as e_broker:
+                    logger.warning(f"[{asset}] Erreur récupération broker account: {e_broker}")
+
                 ctx = {
                     "asset": asset,
                     "phase": market_results.get("phase", {}),
                     "volatility_pips": market_results.get("volatility_pips", 0.0),
                     "account_info": account_info_dict,  # ✅ FIX (31 DEC): Ajouter account_info pour calcul sizing
+                    "active_broker_account": broker_account,  # ✅ FIX (02 JAN 2026): Ajouter pour risk_per_trade_percent
                 }
 
                 # ═══════════════════════════════════════════════════════════════
