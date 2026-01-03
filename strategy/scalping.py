@@ -850,7 +850,8 @@ class ScalpingStrategy(BaseStrategy):
                 progressive_score += 5.0
 
             # 4. COHÉRENCE (0-10 points progressifs)
-            coherence_pct = coherence_details.get("coherence_pct", 0.0)
+            # 🔧 FIX (03 JAN 2026): Utiliser delta_details au lieu de coherence_details inexistant
+            coherence_pct = delta_details.get("coherence", 0.0)
             if coherence_pct >= 0.67:  # 67%+ cohérence
                 progressive_score += 10.0
             elif coherence_pct >= 0.50:  # 50%+ cohérence

@@ -3478,6 +3478,15 @@ def scalping_worker(
 
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
+                # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
+                fusion_out = {
+                    "ok": False,
+                    "action": "HOLD",
+                    "fused_confidence": 0.0,
+                    "signal_type": "NOT_INITIALIZED",
+                    "veto_reason": "Fusion not completed",
+                    "orderflow_score": 0.0
+                }
                 try:
                     # Récupérer ticks pour analyse liquidité
                     # 🔧 FIX (29 DEC 2025): Simplifier check et logger le résultat
