@@ -3173,6 +3173,31 @@ def scalping_worker(
         global_state.increment_cycle(asset)
 
         try:
+            # ⚡ VÉRIFICATION SYMBOL (03 JAN 2026): Protection contre symbol non disponible
+            # Vérifier que le symbol est disponible dans MT5 AVANT de tenter fetch
+            try:
+                symbol_info = mt5_connector.get_symbol_info(asset)
+                if not symbol_info:
+                    logger.error(f"[{asset}] ❌ Symbol non disponible dans MT5, skip cycle")
+                    global_state.record_error(asset, "Symbol unavailable")
+                    time.sleep(cycle_interval)
+                    continue
+
+                # Vérifier si visible dans Market Watch
+                if hasattr(symbol_info, 'visible') and not symbol_info.visible:
+                    logger.warning(f"[{asset}] ⚠️ Symbol non visible, tentative activation...")
+                    # Tentative d'activation (ne pas bloquer si échec)
+                    try:
+                        import MetaTrader5 as mt5
+                        if not mt5.symbol_select(asset, True):
+                            logger.warning(f"[{asset}] ⚠️ Impossible activer symbol, continue quand même...")
+                    except Exception as e_select:
+                        logger.debug(f"[{asset}] Symbol select failed: {e_select}")
+
+            except Exception as e_symbol:
+                logger.warning(f"[{asset}] ⚠️ Vérification symbol failed: {e_symbol}")
+                # Continue quand même (ne pas bloquer le cycle)
+
             # ✅ PHASE 2: Import cache multi-niveaux
             from core.bars_cache import bars_cache
             from phase_observer.regime_resolver import regime_resolver
@@ -3196,8 +3221,9 @@ def scalping_worker(
                 time.sleep(cycle_interval)
                 continue
 
-            # ✅ CHARGEMENT TICKS (26 DEC 2025): Requis pour timing_gatekeeper liquidité analysis
+            # ✅ CHARGEMENT TICKS (26 DEC 2025 / 03 JAN 2026): Requis pour timing_gatekeeper liquidité analysis
             # Récupérer ticks de la dernière bougie M1 pour évaluation tick_rate et coverage
+            # ⚡ AMÉLIORATION (03 JAN 2026): Vérification symbol + timeout + logging renforcé
             ticks_df = None
             try:
                 # Utiliser avant-dernière bougie (fermée) pour éviter données incomplètes
@@ -3215,19 +3241,29 @@ def scalping_worker(
 
                 candle_end = candle_start + pd.Timedelta(minutes=1)
 
-                # Charger ticks pour cette fenêtre M1
+                # Logging début chargement
+                logger.info(f"[{asset}] 🔄 Chargement ticks [{candle_start.strftime('%H:%M:%S')} → {candle_end.strftime('%H:%M:%S')}]...")
+
+                # Charger ticks pour cette fenêtre M1 (avec timeout 5s par défaut)
                 ticks_df = mt5_connector.get_ticks_for_candle(
                     asset,
                     candle_start.to_pydatetime(),
-                    candle_end.to_pydatetime()
+                    candle_end.to_pydatetime(),
+                    timeout=5.0  # ⚡ TIMEOUT (03 JAN 2026): Protection contre blocage MT5
                 )
 
                 if ticks_df is not None and not ticks_df.empty:
-                    logger.debug(f"[{asset}] ✅ {len(ticks_df)} ticks chargés")
+                    logger.info(f"[{asset}] ✅ {len(ticks_df)} ticks chargés")
                 else:
+                    logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré pour cette bougie")
                     ticks_df = None
+
+            except TimeoutError as e_timeout:
+                logger.error(f"[{asset}] ⏱️ TIMEOUT chargement ticks: {e_timeout}")
+                ticks_df = None
+
             except Exception as e_ticks:
-                logger.debug(f"[{asset}] ⚠️ Ticks unavailable: {e_ticks}")
+                logger.error(f"[{asset}] ❌ Erreur chargement ticks: {e_ticks}", exc_info=True)
                 ticks_df = None
 
             # MarketAnalyzer (phase + patterns + features)
@@ -3408,10 +3444,11 @@ def scalping_worker(
                             f"prev_candle={prev_candle_time} {prev_candle_color} (analysée)"
                         )
 
-                        # Préparer asset_signals
+                        # Préparer asset_signals (03 JAN 2026: Ajouter ticks pour analyseurs institutionnels)
                         asset_signals_for_of = {
                             "footprint_summary": {},
-                            "orderflow_summary": {}
+                            "orderflow_summary": {},
+                            "ticks_df": ticks_df  # 🆕 Pour analyseurs institutionnels (Phase 1+2)
                         }
 
                         # Appel OrderFlow V6
@@ -3476,18 +3513,43 @@ def scalping_worker(
                     logger.error(f"[TIMING_GATEKEEPER] Erreur: {e_timing}", exc_info=True)
                     timing_verdict = {"verdict": "VETO", "veto_reason": f"Timing error: {e_timing}", "quality_metrics": {}}
 
-                # ========== ÉTAPE 3: DÉCISION (combine OrderFlow + Timing) ==========
-                # Si VETO timing → HOLD même si bon score OrderFlow
-                # Si PASS timing + bon score OrderFlow → TRADE
-                if timing_verdict and timing_verdict.get("verdict") != "PASS":
-                    # VETO timing → Pas de trade mais on a quand même le score OrderFlow
+                # ========== ÉTAPE 3: DÉCISION INTELLIGENTE (02 JAN 2026 - Veto pondéré) ==========
+                # Système intelligent : Signal OrderFlow fort peut passer outre veto modéré
+                veto_score = timing_verdict.get("veto_score", 0.0) if timing_verdict else 0.0
+                orderflow_score = orderflow_result_mini['score']
+
+                # 🎯 LOGIQUE INTELLIGENTE (02 JAN 2026)
+                # Signal exceptionnel (≥85) peut passer outre veto modéré (< 60)
+                # Signal très fort (≥90) peut passer outre veto fort (< 70)
+                can_override_veto = False
+                override_reason = None
+
+                if orderflow_score >= 90.0 and veto_score < 70.0:
+                    can_override_veto = True
+                    override_reason = f"Signal exceptionnel ({orderflow_score:.0f}/100) > veto ({veto_score:.0f}/100)"
+                elif orderflow_score >= 85.0 and veto_score < 60.0:
+                    can_override_veto = True
+                    override_reason = f"Signal très fort ({orderflow_score:.0f}/100) > veto modéré ({veto_score:.0f}/100)"
+
+                # Décision finale
+                timing_blocks_trade = (
+                    timing_verdict
+                    and timing_verdict.get("verdict") != "PASS"
+                    and not can_override_veto  # ✅ NOUVEAU: Signal fort peut passer outre
+                )
+
+                if timing_blocks_trade:
+                    # VETO timing trop fort → HOLD
                     veto_reason = timing_verdict.get('veto_reason', 'Unknown')
-                    logger.info(f"⚠️  [TIMING_VETO] {veto_reason} → HOLD (OrderFlow score={orderflow_result_mini['score']:.1f} ignoré)")
+                    logger.info(
+                        f"⚠️  [TIMING_VETO] {veto_reason} (veto={veto_score:.0f}) "
+                        f"→ HOLD (OrderFlow score={orderflow_score:.1f} insuffisant pour override)"
+                    )
 
                     decision_mini = {
                         "action": "HOLD",
                         "confidence": 0.0,
-                        "rationale": f"TIMING VETO: {veto_reason} (OrderFlow {orderflow_result_mini['score']:.0f}/100 ignoré)",
+                        "rationale": f"TIMING VETO: {veto_reason} (OrderFlow {orderflow_score:.0f}/100 < override threshold)",
                         "anchor_price": None
                     }
 
@@ -3497,9 +3559,14 @@ def scalping_worker(
                         "fused_confidence": 0.0,
                         "signal_type": "TIMING_VETO",
                         "veto_reason": veto_reason,
-                        "orderflow_score": orderflow_result_mini["score"]  # Score présent même en VETO
+                        "veto_score": veto_score,
+                        "orderflow_score": orderflow_score
                     }
-                else:
+                elif can_override_veto:
+                    # ✅ OVERRIDE: Signal fort passe outre veto modéré
+                    logger.info(
+                        f"🚀 [VETO_OVERRIDE] {override_reason} → Signal autorisé malgré timing non optimal"
+                    )
                     # PASS timing → Vérifier phase avant de décider
 
                     # ========================================================================

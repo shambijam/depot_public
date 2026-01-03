@@ -210,9 +210,12 @@ def evaluate_trading_conditions(
         liquidity_score += 0.1  # Marginal
 
     # ========================================================================
-    # 3️⃣ CONDITIONS DE VETO (29 DEC 2025 - Analyse complète PUIS veto)
+    # 3️⃣ SYSTÈME DE VETO PONDÉRÉ (02 JAN 2026 - Fix veto binaire trop strict)
     # ========================================================================
-    veto_reason = None
+    # Score de veto: 0-100 (0=pas de veto, 100=veto absolu)
+    # Permet aux signaux OrderFlow forts de passer outre des vetos modérés
+    veto_score = 0.0
+    veto_reasons = []
 
     # 🔍 LOG (26 DEC 2025): Métriques test VETO (01 JAN 2026: DEBUG pour console propre)
     logger.debug(
@@ -221,46 +224,64 @@ def evaluate_trading_conditions(
         f"TEST: tick_rate({tick_rate:.1f}) < min_tick_rate({min_tick_rate}) = {tick_rate < min_tick_rate}"
     )
 
-    # 🚨 A) HEURE NON AUTORISÉE (depuis config) - Priorité #1
+    # 🚨 A) HEURE NON AUTORISÉE (depuis config) - Veto PONDÉRÉ
     if not hour_is_allowed:
-        veto_reason = f"🚫 Heure {hour_gmt:02d}h GMT NON autorisée (whitelist config: {allowed_hours})"
-        logger.debug(f"[TIMING_HOUR_VETO][{asset}] {veto_reason}")
+        # Veto modéré (peut être surpassé par signal fort)
+        veto_score += 50.0
+        veto_reasons.append(f"🚫 Heure {hour_gmt:02d}h GMT NON autorisée (whitelist: {allowed_hours})")
+        logger.debug(f"[TIMING_HOUR_VETO][{asset}] Veto +50 (heure non autorisée)")
 
-    # B) Coverage insuffisante
-    elif coverage_s < min_coverage_s:
-        veto_reason = f"Coverage insuffisante ({coverage_s:.1f}s < {min_coverage_s}s)"
+    # B) Coverage insuffisante - Veto FORT
+    if coverage_s < min_coverage_s:
+        # Veto fort (données insuffisantes)
+        veto_score += 70.0
+        veto_reasons.append(f"Coverage insuffisante ({coverage_s:.1f}s < {min_coverage_s}s)")
 
-    # C) Tick rate trop bas (toute session)
-    elif tick_rate < min_tick_rate:
-        veto_reason = f"Tick rate trop faible ({tick_rate:.1f} < {min_tick_rate} ticks/sec)"
-        logger.critical(f"[TIMING_VETO_TRIGGERED][{asset}] VETO déclenché: {veto_reason}")
+    # C) Tick rate trop bas - Veto PONDÉRÉ selon écart
+    if tick_rate < min_tick_rate:
+        # Pénalité proportionnelle à l'écart
+        gap_pct = (min_tick_rate - tick_rate) / min_tick_rate
+        penalty = min(60.0, gap_pct * 80.0)  # Max 60 points
+        veto_score += penalty
+        veto_reasons.append(f"Tick rate faible ({tick_rate:.1f} < {min_tick_rate} ticks/s)")
+        logger.critical(f"[TIMING_VETO][{asset}] Veto +{penalty:.0f} (tick_rate={tick_rate:.1f})")
 
-    # D) Session asiatique précoce avec faible liquidité
-    elif session == "ASIAN_EARLY" and tick_rate < 8.0:
-        veto_reason = f"Session asiatique précoce + tick rate insuffisant ({tick_rate:.1f} < 8.0)"
+    # D) Session asiatique précoce - Veto MODÉRÉ
+    if session == "ASIAN_EARLY" and tick_rate < 8.0:
+        veto_score += 40.0
+        veto_reasons.append(f"Session asiatique précoce + tick rate ({tick_rate:.1f} < 8.0)")
 
-    # E) Tick rate suspicieusement élevé (problème feed)
-    elif tick_rate > max_tick_rate:
-        veto_reason = f"Tick rate anormalement élevé ({tick_rate:.1f} > {max_tick_rate}) - possible problème feed"
+    # E) Tick rate anormal - Veto ABSOLU
+    if tick_rate > max_tick_rate:
+        veto_score = 100.0  # Veto absolu (problème technique)
+        veto_reasons.append(f"Tick rate anormal ({tick_rate:.1f} > {max_tick_rate}) - problème feed")
 
-    # F) Liquidity score global trop faible
-    elif liquidity_score < 0.3:
-        veto_reason = f"Score de liquidité trop faible ({liquidity_score:.2f} < 0.30)"
+    # F) Liquidité globale faible - Veto MODÉRÉ
+    if liquidity_score < 0.3:
+        veto_score += 45.0
+        veto_reasons.append(f"Liquidité faible ({liquidity_score:.2f} < 0.30)")
 
-    # G) Session Off-Peak
-    elif session_quality == "POOR":
-        veto_reason = f"Session off-peak (GMT {hour_gmt:02d}h) - liquidité généralement insuffisante"
+    # G) Session Off-Peak - Veto FAIBLE
+    if session_quality == "POOR":
+        veto_score += 30.0
+        veto_reasons.append(f"Session off-peak (GMT {hour_gmt:02d}h)")
+
+    # Plafonnement à 100
+    veto_score = min(100.0, veto_score)
 
     # ========================================================================
-    # 4️⃣ VERDICT FINAL
+    # 4️⃣ VERDICT FINAL (compatibilité binaire + score pondéré)
     # ========================================================================
-    verdict = "VETO" if veto_reason else "PASS"
+    # Verdict binaire pour compatibilité (veto si score >= 80)
+    verdict = "VETO" if veto_score >= 80.0 else "PASS"
+    veto_reason = " | ".join(veto_reasons) if veto_reasons else None
 
     analysis_ms = (time.perf_counter() - analysis_start) * 1000.0
 
     result = {
         "verdict": verdict,
         "veto_reason": veto_reason,
+        "veto_score": round(veto_score, 1),  # ✅ AJOUTÉ (02 JAN 2026): Score pondéré 0-100
         "quality_metrics": {
             "hour_gmt": hour_gmt,
             "session": session,

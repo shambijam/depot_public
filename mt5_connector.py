@@ -1754,7 +1754,7 @@ class MT5Connector:
             return pd.DataFrame(columns=["time", "bid", "ask", "last", "volume", "mid"])
 
     def get_ticks_for_candle(
-        self, symbol: str, start_ts: datetime, end_ts: datetime
+        self, symbol: str, start_ts: datetime, end_ts: datetime, timeout: float = 5.0
     ) -> pd.DataFrame:
         """
         🎯 Ticks exacts de la bougie M1 fermée : intervalle strict [start_ts, end_ts)
@@ -1762,10 +1762,19 @@ class MT5Connector:
         - COPY_TICKS_ALL + filtrage strict sur l'horodatage (time_msc si dispo, sinon time)
         - Décodage flags 16/32 (BUY/SELL) ; fallback tick-rule (Δmid) ; ultime secours mapping 1/2
         - Fenêtre verrouillée à 60s en UTC
+        - ⚡ TIMEOUT (03 JAN 2026): Protection contre blocage MT5 indéfini
+
+        Args:
+            symbol: Symbol à requêter (ex: EURUSD)
+            start_ts: Début de la fenêtre (UTC)
+            end_ts: Fin de la fenêtre (UTC)
+            timeout: Timeout en secondes pour l'appel MT5 (défaut: 5.0s)
+
         Retourne les colonnes: ["time","bid","ask","last","volume","flags","side","mid","spread"]
         """
         import pandas as pd
         import numpy as np
+        import threading
         from datetime import timedelta, timezone
 
         ret_cols = [
@@ -1794,10 +1803,38 @@ class MT5Connector:
             if (end_ts - start_ts).total_seconds() != 60.0:
                 end_ts = start_ts + timedelta(seconds=60)
 
-            # ── Requête brute
-            ticks = self.mt5.copy_ticks_range(
-                symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL
-            )
+            # ── Requête brute AVEC TIMEOUT (03 JAN 2026)
+            # Protection contre blocage MT5 indéfini
+            ticks = [None]
+            exception = [None]
+
+            def fetch_ticks():
+                try:
+                    ticks[0] = self.mt5.copy_ticks_range(
+                        symbol, start_ts, end_ts, self.mt5.COPY_TICKS_ALL
+                    )
+                except Exception as e:
+                    exception[0] = e
+
+            fetch_thread = threading.Thread(target=fetch_ticks, daemon=True)
+            fetch_thread.start()
+            fetch_thread.join(timeout=timeout)
+
+            # Si thread encore en vie après timeout = blocage MT5
+            if fetch_thread.is_alive():
+                self.logger.error(
+                    f"[MT5C_TIMEOUT] ⏱️ copy_ticks_range() timeout après {timeout}s pour {symbol} "
+                    f"[{start_ts.strftime('%H:%M:%S')} → {end_ts.strftime('%H:%M:%S')}]. "
+                    f"MT5 ne répond pas, retour DataFrame vide."
+                )
+                return pd.DataFrame(columns=ret_cols)
+
+            # Si exception levée dans le thread
+            if exception[0]:
+                raise exception[0]
+
+            # Récupérer résultat
+            ticks = ticks[0]
             if ticks is None or len(ticks) == 0:
                 self.logger.warning(
                     f"[MT5C] Aucun tick trouvé pour {symbol} [{start_ts} → {end_ts}]"

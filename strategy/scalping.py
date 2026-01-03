@@ -806,41 +806,73 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # Critères selon rapport institutionnel ligne 101-123
 
-            # CRITÈRE 1: LIQUIDITÉ IMMÉDIATE
-            liquid = volume_confirmation_score >= 10.0  # Volume fort (≥10/15)
+            # ================================================================
+            # 🎯 SCORING PROGRESSIF (02 JAN 2026 - Fix scoring binaire trop strict)
+            # ================================================================
+            # Système de points progressif au lieu de binaire tout-ou-rien
 
-            # CRITÈRE 2: DÉSÉQUILIBRE FORT
-            # 26 DEC 2025: Seuils assouplis pour USDJPY (activité modérée vs XAUUSD)
-            strong_imbalance = delta_momentum_score >= 12.0  # Delta fort (≥12/25) - assoupli de 18.0
+            progressive_score = 0.0
 
-            # CRITÈRE 3: CONFIRMATION (imbalance persistant)
-            confirmation = imbalance_strength_score >= 5.0  # ≥5/10 - assoupli de 6.0
+            # 1. DELTA MOMENTUM (0-40 points progressifs)
+            if delta_momentum_score >= 20.0:  # Delta très fort
+                progressive_score += 40.0
+            elif delta_momentum_score >= 15.0:  # Delta fort
+                progressive_score += 30.0
+            elif delta_momentum_score >= 12.0:  # Delta modéré-fort
+                progressive_score += 25.0
+            elif delta_momentum_score >= 8.0:   # Delta modéré
+                progressive_score += 15.0
+            elif delta_momentum_score >= 5.0:   # Delta faible
+                progressive_score += 10.0
+            elif delta_momentum_score > 0.0:    # Delta minimal
+                progressive_score += 5.0
 
-            # DÉCISION 2/3 CRITÈRES (31 DEC 2025)
-            # Comptage critères valides
-            criteria_met = sum([liquid, strong_imbalance, confirmation])
+            # 2. VOLUME CONFIRMATION (0-30 points progressifs)
+            if volume_confirmation_score >= 12.0:  # Volume très fort
+                progressive_score += 30.0
+            elif volume_confirmation_score >= 10.0:  # Volume fort
+                progressive_score += 25.0
+            elif volume_confirmation_score >= 7.0:   # Volume modéré
+                progressive_score += 15.0
+            elif volume_confirmation_score >= 5.0:   # Volume faible
+                progressive_score += 10.0
+            elif volume_confirmation_score > 0.0:    # Volume minimal
+                progressive_score += 5.0
 
-            if criteria_met == 3:
-                # Setup A : Tous critères (3/3) - Signal institutionnel parfait
-                result["total_score"] = 90.0
+            # 3. IMBALANCE STRENGTH (0-20 points progressifs)
+            if imbalance_strength_score >= 8.0:  # Imbalance très fort
+                progressive_score += 20.0
+            elif imbalance_strength_score >= 6.0:  # Imbalance fort
+                progressive_score += 15.0
+            elif imbalance_strength_score >= 5.0:  # Imbalance modéré
+                progressive_score += 10.0
+            elif imbalance_strength_score >= 3.0:  # Imbalance faible
+                progressive_score += 5.0
+
+            # 4. COHÉRENCE (0-10 points progressifs)
+            coherence_pct = coherence_details.get("coherence_pct", 0.0)
+            if coherence_pct >= 0.67:  # 67%+ cohérence
+                progressive_score += 10.0
+            elif coherence_pct >= 0.50:  # 50%+ cohérence
+                progressive_score += 7.0
+            elif coherence_pct >= 0.33:  # 33%+ cohérence
+                progressive_score += 5.0
+            elif coherence_pct > 0.0:   # Cohérence minimale
+                progressive_score += 2.0
+
+            # Score final (0-100)
+            result["total_score"] = min(100.0, progressive_score)
+
+            # Qualité du signal basée sur score progressif
+            if progressive_score >= 80.0:
                 result["signal_quality"] = "EXCELLENT"
-            elif criteria_met == 2:
-                # Setup B : 2 critères sur 3 - Signal fort mais incomplet
-                if liquid and strong_imbalance:
-                    # Liquidité + Delta fort (sans confirmation persistante)
-                    result["total_score"] = 75.0
-                    result["signal_quality"] = "GOOD"
-                elif liquid and confirmation:
-                    # Liquidité + Confirmation (delta modéré mais persistant)
-                    result["total_score"] = 65.0
-                    result["signal_quality"] = "GOOD"
-                else:
-                    # strong_imbalance + confirmation (sans liquidité immédiate)
-                    result["total_score"] = 55.0
-                    result["signal_quality"] = "FAIR"
+            elif progressive_score >= 60.0:
+                result["signal_quality"] = "GOOD"
+            elif progressive_score >= 40.0:
+                result["signal_quality"] = "FAIR"
+            elif progressive_score >= 20.0:
+                result["signal_quality"] = "WEAK"
             else:
-                # Setup C : 0 ou 1 critère - Signal insuffisant
-                result["total_score"] = 0.0
                 result["signal_quality"] = "NO_TRADE"
 
             delta_direction = delta_details.get("direction", "neutral")
@@ -899,6 +931,104 @@ class ScalpingStrategy(BaseStrategy):
                 f"→ Score={result['total_score']:.0f}/100 ({result['signal_quality']}) "
                 f"[Brut: Delta={delta_momentum_score:.1f} Vol={volume_confirmation_score:.1f} Imb={imbalance_strength_score:.1f}]"
             )
+
+            # ================================================================
+            # 🆕 ANALYSEURS INSTITUTIONNELS (03 JAN 2026 - Phase 1 + 2)
+            # ================================================================
+            # Importer les 5 nouveaux analyseurs
+            try:
+                from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
+                from phase_observer.market_fatigue_analyzer import MarketFatigueAnalyzer
+                from phase_observer.market_physics_analyzer import MarketPhysicsAnalyzer
+                from phase_observer.microstructure_analyzer import MicrostructureAnalyzer
+                from phase_observer.liquidity_heatmap import LiquidityHeatmap
+
+                institutional_analysis = {}
+
+                # Récupérer ticks depuis asset_signals (si disponibles)
+                ticks_df = asset_signals.get("ticks_df", None)
+
+                # 1. PRIORITY_1: Price Memory (mémoire du prix)
+                try:
+                    price_memory = PriceMemoryAnalyzer(logger=self.logger)
+                    memory_result = price_memory.analyze_price_memory(df_m1, result.get('current_price', df_m1.iloc[-1]['close'] if len(df_m1) > 0 else 0))
+                    institutional_analysis['price_memory'] = memory_result
+                    self.logger.debug(f"[{asset}] 🧠 PriceMemory: {len(memory_result.get('memory_signals', []))} signaux, {len(memory_result.get('fresh_levels', []))} niveaux frais")
+                except Exception as e_memory:
+                    self.logger.debug(f"[{asset}] PriceMemory error: {e_memory}")
+                    institutional_analysis['price_memory'] = {}
+
+                # 2. PRIORITY_2: Market Fatigue (épuisement acheteurs/vendeurs)
+                try:
+                    fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
+                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1.tail(20))
+                    institutional_analysis['market_fatigue'] = fatigue_result
+                    self.logger.debug(f"[{asset}] 😫 MarketFatigue: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
+                except Exception as e_fatigue:
+                    self.logger.debug(f"[{asset}] MarketFatigue error: {e_fatigue}")
+                    institutional_analysis['market_fatigue'] = {}
+
+                # 3. PRIORITY_3: Market Physics (lois physiques du marché)
+                try:
+                    physics_analyzer = MarketPhysicsAnalyzer(logger=self.logger)
+                    physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1)
+                    institutional_analysis['market_physics'] = physics_result
+                    self.logger.debug(f"[{asset}] ⚛️ MarketPhysics: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
+                except Exception as e_physics:
+                    self.logger.debug(f"[{asset}] MarketPhysics error: {e_physics}")
+                    institutional_analysis['market_physics'] = {}
+
+                # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)
+                try:
+                    microstructure = MicrostructureAnalyzer(logger=self.logger)
+                    if ticks_df is not None and len(ticks_df) > 10:
+                        tape_speed = microstructure.analyze_tape_speed(ticks_df)
+                        institutional_analysis['tape_speed'] = tape_speed
+                        self.logger.debug(f"[{asset}] 🔬 TapeSpeed: {tape_speed.get('interpretation', 'N/A')}, ratio={tape_speed.get('speed_ratio', 0):.2f}")
+
+                        # Momentum ignition
+                        ignition = microstructure.detect_momentum_ignition(ticks_df)
+                        if ignition:
+                            institutional_analysis['momentum_ignition'] = ignition[-1]  # Dernier signal
+                            self.logger.debug(f"[{asset}] 🚀 MomentumIgnition: {ignition[-1].get('side', 'N/A')} strength={ignition[-1].get('strength', 0):.1f}")
+                except Exception as e_micro:
+                    self.logger.debug(f"[{asset}] Microstructure error: {e_micro}")
+                    institutional_analysis['tape_speed'] = {}
+
+                # 5. PHASE 2: Liquidity Heatmap (pression buy/sell, liquidity grabs)
+                try:
+                    liquidity_map = LiquidityHeatmap(logger=self.logger)
+                    if ticks_df is not None and len(ticks_df) > 10:
+                        pressure = liquidity_map.calculate_pressure_ratio(ticks_df, window_seconds=5.0)
+                        institutional_analysis['pressure_ratio'] = pressure
+                        self.logger.debug(f"[{asset}] 💧 Pressure: {pressure.get('direction', 'N/A')}, normalized={pressure.get('normalized_pressure', 0):.2f}")
+
+                        # Liquidity grabs
+                        grabs = liquidity_map.detect_liquidity_grab(ticks_df)
+                        if grabs:
+                            institutional_analysis['liquidity_grabs'] = grabs
+                            self.logger.debug(f"[{asset}] 🎯 LiquidityGrab: {grabs[0].get('type', 'N/A')} @ {grabs[0].get('level', 0)}")
+                except Exception as e_liquidity:
+                    self.logger.debug(f"[{asset}] LiquidityHeatmap error: {e_liquidity}")
+                    institutional_analysis['pressure_ratio'] = {}
+
+                # Ajouter au résultat final (en parallèle de l'OrderFlow V6 actuel)
+                result['institutional_analysis'] = institutional_analysis
+
+                self.logger.info(
+                    f"[{asset}] 📊 INSTITUTIONAL ANALYSIS: "
+                    f"Memory={len(institutional_analysis.get('price_memory', {}).get('memory_signals', []))} | "
+                    f"Fatigue={institutional_analysis.get('market_fatigue', {}).get('market_state', 'N/A')} | "
+                    f"Physics={institutional_analysis.get('market_physics', {}).get('physics_bias', 'N/A')} | "
+                    f"Pressure={institutional_analysis.get('pressure_ratio', {}).get('direction', 'N/A')}"
+                )
+
+            except ImportError as e_import:
+                self.logger.warning(f"[{asset}] Impossible importer analyseurs institutionnels: {e_import}")
+                result['institutional_analysis'] = {}
+            except Exception as e_inst:
+                self.logger.error(f"[{asset}] Erreur analyse institutionnelle: {e_inst}", exc_info=True)
+                result['institutional_analysis'] = {}
 
         except Exception as e:
             self.logger.error(
