@@ -8,6 +8,28 @@
     "GBPUSD"
   ],
   "magic_number": 52001,
+  "advanced_scoring": {
+    "enabled": true,
+    "description": "Scoring composite évolutif - 5 composants pondérés (03 JAN 2026)",
+    "weights": {
+      "orderflow": 0.50,
+      "microstructure": 0.20,
+      "liquidity": 0.15,
+      "divergence": 0.10,
+      "smart_money": 0.05
+    },
+    "thresholds": {
+      "strong_signal": 75.0,
+      "good_signal": 65.0,
+      "weak_signal": 55.0,
+      "neutral_low": 45.0,
+      "neutral_high": 55.0
+    },
+    "fallback": {
+      "orderflow_v6_only": true,
+      "neutral_score_on_error": 50.0
+    }
+  },
   "decision_rules": [
     {
       "name": "scalping_entry",

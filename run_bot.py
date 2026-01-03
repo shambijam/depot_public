@@ -31,6 +31,8 @@ from phase_observer.market_analyzer import MarketAnalyzer
 # from phase_observer.vwap import create_vwap_analyzer
 # ✅ AJOUTÉ (25 DEC 2025): Timing Gatekeeper pour filtrage binaire PASS/VETO
 from phase_observer.timing_analyzer import evaluate_trading_conditions
+# ✅ AJOUTÉ (03 JAN 2026): SimpleAdvancedScorer pour scoring composite évolutif
+from strategy.advanced_scoring import SimpleAdvancedScorer
 
 
 load_dotenv()
@@ -3162,6 +3164,17 @@ def scalping_worker(
         logger.warning(f"⚠️ [{asset}] ScalpingStrategy init failed: {e}")
         scalping_strategy = None
 
+    # ✅ NOUVEAU (03 JAN 2026): Instancier SimpleAdvancedScorer pour scoring composite
+    advanced_scorer = None
+    try:
+        # Récupérer poids custom depuis config (optionnel)
+        scoring_weights = strat_cfg.get("advanced_scoring", {}).get("weights", None)
+        advanced_scorer = SimpleAdvancedScorer(config=scoring_weights)
+        logger.info(f"✅ [{asset}] SimpleAdvancedScorer instancié (évolutif)")
+    except Exception as e:
+        logger.warning(f"⚠️ [{asset}] SimpleAdvancedScorer init failed: {e}, fallback OrderFlow V6 seul")
+        advanced_scorer = None
+
     # ⚡ OPTION 1: PRÉ-CALCUL — Squelette trade decision (parties statiques)
     # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
     trade_decision_skeleton = None
@@ -3472,9 +3485,38 @@ def scalping_worker(
                             f"bias={orderflow_result_mini['bias']}"
                         )
 
+                        # ✅ NOUVEAU (03 JAN 2026): Calcul composite score avec SimpleAdvancedScorer
+                        if advanced_scorer:
+                            try:
+                                composite_result = advanced_scorer.calculate_composite_score(
+                                    ticks_df=ticks_df,
+                                    candles_df=rates_df_fresh,
+                                    orderflow_score=orderflow_result_mini['score']
+                                )
+
+                                # Remplacer le score OrderFlow V6 par le composite score
+                                orderflow_result_mini['score'] = composite_result['composite_score']
+                                orderflow_result_mini['composite_details'] = composite_result
+                                orderflow_result_mini['composite_enabled'] = True
+
+                                logger.info(
+                                    f"[COMPOSITE_SCORE][{asset}] {composite_result['composite_score']:.1f}/100 | "
+                                    f"Decision={composite_result['decision']} ({composite_result['confidence']}) | "
+                                    f"Components: OF={composite_result['components']['orderflow']:.0f} "
+                                    f"MS={composite_result['components']['microstructure']:.0f} "
+                                    f"LQ={composite_result['components']['liquidity']:.0f} "
+                                    f"DV={composite_result['components']['divergence']:.0f} "
+                                    f"SM={composite_result['components']['smart_money']:.0f}"
+                                )
+                            except Exception as e_composite:
+                                logger.error(f"[COMPOSITE_SCORE_ERROR] Erreur: {e_composite}, fallback OrderFlow V6 seul", exc_info=True)
+                                orderflow_result_mini['composite_enabled'] = False
+                        else:
+                            orderflow_result_mini['composite_enabled'] = False
+
                     except Exception as e_of:
                         logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur: {e_of}", exc_info=True)
-                        orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}}
+                        orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}, "composite_enabled": False}
 
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
