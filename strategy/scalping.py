@@ -916,6 +916,11 @@ class ScalpingStrategy(BaseStrategy):
                 result["mtf_conflict"] = False
                 result["mtf_bonus"] = False
 
+            # 🔧 FIX (03 JAN 2026): Calculer variables pour logs (compatibilité ancien système binaire)
+            liquid = volume_confirmation_score >= 10.0
+            strong_imbalance = delta_momentum_score >= 12.0
+            confirmation = imbalance_strength_score >= 5.0
+
             # 🔍 LOG (26 DEC 2025): Afficher scoring binaire final (31 DEC: DEBUG pour console propre)
             self.logger.debug(
                 f"[ORDERFLOW_SCORING_BINAIRE][{asset}] "
