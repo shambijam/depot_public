@@ -3765,10 +3765,15 @@ def scalping_worker(
                     bias_short = of_bias[:3] if of_bias else "NEU"
                     timing_short = timing_status[:4] if timing_status else "UNKN"
 
+                    # ✅ (03 JAN 2026): Adapter format score selon mode composite
+                    is_composite_log = orderflow_result_mini.get('composite_enabled', False)
+                    score_label = "CS" if is_composite_log else "OF"  # CS=Composite Score, OF=OrderFlow
+                    score_format_log = f"{of_score:.1f}" if is_composite_log else f"{of_score:.0f}"
+
                     logger.info(
                         f"[{asset}] "
                         f"R:{regime_short}({regime_strength:.1f}) | "
-                        f"OF:{of_score:.0f}/{bias_short} | "
+                        f"{score_label}:{score_format_log}/{bias_short} | "
                         f"T:{timing_short} | "
                         f"→{action}"
                     )
@@ -3804,10 +3809,27 @@ def scalping_worker(
                     print("\n" + "─" * 90)
                     print(f"📊 [{asset}] ANALYSE CYCLE {cycle_count}")
                     print("─" * 90)
-                    print("📈 ORDERFLOW V6:")
+
+                    # ✅ (03 JAN 2026): Afficher titre adaptatif selon mode scoring
+                    is_composite = orderflow_result_mini.get('composite_enabled', False)
+                    scoring_title = "📈 COMPOSITE SCORING:" if is_composite else "📈 ORDERFLOW V6:"
+                    print(scoring_title)
+
                     print(f"  Delta: {delta_total:>6.0f} | Coherence: {coherence:>4.0%} | "
                           f"Volume: {volume_ratio:>4.2f}x | Imb: {imbalance_buy}↑/{imbalance_sell}↓")
-                    print(f"  → Score: {orderflow_result_mini.get('score', 0):.0f}/100 | Bias: {orderflow_result_mini.get('bias', 'NEUTRAL')}")
+
+                    # ✅ (03 JAN 2026): Afficher score avec 1 décimale pour composite (69.6 au lieu de 70)
+                    score_format = f"{orderflow_result_mini.get('score', 0):.1f}" if is_composite else f"{orderflow_result_mini.get('score', 0):.0f}"
+                    print(f"  → Score: {score_format}/100 | Bias: {orderflow_result_mini.get('bias', 'NEUTRAL')}")
+
+                    # ✅ (03 JAN 2026): Afficher détails composants si composite activé
+                    if is_composite and 'composite_details' in orderflow_result_mini:
+                        comp = orderflow_result_mini['composite_details'].get('components', {})
+                        print(f"  → Components: OF={comp.get('orderflow', 0):.0f} | "
+                              f"MS={comp.get('microstructure', 0):.0f} | "
+                              f"LQ={comp.get('liquidity', 0):.0f} | "
+                              f"DV={comp.get('divergence', 0):.0f} | "
+                              f"SM={comp.get('smart_money', 0):.0f}")
 
                     print("\n⏰ TIMING GATEKEEPER:")
                     print(f"  Ticks: {tick_count_timing:>4} | Rate: {tick_rate:>4.1f}/s | "
@@ -4011,8 +4033,8 @@ def dashboard_worker(
                 print(f"📊 SCALPING MULTI-ACTIFS - {now}")
                 print("─" * 90)
 
-                # Table header
-                print(f"{'ASSET':<7} │ {'RÉGIME':<12} │ {'ORDERFLOW':<10} │ {'TIMING':<7} │ {'ACTION':<8} │ {'CONF':<4} │ {'TICKS':<10}")
+                # Table header (03 JAN 2026: ORDERFLOW → SCORING car peut être composite)
+                print(f"{'ASSET':<7} │ {'RÉGIME':<12} │ {'SCORING':<11} │ {'TIMING':<7} │ {'ACTION':<8} │ {'CONF':<4} │ {'TICKS':<10}")
                 print("─" * 90)
 
                 # Lignes par asset (ordre fixe)
@@ -4024,7 +4046,7 @@ def dashboard_worker(
                         regime_short = r["regime"][:4] if r["regime"] else "UNKN"
                         regime_str = f"{regime_short}({r['regime_strength']:.1f})"
 
-                        # Icône + score OrderFlow
+                        # Icône + score (03 JAN 2026: .1f pour afficher composite avec décimale)
                         of_score = r["of_score"]
                         if of_score >= 70:
                             of_icon = "🟢"
@@ -4033,7 +4055,7 @@ def dashboard_worker(
                         else:
                             of_icon = "🔴"
                         bias_short = r["of_bias"][:3]
-                        of_str = f"{of_icon} {of_score:.0f}/{bias_short}"
+                        of_str = f"{of_icon} {of_score:.1f}/{bias_short}"
 
                         # Icône timing
                         timing = r["timing"]
