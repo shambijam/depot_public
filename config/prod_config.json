@@ -239,7 +239,7 @@
       }
     },
     "bot_behavior": {
-      "cycle_interval_seconds": 60,
+      "cycle_interval_seconds": 2.5,
       "ai_audit_interval_cycles": 5,
       "news_filter_enabled": false,
       "halt_on_major_news": false,

@@ -3120,10 +3120,11 @@ def scalping_worker(
         logger.info(f"[{asset}] ⏱️  Délai démarrage: {offset_seconds:.1f}s")
         time.sleep(offset_seconds)
 
-    cycle_interval = 5  # ⚡ OPTIMISÉ: 5 secondes pour capturer mouvements rapides
+    # ✅ CONFIGURABLE (02 JAN 2026): Lire cycle depuis prod_config.json
+    cycle_interval = config_manager.get("bot_behavior.cycle_interval_seconds", 2.5)
     cycle_count = 0
 
-    logger.info(f"🚀 [{asset}] Worker démarré (cycle 5s) ⚡")
+    logger.info(f"🚀 [{asset}] Worker démarré (cycle {cycle_interval}s) ⚡⚡")
 
     # ❌ DÉSACTIVÉ (25 DEC 2025): FusionManager - Architecture minimaliste
     # # ✅ Instancier FusionManager pour ce thread
@@ -4253,12 +4254,15 @@ def main(args: argparse.Namespace) -> None:
 
 
     # 9. Lancement des Threads Séparés (Scalping 10s + Liquidity 60s + Basket Monitor)
+    # ✅ CONFIGURABLE (02 JAN 2026): Lire cycle depuis config
+    scalping_cycle = config_manager.get("bot_behavior.cycle_interval_seconds", 2.5)
+
     logger.info("=" * 80)
-    logger.info("🚀 DÉMARRAGE MULTI-THREADING SCALPING (31 DEC 2025)")
+    logger.info(f"🚀 DÉMARRAGE MULTI-THREADING SCALPING (02 JAN 2026 - Cycle {scalping_cycle}s)")
     logger.info("=" * 80)
-    logger.info("  • SCALPING USDJPY Thread : Cycle 5s (offset 0.0s)")
-    logger.info("  • SCALPING EURUSD Thread : Cycle 5s (offset 1.5s)")
-    logger.info("  • SCALPING GBPUSD Thread : Cycle 5s (offset 3.0s)")
+    logger.info(f"  • SCALPING USDJPY Thread : Cycle {scalping_cycle}s (offset 0.0s)")
+    logger.info(f"  • SCALPING EURUSD Thread : Cycle {scalping_cycle}s (offset 1.5s)")
+    logger.info(f"  • SCALPING GBPUSD Thread : Cycle {scalping_cycle}s (offset 3.0s)")
     logger.info("  • DASHBOARD Thread       : Affichage agrégé 30s")
     logger.info("  • BASKET MONITOR Thread  : Surveillance continue (polling 100ms)")
     logger.info("=" * 80)
