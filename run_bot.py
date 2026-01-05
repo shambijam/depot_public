@@ -1201,8 +1201,9 @@ def run_single_pipeline_cycle(
                             # Problème: Fenêtre M1 (60s) donne scores identiques pendant 24 cycles (60s / 2.5s)
                             # Solution: Charger derniers N secondes de ticks en temps réel
 
-                            # Paramètre configurable: durée fenêtre glissante (secondes)
-                            sliding_window_seconds = 20  # 20s pour scalping sniper (vs 60s M1)
+                            # 🔪 SCALPING SNIPER: Fenêtre ultra-courte 8s pour analyse au scalpel
+                            # 8s = assez de ticks pour statistiques + assez rapide pour retournements
+                            sliding_window_seconds = 8  # 8s pour scalping sniper (vs 20s ancien)
 
                             # Calculer fenêtre glissante [NOW - Ns → NOW]
                             now_utc = pd.Timestamp.utcnow()
@@ -3249,11 +3250,11 @@ def scalping_worker(
 
             # 🎯 (05 JAN 2026): FENÊTRE GLISSANTE pour scalping sniper
             # Fix: Fenêtre M1 (60s) → scores identiques pendant 24 cycles
-            # Solution: Charger derniers 20s de ticks en temps réel
+            # Solution: Charger derniers 8s de ticks en temps réel (analyse au scalpel)
             ticks_df = None
             try:
-                # Paramètre fenêtre glissante (identique au main loop)
-                sliding_window_seconds = 20
+                # 🔪 SCALPING SNIPER: Fenêtre ultra-courte 8s (identique au main loop)
+                sliding_window_seconds = 8
 
                 # Calculer fenêtre glissante [NOW - 20s → NOW]
                 now_utc = pd.Timestamp.utcnow()

@@ -197,10 +197,10 @@
         "allowed_hours_gmt": [7, 8, 9, 10, 13, 14, 15, 16],
         "comment_hours": "Londres 7h-10h GMT + Overlap Londres/NY 13h-16h GMT (31 DEC 2025)",
         "min_tick_rate": 2.0,
-        "min_coverage_s": 15.0,
+        "min_coverage_s": 5.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.2,
-        "comment": "05 JAN 2026: min_coverage_s=15s pour fenêtre glissante 20s (vs 40s ancien M1). Spread max 1.2 pips pour EURUSD (paire serrée)"
+        "comment": "05 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.2 pips EURUSD"
       }
     }
   }
