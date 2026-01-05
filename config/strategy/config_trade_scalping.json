@@ -106,9 +106,11 @@
           11,
           14,
           15,
-          16
+          16,
+          17,
+          18
         ],
-        "comment_allowed_hours": "Whitelist stricte: 0-5h=Asie | 14-16h=Londres | 6h,17h=transitions exclus",
+        "comment_allowed_hours": "Whitelist étendue: 0-5h=Asie | 14-18h=Londres/NY | (05 JAN 2026 - TEST FLAGS FIX)",
         "optimal_hours_gmt": {
           "asian_liquid": [
             0,

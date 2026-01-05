@@ -200,9 +200,12 @@
           9,
           13,
           14,
-          15
+          15,
+          16,
+          17,
+          18
         ],
-        "comment_hours": "Londres pur 7h-9h GMT + Londres/NY 13h-15h GMT (31 DEC 2025)",
+        "comment_hours": "Londres pur 7h-9h GMT + Londres/NY 13h-18h GMT (05 JAN 2026 - TEST FLAGS FIX)",
         "min_tick_rate": 2.5,
         "min_coverage_s": 5.0,
         "max_tick_rate": 200.0,
