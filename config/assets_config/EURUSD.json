@@ -57,12 +57,12 @@
     "scalping": {
       "footprint": {
         "m1_min_ticks": 50,
-        "m1_min_coverage_s": 15,
+        "m1_min_coverage_s": 5,
         "burst_tolerance": {
           "tickrate_min": 3.0,
           "coverage_s_min_burst": 5
         },
-        "comment": "EURUSD : activité élevée (50 ticks vs 30 pour USDJPY)"
+        "comment": "05 JAN 2026 FIX: m1_min_coverage_s=5s pour fenêtre 8s (vs 15s ancien pour 60s). EURUSD : activité élevée"
       },
       "fusion": {
         "ttl_ms": 600,

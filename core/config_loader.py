@@ -486,7 +486,7 @@ class ConfigLoader:
         asset_symbol = str(asset_symbol or "").upper().strip()
         asset_config_path = asset_configs_dir / f"{asset_symbol}.json"
 
-        self.logger.info(
+        self.logger.debug(
             f"Tentative de chargement de la configuration pour l'actif '{asset_symbol}' depuis '{asset_config_path}'..."
         )
 
@@ -503,7 +503,7 @@ class ConfigLoader:
             config = self.load_dynamic_config(
                 str(asset_config_path), schema_name="asset"
             )
-            self.logger.info(
+            self.logger.debug(
                 f"Configuration pour l'actif '{asset_symbol}' chargée avec succès (validation 'asset')."
             )
             return config

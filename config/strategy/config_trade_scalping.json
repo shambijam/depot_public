@@ -135,9 +135,10 @@
           23
         ],
         "min_tick_rate": 1.0,
-        "min_coverage_s": 40.0,
+        "min_coverage_s": 5.0,
         "max_tick_rate": 200.0,
-        "max_spread_pips": 1.5
+        "max_spread_pips": 1.5,
+        "comment_coverage_fix": "05 JAN 2026 FIX: min_coverage_s=5s aligné avec fenêtre glissante 8s (vs 40s ancien pour M1 60s)"
       },
       "blocked_phases": {
         "enabled": true,

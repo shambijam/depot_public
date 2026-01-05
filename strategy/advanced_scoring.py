@@ -26,13 +26,15 @@ class SimpleAdvancedScorer:
     Combine 5 signaux institutionnels avec pondération configurable.
     """
 
-    def __init__(self, config: Optional[Dict[str, float]] = None):
+    def __init__(self, config: Optional[Dict[str, float]] = None, thresholds: Optional[Dict[str, float]] = None):
         """
-        Initialiser le scorer avec poids configurables.
+        Initialiser le scorer avec poids et seuils configurables.
 
         Args:
             config: Dictionnaire de poids (optionnel)
                    Si None, utilise poids par défaut
+            thresholds: Seuils de décision (optionnel)
+                       Si None, utilise seuils par défaut
         """
         # Poids par défaut (somme = 1.0)
         self.weights = {
@@ -43,11 +45,26 @@ class SimpleAdvancedScorer:
             'smart_money': 0.05     # Large ticks, absorption
         }
 
+        # 🔧 FIX BUG #3 (05 JAN 2026): Seuils configurables au lieu de hardcodés
+        self.thresholds = {
+            'STRONG_THRESHOLD': 75.0,
+            'GOOD_THRESHOLD': 65.0,
+            'WEAK_THRESHOLD': 55.0,
+            'NEUTRAL_LOW': 45.0,
+            'NEUTRAL_HIGH': 55.0
+        }
+
         # Override avec config custom si fourni
         if config:
             for key in self.weights:
                 if key in config:
                     self.weights[key] = config[key]
+
+        # Override seuils si fournis
+        if thresholds:
+            for key in self.thresholds:
+                if key in thresholds:
+                    self.thresholds[key] = thresholds[key]
 
         # Normaliser pour garantir somme = 1.0
         total_weight = sum(self.weights.values())
@@ -56,7 +73,7 @@ class SimpleAdvancedScorer:
             for key in self.weights:
                 self.weights[key] /= total_weight
 
-        logger.info(f"[ADVANCED_SCORER] Initialisé avec poids: {self.weights}")
+        logger.info(f"[ADVANCED_SCORER] Initialisé avec poids: {self.weights}, seuils: {self.thresholds}")
 
 
     def calculate_composite_score(
@@ -91,13 +108,16 @@ class SimpleAdvancedScorer:
             logger.warning(f"[ADVANCED_SCORER] candles_df trop court ({len(candles_df)} bougies), scores limités")
 
         # Calculer chaque composant
+        # 🔧 FIX BUG #8 (05 JAN 2026): Défauts 0.0 au lieu de 50.0 pour pénaliser absence de données
+        # Ancien comportement: 50.0 neutre → composite biaisé vers 75+ même sans signal
+        # Nouveau comportement: 0.0 pénalité → composite reflète vraiment la qualité du signal
         try:
             components = {
                 'orderflow': orderflow_score,  # Déjà calculé
-                'microstructure': self._calculate_microstructure_score(ticks_df) if ticks_df is not None else 50.0,
-                'liquidity': self._calculate_liquidity_score(ticks_df) if ticks_df is not None else 50.0,
-                'divergence': self._calculate_divergence_score(ticks_df, candles_df) if ticks_df is not None else 50.0,
-                'smart_money': self._calculate_smart_money_score(ticks_df) if ticks_df is not None else 50.0
+                'microstructure': self._calculate_microstructure_score(ticks_df) if ticks_df is not None else 0.0,
+                'liquidity': self._calculate_liquidity_score(ticks_df) if ticks_df is not None else 0.0,
+                'divergence': self._calculate_divergence_score(ticks_df, candles_df) if ticks_df is not None else 0.0,
+                'smart_money': self._calculate_smart_money_score(ticks_df) if ticks_df is not None else 0.0
             }
         except Exception as e:
             logger.error(f"[ADVANCED_SCORER] Erreur calcul composants: {e}", exc_info=True)
@@ -429,12 +449,12 @@ class SimpleAdvancedScorer:
         Returns:
             (decision, confidence)
         """
-        # Seuils de décision
-        STRONG_THRESHOLD = 75.0
-        GOOD_THRESHOLD = 65.0
-        WEAK_THRESHOLD = 55.0
-        NEUTRAL_LOW = 45.0
-        NEUTRAL_HIGH = 55.0
+        # 🔧 FIX BUG #3 (05 JAN 2026): Utiliser seuils configurables depuis self.thresholds
+        STRONG_THRESHOLD = self.thresholds['STRONG_THRESHOLD']
+        GOOD_THRESHOLD = self.thresholds['GOOD_THRESHOLD']
+        WEAK_THRESHOLD = self.thresholds['WEAK_THRESHOLD']
+        NEUTRAL_LOW = self.thresholds['NEUTRAL_LOW']
+        NEUTRAL_HIGH = self.thresholds['NEUTRAL_HIGH']
 
         # Déterminer direction
         if composite_score >= NEUTRAL_HIGH:
