@@ -75,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Chemin vers le fichier de configuration principal (ex: config/prod_config.json). Priorité sur la configuration par défaut."
     )
+    start_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="🔍 Mode DEBUG: Affiche les détails techniques (delta, bias, components) dans le dashboard pour déboguer."
+    )
 
 
     # --- TODO: Ajouter d'autres sous-commandes ici (exemples commentés) ---

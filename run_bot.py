@@ -3984,7 +3984,8 @@ def scalping_worker(
 def dashboard_worker(
     display_queue: queue.Queue,
     stop_event: threading.Event,
-    logger
+    logger,
+    verbose: bool = False
 ):
     """
     Thread dashboard: consomme la queue et affiche tableau consolidé toutes les 5 secondes.
@@ -4078,8 +4079,23 @@ def dashboard_worker(
                         # Ticks
                         ticks_str = f"{r['tick_count']} ticks"
 
-                        # Affichage ligne
+                        # Affichage ligne principale
                         print(f"{asset_name:<7} │ {regime_str:<12} │ {of_str:<10} │ {timing_str:<7} │ {action_str:<8} │ {conf_str:<4} │ {ticks_str:<10}")
+
+                        # 🔍 MODE VERBOSE: Afficher détails techniques (05 JAN 2026)
+                        if verbose:
+                            # Rationale/Veto reason
+                            rationale = r.get("rationale", "N/A")
+                            timing_reason = r.get("timing_reason", "")
+
+                            details_line = f"    └─ "
+                            if timing == "VETO" and timing_reason:
+                                # Extraire les infos du veto
+                                details_line += f"🚫 {timing_reason[:70]}"
+                            else:
+                                details_line += f"💡 {rationale}"
+
+                            print(details_line)
 
                 # Footer avec résumé
                 print("─" * 90)
@@ -4502,12 +4518,15 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # ✅ Créer thread dashboard (31 DEC 2025 - Solution B)
+    # 🔍 (05 JAN 2026): Support mode verbose pour déboguer
+    verbose_mode = getattr(args, 'verbose', False)
     thread_dashboard = threading.Thread(
         target=dashboard_worker,
         args=(
             display_queue,               # display queue au lieu de global_state
             dashboard_stop_event,
-            logger
+            logger,
+            verbose_mode                 # 🔍 Mode DEBUG activable
         ),
         daemon=True,
         name="Dashboard"

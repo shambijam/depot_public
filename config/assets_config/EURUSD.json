@@ -126,7 +126,7 @@
             "divergence": 0.10,
             "vpoc": 0.05
           },
-          "entry_threshold": 0.75
+          "entry_threshold": 0.60
         },
         "ncp_strong": {
           "delta_abs_min": 100.0,
