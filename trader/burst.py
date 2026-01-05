@@ -1268,6 +1268,33 @@ def monitor_burst_baskets(
                     continue  # Stats impossibles : skip silencieux
                 sym, direction, pip_size, avg_entry, avg_price, pnl_pips = stats
 
+                # 🎯 (05 JAN 2026): Charger config ASSET-SPECIFIC pour target_profit_pips
+                # Permet des seuils différents par actif (ex: USDJPY=2.1, EURUSD=15.0, GBPUSD=20.0)
+                asset_target_profit = target_profit  # Fallback sur global
+                asset_max_loss = max_loss_pips       # Fallback sur global
+
+                try:
+                    config_mgr = getattr(self, "config_manager", None)
+                    if config_mgr and hasattr(config_mgr, "config_loader"):
+                        asset_config = config_mgr.config_loader.load_asset_config(sym) or {}
+                        asset_closure = (
+                            asset_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("closure_rules", {})
+                        )
+                        if asset_closure:
+                            asset_target_profit = float(asset_closure.get("target_profit_pips", target_profit))
+                            asset_max_loss = float(asset_closure.get("max_loss_pips", max_loss_pips))
+                            if logger and asset_target_profit != target_profit:
+                                logger.debug(
+                                    f"[ASSET_CONFIG][{sym}] target_profit={asset_target_profit}p "
+                                    f"(global={target_profit}p) | max_loss={asset_max_loss}p"
+                                )
+                except Exception as e_asset:
+                    if logger:
+                        logger.warning(f"[ASSET_CONFIG][{sym}] Erreur chargement: {e_asset}, using global config")
+
                 # 📊 Log PnL toutes les 5 secondes pour suivre l'évolution
                 now = time.time()
                 last_log = last_log_ts.get(basket_id, 0)
@@ -1275,21 +1302,22 @@ def monitor_burst_baskets(
                     last_log_ts[basket_id] = now
                     logger.info(
                         f"📊 [BASKET_MONITOR] {basket_id} | {sym} {direction} | "
-                        f"PnL={pnl_pips:+.1f}p (target={target_profit:.1f}p, max_loss={-max_loss_pips:.1f}p) | "
+                        f"PnL={pnl_pips:+.1f}p (target={asset_target_profit:.1f}p, max_loss={-asset_max_loss:.1f}p) | "
                         f"Entry={avg_entry:.5f} Current={avg_price:.5f} | "
                         f"Age={age_ms/1000:.1f}s | {len(pos)}/{expected or len(pos)} pos"
                     )
 
                 # 🛡️ LOSS GUARD — Vérification PRIORITAIRE (avant profit)
                 # Vérifie si perte >= max_loss_pips ET âge >= loss_guard_arming_ms
-                if enable_loss_guard and max_loss_pips > 0:
+                # 🎯 (05 JAN 2026): Utilise asset_max_loss (spécifique par actif)
+                if enable_loss_guard and asset_max_loss > 0:
                     if age_ms >= loss_guard_arming_ms:
-                        if pnl_pips <= -max_loss_pips:
+                        if pnl_pips <= -asset_max_loss:
                             logger.error("=" * 80)
                             logger.error(f"🛡️  [LOSS_GUARD_TRIGGERED] {basket_id} ({sym} {direction})")
                             logger.error(f"   📊 PnL actuel: {pnl_pips:.2f} pips")
-                            logger.error(f"   🛡️  Seuil max perte: -{max_loss_pips:.2f} pips")
-                            logger.error(f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{max_loss_pips:.2f}")
+                            logger.error(f"   🛡️  Seuil max perte: -{asset_max_loss:.2f} pips [{sym}-specific]")
+                            logger.error(f"   ❌ Condition remplie: {pnl_pips:.2f} <= -{asset_max_loss:.2f}")
                             logger.error(f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s (arming: {loss_guard_arming_ms/1000:.1f}s)")
                             logger.error(f"   📦 Positions: {len(pos)}/{expected or len(pos)}")
                             logger.error("   → DÉCLENCHEMENT FERMETURE PROTECTION")
@@ -1299,7 +1327,7 @@ def monitor_burst_baskets(
                                 logger.error("=" * 80)
                                 logger.error(f"🛡️  [LOSS_GUARD_CLOSED] Basket {basket_id} fermé par protection perte")
                                 logger.error(f"   💔 Perte limitée à: {pnl_pips:.2f} pips")
-                                logger.error(f"   🛡️  Seuil max: -{max_loss_pips:.2f} pips")
+                                logger.error(f"   🛡️  Seuil max: -{asset_max_loss:.2f} pips [{sym}-specific]")
                                 logger.error("=" * 80)
                                 # Nettoyer le tracking
                                 if basket_id in self._basket_first_seen_ts:
@@ -1313,7 +1341,8 @@ def monitor_burst_baskets(
                                 # Continue quand même pour checker les autres baskets
 
                 # ✅ FERMETURE si PnL >= target_profit_pips
-                if pnl_pips >= target_profit:
+                # 🎯 (05 JAN 2026): Utilise asset_target_profit (spécifique par actif)
+                if pnl_pips >= asset_target_profit:
                     logger.info("=" * 80)
                     logger.info(
                         f"🎯 [PROFIT_TARGET_REACHED] {basket_id} ({sym} {direction})"
@@ -1322,10 +1351,10 @@ def monitor_burst_baskets(
                         f"   📊 PnL actuel: {pnl_pips:+.2f} pips"
                     )
                     logger.info(
-                        f"   🎯 Seuil configuré: {target_profit:.2f} pips  ← target_profit_pips"
+                        f"   🎯 Seuil configuré: {asset_target_profit:.2f} pips [{sym}-specific] ← target_profit_pips"
                     )
                     logger.info(
-                        f"   ✅ Condition remplie: {pnl_pips:.2f} >= {target_profit:.2f}"
+                        f"   ✅ Condition remplie: {pnl_pips:.2f} >= {asset_target_profit:.2f}"
                     )
                     logger.info(
                         f"   ⏱️  Âge du basket: {age_ms/1000:.1f}s"
@@ -1340,8 +1369,8 @@ def monitor_burst_baskets(
                         logger.info("=" * 80)
                         logger.info(f"✅ [BASKET_CLOSED_SUCCESS] Basket {basket_id} fermé avec succès !")
                         logger.info(f"   💰 Profit sécurisé: +{pnl_pips:.2f} pips")
-                        logger.info(f"   🎯 Seuil utilisé: {target_profit:.2f} pips (target_profit_pips)")
-                        logger.info(f"   📈 Performance: {((pnl_pips/target_profit)*100):.1f}% du target")
+                        logger.info(f"   🎯 Seuil utilisé: {asset_target_profit:.2f} pips [{sym}-specific]")
+                        logger.info(f"   📈 Performance: {((pnl_pips/asset_target_profit)*100):.1f}% du target")
                         logger.info("=" * 80)
                         # Nettoyer le tracking
                         if basket_id in self._basket_first_seen_ts:
