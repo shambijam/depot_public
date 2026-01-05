@@ -1558,7 +1558,7 @@ def run_single_pipeline_cycle(
                                 "action": fdec["action"],
                                 "asset": asset,
                                 "price": fdec.get("price"),
-                                "confidence": fdec.get("score", 0.0),  # 0-100
+                                "confidence": fdec.get("fused_confidence", 0.0),  # 🔧 (05 JAN 2026): 0-1 scale pour compatibilité avec entry_threshold
                                 "no_fallback": True,
                                 "entry_style": "MARKET",
                                 "validity_ms": int(fdec.get("ttl_ms", 800)),
@@ -3687,10 +3687,26 @@ def scalping_worker(
                         )
                     else:
                         # PASS timing + PASS phase → Décision basée sur OrderFlow
+                        # 🎯 (05 JAN 2026): Lire min_score DYNAMIQUEMENT depuis asset config
+                        asset_min_score_worker = 65.0  # Default sniper (si composite: ~65, si OrderFlow seul: ~70)
+                        try:
+                            aconf_worker = config_manager.config_loader.load_asset_config(asset) or {}
+                            asset_min_score_worker = float(
+                                (aconf_worker.get("overrides", {}) or {})
+                                .get("scalping", {})
+                                .get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("min_score", asset_min_score_worker)
+                            )
+                            logger.debug(f"[CONFIG_WORKER][{asset}] min_score={asset_min_score_worker} (from asset config)")
+                        except Exception as e_min_score_worker:
+                            logger.warning(f"[CONFIG_WORKER][{asset}] Erreur lecture min_score: {e_min_score_worker}, using default={asset_min_score_worker}")
+
                         try:
                             decision_mini = market_analyzer_thread.build_decision(
                                 orderflow_result=orderflow_result_mini,
-                                min_score=70.0
+                                min_score=asset_min_score_worker
                             ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
 
                             logger.info(
