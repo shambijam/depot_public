@@ -3988,9 +3988,12 @@ def dashboard_worker(
     verbose: bool = False
 ):
     """
-    Thread dashboard: consomme la queue et affiche tableau consolidé toutes les 5 secondes.
+    Thread dashboard: vide la queue et affiche tableau consolidé toutes les 5 secondes.
 
-    Attend de recevoir les 3 rapports (USDJPY, EURUSD, GBPUSD) puis affiche:
+    🎯 (05 JAN 2026): Draine TOUTE la queue à chaque cycle pour éviter accumulation.
+    Garde seulement le dernier rapport par asset (USDJPY, EURUSD, GBPUSD).
+
+    Affiche:
     ═══════════════════════════════════════════════════════════════════════════════
     📊 SCALPING MULTI-ACTIFS - 31 Dec 2025 14:30:05
     ───────────────────────────────────────────────────────────────────────────────
@@ -4003,25 +4006,25 @@ def dashboard_worker(
     """
     import pandas as pd
 
-    display_interval = 5.0  # 5 secondes (synchronisé avec workers)
-    timeout_collect = 2.0   # Timeout pour collecter les 3 rapports
+    display_interval = 5.0  # 5 secondes entre chaque affichage
 
     logger.info("📊 [DASHBOARD] Thread démarré (affichage 5s)")
 
     while not stop_event.is_set():
         try:
-            # Collecter les rapports de la queue
+            # 🎯 (05 JAN 2026): VIDER la queue complètement pour éviter accumulation
+            # Problème: assets produisent 6 rapports/5s, dashboard ne consomme que 3
+            # Solution: drainer toute la queue et garder seulement le dernier par asset
             reports = {}
-            start_collect = time.time()
 
-            # Collecter jusqu'à 3 rapports ou timeout
-            while len(reports) < 3 and (time.time() - start_collect) < timeout_collect:
+            # Vider la queue complètement (non-bloquant)
+            while True:
                 try:
-                    report = display_queue.get(timeout=0.1)
-                    reports[report["asset"]] = report
+                    report = display_queue.get_nowait()
+                    reports[report["asset"]] = report  # Écrase ancien rapport du même asset
                     display_queue.task_done()
                 except queue.Empty:
-                    continue
+                    break  # Queue vidée
 
             # Afficher seulement si on a au moins 1 rapport
             if reports:

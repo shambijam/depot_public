@@ -10,17 +10,17 @@ from logging.handlers import RotatingFileHandler
 # Pour l'instant, nous gardons l'import local pour suivre la structure existante.
 
 
-def setup_production_logging(log_level: str = "INFO", console_level: str = "WARNING") -> None:
+def setup_production_logging(log_level: str = "INFO", console_level: str = "INFO") -> None:
     """
     Initialise un logging de qualité institutionnelle pour le bot.
     Cette fonction est la source unique de vérité pour la configuration du logging.
 
     Args:
         log_level: Niveau pour le fichier log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        console_level: Niveau pour la console (défaut: WARNING pour affichage propre)
+        console_level: Niveau pour la console (défaut: INFO pour debugging)
 
-    🎯 (05 JAN 2026): console_level=WARNING pour épurer la console
-    Le dashboard affiche les infos importantes, la console ne montre que warnings/errors
+    🎯 (05 JAN 2026): console_level=INFO pour voir les détails de décision
+    Peut être changé à WARNING pour production (console propre avec dashboard uniquement)
     """
     try:
         from config_manager.config_manager import ConfigManager
@@ -66,9 +66,9 @@ def setup_production_logging(log_level: str = "INFO", console_level: str = "WARN
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
 
-    # 🎯 (05 JAN 2026): Console affiche uniquement WARNING+ pour épurer l'affichage
-    # Le dashboard gère l'affichage des infos importantes (scores, trades)
-    # Les logs détaillés (INFO/DEBUG) vont dans le fichier uniquement
+    # 🎯 (05 JAN 2026): Console affiche INFO+ pour debugging (configurable)
+    # Pour production propre: passer console_level="WARNING" lors de l'appel
+    # Le dashboard gère l'affichage des scores, les logs montrent les décisions
     console_handler = logging.StreamHandler(sys.stdout)
     console_formatter = logging.Formatter("[%(levelname)s] - %(message)s")
     console_handler.setFormatter(console_formatter)
