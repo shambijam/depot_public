@@ -516,11 +516,17 @@ class ScalpingStrategy(BaseStrategy):
                         total_count = len(ticks_df)
                         unknown_count = total_count - buy_count - sell_count
 
-                        # 🔍 LOG (26 DEC 2025): Détecter ticks non classés
+                        # 🔍 LOG (05 JAN 2026): Détecter ticks non classés (WARNING si >10%, sinon DEBUG)
                         if unknown_count > 0:
-                            self.logger.warning(
-                                f"[ORDERFLOW_TICKS_UNKNOWN][{asset}] {unknown_count} ticks non classés (total={total_count})"
-                            )
+                            unknown_pct = (unknown_count / total_count * 100) if total_count > 0 else 0
+                            if unknown_pct > 10:
+                                self.logger.warning(
+                                    f"[ORDERFLOW_TICKS_UNKNOWN][{asset}] {unknown_count} ticks non classés ({unknown_pct:.1f}%, total={total_count})"
+                                )
+                            else:
+                                self.logger.debug(
+                                    f"[ORDERFLOW_TICKS_UNKNOWN][{asset}] {unknown_count} ticks non classés ({unknown_pct:.1f}%, total={total_count})"
+                                )
 
                         # Ratio moyen attendu = 50/50
                         # Si > 60% buy → imbalance buy

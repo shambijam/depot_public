@@ -3411,7 +3411,7 @@ def scalping_worker(
                     )
                     # 🔍 DEBUG (02 JAN 2026): Vérifier trade_settings
                     trade_settings = broker_account.get("trade_settings", {}) if broker_account else {}
-                    logger.critical(f"[{asset}] 🔍 broker_account.trade_settings = {trade_settings}")
+                    logger.debug(f"[{asset}] 🔍 broker_account.trade_settings = {trade_settings}")
                 except Exception as e_broker:
                     logger.warning(f"[{asset}] Erreur récupération broker account: {e_broker}")
 
