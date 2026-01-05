@@ -199,6 +199,8 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
+            "min_score": 65.0,
+            "comment_min_score": "05 JAN 2026: Seuil OrderFlow minimum pour décision BUY/SELL (65=sniper, 70=normal, 75=conservateur)",
             "of_v6_gate": {
               "min_score": 0.65,
               "require_ncp_strong": true,

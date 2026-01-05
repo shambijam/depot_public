@@ -1494,10 +1494,26 @@ def run_single_pipeline_cycle(
                         )
 
                         # ========== ÉTAPE 3: DÉCISION DIRECTE via MarketAnalyzer ==========
+                        # 🎯 (05 JAN 2026): Lire min_score depuis config asset-specific (dynamique)
+                        # Hiérarchie: USDJPY.json → config_trade_scalping.json → défaut (70.0)
                         try:
+                            # Charger min_score depuis asset config
+                            asset_min_score = 70.0  # Défaut global
+                            try:
+                                aconf = config_manager.config_loader.load_asset_config(asset) or {}
+                                asset_min_score = float(
+                                    (aconf.get("entry_rules", {}) or {})
+                                    .get("scalping", {})
+                                    .get("burst_scalping", {})
+                                    .get("min_score", asset_min_score)
+                                )
+                                logger.debug(f"[CONFIG][{asset}] min_score={asset_min_score} (from asset config)")
+                            except Exception as e_min_score:
+                                logger.warning(f"[CONFIG][{asset}] Erreur lecture min_score: {e_min_score}, using default={asset_min_score}")
+
                             decision = market_analyzer.build_decision(
                                 orderflow_result=orderflow_result,
-                                min_score=75.0  # Seuil défini dans config
+                                min_score=asset_min_score
                             )
 
                             logger.info(
