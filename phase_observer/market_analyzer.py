@@ -143,12 +143,21 @@ class MarketAnalyzer:
                 self.logger.error(f"[MarketAnalyzer] PhaseObserver.analyze() error: {e}")
 
         # Latest candle
+        # 🔧 FIX (05 JAN 2026): Utiliser iloc[-2] (bougie fermée) pour cohérence avec ScalpingStrategy
+        # ScalpingStrategy analyse iloc[-2] pour avoir ticks complets → Régime doit matcher !
         latest = {}
         if not annotated_df.empty:
             try:
-                latest = annotated_df.iloc[-1].to_dict()
+                # Utiliser avant-dernière bougie (fermée) pour synchronisation avec OrderFlow
+                latest = annotated_df.iloc[-2].to_dict()
+                self.logger.debug(
+                    f"[MarketAnalyzer] Régime basé sur bougie FERMÉE (iloc[-2]) pour sync avec OrderFlow"
+                )
             except Exception as e:
                 self.logger.warning(f"[MarketAnalyzer] latest extraction error: {e}")
+                # Fallback sur dernière si problème
+                if len(annotated_df) >= 1:
+                    latest = annotated_df.iloc[-1].to_dict()
 
         return {
             "asset": asset,

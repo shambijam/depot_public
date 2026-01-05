@@ -471,7 +471,8 @@ class ScalpingStrategy(BaseStrategy):
                 try:
                     import pandas as pd
 
-                    # Utiliser avant-dernière bougie (fermée)
+                    # 🔧 (05 JAN 2026): Utiliser avant-dernière bougie (FERMÉE) pour ticks complets
+                    # MarketAnalyzer.analyze() utilise aussi iloc[-2] pour SYNCHRONISATION régime/bias
                     last_candle = df_m1.iloc[-2]
 
                     # Extraire timestamp de la bougie
