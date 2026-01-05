@@ -1197,48 +1197,45 @@ def run_single_pipeline_cycle(
                     try:
                         # Identifier la dernière bougie M1 (en cours)
                         if subset_df is not None and not subset_df.empty:
-                            # ✅ BOUGIE COURANTE (n-1) : analyse en temps réel
-                            # On analyse TOUJOURS la bougie en cours de formation
-                            candle_idx = len(subset_df) - 1 if len(subset_df) >= 1 else 0
+                            # 🎯 (05 JAN 2026): FENÊTRE GLISSANTE pour scalping sniper (<10s)
+                            # Problème: Fenêtre M1 (60s) donne scores identiques pendant 24 cycles (60s / 2.5s)
+                            # Solution: Charger derniers N secondes de ticks en temps réel
 
-                            # Extraire les timestamps de la bougie M1 (60 secondes)
-                            # Utiliser la colonne 'time' si disponible, sinon l'index
-                            if 'time' in subset_df.columns:
-                                candle_start = pd.to_datetime(subset_df.iloc[candle_idx]['time'])
-                            elif isinstance(subset_df.index, pd.DatetimeIndex):
-                                candle_start = subset_df.index[candle_idx]
-                            else:
-                                # Fallback : convertir l'index en DatetimeIndex
-                                subset_df.index = pd.to_datetime(subset_df.index)
-                                candle_start = subset_df.index[candle_idx]
+                            # Paramètre configurable: durée fenêtre glissante (secondes)
+                            sliding_window_seconds = 20  # 20s pour scalping sniper (vs 60s M1)
 
-                            candle_end = candle_start + pd.Timedelta(minutes=1)
+                            # Calculer fenêtre glissante [NOW - Ns → NOW]
+                            now_utc = pd.Timestamp.utcnow()
+                            tick_window_start = now_utc - pd.Timedelta(seconds=sliding_window_seconds)
+                            tick_window_end = now_utc
 
                             logger.info(
-                                f"[TICKS] Récupération ticks pour bougie M1 COURANTE (n-1) | "
-                                f"start={candle_start.isoformat()} | end={candle_end.isoformat()}"
+                                f"[{asset}] 🔄 Chargement ticks [fenêtre glissante {sliding_window_seconds}s] | "
+                                f"[{tick_window_start.strftime('%H:%M:%S')} → {tick_window_end.strftime('%H:%M:%S')}]"
                             )
 
-                            # Récupérer UNIQUEMENT les ticks de cette fenêtre de 60 secondes
-                            # ✅ FIX (24 Nov 2025): Utiliser get_ticks_for_candle() qui classifie les ticks (flags 16/32 + tick-rule)
-                            ticks_df = mt5_connector.get_ticks_for_candle(
-                                asset,
-                                candle_start.to_pydatetime(),
-                                candle_end.to_pydatetime()
-                            )
+                            # Récupérer les ticks de la fenêtre glissante (non verrouillée à 60s)
+                            # Note: get_ticks_for_candle() accepte n'importe quelle fenêtre (le verrou 60s sera contourné)
+                            try:
+                                ticks_df = mt5_connector.get_ticks_for_candle(
+                                    asset,
+                                    tick_window_start.to_pydatetime(),
+                                    tick_window_end.to_pydatetime()
+                                )
+                            except Exception as e_ticks:
+                                logger.error(f"[{asset}] Erreur chargement ticks fenêtre glissante: {e_ticks}")
+                                ticks_df = None
 
                             if ticks_df is not None and not ticks_df.empty:
                                 logger.info(
-                                    f"[TICKS] ✅ Récupéré {len(ticks_df)} ticks pour {asset} | "
-                                    f"fenêtre=[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                                    f"[{asset}] ✅ {len(ticks_df)} ticks chargés (fenêtre glissante {sliding_window_seconds}s)"
                                 )
                             else:
                                 logger.warning(
-                                    f"[TICKS] ⚠️ Aucun tick dans la fenêtre M1 pour {asset} | "
-                                    f"[{candle_start.isoformat()} → {candle_end.isoformat()}]"
+                                    f"[{asset}] ⚠️ Aucun tick dans la fenêtre glissante {sliding_window_seconds}s"
                                 )
                         else:
-                            logger.warning(f"[TICKS] ⚠️ subset_df vide, impossible de déterminer fenêtre M1")
+                            logger.warning(f"[{asset}] ⚠️ subset_df vide, fenêtre glissante non calculée")
                     except Exception as e:
                         logger.error(f"[TICKS] ❌ Erreur récupération ticks {asset}: {e}")
                 else:
@@ -3250,41 +3247,37 @@ def scalping_worker(
                 time.sleep(cycle_interval)
                 continue
 
-            # ✅ CHARGEMENT TICKS (26 DEC 2025 / 03 JAN 2026): Requis pour timing_gatekeeper liquidité analysis
-            # Récupérer ticks de la dernière bougie M1 pour évaluation tick_rate et coverage
-            # ⚡ AMÉLIORATION (03 JAN 2026): Vérification symbol + timeout + logging renforcé
+            # 🎯 (05 JAN 2026): FENÊTRE GLISSANTE pour scalping sniper
+            # Fix: Fenêtre M1 (60s) → scores identiques pendant 24 cycles
+            # Solution: Charger derniers 20s de ticks en temps réel
             ticks_df = None
             try:
-                # Utiliser avant-dernière bougie (fermée) pour éviter données incomplètes
-                last_candle = rates_df.iloc[-2] if len(rates_df) >= 2 else rates_df.iloc[-1]
+                # Paramètre fenêtre glissante (identique au main loop)
+                sliding_window_seconds = 20
 
-                # Extraire timestamp de la bougie
-                if "time" in rates_df.columns:
-                    candle_start = pd.to_datetime(last_candle["time"], utc=True, errors="coerce")
-                else:
-                    candle_start = pd.to_datetime(last_candle.name, utc=True, errors="coerce")
-
-                # Fallback si timestamp invalide
-                if pd.isna(candle_start):
-                    candle_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=1)
-
-                candle_end = candle_start + pd.Timedelta(minutes=1)
+                # Calculer fenêtre glissante [NOW - 20s → NOW]
+                now_utc = pd.Timestamp.utcnow()
+                tick_window_start = now_utc - pd.Timedelta(seconds=sliding_window_seconds)
+                tick_window_end = now_utc
 
                 # Logging début chargement
-                logger.info(f"[{asset}] 🔄 Chargement ticks [{candle_start.strftime('%H:%M:%S')} → {candle_end.strftime('%H:%M:%S')}]...")
+                logger.info(
+                    f"[{asset}] 🔄 Chargement ticks [fenêtre glissante {sliding_window_seconds}s] | "
+                    f"[{tick_window_start.strftime('%H:%M:%S')} → {tick_window_end.strftime('%H:%M:%S')}]"
+                )
 
-                # Charger ticks pour cette fenêtre M1 (avec timeout 5s par défaut)
+                # Charger ticks pour fenêtre glissante (avec timeout 5s par défaut)
                 ticks_df = mt5_connector.get_ticks_for_candle(
                     asset,
-                    candle_start.to_pydatetime(),
-                    candle_end.to_pydatetime(),
+                    tick_window_start.to_pydatetime(),
+                    tick_window_end.to_pydatetime(),
                     timeout=5.0  # ⚡ TIMEOUT (03 JAN 2026): Protection contre blocage MT5
                 )
 
                 if ticks_df is not None and not ticks_df.empty:
-                    logger.info(f"[{asset}] ✅ {len(ticks_df)} ticks chargés")
+                    logger.info(f"[{asset}] ✅ {len(ticks_df)} ticks chargés (fenêtre glissante {sliding_window_seconds}s)")
                 else:
-                    logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré pour cette bougie")
+                    logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré dans fenêtre glissante {sliding_window_seconds}s")
                     ticks_df = None
 
             except TimeoutError as e_timeout:

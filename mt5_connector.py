@@ -1795,13 +1795,20 @@ class MT5Connector:
             return pd.DataFrame(columns=ret_cols)
 
         try:
-            # ── Normalisation UTC + verrou 60s
+            # ── Normalisation UTC (05 JAN 2026: Verrou 60s supprimé pour fenêtre glissante)
             if start_ts.tzinfo is None:
                 start_ts = start_ts.replace(tzinfo=timezone.utc)
             if end_ts.tzinfo is None:
                 end_ts = end_ts.replace(tzinfo=timezone.utc)
-            if (end_ts - start_ts).total_seconds() != 60.0:
-                end_ts = start_ts + timedelta(seconds=60)
+
+            # ✅ FIX (05 JAN 2026): Autoriser fenêtres de durée variable pour scalping sniper
+            # Ancien code forçait 60s → scores identiques pendant 24 cycles
+            # Maintenant accepte n'importe quelle durée (ex: 15-20s pour sniper)
+            # Validation: durée entre 5s et 120s
+            duration_sec = (end_ts - start_ts).total_seconds()
+            if duration_sec < 5 or duration_sec > 120:
+                self.logger.warning(f"[MT5C] Fenêtre ticks anormale: {duration_sec:.1f}s (accepté: 5-120s)")
+                # Ne pas forcer 60s, utiliser la fenêtre demandée
 
             # ── Requête brute AVEC TIMEOUT (03 JAN 2026)
             # Protection contre blocage MT5 indéfini
