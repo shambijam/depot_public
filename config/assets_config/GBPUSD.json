@@ -204,10 +204,10 @@
         ],
         "comment_hours": "Londres pur 7h-9h GMT + Londres/NY 13h-15h GMT (31 DEC 2025)",
         "min_tick_rate": 2.5,
-        "min_coverage_s": 40.0,
+        "min_coverage_s": 15.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.8,
-        "comment": "Spread max 1.8 pips pour GBPUSD (paire plus large)"
+        "comment": "05 JAN 2026: min_coverage_s=15s pour fenêtre glissante 20s (vs 40s ancien M1). Spread max 1.8 pips pour GBPUSD (paire plus large)"
       }
     }
   }

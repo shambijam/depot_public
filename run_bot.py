@@ -1137,7 +1137,7 @@ def run_single_pipeline_cycle(
             if excluded_symbols:
                 logger.info(f"🔒 [PIPELINE] Symboles exclus: {excluded_symbols}")
 
-        print(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
+        logger.info(f"🎯 [PIPELINE] Assets tradables: {tradeable_assets}")
         if not tradeable_assets:
             logger.warning("Aucun actif à trader pour ce cycle. Cycle ignoré.")
             return False
@@ -1153,7 +1153,7 @@ def run_single_pipeline_cycle(
         min_required_bars = 50
 
         for asset in tradeable_assets:
-            print(f"📊 [PIPELINE] Analyse de {asset}...")
+            logger.debug(f"📊 [PIPELINE] Analyse de {asset}...")
             try:
                 rates_df = mt5_connector.get_rates(asset, timeframe_str, bars_to_fetch)
                 if (
@@ -1592,9 +1592,9 @@ def run_single_pipeline_cycle(
             logger.warning("Aucun signal valide généré. Fin du cycle.")
             return False
 
-        # === FUSION SUMMARY (affichage) ===
-        print("\n" + "=" * 58)
-        print("🔎 FUSION SUMMARY (par actif)")
+        # === FUSION SUMMARY (fichier log uniquement) ===
+        logger.debug("=" * 58)
+        logger.debug("🔎 FUSION SUMMARY (par actif)")
 
         def _fmt_float(x):
             try:
@@ -1607,7 +1607,7 @@ def run_single_pipeline_cycle(
             try:
                 # Fusion uniquement pour USDJPY
                 if asset.upper() != "USDJPY":
-                    print(f"   {asset:<7} → n/a (fusion off)")
+                    logger.debug(f"   {asset:<7} → n/a (fusion off)")
                     continue
 
                 # Récupération robuste du 'latest' (clé normalisée)
@@ -1715,9 +1715,9 @@ def run_single_pipeline_cycle(
                 used_line = (
                     f"used:     action={act_used:<4} score={_fmt_float(sc_used)}"
                 )
-                print(f"   {asset:<7} → {used_line} | {snap_line}")
+                logger.debug(f"   {asset:<7} → {used_line} | {snap_line}")
             else:
-                print(f"   {asset:<7} → {snap_line}")
+                logger.debug(f"   {asset:<7} → {snap_line}")
 
         # === GATECHECK USDJPY (diagnostic) ===
         try:
@@ -1950,9 +1950,9 @@ def run_single_pipeline_cycle(
                     pass
 
                 if blocks:
-                    print("[BLOCKERS][USDJPY] " + " | ".join(blocks))
+                    logger.debug("[BLOCKERS][USDJPY] " + " | ".join(blocks))
                 else:
-                    print("[BLOCKERS][USDJPY] none")
+                    logger.debug("[BLOCKERS][USDJPY] none")
         except Exception as _e:
             logger.debug(f"[GATECHECK][USDJPY] skip: {_e}")
 
@@ -1968,8 +1968,8 @@ def run_single_pipeline_cycle(
             active_mt5_account_details,
         )
         global_context["diag_tracker"] = get_tracker_from_context(global_context)
-        print("✅ [PIPELINE] Contexte global construit avec succès !")
-        print(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
+        logger.debug("✅ [PIPELINE] Contexte global construit avec succès !")
+        logger.debug(f"2️⃣ CONTEXT KEYS: {list(global_context.keys())}")
 
         # === FAST-LANE (exécuter immédiatement la meilleure décision Fusion valide) ===
         try:
@@ -2385,7 +2385,7 @@ def run_single_pipeline_cycle(
             logger.error(f"❌ [BURST EXIT] Erreur CRITIQUE: {e}", exc_info=True)
 
         # === Pipeline institutionnel (peut produire Liquidity, etc.) ===
-        print("🤖 [PIPELINE] Appel du decision_pipeline...")
+        logger.debug("🤖 [PIPELINE] Appel du decision_pipeline...")
         decision_package = (
             decision_pipeline.institutional_decision_pipeline(global_context) or {}
         )
@@ -2472,25 +2472,25 @@ def run_single_pipeline_cycle(
         ctx_out = decision_package.get("context", {}) or {}
 
         if final_decisions:
-            print("📦 [PIPELINE] Décisions multiples détectées:")
+            logger.debug("📦 [PIPELINE] Décisions multiples détectées:")
             for d in final_decisions:
-                print(
+                logger.debug(
                     f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
         else:
-            print("📦 [PIPELINE] Aucune décision multiple détectée.")
+            logger.debug("📦 [PIPELINE] Aucune décision multiple détectée.")
 
         if not ctx_out.get("__decision_logged"):
-            print("3️⃣ DÉCISION RETOURNÉE:")
-            print(f"   Action: {final.get('action', 'NONE')}")
-            print(f"   Asset: {final.get('asset', 'NONE')}")
-            print(f"   Volume: {final.get('volume', 0)}")
-            print(
+            logger.debug("3️⃣ DÉCISION RETOURNÉE:")
+            logger.debug(f"   Action: {final.get('action', 'NONE')}")
+            logger.debug(f"   Asset: {final.get('asset', 'NONE')}")
+            logger.debug(f"   Volume: {final.get('volume', 0)}")
+            logger.debug(
                 "   ✅ TRADE DÉCIDÉ !"
                 if str(final.get("action", "")).upper() in {"BUY", "SELL"}
                 else "   ❌ PAS DE TRADE"
             )
-            print("=" * 60 + "\n")
+            logger.debug("=" * 60 + "\n")
 
         # === Filtre scalping: FUSION-ONLY + USDJPY + fusion_data valide ===
         _all_scalping = decision_package.get("scalping_decisions") or []
@@ -2544,7 +2544,7 @@ def run_single_pipeline_cycle(
             except Exception as _e:
                 logger.debug(f"[WHY_NO_TRADE] diagnostic skip: {_e}")
 
-            print("📦 [PIPELINE] Aucune décision détectée.")
+            logger.debug("📦 [PIPELINE] Aucune décision détectée.")
             logger.info("Aucun trade décidé ce cycle.")
             return False
 
@@ -2690,9 +2690,9 @@ def run_single_pipeline_cycle(
 
         # === Exécution Scalping (Fusion-only) ===
         if scalping_decisions:
-            print("📦 [PIPELINE] Décisions Scalping détectées:")
+            logger.debug("📦 [PIPELINE] Décisions Scalping détectées:")
             for d in scalping_decisions:
-                print(
+                logger.debug(
                     f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
 
@@ -2946,9 +2946,9 @@ def run_single_pipeline_cycle(
 
         # === Exécution Liquidity ===
         if liquidity_decisions:
-            print("📦 [PIPELINE] Décisions Liquidity détectées:")
+            logger.debug("📦 [PIPELINE] Décisions Liquidity détectées:")
             for d in liquidity_decisions:
-                print(
+                logger.debug(
                     f"   → {d.get('action')} {d.get('asset')} | vol={d.get('volume', 0)}"
                 )
             for td in liquidity_decisions:
@@ -3830,38 +3830,10 @@ def scalping_worker(
                     session = qm.get("session", "UNKNOWN")
                     hour_gmt = pd.Timestamp.now(tz='UTC').hour
 
-                    # Afficher tableau condensé
-                    print("\n" + "─" * 90)
-                    print(f"📊 [{asset}] ANALYSE CYCLE {cycle_count}")
-                    print("─" * 90)
-
-                    # ✅ (03 JAN 2026): Afficher titre adaptatif selon mode scoring
-                    is_composite = orderflow_result_mini.get('composite_enabled', False)
-                    scoring_title = "📈 COMPOSITE SCORING:" if is_composite else "📈 ORDERFLOW V6:"
-                    print(scoring_title)
-
-                    print(f"  Delta: {delta_total:>6.0f} | Coherence: {coherence:>4.0%} | "
-                          f"Volume: {volume_ratio:>4.2f}x | Imb: {imbalance_buy}↑/{imbalance_sell}↓")
-
-                    # ✅ (03 JAN 2026): Afficher score avec 1 décimale pour composite (69.6 au lieu de 70)
-                    score_format = f"{orderflow_result_mini.get('score', 0):.1f}" if is_composite else f"{orderflow_result_mini.get('score', 0):.0f}"
-                    print(f"  → Score: {score_format}/100 | Bias: {orderflow_result_mini.get('bias', 'NEUTRAL')}")
-
-                    # ✅ (03 JAN 2026): Afficher détails composants si composite activé
-                    if is_composite and 'composite_details' in orderflow_result_mini:
-                        comp = orderflow_result_mini['composite_details'].get('components', {})
-                        print(f"  → Components: OF={comp.get('orderflow', 0):.0f} | "
-                              f"MS={comp.get('microstructure', 0):.0f} | "
-                              f"LQ={comp.get('liquidity', 0):.0f} | "
-                              f"DV={comp.get('divergence', 0):.0f} | "
-                              f"SM={comp.get('smart_money', 0):.0f}")
-
-                    print("\n⏰ TIMING GATEKEEPER:")
-                    print(f"  Ticks: {tick_count_timing:>4} | Rate: {tick_rate:>4.1f}/s | "
-                          f"Coverage: {coverage_s:>4.1f}s | GMT: {hour_gmt:02d}h | Session: {session}")
-                    print(f"  → Verdict: {timing_verdict.get('verdict', 'UNKNOWN')} "
-                          f"({timing_verdict.get('veto_reason', 'N/A') if timing_verdict.get('verdict') != 'PASS' else 'OK'})")
-                    print("─" * 90)
+                    # 🎯 (05 JAN 2026): Tableau cycle SUPPRIMÉ (pollue console)
+                    # Le dashboard affiche tout proprement toutes les 5s
+                    # Logs détaillés vont dans le fichier uniquement
+                    pass
 
                 except Exception as e_display:
                     logger.warning(f"[{asset}] Erreur affichage tableau: {e_display}")
