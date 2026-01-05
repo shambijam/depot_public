@@ -1889,14 +1889,17 @@ class MT5Connector:
                 point = 0.0
             eps = max(point * 0.5, 1e-12)
 
-            # ── Décodage des flags : 16=BUY, 32=SELL (prioritaires)
+            # ── Décodage des flags MT5 : 32=BUY, 64=SELL (prioritaires)
+            # 🔴 FIX (05 JAN 2026): CORRECTION FLAGS INVERSÉS (16/32 → 32/64)
+            # TICK_FLAG_BUY  = 32 (0x20) - Achat confirmé
+            # TICK_FLAG_SELL = 64 (0x40) - Vente confirmée
             flags = df["flags"].astype(int)
-            is_buy_flag = (flags & 16) > 0
-            is_sell_flag = (flags & 32) > 0
+            is_buy_flag = (flags & 32) > 0  # 0x20 = BUY
+            is_sell_flag = (flags & 64) > 0  # 0x40 = SELL
 
             # 🔍 DEBUG (24 Nov 2025): Log flags distribution
             self.logger.critical(f"[MT5C_DEBUG] Flags sample (first 10): {flags.head(10).tolist()}")
-            self.logger.critical(f"[MT5C_DEBUG] Buy flags (16): {is_buy_flag.sum()} | Sell flags (32): {is_sell_flag.sum()}")
+            self.logger.critical(f"[MT5C_DEBUG] Buy flags (32/0x20): {is_buy_flag.sum()} | Sell flags (64/0x40): {is_sell_flag.sum()}")
 
             side = np.where(
                 is_buy_flag, "buy", np.where(is_sell_flag, "sell", "unknown")
