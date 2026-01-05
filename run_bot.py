@@ -3598,8 +3598,18 @@ def scalping_worker(
                     and not can_override_veto  # ✅ NOUVEAU: Signal fort peut passer outre
                 )
 
+                # 🔍 LOG DEBUG (05 JAN 2026): Tracer la décision
+                logger.critical(
+                    f"[DECISION_LOGIC][{asset}] timing_blocks_trade={timing_blocks_trade} | "
+                    f"can_override_veto={can_override_veto} | "
+                    f"timing_verdict={timing_verdict.get('verdict') if timing_verdict else None} | "
+                    f"orderflow_score={orderflow_score:.1f} | "
+                    f"veto_score={veto_score:.1f}"
+                )
+
                 if timing_blocks_trade:
                     # VETO timing trop fort → HOLD
+                    logger.critical(f"[DECISION_BRANCH][{asset}] ➡️ BRANCHE 1: TIMING_VETO (score={orderflow_score:.1f} < 85, veto={veto_score:.1f})")
                     veto_reason = timing_verdict.get('veto_reason', 'Unknown')
                     logger.info(
                         f"⚠️  [TIMING_VETO] {veto_reason} (veto={veto_score:.0f}) "
@@ -3624,6 +3634,7 @@ def scalping_worker(
                     }
                 elif can_override_veto:
                     # ✅ OVERRIDE: Signal fort passe outre veto modéré
+                    logger.critical(f"[DECISION_BRANCH][{asset}] ➡️ BRANCHE 2: OVERRIDE_VETO (score={orderflow_score:.1f} ≥ 85)")
                     logger.info(
                         f"🚀 [VETO_OVERRIDE] {override_reason} → Signal autorisé malgré timing non optimal"
                     )
@@ -3682,6 +3693,116 @@ def scalping_worker(
                         # PASS timing + PASS phase → Décision basée sur OrderFlow
                         # 🎯 (05 JAN 2026): Lire min_score DYNAMIQUEMENT depuis asset config
                         asset_min_score_worker = 65.0  # Default sniper (si composite: ~65, si OrderFlow seul: ~70)
+                        try:
+                            aconf_worker = config_manager.config_loader.load_asset_config(asset) or {}
+                            asset_min_score_worker = float(
+                                (aconf_worker.get("overrides", {}) or {})
+                                .get("scalping", {})
+                                .get("entry_rules", {})
+                                .get("scalping", {})
+                                .get("burst_scalping", {})
+                                .get("min_score", asset_min_score_worker)
+                            )
+                            logger.debug(f"[CONFIG_WORKER][{asset}] min_score={asset_min_score_worker} (from asset config)")
+                        except Exception as e_min_score_worker:
+                            logger.warning(f"[CONFIG_WORKER][{asset}] Erreur lecture min_score: {e_min_score_worker}, using default={asset_min_score_worker}")
+
+                        try:
+                            decision_mini = market_analyzer_thread.build_decision(
+                                orderflow_result=orderflow_result_mini,
+                                min_score=asset_min_score_worker
+                            ) if market_analyzer_thread else {"action": "HOLD", "confidence": 0.0, "rationale": "MarketAnalyzer unavailable"}
+
+                            logger.info(
+                                f"[DECISION][{asset}] action={decision_mini['action']} | "
+                                f"confidence={decision_mini['confidence']:.2f} | "
+                                f"rationale={decision_mini['rationale']}"
+                            )
+                        except Exception as e_decision:
+                            logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
+                            decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
+
+                        # Construction fusion_out
+                        if decision_mini["action"] in ["BUY", "SELL"]:
+                            anchor_price = decision_mini.get("anchor_price") or (latest.get("current_price") if latest else None) or (latest.get("close") if latest else None)
+
+                            fusion_out = {
+                                "ok": True,
+                                "action": decision_mini["action"],
+                                "fused_confidence": decision_mini["confidence"],
+                                "signal_type": "MINIMALIST_ORDERFLOW",
+                                "rationale": decision_mini["rationale"],
+                                "orderflow_score": orderflow_result_mini["score"],
+                                "timing_quality": timing_verdict.get("quality_metrics", {}),
+                                "price": anchor_price,
+                                "context": ctx
+                            }
+
+                            logger.info(
+                                f"🎯 [MINIMALIST][{asset}] ✅ {fusion_out['action']} | "
+                                f"confidence={fusion_out['fused_confidence']:.2f} | "
+                                f"OF_score={orderflow_result_mini['score']:.1f}"
+                            )
+                        else:
+                            fusion_out = {
+                                "ok": False,
+                                "action": "HOLD",
+                                "fused_confidence": 0.0,
+                                "signal_type": "MINIMALIST_HOLD",
+                                "rationale": decision_mini["rationale"],
+                                "orderflow_score": orderflow_result_mini["score"]
+                            }
+
+                            logger.info(
+                                f"[MINIMALIST][{asset}] HOLD | rationale={decision_mini['rationale']}"
+                            )
+                else:
+                    # ✅ FIX (05 JAN 2026): Cas PASS normal sans override
+                    # timing_blocks_trade == False (PASS) ET can_override_veto == False (score < 85)
+                    # → Appliquer logique normale: vérifier phase + build_decision()
+                    logger.critical(f"[DECISION_BRANCH][{asset}] ➡️ BRANCHE 3: PASS_NORMAL (timing=PASS, score={orderflow_score:.1f} < 85)")
+
+                    # Vérifier REGIME VETO
+                    latest_candle = market_results.get("latest", {})
+                    current_regime = latest_candle.get("regime", "unknown")
+                    phase_str = str(current_regime).lower() if current_regime else "unknown"
+
+                    blocked_phases_config = scalping_config_global.get("entry_rules", {}).get("scalping", {}).get("blocked_phases", {})
+                    blocked_phases_enabled = blocked_phases_config.get("enabled", True)
+                    blocked_phases_list = blocked_phases_config.get("phases", ["range", "accumulation", "range_accumulation", "range_distribution"])
+                    phase_is_blocked = blocked_phases_enabled and any(blocked in phase_str for blocked in blocked_phases_list)
+
+                    if phase_is_blocked:
+                        logger.critical(f"[DECISION_BRANCH][{asset}] 🚫 BRANCHE 3.1: REGIME_VETO (phase={phase_str} in {blocked_phases_list})")
+                        logger.critical(
+                            f"[REGIME_CONFIG_VETO][{asset}] 🚫 RÉGIME '{phase_str}' INTERDIT ! "
+                            f"Régimes bloqués (config): {blocked_phases_list}"
+                        )
+
+                        decision_mini = {
+                            "action": "HOLD",
+                            "confidence": 0.0,
+                            "rationale": f"REGIME VETO: Régime '{phase_str}' interdit (range/accumulation bloqué)",
+                            "anchor_price": None
+                        }
+
+                        fusion_out = {
+                            "ok": False,
+                            "action": "HOLD",
+                            "fused_confidence": 0.0,
+                            "signal_type": "REGIME_VETO",
+                            "veto_reason": f"Régime '{phase_str}' interdit",
+                            "orderflow_score": orderflow_result_mini["score"]
+                        }
+
+                        logger.info(
+                            f"[MINIMALIST][{asset}] HOLD | rationale=REGIME VETO: {phase_str}"
+                        )
+                    else:
+                        # PASS timing + PASS phase → Décision basée sur OrderFlow
+                        logger.critical(f"[DECISION_BRANCH][{asset}] ✅ BRANCHE 3.2: BUILD_DECISION (phase={phase_str} OK, score={orderflow_score:.1f})")
+                        # 🎯 (05 JAN 2026): Lire min_score DYNAMIQUEMENT depuis asset config
+                        asset_min_score_worker = 60.0  # Default sniper (composite scoring)
                         try:
                             aconf_worker = config_manager.config_loader.load_asset_config(asset) or {}
                             asset_min_score_worker = float(
