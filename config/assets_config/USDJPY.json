@@ -49,12 +49,6 @@
       "enabled": true
     }
   },
-  "symbol_info": {
-    "point": 0.001,
-    "digits": 3,
-    "trade_contract_size": 100000,
-    "trade_tick_size": 0.001
-  },
   "strategy_toggles": {
     "scalping": true,
     "liquidity": false
@@ -220,7 +214,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 1.8,
+        "target_profit_pips": 1.5,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
