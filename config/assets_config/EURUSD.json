@@ -161,6 +161,12 @@
           "delta_abs_min": 100.0,
           "tickrate_min": 3.0,
           "comment": "Seuils NCP standards pour EURUSD"
+        },
+        "momentum_filter": {
+          "enabled": true,
+          "lookback_bars": 3,
+          "min_price_change_points": 0.0,
+          "comment": "06 JAN 2026 MODE SNIPER: Filtre confluence momentum - BUY si Delta>0 ET prix monte, SELL si Delta<0 ET prix descend. Évite trades contre-courant!"
         }
       },
       "entry_rules": {

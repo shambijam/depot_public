@@ -2165,6 +2165,41 @@ class ScalpingStrategy(BaseStrategy):
                         f"[{asset}] {action_emoji} ACTION FINALE DÉCIDÉE: {action}"
                     )
 
+                # 06 JAN 2026 MODE SNIPER: FILTRE MOMENTUM - Rejette signaux contre-courant
+                if action in ("BUY", "SELL"):
+                    try:
+                        asset_cfg = self.config_manager.load_asset_config(asset) or {}
+                        mom_cfg = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                        if mom_cfg.get("enabled", False):
+                            lookback = int(mom_cfg.get("lookback_bars", 3))
+                            min_change = float(mom_cfg.get("min_price_change_points", 0.0))
+
+                            if len(df_work) >= lookback + 1:
+                                # Momentum = variation de prix sur N dernières bougies
+                                current_price = df_work["close"].iloc[-1]
+                                past_price = df_work["close"].iloc[-(lookback + 1)]
+                                momentum = current_price - past_price
+
+                                # Vérification confluence
+                                if action == "BUY" and momentum < min_change:
+                                    self.logger.warning(
+                                        f"[{asset}] ❌ BUY REJETÉ (momentum filter): Delta positif MAIS prix descend "
+                                        f"(momentum={momentum:.5f} < {min_change}). Évite trade contre-courant!"
+                                    )
+                                    action = None  # Rejette le signal
+                                elif action == "SELL" and momentum > -min_change:
+                                    self.logger.warning(
+                                        f"[{asset}] ❌ SELL REJETÉ (momentum filter): Delta négatif MAIS prix monte "
+                                        f"(momentum={momentum:.5f} > {-min_change}). Évite trade contre-courant!"
+                                    )
+                                    action = None  # Rejette le signal
+                                else:
+                                    self.logger.info(
+                                        f"[{asset}] ✅ Momentum filter PASSED: {action} aligné avec momentum={momentum:.5f}"
+                                    )
+                    except Exception as e:
+                        self.logger.debug(f"[{asset}] Momentum filter skipped: {e}")
+
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
 
