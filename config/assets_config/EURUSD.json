@@ -196,7 +196,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 3.0,
+        "target_profit_pips": 2.5,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
@@ -204,7 +204,7 @@
         "enable_loss_guard": true,
         "max_loss_pips": 20.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "05 JAN 2026: Sniper scalping <10s → Profit 3.0p (covers spread 0.8p avg + slippage 0.2p + edge 0.4p), Loss 20p = ratio 1:6.7"
+        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 2.5p (baissé de 3.0p), Loss 20p = ratio 1:8.0"
       },
       "timing_gatekeeper": {
         "enabled": true,

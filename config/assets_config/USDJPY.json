@@ -243,7 +243,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 2.1,
+        "target_profit_pips": 1.8,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
@@ -251,7 +251,7 @@
         "enable_loss_guard": true,
         "max_loss_pips": 15.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "05 JAN 2026: Sniper scalping <10s → Profit 2.1p (validé par tests réels), Loss 15p = ratio 1:7.1"
+        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 1.8p (baissé de 2.1p), Loss 15p = ratio 1:8.3"
       },
       "timing_gatekeeper": {
         "comment": "⚠️ DÉPRÉCIÉ: allowed_hours_gmt déplacé vers config/strategy/config_trade_scalping.json (29 DEC 2025)",
