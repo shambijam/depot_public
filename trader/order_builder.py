@@ -784,35 +784,8 @@ def _prepare_order_sequential(self, decision_package: dict) -> dict:
         self.logger.critical(f"   ✅ Valeur finale: {resolved_risk_pct}%")
         self.logger.critical("=" * 80)
 
-        def _to_pos_float(x, default=None):
-            try:
-                if isinstance(x, str):
-                    x = x.strip().replace(",", ".")
-                v = float(x)
-                return v if v > 0 else default
-            except Exception:
-                return default
-
-        # === Vérification min/max ===
-        min_risk = _to_pos_float(
-            self.config_manager.get("risk_management.min_risk_per_trade_percent", 0.01),
-            0.01,
-        )
-        max_risk = _to_pos_float(
-            self.config_manager.get("risk_management.max_risk_per_trade_percent", 2.0),
-            2.0,
-        )
-
-        if resolved_risk_pct < min_risk:
-            self.logger.warning(
-                f"[SIZING] risk% {resolved_risk_pct:.2f}% < min {min_risk:.2f}% → forcé à {min_risk:.2f}%"
-            )
-            resolved_risk_pct = min_risk
-        elif resolved_risk_pct > max_risk:
-            self.logger.warning(
-                f"[SIZING] risk% {resolved_risk_pct:.2f}% > max {max_risk:.2f}% → forcé à {max_risk:.2f}%"
-            )
-            resolved_risk_pct = max_risk
+        # 06 JAN 2026: PAS DE MIN/MAX - Utilise risk_per_trade_percent TEL QUEL
+        # resolved_risk_pct est utilisé directement sans limitation
 
         if not sl_price or sl_price <= 0:
             raise TradeExecutionError(
