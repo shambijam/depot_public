@@ -3496,12 +3496,17 @@ def scalping_worker(
                         )
 
                         # ✅ NOUVEAU (03 JAN 2026): Calcul composite score avec SimpleAdvancedScorer
+                        # 🆕 06 JAN 2026 PHASE 3: Ajout institutional_analysis!
                         if advanced_scorer:
                             try:
+                                # Récupérer institutional_analysis depuis orderflow_result_mini
+                                institutional_analysis = orderflow_result_mini.get('institutional_analysis', {})
+
                                 composite_result = advanced_scorer.calculate_composite_score(
                                     ticks_df=ticks_df,
                                     candles_df=rates_df_fresh,
-                                    orderflow_score=orderflow_result_mini['score']
+                                    orderflow_score=orderflow_result_mini['score'],
+                                    institutional_analysis=institutional_analysis  # 🆕 PHASE 3!
                                 )
 
                                 # Remplacer le score OrderFlow V6 par le composite score
@@ -3509,10 +3514,12 @@ def scalping_worker(
                                 orderflow_result_mini['composite_details'] = composite_result
                                 orderflow_result_mini['composite_enabled'] = True
 
+                                # 06 JAN 2026 PHASE 3: Ajout INST dans les logs!
                                 logger.info(
                                     f"[COMPOSITE_SCORE][{asset}] {composite_result['composite_score']:.1f}/100 | "
                                     f"Decision={composite_result['decision']} ({composite_result['confidence']}) | "
                                     f"Components: OF={composite_result['components']['orderflow']:.0f} "
+                                    f"INST={composite_result['components']['institutional']:.0f} "
                                     f"MS={composite_result['components']['microstructure']:.0f} "
                                     f"LQ={composite_result['components']['liquidity']:.0f} "
                                     f"DV={composite_result['components']['divergence']:.0f} "

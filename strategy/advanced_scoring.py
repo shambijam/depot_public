@@ -37,11 +37,13 @@ class SimpleAdvancedScorer:
                        Si None, utilise seuils par défaut
         """
         # Poids par défaut (somme = 1.0)
+        # 06 JAN 2026 PHASE 3: Intégration des 5 analyseurs institutionnels!
         self.weights = {
-            'orderflow': 0.50,      # Score V6 existant
-            'microstructure': 0.20, # Tape speed, clusters
+            'orderflow': 0.35,      # Score V6 existant (réduit 50→35%)
+            'institutional': 0.25,  # 🆕 Les 5 analyseurs sophistiqués!
+            'microstructure': 0.15, # Tape speed, clusters (réduit 20→15%)
             'liquidity': 0.15,      # Pressure, continuité
-            'divergence': 0.10,     # Price/delta divergence
+            'divergence': 0.05,     # Price/delta divergence (réduit 10→5%)
             'smart_money': 0.05     # Large ticks, absorption
         }
 
@@ -80,15 +82,17 @@ class SimpleAdvancedScorer:
         self,
         ticks_df: Optional[pd.DataFrame],
         candles_df: pd.DataFrame,
-        orderflow_score: float
+        orderflow_score: float,
+        institutional_analysis: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Calculer le score composite à partir des 5 composants.
+        Calculer le score composite à partir des 6 composants (PHASE 3 - 06 JAN 2026).
 
         Args:
             ticks_df: DataFrame des ticks (None si indisponible)
             candles_df: DataFrame M1 (minimum 10 bougies)
             orderflow_score: Score OrderFlow V6 (0-100)
+            institutional_analysis: Résultats des 5 analyseurs institutionnels
 
         Returns:
             {
@@ -111,9 +115,11 @@ class SimpleAdvancedScorer:
         # 🔧 FIX BUG #8 (05 JAN 2026): Défauts 0.0 au lieu de 50.0 pour pénaliser absence de données
         # Ancien comportement: 50.0 neutre → composite biaisé vers 75+ même sans signal
         # Nouveau comportement: 0.0 pénalité → composite reflète vraiment la qualité du signal
+        # 🆕 06 JAN 2026 PHASE 3: Ajout du composant institutional (les 5 analyseurs!)
         try:
             components = {
                 'orderflow': orderflow_score,  # Déjà calculé
+                'institutional': self._calculate_institutional_score(institutional_analysis) if institutional_analysis else 50.0,  # 🆕 Les 5 analyseurs!
                 'microstructure': self._calculate_microstructure_score(ticks_df) if ticks_df is not None else 0.0,
                 'liquidity': self._calculate_liquidity_score(ticks_df) if ticks_df is not None else 0.0,
                 'divergence': self._calculate_divergence_score(ticks_df, candles_df) if ticks_df is not None else 0.0,
@@ -151,7 +157,7 @@ class SimpleAdvancedScorer:
         logger.info(
             f"[ADVANCED_SCORER] Composite={composite_score:.1f}/100 | "
             f"Decision={decision} ({confidence}) | "
-            f"Components: OF={components['orderflow']:.0f} MS={components['microstructure']:.0f} "
+            f"Components: OF={components['orderflow']:.0f} INST={components['institutional']:.0f} MS={components['microstructure']:.0f} "
             f"LQ={components['liquidity']:.0f} DV={components['divergence']:.0f} SM={components['smart_money']:.0f}"
         )
 
@@ -435,6 +441,142 @@ class SimpleAdvancedScorer:
 
         except Exception as e:
             logger.error(f"[SMART_MONEY] Erreur calcul: {e}", exc_info=True)
+            return 50.0
+
+
+    def _calculate_institutional_score(self, institutional_analysis: Dict[str, Any]) -> float:
+        """
+        🆕 06 JAN 2026 PHASE 3: Agréger les 5 analyseurs institutionnels en score 0-100.
+
+        Les 5 analyseurs:
+        1. Price Memory → Qualité des niveaux mémoire
+        2. Market Fatigue → État d'épuisement du marché
+        3. Market Physics → Bias physique (inertie, momentum)
+        4. Microstructure (Tape Speed) → Vitesse et ignition
+        5. Liquidity Heatmap (Pressure) → Pression buy/sell
+
+        Args:
+            institutional_analysis: Dict contenant les 5 analyses
+
+        Returns:
+            Score 0-100 (0=bearish fort, 50=neutre, 100=bullish fort)
+        """
+        if not institutional_analysis:
+            return 50.0  # Neutre si pas de données
+
+        try:
+            scores = []
+            weights = []
+
+            # 1. PRICE MEMORY (20%) - Niveaux frais vs memory signals
+            price_memory = institutional_analysis.get('price_memory', {})
+            memory_signals = price_memory.get('memory_signals', [])
+            fresh_levels = price_memory.get('fresh_levels', [])
+
+            if memory_signals or fresh_levels:
+                # Plus de niveaux frais = bullish (opportunité), plus de memory = résistance
+                fresh_ratio = len(fresh_levels) / max(1, len(memory_signals) + len(fresh_levels))
+                memory_score = 50.0 + (fresh_ratio - 0.5) * 50.0  # 0→25, 0.5→50, 1→75
+                scores.append(memory_score)
+                weights.append(0.20)
+                logger.debug(f"[INST_SCORE] PriceMemory: {memory_score:.1f} (fresh={len(fresh_levels)}, memory={len(memory_signals)})")
+
+            # 2. MARKET FATIGUE (25%) - État du marché
+            market_fatigue = institutional_analysis.get('market_fatigue', {})
+            fatigue_state = str(market_fatigue.get('market_state', 'NEUTRAL')).upper()
+            fatigue_score_raw = float(market_fatigue.get('fatigue_score', 5.0))  # 0-10
+
+            if fatigue_state != 'UNKNOWN':
+                # Fatigue high = bullish exhausted (bearish), fatigue low = fresh (bullish)
+                fatigue_score = 50.0 + (5.0 - fatigue_score_raw) * 5.0  # 10→0, 5→50, 0→100
+
+                # Ajustement par état
+                if fatigue_state == 'EXHAUSTED_BUYERS':
+                    fatigue_score = min(fatigue_score, 30.0)  # Force bearish
+                elif fatigue_state == 'EXHAUSTED_SELLERS':
+                    fatigue_score = max(fatigue_score, 70.0)  # Force bullish
+                elif fatigue_state == 'BALANCED':
+                    fatigue_score = 50.0
+
+                scores.append(fatigue_score)
+                weights.append(0.25)
+                logger.debug(f"[INST_SCORE] MarketFatigue: {fatigue_score:.1f} (state={fatigue_state}, score={fatigue_score_raw:.1f}/10)")
+
+            # 3. MARKET PHYSICS (25%) - Bias physique
+            market_physics = institutional_analysis.get('market_physics', {})
+            physics_bias = str(market_physics.get('physics_bias', 'NEUTRAL')).upper()
+            price_inertia = market_physics.get('price_inertia', {})
+            inertia_dir = str(price_inertia.get('direction', 'NEUTRAL')).upper()
+
+            if physics_bias != 'UNKNOWN':
+                # Convertir bias en score
+                if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
+                    physics_score = 75.0
+                elif 'BEARISH' in physics_bias or 'SELL' in physics_bias:
+                    physics_score = 25.0
+                else:
+                    physics_score = 50.0
+
+                # Boost si inertie alignée
+                if inertia_dir == 'UPWARD':
+                    physics_score = min(100.0, physics_score + 10.0)
+                elif inertia_dir == 'DOWNWARD':
+                    physics_score = max(0.0, physics_score - 10.0)
+
+                scores.append(physics_score)
+                weights.append(0.25)
+                logger.debug(f"[INST_SCORE] MarketPhysics: {physics_score:.1f} (bias={physics_bias}, inertia={inertia_dir})")
+
+            # 4. TAPE SPEED (15%) - Vitesse du tape
+            tape_speed = institutional_analysis.get('tape_speed', {})
+            speed_ratio = float(tape_speed.get('speed_ratio', 1.0))
+            speed_interp = str(tape_speed.get('interpretation', 'NORMAL')).upper()
+
+            if speed_ratio > 0:
+                # Speed élevé = activité (neutre à bullish), speed faible = apathie (bearish)
+                if speed_ratio >= 2.0:
+                    tape_score = 70.0  # Haute activité
+                elif speed_ratio >= 1.5:
+                    tape_score = 60.0
+                elif speed_ratio >= 0.8:
+                    tape_score = 50.0  # Normal
+                else:
+                    tape_score = 35.0  # Apathie
+
+                scores.append(tape_score)
+                weights.append(0.15)
+                logger.debug(f"[INST_SCORE] TapeSpeed: {tape_score:.1f} (ratio={speed_ratio:.2f}, interp={speed_interp})")
+
+            # 5. PRESSURE RATIO (15%) - Pression buy/sell
+            pressure_ratio = institutional_analysis.get('pressure_ratio', {})
+            pressure_dir = str(pressure_ratio.get('direction', 'NEUTRAL')).upper()
+            pressure_norm = float(pressure_ratio.get('normalized_pressure', 0.0))  # -1 à +1
+
+            if pressure_dir != 'UNKNOWN':
+                # Convertir pression en score
+                pressure_score = 50.0 + (pressure_norm * 50.0)  # -1→0, 0→50, +1→100
+
+                scores.append(pressure_score)
+                weights.append(0.15)
+                logger.debug(f"[INST_SCORE] Pressure: {pressure_score:.1f} (dir={pressure_dir}, norm={pressure_norm:.2f})")
+
+            # Calcul final pondéré
+            if scores:
+                total_weight = sum(weights)
+                institutional_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
+                institutional_score = max(0.0, min(100.0, institutional_score))
+
+                logger.info(
+                    f"[INST_SCORE] ✅ Score Institutionnel={institutional_score:.1f}/100 "
+                    f"({len(scores)}/5 analyseurs actifs)"
+                )
+                return round(institutional_score, 2)
+            else:
+                logger.warning("[INST_SCORE] Aucun analyseur actif, score neutre 50.0")
+                return 50.0
+
+        except Exception as e:
+            logger.error(f"[INST_SCORE] Erreur calcul: {e}", exc_info=True)
             return 50.0
 
 
