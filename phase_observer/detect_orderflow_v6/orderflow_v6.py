@@ -172,7 +172,18 @@ def detect_orderflow_v6(
         }
     
     # --- 3) Métriques volume (core) ---
-    df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
+    # Extraction cvd_slope_window depuis vp_options (06 JAN 2026 - Problème #4 fix)
+    cvd_slope_window = None
+    if isinstance(vp_options, dict) and "cvd_slope_window" in vp_options:
+        cvd_slope_window = vp_options.get("cvd_slope_window")
+        if cvd_slope_window is not None:
+            cvd_slope_window = int(cvd_slope_window)
+
+    df, metrics = calculate_volume_metrics(
+        df,
+        cvd_smoothing=cvd_smoothing,
+        cvd_slope_window=cvd_slope_window
+    )
     
     try:
         df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)

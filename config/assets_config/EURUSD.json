@@ -80,6 +80,8 @@
           "vwap_key": "vwap"
         },
         "lookback_bars": 20,
+        "cvd_slope_window": 20,
+        "comment_cvd_slope": "06 JAN 2026 FIX Problème #4: Fenêtre CVD slope alignée sur lookback_bars (cohérence temporelle)",
         "features": {
           "delta": {
             "abs_strong": 100.0,
@@ -103,7 +105,8 @@
           },
           "cvd": {
             "slope_window": 10,
-            "slope_min": 0.0
+            "slope_min": 0.0,
+            "comment": "06 JAN 2026 FIX: slope_window déprécié, utilisez cvd_slope_window au niveau orderflow_v6"
           },
           "vwap": {
             "confirm_window": 10

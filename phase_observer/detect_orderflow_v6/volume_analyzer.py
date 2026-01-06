@@ -1,6 +1,6 @@
 # phase_observer/detect_orderflow_v6/volume_analyzer.py
 from __future__ import annotations
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 from collections import OrderedDict
@@ -80,7 +80,9 @@ def _ols_slope_lastN(y: np.ndarray, N: int) -> float:
 
 
 def calculate_volume_metrics(
-    df: pd.DataFrame, cvd_smoothing: float = 0.0
+    df: pd.DataFrame,
+    cvd_smoothing: float = 0.0,
+    cvd_slope_window: Optional[int] = None
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Métriques volume alignées V5 + ajouts V6 (sans Numba) :
@@ -88,6 +90,9 @@ def calculate_volume_metrics(
       - CVD avec lissage EMA via pandas.ewm(alpha=..)
       - VWAP (TP*Vol cumulé / Vol cumulé), pente VWAP, écart prix–VWAP
       - Expose des infos utiles au scoring: rows, coverage_s, tick_rate
+
+    Args:
+      cvd_slope_window: Fenêtre pour calcul pente CVD (défaut: 20 ou taille CVD)
 
     Retour: (df_enrichi, metrics) avec clés:
       total_volume, delta_total, imbalance_mean, buy_ratio, aggress_ratio,
@@ -233,8 +238,11 @@ def calculate_volume_metrics(
         )
     df["cvd"] = cvd
 
-    # pente CVD
-    N = 20 if cvd.size >= 20 else max(2, cvd.size)
+    # pente CVD (06 JAN 2026: fenêtre configurable pour cohérence avec lookback)
+    if cvd_slope_window is not None and cvd_slope_window > 0:
+        N = min(cvd_slope_window, cvd.size) if cvd.size >= cvd_slope_window else max(2, cvd.size)
+    else:
+        N = 20 if cvd.size >= 20 else max(2, cvd.size)
     cvd_slope = _ols_slope_lastN(cvd, N)
 
     # ---- VWAP (typical price * vol cumulé / vol cumulé) ----
