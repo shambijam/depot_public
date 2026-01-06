@@ -962,6 +962,15 @@ class ScalpingStrategy(BaseStrategy):
                 # Récupérer ticks depuis asset_signals (si disponibles)
                 ticks_df = asset_signals.get("ticks_df", None)
 
+                # 06 JAN 2026 FIX: Diagnostiquer colonne 'volume' manquante
+                if ticks_df is not None:
+                    self.logger.info(
+                        f"[{asset}] 🔍 TICKS_DF COLONNES: {list(ticks_df.columns)} | "
+                        f"Taille: {len(ticks_df)} rows × {len(ticks_df.columns)} cols"
+                    )
+                else:
+                    self.logger.warning(f"[{asset}] ⚠️ ticks_df est None!")
+
                 # 1. PRIORITY_1: Price Memory (mémoire du prix)
                 try:
                     price_memory = PriceMemoryAnalyzer(logger=self.logger)
@@ -977,9 +986,11 @@ class ScalpingStrategy(BaseStrategy):
                     # 06 JAN 2026 FIX: Diagnostiquer pourquoi Fatigue retourne N/A
                     ticks_count = len(ticks_df) if ticks_df is not None else 0
                     candles_count = len(df_m1) if df_m1 is not None else 0
+                    ticks_cols = list(ticks_df.columns) if ticks_df is not None else []
                     self.logger.info(
                         f"[{asset}] 😫 MarketFatigue PRE-CHECK: ticks_df={ticks_count} ticks, "
-                        f"df_m1={candles_count} bars (besoin: ticks>=5, candles>=5)"
+                        f"df_m1={candles_count} bars (besoin: ticks>=5, candles>=5) | "
+                        f"ticks_columns={ticks_cols}"
                     )
 
                     fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
@@ -987,7 +998,11 @@ class ScalpingStrategy(BaseStrategy):
                     institutional_analysis['market_fatigue'] = fatigue_result
                     self.logger.info(f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
                 except Exception as e_fatigue:
-                    self.logger.warning(f"[{asset}] ⚠️ MarketFatigue EXCEPTION: {e_fatigue}")
+                    import traceback
+                    self.logger.warning(
+                        f"[{asset}] ⚠️ MarketFatigue EXCEPTION: {e_fatigue}\n"
+                        f"Traceback: {traceback.format_exc()}"
+                    )
                     institutional_analysis['market_fatigue'] = {}
 
                 # 3. PRIORITY_3: Market Physics (lois physiques du marché)
@@ -1005,7 +1020,11 @@ class ScalpingStrategy(BaseStrategy):
                     institutional_analysis['market_physics'] = physics_result
                     self.logger.info(f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
                 except Exception as e_physics:
-                    self.logger.warning(f"[{asset}] ⚠️ MarketPhysics EXCEPTION: {e_physics}")
+                    import traceback
+                    self.logger.warning(
+                        f"[{asset}] ⚠️ MarketPhysics EXCEPTION: {e_physics}\n"
+                        f"Traceback: {traceback.format_exc()}"
+                    )
                     institutional_analysis['market_physics'] = {}
 
                 # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)
