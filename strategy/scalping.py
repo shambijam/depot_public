@@ -974,22 +974,38 @@ class ScalpingStrategy(BaseStrategy):
 
                 # 2. PRIORITY_2: Market Fatigue (épuisement acheteurs/vendeurs)
                 try:
+                    # 06 JAN 2026 FIX: Diagnostiquer pourquoi Fatigue retourne N/A
+                    ticks_count = len(ticks_df) if ticks_df is not None else 0
+                    candles_count = len(df_m1) if df_m1 is not None else 0
+                    self.logger.info(
+                        f"[{asset}] 😫 MarketFatigue PRE-CHECK: ticks_df={ticks_count} ticks, "
+                        f"df_m1={candles_count} bars (besoin: ticks>=5, candles>=5)"
+                    )
+
                     fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
                     fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1.tail(20))
                     institutional_analysis['market_fatigue'] = fatigue_result
-                    self.logger.debug(f"[{asset}] 😫 MarketFatigue: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
+                    self.logger.info(f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
                 except Exception as e_fatigue:
-                    self.logger.debug(f"[{asset}] MarketFatigue error: {e_fatigue}")
+                    self.logger.warning(f"[{asset}] ⚠️ MarketFatigue EXCEPTION: {e_fatigue}")
                     institutional_analysis['market_fatigue'] = {}
 
                 # 3. PRIORITY_3: Market Physics (lois physiques du marché)
                 try:
+                    # 06 JAN 2026 FIX: Diagnostiquer pourquoi Physics retourne N/A
+                    ticks_count = len(ticks_df) if ticks_df is not None else 0
+                    candles_count = len(df_m1) if df_m1 is not None else 0
+                    self.logger.info(
+                        f"[{asset}] ⚛️ MarketPhysics PRE-CHECK: ticks_df={ticks_count} ticks, "
+                        f"df_m1={candles_count} bars (besoin: ticks>=10, candles>=10)"
+                    )
+
                     physics_analyzer = MarketPhysicsAnalyzer(logger=self.logger)
                     physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1)
                     institutional_analysis['market_physics'] = physics_result
-                    self.logger.debug(f"[{asset}] ⚛️ MarketPhysics: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
+                    self.logger.info(f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
                 except Exception as e_physics:
-                    self.logger.debug(f"[{asset}] MarketPhysics error: {e_physics}")
+                    self.logger.warning(f"[{asset}] ⚠️ MarketPhysics EXCEPTION: {e_physics}")
                     institutional_analysis['market_physics'] = {}
 
                 # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)

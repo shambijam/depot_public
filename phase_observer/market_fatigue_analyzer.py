@@ -55,6 +55,12 @@ class MarketFatigueAnalyzer:
             }
         """
         if recent_candles is None or len(recent_candles) < 5:
+            # 06 JAN 2026 FIX: Log WARNING pour diagnostiquer pourquoi N/A
+            if self.logger:
+                candles_count = len(recent_candles) if recent_candles is not None else 0
+                self.logger.warning(
+                    f"⚠️ MarketFatigueAnalyzer: Données insuffisantes (candles={candles_count}, besoin>=5) → Retourne UNKNOWN"
+                )
             return {
                 'fatigue_score': 0.0,
                 'buyer_fatigue': {'score': 0, 'reason': 'Pas assez de données'},

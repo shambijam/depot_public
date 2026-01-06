@@ -56,6 +56,14 @@ class MarketPhysicsAnalyzer:
             }
         """
         if candles_df is None or len(candles_df) < 10:
+            # 06 JAN 2026 FIX: Log WARNING pour diagnostiquer pourquoi N/A
+            if self.logger:
+                candles_count = len(candles_df) if candles_df is not None else 0
+                ticks_count = len(ticks_df) if ticks_df is not None else 0
+                self.logger.warning(
+                    f"⚠️ MarketPhysicsAnalyzer: Données insuffisantes (candles={candles_count}, "
+                    f"ticks={ticks_count}, besoin candles>=10) → Retourne NEUTRAL"
+                )
             return {
                 'energy_conservation': {},
                 'price_inertia': {},
