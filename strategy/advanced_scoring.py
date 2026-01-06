@@ -479,28 +479,36 @@ class SimpleAdvancedScorer:
                 memory_score = 50.0 + (fresh_ratio - 0.5) * 50.0  # 0→25, 0.5→50, 1→75
                 scores.append(memory_score)
                 weights.append(0.20)
-                logger.debug(f"[INST_SCORE] PriceMemory: {memory_score:.1f} (fresh={len(fresh_levels)}, memory={len(memory_signals)})")
+                logger.info(f"[INST_SCORE] PriceMemory: {memory_score:.1f} (fresh={len(fresh_levels)}, memory={len(memory_signals)})")
 
             # 2. MARKET FATIGUE (25%) - État du marché
             market_fatigue = institutional_analysis.get('market_fatigue', {})
-            fatigue_state = str(market_fatigue.get('market_state', 'NEUTRAL')).upper()
+            fatigue_state = str(market_fatigue.get('market_state', 'UNKNOWN')).upper()
             fatigue_score_raw = float(market_fatigue.get('fatigue_score', 5.0))  # 0-10
 
+            # 06 JAN 2026 FIX: États réels retournés par MarketFatigueAnalyzer
+            # 'EXHAUSTED' (>=7), 'FATIGUED' (>=4), 'NORMAL' (>=2), 'ENERGETIC' (<2)
             if fatigue_state != 'UNKNOWN':
-                # Fatigue high = bullish exhausted (bearish), fatigue low = fresh (bullish)
+                # Fatigue high = bearish (épuisement), fatigue low = bullish (énergie)
                 fatigue_score = 50.0 + (5.0 - fatigue_score_raw) * 5.0  # 10→0, 5→50, 0→100
 
-                # Ajustement par état
-                if fatigue_state == 'EXHAUSTED_BUYERS':
-                    fatigue_score = min(fatigue_score, 30.0)  # Force bearish
-                elif fatigue_state == 'EXHAUSTED_SELLERS':
-                    fatigue_score = max(fatigue_score, 70.0)  # Force bullish
-                elif fatigue_state == 'BALANCED':
+                # Ajustement par état (06 JAN 2026: utiliser vrais états)
+                if fatigue_state == 'EXHAUSTED':
+                    # Marché épuisé → probable reversal → bearish (contre le mouvement actuel)
+                    fatigue_score = 30.0
+                elif fatigue_state == 'FATIGUED':
+                    # Marché fatigué → affaiblissement
+                    fatigue_score = 40.0
+                elif fatigue_state == 'NORMAL':
+                    # Marché sain → neutre
                     fatigue_score = 50.0
+                elif fatigue_state == 'ENERGETIC':
+                    # Marché énergique → continuation probable → bullish
+                    fatigue_score = 65.0
 
                 scores.append(fatigue_score)
                 weights.append(0.25)
-                logger.debug(f"[INST_SCORE] MarketFatigue: {fatigue_score:.1f} (state={fatigue_state}, score={fatigue_score_raw:.1f}/10)")
+                logger.info(f"[INST_SCORE] MarketFatigue: {fatigue_score:.1f} (state={fatigue_state}, raw={fatigue_score_raw:.1f}/10)")
 
             # 3. MARKET PHYSICS (25%) - Bias physique
             market_physics = institutional_analysis.get('market_physics', {})
@@ -508,6 +516,7 @@ class SimpleAdvancedScorer:
             price_inertia = market_physics.get('price_inertia', {})
             inertia_dir = str(price_inertia.get('direction', 'NEUTRAL')).upper()
 
+            # 06 JAN 2026 FIX: MarketPhysicsAnalyzer retourne 'UP'/'DOWN', pas 'UPWARD'/'DOWNWARD'
             if physics_bias != 'UNKNOWN':
                 # Convertir bias en score
                 if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
@@ -517,15 +526,15 @@ class SimpleAdvancedScorer:
                 else:
                     physics_score = 50.0
 
-                # Boost si inertie alignée
-                if inertia_dir == 'UPWARD':
+                # Boost si inertie alignée (06 JAN 2026: accepter 'UP'/'DOWN')
+                if inertia_dir == 'UP' or inertia_dir == 'UPWARD':
                     physics_score = min(100.0, physics_score + 10.0)
-                elif inertia_dir == 'DOWNWARD':
+                elif inertia_dir == 'DOWN' or inertia_dir == 'DOWNWARD':
                     physics_score = max(0.0, physics_score - 10.0)
 
                 scores.append(physics_score)
                 weights.append(0.25)
-                logger.debug(f"[INST_SCORE] MarketPhysics: {physics_score:.1f} (bias={physics_bias}, inertia={inertia_dir})")
+                logger.info(f"[INST_SCORE] MarketPhysics: {physics_score:.1f} (bias={physics_bias}, inertia={inertia_dir})")
 
             # 4. TAPE SPEED (15%) - Vitesse du tape
             tape_speed = institutional_analysis.get('tape_speed', {})
@@ -545,7 +554,7 @@ class SimpleAdvancedScorer:
 
                 scores.append(tape_score)
                 weights.append(0.15)
-                logger.debug(f"[INST_SCORE] TapeSpeed: {tape_score:.1f} (ratio={speed_ratio:.2f}, interp={speed_interp})")
+                logger.info(f"[INST_SCORE] TapeSpeed: {tape_score:.1f} (ratio={speed_ratio:.2f}, interp={speed_interp})")
 
             # 5. PRESSURE RATIO (15%) - Pression buy/sell
             pressure_ratio = institutional_analysis.get('pressure_ratio', {})
@@ -558,7 +567,7 @@ class SimpleAdvancedScorer:
 
                 scores.append(pressure_score)
                 weights.append(0.15)
-                logger.debug(f"[INST_SCORE] Pressure: {pressure_score:.1f} (dir={pressure_dir}, norm={pressure_norm:.2f})")
+                logger.info(f"[INST_SCORE] Pressure: {pressure_score:.1f} (dir={pressure_dir}, norm={pressure_norm:.2f})")
 
             # Calcul final pondéré
             if scores:
