@@ -962,12 +962,49 @@ class ScalpingStrategy(BaseStrategy):
                 # Récupérer ticks depuis asset_signals (si disponibles)
                 ticks_df = asset_signals.get("ticks_df", None)
 
-                # 06 JAN 2026 FIX: Diagnostiquer colonne 'volume' manquante
+                # 06 JAN 2026 FIX: S'assurer que ticks_df a toutes les colonnes requises
                 if ticks_df is not None:
+                    # Log colonnes pour diagnostic
+                    ticks_cols = list(ticks_df.columns)
                     self.logger.info(
-                        f"[{asset}] 🔍 TICKS_DF COLONNES: {list(ticks_df.columns)} | "
+                        f"[{asset}] 🔍 TICKS_DF COLONNES: {ticks_cols} | "
                         f"Taille: {len(ticks_df)} rows × {len(ticks_df.columns)} cols"
                     )
+
+                    # 🔧 FIX CRITIQUE: Colonnes requises par analyseurs institutionnels
+                    required_cols = ['time', 'side', 'volume', 'price']
+                    missing_cols = [col for col in required_cols if col not in ticks_df.columns]
+
+                    if missing_cols:
+                        self.logger.warning(
+                            f"[{asset}] ⚠️ Colonnes manquantes dans ticks_df: {missing_cols} | "
+                            f"Colonnes présentes: {ticks_cols}"
+                        )
+                        # Copier pour ne pas modifier l'original
+                        ticks_df = ticks_df.copy()
+
+                        # Ajouter colonnes manquantes avec valeurs par défaut
+                        if 'volume' in missing_cols:
+                            ticks_df['volume'] = 1.0  # Standard Forex: 1 tick = 1 volume
+                        if 'price' in missing_cols:
+                            # Utiliser 'last' si disponible, sinon mid
+                            if 'last' in ticks_df.columns:
+                                ticks_df['price'] = ticks_df['last']
+                            elif 'mid' in ticks_df.columns:
+                                ticks_df['price'] = ticks_df['mid']
+                            elif 'bid' in ticks_df.columns:
+                                ticks_df['price'] = ticks_df['bid']
+                            else:
+                                self.logger.error(f"[{asset}] ❌ Impossible de créer colonne 'price' (pas de last/mid/bid)")
+                                ticks_df['price'] = 0.0
+                        if 'side' in missing_cols:
+                            self.logger.error(f"[{asset}] ❌ Colonne 'side' manquante - analyseurs ne fonctionneront pas correctement")
+                            ticks_df['side'] = 'unknown'
+                        if 'time' in missing_cols:
+                            self.logger.error(f"[{asset}] ❌ Colonne 'time' manquante - timestamp unavailable")
+                            ticks_df['time'] = pd.Timestamp.now(tz='UTC')
+
+                        self.logger.info(f"[{asset}] ✅ Colonnes ajoutées: {missing_cols}")
                 else:
                     self.logger.warning(f"[{asset}] ⚠️ ticks_df est None!")
 
@@ -987,14 +1024,26 @@ class ScalpingStrategy(BaseStrategy):
                     ticks_count = len(ticks_df) if ticks_df is not None else 0
                     candles_count = len(df_m1) if df_m1 is not None else 0
                     ticks_cols = list(ticks_df.columns) if ticks_df is not None else []
+                    candles_cols = list(df_m1.columns) if df_m1 is not None else []
                     self.logger.info(
                         f"[{asset}] 😫 MarketFatigue PRE-CHECK: ticks_df={ticks_count} ticks, "
                         f"df_m1={candles_count} bars (besoin: ticks>=5, candles>=5) | "
-                        f"ticks_columns={ticks_cols}"
+                        f"ticks_columns={ticks_cols} | candles_columns={candles_cols}"
                     )
 
+                    # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
+                    # Créer copie avec 'volume' depuis 'tick_volume' si disponible
+                    df_m1_for_fatigue = df_m1.tail(20).copy()
+                    if 'volume' not in df_m1_for_fatigue.columns:
+                        if 'tick_volume' in df_m1_for_fatigue.columns:
+                            df_m1_for_fatigue['volume'] = df_m1_for_fatigue['tick_volume']
+                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume'")
+                        else:
+                            df_m1_for_fatigue['volume'] = 1.0  # Fallback
+                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1, utilise 1.0")
+
                     fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
-                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1.tail(20))
+                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1_for_fatigue)
                     institutional_analysis['market_fatigue'] = fatigue_result
                     self.logger.info(f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
                 except Exception as e_fatigue:
@@ -1015,8 +1064,19 @@ class ScalpingStrategy(BaseStrategy):
                         f"df_m1={candles_count} bars (besoin: ticks>=10, candles>=10)"
                     )
 
+                    # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
+                    # Créer copie avec 'volume' depuis 'tick_volume' si disponible
+                    df_m1_for_physics = df_m1.copy()
+                    if 'volume' not in df_m1_for_physics.columns:
+                        if 'tick_volume' in df_m1_for_physics.columns:
+                            df_m1_for_physics['volume'] = df_m1_for_physics['tick_volume']
+                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume' (Physics)")
+                        else:
+                            df_m1_for_physics['volume'] = 1.0  # Fallback
+                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1 (Physics), utilise 1.0")
+
                     physics_analyzer = MarketPhysicsAnalyzer(logger=self.logger)
-                    physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1)
+                    physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1_for_physics)
                     institutional_analysis['market_physics'] = physics_result
                     self.logger.info(f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
                 except Exception as e_physics:
