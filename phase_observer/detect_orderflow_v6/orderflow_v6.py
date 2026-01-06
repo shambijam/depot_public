@@ -1,16 +1,83 @@
 # phase_observer/detect_orderflow_v6/orderflow_v6.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import pandas as pd
+import numpy as np
 
 from .logging_manager import safe_log
 from .data_preparator import validate_and_prepare_data
 from .volume_analyzer import calculate_volume_metrics
 from .pattern_detector import detect_patterns
 from .institutional_metrics import calculate_volume_profile
-from .scoring_engine import calculate_score, calculate_score_integrated
+from .scoring_engine import calculate_score_integrated
 from .result_builder import build_result
 from .divergence_detector import detect_divergences
+
+
+def _estimate_current_regime(
+    df: pd.DataFrame, 
+    metrics: Dict[str, float],
+    vp_options: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    🎯 ESTIMATION DU RÉGIME COURANT - Optimisé pour scalping
+    
+    Règles pour votre stratégie:
+    - trending: Forte pente CVD + volume élevé
+    - consolidation: Volume modéré + range prix serré
+    - range: Volume faible + pas de direction claire
+    """
+    if df is None or len(df) < 5:
+        return "unknown"
+    
+    # Récupération des métriques
+    cvd_slope = metrics.get("cvd_slope", 0.0)
+    total_vol = metrics.get("total_volume", 0.0)
+    delta_total = metrics.get("delta_total", 0.0)
+    vol_ratio = metrics.get("vol_ratio", 1.0)
+    
+    # Calculs supplémentaires si nécessaires
+    if "vol_ratio" not in metrics and "rows" in metrics:
+        rows = metrics.get("rows", 1)
+        avg_vol = total_vol / max(rows, 1)
+        vol_ratio = total_vol / max(avg_vol, 1.0) if avg_vol > 0 else 1.0
+    
+    # Calcul range prix (ATR-like simplifié)
+    price_range_pct = 0.0
+    if len(df) > 1:
+        high_max = df['high'].max() if 'high' in df.columns else df['close'].max()
+        low_min = df['low'].min() if 'low' in df.columns else df['close'].min()
+        mean_price = df['close'].mean() if 'close' in df.columns else 0
+        if mean_price > 0:
+            price_range_pct = (high_max - low_min) / mean_price * 100
+    
+    # ✅ RÈGLES OPTIMISÉES POUR SCALPING LONDON/NY
+    # 1. TRENDING: Fort mouvement directionnel
+    if (abs(cvd_slope) > 0.3 and 
+        abs(delta_total) > total_vol * 0.25 and 
+        vol_ratio > 1.1):
+        return "trending"
+    
+    # 2. RANGE: Pas de direction + volume bas
+    elif (abs(cvd_slope) < 0.15 and 
+          price_range_pct < 0.05 and  # Range serré < 0.05%
+          vol_ratio < 0.9):
+        return "range"
+    
+    # 3. CONSOLIDATION: Volume présent mais sans forte direction
+    elif (abs(cvd_slope) < 0.25 and 
+          price_range_pct < 0.08 and  # Range modéré
+          vol_ratio >= 0.9):
+        return "consolidation"
+    
+    # 4. BREAKOUT_POTENTIAL: Fort volume sans direction établie
+    elif (vol_ratio > 1.2 and 
+          abs(cvd_slope) < 0.2 and 
+          price_range_pct < 0.06):
+        return "breakout_potential"
+    
+    # Fallback
+    return "consolidation"
 
 
 def detect_orderflow_v6(
@@ -19,27 +86,21 @@ def detect_orderflow_v6(
     imbalance_threshold: float = 0.20,
     cvd_smoothing: float = 0.0,
     price_bins: int = 20,
-    vp_options: Optional[
-        Dict[str, Any]
-    ] = None,  # options Volume Profile avancées (facultatives)
+    vp_options: Optional[Dict[str, Any]] = None,
     logger=None,
-    footprint_data: Optional[Dict[str, Any]] = None,  # ⚡ NOUVEAU: Données Footprint M1 (buy_volume, sell_volume, delta, poc...)
+    footprint_data: Optional[Dict[str, Any]] = None,
+    # NOUVEAU: Paramètres scalping
+    current_regime: Optional[str] = None,  # Si déjà déterminé ailleurs
+    lookback_override: Optional[int] = None,  # Override manuel
 ) -> Dict[str, Any]:
     """
-    Interface publique V6 (compatible V5) → retourne:
-      {
-        "score": float(0..100),
-        "status": "VALID" | "SUSPECT",
-        "summary": { ...  },        # inclut alias V5: vpoc_price, va_low, va_high
-        "patterns": dict | list     # flags ou événements
-      }
-    + `summary.volume_profile` : bloc complet du Volume Profile (VPOC, VA, HVN/LVN, ...).
-
-    Paramètres clés:
-      - imbalance_threshold: 0.20 ≈ 70/30 si usage centré dans detect_patterns
-      - cvd_smoothing: alpha EMA ∈ (0,1] pour lisser le CVD (0 = off)
-      - price_bins: granularité de base du VP si pas de bin_width
-      - vp_options: dict d’options VP (ex: {"coverage":0.7, "body_gain":0.6, "max_bins":400, ...})
+    🚀 ORDERFLOW V6 OPTIMISÉ POUR SCALPING TRENDING/CONSOLIDATION
+    
+    Optimisations majeures:
+    1. Lookback configurable et adaptatif
+    2. Divergences adaptées au scalping
+    3. Détection de régime intégrée
+    4. Paramètres optimisés pour London/NY sessions
     """
     # --- 0) Garde-fou entrée ---
     if df_m1 is None or len(df_m1) == 0:
@@ -50,39 +111,55 @@ def detect_orderflow_v6(
             "patterns": {},
         }
 
-    # --- 1) Préparation / validation des données ---
-    # Analyser les 8-30 dernières barres M1 (configuration recommandée: 8-12 barres)
-    # + intégration données Footprint M1 si disponibles
-
+    # --- 1) DÉTERMINATION LOOKBACK OPTIMAL ---
+    # Priorité: override > vp_options > défaut adaptatif
+    if lookback_override is not None and lookback_override > 0:
+        lookback = lookback_override
+    elif vp_options and "lookback_bars" in vp_options:
+        lookback = int(vp_options["lookback_bars"])
+    else:
+        # ✅ LOOKBACK ADAPTATIF selon disponibilité données
+        total_bars = len(df_m1)
+        if total_bars >= 30:
+            lookback = 15  # Assez de données pour analyse robuste
+        elif total_bars >= 20:
+            lookback = 12
+        elif total_bars >= 15:
+            lookback = 10
+        elif total_bars >= 10:
+            lookback = 8
+        else:
+            lookback = max(5, total_bars - 2)  # Minimum 5 barres
+    
+    safe_log(logger, "info", f"[OF V6] 📈 Lookback adaptatif: {lookback} barres")
+    
+    # Extraction des barres pour analyse
+    df_bars = df_m1.iloc[-lookback:] if len(df_m1) >= lookback else df_m1
+    
+    # --- 2) Préparation / validation des données ---
     has_footprint = footprint_data is not None and isinstance(footprint_data, dict)
-
+    
     if has_footprint:
         safe_log(logger, "info", f"[OF V6] 🎯 Analyse OrderFlow avec intégration Footprint M1")
     else:
         safe_log(logger, "info", f"[OF V6] 📊 Analyse OrderFlow standard (sans Footprint)")
-
-    # Utiliser 8-12 barres pour analyse OrderFlow (recommandation doc)
-    lookback = 10  # Configurable
-    df_bars = df_m1.iloc[-lookback:] if len(df_m1) >= lookback else df_m1
+    
     df, rescue_level, rescue_note = validate_and_prepare_data(df_bars)
-
-    # === PATCH TZ-NORMALIZE (2025-11-03) — neutralise les tz pour éviter .astype sur tz-aware ===
+    
+    # === PATCH TZ-NORMALIZE ===
     try:
-        # Index → tz-naive
         if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-
-        # Colonnes temporelles usuelles → tz-naive
+        
         for col in ("time", "timestamp", "datetime", "Date"):
             if col in df.columns:
                 s = pd.to_datetime(df[col], errors="coerce", utc=True)
                 if s.notna().any():
-                    # on repasse en tz-naive pour éviter les .astype('datetime64[ns]') qui cassent
                     df[col] = s.dt.tz_convert("UTC").dt.tz_localize(None)
     except Exception as e_tz:
         safe_log(logger, "warning", f"[OF V6][TZ] normalization skipped: {e_tz}")
-
-    # Si tout a été filtré/invalidé, on reste cohérent
+    
+    # Si tout a été filtré/invalidé
     if df is None or len(df) == 0:
         return {
             "score": 0.0,
@@ -93,21 +170,19 @@ def detect_orderflow_v6(
             },
             "patterns": {},
         }
-
-    # --- 2) Métriques volume (core) ---
+    
+    # --- 3) Métriques volume (core) ---
     df, metrics = calculate_volume_metrics(df, cvd_smoothing=cvd_smoothing)
-    # garder l'imbalance globale sur df.attrs pour d’éventuels détecteurs en aval
+    
     try:
         df.attrs["imbalance_global"] = metrics.get("imbalance", 0.0)
     except Exception:
         pass
-
-    # --- 2.b) Runtime metrics (rows/coverage/tick_rate) → compléter si absents ---
+    
+    # --- 3.b) Runtime metrics ---
     try:
-        # rows
         metrics.setdefault("rows", int(len(df)))
-
-        # coverage_s & tick_rate (si non fournis par calculate_volume_metrics)
+        
         if (
             ("coverage_s" not in metrics or "tick_rate" not in metrics)
             and "time" in df.columns
@@ -119,45 +194,81 @@ def detect_orderflow_v6(
                 coverage_s = float((t1 - t0).total_seconds())
                 if coverage_s > 0:
                     metrics.setdefault("coverage_s", coverage_s)
-                    # tick_rate simple par lignes (si tick_volume non fiable)
                     metrics.setdefault("tick_rate", float(len(df) / coverage_s))
+                    
+                    # ✅ NOUVEAU: Calcul ratio volume pour régime
+                    if "total_volume" in metrics and "rows" in metrics:
+                        rows = metrics["rows"]
+                        total_vol = metrics["total_volume"]
+                        avg_vol = total_vol / max(rows, 1)
+                        metrics.setdefault("vol_ratio", total_vol / max(avg_vol, 1.0))
     except Exception as e_cov:
         safe_log(logger, "debug", f"[OF V6] coverage computation skipped: {e_cov}")
-
-    # --- 3) Patterns ---
+    
+    # --- 4) DÉTECTION RÉGIME (critique pour scoring adaptatif) ---
+    if current_regime:
+        regime = current_regime
+        safe_log(logger, "info", f"[OF V6] 📊 Régime fourni: {regime}")
+    else:
+        regime = _estimate_current_regime(df, metrics, vp_options)
+        safe_log(logger, "info", f"[OF V6] 📊 Régime détecté: {regime}")
+    
+    # --- 5) Patterns ---
     try:
         patterns = detect_patterns(df, imbalance_threshold=imbalance_threshold)
     except Exception as e_pat:
         safe_log(logger, "warning", f"[OF V6] pattern detection failed: {e_pat}")
-        patterns = []  # format neutre (result_builder et scoring gèrent dict|list)
-
-    # --- 3.b) Divergences (prix vs indicateur: CVD/VWAP) ---
+        patterns = []
+    
+    # --- 5.b) DIVERGENCES ADAPTÉES AU SCALPING ---
+    # ✅ PARAMÈTRES OPTIMISÉS pour scalping London/NY
+    if regime in ["trending", "breakout_potential"]:
+        # En trending: divergences plus courtes pour réactivité
+        div_lookback = min(50, lookback * 3)  # Max 50 barres (50 min)
+        div_pivot = 2
+        div_confirm = 5
+    elif regime == "consolidation":
+        # En consolidation: divergences moyennes
+        div_lookback = min(80, lookback * 4)  # Max 80 barres
+        div_pivot = 2
+        div_confirm = 6
+    else:  # range ou unknown
+        # En range: divergences très courtes (évite faux signaux)
+        div_lookback = min(30, lookback * 2)
+        div_pivot = 2
+        div_confirm = 4
+    
+    safe_log(logger, "debug", 
+             f"[OF V6] 🔍 Divergences: lookback={div_lookback}, pivot={div_pivot}, confirm={div_confirm}")
+    
     try:
         divergences = detect_divergences(
             df,
-            lookback=200,
-            pivot_window=3,
-            confirm_window=10,
+            lookback=div_lookback,      # ✅ Adapté au régime
+            pivot_window=div_pivot,     # ✅ Adapté
+            confirm_window=div_confirm, # ✅ Adapté
             fallback_indicator="cvd",
         )
     except Exception as e_div:
         safe_log(logger, "warning", f"[OF V6] divergence detection failed: {e_div}")
         divergences = []
-
-    # Fusionne proprement avec le format des patterns existants (liste V5 ou dict)
+    
+    # Fusion patterns + divergences
     if isinstance(patterns, list):
         patterns.extend(divergences)
     elif isinstance(patterns, dict):
         patterns = {"events": patterns, "divergences": divergences}
     else:
         patterns = {"events": [], "divergences": divergences}
-
-    # --- 4) Volume Profile (avec options avancées fusionnées proprement) ---
+    
+    # --- 6) Volume Profile (avec cache optimisé) ---
     vp_kwargs: Dict[str, Any] = {"price_bins": price_bins}
     if isinstance(vp_options, dict):
-        # vp_options > paramètres par défaut
         vp_kwargs.update({k: v for k, v in vp_options.items() if v is not None})
-
+    
+    # ✅ OPTIMISATION: Ajout régime dans options VP pour cache adaptatif
+    vp_kwargs["current_regime"] = regime
+    
     try:
         vp = calculate_volume_profile(df, **vp_kwargs)
     except Exception as e_vp:
@@ -173,21 +284,69 @@ def detect_orderflow_v6(
             "balance_metrics": {},
             "ib": {},
         }
-
-    # --- 5) Score / statut (NOUVEAU SYSTÈME INTÉGRÉ) ---
-    # Utilise calculate_score_integrated qui fusionne OrderFlow + Footprint + Triggers
+    
+    # --- 7) SCORING ADAPTATIF PAR RÉGIME ---
+    # Extraction poids de scoring
+    scoring_weights = None
+    if isinstance(vp_options, dict) and "scoring_weights" in vp_options:
+        scoring_weights = vp_options.get("scoring_weights")
+    
+    # ✅ SCORING AVEC RÉGIME (CRITIQUE)
     score, status, summary = calculate_score_integrated(
         metrics,
         patterns,
         int(rescue_level or 0),
         str(rescue_note or ""),
-        footprint_data=footprint_data,  # Données Footprint M1 si disponibles
+        footprint_data=footprint_data,
+        scoring_weights=scoring_weights,
+        current_regime=regime,  # ✅ NOUVEAU: Passe le régime au scoring
     )
-
-    # Log minimal (détails dans le bilan consolidé de fusion_manager.py)
-    safe_log(logger, "info", f"[OF V6] Score: {score:.1f}% | Status: {status}")
-
-    # --- 6) Résultat final (inclut alias V5 + bloc volume_profile) ---
+    
+    # --- 8) LOGS AMÉLIORÉS ---
+    if score >= 70:
+        safe_log(logger, "info", f"[OF V6] 🟢 Score: {score:.1f}% | Status: {status} | Régime: {regime}")
+    elif score >= 50:
+        safe_log(logger, "info", f"[OF V6] 🟡 Score: {score:.1f}% | Status: {status} | Régime: {regime}")
+    else:
+        safe_log(logger, "info", f"[OF V6] 🔴 Score: {score:.1f}% | Status: {status} | Régime: {regime}")
+    
+    # --- 9) Résultat final avec métadonnées enrichies ---
     res = build_result(score, status, summary, patterns, vp)
-
+    
+    # Ajout métadonnées supplémentaires
+    res["metadata"] = {
+        "lookback_used": lookback,
+        "regime_detected": regime,
+        "divergence_params": {
+            "lookback": div_lookback,
+            "pivot_window": div_pivot,
+            "confirm_window": div_confirm
+        },
+        "analysis_timestamp": pd.Timestamp.now().isoformat()
+    }
+    
     return res
+
+
+# ✅ FONCTION UTILITAIRE: Détection régime depuis scalping.py
+def extract_regime_from_scalping_logs(log_line: str) -> Optional[str]:
+    """
+    Extrait le régime depuis les logs de scalping.py
+    Ex: "R:RANG(0.9)" → "range"
+    """
+    import re
+    
+    patterns = {
+        r"R:RANG\([^)]+\)": "range",
+        r"R:TRAN\([^)]+\)": "trending", 
+        r"R:CONS\([^)]+\)": "consolidation",
+        r"Phase=range_[^,]+": "range",
+        r"Phase=trending_[^,]+": "trending",
+        r"Phase=consolidation_[^,]+": "consolidation",
+    }
+    
+    for pattern, regime in patterns.items():
+        if re.search(pattern, log_line):
+            return regime
+    
+    return None

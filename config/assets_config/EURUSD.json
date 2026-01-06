@@ -126,7 +126,21 @@
             "divergence": 0.10,
             "vpoc": 0.05
           },
-          "entry_threshold": 0.60
+          "entry_threshold": 0.60,
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES (ancien système). Utilisez 'scoring_weights' ci-dessous (06 JAN 2026)"
+        },
+        "scoring_weights": {
+          "comment": "✅ POIDS CONFIGURABLES OrderFlow V6 Intégré (06 JAN 2026)",
+          "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
+          "delta_momentum_max": 28.0,
+          "volume_confirm_max": 14.0,
+          "imbalance_strength_max": 8.0,
+          "absorption_max": 16.0,
+          "clustering_max": 10.0,
+          "rejection_max": 4.0,
+          "triggers_max": 20.0,
+          "comment_total": "Total: 28+14+8 (OrderFlow=50) + 16+10+4 (Footprint=30) + 20 (Triggers) = 100 pts",
+          "comment_eurusd": "EURUSD: Augmente delta_momentum (+3) et absorption (+1) car volatilité moyenne. Réduit volume_confirm (-1) et imbalance (-2)"
         },
         "ncp_strong": {
           "delta_abs_min": 100.0,
