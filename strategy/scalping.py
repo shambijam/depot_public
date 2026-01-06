@@ -1979,11 +1979,17 @@ class ScalpingStrategy(BaseStrategy):
                 momentum_analysis = self._calculate_institutional_momentum(df_work, df_m3_momentum, df_m5_momentum)
                 momentum_m1 = momentum_analysis.get('primary_direction', 'NEUTRAL')
 
+                # 06 JAN 2026: FORCE INFO pour diagnostiquer régime global
                 self.logger.info(
                     f"[{asset}] 🏦 Momentum Institutionnel | Direction={momentum_m1} | "
                     f"Score={momentum_analysis.get('momentum_score', 0):.1f} | "
                     f"Quality={momentum_analysis.get('momentum_quality', 'WEAK')} | "
                     f"Entry={momentum_analysis.get('entry_quality', 'POOR')}"
+                )
+            else:
+                # 06 JAN 2026: LOG si données insuffisantes
+                self.logger.warning(
+                    f"[{asset}] ⚠️ Momentum Institutionnel SKIP: df_work={'None' if df_work is None else f'{len(df_work)} bars'} (min 12 requis)"
                 )
 
             # ✅ AJOUTER au contexte pour FusionManager
@@ -2165,40 +2171,66 @@ class ScalpingStrategy(BaseStrategy):
                         f"[{asset}] {action_emoji} ACTION FINALE DÉCIDÉE: {action}"
                     )
 
-                # 06 JAN 2026 MODE SNIPER: FILTRE MOMENTUM - Rejette signaux contre-courant
+                # 06 JAN 2026 MODE SNIPER: FILTRE TREND GLOBAL - Rejette signaux contre régime
                 if action in ("BUY", "SELL"):
                     try:
                         asset_cfg = self.config_manager.load_asset_config(asset) or {}
                         mom_cfg = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
                         if mom_cfg.get("enabled", False):
-                            lookback = int(mom_cfg.get("lookback_bars", 3))
-                            min_change = float(mom_cfg.get("min_price_change_points", 0.0))
+                            # 1) RÉGIME GLOBAL (primary_direction depuis momentum institutionnel)
+                            primary_dir = momentum_analysis.get('primary_direction', 'NEUTRAL')
+                            mom_score = momentum_analysis.get('momentum_score', 0)
+                            mom_quality = momentum_analysis.get('momentum_quality', 'WEAK')
 
+                            # 2) MOMENTUM COURT TERME (3 bougies)
+                            lookback = int(mom_cfg.get("lookback_bars", 3))
+                            short_momentum = 0.0
                             if len(df_work) >= lookback + 1:
-                                # Momentum = variation de prix sur N dernières bougies
                                 current_price = df_work["close"].iloc[-1]
                                 past_price = df_work["close"].iloc[-(lookback + 1)]
-                                momentum = current_price - past_price
+                                short_momentum = current_price - past_price
 
-                                # Vérification confluence
-                                if action == "BUY" and momentum < min_change:
+                            # 3) FILTRAGE INTELLIGENT PAR RÉGIME
+                            reject_reason = None
+
+                            if action == "BUY":
+                                # BUY interdit si régime BEARISH ET momentum court négatif
+                                if primary_dir == "BEARISH" and short_momentum < 0:
+                                    reject_reason = f"Régime BEARISH (score={mom_score:.1f}) + momentum court négatif ({short_momentum:.5f})"
+                                # BUY warning si régime BEARISH mais momentum court positif (divergence faible)
+                                elif primary_dir == "BEARISH" and short_momentum >= 0:
                                     self.logger.warning(
-                                        f"[{asset}] ❌ BUY REJETÉ (momentum filter): Delta positif MAIS prix descend "
-                                        f"(momentum={momentum:.5f} < {min_change}). Évite trade contre-courant!"
+                                        f"[{asset}] ⚠️ BUY dans régime BEARISH (divergence): "
+                                        f"Régime={primary_dir} (score={mom_score:.1f}) MAIS momentum court={short_momentum:.5f}>0. "
+                                        f"Signal accepté mais RISQUÉ!"
                                     )
-                                    action = None  # Rejette le signal
-                                elif action == "SELL" and momentum > -min_change:
+
+                            elif action == "SELL":
+                                # SELL interdit si régime BULLISH ET momentum court positif
+                                if primary_dir == "BULLISH" and short_momentum > 0:
+                                    reject_reason = f"Régime BULLISH (score={mom_score:.1f}) + momentum court positif ({short_momentum:.5f})"
+                                # SELL warning si régime BULLISH mais momentum court négatif (divergence faible)
+                                elif primary_dir == "BULLISH" and short_momentum <= 0:
                                     self.logger.warning(
-                                        f"[{asset}] ❌ SELL REJETÉ (momentum filter): Delta négatif MAIS prix monte "
-                                        f"(momentum={momentum:.5f} > {-min_change}). Évite trade contre-courant!"
+                                        f"[{asset}] ⚠️ SELL dans régime BULLISH (divergence): "
+                                        f"Régime={primary_dir} (score={mom_score:.1f}) MAIS momentum court={short_momentum:.5f}<0. "
+                                        f"Signal accepté mais RISQUÉ!"
                                     )
-                                    action = None  # Rejette le signal
-                                else:
-                                    self.logger.info(
-                                        f"[{asset}] ✅ Momentum filter PASSED: {action} aligné avec momentum={momentum:.5f}"
-                                    )
+
+                            # 4) REJET DU SIGNAL SI CONFLIT TOTAL
+                            if reject_reason:
+                                self.logger.warning(
+                                    f"[{asset}] ❌ {action} REJETÉ (trend filter): {reject_reason}. "
+                                    f"Évite trade CONTRE le régime global!"
+                                )
+                                action = None
+                            elif not reject_reason and action:
+                                self.logger.info(
+                                    f"[{asset}] ✅ Trend filter PASSED: {action} aligné avec régime {primary_dir} "
+                                    f"(score={mom_score:.1f}, quality={mom_quality}, momentum={short_momentum:.5f})"
+                                )
                     except Exception as e:
-                        self.logger.debug(f"[{asset}] Momentum filter skipped: {e}")
+                        self.logger.debug(f"[{asset}] Trend filter skipped: {e}")
 
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")
