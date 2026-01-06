@@ -556,9 +556,10 @@ class ScalpingStrategy(BaseStrategy):
                         # Déterminer direction delta
                         delta_direction_calc = "BULLISH" if delta_total > 0 else "BEARISH" if delta_total < 0 else "NEUTRAL"
 
-                        self.logger.debug(
+                        # 06 JAN 2026: FORCE INFO (au lieu de DEBUG) pour diagnostiquer pourquoi pas de SELL
+                        self.logger.info(
                             f"[ORDERFLOW_TICKS_CALC][{asset}] ✅ Ticks calculés: {len(ticks_df)} ticks | "
-                            f"BUY={buy_volume:.0f} SELL={sell_volume:.0f} | "
+                            f"BUY={buy_volume:.0f} ({buy_count} ticks) SELL={sell_volume:.0f} ({sell_count} ticks) | "
                             f"Delta={delta_total:.0f} → Direction={delta_direction_calc} | "
                             f"Imbalance={imbalance:.2f} | Imb_BUY={imbalance_buy} Imb_SELL={imbalance_sell}"
                         )
@@ -2150,10 +2151,19 @@ class ScalpingStrategy(BaseStrategy):
                         d = float(fp_summary.get("delta_total", 0))
                         if d > 0:
                             action = "BUY"
+                            self.logger.info(f"[{asset}] 🟢 Action=BUY (delta={d:.0f} > 0)")
                         elif d < 0:
                             action = "SELL"
+                            self.logger.info(f"[{asset}] 🔴 Action=SELL (delta={d:.0f} < 0)")
                 except Exception:
                     pass
+
+                # 06 JAN 2026: LOG FINAL de l'action décidée
+                if action:
+                    action_emoji = "🟢" if action == "BUY" else "🔴"
+                    self.logger.info(
+                        f"[{asset}] {action_emoji} ACTION FINALE DÉCIDÉE: {action}"
+                    )
 
             except Exception as e:
                 self.logger.warning(f"[{asset}] Footprint integration skipped: {e}")

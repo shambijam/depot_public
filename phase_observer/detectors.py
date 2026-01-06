@@ -297,14 +297,15 @@ def reconstruct_tick_side_mt5(ticks: pd.DataFrame) -> pd.DataFrame:
     df["mid"] = (df["bid"] + df["ask"]) / 2
     df["spread"] = df["ask"] - df["bid"]
 
-    # --- Reconstruction du côté d’agresseur
-    # Si last >= ask → acheteur agressif
-    # Si last <= bid → vendeur agressif
+    # --- Reconstruction du côté d'agresseur
+    # 06 JAN 2026 MODE SNIPER FIX: Utilisation du mid-price pour Forex MT5
+    # Si last > mid → acheteur agressif (paie au-dessus du mid = vers ask)
+    # Si last < mid → vendeur agressif (vend en-dessous du mid = vers bid)
     # Sinon → neutre/inconnu
     df["side"] = np.where(
-        df["last"] >= df["ask"],
+        df["last"] > df["mid"],
         "buy",
-        np.where(df["last"] <= df["bid"], "sell", "unknown"),
+        np.where(df["last"] < df["mid"], "sell", "unknown"),
     )
 
     # --- Volume directionnel

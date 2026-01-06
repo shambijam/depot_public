@@ -255,7 +255,8 @@ class ConfigLoader:
 
             self.validate_config(config, schema_name)
 
-            self.logger.info(
+            # 06 JAN 2026: Réduit INFO→DEBUG pour éviter flood logs à chaque cycle
+            self.logger.debug(
                 f"Configuration dynamique chargée et validée depuis {config_path_obj}."
             )
             return config
