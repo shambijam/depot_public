@@ -1,9 +1,9 @@
 {
-  "description": "Configuration institutionnelle pour GBPUSD",
+  "description": "Configuration institutionnelle pour GBPUSD - MODE SNIPER",
   "symbol": "GBPUSD",
   "type": "forex",
   "profile": "institutionnel",
-  "last_updated": "2025-09-17",
+  "last_updated": "2026-01-06",
   "volatility": {
     "expected_daily_range_percent": {
       "value": 1.0,
@@ -62,7 +62,7 @@
           "tickrate_min": 3.5,
           "coverage_s_min_burst": 5
         },
-        "comment": "05 JAN 2026 FIX: m1_min_coverage_s=5s pour fenêtre 8s (vs 15s ancien pour 60s). GBPUSD : activité très élevée"
+        "comment": "06 JAN 2026 MODE SNIPER: m1_min_coverage_s=5s pour fenêtre 8s. GBPUSD : activité très élevée (60 ticks)"
       },
       "fusion": {
         "ttl_ms": 700,
@@ -79,9 +79,9 @@
           "cvd_slope_key": "cvd_slope",
           "vwap_key": "vwap"
         },
-        "lookback_bars": 20,
-        "cvd_slope_window": 20,
-        "comment_cvd_slope": "06 JAN 2026 FIX Problème #4: Fenêtre CVD slope alignée sur lookback_bars (cohérence temporelle)",
+        "lookback_bars": 5,
+        "cvd_slope_window": 4,
+        "comment_lookback": "06 JAN 2026 MODE SNIPER: lookback=5, cvd_slope=4 (PLUS COURT que EURUSD! GBPUSD haute volatilité = ultra-réactif)",
         "features": {
           "delta": {
             "abs_strong": 120.0,
@@ -114,12 +114,14 @@
         },
         "divergence": {
           "enabled": true,
-          "pivot_window": 3,
-          "confirm_window": 10,
+          "lookback": 6,
+          "pivot_window": 1,
+          "confirm_window": 2,
           "min_separation": 4,
           "min_price_move_frac": 0.0001,
           "min_indicator_move_frac": 0.0001,
-          "add_exhaustion": true
+          "add_exhaustion": true,
+          "comment": "06 JAN 2026 MODE SNIPER: lookback=6, pivot=1, confirm=2 (GBPUSD haute volatilité, réactivité maximale)"
         },
         "scoring": {
           "weights": {
@@ -129,7 +131,31 @@
             "divergence": 0.10,
             "vpoc": 0.05
           },
-          "entry_threshold": 0.60
+          "entry_threshold": 0.60,
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES (ancien système). Utilisez 'scoring_weights' ci-dessous (06 JAN 2026)"
+        },
+        "scoring_weights": {
+          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER (06 JAN 2026)",
+          "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
+          "delta_momentum_max": 35.0,
+          "volume_confirm_max": 8.0,
+          "imbalance_strength_max": 7.0,
+          "absorption_max": 22.0,
+          "clustering_max": 7.0,
+          "rejection_max": 3.0,
+          "triggers_max": 18.0,
+          "comment_total": "Total: 35+8+7 (OrderFlow=50) + 22+7+3 (Footprint=32) + 18 (Triggers) = 100 pts",
+          "comment_sniper": "MODE SNIPER GBPUSD: Delta CRITIQUE (+7→35), absorption MAX (+6→22). Volume -4, imbalance -1, clustering -2, rejection -1, triggers -2 pour ultra-réactivité"
+        },
+        "sniper_mode": {
+          "enabled": true,
+          "max_trade_duration_seconds": 12,
+          "required_score_threshold": 87,
+          "delta_acceleration_min": 0.8,
+          "volume_spike_multiplier": 2.8,
+          "allow_partial_fills": false,
+          "max_spread_pips": 1.8,
+          "comment": "06 JAN 2026 NOUVEAU: Mode sniper trades <12s (vs 15s autres), score >87 (vs 85 EURUSD car haute volatilité), delta accélération 0.8"
         },
         "ncp_strong": {
           "delta_abs_min": 120.0,
@@ -142,7 +168,7 @@
           "burst_scalping": {
             "use_orderflow_v6": true,
             "min_score": 60.0,
-            "comment_min_score": "05 JAN 2026: Seuil COMPOSITE minimum pour décision BUY/SELL (60=sniper avec composite, 65=normal, 70=conservateur). Composite score < OrderFlow car moyenne pondérée de 5 composants.",
+            "comment_min_score": "06 JAN 2026: Seuil COMPOSITE minimum pour décision BUY/SELL (60=sniper avec composite, 65=normal, 70=conservateur)",
             "of_v6_gate": {
               "min_score": 0.67,
               "require_ncp_strong": true,
@@ -170,7 +196,7 @@
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "swing_lookback": 0,
-          "comment": "20 pips SL pour GBPUSD (Option A - Conservateur, 31 DEC 2025)"
+          "comment": "20 pips SL pour GBPUSD (Option A - Conservateur, 06 JAN 2026)"
         },
         "tp": {
           "pips": 30.0,
@@ -193,7 +219,7 @@
         "enable_loss_guard": true,
         "max_loss_pips": 25.0,
         "loss_guard_arming_ms": 3000,
-        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 2.5p (baissé de 3.0p), Loss 25p = ratio 1:10.0"
+        "comment": "06 JAN 2026: Sniper scalping <10s → Profit 2.5p, Loss 25p = ratio 1:10.0"
       },
       "timing_gatekeeper": {
         "enabled": true,
@@ -208,12 +234,12 @@
           17,
           18
         ],
-        "comment_hours": "Londres pur 7h-9h GMT + Londres/NY 13h-18h GMT (05 JAN 2026 - TEST FLAGS FIX)",
+        "comment_hours": "06 JAN 2026 MODE SNIPER: Londres pur 7h-9h GMT + Londres/NY 13h-18h GMT",
         "min_tick_rate": 2.5,
         "min_coverage_s": 5.0,
         "max_tick_rate": 200.0,
         "max_spread_pips": 1.8,
-        "comment": "05 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.8 pips GBPUSD"
+        "comment": "06 JAN 2026: min_coverage_s=5s pour fenêtre glissante 8s SCALPING SNIPER (analyse au scalpel). Spread max 1.8 pips GBPUSD"
       }
     }
   }

@@ -232,25 +232,37 @@ def detect_orderflow_v6(
         patterns = []
     
     # --- 5.b) DIVERGENCES ADAPTÉES AU SCALPING ---
-    # ✅ PARAMÈTRES OPTIMISÉS pour scalping London/NY
-    if regime in ["trending", "breakout_potential"]:
-        # En trending: divergences plus courtes pour réactivité
-        div_lookback = min(50, lookback * 3)  # Max 50 barres (50 min)
-        div_pivot = 2
-        div_confirm = 5
-    elif regime == "consolidation":
-        # En consolidation: divergences moyennes
-        div_lookback = min(80, lookback * 4)  # Max 80 barres
-        div_pivot = 2
-        div_confirm = 6
-    else:  # range ou unknown
-        # En range: divergences très courtes (évite faux signaux)
-        div_lookback = min(30, lookback * 2)
-        div_pivot = 2
-        div_confirm = 4
-    
-    safe_log(logger, "debug", 
-             f"[OF V6] 🔍 Divergences: lookback={div_lookback}, pivot={div_pivot}, confirm={div_confirm}")
+    # Extraction paramètres divergence depuis config (06 JAN 2026 - MODE SNIPER)
+    div_config = None
+    if isinstance(vp_options, dict) and "divergence" in vp_options:
+        div_config = vp_options.get("divergence")
+
+    if div_config and isinstance(div_config, dict):
+        # ✅ PARAMÈTRES DEPUIS CONFIG (MODE SNIPER)
+        div_lookback = div_config.get("lookback", lookback * 3)
+        div_pivot = div_config.get("pivot_window", 2)
+        div_confirm = div_config.get("confirm_window", 5)
+        safe_log(logger, "info",
+                 f"[OF V6] 🎯 Divergences depuis config SNIPER: lookback={div_lookback}, pivot={div_pivot}, confirm={div_confirm}")
+    else:
+        # ✅ PARAMÈTRES ADAPTATIFS (fallback si pas de config)
+        if regime in ["trending", "breakout_potential"]:
+            # En trending: divergences plus courtes pour réactivité
+            div_lookback = min(50, lookback * 3)  # Max 50 barres (50 min)
+            div_pivot = 2
+            div_confirm = 5
+        elif regime == "consolidation":
+            # En consolidation: divergences moyennes
+            div_lookback = min(80, lookback * 4)  # Max 80 barres
+            div_pivot = 2
+            div_confirm = 6
+        else:  # range ou unknown
+            # En range: divergences très courtes (évite faux signaux)
+            div_lookback = min(30, lookback * 2)
+            div_pivot = 2
+            div_confirm = 4
+        safe_log(logger, "debug",
+                 f"[OF V6] 🔍 Divergences adaptatives (régime={regime}): lookback={div_lookback}, pivot={div_pivot}, confirm={div_confirm}")
     
     try:
         divergences = detect_divergences(
