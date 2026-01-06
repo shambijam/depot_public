@@ -450,15 +450,17 @@ class Detectors:
 
         adx, di_plus, di_minus = calculate_adx(df, adx_period)
         # --- PATCH C1: ADX quantiles (auto-calibration) ---
+        # 06 JAN 2026 MODE SNIPER: Réduit de 200→50 bars pour réactivité
         win = int(adx_config.get("quantile_window", 200))
+        min_periods_regime = max(15, win // 4)  # MODE SNIPER: 15 bars min (vs 50 avant)
         trend_q = (
-            adx.rolling(window=win, min_periods=max(50, win // 4))
+            adx.rolling(window=win, min_periods=min_periods_regime)
             .quantile(0.70)
             .bfill()
             .fillna(adx.median())
         )
         range_q = (
-            adx.rolling(window=win, min_periods=max(50, win // 4))
+            adx.rolling(window=win, min_periods=min_periods_regime)
             .quantile(0.30)
             .bfill()
             .fillna(adx.median())

@@ -105,7 +105,7 @@
             "period": 14,
             "trending_threshold": 25,
             "ranging_threshold": 20,
-            "quantile_window": 200
+            "quantile_window": 50
         },
         "volatility_regimes": {
             "calculation_period": 15,
