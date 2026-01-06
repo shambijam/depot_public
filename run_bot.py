@@ -3499,8 +3499,8 @@ def scalping_worker(
                         # 🆕 06 JAN 2026 PHASE 3: Ajout institutional_analysis!
                         if advanced_scorer:
                             try:
-                                # Récupérer institutional_analysis depuis orderflow_result_mini
-                                institutional_analysis = orderflow_result_mini.get('institutional_analysis', {})
+                                # 🔧 FIX CRITIQUE (06 JAN 2026): institutional_analysis est dans of_v6_result, PAS orderflow_result_mini!
+                                institutional_analysis = of_v6_result.get('institutional_analysis', {})
 
                                 composite_result = advanced_scorer.calculate_composite_score(
                                     ticks_df=ticks_df,
