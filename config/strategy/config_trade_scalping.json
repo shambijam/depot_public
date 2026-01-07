@@ -218,6 +218,12 @@
       "timing_gatekeeper": {
         "enabled": true,
         "description": "Filtre binaire PASS/VETO - Config institutionnelle (29 DEC 2025)",
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 50,
+          "description": "07 JAN 2026: VETO trades après 50s de la bougie M1 (évite trades en fin de bougie qui reversent)",
+          "comment": "Exemple: Bougie 14:23:00-14:24:00 → VETO après 14:23:50. Évite les trades tardifs avant nouveau M1."
+        },
         "allowed_hours_gmt": [
           0,
           1,

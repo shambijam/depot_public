@@ -266,6 +266,32 @@ def evaluate_trading_conditions(
         veto_score += 30.0
         veto_reasons.append(f"Session off-peak (GMT {hour_gmt:02d}h)")
 
+    # H) 🆕 FIN DE BOUGIE M1 - Veto ABSOLU (07 JAN 2026)
+    # Évite de trader en fin de bougie (ex: après 50s sur bougie de 60s)
+    # Car risque élevé de reversal à l'ouverture de la nouvelle bougie
+    candle_timing_cfg = timing_config.get("candle_timing_veto", {})
+    candle_veto_enabled = candle_timing_cfg.get("enabled", False)
+
+    if candle_veto_enabled:
+        max_candle_age_s = candle_timing_cfg.get("max_candle_age_seconds", 50)
+
+        # Calculer l'âge de la bougie M1 actuelle (secondes depuis début bougie)
+        # Bougie M1: 14:23:00 → 14:24:00 (durée 60s)
+        # Si current_time = 14:23:52 → candle_age = 52s → VETO car > 50s
+        current_second = current_time.second if hasattr(current_time, 'second') else 0
+        candle_age_s = current_second  # Secondes écoulées dans la minute actuelle
+
+        if candle_age_s > max_candle_age_s:
+            veto_score = 100.0  # Veto ABSOLU (trading en fin de bougie = très risqué)
+            veto_reasons.append(
+                f"🚫 FIN DE BOUGIE M1 ({candle_age_s}s > {max_candle_age_s}s max) - "
+                f"Risque reversal élevé sur nouvelle bougie"
+            )
+            logger.info(
+                f"[CANDLE_TIMING_VETO][{asset}] Trade bloqué à {current_time.strftime('%H:%M:%S')} "
+                f"({candle_age_s}s dans la bougie, max={max_candle_age_s}s)"
+            )
+
     # Plafonnement à 100
     veto_score = min(100.0, veto_score)
 

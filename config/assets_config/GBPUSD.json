@@ -272,6 +272,11 @@
       },
       "timing_gatekeeper": {
         "enabled": true,
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 48,
+          "comment": "07 JAN 2026: VETO trades après 48s (GBPUSD plus strict car haute volatilité)"
+        },
         "allowed_hours_gmt": [
           7,
           8,

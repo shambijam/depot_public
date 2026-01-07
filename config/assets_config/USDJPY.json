@@ -281,6 +281,11 @@
       },
       "timing_gatekeeper": {
         "enabled": true,
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 52,
+          "comment": "07 JAN 2026: VETO trades après 52s (USDJPY plus permissif car moins volatile)"
+        },
         "allowed_hours_gmt": [
           0,
           1,
