@@ -58,6 +58,50 @@
   ],
   "overrides": {
     "scalping": {
+      "burst_mode_overrides": {
+        "comment": "07 JAN 2026: Ajustements USDJPY pour les 4 modes de burst (deltas faibles)",
+        "niveau_2": {
+          "delta_momentum_min": 15.0,
+          "volume_confirmation_min": 8.0,
+          "imbalance_strength_min": 5.0,
+          "composite_score_min": 62.0,
+          "comment": "USDJPY: Delta -5 pts, volume -2 pts, composite -3 pts (deltas 15 vs 100 EURUSD)"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 12.0,
+          "volume_confirmation_min": 8.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 8.0,
+            "order_clustering_min": 5.0,
+            "tape_speed_ratio_min": 1.5
+          },
+          "comment": "USDJPY: Seuils réduits (activité modérée, tape speed 1.5)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 12.0,
+          "absorption_levels_min": 8.0,
+          "order_clustering_min": 3.0,
+          "composite_score_min": 64.0,
+          "comment": "USDJPY: Seuils adaptés à faible delta (niveau 3 recommandé)"
+        },
+        "niveau_4": {
+          "composite_score_min": 66.0,
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 4.0,
+              "penalty_exhausted": 8.0
+            },
+            "price_memory": {
+              "min_score": 48.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "USDJPY: Pénalités fatigue réduites (-1 pt), memory 48 (plus tolérant)"
+        }
+      },
       "footprint": {
         "m1_min_ticks": 30,
         "m1_min_coverage_s": 5,
@@ -176,15 +220,20 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 60.0,
-            "comment_min_score": "06 JAN 2026: Seuil COMPOSITE minimum pour décision BUY/SELL (60=sniper avec composite, 65=normal, 70=conservateur)",
+            "min_score": 64.0,
+            "comment_min_score": "07 JAN 2026 TEST PARALLÈLE: USDJPY = NIVEAU 2.5 (Hybrid - Trio + 1 boost)",
             "of_v6_gate": {
-              "min_score": 0.65,
+              "min_score": 0.70,
               "require_ncp_strong": true,
               "min_delta_abs": 15.0,
               "min_imbalance": 0.60,
               "min_tickrate": 1.5,
-              "comment": "Seuils d'entrée assouplis pour USDJPY"
+              "require_one_of": {
+                "absorption_min": 8.0,
+                "clustering_min": 5.0,
+                "tape_speed_ratio_min": 1.5
+              },
+              "comment": "07 JAN 2026 NIVEAU 2.5: Exige AU MOINS UN boost (absorption OU clustering OU tape speed)"
             },
             "flow_vol_gate": {
               "enabled": false

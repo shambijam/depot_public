@@ -55,6 +55,47 @@
   ],
   "overrides": {
     "scalping": {
+      "burst_mode_overrides": {
+        "comment": "07 JAN 2026: Ajustements GBPUSD pour les 4 modes de burst (haute volatilité)",
+        "niveau_2": {
+          "delta_momentum_min": 22.0,
+          "volume_confirmation_min": 10.0,
+          "comment": "GBPUSD: Delta min +2 pts vs EURUSD (deltas plus élevés, 120 vs 100)"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 20.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 12.0,
+            "order_clustering_min": 6.0,
+            "tape_speed_ratio_min": 2.5
+          },
+          "comment": "GBPUSD: Absorption +2 pts, tape speed 2.5 (très actif)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 20.0,
+          "absorption_levels_min": 12.0,
+          "order_clustering_min": 4.0,
+          "composite_score_min": 70.0,
+          "comment": "GBPUSD: Seuils plus stricts (haute volatilité, composite +2 pts)"
+        },
+        "niveau_4": {
+          "composite_score_min": 72.0,
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 6.0,
+              "penalty_exhausted": 12.0
+            },
+            "price_memory": {
+              "min_score": 52.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "GBPUSD: Pénalités fatigue plus sévères (+1 pt), composite +4 pts total"
+        }
+      },
       "footprint": {
         "m1_min_ticks": 60,
         "m1_min_coverage_s": 5,
@@ -173,15 +214,17 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 60.0,
-            "comment_min_score": "06 JAN 2026: Seuil COMPOSITE minimum pour décision BUY/SELL (60=sniper avec composite, 65=normal, 70=conservateur)",
+            "min_score": 70.0,
+            "comment_min_score": "07 JAN 2026 TEST PARALLÈLE: GBPUSD = NIVEAU 3 (Optimal - Absorption Boostée)",
             "of_v6_gate": {
-              "min_score": 0.67,
+              "min_score": 0.72,
               "require_ncp_strong": true,
               "min_delta_abs": 120.0,
               "min_imbalance": 0.62,
               "min_tickrate": 3.5,
-              "comment": "Seuils assouplis pour GBPUSD (Option B - 31 DEC 2025)"
+              "require_absorption_min": 12.0,
+              "require_clustering_min": 4.0,
+              "comment": "07 JAN 2026 NIVEAU 3: Absorption ≥12 + Clustering ≥4 requis (signature institutionnelle)"
             },
             "flow_vol_gate": {
               "enabled": false

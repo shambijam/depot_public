@@ -201,14 +201,14 @@ asset_signals_for_of = {
 
 ### Estimation Temps Calcul
 
-| Analyseur | Temps Estimé |
-|-----------|-------------|
-| PriceMemoryAnalyzer | 35-50ms |
-| MarketFatigueAnalyzer | 28-43ms |
-| MarketPhysicsAnalyzer | 28-40ms |
-| MicrostructureAnalyzer | 25-38ms |
-| LiquidityHeatmap | 22-33ms |
-| **TOTAL Phase 1+2** | **138-204ms** |
+| Analyseur              | Temps Estimé  |
+| ---------------------- | ------------- |
+| PriceMemoryAnalyzer    | 35-50ms       |
+| MarketFatigueAnalyzer  | 28-43ms       |
+| MarketPhysicsAnalyzer  | 28-40ms       |
+| MicrostructureAnalyzer | 25-38ms       |
+| LiquidityHeatmap       | 22-33ms       |
+| **TOTAL Phase 1+2**    | **138-204ms** |
 
 **Total cycle avec OrderFlow V6 actuel** : 95ms + 204ms = **299ms**
 
@@ -298,12 +298,12 @@ tail -f logs/sniper_x_bot_*.log | grep "Cycle time"
 ---
 
 ## 📁 FICHIERS CRÉÉS
-
 1. ✅ `phase_observer/price_memory_analyzer.py` (426 lignes)
 2. ✅ `phase_observer/market_fatigue_analyzer.py` (330 lignes)
 3. ✅ `phase_observer/market_physics_analyzer.py` (356 lignes)
 4. ✅ `phase_observer/microstructure_analyzer.py` (239 lignes)
 5. ✅ `phase_observer/liquidity_heatmap.py` (218 lignes)
+
 
 **Total** : ~1569 lignes de code
 

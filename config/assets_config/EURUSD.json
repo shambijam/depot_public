@@ -55,6 +55,45 @@
   ],
   "overrides": {
     "scalping": {
+      "burst_mode_overrides": {
+        "comment": "07 JAN 2026: Ajustements EURUSD pour les 4 modes de burst",
+        "niveau_2": {
+          "delta_momentum_min": 20.0,
+          "comment": "EURUSD standard, seuils par défaut OK"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 18.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 10.0,
+            "order_clustering_min": 6.0,
+            "tape_speed_ratio_min": 2.0
+          },
+          "comment": "EURUSD: Tape speed min 2.0 (activité normale)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 18.0,
+          "absorption_levels_min": 10.0,
+          "order_clustering_min": 3.5,
+          "composite_score_min": 68.0,
+          "comment": "EURUSD: Mode optimal recommandé pour tests"
+        },
+        "niveau_4": {
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 5.0,
+              "penalty_exhausted": 10.0
+            },
+            "price_memory": {
+              "min_score": 50.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "EURUSD: Filtres institutionnels standards"
+        }
+      },
       "footprint": {
         "m1_min_ticks": 50,
         "m1_min_coverage_s": 5,
@@ -173,15 +212,15 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 60.0,
-            "comment_min_score": "06 JAN 2026: Seuil COMPOSITE minimum pour décision BUY/SELL (60=sniper avec composite, 65=normal, 70=conservateur)",
+            "min_score": 65.0,
+            "comment_min_score": "07 JAN 2026 TEST PARALLÈLE: EURUSD = NIVEAU 2 (Baseline permissif)",
             "of_v6_gate": {
-              "min_score": 0.65,
+              "min_score": 0.67,
               "require_ncp_strong": true,
               "min_delta_abs": 100.0,
               "min_imbalance": 0.60,
               "min_tickrate": 3.0,
-              "comment": "Seuils assouplis pour EURUSD (Option B - 31 DEC 2025)"
+              "comment": "07 JAN 2026 NIVEAU 2: Seuils permissifs pour baseline (0.67 vs 0.70)"
             },
             "flow_vol_gate": {
               "enabled": false

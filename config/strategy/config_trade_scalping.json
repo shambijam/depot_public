@@ -52,6 +52,8 @@
         "burst_size": 11,
         "enforce_single_basket": true,
         "per_leg_virtual": false,
+        "active_burst_mode": "multi_niveau",
+        "comment_active_mode": "07 JAN 2026 - TEST PARALLÈLE: 3 niveaux simultanés (EURUSD=N2, GBPUSD=N3, USDJPY=N2.5)",
         "sltp": {
           "exit_mode": "sl_tp_then_trail",
           "sl_method": "PIPS",
@@ -86,6 +88,131 @@
           "enable_loss_guard": true,
           "max_loss_pips": 80.0,
           "loss_guard_arming_ms": 3000
+        }
+      },
+      "burst_modes": {
+        "description": "07 JAN 2026: Modes de burst testables progressivement (Niveaux 2, 2.5, 3, 4)",
+        "niveau_2": {
+          "name": "Trio Delta/Volume/Imbalance",
+          "description": "Baseline burst classique - Trio gagnant éprouvé",
+          "criteria": {
+            "delta_momentum_min": 20.0,
+            "volume_confirmation_min": 10.0,
+            "imbalance_strength_min": 5.0,
+            "composite_score_min": 65.0
+          },
+          "institutional_filters": {
+            "enabled": false
+          },
+          "exit": {
+            "target_profit_pips": 3.0,
+            "comment": "Sortie rapide +3 pips pour burst classique"
+          },
+          "expected_performance": {
+            "trades_per_day": "8-15",
+            "win_rate": "55-60%",
+            "avg_pips_per_win": "3-4"
+          }
+        },
+        "niveau_2_5": {
+          "name": "Hybrid Boost (Trio + 1 signal institutionnel)",
+          "description": "Compromis qualité/fréquence - Trio + au moins UN boost institutionnel",
+          "criteria": {
+            "delta_momentum_min": 18.0,
+            "volume_confirmation_min": 10.0,
+            "imbalance_strength_min": 5.0,
+            "composite_score_min": 66.0,
+            "require_at_least_one": {
+              "absorption_levels_min": 10.0,
+              "order_clustering_min": 6.0,
+              "tape_speed_ratio_min": 2.0
+            }
+          },
+          "institutional_filters": {
+            "enabled": false
+          },
+          "exit": {
+            "target_profit_pips": 3.5,
+            "comment": "Sortie +3.5 pips (légèrement plus que niveau 2)"
+          },
+          "expected_performance": {
+            "trades_per_day": "6-12",
+            "win_rate": "62-67%",
+            "avg_pips_per_win": "3.5-5"
+          }
+        },
+        "niveau_3": {
+          "name": "Absorption Boostée (Signature Institutionnelle)",
+          "description": "OPTIMAL - Absorption + Clustering = signature institutionnelle claire",
+          "criteria": {
+            "delta_momentum_min": 18.0,
+            "volume_confirmation_min": 10.0,
+            "absorption_levels_min": 10.0,
+            "order_clustering_min": 3.5,
+            "composite_score_min": 68.0,
+            "require_absorption_bonus": true
+          },
+          "institutional_filters": {
+            "enabled": false,
+            "comment": "Pas de filtres institutionnels durs au niveau 3, seulement signature absorption"
+          },
+          "exit": {
+            "target_profit_pips": 4.0,
+            "dynamic_exit": {
+              "enabled": true,
+              "early_exit_pips": 3.0,
+              "early_exit_condition": "tape_speed_ratio < 1.0",
+              "comment": "Sortie anticipée à +3 pips si tape speed faiblit"
+            }
+          },
+          "expected_performance": {
+            "trades_per_day": "5-10",
+            "win_rate": "65-70%",
+            "avg_pips_per_win": "4-6"
+          }
+        },
+        "niveau_4": {
+          "name": "Institutional Filter (Contexte de Marché)",
+          "description": "Niveau 3 + Filtres institutionnels (Fatigue, Memory, Physics)",
+          "criteria": {
+            "delta_momentum_min": 18.0,
+            "volume_confirmation_min": 10.0,
+            "absorption_levels_min": 10.0,
+            "order_clustering_min": 3.5,
+            "composite_score_min": 68.0,
+            "require_absorption_bonus": true
+          },
+          "institutional_filters": {
+            "enabled": true,
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 5.0,
+              "penalty_exhausted": 10.0,
+              "comment": "Si FATIGUED: composite_min +5 pts. Si EXHAUSTED: composite_min +10 pts"
+            },
+            "price_memory": {
+              "min_score": 50.0,
+              "comment": "fresh_ratio >= 0.5 (pas trop de vieux niveaux bloquants)"
+            },
+            "market_physics": {
+              "require_aligned": true,
+              "comment": "Physics bias doit être aligné avec direction du delta"
+            }
+          },
+          "exit": {
+            "target_profit_pips": 5.0,
+            "dynamic_exit": {
+              "enabled": true,
+              "early_exit_pips": 3.5,
+              "early_exit_condition": "tape_speed_ratio < 1.2",
+              "comment": "Sortie anticipée si tape speed faiblit"
+            }
+          },
+          "expected_performance": {
+            "trades_per_day": "3-7",
+            "win_rate": "70-75%",
+            "avg_pips_per_win": "5-7"
+          }
         }
       },
       "timing_gatekeeper": {
@@ -199,10 +326,11 @@
         }
       },
       "decision": {
-        "min_orderflow_score": 70,
+        "min_orderflow_score": 75,
         "require_timing_pass": true,
         "max_spread_pts": 15,
-        "min_confidence": 0.65
+        "min_confidence": 0.70,
+        "comment": "06 JAN 2026 QUALITÉ: Seuils augmentés (70→75, 0.65→0.70) pour trades plus sélectifs"
       }
     }
   },
