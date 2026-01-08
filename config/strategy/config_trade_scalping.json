@@ -80,7 +80,7 @@
         "closure_rules": {
           "enabled": true,
           "enable_profit_close": true,
-          "target_profit_pips": 2.1,
+          "target_profit_pips": 1.8,
           "require_full_count_for_profit_close": false,
           "rt_fast_window_ms": 120000,
           "rt_poll_interval_ms": 100,
@@ -132,8 +132,8 @@
             "enabled": false
           },
           "exit": {
-            "target_profit_pips": 3.5,
-            "comment": "Sortie +3.5 pips (légèrement plus que niveau 2)"
+            "target_profit_pips": 1.8,
+            "comment": "Sortie +1.8 pips (légèrement plus que niveau 2)"
           },
           "expected_performance": {
             "trades_per_day": "6-12",
@@ -185,7 +185,10 @@
           "institutional_filters": {
             "enabled": true,
             "market_fatigue": {
-              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "allowed_states": [
+                "ENERGETIC",
+                "NORMAL"
+              ],
               "penalty_fatigued": 5.0,
               "penalty_exhausted": 10.0,
               "comment": "Si FATIGUED: composite_min +5 pts. Si EXHAUSTED: composite_min +10 pts"

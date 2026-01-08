@@ -3979,9 +3979,10 @@ def scalping_worker(
                     of_score = orderflow_result_mini.get("score", 0.0)
                     of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
 
-                    # Extraire delta_total depuis OrderFlow summary
+                    # Extraire delta_total depuis OrderFlow summary (08 JAN 2026: FIX chemin d'accès)
                     of_summary = orderflow_result_mini.get("summary", {})
-                    delta_total = of_summary.get("delta_total", 0)
+                    delta_details = of_summary.get("delta_momentum_details", {})
+                    delta_total = delta_details.get("delta_total", 0)
 
                     # Formater trend depuis of_bias
                     if of_bias == "BULLISH":
