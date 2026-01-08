@@ -58,20 +58,20 @@
       "burst_mode_overrides": {
         "comment": "08 JAN 2026: Ajustements NAS100 pour les 4 modes de burst",
         "niveau_2": {
-          "delta_momentum_min": 25.0,
-          "comment": "NAS100 plus volatile, seuils delta augmentés"
+          "delta_momentum_min": 18.0,
+          "comment": "NAS100 delta baissé 25→18 pour transition 16h-17h GMT"
         },
         "niveau_2_5": {
-          "delta_momentum_min": 22.0,
+          "delta_momentum_min": 15.0,
           "require_at_least_one": {
-            "absorption_levels_min": 12.0,
-            "order_clustering_min": 7.0,
-            "tape_speed_ratio_min": 2.5
+            "absorption_levels_min": 10.0,
+            "order_clustering_min": 6.0,
+            "tape_speed_ratio_min": 2.0
           },
-          "comment": "NAS100: Tape speed min 2.5 (activité très élevée)"
+          "comment": "NAS100: Seuils assouplis pour transition 16h-17h GMT"
         },
         "niveau_3": {
-          "delta_momentum_min": 22.0,
+          "delta_momentum_min": 15.0,
           "absorption_levels_min": 12.0,
           "order_clustering_min": 4.0,
           "composite_score_min": 68.0,
@@ -215,12 +215,12 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 66.0,
-            "comment_min_score": "08 JAN 2026: NAS100 = NIVEAU 2.5 (Compromis qualité/fréquence)",
+            "min_score": 60.0,
+            "comment_min_score": "08 JAN 2026: NAS100 score baissé 66→60 pour transition 16h-17h GMT",
             "of_v6_gate": {
-              "min_score": 0.67,
+              "min_score": 0.65,
               "require_ncp_strong": true,
-              "min_delta_abs": 200.0,
+              "min_delta_abs": 150.0,
               "min_imbalance": 0.60,
               "min_tickrate": 5.0,
               "comment": "08 JAN 2026: NAS100 seuils adaptés à l'activité élevée"
@@ -287,11 +287,11 @@
           20
         ],
         "comment_hours": "08 JAN 2026: NY session 13h-20h GMT (NAS100 plus actif pendant Wall Street)",
-        "min_tick_rate": 5.0,
+        "min_tick_rate": 2.5,
         "min_coverage_s": 5.0,
         "max_tick_rate": 300.0,
         "max_spread_pips": 2.0,
-        "comment": "08 JAN 2026: NAS100 activité élevée - min_tick_rate=5, max_spread=2pts"
+        "comment": "08 JAN 2026: NAS100 tick_rate baissé 5→2.5 pour capter trades pendant transition 16h-17h GMT"
       }
     }
   }

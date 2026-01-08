@@ -15,7 +15,7 @@
         },
         "symbol": {
             "type": "string",
-            "pattern": "^[A-Z]{3,6}$"
+            "pattern": "^[A-Z0-9]{3,10}$"
         },
         "type": {
             "type": "string",

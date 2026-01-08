@@ -214,8 +214,8 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 70.0,
-            "comment_min_score": "07 JAN 2026 TEST PARALLÈLE: GBPUSD = NIVEAU 3 (Optimal - Absorption Boostée)",
+            "min_score": 62.0,
+            "comment_min_score": "08 JAN 2026: GBPUSD score baissé 70→62 pour capter plus de trades 16h-17h GMT",
             "of_v6_gate": {
               "min_score": 0.72,
               "require_ncp_strong": true,
