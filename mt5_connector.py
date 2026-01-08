@@ -1898,16 +1898,24 @@ class MT5Connector:
             is_sell_flag = (flags & 64) > 0  # 0x40 = SELL
 
             # 🔍 DEBUG (24 Nov 2025): Log flags distribution
-            self.logger.critical(f"[MT5C_DEBUG] Flags sample (first 10): {flags.head(10).tolist()}")
-            self.logger.critical(f"[MT5C_DEBUG] Buy flags (32/0x20): {is_buy_flag.sum()} | Sell flags (64/0x40): {is_sell_flag.sum()}")
+            if symbol in ["USDJPY", "EURUSD"]:
+                self.logger.critical(f"[MT5_FLAGS][{symbol}] Flags sample (first 10): {flags.head(10).tolist()}")
+                self.logger.critical(
+                    f"[MT5_FLAGS][{symbol}] "
+                    f"Flag 32 (BUY): {is_buy_flag.sum()} | "
+                    f"Flag 64 (SELL): {is_sell_flag.sum()} | "
+                    f"Autres: {(~is_buy_flag & ~is_sell_flag).sum()} | "
+                    f"Total: {len(flags)}"
+                )
 
             side = np.where(
                 is_buy_flag, "buy", np.where(is_sell_flag, "sell", "unknown")
             )
 
             # 🔍 DEBUG (24 Nov 2025): Log side après flags
-            side_after_flags = pd.Series(side).value_counts().to_dict()
-            self.logger.critical(f"[MT5C_DEBUG] Side après flags 16/32: {side_after_flags}")
+            if symbol in ["USDJPY", "EURUSD"]:
+                side_after_flags = pd.Series(side).value_counts().to_dict()
+                self.logger.critical(f"[MT5_FLAGS][{symbol}] Side après flags 32/64: {side_after_flags}")
 
             # ── Fallback 1 : tick-rule (Lee–Ready simplifié sur Δmid)
             unk_mask = side == "unknown"
@@ -1934,8 +1942,13 @@ class MT5Connector:
                 side = tmp
 
                 # 🔍 DEBUG (24 Nov 2025): Log side après tick-rule
-                side_after_tickrule = pd.Series(side).value_counts().to_dict()
-                self.logger.critical(f"[MT5C_DEBUG] Side après tick-rule: {side_after_tickrule}")
+                if symbol in ["USDJPY", "EURUSD"]:
+                    side_after_tickrule = pd.Series(side).value_counts().to_dict()
+                    self.logger.critical(
+                        f"[MT5_TICKRULE][{symbol}] "
+                        f"Distribution: {side_after_tickrule} | "
+                        f"Unknown: {side_after_tickrule.get('unknown', 0)}/{len(side)}"
+                    )
 
             # ── Fallback 2 (ultime) : lecture légère des bits 1/2 (ASK↑ ≈ buy, BID↓ ≈ sell)
             #    ⚠️ Ce n'est pas une "volonté d'agresseur", juste un dernier filet pour classer.
@@ -1959,11 +1972,30 @@ class MT5Connector:
                 tmp[unk_mask] = side_bits[unk_mask]
                 side = tmp
 
+                # 🔍 DEBUG (08 JAN 2026): Log side après Fallback 2 (bits 1/2)
+                if symbol in ["USDJPY", "EURUSD"]:
+                    side_after_bits = pd.Series(side).value_counts().to_dict()
+                    flag1_alone = (is_ask_bit & ~is_bid_bit).sum()
+                    flag2_alone = (is_bid_bit & ~is_ask_bit).sum()
+                    self.logger.critical(
+                        f"[MT5_BITS][{symbol}] "
+                        f"Flag 1 seul: {flag1_alone} → sell | "
+                        f"Flag 2 seul: {flag2_alone} → buy | "
+                        f"Distribution finale: {side_after_bits}"
+                    )
+
             df["side"] = side
 
             # 🔍 DEBUG (24 Nov 2025): Log side FINAL
-            side_final = df["side"].value_counts().to_dict()
-            self.logger.critical(f"[MT5C_DEBUG] Side FINAL (retourné): {side_final}")
+            if symbol in ["USDJPY", "EURUSD"]:
+                side_final = df["side"].value_counts().to_dict()
+                self.logger.critical(
+                    f"[MT5_FINAL][{symbol}] "
+                    f"BUY: {side_final.get('buy', 0)} | "
+                    f"SELL: {side_final.get('sell', 0)} | "
+                    f"UNKNOWN: {side_final.get('unknown', 0)} | "
+                    f"Total: {len(df)}"
+                )
 
             # ── Stats & log
             total = len(df)

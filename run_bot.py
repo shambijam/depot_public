@@ -3979,6 +3979,18 @@ def scalping_worker(
                     of_score = orderflow_result_mini.get("score", 0.0)
                     of_bias = orderflow_result_mini.get("bias", "NEUTRAL")
 
+                    # Extraire delta_total depuis OrderFlow summary
+                    of_summary = orderflow_result_mini.get("summary", {})
+                    delta_total = of_summary.get("delta_total", 0)
+
+                    # Formater trend depuis of_bias
+                    if of_bias == "BULLISH":
+                        trend_str = "🟢 BULL"
+                    elif of_bias == "BEARISH":
+                        trend_str = "🔴 BEAR"
+                    else:
+                        trend_str = "⚪ NEU"
+
                     timing_status = timing_verdict.get("verdict", "UNKNOWN")
                     timing_reason = timing_verdict.get("veto_reason", "")
                     qm = timing_verdict.get("quality_metrics", {})
@@ -3995,6 +4007,8 @@ def scalping_worker(
                         "timestamp": time.time(),
                         "regime": str(current_regime).upper(),
                         "regime_strength": regime_strength,
+                        "trend": trend_str,  # 08 JAN 2026: Ajout trend
+                        "delta": delta_total,  # 08 JAN 2026: Ajout delta
                         "of_score": of_score,
                         "of_bias": of_bias,
                         "timing": timing_status,
@@ -4159,13 +4173,13 @@ def dashboard_worker(
             if reports:
                 # Header
                 now = pd.Timestamp.now().strftime("%d %b %Y %H:%M:%S")
-                print("\n" + "═" * 90)
+                print("\n" + "═" * 110)
                 print(f"📊 SCALPING MULTI-ACTIFS - {now}")
-                print("─" * 90)
+                print("─" * 110)
 
-                # Table header (03 JAN 2026: ORDERFLOW → SCORING car peut être composite)
-                print(f"{'ASSET':<7} │ {'RÉGIME':<12} │ {'SCORING':<11} │ {'TIMING':<7} │ {'ACTION':<8} │ {'CONF':<4} │ {'TICKS':<10}")
-                print("─" * 90)
+                # Table header (08 JAN 2026: Ajout TREND + DELTA)
+                print(f"{'ASSET':<7} │ {'RÉGIME':<12} │ {'TREND':<8} │ {'SCORING':<11} │ {'DELTA':<7} │ {'TIMING':<7} │ {'ACTION':<8} │ {'CONF':<4} │ {'TICKS':<10}")
+                print("─" * 110)
 
                 # Lignes par asset (ordre fixe)
                 for asset_name in ["USDJPY", "EURUSD", "GBPUSD"]:
@@ -4208,11 +4222,23 @@ def dashboard_worker(
                         # Confidence
                         conf_str = f"{r['confidence']*100:.0f}%"
 
+                        # Trend (08 JAN 2026)
+                        trend_str = r.get("trend", "⚪ NEU")
+
+                        # Delta (08 JAN 2026)
+                        delta_val = r.get("delta", 0)
+                        if delta_val > 0:
+                            delta_str = f"🟢{delta_val:+.0f}"
+                        elif delta_val < 0:
+                            delta_str = f"🔴{delta_val:+.0f}"
+                        else:
+                            delta_str = "⚪0"
+
                         # Ticks
                         ticks_str = f"{r['tick_count']} ticks"
 
-                        # Affichage ligne principale
-                        print(f"{asset_name:<7} │ {regime_str:<12} │ {of_str:<10} │ {timing_str:<7} │ {action_str:<8} │ {conf_str:<4} │ {ticks_str:<10}")
+                        # Affichage ligne principale (08 JAN 2026: Ajout TREND + DELTA)
+                        print(f"{asset_name:<7} │ {regime_str:<12} │ {trend_str:<8} │ {of_str:<10} │ {delta_str:<7} │ {timing_str:<7} │ {action_str:<8} │ {conf_str:<4} │ {ticks_str:<10}")
 
                         # 🔍 MODE VERBOSE: Afficher détails techniques (05 JAN 2026)
                         if verbose:
@@ -4230,7 +4256,7 @@ def dashboard_worker(
                             print(details_line)
 
                 # Footer avec résumé
-                print("─" * 90)
+                print("─" * 110)
 
                 # Compter signaux
                 buy_count = sum(1 for r in reports.values() if r["action"] == "BUY")
@@ -4262,7 +4288,7 @@ def dashboard_worker(
                 if summary_parts:
                     print(" | ".join(summary_parts))
 
-                print("═" * 90)
+                print("═" * 110)
 
             # Attendre jusqu'au prochain affichage
             time.sleep(display_interval)

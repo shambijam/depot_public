@@ -516,6 +516,17 @@ class ScalpingStrategy(BaseStrategy):
                         total_count = len(ticks_df)
                         unknown_count = total_count - buy_count - sell_count
 
+                        # 🔍 DEBUG (08 JAN 2026): Log calcul delta pour USDJPY/EURUSD
+                        if asset in ["USDJPY", "EURUSD"]:
+                            self.logger.critical(
+                                f"[DELTA_CALC][{asset}] "
+                                f"BUY_volume={buy_volume:.1f} ({buy_count} ticks) | "
+                                f"SELL_volume={sell_volume:.1f} ({sell_count} ticks) | "
+                                f"DELTA={delta_total:+.1f} | "
+                                f"Imbalance={imbalance:.2f} | "
+                                f"Unknown={unknown_count}"
+                            )
+
                         # 🔍 LOG (05 JAN 2026): Détecter ticks non classés (WARNING si >10%, sinon DEBUG)
                         if unknown_count > 0:
                             unknown_pct = (unknown_count / total_count * 100) if total_count > 0 else 0
