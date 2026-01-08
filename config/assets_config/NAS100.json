@@ -207,8 +207,8 @@
         "momentum_filter": {
           "enabled": true,
           "lookback_bars": 3,
-          "min_price_change_pips": 50.0,
-          "comment": "08 JAN 2026: VETO SELL si prix monte >50 pips sur 3 bougies (0.5 index points), VETO BUY si prix descend >50 pips"
+          "min_price_change_pips": 20.0,
+          "comment": "08 JAN 2026: Seuil baissé 50→20 (0.2 index points) pour capter micro-tendances - Ex: 11 bougies rouges = -6 à -9 pts sur 3 bars détecté!"
         }
       },
       "entry_rules": {
