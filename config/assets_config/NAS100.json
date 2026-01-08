@@ -196,8 +196,8 @@
           "delta_acceleration_min": 0.7,
           "volume_spike_multiplier": 3.0,
           "allow_partial_fills": false,
-          "max_spread_pips": 2.0,
-          "comment": "08 JAN 2026: Mode sniper NAS100 - Spread max 2 points"
+          "max_spread_pips": 200,
+          "comment": "08 JAN 2026 FIX: 200 pips = 2.0 index points spread max (100x pour indices)"
         },
         "ncp_strong": {
           "delta_abs_min": 200.0,
@@ -239,35 +239,35 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 8.0,
-          "buffer_pips": 2,
+          "pips": 800,
+          "buffer_pips": 200,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "swing_lookback": 0,
-          "comment": "8 points SL pour NAS100 (plus serré que forex, mouvements directionnels)"
+          "comment": "08 JAN 2026 FIX: 800 pips = 8 index points (1 pip NAS100 = 0.01 MT5, besoin 100x pour 1 point indice)"
         },
         "tp": {
-          "pips": 12.0,
+          "pips": 1200,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
-            "min_sl_tp_distance_pips": 15
+            "min_sl_tp_distance_pips": 1500
           },
-          "comment": "12 points TP pour NAS100 (RR 1.5)"
+          "comment": "08 JAN 2026 FIX: 1200 pips = 12 index points (RR 1.5)"
         }
       },
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 1.7,
+        "target_profit_pips": 170,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
         "min_age_ms_for_any_close": 2000,
         "enable_loss_guard": true,
-        "max_loss_pips": 25.0,
+        "max_loss_pips": 2500,
         "loss_guard_arming_ms": 3000,
-        "comment": "08 JAN 2026: NAS100 scalping rapide - Profit 3pts, Loss 25pts"
+        "comment": "08 JAN 2026 FIX: 170 pips = 1.7 index points profit, 2500 pips = 25 index points loss (100x pour indices)"
       },
       "timing_gatekeeper": {
         "enabled": true,
@@ -290,8 +290,8 @@
         "min_tick_rate": 2.5,
         "min_coverage_s": 5.0,
         "max_tick_rate": 300.0,
-        "max_spread_pips": 2.0,
-        "comment": "08 JAN 2026: NAS100 tick_rate baissé 5→2.5 pour capter trades pendant transition 16h-17h GMT"
+        "max_spread_pips": 200,
+        "comment": "08 JAN 2026 FIX: NAS100 tick_rate baissé 5→2.5, max_spread_pips=200 (2.0 index points, 100x)"
       }
     }
   }
