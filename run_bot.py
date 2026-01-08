@@ -3984,10 +3984,10 @@ def scalping_worker(
                     delta_details = of_summary.get("delta_momentum_details", {})
                     delta_total = delta_details.get("delta_total", 0)
 
-                    # Formater trend depuis of_bias
-                    if of_bias == "BULLISH":
+                    # Formater trend depuis of_bias (08 JAN 2026: FIX mapping BUY/SELL)
+                    if of_bias in ["BULLISH", "BUY"]:
                         trend_str = "🟢 BULL"
-                    elif of_bias == "BEARISH":
+                    elif of_bias in ["BEARISH", "SELL"]:
                         trend_str = "🔴 BEAR"
                     else:
                         trend_str = "⚪ NEU"
