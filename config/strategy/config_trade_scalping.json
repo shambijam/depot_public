@@ -52,8 +52,8 @@
         "burst_size": 11,
         "enforce_single_basket": true,
         "per_leg_virtual": false,
-        "active_burst_mode": "multi_niveau",
-        "comment_active_mode": "07 JAN 2026 - TEST PARALLÈLE: 3 niveaux simultanés (EURUSD=N2, GBPUSD=N3, USDJPY=N2.5)",
+        "active_burst_mode": "niveau_2_5",
+        "comment_active_mode": "08 JAN 2026 - TOUS au Niveau 2.5 (Hybrid Boost: Trio + 1 signal institutionnel)",
         "sltp": {
           "exit_mode": "sl_tp_then_trail",
           "sl_method": "PIPS",
