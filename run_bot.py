@@ -3535,6 +3535,52 @@ def scalping_worker(
                         logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur: {e_of}", exc_info=True)
                         orderflow_result_mini = {"score": 0.0, "bias": "NEUTRAL", "summary": {}, "composite_enabled": False}
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🧠 PRICE MEMORY TREND ANALYSIS (08 JAN 2026)
+                # Détecte la tendance historique sur 50 bougies M1
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
+
+                    # Initialiser l'analyseur (une seule fois par thread)
+                    if not hasattr(run_scalping_thread, 'price_memory_analyzer'):
+                        run_scalping_thread.price_memory_analyzer = PriceMemoryAnalyzer(logger=logger)
+
+                    price_memory_analyzer = run_scalping_thread.price_memory_analyzer
+
+                    # Analyser la structure de tendance
+                    latest_candle_for_memory = market_results.get("latest", {})
+                    current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
+
+                    trend_structure = price_memory_analyzer.analyze_trend_structure(
+                        historical_data=rates_df_fresh,
+                        current_price=current_price
+                    )
+
+                    # Extraire les informations clés
+                    memory_trend_direction = trend_structure.get('trend_direction', 'RANGE')  # BULLISH/BEARISH/RANGE
+                    memory_trend_strength = trend_structure.get('trend_strength', 0.0)         # 0.0-1.0
+                    memory_net_disp = trend_structure.get('net_displacement', {})
+                    memory_net_pips = memory_net_disp.get('net_pips', 0.0)
+                    memory_net_direction = memory_net_disp.get('net_direction', 'FLAT')
+                    memory_clarity = memory_net_disp.get('trend_clarity', 0.0)
+
+                    logger.info(
+                        f"[PRICE_MEMORY_TREND][{asset}] {memory_trend_direction} "
+                        f"(strength={memory_trend_strength:.2f}) | "
+                        f"Net: {memory_net_direction} {memory_net_pips:+.1f} pips | "
+                        f"Clarity: {memory_clarity:.2f}"
+                    )
+
+                except Exception as e_memory_trend:
+                    logger.error(f"[{asset}] Erreur Price Memory Trend: {e_memory_trend}", exc_info=True)
+                    # Valeurs par défaut en cas d'erreur
+                    memory_trend_direction = "RANGE"
+                    memory_trend_strength = 0.0
+                    memory_net_pips = 0.0
+                    memory_net_direction = "FLAT"
+                    memory_clarity = 0.0
+
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
@@ -3729,6 +3775,91 @@ def scalping_worker(
                         except Exception as e_decision:
                             logger.error(f"[DECISION] Erreur: {e_decision}", exc_info=True)
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
+
+                        # ═══════════════════════════════════════════════════════════════
+                        # 🧠 PRICE MEMORY VETO/BOOST (08 JAN 2026)
+                        # Ajuste le score selon alignement avec la tendance historique
+                        # ═══════════════════════════════════════════════════════════════
+
+                        # Extraire la direction du signal OrderFlow
+                        signal_direction = decision_mini.get("action", "HOLD")  # BUY/SELL/HOLD
+                        of_score_original = orderflow_result_mini.get("score", 0.0)
+
+                        # Appliquer VETO ou BOOST si signal de trading
+                        if signal_direction in ["BUY", "SELL"] and memory_trend_direction != "RANGE":
+
+                            # ═════════════════════════════════════════════════════════
+                            # CAS 1: Signal CONTRE tendance forte → VETO
+                            # ═════════════════════════════════════════════════════════
+                            if signal_direction == "BUY" and memory_trend_direction == "BEARISH":
+                                if memory_trend_strength > 0.70:
+                                    logger.warning(
+                                        f"[PRICE_MEMORY_VETO][{asset}] BUY contre tendance BEARISH forte "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips)"
+                                    )
+                                    # VETO complet
+                                    decision_mini["action"] = "HOLD"
+                                    decision_mini["rationale"] = f"VETO: BUY contre tendance BEARISH forte ({memory_net_pips:+.1f} pips, clarté {memory_clarity:.0%})"
+                                    decision_mini["confidence"] = 0.0
+
+                            elif signal_direction == "SELL" and memory_trend_direction == "BULLISH":
+                                if memory_trend_strength > 0.70:
+                                    logger.warning(
+                                        f"[PRICE_MEMORY_VETO][{asset}] SELL contre tendance BULLISH forte "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips)"
+                                    )
+                                    # VETO complet
+                                    decision_mini["action"] = "HOLD"
+                                    decision_mini["rationale"] = f"VETO: SELL contre tendance BULLISH forte ({memory_net_pips:+.1f} pips, clarté {memory_clarity:.0%})"
+                                    decision_mini["confidence"] = 0.0
+
+                            # ═════════════════════════════════════════════════════════
+                            # CAS 2: Signal AVEC tendance forte → BOOST
+                            # ═════════════════════════════════════════════════════════
+                            elif signal_direction == "BUY" and memory_trend_direction == "BULLISH":
+                                if memory_trend_strength > 0.60:
+                                    boost_points = 15
+                                    orderflow_result_mini["score"] = of_score_original + boost_points
+                                    logger.info(
+                                        f"[PRICE_MEMORY_BOOST][{asset}] BUY aligné avec tendance BULLISH "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, boost=+{boost_points})"
+                                    )
+                                    # Mettre à jour la rationale
+                                    if "rationale" in decision_mini:
+                                        decision_mini["rationale"] += f" [BOOST +{boost_points}: Aligné tendance BULL]"
+
+                            elif signal_direction == "SELL" and memory_trend_direction == "BEARISH":
+                                if memory_trend_strength > 0.60:
+                                    boost_points = 15
+                                    orderflow_result_mini["score"] = of_score_original + boost_points
+                                    logger.info(
+                                        f"[PRICE_MEMORY_BOOST][{asset}] SELL aligné avec tendance BEARISH "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, boost=+{boost_points})"
+                                    )
+                                    # Mettre à jour la rationale
+                                    if "rationale" in decision_mini:
+                                        decision_mini["rationale"] += f" [BOOST +{boost_points}: Aligné tendance BEAR]"
+
+                            # ═════════════════════════════════════════════════════════
+                            # CAS 3: Signal contre tendance MODÉRÉE → PENALTY
+                            # ═════════════════════════════════════════════════════════
+                            elif signal_direction == "BUY" and memory_trend_direction == "BEARISH":
+                                if 0.40 < memory_trend_strength <= 0.70:
+                                    penalty_points = 10
+                                    orderflow_result_mini["score"] = max(0, of_score_original - penalty_points)
+                                    logger.info(
+                                        f"[PRICE_MEMORY_PENALTY][{asset}] BUY contre tendance BEARISH modérée "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, penalty=-{penalty_points})"
+                                    )
+
+                            elif signal_direction == "SELL" and memory_trend_direction == "BULLISH":
+                                if 0.40 < memory_trend_strength <= 0.70:
+                                    penalty_points = 10
+                                    orderflow_result_mini["score"] = max(0, of_score_original - penalty_points)
+                                    logger.info(
+                                        f"[PRICE_MEMORY_PENALTY][{asset}] SELL contre tendance BULLISH modérée "
+                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, penalty=-{penalty_points})"
+                                    )
 
                         # Construction fusion_out
                         if decision_mini["action"] in ["BUY", "SELL"]:
@@ -3984,13 +4115,44 @@ def scalping_worker(
                     delta_details = of_summary.get("delta_momentum_details", {})
                     delta_total = delta_details.get("delta_total", 0)
 
-                    # Formater trend depuis of_bias (08 JAN 2026: FIX mapping BUY/SELL)
-                    if of_bias in ["BULLISH", "BUY"]:
-                        trend_str = "🟢 BULL"
-                    elif of_bias in ["BEARISH", "SELL"]:
-                        trend_str = "🔴 BEAR"
+                    # Formater trend avec Price Memory + OrderFlow (08 JAN 2026: Fusion Memory + OF)
+                    # Combiner OrderFlow (court terme 8s) + PriceMemory (moyen terme 50 bougies)
+                    if memory_trend_direction == "BULLISH" and of_bias in ["BULLISH", "BUY"]:
+                        # Alignement parfait: tendance haussière + signal BUY
+                        trend_str = f"🟢🟢 BULL NET{memory_net_pips:+.0f}"
+
+                    elif memory_trend_direction == "BEARISH" and of_bias in ["BEARISH", "SELL"]:
+                        # Alignement parfait: tendance baissière + signal SELL
+                        trend_str = f"🔴🔴 BEAR NET{memory_net_pips:+.0f}"
+
+                    elif memory_trend_direction == "BULLISH" and of_bias in ["BEARISH", "SELL"]:
+                        # Contre-tendance: signal SELL mais mémoire BULLISH
+                        trend_str = f"⚠️ BEAR NET{memory_net_pips:+.0f}"
+
+                    elif memory_trend_direction == "BEARISH" and of_bias in ["BULLISH", "BUY"]:
+                        # Contre-tendance: signal BUY mais mémoire BEARISH
+                        trend_str = f"⚠️ BULL NET{memory_net_pips:+.0f}"
+
+                    elif memory_trend_direction == "RANGE":
+                        # Marché flat/choppy
+                        if abs(memory_net_pips) < 5:
+                            trend_str = f"⚪ FLAT NET{memory_net_pips:+.0f}"
+                        else:
+                            # Range mais avec déplacement net
+                            if of_bias in ["BULLISH", "BUY"]:
+                                trend_str = f"⚪ BULL NET{memory_net_pips:+.0f}"
+                            elif of_bias in ["BEARISH", "SELL"]:
+                                trend_str = f"⚪ BEAR NET{memory_net_pips:+.0f}"
+                            else:
+                                trend_str = f"⚪ NEU NET{memory_net_pips:+.0f}"
                     else:
-                        trend_str = "⚪ NEU"
+                        # Fallback (ne devrait jamais arriver)
+                        if of_bias in ["BULLISH", "BUY"]:
+                            trend_str = f"🟢 BULL NET{memory_net_pips:+.0f}"
+                        elif of_bias in ["BEARISH", "SELL"]:
+                            trend_str = f"🔴 BEAR NET{memory_net_pips:+.0f}"
+                        else:
+                            trend_str = f"⚪ NEU NET{memory_net_pips:+.0f}"
 
                     timing_status = timing_verdict.get("verdict", "UNKNOWN")
                     timing_reason = timing_verdict.get("veto_reason", "")

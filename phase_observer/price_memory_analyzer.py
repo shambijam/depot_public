@@ -345,3 +345,359 @@ class PriceMemoryAnalyzer:
                 fresh_levels.append(pivot)
 
         return sorted(fresh_levels)
+
+    def analyze_trend_structure(
+        self,
+        historical_data: pd.DataFrame,
+        current_price: float
+    ) -> Dict[str, Any]:
+        """
+        🆕 08 JAN 2026: Analyse la structure de tendance basée sur les pivots historiques
+
+        Détecte:
+        - Higher Highs + Higher Lows = TENDANCE HAUSSIÈRE
+        - Lower Highs + Lower Lows = TENDANCE BAISSIÈRE
+        - Structure mixte = RANGE
+        - Déplacement net du prix (malgré oscillations)
+
+        Args:
+            historical_data: DataFrame OHLCV (minimum 20 bougies recommandé)
+            current_price: Prix actuel
+
+        Returns:
+            dict: {
+                'trend_direction': 'BULLISH' | 'BEARISH' | 'RANGE',
+                'trend_strength': 0.0-1.0,
+                'structure': {
+                    'higher_highs': bool,
+                    'higher_lows': bool,
+                    'lower_highs': bool,
+                    'lower_lows': bool
+                },
+                'net_displacement': {
+                    'net_pips': float,
+                    'net_direction': 'UP' | 'DOWN' | 'FLAT',
+                    'avg_pips_per_candle': float,
+                    'trend_clarity': 0.0-1.0
+                },
+                'last_pivots': {
+                    'highs': List[float],
+                    'lows': List[float]
+                }
+            }
+        """
+        if historical_data is None or len(historical_data) < 10:
+            return self._default_trend_structure()
+
+        try:
+            # 1. Trouver tous les pivots (swing highs/lows)
+            all_pivots = self.find_pivots(historical_data, window=3)
+
+            if len(all_pivots) < 4:
+                return self._default_trend_structure()
+
+            # 2. Séparer en highs et lows
+            swing_highs = []
+            swing_lows = []
+
+            for i in range(3, len(historical_data) - 3):
+                current_high = historical_data.iloc[i]['high']
+                current_low = historical_data.iloc[i]['low']
+
+                # Swing high check
+                is_swing_high = True
+                for j in range(i - 3, i + 4):
+                    if j != i and historical_data.iloc[j]['high'] >= current_high:
+                        is_swing_high = False
+                        break
+                if is_swing_high:
+                    swing_highs.append(current_high)
+
+                # Swing low check
+                is_swing_low = True
+                for j in range(i - 3, i + 4):
+                    if j != i and historical_data.iloc[j]['low'] <= current_low:
+                        is_swing_low = False
+                        break
+                if is_swing_low:
+                    swing_lows.append(current_low)
+
+            # Garder les 3-5 derniers pivots de chaque type
+            recent_highs = sorted(swing_highs)[-5:] if swing_highs else []
+            recent_lows = sorted(swing_lows)[-5:] if swing_lows else []
+
+            # 3. Analyser la structure (Higher Highs, Lower Lows, etc.)
+            structure = self._analyze_pivot_structure(recent_highs, recent_lows)
+
+            # 4. Analyser le déplacement net
+            net_displacement = self._analyze_net_displacement(historical_data, current_price)
+
+            # 5. Déterminer la tendance finale
+            trend_direction, trend_strength = self._determine_trend(structure, net_displacement)
+
+            result = {
+                'trend_direction': trend_direction,
+                'trend_strength': round(trend_strength, 2),
+                'structure': structure,
+                'net_displacement': net_displacement,
+                'last_pivots': {
+                    'highs': [round(h, 5) for h in recent_highs[-3:]] if len(recent_highs) >= 3 else recent_highs,
+                    'lows': [round(l, 5) for l in recent_lows[-3:]] if len(recent_lows) >= 3 else recent_lows
+                }
+            }
+
+            if self.logger:
+                self.logger.debug(
+                    f"[PRICE_MEMORY_TREND] {trend_direction} (strength={trend_strength:.2f}) | "
+                    f"Net: {net_displacement['net_direction']} {net_displacement['net_pips']:+.1f} pips | "
+                    f"Clarity: {net_displacement['trend_clarity']:.2f}"
+                )
+
+            return result
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[PRICE_MEMORY_TREND] Erreur analyse: {e}", exc_info=True)
+            return self._default_trend_structure()
+
+    def _analyze_pivot_structure(
+        self,
+        recent_highs: list,
+        recent_lows: list
+    ) -> Dict[str, bool]:
+        """
+        Analyse si les pivots forment une structure haussière ou baissière
+
+        Returns:
+            {
+                'higher_highs': bool,
+                'higher_lows': bool,
+                'lower_highs': bool,
+                'lower_lows': bool
+            }
+        """
+        structure = {
+            'higher_highs': False,
+            'higher_lows': False,
+            'lower_highs': False,
+            'lower_lows': False
+        }
+
+        # Besoin d'au moins 2 pivots de chaque type
+        if len(recent_highs) < 2 or len(recent_lows) < 2:
+            return structure
+
+        # Analyser les highs (prendre les 3 derniers)
+        if len(recent_highs) >= 3:
+            highs = recent_highs[-3:]
+            # Higher highs: chaque high est plus haut que le précédent
+            if highs[-1] > highs[-2] and highs[-2] > highs[-3]:
+                structure['higher_highs'] = True
+            # Lower highs: chaque high est plus bas que le précédent
+            elif highs[-1] < highs[-2] and highs[-2] < highs[-3]:
+                structure['lower_highs'] = True
+        elif len(recent_highs) == 2:
+            if recent_highs[-1] > recent_highs[-2]:
+                structure['higher_highs'] = True
+            else:
+                structure['lower_highs'] = True
+
+        # Analyser les lows (prendre les 3 derniers)
+        if len(recent_lows) >= 3:
+            lows = recent_lows[-3:]
+            # Higher lows: chaque low est plus haut que le précédent
+            if lows[-1] > lows[-2] and lows[-2] > lows[-3]:
+                structure['higher_lows'] = True
+            # Lower lows: chaque low est plus bas que le précédent
+            elif lows[-1] < lows[-2] and lows[-2] < lows[-3]:
+                structure['lower_lows'] = True
+        elif len(recent_lows) == 2:
+            if recent_lows[-1] > recent_lows[-2]:
+                structure['higher_lows'] = True
+            else:
+                structure['lower_lows'] = True
+
+        return structure
+
+    def _analyze_net_displacement(
+        self,
+        historical_data: pd.DataFrame,
+        current_price: float
+    ) -> Dict[str, Any]:
+        """
+        Analyse le déplacement NET du prix (ignorant les oscillations)
+
+        Répond à: "Malgré les bougies vertes/rouges alternées,
+                   où le prix est-il VRAIMENT allé?"
+
+        Returns:
+            {
+                'net_pips': float,
+                'net_direction': 'UP' | 'DOWN' | 'FLAT',
+                'avg_pips_per_candle': float,
+                'trend_clarity': 0.0-1.0,
+                'price_path': dict
+            }
+        """
+        if len(historical_data) < 5:
+            return {
+                'net_pips': 0.0,
+                'net_direction': 'FLAT',
+                'avg_pips_per_candle': 0.0,
+                'trend_clarity': 0.0,
+                'price_path': {}
+            }
+
+        # Prix de départ (première bougie)
+        start_price = historical_data.iloc[0]['close']
+
+        # Prix actuel
+        end_price = current_price
+
+        # Plus haut/bas dans la période
+        highest = historical_data['high'].max()
+        lowest = historical_data['low'].min()
+
+        # DÉPLACEMENT NET (clé!)
+        net_displacement = end_price - start_price
+
+        # Déterminer le nombre de décimales (5 pour forex majeur, 3 pour JPY)
+        if abs(start_price) > 100:  # Probablement JPY
+            pip_multiplier = 100  # 157.50 → 15750 pips
+        else:
+            pip_multiplier = 10000  # 1.0500 → 10500 pips
+
+        net_pips = net_displacement * pip_multiplier
+
+        # Direction nette
+        if abs(net_pips) < 3:
+            net_direction = "FLAT"
+        elif net_pips > 0:
+            net_direction = "UP"
+        else:
+            net_direction = "DOWN"
+
+        # Moyenne de déplacement par bougie
+        num_candles = len(historical_data)
+        avg_pips_per_candle = net_pips / num_candles if num_candles > 0 else 0.0
+
+        # CLARTÉ DE LA TENDANCE
+        # Compare le déplacement net vs le range total
+        total_range = (highest - lowest) * pip_multiplier
+        if total_range > 0:
+            trend_clarity = abs(net_pips) / total_range
+            # 1.0 = déplacement net = tout le range (tendance pure)
+            # 0.0 = déplacement net = 0 (range pur)
+        else:
+            trend_clarity = 0.0
+
+        return {
+            'net_pips': round(net_pips, 1),
+            'net_direction': net_direction,
+            'avg_pips_per_candle': round(avg_pips_per_candle, 2),
+            'trend_clarity': round(min(1.0, trend_clarity), 2),
+            'price_path': {
+                'start': round(start_price, 5),
+                'current': round(end_price, 5),
+                'highest': round(highest, 5),
+                'lowest': round(lowest, 5),
+                'total_range_pips': round(total_range, 1)
+            }
+        }
+
+    def _determine_trend(
+        self,
+        structure: Dict[str, bool],
+        net_displacement: Dict[str, Any]
+    ) -> tuple:
+        """
+        Détermine la tendance finale et sa force
+
+        Combine:
+        - Structure des pivots (Higher Highs, etc.)
+        - Déplacement net du prix
+
+        Returns:
+            (trend_direction, trend_strength)
+        """
+        # Extraire les infos
+        higher_highs = structure['higher_highs']
+        higher_lows = structure['higher_lows']
+        lower_highs = structure['lower_highs']
+        lower_lows = structure['lower_lows']
+
+        net_direction = net_displacement['net_direction']
+        net_pips = abs(net_displacement['net_pips'])
+        clarity = net_displacement['trend_clarity']
+
+        # LOGIQUE DE DÉCISION
+
+        # CAS 1: TENDANCE HAUSSIÈRE CLAIRE
+        if higher_highs and higher_lows and net_direction == "UP":
+            # Structure + déplacement alignés = tendance forte
+            strength = min(1.0, 0.7 + (clarity * 0.3))  # 0.7-1.0
+            return "BULLISH", strength
+
+        # CAS 2: TENDANCE BAISSIÈRE CLAIRE
+        if lower_highs and lower_lows and net_direction == "DOWN":
+            # Structure + déplacement alignés = tendance forte
+            strength = min(1.0, 0.7 + (clarity * 0.3))  # 0.7-1.0
+            return "BEARISH", strength
+
+        # CAS 3: Structure haussière mais déplacement faible/neutre
+        if higher_highs and higher_lows:
+            if net_pips > 10:
+                return "BULLISH", 0.6  # Modéré
+            else:
+                return "RANGE", 0.4  # Structure sans mouvement = range
+
+        # CAS 4: Structure baissière mais déplacement faible/neutre
+        if lower_highs and lower_lows:
+            if net_pips > 10:
+                return "BEARISH", 0.6  # Modéré
+            else:
+                return "RANGE", 0.4
+
+        # CAS 5: Déplacement net significatif SANS structure claire
+        if net_pips > 20:
+            if net_direction == "UP":
+                return "BULLISH", 0.5  # Faible (pas de confirmation structure)
+            elif net_direction == "DOWN":
+                return "BEARISH", 0.5
+
+        # CAS 6: Structure mixte (higher highs + lower lows, etc.)
+        if (higher_highs and lower_lows) or (lower_highs and higher_lows):
+            return "RANGE", 0.3  # Choppy
+
+        # CAS 7: Déplacement net faible + pas de structure
+        if net_pips < 10:
+            return "RANGE", 0.2  # Flat
+
+        # DEFAULT: Range avec force selon clarté
+        return "RANGE", round(clarity * 0.5, 2)
+
+    def _default_trend_structure(self) -> Dict[str, Any]:
+        """
+        Retourne une structure par défaut quand l'analyse n'est pas possible
+        """
+        return {
+            'trend_direction': 'RANGE',
+            'trend_strength': 0.0,
+            'structure': {
+                'higher_highs': False,
+                'higher_lows': False,
+                'lower_highs': False,
+                'lower_lows': False
+            },
+            'net_displacement': {
+                'net_pips': 0.0,
+                'net_direction': 'FLAT',
+                'avg_pips_per_candle': 0.0,
+                'trend_clarity': 0.0,
+                'price_path': {}
+            },
+            'last_pivots': {
+                'highs': [],
+                'lows': []
+            }
+        }
