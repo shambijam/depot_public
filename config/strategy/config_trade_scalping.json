@@ -4,7 +4,7 @@
   "version": "5.0-minimalist",
   "tradeable_assets": [
     "USDJPY",
-    "EURUSD",
+    "NAS100",
     "GBPUSD"
   ],
   "magic_number": 52001,

@@ -1,0 +1,295 @@
+{
+  "description": "Configuration institutionnelle pour NAS100 (Nasdaq 100) - MODE SNIPER",
+  "symbol": "NAS100",
+  "type": "index",
+  "profile": "institutionnel",
+  "last_updated": "2026-01-08",
+  "volatility": {
+    "expected_daily_range_percent": {
+      "value": 2.5,
+      "adaptive_range": {
+        "min": 1.5,
+        "max": 4.0,
+        "adjustment_period_days": 30
+      }
+    },
+    "max_allowed_spread_points": {
+      "base": 80,
+      "session_multipliers": {
+        "asia": 1.5,
+        "london": 1.2,
+        "new_york": 1.0
+      },
+      "news_spike_tolerance": 3,
+      "volatility_adjustment": true
+    },
+    "min_tradable_range_points": {
+      "value": 50,
+      "dynamic_adjustment": true
+    }
+  },
+  "risk_management": {
+    "base_lot_size": 0.1,
+    "daily_loss_limit_percent": {
+      "value": 2.0
+    },
+    "weekly_loss_limit_percent": {
+      "value": 5.0
+    },
+    "performance_based_adjustments": {
+      "enabled": true
+    }
+  },
+  "symbol_info": {
+    "point": 0.01,
+    "digits": 2,
+    "trade_contract_size": 1,
+    "trade_tick_size": 0.01
+  },
+  "strategy_toggles": {
+    "scalping": true,
+    "liquidity": false
+  },
+  "strategy_whitelist": [
+    "scalping"
+  ],
+  "overrides": {
+    "scalping": {
+      "burst_mode_overrides": {
+        "comment": "08 JAN 2026: Ajustements NAS100 pour les 4 modes de burst",
+        "niveau_2": {
+          "delta_momentum_min": 25.0,
+          "comment": "NAS100 plus volatile, seuils delta augmentés"
+        },
+        "niveau_2_5": {
+          "delta_momentum_min": 22.0,
+          "require_at_least_one": {
+            "absorption_levels_min": 12.0,
+            "order_clustering_min": 7.0,
+            "tape_speed_ratio_min": 2.5
+          },
+          "comment": "NAS100: Tape speed min 2.5 (activité très élevée)"
+        },
+        "niveau_3": {
+          "delta_momentum_min": 22.0,
+          "absorption_levels_min": 12.0,
+          "order_clustering_min": 4.0,
+          "composite_score_min": 68.0,
+          "comment": "NAS100: Mode optimal recommandé - Absorption plus élevée"
+        },
+        "niveau_4": {
+          "institutional_filters": {
+            "market_fatigue": {
+              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "penalty_fatigued": 5.0,
+              "penalty_exhausted": 10.0
+            },
+            "price_memory": {
+              "min_score": 50.0
+            },
+            "market_physics": {
+              "require_aligned": true
+            }
+          },
+          "comment": "NAS100: Filtres institutionnels standards"
+        }
+      },
+      "footprint": {
+        "m1_min_ticks": 80,
+        "m1_min_coverage_s": 5,
+        "burst_tolerance": {
+          "tickrate_min": 5.0,
+          "coverage_s_min_burst": 5
+        },
+        "comment": "08 JAN 2026 MODE SNIPER: NAS100 très actif, min_ticks=80 (vs 50 forex)"
+      },
+      "fusion": {
+        "ttl_ms": 600,
+        "max_slippage_points": 100,
+        "comment": "100 points = 1 point indice pour NAS100"
+      },
+      "orderflow_v6": {
+        "enabled": true,
+        "field_map": {
+          "delta_key": "delta",
+          "imbalance_key": "imbalance",
+          "vpoc_key": "vpoc",
+          "cvd_key": "cvd",
+          "cvd_slope_key": "cvd_slope",
+          "vwap_key": "vwap"
+        },
+        "lookback_bars": 6,
+        "cvd_slope_window": 5,
+        "comment_lookback": "08 JAN 2026 MODE SNIPER: lookback=6 pour réactivité maximale",
+        "features": {
+          "delta": {
+            "abs_strong": 200.0,
+            "abs_extreme": 400.0,
+            "comment": "NAS100 a des deltas très élevés (200+ vs 100 EURUSD)"
+          },
+          "imbalance": {
+            "min": 0.58,
+            "extreme": 0.72,
+            "comment": "Seuils standards pour NAS100"
+          },
+          "tickrate": {
+            "min": 5.0,
+            "burst_min": 8.0,
+            "coverage_s_min": 5,
+            "comment": "NAS100 : 5-8 ticks/sec (activité TRÈS élevée)"
+          },
+          "vpoc": {
+            "drift_max_points": 50.0,
+            "comment": "50 points = 0.5 point indice pour NAS100"
+          },
+          "cvd": {
+            "slope_window": 10,
+            "slope_min": 0.0,
+            "comment": "08 JAN 2026: slope_window déprécié, utilisez cvd_slope_window"
+          },
+          "vwap": {
+            "confirm_window": 10
+          }
+        },
+        "divergence": {
+          "enabled": true,
+          "lookback": 8,
+          "pivot_window": 1,
+          "confirm_window": 2,
+          "min_separation": 4,
+          "min_price_move_frac": 0.0005,
+          "min_indicator_move_frac": 0.0001,
+          "add_exhaustion": true,
+          "comment": "08 JAN 2026 MODE SNIPER: NAS100 mouvements plus amples"
+        },
+        "scoring": {
+          "weights": {
+            "delta": 0.35,
+            "imbalance": 0.30,
+            "tickrate": 0.20,
+            "divergence": 0.10,
+            "vpoc": 0.05
+          },
+          "entry_threshold": 0.60,
+          "comment_deprecated": "ATTENTION: Ces poids sont OBSOLÈTES. Utilisez 'scoring_weights'"
+        },
+        "scoring_weights": {
+          "comment": "✅ POIDS OPTIMISÉS MODE SNIPER NAS100 (08 JAN 2026)",
+          "comment_architecture": "Architecture: OrderFlow (50) + Footprint (30) + Triggers (20) = 100 pts max",
+          "delta_momentum_max": 32.0,
+          "volume_confirm_max": 12.0,
+          "imbalance_strength_max": 6.0,
+          "absorption_max": 18.0,
+          "clustering_max": 9.0,
+          "rejection_max": 3.0,
+          "triggers_max": 20.0,
+          "comment_total": "Total: 32+12+6 (OrderFlow=50) + 18+9+3 (Footprint=30) + 20 (Triggers) = 100 pts",
+          "comment_sniper": "MODE SNIPER: NAS100 mouvements directionnels forts, delta et absorption critiques"
+        },
+        "sniper_mode": {
+          "enabled": true,
+          "max_trade_duration_seconds": 15,
+          "required_score_threshold": 85,
+          "delta_acceleration_min": 0.7,
+          "volume_spike_multiplier": 3.0,
+          "allow_partial_fills": false,
+          "max_spread_pips": 2.0,
+          "comment": "08 JAN 2026: Mode sniper NAS100 - Spread max 2 points"
+        },
+        "ncp_strong": {
+          "delta_abs_min": 200.0,
+          "tickrate_min": 5.0,
+          "comment": "Seuils NCP adaptés pour NAS100 (activité élevée)"
+        },
+        "momentum_filter": {
+          "enabled": true,
+          "lookback_bars": 3,
+          "min_price_change_points": 0.0,
+          "comment": "08 JAN 2026: Filtre RÉGIME GLOBAL + momentum - Rejette trades contre régime"
+        }
+      },
+      "entry_rules": {
+        "scalping": {
+          "burst_scalping": {
+            "use_orderflow_v6": true,
+            "min_score": 66.0,
+            "comment_min_score": "08 JAN 2026: NAS100 = NIVEAU 2.5 (Compromis qualité/fréquence)",
+            "of_v6_gate": {
+              "min_score": 0.67,
+              "require_ncp_strong": true,
+              "min_delta_abs": 200.0,
+              "min_imbalance": 0.60,
+              "min_tickrate": 5.0,
+              "comment": "08 JAN 2026: NAS100 seuils adaptés à l'activité élevée"
+            },
+            "flow_vol_gate": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      "sltp": {
+        "exit_mode": "sl_tp_then_trail",
+        "sl_method": "PIPS",
+        "tp_method": "PIPS",
+        "rr_base": 1.5,
+        "rr_floor": 1.0,
+        "rr_cap": 3.0,
+        "sl": {
+          "pips": 8.0,
+          "buffer_pips": 2,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "swing_lookback": 0,
+          "comment": "8 points SL pour NAS100 (plus serré que forex, mouvements directionnels)"
+        },
+        "tp": {
+          "pips": 12.0,
+          "atr_period": 14,
+          "atr_multiplier": 0.0,
+          "execution": {
+            "min_sl_tp_distance_pips": 15
+          },
+          "comment": "12 points TP pour NAS100 (RR 1.5)"
+        }
+      },
+      "closure_rules": {
+        "enabled": true,
+        "enable_profit_close": true,
+        "target_profit_pips": 3.0,
+        "require_full_count_for_profit_close": false,
+        "rt_fast_window_ms": 120000,
+        "rt_poll_interval_ms": 100,
+        "min_age_ms_for_any_close": 2000,
+        "enable_loss_guard": true,
+        "max_loss_pips": 25.0,
+        "loss_guard_arming_ms": 3000,
+        "comment": "08 JAN 2026: NAS100 scalping rapide - Profit 3pts, Loss 25pts"
+      },
+      "timing_gatekeeper": {
+        "enabled": true,
+        "candle_timing_veto": {
+          "enabled": true,
+          "max_candle_age_seconds": 50,
+          "comment": "08 JAN 2026: VETO trades après 50s (standard)"
+        },
+        "allowed_hours_gmt": [
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20
+        ],
+        "comment_hours": "08 JAN 2026: NY session 13h-20h GMT (NAS100 plus actif pendant Wall Street)",
+        "min_tick_rate": 5.0,
+        "min_coverage_s": 5.0,
+        "max_tick_rate": 300.0,
+        "max_spread_pips": 2.0,
+        "comment": "08 JAN 2026: NAS100 activité élevée - min_tick_rate=5, max_spread=2pts"
+      }
+    }
+  }
+}
