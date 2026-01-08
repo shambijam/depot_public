@@ -3162,6 +3162,15 @@ def scalping_worker(
         global_state.record_error(asset, f"MarketAnalyzer init failed: {e}")
         return  # Arrêt du thread si MarketAnalyzer échoue
 
+    # ✅ Instancier PriceMemoryAnalyzer pour analyse de tendance (08 JAN 2026)
+    try:
+        from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
+        price_memory_analyzer = PriceMemoryAnalyzer(logger=logger)
+        logger.info(f"✅ [{asset}] PriceMemoryAnalyzer instancié")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer PriceMemoryAnalyzer: {e}")
+        price_memory_analyzer = None  # Continue sans Price Memory
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -3540,37 +3549,38 @@ def scalping_worker(
                 # Détecte la tendance historique sur 50 bougies M1
                 # ═══════════════════════════════════════════════════════════════
                 try:
-                    from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
+                    # Vérifier que l'analyseur est disponible
+                    if price_memory_analyzer is not None:
+                        # Analyser la structure de tendance
+                        latest_candle_for_memory = market_results.get("latest", {})
+                        current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
 
-                    # Initialiser l'analyseur (une seule fois par thread)
-                    if not hasattr(run_scalping_thread, 'price_memory_analyzer'):
-                        run_scalping_thread.price_memory_analyzer = PriceMemoryAnalyzer(logger=logger)
+                        trend_structure = price_memory_analyzer.analyze_trend_structure(
+                            historical_data=rates_df_fresh,
+                            current_price=current_price
+                        )
 
-                    price_memory_analyzer = run_scalping_thread.price_memory_analyzer
+                        # Extraire les informations clés
+                        memory_trend_direction = trend_structure.get('trend_direction', 'RANGE')  # BULLISH/BEARISH/RANGE
+                        memory_trend_strength = trend_structure.get('trend_strength', 0.0)         # 0.0-1.0
+                        memory_net_disp = trend_structure.get('net_displacement', {})
+                        memory_net_pips = memory_net_disp.get('net_pips', 0.0)
+                        memory_net_direction = memory_net_disp.get('net_direction', 'FLAT')
+                        memory_clarity = memory_net_disp.get('trend_clarity', 0.0)
 
-                    # Analyser la structure de tendance
-                    latest_candle_for_memory = market_results.get("latest", {})
-                    current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
-
-                    trend_structure = price_memory_analyzer.analyze_trend_structure(
-                        historical_data=rates_df_fresh,
-                        current_price=current_price
-                    )
-
-                    # Extraire les informations clés
-                    memory_trend_direction = trend_structure.get('trend_direction', 'RANGE')  # BULLISH/BEARISH/RANGE
-                    memory_trend_strength = trend_structure.get('trend_strength', 0.0)         # 0.0-1.0
-                    memory_net_disp = trend_structure.get('net_displacement', {})
-                    memory_net_pips = memory_net_disp.get('net_pips', 0.0)
-                    memory_net_direction = memory_net_disp.get('net_direction', 'FLAT')
-                    memory_clarity = memory_net_disp.get('trend_clarity', 0.0)
-
-                    logger.info(
-                        f"[PRICE_MEMORY_TREND][{asset}] {memory_trend_direction} "
-                        f"(strength={memory_trend_strength:.2f}) | "
-                        f"Net: {memory_net_direction} {memory_net_pips:+.1f} pips | "
-                        f"Clarity: {memory_clarity:.2f}"
-                    )
+                        logger.info(
+                            f"[PRICE_MEMORY_TREND][{asset}] {memory_trend_direction} "
+                            f"(strength={memory_trend_strength:.2f}) | "
+                            f"Net: {memory_net_direction} {memory_net_pips:+.1f} pips | "
+                            f"Clarity: {memory_clarity:.2f}"
+                        )
+                    else:
+                        # PriceMemoryAnalyzer non disponible
+                        memory_trend_direction = "RANGE"
+                        memory_trend_strength = 0.0
+                        memory_net_pips = 0.0
+                        memory_net_direction = "FLAT"
+                        memory_clarity = 0.0
 
                 except Exception as e_memory_trend:
                     logger.error(f"[{asset}] Erreur Price Memory Trend: {e_memory_trend}", exc_info=True)
