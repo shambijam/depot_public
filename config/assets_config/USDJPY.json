@@ -212,8 +212,8 @@
         "momentum_filter": {
           "enabled": true,
           "lookback_bars": 3,
-          "min_price_change_points": 0.0,
-          "comment": "06 JAN 2026 MODE SNIPER V2: Filtre RÉGIME GLOBAL + momentum court - Rejette BUY si régime BEARISH+prix descend, rejette SELL si régime BULLISH+prix monte. Évite trades CONTRE le régime dominant!"
+          "min_price_change_pips": 3.0,
+          "comment": "08 JAN 2026: VETO SELL si prix monte >3 pips sur 3 bougies, VETO BUY si prix descend >3 pips (seuil plus bas car USDJPY moins volatile)"
         }
       },
       "entry_rules": {

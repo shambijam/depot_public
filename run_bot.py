@@ -3546,7 +3546,7 @@ def scalping_worker(
 
                 # ═══════════════════════════════════════════════════════════════
                 # 🧠 PRICE MEMORY TREND ANALYSIS (08 JAN 2026)
-                # Détecte la tendance historique sur 50 bougies M1
+                # Détecte la tendance historique sur 15 bougies M1 (réactivité micro-tendances)
                 # ═══════════════════════════════════════════════════════════════
                 try:
                     # Vérifier que l'analyseur est disponible
@@ -3555,8 +3555,14 @@ def scalping_worker(
                         latest_candle_for_memory = market_results.get("latest", {})
                         current_price = latest_candle_for_memory.get('close', 0.0) if latest_candle_for_memory else 0.0
 
+                        # 🔧 08 JAN 2026: Utiliser seulement les 15 dernières bougies (au lieu de 50)
+                        # Raison: 50 bougies dilue les micro-tendances (4 bougies +12 pips → NET +1 pip)
+                        # Avec 15 bougies: 4 bougies +12 pips → NET +8-10 pips (détection claire!)
+                        lookback_bars = 15
+                        recent_candles = rates_df_fresh.tail(lookback_bars) if len(rates_df_fresh) >= lookback_bars else rates_df_fresh
+
                         trend_structure = price_memory_analyzer.analyze_trend_structure(
-                            historical_data=rates_df_fresh,
+                            historical_data=recent_candles,
                             current_price=current_price
                         )
 
@@ -3571,7 +3577,7 @@ def scalping_worker(
                         logger.info(
                             f"[PRICE_MEMORY_TREND][{asset}] {memory_trend_direction} "
                             f"(strength={memory_trend_strength:.2f}) | "
-                            f"Net: {memory_net_direction} {memory_net_pips:+.1f} pips | "
+                            f"Net: {memory_net_direction} {memory_net_pips:+.1f} pips ({lookback_bars} bars) | "
                             f"Clarity: {memory_clarity:.2f}"
                         )
                     else:
@@ -3787,89 +3793,171 @@ def scalping_worker(
                             decision_mini = {"action": "HOLD", "confidence": 0.0, "rationale": f"Decision error: {e_decision}"}
 
                         # ═══════════════════════════════════════════════════════════════
-                        # 🧠 PRICE MEMORY VETO/BOOST (08 JAN 2026)
-                        # Ajuste le score selon alignement avec la tendance historique
+                        # 🧠 PRICE MEMORY VETO/BOOST (08 JAN 2026) - DÉSACTIVÉ
+                        # ⚠️ REMPLACÉ PAR LOGIQUE PRICE-FIRST CI-DESSOUS
+                        # Cette section est conservée pour référence historique
                         # ═══════════════════════════════════════════════════════════════
+                        # (Ancienne logique où OrderFlow décidait, puis Price Memory faisait VETO)
+                        # NOUVELLE LOGIQUE: Price Memory décide d'abord, Delta confirme
+                        # Voir section "PRICE-FIRST DECISION" plus bas
 
-                        # Extraire la direction du signal OrderFlow
-                        signal_direction = decision_mini.get("action", "HOLD")  # BUY/SELL/HOLD
-                        of_score_original = orderflow_result_mini.get("score", 0.0)
+                        # ═══════════════════════════════════════════════════════════════
+                        # 📊 MOMENTUM CALCULATION (08 JAN 2026)
+                        # Calcule le mouvement de prix sur N bougies (utilisé par PRICE-FIRST)
+                        # ⚠️ Ne fait PLUS de VETO ici - décision prise par PRICE-FIRST ci-dessous
+                        # ═══════════════════════════════════════════════════════════════
+                        price_change_pips = 0.0  # Initialiser
+                        try:
+                            # Lire config momentum_filter depuis asset config
+                            momentum_config = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                            momentum_enabled = momentum_config.get("enabled", False)
 
-                        # Appliquer VETO ou BOOST si signal de trading
-                        if signal_direction in ["BUY", "SELL"] and memory_trend_direction != "RANGE":
+                            if momentum_enabled:
+                                lookback_bars = momentum_config.get("lookback_bars", 3)
 
-                            # ═════════════════════════════════════════════════════════
-                            # CAS 1: Signal CONTRE tendance forte → VETO
-                            # ═════════════════════════════════════════════════════════
-                            if signal_direction == "BUY" and memory_trend_direction == "BEARISH":
-                                if memory_trend_strength > 0.70:
-                                    logger.warning(
-                                        f"[PRICE_MEMORY_VETO][{asset}] BUY contre tendance BEARISH forte "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips)"
+                                # Calculer le mouvement de prix sur les N dernières bougies
+                                if rates_df_fresh is not None and len(rates_df_fresh) >= lookback_bars:
+                                    # Prix de départ (bougie -N) et prix actuel (bougie -1)
+                                    price_start = rates_df_fresh.iloc[-(lookback_bars + 1)]['close']
+                                    price_current = rates_df_fresh.iloc[-1]['close']
+                                    price_change_points = (price_current - price_start) / point if point > 0 else 0.0
+
+                                    # Convertir en pips selon le nombre de digits
+                                    if digits in (3, 5):
+                                        price_change_pips = price_change_points / 10.0
+                                    else:
+                                        price_change_pips = price_change_points
+
+                                    logger.info(
+                                        f"[MOMENTUM_CALC][{asset}] Mouvement sur {lookback_bars} bougies: "
+                                        f"{price_start:.5f} → {price_current:.5f} = {price_change_pips:+.1f} pips"
                                     )
-                                    # VETO complet
+
+                        except Exception as e_momentum:
+                            logger.error(f"[MOMENTUM_CALC][{asset}] Erreur: {e_momentum}", exc_info=True)
+                            price_change_pips = 0.0
+
+                        # ═══════════════════════════════════════════════════════════════
+                        # 🎯 PRICE-FIRST DECISION (08 JAN 2026)
+                        # Le PRIX décide, le DELTA confirme (bonus/malus)
+                        # ═══════════════════════════════════════════════════════════════
+                        try:
+                            # Lire les seuils depuis config
+                            momentum_config = asset_cfg.get("overrides", {}).get("scalping", {}).get("orderflow_v6", {}).get("momentum_filter", {})
+                            min_price_change_pips = momentum_config.get("min_price_change_pips", 5.0)
+
+                            # Seuil pour Price Memory strength
+                            price_memory_strength_threshold = 0.50  # 50% de confiance minimum
+
+                            # ═══════════════════════════════════════════════════════════
+                            # ÉTAPE 1: Déterminer direction basée sur PRIX
+                            # ═══════════════════════════════════════════════════════════
+                            price_direction = "HOLD"  # Par défaut
+                            price_confidence = 0.0
+                            price_source = ""
+
+                            # Momentum (court terme - 3 bars) a priorité car plus récent
+                            if 'price_change_pips' in locals() and abs(price_change_pips) >= min_price_change_pips:
+                                if price_change_pips > 0:
+                                    price_direction = "BUY"
+                                    price_confidence = min(1.0, abs(price_change_pips) / 20.0)  # Normaliser sur 20 pips
+                                    price_source = f"Momentum +{price_change_pips:.1f}p"
+                                else:
+                                    price_direction = "SELL"
+                                    price_confidence = min(1.0, abs(price_change_pips) / 20.0)
+                                    price_source = f"Momentum {price_change_pips:.1f}p"
+
+                            # Si Momentum ne donne pas de direction, utiliser Price Memory (moyen terme - 15 bars)
+                            elif memory_trend_direction in ["BULLISH", "BEARISH"] and memory_trend_strength >= price_memory_strength_threshold:
+                                if memory_trend_direction == "BULLISH":
+                                    price_direction = "BUY"
+                                    price_confidence = memory_trend_strength
+                                    price_source = f"PriceMemory BULL ({memory_net_pips:+.1f}p)"
+                                else:
+                                    price_direction = "SELL"
+                                    price_confidence = memory_trend_strength
+                                    price_source = f"PriceMemory BEAR ({memory_net_pips:+.1f}p)"
+
+                            # ═══════════════════════════════════════════════════════════
+                            # ÉTAPE 2: Delta = Bonus/Malus de score
+                            # ═══════════════════════════════════════════════════════════
+                            delta_value = orderflow_result_mini.get("summary", {}).get("delta", 0.0)
+                            original_score = orderflow_result_mini.get("score", 0.0)
+                            delta_adjustment = 0
+                            delta_alignment = "neutral"
+
+                            if price_direction == "BUY":
+                                if delta_value > 5:
+                                    delta_adjustment = +20
+                                    delta_alignment = "aligned"
+                                elif delta_value < -5:
+                                    delta_adjustment = -10
+                                    delta_alignment = "contra"
+
+                            elif price_direction == "SELL":
+                                if delta_value < -5:
+                                    delta_adjustment = +20
+                                    delta_alignment = "aligned"
+                                elif delta_value > 5:
+                                    delta_adjustment = -10
+                                    delta_alignment = "contra"
+
+                            # Ajuster le score
+                            adjusted_score = original_score + delta_adjustment
+
+                            # ═══════════════════════════════════════════════════════════
+                            # ÉTAPE 3: Remplacer la décision OrderFlow par décision PRIX
+                            # ═══════════════════════════════════════════════════════════
+                            if price_direction in ["BUY", "SELL"]:
+                                # Vérifier que le score ajusté dépasse le seuil
+                                if adjusted_score >= asset_min_score_worker:
+                                    # Remplacer la décision
+                                    decision_mini["action"] = price_direction
+                                    decision_mini["confidence"] = price_confidence
+                                    decision_mini["rationale"] = (
+                                        f"PRICE-FIRST: {price_source} | "
+                                        f"Delta {delta_value:+.0f} ({delta_alignment}) → "
+                                        f"Score {original_score:.1f}{delta_adjustment:+d} = {adjusted_score:.1f}"
+                                    )
+
+                                    # Mettre à jour le score OrderFlow
+                                    orderflow_result_mini["score"] = adjusted_score
+
+                                    logger.info(
+                                        f"[PRICE_FIRST][{asset}] ✅ {price_direction} décidé par PRIX | "
+                                        f"Source: {price_source} | "
+                                        f"Delta: {delta_value:+.0f} ({delta_alignment}, {delta_adjustment:+d} pts) | "
+                                        f"Score: {original_score:.1f} → {adjusted_score:.1f}"
+                                    )
+                                else:
+                                    # Score insuffisant même avec ajustement
                                     decision_mini["action"] = "HOLD"
-                                    decision_mini["rationale"] = f"VETO: BUY contre tendance BEARISH forte ({memory_net_pips:+.1f} pips, clarté {memory_clarity:.0%})"
                                     decision_mini["confidence"] = 0.0
-
-                            elif signal_direction == "SELL" and memory_trend_direction == "BULLISH":
-                                if memory_trend_strength > 0.70:
-                                    logger.warning(
-                                        f"[PRICE_MEMORY_VETO][{asset}] SELL contre tendance BULLISH forte "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips)"
+                                    decision_mini["rationale"] = (
+                                        f"PRICE-FIRST: {price_source} mais score {adjusted_score:.1f} < seuil {asset_min_score_worker}"
                                     )
-                                    # VETO complet
-                                    decision_mini["action"] = "HOLD"
-                                    decision_mini["rationale"] = f"VETO: SELL contre tendance BULLISH forte ({memory_net_pips:+.1f} pips, clarté {memory_clarity:.0%})"
-                                    decision_mini["confidence"] = 0.0
 
-                            # ═════════════════════════════════════════════════════════
-                            # CAS 2: Signal AVEC tendance forte → BOOST
-                            # ═════════════════════════════════════════════════════════
-                            elif signal_direction == "BUY" and memory_trend_direction == "BULLISH":
-                                if memory_trend_strength > 0.60:
-                                    boost_points = 15
-                                    orderflow_result_mini["score"] = of_score_original + boost_points
                                     logger.info(
-                                        f"[PRICE_MEMORY_BOOST][{asset}] BUY aligné avec tendance BULLISH "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, boost=+{boost_points})"
+                                        f"[PRICE_FIRST][{asset}] ⏸️ HOLD | "
+                                        f"Direction: {price_direction} ({price_source}) | "
+                                        f"Score {adjusted_score:.1f} < {asset_min_score_worker}"
                                     )
-                                    # Mettre à jour la rationale
-                                    if "rationale" in decision_mini:
-                                        decision_mini["rationale"] += f" [BOOST +{boost_points}: Aligné tendance BULL]"
+                            else:
+                                # Pas de direction claire du PRIX → HOLD
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+                                decision_mini["rationale"] = "PRICE-FIRST: Pas de direction claire (prix flat/range)"
 
-                            elif signal_direction == "SELL" and memory_trend_direction == "BEARISH":
-                                if memory_trend_strength > 0.60:
-                                    boost_points = 15
-                                    orderflow_result_mini["score"] = of_score_original + boost_points
-                                    logger.info(
-                                        f"[PRICE_MEMORY_BOOST][{asset}] SELL aligné avec tendance BEARISH "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, boost=+{boost_points})"
-                                    )
-                                    # Mettre à jour la rationale
-                                    if "rationale" in decision_mini:
-                                        decision_mini["rationale"] += f" [BOOST +{boost_points}: Aligné tendance BEAR]"
+                                logger.info(
+                                    f"[PRICE_FIRST][{asset}] ⏸️ HOLD | "
+                                    f"Momentum: {price_change_pips:+.1f}p | "
+                                    f"Memory: {memory_trend_direction} ({memory_net_pips:+.1f}p) | "
+                                    f"Pas de direction claire"
+                                )
 
-                            # ═════════════════════════════════════════════════════════
-                            # CAS 3: Signal contre tendance MODÉRÉE → PENALTY
-                            # ═════════════════════════════════════════════════════════
-                            elif signal_direction == "BUY" and memory_trend_direction == "BEARISH":
-                                if 0.40 < memory_trend_strength <= 0.70:
-                                    penalty_points = 10
-                                    orderflow_result_mini["score"] = max(0, of_score_original - penalty_points)
-                                    logger.info(
-                                        f"[PRICE_MEMORY_PENALTY][{asset}] BUY contre tendance BEARISH modérée "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, penalty=-{penalty_points})"
-                                    )
-
-                            elif signal_direction == "SELL" and memory_trend_direction == "BULLISH":
-                                if 0.40 < memory_trend_strength <= 0.70:
-                                    penalty_points = 10
-                                    orderflow_result_mini["score"] = max(0, of_score_original - penalty_points)
-                                    logger.info(
-                                        f"[PRICE_MEMORY_PENALTY][{asset}] SELL contre tendance BULLISH modérée "
-                                        f"(strength={memory_trend_strength:.2f}, net={memory_net_pips:+.1f} pips, penalty=-{penalty_points})"
-                                    )
+                        except Exception as e_price_first:
+                            logger.error(f"[PRICE_FIRST][{asset}] Erreur: {e_price_first}", exc_info=True)
+                            # En cas d'erreur, garder la décision OrderFlow originale
 
                         # Construction fusion_out
                         if decision_mini["action"] in ["BUY", "SELL"]:

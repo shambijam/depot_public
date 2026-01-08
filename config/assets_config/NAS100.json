@@ -207,8 +207,8 @@
         "momentum_filter": {
           "enabled": true,
           "lookback_bars": 3,
-          "min_price_change_points": 0.0,
-          "comment": "08 JAN 2026: Filtre RÉGIME GLOBAL + momentum - Rejette trades contre régime"
+          "min_price_change_pips": 50.0,
+          "comment": "08 JAN 2026: VETO SELL si prix monte >50 pips sur 3 bougies (0.5 index points), VETO BUY si prix descend >50 pips"
         }
       },
       "entry_rules": {
