@@ -620,7 +620,7 @@ def run_single_pipeline_cycle(
             ) or {}
 
             # --- Seuils depuis conf (avec défauts prudents) ---
-            sym_spread_max = {"EURUSD": 12.0, "GBPUSD": 18.0, "USDJPY": 40.0}.get(
+            sym_spread_max = {"NAS100": 80.0, "GBPUSD": 18.0, "USDJPY": 40.0}.get(
                 str(sym).upper(), 999.0
             )
 
@@ -4355,7 +4355,7 @@ def dashboard_worker(
                 print("─" * 110)
 
                 # Lignes par asset (ordre fixe)
-                for asset_name in ["USDJPY", "EURUSD", "GBPUSD"]:
+                for asset_name in ["USDJPY", "NAS100", "GBPUSD"]:
                     if asset_name in reports:
                         r = reports[asset_name]
 
@@ -4745,7 +4745,7 @@ def main(args: argparse.Namespace) -> None:
     logger.info(f"🚀 DÉMARRAGE MULTI-THREADING SCALPING (02 JAN 2026 - Cycle {scalping_cycle}s)")
     logger.info("=" * 80)
     logger.info(f"  • SCALPING USDJPY Thread : Cycle {scalping_cycle}s (offset 0.0s)")
-    logger.info(f"  • SCALPING EURUSD Thread : Cycle {scalping_cycle}s (offset 1.5s)")
+    logger.info(f"  • SCALPING NAS100 Thread : Cycle {scalping_cycle}s (offset 1.5s)")
     logger.info(f"  • SCALPING GBPUSD Thread : Cycle {scalping_cycle}s (offset 3.0s)")
     logger.info("  • DASHBOARD Thread       : Affichage agrégé 30s")
     logger.info("  • BASKET MONITOR Thread  : Surveillance continue (polling 100ms)")
@@ -4770,7 +4770,7 @@ def main(args: argparse.Namespace) -> None:
     context_lock = threading.Lock()
 
     # ✅ Créer GlobalScalpingState (31 DEC 2025)
-    assets = ["USDJPY", "EURUSD", "GBPUSD"]
+    assets = ["USDJPY", "NAS100", "GBPUSD"]
     global_scalping_state = GlobalScalpingState(assets)
 
     # ✅ Créer Display Queue (31 DEC 2025 - Solution B)
@@ -4804,10 +4804,10 @@ def main(args: argparse.Namespace) -> None:
         name="ScalpingWorker-USDJPY"
     )
 
-    thread_eurusd = threading.Thread(
+    thread_nas100 = threading.Thread(
         target=scalping_worker,
         args=(
-            "EURUSD",                    # asset
+            "NAS100",                    # asset
             global_scalping_state,       # global state
             display_queue,               # display queue (31 DEC 2025)
             context_lock,                # context lock (31 DEC 2025)
@@ -4823,7 +4823,7 @@ def main(args: argparse.Namespace) -> None:
             logger
         ),
         daemon=True,
-        name="ScalpingWorker-EURUSD"
+        name="ScalpingWorker-NAS100"
     )
 
     thread_gbpusd = threading.Thread(
@@ -4894,7 +4894,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ✅ Démarrer tous les threads (31 DEC 2025)
     thread_usdjpy.start()
-    thread_eurusd.start()
+    thread_nas100.start()
     thread_gbpusd.start()
     thread_dashboard.start()
     basket_monitor.start()
@@ -4937,13 +4937,13 @@ def main(args: argparse.Namespace) -> None:
 
             # ✅ Attendre arrêt avec timeout
             thread_usdjpy.join(timeout=5.0)
-            thread_eurusd.join(timeout=5.0)
+            thread_nas100.join(timeout=5.0)
             thread_gbpusd.join(timeout=5.0)
             thread_dashboard.join(timeout=5.0)
             basket_monitor.join(timeout=5.0)
 
             # ✅ Vérifier threads encore actifs
-            for thread in [thread_usdjpy, thread_eurusd, thread_gbpusd, thread_dashboard]:
+            for thread in [thread_usdjpy, thread_nas100, thread_gbpusd, thread_dashboard]:
                 if thread.is_alive():
                     logger.warning(f"⚠️ Thread {thread.name} n'a pas terminé dans les 5s")
                 else:
