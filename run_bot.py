@@ -3847,116 +3847,182 @@ def scalping_worker(
                             min_price_change_pips = momentum_config.get("min_price_change_pips", 5.0)
 
                             # Seuil pour Price Memory strength
-                            price_memory_strength_threshold = 0.50  # 50% de confiance minimum
-
                             # ═══════════════════════════════════════════════════════════
-                            # ÉTAPE 1: Déterminer direction basée sur PRIX
+                            # 🎯 TRIPLE FILTRE - DELTA CONFIRMÉ (08 JAN 2026 v5 FINALE)
+                            # Filtre 1: Delta Pondéré Multi-TF (M1 + M3)
+                            # Filtre 2: Microstructure (Volume, Tickrate, Coverage)
+                            # Filtre 3: Contexte (Fatigue, Price Memory)
                             # ═══════════════════════════════════════════════════════════
-                            price_direction = "HOLD"  # Par défaut
-                            price_confidence = 0.0
-                            price_source = ""
 
-                            # Momentum (court terme - 3 bars) a priorité car plus récent
-                            if 'price_change_pips' in locals() and abs(price_change_pips) >= min_price_change_pips:
-                                if price_change_pips > 0:
-                                    price_direction = "BUY"
-                                    price_confidence = min(1.0, abs(price_change_pips) / 20.0)  # Normaliser sur 20 pips
-                                    price_source = f"Momentum +{price_change_pips:.1f}p"
-                                else:
-                                    price_direction = "SELL"
-                                    price_confidence = min(1.0, abs(price_change_pips) / 20.0)
-                                    price_source = f"Momentum {price_change_pips:.1f}p"
-
-                            # Si Momentum ne donne pas de direction, utiliser Price Memory (moyen terme - 15 bars)
-                            elif memory_trend_direction in ["BULLISH", "BEARISH"] and memory_trend_strength >= price_memory_strength_threshold:
-                                if memory_trend_direction == "BULLISH":
-                                    price_direction = "BUY"
-                                    price_confidence = memory_trend_strength
-                                    price_source = f"PriceMemory BULL ({memory_net_pips:+.1f}p)"
-                                else:
-                                    price_direction = "SELL"
-                                    price_confidence = memory_trend_strength
-                                    price_source = f"PriceMemory BEAR ({memory_net_pips:+.1f}p)"
-
-                            # ═══════════════════════════════════════════════════════════
-                            # ÉTAPE 2: Delta = Bonus/Malus de score
-                            # ═══════════════════════════════════════════════════════════
-                            delta_value = orderflow_result_mini.get("summary", {}).get("delta", 0.0)
+                            # Récupération données
+                            delta_m1 = orderflow_result_mini.get("summary", {}).get("delta", 0.0)
+                            cvd_slope = orderflow_result_mini.get("summary", {}).get("cvd_slope", 0.0)
+                            vol_ratio = orderflow_result_mini.get("summary", {}).get("vol_ratio", 1.0)
                             original_score = orderflow_result_mini.get("score", 0.0)
-                            delta_adjustment = 0
-                            delta_alignment = "neutral"
 
-                            if price_direction == "BUY":
-                                if delta_value > 5:
-                                    delta_adjustment = +20
-                                    delta_alignment = "aligned"
-                                elif delta_value < -5:
-                                    delta_adjustment = -10
-                                    delta_alignment = "contra"
-
-                            elif price_direction == "SELL":
-                                if delta_value < -5:
-                                    delta_adjustment = +20
-                                    delta_alignment = "aligned"
-                                elif delta_value > 5:
-                                    delta_adjustment = -10
-                                    delta_alignment = "contra"
-
-                            # Ajuster le score
-                            adjusted_score = original_score + delta_adjustment
+                            # Footprint data
+                            fp_summary = orderflow_result_mini.get("footprint_summary", {})
+                            tickrate = fp_summary.get("tickrate", 0.0)
+                            coverage_s = fp_summary.get("coverage_s", 0.0)
 
                             # ═══════════════════════════════════════════════════════════
-                            # ÉTAPE 3: Remplacer la décision OrderFlow par décision PRIX
+                            # FILTRE 1: DELTA PONDÉRÉ MULTI-TIMEFRAME
                             # ═══════════════════════════════════════════════════════════
-                            if price_direction in ["BUY", "SELL"]:
-                                # Vérifier que le score ajusté dépasse le seuil
-                                if adjusted_score >= asset_min_score_worker:
-                                    # Remplacer la décision
-                                    decision_mini["action"] = price_direction
-                                    decision_mini["confidence"] = price_confidence
-                                    decision_mini["rationale"] = (
-                                        f"PRICE-FIRST: {price_source} | "
-                                        f"Delta {delta_value:+.0f} ({delta_alignment}) → "
-                                        f"Score {original_score:.1f}{delta_adjustment:+d} = {adjusted_score:.1f}"
-                                    )
+                            delta_weighted = 0.0
+                            delta_m3 = 0.0
 
-                                    # Mettre à jour le score OrderFlow
-                                    orderflow_result_mini["score"] = adjusted_score
-
-                                    logger.info(
-                                        f"[PRICE_FIRST][{asset}] ✅ {price_direction} décidé par PRIX | "
-                                        f"Source: {price_source} | "
-                                        f"Delta: {delta_value:+.0f} ({delta_alignment}, {delta_adjustment:+d} pts) | "
-                                        f"Score: {original_score:.1f} → {adjusted_score:.1f}"
-                                    )
-                                else:
-                                    # Score insuffisant même avec ajustement
-                                    decision_mini["action"] = "HOLD"
-                                    decision_mini["confidence"] = 0.0
-                                    decision_mini["rationale"] = (
-                                        f"PRICE-FIRST: {price_source} mais score {adjusted_score:.1f} < seuil {asset_min_score_worker}"
-                                    )
-
-                                    logger.info(
-                                        f"[PRICE_FIRST][{asset}] ⏸️ HOLD | "
-                                        f"Direction: {price_direction} ({price_source}) | "
-                                        f"Score {adjusted_score:.1f} < {asset_min_score_worker}"
-                                    )
+                            if 'price_change_pips' in locals():
+                                # Convertir momentum M3 en "delta equivalent"
+                                delta_m3 = price_change_pips
+                                # Pondération: M1 (60%) + M3 (40%)
+                                delta_weighted = (delta_m1 * 0.6) + (delta_m3 * 0.4)
                             else:
-                                # Pas de direction claire du PRIX → HOLD
-                                decision_mini["action"] = "HOLD"
-                                decision_mini["confidence"] = 0.0
-                                decision_mini["rationale"] = "PRICE-FIRST: Pas de direction claire (prix flat/range)"
+                                delta_weighted = delta_m1
 
-                                logger.info(
-                                    f"[PRICE_FIRST][{asset}] ⏸️ HOLD | "
-                                    f"Momentum: {price_change_pips:+.1f}p | "
-                                    f"Memory: {memory_trend_direction} ({memory_net_pips:+.1f}p) | "
-                                    f"Pas de direction claire"
+                            # Vérifier cohérence CVD
+                            cvd_aligned = False
+                            if delta_weighted > 0 and cvd_slope > 0:
+                                cvd_aligned = True
+                            elif delta_weighted < 0 and cvd_slope < 0:
+                                cvd_aligned = True
+
+                            # Seuils pour direction (adaptés par asset via min_price_change_pips)
+                            delta_threshold = min_price_change_pips * 3  # Ex: 3 pips → seuil 9
+
+                            filtre1_direction = "HOLD"
+                            filtre1_confidence = 0.0
+
+                            if abs(delta_weighted) >= delta_threshold:
+                                if delta_weighted > 0:
+                                    filtre1_direction = "BUY"
+                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+                                else:
+                                    filtre1_direction = "SELL"
+                                    filtre1_confidence = min(1.0, abs(delta_weighted) / (delta_threshold * 3))
+
+                            filtre1_status = "✅ PASS" if filtre1_direction in ["BUY", "SELL"] else "❌ FAIL"
+                            filtre1_detail = f"Δw={delta_weighted:.1f} (M1:{delta_m1:.0f}×0.6 + M3:{delta_m3:.1f}×0.4) CVD:{cvd_slope:.2f} {'✅' if cvd_aligned else '❌'}"
+
+                            # ═══════════════════════════════════════════════════════════
+                            # FILTRE 2: MICROSTRUCTURE
+                            # ═══════════════════════════════════════════════════════════
+                            conditions_micro = []
+
+                            # 1. Volume fort (>150% moyenne)
+                            volume_strong = vol_ratio > 1.5
+                            conditions_micro.append(("Volume>150%", volume_strong, f"ratio={vol_ratio:.2f}"))
+
+                            # 2. Activité élevée (>2 ticks/sec) - Ajuster selon asset
+                            tickrate_min_threshold = 2.0  # Default
+                            if asset == "NAS100":
+                                tickrate_min_threshold = 5.0
+                            elif asset == "GBPUSD":
+                                tickrate_min_threshold = 3.5
+                            elif asset == "USDJPY":
+                                tickrate_min_threshold = 1.5
+
+                            activity_high = tickrate >= tickrate_min_threshold
+                            conditions_micro.append(("Ticks>min", activity_high, f"{tickrate:.1f} (min={tickrate_min_threshold})"))
+
+                            # 3. Pas de gaps (coverage > 5s)
+                            no_gaps = coverage_s >= 5.0
+                            conditions_micro.append(("Coverage>5s", no_gaps, f"{coverage_s:.1f}s"))
+
+                            # 4. CVD aligné
+                            conditions_micro.append(("CVD aligned", cvd_aligned, f"slope={cvd_slope:.2f}"))
+
+                            # Score microstructure (3/4 conditions = PASS)
+                            micro_passed = sum(1 for _, passed, _ in conditions_micro if passed)
+                            filtre2_pass = micro_passed >= 3
+                            filtre2_status = f"✅ PASS ({micro_passed}/4)" if filtre2_pass else f"❌ FAIL ({micro_passed}/4)"
+                            filtre2_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_micro])
+
+                            # ═══════════════════════════════════════════════════════════
+                            # FILTRE 3: CONTEXTE
+                            # ═══════════════════════════════════════════════════════════
+                            conditions_context = []
+
+                            # 1. Fatigue acceptable
+                            fatigue_ok = True  # Par défaut OK (on désactive le veto global)
+                            conditions_context.append(("Fatigue OK", fatigue_ok, "N/A"))
+
+                            # 2. Price Memory fresh (>50%)
+                            memory_fresh = memory_clarity >= 0.5 if 'memory_clarity' in locals() else True
+                            conditions_context.append(("Memory fresh", memory_fresh, f"clarity={memory_clarity:.0%}" if 'memory_clarity' in locals() else "N/A"))
+
+                            # 3. Alignement Price Memory (bonus si aligné)
+                            memory_aligned = False
+                            if filtre1_direction == "BUY" and memory_trend_direction == "BULLISH":
+                                memory_aligned = True
+                            elif filtre1_direction == "SELL" and memory_trend_direction == "BEARISH":
+                                memory_aligned = True
+                            conditions_context.append(("Memory aligned", memory_aligned, f"{memory_trend_direction}"))
+
+                            # Score contexte (2/3 = PASS)
+                            context_passed = sum(1 for _, passed, _ in conditions_context if passed)
+                            filtre3_pass = context_passed >= 2
+                            filtre3_status = f"✅ PASS ({context_passed}/3)" if filtre3_pass else f"❌ FAIL ({context_passed}/3)"
+                            filtre3_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_context])
+
+                            # ═══════════════════════════════════════════════════════════
+                            # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER
+                            # ═══════════════════════════════════════════════════════════
+                            all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass
+
+                            # Bonus si Price Memory aligné
+                            bonus_memory = 30 if memory_aligned else 0
+                            adjusted_score = original_score + bonus_memory
+
+                            if all_filters_pass and adjusted_score >= asset_min_score_worker:
+                                # ✅ Signal validé - TOUS LES FILTRES PASSENT
+                                decision_mini["action"] = filtre1_direction
+                                decision_mini["confidence"] = filtre1_confidence
+                                decision_mini["rationale"] = (
+                                    f"TRIPLE_FILTER: {filtre1_direction} | "
+                                    f"F1:{filtre1_status} F2:{filtre2_status} F3:{filtre3_status} | "
+                                    f"Score: {original_score:.1f}+{bonus_memory} = {adjusted_score:.1f}"
                                 )
 
-                        except Exception as e_price_first:
-                            logger.error(f"[PRICE_FIRST][{asset}] Erreur: {e_price_first}", exc_info=True)
+                                orderflow_result_mini["score"] = adjusted_score
+
+                                logger.info(
+                                    f"[TRIPLE_FILTER][{asset}] ✅ {filtre1_direction} VALIDÉ | "
+                                    f"F1: {filtre1_detail} | "
+                                    f"F2: {filtre2_detail} | "
+                                    f"F3: {filtre3_detail} | "
+                                    f"Score: {original_score:.1f} → {adjusted_score:.1f}"
+                                )
+                            else:
+                                # ⏸️ HOLD - AU MOINS UN FILTRE A ÉCHOUÉ
+                                decision_mini["action"] = "HOLD"
+                                decision_mini["confidence"] = 0.0
+
+                                # Déterminer raison du rejet
+                                reject_reasons = []
+                                if filtre1_direction == "HOLD":
+                                    reject_reasons.append(f"F1_FAIL(Δw={delta_weighted:.1f}<{delta_threshold:.1f})")
+                                if not filtre2_pass:
+                                    reject_reasons.append(f"F2_FAIL({micro_passed}/4)")
+                                if not filtre3_pass:
+                                    reject_reasons.append(f"F3_FAIL({context_passed}/3)")
+                                if adjusted_score < asset_min_score_worker:
+                                    reject_reasons.append(f"SCORE({adjusted_score:.1f}<{asset_min_score_worker})")
+
+                                reject_str = " + ".join(reject_reasons)
+
+                                decision_mini["rationale"] = f"TRIPLE_FILTER: HOLD - {reject_str}"
+
+                                logger.info(
+                                    f"[TRIPLE_FILTER][{asset}] ⏸️ HOLD | "
+                                    f"Direction: {filtre1_direction} | "
+                                    f"F1: {filtre1_detail} | "
+                                    f"F2: {filtre2_detail} | "
+                                    f"F3: {filtre3_detail} | "
+                                    f"Rejet: {reject_str}"
+                                )
+
+                        except Exception as e_triple_filter:
+                            logger.error(f"[TRIPLE_FILTER][{asset}] Erreur: {e_triple_filter}", exc_info=True)
                             # En cas d'erreur, garder la décision OrderFlow originale
 
                         # Construction fusion_out
