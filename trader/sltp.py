@@ -511,10 +511,9 @@ def _calculate_sl_tp_prices(
 
     # DEBUG: Tracer config path
     try:
-        self.logger.critical(
-            f"🔍 [CONFIG_DEBUG] sltp_cfg keys={list(sltp_cfg.keys()) if sltp_cfg else 'EMPTY'} | "
-            f"config has entry_rules={('entry_rules' in config)} | "
-            f"config.entry_rules has scalping={('scalping' in config.get('entry_rules', {}))}"
+        self.logger.debug(
+            f"[SLTP_CONFIG] sltp_cfg found={bool(sltp_cfg)} | "
+            f"keys={list(sltp_cfg.keys()) if sltp_cfg else 'EMPTY'}"
         )
     except Exception:
         pass
@@ -526,15 +525,6 @@ def _calculate_sl_tp_prices(
 
     dyn_sl = (sltp_cfg.get("sl") or {}) if isinstance(sltp_cfg.get("sl"), dict) else {}
     dyn_tp = (sltp_cfg.get("tp") or {}) if isinstance(sltp_cfg.get("tp"), dict) else {}
-
-    # DEBUG: Tracer dyn_sl
-    try:
-        self.logger.critical(
-            f"🔍 [SL_CONFIG_DEBUG] dyn_sl keys={list(dyn_sl.keys()) if dyn_sl else 'EMPTY'} | "
-            f"dyn_sl.pips={dyn_sl.get('pips')}"
-        )
-    except Exception:
-        pass
 
     legacy = (
         (config.get("smart_sl_tp_settings") or {})
@@ -855,6 +845,24 @@ def _calculate_sl_tp_prices(
     take_profit_price = (
         None if take_profit_price is None else round(float(take_profit_price), digits)
     )
+
+    # 🆕 10 JAN 2026: DEBUG - Log final SL/TP calculés
+    try:
+        sl_dist_final = abs(entry_price - stop_loss_price)
+        tp_dist_final = abs(take_profit_price - entry_price) if take_profit_price else None
+        sl_points_final = sl_dist_final / point if point > 0 else 0
+        tp_points_final = (tp_dist_final / point) if (tp_dist_final and point > 0) else None
+        rr_final = (tp_dist_final / sl_dist_final) if (tp_dist_final and sl_dist_final > 0) else None
+
+        self.logger.critical(
+            f"✅ [SLTP_FINAL] {symbol} {action} | Entry={entry_price:.5f} | "
+            f"SL={stop_loss_price:.5f} (dist={sl_points_final:.1f}pts) | "
+            f"TP={take_profit_price:.5f if take_profit_price else 'None'} "
+            f"(dist={tp_points_final:.1f if tp_points_final else 0}pts) | "
+            f"RR={rr_final:.2f if rr_final else 'N/A'}"
+        )
+    except Exception:
+        pass
 
     return float(stop_loss_price), take_profit_price
 
