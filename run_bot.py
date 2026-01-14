@@ -3171,6 +3171,34 @@ def scalping_worker(
         logger.error(f"❌ [{asset}] Impossible de créer PriceMemoryAnalyzer: {e}")
         price_memory_analyzer = None  # Continue sans Price Memory
 
+    # 🐻 NOUVEAU (14 JAN 2026): Instancier InstitutionalReversalDetector pour validation BEARISH
+    reversal_detector = None
+    try:
+        from phase_observer.institutional_reversal_detector import InstitutionalReversalDetector
+        reversal_detector = InstitutionalReversalDetector(config=None, logger=logger)
+        logger.info(f"✅ [{asset}] InstitutionalReversalDetector instancié (standalone v2.1)")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer InstitutionalReversalDetector: {e}")
+        reversal_detector = None  # Continue sans reversal detector
+
+    # 🐻 NOUVEAU (14 JAN 2026): Instancier BearishScalpingValidator pour trades BEARISH
+    bearish_validator = None
+    try:
+        from phase_observer.bearish_scalping_validator import BearishScalpingValidator
+        if reversal_detector and price_memory_analyzer:
+            bearish_validator = BearishScalpingValidator(
+                reversal_detector=reversal_detector,
+                price_memory_analyzer=price_memory_analyzer,
+                config=None,  # Utilise config par défaut
+                logger=logger
+            )
+            logger.info(f"✅ [{asset}] BearishScalpingValidator instancié (M1 ultra-rapide)")
+        else:
+            logger.warning(f"⚠️ [{asset}] BearishScalpingValidator skip: reversal_detector ou price_memory manquant")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer BearishScalpingValidator: {e}")
+        bearish_validator = None  # Continue sans bearish validator
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -3202,6 +3230,18 @@ def scalping_worker(
     # Créé UNE FOIS au démarrage, réutilisé à chaque cycle avec valeurs dynamiques
     trade_decision_skeleton = None
     last_config_update = 0
+
+    # 🐻 NOUVEAU (14 JAN 2026): Buffers historiques pour reversal detector
+    from collections import deque
+    cvd_history = deque(maxlen=100)
+    delta_history = deque(maxlen=100)
+    volume_history = deque(maxlen=100)
+
+    # Cache du dernier résultat reversal detector (éviter recalculs)
+    last_reversal_check = None
+    reversal_check_counter = 0
+
+    logger.info(f"✅ [{asset}] Buffers historiques CVD/Delta/Volume initialisés (100 valeurs max)")
 
     while not stop_event.is_set():
         cycle_count += 1
@@ -3539,6 +3579,66 @@ def scalping_worker(
                                 orderflow_result_mini['composite_enabled'] = False
                         else:
                             orderflow_result_mini['composite_enabled'] = False
+
+                        # 🐻 NOUVEAU (14 JAN 2026): Alimentation buffers historiques pour reversal detector
+                        try:
+                            # Récupérer CVD, delta, volume depuis of_v6_result
+                            current_cvd = of_v6_result.get('cvd', 0.0)
+                            current_delta = of_v6_result.get('delta', 0.0)
+                            current_volume = rates_df_fresh.iloc[-1]['tick_volume'] if 'tick_volume' in rates_df_fresh.columns else 0.0
+
+                            # Ajouter aux buffers
+                            cvd_history.append(current_cvd)
+                            delta_history.append(current_delta)
+                            volume_history.append(current_volume)
+
+                            logger.debug(
+                                f"[BUFFER_FEED][{asset}] CVD={current_cvd:.2f} | "
+                                f"Delta={current_delta:.0f} | Volume={current_volume:.0f} | "
+                                f"Buffer size: CVD={len(cvd_history)}, Delta={len(delta_history)}, Vol={len(volume_history)}"
+                            )
+                        except Exception as e_buffer:
+                            logger.warning(f"[BUFFER_FEED][{asset}] Erreur alimentation buffers: {e_buffer}")
+
+                        # 🐻 NOUVEAU (14 JAN 2026): Appel reversal detector (1x/10 cycles = 25s)
+                        reversal_check_counter += 1
+                        if reversal_check_counter >= 10 and reversal_detector:
+                            reversal_check_counter = 0
+
+                            # Vérifier qu'on a assez de données (minimum 30 valeurs)
+                            if len(cvd_history) >= 30:
+                                try:
+                                    # Préparer market_data pour reversal detector
+                                    # Note: On utilise rates_df_fresh (M1) pour les deux (M1 et M5)
+                                    # Le reversal detector peut fonctionner avec M1 seulement
+                                    market_data_reversal = {
+                                        'candles_m5': rates_df_fresh,  # Utilise M1 (pas de M5 dans scalping_worker)
+                                        'candles_m1': rates_df_fresh,
+                                        'cvd_values': list(cvd_history),
+                                        'delta_values': list(delta_history),
+                                        'volume_values': list(volume_history)
+                                    }
+
+                                    # Appeler le détecteur
+                                    last_reversal_check = reversal_detector.detect_reversal(market_data_reversal)
+
+                                    # Log du résultat
+                                    logger.critical(
+                                        f"🏛️ [REVERSAL_CHECK][{asset}] "
+                                        f"Score={last_reversal_check['institutional_score']:.1f}/100 | "
+                                        f"Conviction={last_reversal_check['conviction_level']} | "
+                                        f"Trend={last_reversal_check['new_trend']} | "
+                                        f"Reversal={last_reversal_check['reversal_detected']}"
+                                    )
+
+                                except Exception as e_reversal:
+                                    logger.error(f"[REVERSAL_DETECTOR][{asset}] Erreur: {e_reversal}")
+                                    last_reversal_check = None
+                            else:
+                                logger.debug(
+                                    f"[REVERSAL_DETECTOR][{asset}] Pas assez de données "
+                                    f"({len(cvd_history)} < 30), skip ce cycle"
+                                )
 
                     except Exception as e_of:
                         logger.critical(f"[ORDERFLOW_V6_ERROR] Erreur: {e_of}", exc_info=True)
@@ -3965,13 +4065,65 @@ def scalping_worker(
                             filtre3_detail = " | ".join([f"{name}:{'✅' if p else '❌'}({d})" for name, p, d in conditions_context])
 
                             # ═══════════════════════════════════════════════════════════
+                            # 🐻 NOUVEAU (14 JAN 2026): VALIDATION BEARISH (MODE LOG ONLY)
+                            # Ajoute un boost/malus pour les trades BEARISH basé sur validation croisée
+                            # ═══════════════════════════════════════════════════════════
+                            bearish_boost = 0.0
+                            bearish_validation_result = None
+
+                            if filtre1_direction == "SELL" and bearish_validator and last_reversal_check:
+                                try:
+                                    # Récupérer le temps de la bougie actuelle (pour timing validation)
+                                    from datetime import datetime
+                                    current_time_dt = datetime.now()
+                                    candle_open_time_dt = pd.to_datetime(rates_df_fresh.iloc[-1]['time'])
+
+                                    # Appeler le validateur BEARISH
+                                    bearish_validation_result = bearish_validator.validate_bearish_trade(
+                                        symbol=asset,
+                                        current_price=rates_df_fresh.iloc[-1]['close'],
+                                        current_time=current_time_dt,
+                                        candle_open_time=candle_open_time_dt,
+                                        historical_data_m1=rates_df_fresh,
+                                        reversal_result=last_reversal_check
+                                    )
+
+                                    # Récupérer le boost (mais NE PAS l'appliquer en mode LOG ONLY)
+                                    bearish_boost = bearish_validation_result.score_boost
+
+                                    # 🧪 MODE LOG ONLY: Log le boost théorique sans l'appliquer
+                                    logger.critical(
+                                        f"🧪 [BEARISH_TEST][{asset}] "
+                                        f"Level={bearish_validation_result.validation_level} | "
+                                        f"Confidence={bearish_validation_result.confidence:.2f} | "
+                                        f"Boost théorique={bearish_boost:+.1f} | "
+                                        f"Score actuel={original_score:.1f} | "
+                                        f"Score ajusté théorique={original_score + bearish_boost:.1f}"
+                                    )
+
+                                    # Afficher les raisons
+                                    for reason in bearish_validation_result.reasons:
+                                        logger.info(f"  {reason}")
+
+                                    # 🚫 MODE LOG ONLY: NE PAS appliquer le boost (pour test)
+                                    # bearish_boost = 0.0  # ← Déjà 0.0 par défaut, on ne l'applique pas
+
+                                except Exception as e_bearish:
+                                    logger.error(f"[BEARISH_VALIDATOR][{asset}] Erreur: {e_bearish}")
+                                    bearish_boost = 0.0
+
+                            # ═══════════════════════════════════════════════════════════
                             # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER
                             # ═══════════════════════════════════════════════════════════
                             all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass
 
                             # Bonus si Price Memory aligné
                             bonus_memory = 30 if memory_aligned else 0
-                            adjusted_score = original_score + bonus_memory
+
+                            # 🐻 NOTE: En mode LOG ONLY, bearish_boost n'est PAS appliqué (reste 0.0)
+                            # Pour activer, décommenter la ligne ci-dessous:
+                            # adjusted_score = original_score + bonus_memory + bearish_boost
+                            adjusted_score = original_score + bonus_memory  # MODE LOG ONLY
 
                             if all_filters_pass and adjusted_score >= asset_min_score_worker:
                                 # ✅ Signal validé - TOUS LES FILTRES PASSENT

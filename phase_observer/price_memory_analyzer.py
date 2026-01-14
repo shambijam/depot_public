@@ -676,6 +676,163 @@ class PriceMemoryAnalyzer:
         # DEFAULT: Range avec force selon clarté
         return "RANGE", round(clarity * 0.5, 2)
 
+    def detect_micro_resistance_m1(
+        self,
+        historical_data: pd.DataFrame,
+        current_price: float,
+        lookback_minutes: int = 15
+    ) -> Dict[str, Any]:
+        """
+        🆕 14 JAN 2026: SCALPING - Détecte micro-résistances M1 (< 1 pip)
+
+        Optimisé pour burst scalping:
+        - Lookback ultra-court (15 minutes M1 = 15 bougies)
+        - Distance en ticks (pas en pips)
+        - Bounce probability basée sur réactions récentes
+
+        Args:
+            historical_data: DataFrame M1 (minimum 15-20 bougies)
+            current_price: Prix actuel
+            lookback_minutes: Minutes à regarder en arrière (défaut: 15)
+
+        Returns:
+            dict: {
+                'micro_resistance': float | None - Prix du dernier high M1
+                'distance_ticks': float - Écart en ticks
+                'distance_pips': float - Écart en pips
+                'bounce_probability': float (0-1) - % de rebonds
+                'age_minutes': int - Ancienneté du niveau
+                'rejection_detected': bool - Wick de rejet présent
+                'strength': str - 'STRONG' | 'MODERATE' | 'WEAK'
+            }
+        """
+        if historical_data is None or len(historical_data) < 10:
+            return {
+                'micro_resistance': None,
+                'distance_ticks': 0.0,
+                'distance_pips': 0.0,
+                'bounce_probability': 0.0,
+                'age_minutes': 0,
+                'rejection_detected': False,
+                'strength': 'NONE'
+            }
+
+        # Prendre seulement les N dernières minutes (lookback)
+        recent_data = historical_data.tail(lookback_minutes)
+
+        if len(recent_data) < 5:
+            return {
+                'micro_resistance': None,
+                'distance_ticks': 0.0,
+                'distance_pips': 0.0,
+                'bounce_probability': 0.0,
+                'age_minutes': 0,
+                'rejection_detected': False,
+                'strength': 'NONE'
+            }
+
+        # 1. Trouver le dernier swing high M1 (fenêtre réduite = 2)
+        window = 2
+        last_micro_resistance = None
+        resistance_index = None
+
+        for i in range(len(recent_data) - 1, window - 1, -1):
+            if i < window or i >= len(recent_data) - window:
+                continue
+
+            current_high = recent_data.iloc[i]['high']
+
+            # Vérifier si c'est un swing high local
+            is_swing_high = True
+            for j in range(i - window, i + window + 1):
+                if j != i and j >= 0 and j < len(recent_data):
+                    if recent_data.iloc[j]['high'] >= current_high:
+                        is_swing_high = False
+                        break
+
+            if is_swing_high and current_high > current_price:
+                last_micro_resistance = current_high
+                resistance_index = i
+                break
+
+        if last_micro_resistance is None:
+            return {
+                'micro_resistance': None,
+                'distance_ticks': 0.0,
+                'distance_pips': 0.0,
+                'bounce_probability': 0.0,
+                'age_minutes': 0,
+                'rejection_detected': False,
+                'strength': 'NONE'
+            }
+
+        # 2. Calculer distance en ticks et pips
+        distance_price = abs(last_micro_resistance - current_price)
+        distance_pips = distance_price * 10000
+        distance_ticks = distance_pips * 10  # 1 pip = 10 ticks approx
+
+        # 3. Calculer bounce probability (réactions passées à ce niveau)
+        tolerance = 0.5 / 10000  # 0.5 pip de tolérance
+        bounces = 0
+        breaks = 0
+
+        for i in range(1, len(recent_data)):
+            prev_close = recent_data.iloc[i - 1]['close']
+            curr_low = recent_data.iloc[i]['low']
+            curr_high = recent_data.iloc[i]['high']
+            curr_close = recent_data.iloc[i]['close']
+
+            # Le prix a touché le niveau ?
+            level_touched = (
+                curr_low <= last_micro_resistance + tolerance and
+                curr_high >= last_micro_resistance - tolerance
+            )
+
+            if level_touched:
+                # Bounce down : Prix monte vers niveau et redescend
+                if prev_close < last_micro_resistance and curr_high >= last_micro_resistance - tolerance and curr_close < last_micro_resistance:
+                    bounces += 1
+
+                # Break up : Prix traverse le niveau
+                elif prev_close < last_micro_resistance and curr_close > last_micro_resistance + tolerance:
+                    breaks += 1
+
+        total_tests = bounces + breaks
+        bounce_probability = bounces / total_tests if total_tests > 0 else 0.5
+
+        # 4. Calculer âge du niveau (en minutes)
+        age_minutes = len(recent_data) - resistance_index - 1
+
+        # 5. Détecter rejection (wick de rejet sur bougie actuelle)
+        last_candle = historical_data.iloc[-1]
+        upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+        body_size = abs(last_candle['close'] - last_candle['open'])
+
+        rejection_detected = (
+            upper_wick > body_size * 1.5 and  # Wick > 1.5x body
+            abs(last_candle['high'] - last_micro_resistance) < 0.5 / 10000  # Wick a touché résistance
+        )
+
+        # 6. Déterminer strength
+        if distance_pips < 0.5 and bounce_probability >= 0.7:
+            strength = 'STRONG'
+        elif distance_pips < 1.0 and bounce_probability >= 0.6:
+            strength = 'MODERATE'
+        elif distance_pips < 1.5:
+            strength = 'WEAK'
+        else:
+            strength = 'NONE'
+
+        return {
+            'micro_resistance': last_micro_resistance,
+            'distance_ticks': distance_ticks,
+            'distance_pips': distance_pips,
+            'bounce_probability': bounce_probability,
+            'age_minutes': age_minutes,
+            'rejection_detected': rejection_detected,
+            'strength': strength
+        }
+
     def _default_trend_structure(self) -> Dict[str, Any]:
         """
         Retourne une structure par défaut quand l'analyse n'est pas possible
