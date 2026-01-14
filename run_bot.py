@@ -4121,10 +4121,8 @@ def scalping_worker(
                             # Bonus si Price Memory aligné
                             bonus_memory = 30 if memory_aligned else 0
 
-                            # 🐻 NOTE: En mode LOG ONLY, bearish_boost n'est PAS appliqué (reste 0.0)
-                            # Pour activer, décommenter la ligne ci-dessous:
-                            # adjusted_score = original_score + bonus_memory + bearish_boost
-                            adjusted_score = original_score + bonus_memory  # MODE LOG ONLY
+                            # 🐻 MODE PRODUCTION (14 JAN 2026): Boost BEARISH activé
+                            adjusted_score = original_score + bonus_memory + bearish_boost
 
                             if all_filters_pass and adjusted_score >= asset_min_score_worker:
                                 # ✅ Signal validé - TOUS LES FILTRES PASSENT
