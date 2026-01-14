@@ -277,8 +277,8 @@
         "comment_coverage_fix": "05 JAN 2026 FIX: min_coverage_s=5s aligné avec fenêtre glissante 8s (vs 40s ancien pour M1 60s)"
       },
       "blocked_phases": {
-        "enabled": false,
-        "description": "08 JAN 2026: DÉSACTIVÉ - Bloquait les vrais signaux (ex: 11 bougies rouges NAS100 = SELL évident bloqué par 'range_retail')",
+        "enabled": true,
+        "description": "14 JAN 2026: RÉACTIVÉ - Bloquer trades en range/accumulation (demande utilisateur)",
         "phases": [
           "range",
           "accumulation",
@@ -286,7 +286,7 @@
           "range_distribution",
           "high_volatility_chaos"
         ],
-        "comment": "PRICE-FIRST décide maintenant - Le PRIX ne ment pas, le DELTA confirme!"
+        "comment": "Veto actif pour éviter trades en range/accumulation - Seulement trending/transitional"
       },
       "orderflow_v6": {
         "enabled": true,
