@@ -3506,11 +3506,15 @@ def scalping_worker(
                                     # Écrasement direct pour les valeurs simples
                                     current_sltp[key] = value
 
+                            # 🔧 FIX CRITIQUE (14 JAN 2026): Mettre à jour sltp_cfg avec valeurs mergées
+                            # SINON le skeleton utilisera les anciennes valeurs (20/30 au lieu de 800/1200)
+                            sltp_cfg = current_sltp
+
                             # Log les valeurs finales
                             sl_pips_final = current_sltp.get("sl", {}).get("pips", "N/A")
                             tp_pips_final = current_sltp.get("tp", {}).get("pips", "N/A")
                             logger.critical(
-                                f"✅ [CONFIG_MERGE][{asset}] SLTP fusionné | "
+                                f"✅ [CONFIG_MERGE][{asset}] SLTP fusionné ET appliqué au skeleton | "
                                 f"SL={sl_pips_final} pips | TP={tp_pips_final} pips"
                             )
                         else:
@@ -3518,6 +3522,13 @@ def scalping_worker(
                     except Exception as e:
                         logger.warning(f"[{asset}] Fusion config échouée: {e}")
                         merged_config = base_config
+
+                    # 🔍 DEBUG FINAL (14 JAN 2026): Vérifier sltp_cfg avant création skeleton
+                    logger.critical(
+                        f"🔍 [SKELETON_DEBUG][{asset}] sltp_cfg avant création skeleton | "
+                        f"SL={sltp_cfg.get('sl', {}).get('pips', 'N/A')} pips | "
+                        f"TP={sltp_cfg.get('tp', {}).get('pips', 'N/A')} pips"
+                    )
 
                     # ⚡ SQUELETTE PRÉ-CALCULÉ (parties statiques)
                     trade_decision_skeleton = {
