@@ -211,6 +211,7 @@ def _get_merged_config_for_asset(
         "broker_overrides",
         "position_management",
         "entry_rules",  # <-- CRITIQUE: permet de fusionner les overrides SL/TP par asset
+        "overrides",    # <-- FIX 14 JAN 2026: CRITIQUE pour NAS100 (config dans overrides.scalping.entry_rules)
     ]
 
     for section in sections_to_merge:
