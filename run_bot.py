@@ -3467,23 +3467,54 @@ def scalping_worker(
                                 scalping_strategy_config["entry_rules"]
                             )
 
-                        # ✅ FIX (31 DEC 2025): Fusionner asset-specific overrides (target_profit_pips, etc.)
-                        # 🐛 FIX (02 JAN 2026): Utiliser load_asset_config au lieu de get_asset_config
+                        # ✅ FIX (14 JAN 2026): Charger config asset et merger CORRECTEMENT
                         asset_config = config_manager.load_asset_config(asset)
-                        asset_overrides = asset_config.get("overrides", {}).get("scalping", {})
-                        if asset_overrides:
-                            # Fusionner deep les overrides d'actif dans entry_rules.scalping.burst_scalping
+
+                        # 🎯 CHERCHER SLTP DANS 2 ENDROITS (selon structure asset)
+                        # - NAS100: entry_rules.scalping.burst_scalping.sltp
+                        # - Forex (USDJPY, GBPUSD): overrides.scalping.sltp
+
+                        asset_sltp_config = None
+
+                        # Tentative 1: entry_rules (NAS100)
+                        asset_sltp_config = (
+                            asset_config.get("entry_rules", {})
+                            .get("scalping", {})
+                            .get("burst_scalping", {})
+                            .get("sltp")
+                        )
+
+                        # Tentative 2: overrides.scalping (Forex)
+                        if not asset_sltp_config:
+                            asset_sltp_config = (
+                                asset_config.get("overrides", {})
+                                .get("scalping", {})
+                                .get("sltp")
+                            )
+
+                        if asset_sltp_config:
+                            # ⚠️ DEEP MERGE des valeurs SL/TP (pas juste .update() qui écrase)
                             burst_scalping_path = merged_config.setdefault("entry_rules", {}).setdefault("scalping", {}).setdefault("burst_scalping", {})
+                            current_sltp = burst_scalping_path.setdefault("sltp", {})
 
-                            # Fusionner closure_rules si présent dans asset overrides
-                            if "closure_rules" in asset_overrides:
-                                burst_scalping_path.setdefault("closure_rules", {}).update(asset_overrides["closure_rules"])
+                            # Merger chaque sous-clé individuellement (deep merge)
+                            for key, value in asset_sltp_config.items():
+                                if isinstance(value, dict) and key in current_sltp and isinstance(current_sltp[key], dict):
+                                    # Deep merge pour sl, tp, etc.
+                                    current_sltp[key].update(value)
+                                else:
+                                    # Écrasement direct pour les valeurs simples
+                                    current_sltp[key] = value
 
-                            # Fusionner sltp si présent dans asset overrides
-                            if "sltp" in asset_overrides:
-                                burst_scalping_path.setdefault("sltp", {}).update(asset_overrides["sltp"])
-
-                            logger.info(f"✅ [CONFIG_MERGE] Asset overrides appliqués pour {asset}")
+                            # Log les valeurs finales
+                            sl_pips_final = current_sltp.get("sl", {}).get("pips", "N/A")
+                            tp_pips_final = current_sltp.get("tp", {}).get("pips", "N/A")
+                            logger.critical(
+                                f"✅ [CONFIG_MERGE][{asset}] SLTP fusionné | "
+                                f"SL={sl_pips_final} pips | TP={tp_pips_final} pips"
+                            )
+                        else:
+                            logger.warning(f"⚠️ [{asset}] Pas de config SLTP asset-specific trouvée")
                     except Exception as e:
                         logger.warning(f"[{asset}] Fusion config échouée: {e}")
                         merged_config = base_config
