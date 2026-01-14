@@ -509,6 +509,43 @@ def _calculate_sl_tp_prices(
         .get("sltp", {})
     ) or {}
 
+    # 🆕 FALLBACK MULTI-NIVEAUX: Si vide, chercher dans overrides (FIX 14 JAN 2026)
+    # Structure différente selon les assets:
+    # - NAS100: overrides.scalping.entry_rules.scalping.burst_scalping.sltp
+    # - Forex (GBPUSD, EURUSD, etc): overrides.scalping.sltp
+    config_source = "entry_rules"
+    if not sltp_cfg:
+        # Tentative 1: overrides.scalping.entry_rules.scalping.burst_scalping.sltp (NAS100)
+        sltp_cfg = (
+            ((config.get("overrides") or {}).get("scalping") or {})
+            .get("entry_rules", {})
+            .get("scalping", {})
+            .get("burst_scalping", {})
+            .get("sltp", {})
+        ) or {}
+        if sltp_cfg:
+            config_source = "overrides.scalping.entry_rules"
+
+    if not sltp_cfg:
+        # Tentative 2: overrides.scalping.sltp (GBPUSD, EURUSD, USDJPY)
+        sltp_cfg = (
+            ((config.get("overrides") or {}).get("scalping") or {})
+            .get("sltp", {})
+        ) or {}
+        if sltp_cfg:
+            config_source = "overrides.scalping"
+
+    # DEBUG: Confirmer la source de config utilisée
+    try:
+        if config_source != "entry_rules":
+            self.logger.critical(
+                f"🔄 [CONFIG_FALLBACK] Asset {symbol}: Utilisation {config_source} | "
+                f"SL={sltp_cfg.get('sl', {}).get('pips')} pips, "
+                f"TP={sltp_cfg.get('tp', {}).get('pips')} pips"
+            )
+    except Exception:
+        pass
+
     # DEBUG: Tracer config path
     try:
         self.logger.debug(
@@ -573,6 +610,19 @@ def _calculate_sl_tp_prices(
     tp_pips_default = float(
         dyn_tp.get("pips") or legacy.get("take_profit_pips")
     )
+
+    # 🆕 DEBUG: Tracer les valeurs SL/TP récupérées (FIX 14 JAN 2026)
+    try:
+        self.logger.critical(
+            f"🔍 [SL_TP_CONFIG_DEBUG] Asset {symbol} | "
+            f"SL_pips_config={dyn_sl.get('pips')} | "
+            f"TP_pips_config={dyn_tp.get('pips')} | "
+            f"SL_method={sl_method} | "
+            f"TP_method={tp_method} | "
+            f"pip_size={pip_size:.6f}"
+        )
+    except Exception:
+        pass
 
     # RR effectif (hint + facteurs)
     rr_default = float(
@@ -733,6 +783,20 @@ def _calculate_sl_tp_prices(
         )
         if not (tp_dist_price and tp_dist_price > 0):
             raise TradeExecutionError("Distance TP invalide (<=0).")
+
+    # 🆕 DEBUG: Tracer les distances SL/TP calculées (FIX 14 JAN 2026)
+    try:
+        self.logger.critical(
+            f"📐 [SL_TP_DISTANCES] Asset {symbol} | "
+            f"Entry={entry_price:.2f} | "
+            f"SL_price={stop_loss_price:.2f} | "
+            f"TP_price={take_profit_price:.2f if take_profit_price else 'None'} | "
+            f"SL_dist={sl_dist_price:.2f} pts | "
+            f"TP_dist={tp_dist_price:.2f if tp_dist_price else 'None'} pts | "
+            f"RR={(tp_dist_price/sl_dist_price):.2f if tp_dist_price and sl_dist_price else 'N/A'}"
+        )
+    except Exception:
+        pass
 
     # ---------- A) Min broker + soft 2 ticks ----------
     sl_dist_price = max(sl_dist_price, soft_min_price)
