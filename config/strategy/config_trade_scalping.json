@@ -278,7 +278,7 @@
       },
       "blocked_phases": {
         "enabled": true,
-        "description": "14 JAN 2026: RÉACTIVÉ - Bloquer trades en range/accumulation (demande utilisateur)",
+        "description": "14 JAN 2026: ACTIF - Détection de phase à corriger pour temps réel",
         "phases": [
           "range",
           "accumulation",
@@ -286,7 +286,7 @@
           "range_distribution",
           "high_volatility_chaos"
         ],
-        "comment": "Veto actif pour éviter trades en range/accumulation - Seulement trending/transitional"
+        "comment": "VETO DÉSACTIVÉ - La détection de phase ne suit pas les mouvements rapides"
       },
       "orderflow_v6": {
         "enabled": true,
@@ -354,7 +354,7 @@
       "liquidity_eqh_eql",
       "transitional"
     ],
-    "lookback_window": 12,
+    "lookback_window": 3,
     "volatility_threshold": 0.0,
     "volume_zscore": 0.0,
     "eq_level_tolerance": 0.0,

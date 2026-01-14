@@ -111,9 +111,9 @@ class RegimeDetectorLite:
                 "momentum_pct": float     # Momentum 20 barres en % (-10.0 à 10.0)
             }
         """
-        # --- 1. SLOPE LINÉAIRE (20 barres) ---
-        # Régression linéaire sur close
-        window = min(20, len(df))
+        # --- 1. SLOPE LINÉAIRE (3 barres) ---
+        # Régression linéaire sur close - RÉDUIT à 3 pour réactivité (14 JAN 2026)
+        window = min(3, len(df))
         close_series = df["close"].iloc[-window:].values
         x = np.arange(len(close_series))
 
@@ -126,8 +126,9 @@ class RegimeDetectorLite:
         else:
             slope = 0.0
 
-        # --- 2. ATR 14 (Average True Range) ---
-        atr_period = min(14, len(df))
+        # --- 2. ATR 5 (Average True Range) ---
+        # RÉDUIT à 5 pour réactivité (14 JAN 2026)
+        atr_period = min(5, len(df))
         if len(df) >= atr_period:
             high = df["high"].values
             low = df["low"].values
@@ -146,7 +147,8 @@ class RegimeDetectorLite:
             atr_pct = 0.0
 
         # --- 3. VOLUME RATIO ---
-        volume_period = min(14, len(df))
+        # RÉDUIT à 5 pour réactivité (14 JAN 2026)
+        volume_period = min(5, len(df))
         if len(df) >= volume_period:
             volume_ma = df["tick_volume"].rolling(window=volume_period, min_periods=1).mean().iloc[-1]
             current_volume = df["tick_volume"].iloc[-1]
@@ -154,8 +156,9 @@ class RegimeDetectorLite:
         else:
             volume_ratio = 1.0
 
-        # --- 4. MOMENTUM 20 BARRES ---
-        momentum_period = min(20, len(df))
+        # --- 4. MOMENTUM 3 BARRES ---
+        # RÉDUIT à 3 pour détecter mouvements rapides (14 JAN 2026)
+        momentum_period = min(3, len(df))
         if len(df) >= momentum_period:
             price_start = df["close"].iloc[-momentum_period]
             price_end = df["close"].iloc[-1]
