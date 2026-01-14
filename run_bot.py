@@ -184,6 +184,33 @@ def _get_merged_config_for_asset(
     - Merge récursif (deep) pour éviter d'écraser des sous-champs par inadvertance.
     """
     asset_specific_config = config_manager.config_loader.load_asset_config(asset) or {}
+
+    # 🔍 DEBUG (14 JAN 2026): Vérifier si asset config est chargé
+    import logging
+    logger = logging.getLogger(__name__)
+    if asset_specific_config:
+        has_entry_rules = "entry_rules" in asset_specific_config
+        has_sltp = bool(
+            asset_specific_config.get("entry_rules", {})
+            .get("scalping", {})
+            .get("burst_scalping", {})
+            .get("sltp", {})
+        ) if has_entry_rules else False
+        sl_pips = (
+            asset_specific_config.get("entry_rules", {})
+            .get("scalping", {})
+            .get("burst_scalping", {})
+            .get("sltp", {})
+            .get("sl", {})
+            .get("pips", "N/A")
+        ) if has_sltp else "N/A"
+        logger.critical(
+            f"🔍 [CONFIG_LOAD][{asset}] Asset config loaded | "
+            f"has_entry_rules={has_entry_rules} | has_sltp={has_sltp} | sl_pips={sl_pips}"
+        )
+    else:
+        logger.critical(f"⚠️ [CONFIG_LOAD][{asset}] Asset config VIDE ou non trouvé !")
+
     merged_config = dict(active_config or {})
     merged_config["asset_symbol"] = asset  # pratique pour les logs/pipelines
 
@@ -221,6 +248,20 @@ def _get_merged_config_for_asset(
                 merged_config.get(section, {}), asset_section
             )
             merged_config[section] = merged_section
+
+    # 🔍 DEBUG (14 JAN 2026): Vérifier le résultat du merge
+    sl_pips_after_merge = (
+        merged_config.get("entry_rules", {})
+        .get("scalping", {})
+        .get("burst_scalping", {})
+        .get("sltp", {})
+        .get("sl", {})
+        .get("pips", "N/A")
+    )
+    logger.critical(
+        f"🔍 [CONFIG_MERGE][{asset}] Après merge | "
+        f"sl_pips={sl_pips_after_merge}"
+    )
 
     return merged_config
 
