@@ -3200,6 +3200,16 @@ def scalping_worker(
         logger.error(f"❌ [{asset}] Impossible de créer BearishScalpingValidator: {e}")
         bearish_validator = None  # Continue sans bearish validator
 
+    # ⚡ NOUVEAU (14 JAN 2026): Instancier MicrostructureAnalyzer pour détection accélérations
+    microstructure_analyzer = None
+    try:
+        from phase_observer.microstructure_analyzer import MicrostructureAnalyzer
+        microstructure_analyzer = MicrostructureAnalyzer(logger=logger)
+        logger.info(f"✅ [{asset}] MicrostructureAnalyzer instancié (tape speed + momentum ignition)")
+    except Exception as e:
+        logger.error(f"❌ [{asset}] Impossible de créer MicrostructureAnalyzer: {e}")
+        microstructure_analyzer = None
+
     # ✅ Instancier ScalpingStrategy pour logs de rapport OrderFlow V6
     try:
         from strategy.scalping import ScalpingStrategy
@@ -3327,17 +3337,36 @@ def scalping_worker(
 
                 if ticks_df is not None and not ticks_df.empty:
                     logger.info(f"[{asset}] ✅ {len(ticks_df)} ticks chargés (fenêtre glissante {sliding_window_seconds}s)")
+
+                    # ⚡ NOUVEAU (14 JAN 2026): Analyser tape speed (accélérations)
+                    tape_speed_result = None
+                    if microstructure_analyzer:
+                        try:
+                            tape_speed_result = microstructure_analyzer.analyze_tape_speed(ticks_df)
+                            logger.critical(
+                                f"⚡ [TAPE_SPEED][{asset}] "
+                                f"Buy={tape_speed_result['tape_speed_buy']:.2f} ticks/s | "
+                                f"Sell={tape_speed_result['tape_speed_sell']:.2f} ticks/s | "
+                                f"Ratio={tape_speed_result['speed_ratio']:.2f} | "
+                                f"Signal={tape_speed_result['interpretation']}"
+                            )
+                        except Exception as e_tape:
+                            logger.warning(f"[{asset}] ⚠️ Erreur tape speed analysis: {e_tape}")
+                            tape_speed_result = None
                 else:
                     logger.warning(f"[{asset}] ⚠️ Aucun tick récupéré dans fenêtre glissante {sliding_window_seconds}s")
                     ticks_df = None
+                    tape_speed_result = None
 
             except TimeoutError as e_timeout:
                 logger.error(f"[{asset}] ⏱️ TIMEOUT chargement ticks: {e_timeout}")
                 ticks_df = None
+                tape_speed_result = None
 
             except Exception as e_ticks:
                 logger.error(f"[{asset}] ❌ Erreur chargement ticks: {e_ticks}", exc_info=True)
                 ticks_df = None
+                tape_speed_result = None
 
             # MarketAnalyzer (phase + patterns + features)
             # Import déplacé au début de la fonction (ligne 3124)
@@ -4121,8 +4150,55 @@ def scalping_worker(
                             # Bonus si Price Memory aligné
                             bonus_memory = 30 if memory_aligned else 0
 
-                            # 🐻 MODE PRODUCTION (14 JAN 2026): Boost BEARISH activé
-                            adjusted_score = original_score + bonus_memory + bearish_boost
+                            # ⚡ NOUVEAU (14 JAN 2026): Bonus TAPE SPEED (accélération)
+                            bonus_tape_speed = 0.0
+                            if tape_speed_result and tape_speed_result.get('interpretation') != 'PAS_ASSEZ_DONNEES':
+                                interpretation = tape_speed_result.get('interpretation', 'BALANCED')
+                                speed_ratio = tape_speed_result.get('speed_ratio', 1.0)
+
+                                # Vitesse absolue pour multiplicateur
+                                tape_speed_buy = tape_speed_result.get('tape_speed_buy', 0)
+                                tape_speed_sell = tape_speed_result.get('tape_speed_sell', 0)
+                                max_tape_speed = max(tape_speed_buy, tape_speed_sell)
+
+                                # Bonus de base selon interprétation + alignement
+                                base_bonus = 0.0
+                                if filtre1_direction == "BUY":
+                                    if interpretation == 'BUYERS_AGGRESSIVE':  # speed_ratio > 1.5
+                                        base_bonus = 15.0
+                                    elif interpretation == 'BUYERS_MODERATE':  # speed_ratio > 1.2
+                                        base_bonus = 8.0
+                                elif filtre1_direction == "SELL":
+                                    if interpretation == 'SELLERS_AGGRESSIVE':  # speed_ratio < 0.67
+                                        base_bonus = 15.0
+                                    elif interpretation == 'SELLERS_MODERATE':  # speed_ratio < 0.83
+                                        base_bonus = 8.0
+
+                                # Multiplicateur selon vitesse absolue
+                                if max_tape_speed > 10.0:
+                                    speed_multiplier = 1.2  # Accélération forte
+                                elif max_tape_speed > 5.0:
+                                    speed_multiplier = 1.0  # Normal
+                                elif max_tape_speed > 2.0:
+                                    speed_multiplier = 0.8  # Ralentissement léger
+                                else:
+                                    speed_multiplier = 0.5  # Très lent (grind)
+
+                                bonus_tape_speed = base_bonus * speed_multiplier
+
+                                # Log le bonus
+                                if bonus_tape_speed > 0:
+                                    logger.critical(
+                                        f"⚡ [TAPE_BONUS][{asset}] "
+                                        f"Direction={filtre1_direction} | "
+                                        f"Signal={interpretation} | "
+                                        f"Speed={max_tape_speed:.1f} ticks/s | "
+                                        f"Base={base_bonus:.0f} × Mult={speed_multiplier:.1f} | "
+                                        f"BONUS={bonus_tape_speed:+.1f}"
+                                    )
+
+                            # 🐻 MODE PRODUCTION (14 JAN 2026): Boost BEARISH activé + Tape Speed
+                            adjusted_score = original_score + bonus_memory + bearish_boost + bonus_tape_speed
 
                             if all_filters_pass and adjusted_score >= asset_min_score_worker:
                                 # ✅ Signal validé - TOUS LES FILTRES PASSENT
@@ -4131,7 +4207,7 @@ def scalping_worker(
                                 decision_mini["rationale"] = (
                                     f"TRIPLE_FILTER: {filtre1_direction} | "
                                     f"F1:{filtre1_status} F2:{filtre2_status} F3:{filtre3_status} | "
-                                    f"Score: {original_score:.1f}+{bonus_memory} = {adjusted_score:.1f}"
+                                    f"Score: {original_score:.1f}+{bonus_memory}+{bearish_boost:.0f}+{bonus_tape_speed:.0f} = {adjusted_score:.1f}"
                                 )
 
                                 orderflow_result_mini["score"] = adjusted_score
@@ -4141,7 +4217,7 @@ def scalping_worker(
                                     f"F1: {filtre1_detail} | "
                                     f"F2: {filtre2_detail} | "
                                     f"F3: {filtre3_detail} | "
-                                    f"Score: {original_score:.1f} → {adjusted_score:.1f}"
+                                    f"Score: {original_score:.1f} +mem={bonus_memory} +bear={bearish_boost:.0f} +tape={bonus_tape_speed:.0f} → {adjusted_score:.1f}"
                                 )
                             else:
                                 # ⏸️ HOLD - AU MOINS UN FILTRE A ÉCHOUÉ

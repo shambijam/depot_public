@@ -53,6 +53,37 @@
   "strategy_whitelist": [
     "scalping"
   ],
+  "entry_rules": {
+    "scalping": {
+      "burst_scalping": {
+        "sltp": {
+          "exit_mode": "sl_tp_then_trail",
+          "sl_method": "PIPS",
+          "tp_method": "PIPS",
+          "rr_base": 1.5,
+          "rr_floor": 1.0,
+          "rr_cap": 3.0,
+          "sl": {
+            "pips": 800,
+            "buffer_pips": 200,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
+            "swing_lookback": 0,
+            "comment": "10 JAN 2026: 800 pips = 8 index points (NAS100 100x multiplier)"
+          },
+          "tp": {
+            "pips": 1200,
+            "atr_period": 14,
+            "atr_multiplier": 0.0,
+            "execution": {
+              "min_sl_tp_distance_pips": 1500
+            },
+            "comment": "10 JAN 2026: 1200 pips = 12 index points (RR 1.5)"
+          }
+        }
+      }
+    }
+  },
   "overrides": {
     "scalping": {
       "footprint": {
@@ -186,31 +217,7 @@
             "flow_vol_gate": {
               "enabled": false
             },
-            "sltp": {
-              "exit_mode": "sl_tp_then_trail",
-              "sl_method": "PIPS",
-              "tp_method": "PIPS",
-              "rr_base": 1.5,
-              "rr_floor": 1.0,
-              "rr_cap": 3.0,
-              "sl": {
-                "pips": 800,
-                "buffer_pips": 200,
-                "atr_period": 14,
-                "atr_multiplier": 0.0,
-                "swing_lookback": 0,
-                "comment": "10 JAN 2026: 800 pips = 8 index points (NAS100 100x multiplier)"
-              },
-              "tp": {
-                "pips": 1200,
-                "atr_period": 14,
-                "atr_multiplier": 0.0,
-                "execution": {
-                  "min_sl_tp_distance_pips": 1500
-                },
-                "comment": "10 JAN 2026: 1200 pips = 12 index points (RR 1.5)"
-              }
-            }
+            "comment_sltp": "14 JAN 2026: SL/TP config déplacée au niveau racine entry_rules (plus besoin de fallbacks complexes)"
           }
         }
       },
