@@ -82,7 +82,10 @@
           "composite_score_min": 72.0,
           "institutional_filters": {
             "market_fatigue": {
-              "allowed_states": ["ENERGETIC", "NORMAL"],
+              "allowed_states": [
+                "ENERGETIC",
+                "NORMAL"
+              ],
               "penalty_fatigued": 6.0,
               "penalty_exhausted": 12.0
             },
@@ -240,7 +243,7 @@
         "rr_floor": 1.0,
         "rr_cap": 3.0,
         "sl": {
-          "pips": 20.0,
+          "pips": 5.0,
           "buffer_pips": 1,
           "atr_period": 14,
           "atr_multiplier": 0.0,
@@ -248,7 +251,7 @@
           "comment": "20 pips SL pour GBPUSD (Option A - Conservateur, 06 JAN 2026)"
         },
         "tp": {
-          "pips": 30.0,
+          "pips": 10.0,
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
@@ -260,7 +263,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 1.6,
+        "target_profit_pips": 1.5,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
