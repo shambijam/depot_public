@@ -3461,7 +3461,10 @@ def scalping_worker(
                     # Fusionner config scalping avec base_config + asset overrides (31 DEC 2025)
                     try:
                         scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
-                        merged_config = dict(base_config)
+                        # 🔧 FIX (15 JAN 2026): DEEP COPY pour éviter partage entre workers
+                        # dict() fait une shallow copy - les objets imbriqués sont partagés!
+                        import copy
+                        merged_config = copy.deepcopy(base_config)
                         if "entry_rules" in scalping_strategy_config:
                             merged_config.setdefault("entry_rules", {}).update(
                                 scalping_strategy_config["entry_rules"]
