@@ -130,7 +130,8 @@ class ConfigManager:
         if asset in self._asset_config_cache:
             return self._asset_config_cache[asset]
 
-        config_dir = self.get("paths.assets_config", "config/assets_config/")
+        # FIX (15 JAN 2026): Corriger le nom de clé (asset_configs et non assets_config)
+        config_dir = self.get("paths.asset_configs", "config/assets_config/")
         asset_path = Path(config_dir) / f"{asset}.json"
 
         if not asset_path.is_file():

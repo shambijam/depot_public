@@ -3470,6 +3470,12 @@ def scalping_worker(
                         # ✅ FIX (14 JAN 2026): Charger config asset et merger CORRECTEMENT
                         asset_config = config_manager.load_asset_config(asset)
 
+                        # 🔍 DEBUG (15 JAN 2026): Confirmer chargement config asset
+                        logger.critical(
+                            f"🔍 [ASSET_CONFIG_LOAD][{asset}] Chargé: {bool(asset_config)} | "
+                            f"Clés: {list(asset_config.keys()) if asset_config else 'VIDE'}"
+                        )
+
                         # 🎯 CHERCHER SLTP DANS 2 ENDROITS (selon structure asset)
                         # - NAS100: entry_rules.scalping.burst_scalping.sltp
                         # - Forex (USDJPY, GBPUSD): overrides.scalping.sltp
