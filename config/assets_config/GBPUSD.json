@@ -217,8 +217,8 @@
         "scalping": {
           "burst_scalping": {
             "use_orderflow_v6": true,
-            "min_score": 62.0,
-            "comment_min_score": "08 JAN 2026: GBPUSD score baissé 70→62 pour capter plus de trades 16h-17h GMT",
+            "min_score": 65.0,
+            "comment_min_score": "16 JAN 2026: GBPUSD score uniformisé à 65 (standard pour tous les actifs)",
             "of_v6_gate": {
               "min_score": 0.72,
               "require_ncp_strong": true,

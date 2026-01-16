@@ -7,11 +7,46 @@ Raison: "Bot trade sans savoir où prix a déjà été. C'est suicidaire."
 
 Source: DEBUG_LOGS.txt lignes 771-813
 Date: 03 Janvier 2026
+
+🆕 16 JAN 2026: Ajout MTF Analysis + Mémoire Persistante
+- Analyse constante M15 + M5 + M1
+- Historique des analyses (mémoire persistante)
+- get_mtf_trend_verdict() pour verdict BEARISH/BULLISH
+- Logique asymétrique: MTF = direction pour BEARISH, delta = timing uniquement
 """
 
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Any
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass
+class MTFAnalysisResult:
+    """Résultat d'analyse d'un timeframe"""
+    timeframe: str  # M15, M5, M1
+    direction: str  # BEARISH, BULLISH, NEUTRAL
+    net_pips: float
+    trend_clarity: float  # 0.0-1.0
+    candles_analyzed: int
+    timestamp: datetime
+
+
+@dataclass
+class MTFTrendVerdict:
+    """Verdict MTF pour décision de trade"""
+    direction: str  # BEARISH, BULLISH, NEUTRAL
+    alignment: str  # "3/3", "2/3", "1/3", "0/3"
+    alignment_count: int  # 0, 1, 2, 3
+    bonus: float  # +20, +15, 0
+    m15_direction: str
+    m5_direction: str
+    m1_direction: str
+    confidence: float  # 0.0-1.0
+    should_override_delta: bool  # True si MTF doit ignorer le delta
+    details: Dict[str, Any]
 
 
 class PriceMemoryAnalyzer:
@@ -23,6 +58,11 @@ class PriceMemoryAnalyzer:
     - Volume nodes (niveaux où volume s'est concentré)
     - Réactions passées aux niveaux
     - Niveaux frais (jamais testés)
+
+    🆕 16 JAN 2026: MTF Analysis
+    - Analyse constante M15 + M5 + M1
+    - Mémoire persistante des analyses
+    - Verdict MTF pour trades BEARISH
     """
 
     def __init__(self, logger=None):
@@ -31,6 +71,16 @@ class PriceMemoryAnalyzer:
             logger: Logger pour debug
         """
         self.logger = logger
+
+        # 🆕 16 JAN 2026: Mémoire persistante par asset et timeframe
+        self._mtf_history: Dict[str, Dict[str, deque]] = {}
+        self._history_maxlen = 100  # Garder les 100 dernières analyses par TF
+
+        # Cache du dernier verdict par asset
+        self._last_verdict: Dict[str, MTFTrendVerdict] = {}
+
+        if self.logger:
+            self.logger.info("✅ [PRICE_MEMORY] Initialisé avec MTF Analysis + Mémoire Persistante")
 
     def analyze_price_memory(
         self,
@@ -858,3 +908,387 @@ class PriceMemoryAnalyzer:
                 'lows': []
             }
         }
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 16 JAN 2026: MTF ANALYSIS (M15 + M5 + M1)
+    # ═══════════════════════════════════════════════════════════════
+
+    def _init_asset_history(self, asset: str) -> None:
+        """Initialise l'historique pour un asset s'il n'existe pas"""
+        if asset not in self._mtf_history:
+            self._mtf_history[asset] = {
+                'M15': deque(maxlen=self._history_maxlen),
+                'M5': deque(maxlen=self._history_maxlen),
+                'M1': deque(maxlen=self._history_maxlen)
+            }
+
+    def analyze_single_timeframe(
+        self,
+        asset: str,
+        timeframe: str,
+        candles: pd.DataFrame,
+        current_price: float
+    ) -> MTFAnalysisResult:
+        """
+        Analyse un seul timeframe et stocke dans l'historique
+
+        Args:
+            asset: Symbole (NAS100, EURUSD, etc.)
+            timeframe: M15, M5, ou M1
+            candles: DataFrame OHLCV pour ce timeframe
+            current_price: Prix actuel
+
+        Returns:
+            MTFAnalysisResult avec direction et métriques
+        """
+        self._init_asset_history(asset)
+
+        # Utiliser analyze_trend_structure existant
+        trend_result = self.analyze_trend_structure(candles, current_price)
+
+        # Extraire les données clés
+        net_displacement = trend_result.get('net_displacement', {})
+        net_pips = net_displacement.get('net_pips', 0.0)
+        net_direction = net_displacement.get('net_direction', 'FLAT')
+        trend_clarity = net_displacement.get('trend_clarity', 0.0)
+
+        # Déterminer direction
+        if net_direction == 'DOWN' and abs(net_pips) >= 5:
+            direction = 'BEARISH'
+        elif net_direction == 'UP' and abs(net_pips) >= 5:
+            direction = 'BULLISH'
+        else:
+            direction = 'NEUTRAL'
+
+        # Créer résultat
+        result = MTFAnalysisResult(
+            timeframe=timeframe,
+            direction=direction,
+            net_pips=net_pips,
+            trend_clarity=trend_clarity,
+            candles_analyzed=len(candles) if candles is not None else 0,
+            timestamp=datetime.now()
+        )
+
+        # Stocker dans l'historique
+        self._mtf_history[asset][timeframe].append(result)
+
+        if self.logger:
+            self.logger.debug(
+                f"[MTF_ANALYSIS][{asset}][{timeframe}] "
+                f"{direction} | net={net_pips:+.1f} pips | clarity={trend_clarity:.2f}"
+            )
+
+        return result
+
+    def get_mtf_trend_verdict(
+        self,
+        asset: str,
+        candles_m15: Optional[pd.DataFrame],
+        candles_m5: Optional[pd.DataFrame],
+        candles_m1: Optional[pd.DataFrame],
+        current_price: float
+    ) -> MTFTrendVerdict:
+        """
+        🎯 MÉTHODE PRINCIPALE - Verdict MTF pour décision BEARISH/BULLISH
+
+        Analyse M15 + M5 + M1 et retourne un verdict avec bonus
+
+        Args:
+            asset: Symbole (NAS100, EURUSD, etc.)
+            candles_m15: DataFrame M15 (30-50 bougies recommandé)
+            candles_m5: DataFrame M5 (50-100 bougies recommandé)
+            candles_m1: DataFrame M1 (50-100 bougies recommandé)
+            current_price: Prix actuel
+
+        Returns:
+            MTFTrendVerdict avec direction, alignment, bonus, etc.
+        """
+        self._init_asset_history(asset)
+
+        # Analyser chaque timeframe
+        m15_result = None
+        m5_result = None
+        m1_result = None
+
+        if candles_m15 is not None and len(candles_m15) >= 10:
+            m15_result = self.analyze_single_timeframe(asset, 'M15', candles_m15, current_price)
+
+        if candles_m5 is not None and len(candles_m5) >= 10:
+            m5_result = self.analyze_single_timeframe(asset, 'M5', candles_m5, current_price)
+
+        if candles_m1 is not None and len(candles_m1) >= 10:
+            m1_result = self.analyze_single_timeframe(asset, 'M1', candles_m1, current_price)
+
+        # Extraire les directions
+        m15_dir = m15_result.direction if m15_result else 'NEUTRAL'
+        m5_dir = m5_result.direction if m5_result else 'NEUTRAL'
+        m1_dir = m1_result.direction if m1_result else 'NEUTRAL'
+
+        # Compter les alignements BEARISH et BULLISH
+        directions = [m15_dir, m5_dir, m1_dir]
+        bearish_count = sum(1 for d in directions if d == 'BEARISH')
+        bullish_count = sum(1 for d in directions if d == 'BULLISH')
+
+        # Déterminer la direction dominante et le bonus
+        if bearish_count >= 2:
+            direction = 'BEARISH'
+            alignment_count = bearish_count
+            alignment = f"{bearish_count}/3"
+            bonus = 20.0 if bearish_count == 3 else 15.0
+            should_override_delta = True  # MTF BEARISH = ignorer le delta
+            confidence = 0.9 if bearish_count == 3 else 0.75
+        elif bullish_count >= 2:
+            direction = 'BULLISH'
+            alignment_count = bullish_count
+            alignment = f"{bullish_count}/3"
+            bonus = 0.0  # Pas de bonus pour BULLISH (delta fonctionne bien)
+            should_override_delta = False  # BULLISH = delta reste l'autorité
+            confidence = 0.9 if bullish_count == 3 else 0.75
+        else:
+            direction = 'NEUTRAL'
+            alignment_count = 0
+            alignment = "0/3"
+            bonus = 0.0
+            should_override_delta = False
+            confidence = 0.3
+
+        # Construire le détail
+        details = {
+            'm15': {
+                'direction': m15_dir,
+                'net_pips': m15_result.net_pips if m15_result else 0.0,
+                'clarity': m15_result.trend_clarity if m15_result else 0.0
+            },
+            'm5': {
+                'direction': m5_dir,
+                'net_pips': m5_result.net_pips if m5_result else 0.0,
+                'clarity': m5_result.trend_clarity if m5_result else 0.0
+            },
+            'm1': {
+                'direction': m1_dir,
+                'net_pips': m1_result.net_pips if m1_result else 0.0,
+                'clarity': m1_result.trend_clarity if m1_result else 0.0
+            },
+            'bearish_count': bearish_count,
+            'bullish_count': bullish_count,
+            'history_size': {
+                'M15': len(self._mtf_history[asset]['M15']),
+                'M5': len(self._mtf_history[asset]['M5']),
+                'M1': len(self._mtf_history[asset]['M1'])
+            }
+        }
+
+        verdict = MTFTrendVerdict(
+            direction=direction,
+            alignment=alignment,
+            alignment_count=alignment_count,
+            bonus=bonus,
+            m15_direction=m15_dir,
+            m5_direction=m5_dir,
+            m1_direction=m1_dir,
+            confidence=confidence,
+            should_override_delta=should_override_delta,
+            details=details
+        )
+
+        # Cacher le verdict
+        self._last_verdict[asset] = verdict
+
+        # Log le verdict
+        if self.logger:
+            emoji = "🐻" if direction == 'BEARISH' else ("🐂" if direction == 'BULLISH' else "⚖️")
+            self.logger.info(
+                f"{emoji} [MTF_VERDICT][{asset}] "
+                f"{direction} ({alignment}) | "
+                f"M15:{m15_dir} M5:{m5_dir} M1:{m1_dir} | "
+                f"Bonus: {bonus:+.0f} | "
+                f"Override Delta: {should_override_delta}"
+            )
+
+        return verdict
+
+    def get_last_verdict(self, asset: str) -> Optional[MTFTrendVerdict]:
+        """Retourne le dernier verdict caché pour un asset"""
+        return self._last_verdict.get(asset)
+
+    def get_mtf_history(self, asset: str, timeframe: str, limit: int = 10) -> List[MTFAnalysisResult]:
+        """
+        Retourne l'historique des analyses pour un asset/timeframe
+
+        Args:
+            asset: Symbole
+            timeframe: M15, M5, M1
+            limit: Nombre d'entrées à retourner
+
+        Returns:
+            Liste des dernières analyses (plus récente en premier)
+        """
+        self._init_asset_history(asset)
+        history = list(self._mtf_history[asset].get(timeframe, []))
+        return list(reversed(history[-limit:]))
+
+    def get_trend_consistency(self, asset: str, timeframe: str, lookback: int = 10) -> Dict[str, Any]:
+        """
+        Analyse la consistance de la tendance sur les N dernières analyses
+
+        Args:
+            asset: Symbole
+            timeframe: M15, M5, M1
+            lookback: Nombre d'analyses à considérer
+
+        Returns:
+            Dict avec ratio bearish/bullish et tendance dominante
+        """
+        history = self.get_mtf_history(asset, timeframe, lookback)
+
+        if not history:
+            return {
+                'dominant_trend': 'NEUTRAL',
+                'bearish_ratio': 0.0,
+                'bullish_ratio': 0.0,
+                'consistency': 0.0,
+                'sample_size': 0
+            }
+
+        bearish_count = sum(1 for h in history if h.direction == 'BEARISH')
+        bullish_count = sum(1 for h in history if h.direction == 'BULLISH')
+        total = len(history)
+
+        bearish_ratio = bearish_count / total
+        bullish_ratio = bullish_count / total
+
+        if bearish_ratio > bullish_ratio:
+            dominant = 'BEARISH'
+            consistency = bearish_ratio
+        elif bullish_ratio > bearish_ratio:
+            dominant = 'BULLISH'
+            consistency = bullish_ratio
+        else:
+            dominant = 'NEUTRAL'
+            consistency = 0.5
+
+        return {
+            'dominant_trend': dominant,
+            'bearish_ratio': round(bearish_ratio, 2),
+            'bullish_ratio': round(bullish_ratio, 2),
+            'consistency': round(consistency, 2),
+            'sample_size': total
+        }
+
+    def should_take_bearish_trade(
+        self,
+        asset: str,
+        candles_m15: Optional[pd.DataFrame],
+        candles_m5: Optional[pd.DataFrame],
+        candles_m1: Optional[pd.DataFrame],
+        current_price: float,
+        orderflow_score: float = 0.0,
+        delta_value: float = 0.0
+    ) -> Dict[str, Any]:
+        """
+        🎯 DÉCISION FINALE: Doit-on prendre un trade BEARISH ?
+
+        Logique asymétrique:
+        - MTF = autorité pour la DIRECTION (pas le delta)
+        - Delta = indicateur de TIMING uniquement
+        - Si MTF dit SELL → on vend, peu importe le delta
+
+        Args:
+            asset: Symbole
+            candles_m15/m5/m1: DataFrames OHLCV
+            current_price: Prix actuel
+            orderflow_score: Score OrderFlow actuel (optionnel)
+            delta_value: Valeur du delta actuel (optionnel)
+
+        Returns:
+            Dict avec décision, bonus, et justification
+        """
+        # Obtenir le verdict MTF
+        verdict = self.get_mtf_trend_verdict(
+            asset, candles_m15, candles_m5, candles_m1, current_price
+        )
+
+        # Décision basée sur MTF (pas sur delta pour BEARISH)
+        should_trade = verdict.direction == 'BEARISH' and verdict.alignment_count >= 2
+
+        # Calculer le score final avec bonus
+        final_score = orderflow_score + verdict.bonus
+
+        # Timing quality basé sur delta (mais pas sur décision)
+        if delta_value < 0:
+            timing_quality = 'OPTIMAL'
+            timing_bonus = 5.0  # Petit bonus timing
+        elif delta_value < 10:
+            timing_quality = 'ACCEPTABLE'
+            timing_bonus = 0.0
+        else:
+            timing_quality = 'SUBOPTIMAL'
+            timing_bonus = 0.0  # Pas de malus, MTF prime
+
+        final_score += timing_bonus
+
+        result = {
+            'should_trade': should_trade,
+            'direction': 'SELL' if should_trade else 'NO_TRADE',
+            'mtf_verdict': verdict.direction,
+            'mtf_alignment': verdict.alignment,
+            'mtf_bonus': verdict.bonus,
+            'timing_quality': timing_quality,
+            'timing_bonus': timing_bonus,
+            'orderflow_score_original': orderflow_score,
+            'final_score': final_score,
+            'delta_value': delta_value,
+            'delta_ignored_for_direction': True,  # Toujours True pour BEARISH
+            'confidence': verdict.confidence,
+            'details': {
+                'm15': verdict.m15_direction,
+                'm5': verdict.m5_direction,
+                'm1': verdict.m1_direction
+            },
+            'reason': self._build_bearish_reason(verdict, timing_quality, delta_value)
+        }
+
+        if self.logger:
+            emoji = "✅" if should_trade else "❌"
+            self.logger.info(
+                f"{emoji} [BEARISH_DECISION][{asset}] "
+                f"Trade={should_trade} | "
+                f"MTF={verdict.alignment} {verdict.direction} | "
+                f"Score: {orderflow_score:.1f} + {verdict.bonus:+.0f} + {timing_bonus:+.0f} = {final_score:.1f} | "
+                f"Delta={delta_value:.1f} ({timing_quality})"
+            )
+
+        return result
+
+    def _build_bearish_reason(
+        self,
+        verdict: MTFTrendVerdict,
+        timing_quality: str,
+        delta_value: float
+    ) -> str:
+        """Construit une explication lisible de la décision"""
+        if verdict.direction != 'BEARISH':
+            return f"MTF non aligné BEARISH ({verdict.alignment})"
+
+        if verdict.alignment_count == 3:
+            reason = f"MTF parfaitement aligné BEARISH (M15↓ M5↓ M1↓) → +{verdict.bonus:.0f} pts"
+        elif verdict.alignment_count == 2:
+            aligned = []
+            if verdict.m15_direction == 'BEARISH':
+                aligned.append('M15↓')
+            if verdict.m5_direction == 'BEARISH':
+                aligned.append('M5↓')
+            if verdict.m1_direction == 'BEARISH':
+                aligned.append('M1↓')
+            reason = f"MTF aligné 2/3 BEARISH ({' '.join(aligned)}) → +{verdict.bonus:.0f} pts"
+        else:
+            reason = "Alignement MTF insuffisant"
+
+        # Ajouter info timing
+        if timing_quality == 'OPTIMAL':
+            reason += f" | Delta négatif ({delta_value:.1f}) = timing optimal"
+        elif timing_quality == 'SUBOPTIMAL':
+            reason += f" | Delta positif ({delta_value:.1f}) mais MTF prime → on trade quand même"
+
+        return reason

@@ -19,7 +19,7 @@ Solution:
 Architecture:
 - FAST-TRACK: < 5s (reversal élevé + résistance très proche)
 - STANDARD: 10-15s (validation complète)
-- 3 niveaux: STRONG (+20 pts) / MODERATE (+10 pts) / WEAK (+3 pts) / REJECTED (-15 pts)
+- 3 niveaux: STRONG (+20 pts) / MODERATE (+10 pts) / WEAK (+3 pts) / REJECTED (0 pts)
 """
 
 import pandas as pd
@@ -35,7 +35,7 @@ class BearishValidationResult:
     """Résultat de validation d'un trade BEARISH"""
     validation_level: str  # STRONG / MODERATE / WEAK / REJECTED
     confidence: float      # 0.0-1.0
-    score_boost: float     # -15 à +20 (ajustement du score composite)
+    score_boost: float     # 0 à +20 (ajustement du score composite)
     reasons: List[str]     # Raisons détaillées
     reversal_score: float  # 0-100
     reversal_conviction: str  # HIGH / MODERATE / CAUTION / LOW
@@ -400,7 +400,7 @@ class BearishScalpingValidator:
             bounce_prob = micro_resistance.get('bounce_probability', 0.0)
             reasons.append(f"❌ Résistance inadéquate: {distance_pips:.1f}p (bounce {bounce_prob:.0%})")
 
-        return ('REJECTED', 0.0, -15.0, reasons)
+        return ('REJECTED', 0.0, 0.0, reasons)
 
     def _rejected(self, reason: str, details: str) -> BearishValidationResult:
         """
@@ -416,7 +416,7 @@ class BearishScalpingValidator:
         return BearishValidationResult(
             validation_level='REJECTED',
             confidence=0.0,
-            score_boost=-15.0,
+            score_boost=0.0,
             reasons=[f"❌ {reason}: {details}"],
             reversal_score=0.0,
             reversal_conviction='N/A',

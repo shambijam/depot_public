@@ -2178,6 +2178,94 @@ class ScalpingStrategy(BaseStrategy):
                 except Exception:
                     pass
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🆕 16 JAN 2026: MTF VERDICT - AUTORITÉ POUR BEARISH
+                # Logique asymétrique:
+                # - BULLISH: Delta reste l'autorité (inchangé)
+                # - BEARISH: MTF (M15+M5+M1) devient l'autorité, delta = timing
+                # ═══════════════════════════════════════════════════════════════
+                mtf_verdict = None
+                mtf_bonus = 0.0
+                try:
+                    from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer, MTFTrendVerdict
+
+                    # Utiliser ou créer price_memory_analyzer
+                    if not hasattr(self, '_price_memory_mtf'):
+                        self._price_memory_mtf = PriceMemoryAnalyzer(logger=self.logger)
+
+                    # Récupérer les DataFrames MTF (df_work=M1, df_m5, df_m15 si dispo)
+                    df_m1_mtf = df_work if 'df_work' in dir() else None
+                    df_m5_mtf = df_m5 if 'df_m5' in dir() else None
+                    df_m15_mtf = df_m15 if 'df_m15' in dir() else None
+
+                    # Obtenir le prix actuel
+                    current_price_mtf = df_work["close"].iloc[-1] if df_work is not None and len(df_work) > 0 else 0
+
+                    # Analyser MTF
+                    mtf_verdict = self._price_memory_mtf.get_mtf_trend_verdict(
+                        asset=asset,
+                        candles_m15=df_m15_mtf,
+                        candles_m5=df_m5_mtf,
+                        candles_m1=df_m1_mtf,
+                        current_price=current_price_mtf
+                    )
+
+                    if mtf_verdict:
+                        mtf_bonus = mtf_verdict.bonus
+
+                        # 🐻 BEARISH: MTF a l'autorité sur le delta
+                        if mtf_verdict.direction == 'BEARISH' and mtf_verdict.alignment_count >= 2:
+                            # Si MTF dit BEARISH (2/3 ou 3/3), on force SELL
+                            if action != "SELL":
+                                delta_val = float(fp_summary.get("delta_total", 0)) if isinstance(fp_summary, dict) else 0
+                                self.logger.info(
+                                    f"[{asset}] 🐻 MTF OVERRIDE: {mtf_verdict.alignment} BEARISH "
+                                    f"(M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction}) "
+                                    f"→ SELL forcé (delta={delta_val:.0f} ignoré pour direction)"
+                                )
+                            action = "SELL"
+                            # Stocker le bonus MTF pour le score
+                            asset_signals["mtf_bearish_bonus"] = mtf_bonus
+                            asset_signals["mtf_verdict"] = {
+                                "direction": mtf_verdict.direction,
+                                "alignment": mtf_verdict.alignment,
+                                "bonus": mtf_bonus,
+                                "m15": mtf_verdict.m15_direction,
+                                "m5": mtf_verdict.m5_direction,
+                                "m1": mtf_verdict.m1_direction
+                            }
+                            self.logger.info(
+                                f"[{asset}] 🐻 MTF BEARISH CONFIRMÉ: +{mtf_bonus:.0f} pts bonus"
+                            )
+
+                        # 🐂 BULLISH: Delta reste l'autorité (pas de changement)
+                        elif mtf_verdict.direction == 'BULLISH' and mtf_verdict.alignment_count >= 2:
+                            # Log informatif seulement
+                            self.logger.debug(
+                                f"[{asset}] 🐂 MTF BULLISH ({mtf_verdict.alignment}): "
+                                f"Delta reste l'autorité pour BUY"
+                            )
+                            asset_signals["mtf_verdict"] = {
+                                "direction": mtf_verdict.direction,
+                                "alignment": mtf_verdict.alignment,
+                                "bonus": 0.0,  # Pas de bonus pour BULLISH
+                                "m15": mtf_verdict.m15_direction,
+                                "m5": mtf_verdict.m5_direction,
+                                "m1": mtf_verdict.m1_direction
+                            }
+
+                        else:
+                            # NEUTRAL ou alignement insuffisant
+                            self.logger.debug(
+                                f"[{asset}] ⚖️ MTF NEUTRAL ({mtf_verdict.alignment}): "
+                                f"Pas d'override, delta reste l'autorité"
+                            )
+
+                except Exception as e:
+                    self.logger.warning(f"[{asset}] ⚠️ MTF Analysis error: {e}")
+                    mtf_verdict = None
+                    mtf_bonus = 0.0
+
                 # 06 JAN 2026: LOG FINAL de l'action décidée
                 if action:
                     action_emoji = "🟢" if action == "BUY" else "🔴"
@@ -2555,6 +2643,24 @@ class ScalpingStrategy(BaseStrategy):
                             f"[OF V6][{asset}] Impossible récupérer M5 via MT5: {e}"
                         )
 
+                # 🆕 16 JAN 2026: Récupérer M15 pour analyse MTF BEARISH
+                df_m15 = None
+                if self.mt5_connector:
+                    try:
+                        import MetaTrader5 as mt5
+
+                        df_m15 = self.mt5_connector.get_rates(
+                            asset, mt5.TIMEFRAME_M15, count=30
+                        )
+                        if df_m15 is not None and len(df_m15) >= 10:
+                            self.logger.debug(
+                                f"[OF V6][{asset}] M15 récupéré via MT5 | len={len(df_m15)}"
+                            )
+                    except Exception as e:
+                        self.logger.debug(
+                            f"[OF V6][{asset}] Impossible récupérer M15 via MT5: {e}"
+                        )
+
                 # ⚡ 1. OrderFlow Analysis (50% du score)
                 orderflow_result = self._analyze_orderflow_v6(
                     asset=asset,
@@ -2622,6 +2728,15 @@ class ScalpingStrategy(BaseStrategy):
                 final_score_normalized = (
                     score_normalized + (vwap_score_pct / 100.0) * w_vw
                 )  # 0-100
+
+                # 🆕 16 JAN 2026: Ajouter bonus MTF pour BEARISH
+                mtf_bonus_applied = asset_signals.get("mtf_bearish_bonus", 0.0)
+                if action == "SELL" and mtf_bonus_applied > 0:
+                    final_score_normalized += mtf_bonus_applied
+                    self.logger.info(
+                        f"[{asset}] 🐻 MTF BONUS APPLIQUÉ: {mtf_bonus_applied:+.0f} pts → "
+                        f"Score final: {final_score_normalized:.1f}"
+                    )
 
                 # 📋 5. RAPPORT CONSOLIDÉ
                 # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
