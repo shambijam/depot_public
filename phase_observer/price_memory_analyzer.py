@@ -1030,26 +1030,82 @@ class PriceMemoryAnalyzer:
         bearish_count = sum(1 for d in directions if d == 'BEARISH')
         bullish_count = sum(1 for d in directions if d == 'BULLISH')
 
-        # Déterminer la direction dominante et le bonus
+        # 🆕 16 JAN 2026: Calculer le net_pips moyen pour bonus proportionnel
+        net_pips_values = []
+        if m15_result:
+            net_pips_values.append(abs(m15_result.net_pips))
+        if m5_result:
+            net_pips_values.append(abs(m5_result.net_pips))
+        if m1_result:
+            net_pips_values.append(abs(m1_result.net_pips))
+
+        # Prendre le MAX des net_pips (le TF le plus fort)
+        max_net_pips = max(net_pips_values) if net_pips_values else 0.0
+
+        # Déterminer la direction dominante et le bonus PROPORTIONNEL
         if bearish_count >= 2:
             direction = 'BEARISH'
             alignment_count = bearish_count
             alignment = f"{bearish_count}/3"
-            bonus = 20.0 if bearish_count == 3 else 15.0
+
+            # 🆕 BONUS PROPORTIONNEL AU MOUVEMENT
+            # Base alignement: 3/3 = +15, 2/3 = +10
+            base_bonus = 15.0 if bearish_count == 3 else 10.0
+
+            # Bonus net_pips (force du mouvement)
+            if max_net_pips >= 50:
+                pips_bonus = 15.0  # Mouvement FORT
+            elif max_net_pips >= 30:
+                pips_bonus = 10.0  # Mouvement MODÉRÉ
+            elif max_net_pips >= 15:
+                pips_bonus = 5.0   # Mouvement FAIBLE
+            else:
+                pips_bonus = 0.0   # Pas de bonus pips
+
+            bonus = base_bonus + pips_bonus  # Total: jusqu'à +30
             should_override_delta = True  # MTF BEARISH = ignorer le delta
             confidence = 0.9 if bearish_count == 3 else 0.75
+
+            if self.logger:
+                self.logger.debug(
+                    f"[MTF_BONUS] BEARISH: base={base_bonus:.0f} + pips_bonus={pips_bonus:.0f} "
+                    f"(max_net={max_net_pips:.1f}) = {bonus:.0f} total"
+                )
+
         elif bullish_count >= 2:
             direction = 'BULLISH'
             alignment_count = bullish_count
             alignment = f"{bullish_count}/3"
-            bonus = 0.0  # Pas de bonus pour BULLISH (delta fonctionne bien)
+
+            # 🆕 BULLISH aussi reçoit un bonus proportionnel maintenant
+            # Base alignement: 3/3 = +15, 2/3 = +10
+            base_bonus = 15.0 if bullish_count == 3 else 10.0
+
+            # Bonus net_pips (force du mouvement)
+            if max_net_pips >= 50:
+                pips_bonus = 15.0  # Mouvement FORT
+            elif max_net_pips >= 30:
+                pips_bonus = 10.0  # Mouvement MODÉRÉ
+            elif max_net_pips >= 15:
+                pips_bonus = 5.0   # Mouvement FAIBLE
+            else:
+                pips_bonus = 0.0   # Pas de bonus pips
+
+            bonus = base_bonus + pips_bonus  # Total: jusqu'à +30
             should_override_delta = False  # BULLISH = delta reste l'autorité
             confidence = 0.9 if bullish_count == 3 else 0.75
+
+            if self.logger:
+                self.logger.debug(
+                    f"[MTF_BONUS] BULLISH: base={base_bonus:.0f} + pips_bonus={pips_bonus:.0f} "
+                    f"(max_net={max_net_pips:.1f}) = {bonus:.0f} total"
+                )
         else:
             direction = 'NEUTRAL'
             alignment_count = 0
             alignment = "0/3"
             bonus = 0.0
+            pips_bonus = 0.0
             should_override_delta = False
             confidence = 0.3
 

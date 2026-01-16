@@ -2238,21 +2238,22 @@ class ScalpingStrategy(BaseStrategy):
                                 f"[{asset}] 🐻 MTF BEARISH CONFIRMÉ: +{mtf_bonus:.0f} pts bonus"
                             )
 
-                        # 🐂 BULLISH: Delta reste l'autorité (pas de changement)
+                        # 🐂 BULLISH: Delta reste l'autorité mais bonus MTF appliqué aussi
                         elif mtf_verdict.direction == 'BULLISH' and mtf_verdict.alignment_count >= 2:
-                            # Log informatif seulement
-                            self.logger.debug(
-                                f"[{asset}] 🐂 MTF BULLISH ({mtf_verdict.alignment}): "
-                                f"Delta reste l'autorité pour BUY"
-                            )
+                            # 🆕 16 JAN 2026: BULLISH reçoit aussi le bonus proportionnel
+                            asset_signals["mtf_bullish_bonus"] = mtf_bonus
                             asset_signals["mtf_verdict"] = {
                                 "direction": mtf_verdict.direction,
                                 "alignment": mtf_verdict.alignment,
-                                "bonus": 0.0,  # Pas de bonus pour BULLISH
+                                "bonus": mtf_bonus,
                                 "m15": mtf_verdict.m15_direction,
                                 "m5": mtf_verdict.m5_direction,
                                 "m1": mtf_verdict.m1_direction
                             }
+                            self.logger.info(
+                                f"[{asset}] 🐂 MTF BULLISH ({mtf_verdict.alignment}): "
+                                f"+{mtf_bonus:.0f} pts bonus | Delta reste l'autorité pour BUY"
+                            )
 
                         else:
                             # NEUTRAL ou alignement insuffisant
@@ -2729,14 +2730,24 @@ class ScalpingStrategy(BaseStrategy):
                     score_normalized + (vwap_score_pct / 100.0) * w_vw
                 )  # 0-100
 
-                # 🆕 16 JAN 2026: Ajouter bonus MTF pour BEARISH
-                mtf_bonus_applied = asset_signals.get("mtf_bearish_bonus", 0.0)
-                if action == "SELL" and mtf_bonus_applied > 0:
-                    final_score_normalized += mtf_bonus_applied
-                    self.logger.info(
-                        f"[{asset}] 🐻 MTF BONUS APPLIQUÉ: {mtf_bonus_applied:+.0f} pts → "
-                        f"Score final: {final_score_normalized:.1f}"
-                    )
+                # 🆕 16 JAN 2026: Ajouter bonus MTF proportionnel (BEARISH et BULLISH)
+                mtf_bonus_applied = 0.0
+                if action == "SELL":
+                    mtf_bonus_applied = asset_signals.get("mtf_bearish_bonus", 0.0)
+                    if mtf_bonus_applied > 0:
+                        final_score_normalized += mtf_bonus_applied
+                        self.logger.info(
+                            f"[{asset}] 🐻 MTF BONUS APPLIQUÉ: {mtf_bonus_applied:+.0f} pts → "
+                            f"Score final: {final_score_normalized:.1f}"
+                        )
+                elif action == "BUY":
+                    mtf_bonus_applied = asset_signals.get("mtf_bullish_bonus", 0.0)
+                    if mtf_bonus_applied > 0:
+                        final_score_normalized += mtf_bonus_applied
+                        self.logger.info(
+                            f"[{asset}] 🐂 MTF BONUS APPLIQUÉ: {mtf_bonus_applied:+.0f} pts → "
+                            f"Score final: {final_score_normalized:.1f}"
+                        )
 
                 # 📋 5. RAPPORT CONSOLIDÉ
                 # Récupérer le score VWAP depuis asset_signals (stocké par run_bot.py)
