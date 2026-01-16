@@ -3725,6 +3725,60 @@ def scalping_worker(
                     memory_net_direction = "FLAT"
                     memory_clarity = 0.0
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🆕 16 JAN 2026: MTF TREND VERDICT (M15 + M5 + M1)
+                # Analyse multi-timeframe avec bonus proportionnel
+                # ═══════════════════════════════════════════════════════════════
+                mtf_verdict = None
+                mtf_bonus = 0.0
+                try:
+                    if price_memory_analyzer is not None:
+                        # Récupérer M5 et M15 via MT5
+                        import MetaTrader5 as mt5
+
+                        df_m5_mtf = None
+                        df_m15_mtf = None
+
+                        try:
+                            df_m5_mtf = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M5, count=30)
+                        except Exception:
+                            pass
+
+                        try:
+                            df_m15_mtf = mt5_connector.get_rates(asset, mt5.TIMEFRAME_M15, count=30)
+                        except Exception:
+                            pass
+
+                        # M1 = rates_df_fresh
+                        df_m1_mtf = rates_df_fresh
+                        current_price_mtf = rates_df_fresh.iloc[-1]['close'] if len(rates_df_fresh) > 0 else 0
+
+                        # Appeler le verdict MTF
+                        mtf_verdict = price_memory_analyzer.get_mtf_trend_verdict(
+                            asset=asset,
+                            candles_m15=df_m15_mtf,
+                            candles_m5=df_m5_mtf,
+                            candles_m1=df_m1_mtf,
+                            current_price=current_price_mtf
+                        )
+
+                        if mtf_verdict:
+                            mtf_bonus = mtf_verdict.bonus
+
+                            # Log du verdict
+                            emoji = "🐻" if mtf_verdict.direction == 'BEARISH' else ("🐂" if mtf_verdict.direction == 'BULLISH' else "⚖️")
+                            logger.critical(
+                                f"{emoji} [MTF_VERDICT][{asset}] "
+                                f"{mtf_verdict.direction} ({mtf_verdict.alignment}) | "
+                                f"M15:{mtf_verdict.m15_direction} M5:{mtf_verdict.m5_direction} M1:{mtf_verdict.m1_direction} | "
+                                f"Bonus: {mtf_bonus:+.0f} pts"
+                            )
+
+                except Exception as e_mtf:
+                    logger.warning(f"[{asset}] MTF Verdict error: {e_mtf}")
+                    mtf_verdict = None
+                    mtf_bonus = 0.0
+
                 # ========== ÉTAPE 2: TIMING GATEKEEPER (GO/NOGO TRADE) ==========
                 timing_verdict = None
                 # 🔧 FIX (03 JAN 2026): Initialiser fusion_out pour éviter UnboundLocalError
@@ -4221,8 +4275,26 @@ def scalping_worker(
                                         f"BONUS={bonus_tape_speed:+.1f}"
                                     )
 
-                            # 🐻 MODE PRODUCTION (14 JAN 2026): Boost BEARISH activé + Tape Speed
-                            adjusted_score = original_score + bonus_memory + bearish_boost + bonus_tape_speed
+                            # 🆕 16 JAN 2026: Calculer bonus MTF selon direction
+                            bonus_mtf = 0.0
+                            if mtf_verdict and mtf_bonus > 0:
+                                # BEARISH MTF + SELL direction = bonus appliqué
+                                if mtf_verdict.direction == 'BEARISH' and filtre1_direction == 'SELL':
+                                    bonus_mtf = mtf_bonus
+                                    logger.critical(
+                                        f"🐻 [MTF_BONUS][{asset}] SELL + MTF BEARISH ({mtf_verdict.alignment}) "
+                                        f"→ +{bonus_mtf:.0f} pts"
+                                    )
+                                # BULLISH MTF + BUY direction = bonus appliqué
+                                elif mtf_verdict.direction == 'BULLISH' and filtre1_direction == 'BUY':
+                                    bonus_mtf = mtf_bonus
+                                    logger.critical(
+                                        f"🐂 [MTF_BONUS][{asset}] BUY + MTF BULLISH ({mtf_verdict.alignment}) "
+                                        f"→ +{bonus_mtf:.0f} pts"
+                                    )
+
+                            # 🐻 MODE PRODUCTION (14 JAN 2026): Boost BEARISH + Tape Speed + MTF
+                            adjusted_score = original_score + bonus_memory + bearish_boost + bonus_tape_speed + bonus_mtf
 
                             if all_filters_pass and adjusted_score >= asset_min_score_worker:
                                 # ✅ Signal validé - TOUS LES FILTRES PASSENT
@@ -4231,7 +4303,7 @@ def scalping_worker(
                                 decision_mini["rationale"] = (
                                     f"TRIPLE_FILTER: {filtre1_direction} | "
                                     f"F1:{filtre1_status} F2:{filtre2_status} F3:{filtre3_status} | "
-                                    f"Score: {original_score:.1f}+{bonus_memory}+{bearish_boost:.0f}+{bonus_tape_speed:.0f} = {adjusted_score:.1f}"
+                                    f"Score: {original_score:.1f}+{bonus_memory}+{bearish_boost:.0f}+{bonus_tape_speed:.0f}+{bonus_mtf:.0f} = {adjusted_score:.1f}"
                                 )
 
                                 orderflow_result_mini["score"] = adjusted_score
@@ -4241,7 +4313,7 @@ def scalping_worker(
                                     f"F1: {filtre1_detail} | "
                                     f"F2: {filtre2_detail} | "
                                     f"F3: {filtre3_detail} | "
-                                    f"Score: {original_score:.1f} +mem={bonus_memory} +bear={bearish_boost:.0f} +tape={bonus_tape_speed:.0f} → {adjusted_score:.1f}"
+                                    f"Score: {original_score:.1f} +mem={bonus_memory} +bear={bearish_boost:.0f} +tape={bonus_tape_speed:.0f} +mtf={bonus_mtf:.0f} → {adjusted_score:.1f}"
                                 )
                             else:
                                 # ⏸️ HOLD - AU MOINS UN FILTRE A ÉCHOUÉ
