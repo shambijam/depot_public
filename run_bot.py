@@ -180,88 +180,39 @@ def _get_merged_config_for_asset(
 ) -> dict:
     """
     Fusionne la configuration globale avec la configuration spécifique à l'actif.
-    - Autorise des overrides par actif pour: phase_detection, risk_management, exit_policy, etc.
-    - Merge récursif (deep) pour éviter d'écraser des sous-champs par inadvertance.
-    """
-    asset_specific_config = config_manager.config_loader.load_asset_config(asset) or {}
 
-    # 🔍 DEBUG (14 JAN 2026): Vérifier si asset config est chargé
+    ✅ 16 JAN 2026: Utilise maintenant ConfigMerger (core/config_merge.py)
+    au lieu du merge manuel précédent.
+    """
     import logging
     logger = logging.getLogger(__name__)
-    if asset_specific_config:
-        has_entry_rules = "entry_rules" in asset_specific_config
-        has_sltp = bool(
-            asset_specific_config.get("entry_rules", {})
-            .get("scalping", {})
-            .get("burst_scalping", {})
-            .get("sltp", {})
-        ) if has_entry_rules else False
-        sl_pips = (
-            asset_specific_config.get("entry_rules", {})
-            .get("scalping", {})
-            .get("burst_scalping", {})
-            .get("sltp", {})
-            .get("sl", {})
-            .get("pips", "N/A")
-        ) if has_sltp else "N/A"
-        logger.critical(
-            f"🔍 [CONFIG_LOAD][{asset}] Asset config loaded | "
-            f"has_entry_rules={has_entry_rules} | has_sltp={has_sltp} | sl_pips={sl_pips}"
-        )
-    else:
-        logger.critical(f"⚠️ [CONFIG_LOAD][{asset}] Asset config VIDE ou non trouvé !")
 
+    # Utiliser le nouveau ConfigMerger
+    try:
+        merged_config = config_manager.get_merged_config(asset, "scalping")
+        if merged_config:
+            # Ajouter asset_symbol et conserver strategy_name de active_config
+            merged_config["asset_symbol"] = asset
+            if "strategy_name" in active_config:
+                merged_config["strategy_name"] = active_config["strategy_name"]
+            logger.debug(f"[{asset}] Config fusionnée via ConfigMerger")
+            return merged_config
+    except Exception as e:
+        logger.warning(f"[{asset}] ConfigMerger erreur: {e}, fallback sur merge manuel")
+
+    # Fallback: merge simple si ConfigMerger échoue
     merged_config = dict(active_config or {})
-    merged_config["asset_symbol"] = asset  # pratique pour les logs/pipelines
-
-    # Strategy name:
-    # - si tu veux autoriser une stratégie différente par actif, dé-commente la ligne suivante
-    # if "strategy_name" in asset_specific_config:
-    #     merged_config["strategy_name"] = asset_specific_config["strategy_name"]
-    # Sinon on garde la logique actuelle (priorité au global) :
+    merged_config["asset_symbol"] = asset
     if "strategy_name" in active_config:
         merged_config["strategy_name"] = active_config["strategy_name"]
 
-    # Sections à merger (tu peux en ajouter/retirer selon tes fichiers d'assets)
-    sections_to_merge = [
-        "phase_detection",
-        "volatility",
-        "risk_management",
-        "smart_targets",
-        "temporal_context",
-        "institutional_bias",
-        "weighting",
-        "strategy_toggles",
-        "exit_policy",  # <-- important pour tes sorties fallback / BE / trailing
-        "trade_limits",
-        "data_collection",
-        "broker_overrides",
-        "position_management",
-        "entry_rules",  # <-- CRITIQUE: permet de fusionner les overrides SL/TP par asset
-        "overrides",    # <-- FIX 14 JAN 2026: CRITIQUE pour NAS100 (config dans overrides.scalping.entry_rules)
-    ]
-
-    for section in sections_to_merge:
+    asset_specific_config = config_manager.load_asset_config(asset) or {}
+    for section in ["entry_rules", "overrides", "risk_management", "volatility"]:
         asset_section = asset_specific_config.get(section)
         if asset_section is not None:
-            merged_section = _deep_merge_dicts(
+            merged_config[section] = _deep_merge_dicts(
                 merged_config.get(section, {}), asset_section
             )
-            merged_config[section] = merged_section
-
-    # 🔍 DEBUG (14 JAN 2026): Vérifier le résultat du merge
-    sl_pips_after_merge = (
-        merged_config.get("entry_rules", {})
-        .get("scalping", {})
-        .get("burst_scalping", {})
-        .get("sltp", {})
-        .get("sl", {})
-        .get("pips", "N/A")
-    )
-    logger.critical(
-        f"🔍 [CONFIG_MERGE][{asset}] Après merge | "
-        f"sl_pips={sl_pips_after_merge}"
-    )
 
     return merged_config
 
@@ -3458,86 +3409,41 @@ def scalping_worker(
                             .get("sltp", {})
                         ) or {}
 
-                    # Fusionner config scalping avec base_config + asset overrides (31 DEC 2025)
+                    # ✅ CONFIG_MERGER (16 JAN 2026): Utilisation du nouveau système de fusion
+                    # Remplace l'ancien code de merge manuel (commits nas_1 à nas_7)
                     try:
-                        scalping_strategy_config = strategy_manager.get_strategy_config("scalping") or {}
-                        # 🔧 FIX (15 JAN 2026): DEEP COPY pour éviter partage entre workers
-                        # dict() fait une shallow copy - les objets imbriqués sont partagés!
                         import copy
-                        merged_config = copy.deepcopy(base_config)
-                        if "entry_rules" in scalping_strategy_config:
-                            merged_config.setdefault("entry_rules", {}).update(
-                                scalping_strategy_config["entry_rules"]
-                            )
+                        # Obtenir la config fusionnée via ConfigMerger (stratégie base + asset overrides)
+                        merged_config = config_manager.get_merged_config(asset, "scalping")
+                        if not merged_config:
+                            merged_config = copy.deepcopy(base_config)
+                            logger.warning(f"[{asset}] ConfigMerger a retourné vide, fallback sur base_config")
 
-                        # ✅ FIX (14 JAN 2026): Charger config asset et merger CORRECTEMENT
-                        asset_config = config_manager.load_asset_config(asset)
-
-                        # 🔍 DEBUG (15 JAN 2026): Confirmer chargement config asset
-                        logger.critical(
-                            f"🔍 [ASSET_CONFIG_LOAD][{asset}] Chargé: {bool(asset_config)} | "
-                            f"Clés: {list(asset_config.keys()) if asset_config else 'VIDE'}"
-                        )
-
-                        # 🎯 CHERCHER SLTP DANS 2 ENDROITS (selon structure asset)
-                        # - NAS100: entry_rules.scalping.burst_scalping.sltp
-                        # - Forex (USDJPY, GBPUSD): overrides.scalping.sltp
-
-                        asset_sltp_config = None
-
-                        # Tentative 1: entry_rules (NAS100)
-                        asset_sltp_config = (
-                            asset_config.get("entry_rules", {})
-                            .get("scalping", {})
-                            .get("burst_scalping", {})
-                            .get("sltp")
-                        )
-
-                        # Tentative 2: overrides.scalping (Forex)
-                        if not asset_sltp_config:
-                            asset_sltp_config = (
-                                asset_config.get("overrides", {})
-                                .get("scalping", {})
-                                .get("sltp")
-                            )
-
-                        if asset_sltp_config:
-                            # ⚠️ DEEP MERGE des valeurs SL/TP (pas juste .update() qui écrase)
-                            burst_scalping_path = merged_config.setdefault("entry_rules", {}).setdefault("scalping", {}).setdefault("burst_scalping", {})
-                            current_sltp = burst_scalping_path.setdefault("sltp", {})
-
-                            # Merger chaque sous-clé individuellement (deep merge)
-                            for key, value in asset_sltp_config.items():
-                                if isinstance(value, dict) and key in current_sltp and isinstance(current_sltp[key], dict):
-                                    # Deep merge pour sl, tp, etc.
-                                    current_sltp[key].update(value)
-                                else:
-                                    # Écrasement direct pour les valeurs simples
-                                    current_sltp[key] = value
-
-                            # 🔧 FIX CRITIQUE (14 JAN 2026): Mettre à jour sltp_cfg avec valeurs mergées
-                            # SINON le skeleton utilisera les anciennes valeurs (20/30 au lieu de 800/1200)
-                            sltp_cfg = current_sltp
-
-                            # Log les valeurs finales
-                            sl_pips_final = current_sltp.get("sl", {}).get("pips", "N/A")
-                            tp_pips_final = current_sltp.get("tp", {}).get("pips", "N/A")
-                            logger.critical(
-                                f"✅ [CONFIG_MERGE][{asset}] SLTP fusionné ET appliqué au skeleton | "
-                                f"SL={sl_pips_final} pips | TP={tp_pips_final} pips"
+                        # Obtenir SLTP via ConfigMerger (méthode dédiée)
+                        sltp_flat = config_manager.get_sltp_config(asset, "scalping")
+                        if sltp_flat and sltp_flat.get("sl_pips"):
+                            # Reconstruire structure sltp pour compatibilité avec skeleton
+                            sltp_cfg = {
+                                "sl": {"pips": sltp_flat.get("sl_pips"), "buffer_pips": sltp_flat.get("sl_buffer_pips", 0)},
+                                "tp": {"pips": sltp_flat.get("tp_pips")},
+                                "sl_method": sltp_flat.get("sl_method", "PIPS"),
+                                "tp_method": sltp_flat.get("tp_method", "PIPS"),
+                                "rr_base": sltp_flat.get("rr_base", 1.5),
+                                "rr_floor": sltp_flat.get("rr_floor", 1.0),
+                                "rr_cap": sltp_flat.get("rr_cap", 3.0),
+                                "exit_mode": sltp_flat.get("exit_mode", "sl_tp_then_trail"),
+                            }
+                            logger.info(
+                                f"[CONFIG_MERGER][{asset}] SLTP chargé | "
+                                f"SL={sltp_flat.get('sl_pips')} pips | TP={sltp_flat.get('tp_pips')} pips"
                             )
                         else:
-                            logger.warning(f"⚠️ [{asset}] Pas de config SLTP asset-specific trouvée")
-                    except Exception as e:
-                        logger.warning(f"[{asset}] Fusion config échouée: {e}")
-                        merged_config = base_config
+                            logger.warning(f"[{asset}] ConfigMerger n'a pas trouvé de SLTP, utilisation fallback")
 
-                    # 🔍 DEBUG FINAL (14 JAN 2026): Vérifier sltp_cfg avant création skeleton
-                    logger.critical(
-                        f"🔍 [SKELETON_DEBUG][{asset}] sltp_cfg avant création skeleton | "
-                        f"SL={sltp_cfg.get('sl', {}).get('pips', 'N/A')} pips | "
-                        f"TP={sltp_cfg.get('tp', {}).get('pips', 'N/A')} pips"
-                    )
+                    except Exception as e:
+                        logger.warning(f"[{asset}] ConfigMerger erreur: {e}, fallback sur base_config")
+                        import copy
+                        merged_config = copy.deepcopy(base_config)
 
                     # ⚡ SQUELETTE PRÉ-CALCULÉ (parties statiques)
                     trade_decision_skeleton = {

@@ -1354,10 +1354,23 @@ class DecisionPipeline:
 
         # 💡 RR dynamique → hint pour le moteur SLTP (utilisé par order_builder)
         try:
-            bs_cfg = (
-                (current_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}
-            ).get("burst_scalping", {}) or {}
-            sltp_cfg = bs_cfg.get("sltp", {}) or {}
+            # ✅ UTILISATION DE CONFIG_MERGER - Config fusionnée (stratégie + asset overrides)
+            sltp_cfg = self.config_manager.get_sltp_config(asset_raw, "scalping")
+
+            # Fallback sur current_config si get_sltp_config retourne vide
+            if not sltp_cfg:
+                bs_cfg = (
+                    (current_config.get("entry_rules", {}) or {}).get("scalping", {}) or {}
+                ).get("burst_scalping", {}) or {}
+                sltp_cfg_legacy = bs_cfg.get("sltp", {}) or {}
+                sltp_cfg = {
+                    "rr_base": sltp_cfg_legacy.get("rr_base", 1.5),
+                    "rr_floor": sltp_cfg_legacy.get("rr_floor", 1.0),
+                    "rr_cap": sltp_cfg_legacy.get("rr_cap", 3.0),
+                    "sl_pips": (sltp_cfg_legacy.get("sl", {}) or {}).get("pips"),
+                    "tp_pips": (sltp_cfg_legacy.get("tp", {}) or {}).get("pips"),
+                }
+                self.logger.debug(f"[SLTP] Fallback sur config legacy pour {asset_raw}")
 
             rr_base = float(sltp_cfg.get("rr_base", 1.5) or 1.5)
             rr_floor = float(sltp_cfg.get("rr_floor", 1.0) or 1.0)
@@ -1385,10 +1398,17 @@ class DecisionPipeline:
             # ===== SLTP HINTS (paquet unique pour l'Order Builder) =====
             sl = trade_decision.get("sl_price")
             tp = trade_decision.get("tp_price")
-            sl_pips = trade_decision.get("target_sl_pips")
-            tp_pips = trade_decision.get("target_tp_pips")
+            # Priorité: target_sl/tp_pips de trade_decision → sinon config fusionnée
+            sl_pips = trade_decision.get("target_sl_pips") or sltp_cfg.get("sl_pips")
+            tp_pips = trade_decision.get("target_tp_pips") or sltp_cfg.get("tp_pips")
             rr_hint_val = trade_decision.get("tp_rr_ratio_hint")
             multi_tp_enabled = bool(sltp_cfg.get("multi_tp_enabled", False))
+
+            # Log pour debug des valeurs SLTP utilisées
+            self.logger.info(
+                f"[SLTP] {asset_raw}: sl_pips={sl_pips}, tp_pips={tp_pips}, "
+                f"rr_base={rr_base}, source=config_merger"
+            )
 
             entry_price = trade_decision.get("entry_price")
             entry_price = float(entry_price) if entry_price is not None else None

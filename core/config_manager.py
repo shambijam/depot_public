@@ -31,6 +31,7 @@ from typing import (
 from functools import lru_cache
 from enum import Enum
 from core.config_loader import ConfigLoader
+from core.config_merge import ConfigMerger
 
 from core.audit_logger import AuditLogger
 from core.strategy_manager import StrategyManager
@@ -85,6 +86,7 @@ class ConfigManager:
 
         # Dépendances principales
         self.config_loader = ConfigLoader(config_manager_instance=self)
+        self.config_merger = ConfigMerger(config_loader_instance=self.config_loader)
         self.audit_logger = AuditLogger(config_manager_instance=self)
    
         self.strategy_manager = StrategyManager(
@@ -155,6 +157,43 @@ class ConfigManager:
             )
             return {}
 
+    def get_merged_config(
+        self,
+        asset_symbol: str,
+        strategy_name: str = "scalping",
+        force_reload: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Retourne la configuration fusionnée pour un actif et une stratégie.
+
+        C'est la MÉTHODE PRINCIPALE à utiliser pour obtenir une config complète.
+        Elle combine:
+        1. La config de base de la stratégie (config_trade_scalping.json)
+        2. Les overrides spécifiques à l'actif (NAS100.json, EURUSD.json, etc.)
+
+        Args:
+            asset_symbol: Symbole de l'actif (ex: "NAS100", "EURUSD")
+            strategy_name: Nom de la stratégie (default: "scalping")
+            force_reload: Si True, ignore le cache et recharge depuis les fichiers
+
+        Returns:
+            Dict[str, Any]: Configuration fusionnée prête à l'emploi
+        """
+        return self.config_merger.get_merged_config(
+            asset_symbol=asset_symbol,
+            strategy_name=strategy_name,
+            force_reload=force_reload
+        )
+
+    def get_sltp_config(self, asset_symbol: str, strategy_name: str = "scalping") -> Dict[str, Any]:
+        """
+        Raccourci pour obtenir la config SLTP fusionnée pour un actif.
+
+        Returns:
+            Dict avec: sl_pips, tp_pips, sl_method, tp_method, rr_base, etc.
+        """
+        return self.config_merger.get_sltp_config(asset_symbol, strategy_name)
+
     def _reset_session_state(self) -> None:
         """
         Réinitialise l'état de la session de configuration à ses valeurs par défaut.
@@ -196,6 +235,11 @@ class ConfigManager:
                 cache_size = len(self._asset_config_cache)
                 self._asset_config_cache.clear()
                 self.logger.info(f"🔄 [HOT-RELOAD] Cache assets vidé ({cache_size} entrées)")
+
+            # 1b. Vider le cache du ConfigMerger (configs fusionnées)
+            if hasattr(self, "config_merger"):
+                self.config_merger.clear_cache()
+                self.logger.info("🔄 [HOT-RELOAD] Cache ConfigMerger vidé")
 
             # 2. Recharger prod_config.json
             template_path = self.get("paths.prod_config", "config/prod_config.json")
