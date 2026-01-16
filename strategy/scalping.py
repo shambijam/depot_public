@@ -1514,7 +1514,7 @@ class ScalpingStrategy(BaseStrategy):
         ✅ CORRIGÉ (19 DIC 2025): Normalisation des scores pour échelle cohérente 0-100pts
         ⏱️ MODIFIÉ (17 DEC 2025): Ajout Timing Analyzer au Footprint (25→30 pts max)
         📊 MODIFIÉ (18 DEC 2025): Ajout Momentum Institutionnel - NOUVEAUX POIDS
-        🔒 RESTRICTION (18 DEC 2025): USDJPY UNIQUEMENT
+        🆕 16 JAN 2026: RESTRICTION SUPPRIMÉE - TOUS LES ASSETS
 
         SCORES BRUTS :
         - OrderFlow V6: 0-50 points (Delta 0-25, Volume 0-15, Imbalance 0-10)
@@ -1529,10 +1529,6 @@ class ScalpingStrategy(BaseStrategy):
         - VWAP_norm = (score_pct / 100) * 20%       # 📉 RÉDUIT: 20%→20% (inchangé)
         - TOTAL = OF_norm + FP_norm + MOM_norm + VWAP_norm (0-100pts)
         """
-
-        # 🔒 RESTRICTION: Ce rapport détaillé est UNIQUEMENT pour USDJPY
-        if asset != "USDJPY":
-            return
 
         try:
             # ================================================================
@@ -2562,16 +2558,9 @@ class ScalpingStrategy(BaseStrategy):
                 return {}
 
             # ================================================================
-            # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M3/M5)
-            # 🔒 RESTRICTION (18 DEC 2025): USDJPY UNIQUEMENT
+            # ORDERFLOW V6 - ANALYSE MULTI-COMPOSANTS (M1/M3/M5/M15)
+            # 🆕 16 JAN 2026: RESTRICTION SUPPRIMÉE - TOUS LES ASSETS
             # ================================================================
-            # ⚠️ OrderFlow V6 + Footprint V6 + VWAP = USDJPY SEULEMENT
-            if asset != "USDJPY":
-                self.logger.debug(
-                    f"[{asset}] OrderFlow V6 analysis skipped (USDJPY only)"
-                )
-                return {}  # Pas d'analyse pour les autres symboles
-
             try:
                 # Récupération des DataFrames multi-timeframe
                 df_m3 = None

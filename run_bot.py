@@ -4141,9 +4141,35 @@ def scalping_worker(
                                     bearish_boost = 0.0
 
                             # ═══════════════════════════════════════════════════════════
-                            # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER
+                            # 🆕 16 JAN 2026: REVERSAL BLOCKING - Bloque trades contre reversal
                             # ═══════════════════════════════════════════════════════════
-                            all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass
+                            reversal_blocked = False
+                            if last_reversal_check and filtre1_direction in ["BUY", "SELL"]:
+                                reversal_trend = last_reversal_check.get('new_trend', 'NEUTRAL')
+                                reversal_detected = last_reversal_check.get('reversal_detected', False)
+                                reversal_score = last_reversal_check.get('institutional_score', 0)
+                                reversal_conviction = last_reversal_check.get('conviction_level', 'LOW')
+
+                                # BUY bloqué si reversal BEARISH détecté (score >= 65)
+                                if filtre1_direction == "BUY" and reversal_trend == "BEARISH" and reversal_score >= 65:
+                                    reversal_blocked = True
+                                    logger.warning(
+                                        f"🚫 [REVERSAL_BLOCK][{asset}] BUY BLOQUÉ! "
+                                        f"Reversal BEARISH détecté (score={reversal_score:.0f}, conviction={reversal_conviction})"
+                                    )
+
+                                # SELL bloqué si reversal BULLISH détecté (score >= 65)
+                                elif filtre1_direction == "SELL" and reversal_trend == "BULLISH" and reversal_score >= 65:
+                                    reversal_blocked = True
+                                    logger.warning(
+                                        f"🚫 [REVERSAL_BLOCK][{asset}] SELL BLOQUÉ! "
+                                        f"Reversal BULLISH détecté (score={reversal_score:.0f}, conviction={reversal_conviction})"
+                                    )
+
+                            # ═══════════════════════════════════════════════════════════
+                            # DÉCISION FINALE: LES 3 FILTRES DOIVENT PASSER + PAS DE REVERSAL BLOCK
+                            # ═══════════════════════════════════════════════════════════
+                            all_filters_pass = filtre1_direction in ["BUY", "SELL"] and filtre2_pass and filtre3_pass and not reversal_blocked
 
                             # Bonus si Price Memory aligné
                             bonus_memory = 30 if memory_aligned else 0
