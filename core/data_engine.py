@@ -16,7 +16,7 @@ import time
 import logging
 from typing import List, Optional, Dict, Any
 
-from core.footprint_cache import footprint_cache
+
 from core.bars_cache import bars_cache  # ✅ PHASE 2: Cache barres historiques
 
 
@@ -215,8 +215,7 @@ class DataEngine(threading.Thread):
             footprint_result['analysis_time_ms'] = analysis_duration_ms
             footprint_result['cache_timestamp'] = time.time()
 
-            # 5. Mettre à jour le cache
-            footprint_cache.update(symbol, footprint_result)
+           
 
             # 6. Log succès
             ticks = footprint_result.get('footprint_summary', {}).get('tick_count', 0)
