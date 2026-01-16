@@ -255,7 +255,7 @@
           "atr_period": 14,
           "atr_multiplier": 0.0,
           "execution": {
-            "min_sl_tp_distance_pips": 15
+            "min_sl_tp_distance_pips": 5
           },
           "comment": "30 pips TP pour GBPUSD (RR 1.5, Option A - Conservateur)"
         }
@@ -263,7 +263,7 @@
       "closure_rules": {
         "enabled": true,
         "enable_profit_close": true,
-        "target_profit_pips": 1.5,
+        "target_profit_pips": 1.4,
         "require_full_count_for_profit_close": false,
         "rt_fast_window_ms": 120000,
         "rt_poll_interval_ms": 100,
