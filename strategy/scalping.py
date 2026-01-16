@@ -960,11 +960,9 @@ class ScalpingStrategy(BaseStrategy):
             # ================================================================
             # 🆕 ANALYSEURS INSTITUTIONNELS (03 JAN 2026 - Phase 1 + 2)
             # ================================================================
-            # Importer les 5 nouveaux analyseurs
+            # Importer les analyseurs institutionnels (Fatigue/Physics supprimés 16 JAN 2026)
             try:
                 from phase_observer.price_memory_analyzer import PriceMemoryAnalyzer
-                from phase_observer.market_fatigue_analyzer import MarketFatigueAnalyzer
-                from phase_observer.market_physics_analyzer import MarketPhysicsAnalyzer
                 from phase_observer.microstructure_analyzer import MicrostructureAnalyzer
                 from phase_observer.liquidity_heatmap import LiquidityHeatmap
 
@@ -975,22 +973,13 @@ class ScalpingStrategy(BaseStrategy):
 
                 # 06 JAN 2026 FIX: S'assurer que ticks_df a toutes les colonnes requises
                 if ticks_df is not None:
-                    # Log colonnes pour diagnostic
                     ticks_cols = list(ticks_df.columns)
-                    self.logger.info(
-                        f"[{asset}] 🔍 TICKS_DF COLONNES: {ticks_cols} | "
-                        f"Taille: {len(ticks_df)} rows × {len(ticks_df.columns)} cols"
-                    )
 
                     # 🔧 FIX CRITIQUE: Colonnes requises par analyseurs institutionnels
                     required_cols = ['time', 'side', 'volume', 'price']
                     missing_cols = [col for col in required_cols if col not in ticks_df.columns]
 
                     if missing_cols:
-                        self.logger.warning(
-                            f"[{asset}] ⚠️ Colonnes manquantes dans ticks_df: {missing_cols} | "
-                            f"Colonnes présentes: {ticks_cols}"
-                        )
                         # Copier pour ne pas modifier l'original
                         ticks_df = ticks_df.copy()
 
@@ -1029,76 +1018,7 @@ class ScalpingStrategy(BaseStrategy):
                     self.logger.debug(f"[{asset}] PriceMemory error: {e_memory}")
                     institutional_analysis['price_memory'] = {}
 
-                # 2. PRIORITY_2: Market Fatigue (épuisement acheteurs/vendeurs)
-                try:
-                    # 06 JAN 2026 FIX: Diagnostiquer pourquoi Fatigue retourne N/A
-                    ticks_count = len(ticks_df) if ticks_df is not None else 0
-                    candles_count = len(df_m1) if df_m1 is not None else 0
-                    ticks_cols = list(ticks_df.columns) if ticks_df is not None else []
-                    candles_cols = list(df_m1.columns) if df_m1 is not None else []
-                    self.logger.info(
-                        f"[{asset}] 😫 MarketFatigue PRE-CHECK: ticks_df={ticks_count} ticks, "
-                        f"df_m1={candles_count} bars (besoin: ticks>=5, candles>=5) | "
-                        f"ticks_columns={ticks_cols} | candles_columns={candles_cols}"
-                    )
-
-                    # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
-                    # Créer copie avec 'volume' depuis 'tick_volume' si disponible
-                    df_m1_for_fatigue = df_m1.tail(20).copy()
-                    if 'volume' not in df_m1_for_fatigue.columns:
-                        if 'tick_volume' in df_m1_for_fatigue.columns:
-                            df_m1_for_fatigue['volume'] = df_m1_for_fatigue['tick_volume']
-                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume'")
-                        else:
-                            df_m1_for_fatigue['volume'] = 1.0  # Fallback
-                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1, utilise 1.0")
-
-                    fatigue_analyzer = MarketFatigueAnalyzer(logger=self.logger)
-                    fatigue_result = fatigue_analyzer.calculate_fatigue_indicators(ticks_df, df_m1_for_fatigue)
-                    institutional_analysis['market_fatigue'] = fatigue_result
-                    self.logger.info(f"[{asset}] 😫 MarketFatigue RESULT: score={fatigue_result.get('fatigue_score', 0):.1f}/10, état={fatigue_result.get('market_state', 'UNKNOWN')}")
-                except Exception as e_fatigue:
-                    import traceback
-                    self.logger.warning(
-                        f"[{asset}] ⚠️ MarketFatigue EXCEPTION: {e_fatigue}\n"
-                        f"Traceback: {traceback.format_exc()}"
-                    )
-                    institutional_analysis['market_fatigue'] = {}
-
-                # 3. PRIORITY_3: Market Physics (lois physiques du marché)
-                try:
-                    # 06 JAN 2026 FIX: Diagnostiquer pourquoi Physics retourne N/A
-                    ticks_count = len(ticks_df) if ticks_df is not None else 0
-                    candles_count = len(df_m1) if df_m1 is not None else 0
-                    self.logger.info(
-                        f"[{asset}] ⚛️ MarketPhysics PRE-CHECK: ticks_df={ticks_count} ticks, "
-                        f"df_m1={candles_count} bars (besoin: ticks>=10, candles>=10)"
-                    )
-
-                    # 🔧 FIX CRITIQUE (06 JAN 2026): df_m1 n'a pas de colonne 'volume' en MT5 Forex
-                    # Créer copie avec 'volume' depuis 'tick_volume' si disponible
-                    df_m1_for_physics = df_m1.copy()
-                    if 'volume' not in df_m1_for_physics.columns:
-                        if 'tick_volume' in df_m1_for_physics.columns:
-                            df_m1_for_physics['volume'] = df_m1_for_physics['tick_volume']
-                            self.logger.debug(f"[{asset}] ✅ Colonne 'volume' créée depuis 'tick_volume' (Physics)")
-                        else:
-                            df_m1_for_physics['volume'] = 1.0  # Fallback
-                            self.logger.warning(f"[{asset}] ⚠️ Ni 'volume' ni 'tick_volume' dans df_m1 (Physics), utilise 1.0")
-
-                    physics_analyzer = MarketPhysicsAnalyzer(logger=self.logger)
-                    physics_result = physics_analyzer.apply_physics_principles(ticks_df, df_m1_for_physics)
-                    institutional_analysis['market_physics'] = physics_result
-                    self.logger.info(f"[{asset}] ⚛️ MarketPhysics RESULT: bias={physics_result.get('physics_bias', 'NEUTRAL')}, inertie={physics_result.get('price_inertia', {}).get('direction', 'N/A')}")
-                except Exception as e_physics:
-                    import traceback
-                    self.logger.warning(
-                        f"[{asset}] ⚠️ MarketPhysics EXCEPTION: {e_physics}\n"
-                        f"Traceback: {traceback.format_exc()}"
-                    )
-                    institutional_analysis['market_physics'] = {}
-
-                # 4. PHASE 2: Microstructure (vitesse ruban, order imbalance)
+                # 2. Microstructure (vitesse ruban, order imbalance)
                 try:
                     microstructure = MicrostructureAnalyzer(logger=self.logger)
                     if ticks_df is not None and len(ticks_df) > 10:
@@ -1136,10 +1056,9 @@ class ScalpingStrategy(BaseStrategy):
                 result['institutional_analysis'] = institutional_analysis
 
                 self.logger.info(
-                    f"[{asset}] 📊 INSTITUTIONAL ANALYSIS: "
+                    f"[{asset}] 📊 INSTITUTIONAL: "
                     f"Memory={len(institutional_analysis.get('price_memory', {}).get('memory_signals', []))} | "
-                    f"Fatigue={institutional_analysis.get('market_fatigue', {}).get('market_state', 'N/A')} | "
-                    f"Physics={institutional_analysis.get('market_physics', {}).get('physics_bias', 'N/A')} | "
+                    f"TapeSpeed={institutional_analysis.get('tape_speed', {}).get('interpretation', 'N/A')} | "
                     f"Pressure={institutional_analysis.get('pressure_ratio', {}).get('direction', 'N/A')}"
                 )
 

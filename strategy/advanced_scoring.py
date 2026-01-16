@@ -446,17 +446,12 @@ class SimpleAdvancedScorer:
 
     def _calculate_institutional_score(self, institutional_analysis: Dict[str, Any]) -> float:
         """
-        🆕 06 JAN 2026 PHASE 3: Agréger les 5 analyseurs institutionnels en score 0-100.
+        Score institutionnel basé sur 3 analyseurs (16 JAN 2026: Fatigue/Physics supprimés).
 
-        Les 5 analyseurs:
-        1. Price Memory → Qualité des niveaux mémoire
-        2. Market Fatigue → État d'épuisement du marché
-        3. Market Physics → Bias physique (inertie, momentum)
-        4. Microstructure (Tape Speed) → Vitesse et ignition
-        5. Liquidity Heatmap (Pressure) → Pression buy/sell
-
-        Args:
-            institutional_analysis: Dict contenant les 5 analyses
+        Les 3 analyseurs:
+        1. Price Memory (35%) → Qualité des niveaux mémoire
+        2. Tape Speed (35%) → Vitesse et activité du ruban
+        3. Pressure Ratio (30%) → Pression buy/sell
 
         Returns:
             Score 0-100 (0=bearish fort, 50=neutre, 100=bullish fort)
@@ -468,7 +463,7 @@ class SimpleAdvancedScorer:
             scores = []
             weights = []
 
-            # 1. PRICE MEMORY (20%) - Niveaux frais vs memory signals
+            # 1. PRICE MEMORY (35%) - Niveaux frais vs memory signals
             price_memory = institutional_analysis.get('price_memory', {})
             memory_signals = price_memory.get('memory_signals', [])
             fresh_levels = price_memory.get('fresh_levels', [])
@@ -478,65 +473,10 @@ class SimpleAdvancedScorer:
                 fresh_ratio = len(fresh_levels) / max(1, len(memory_signals) + len(fresh_levels))
                 memory_score = 50.0 + (fresh_ratio - 0.5) * 50.0  # 0→25, 0.5→50, 1→75
                 scores.append(memory_score)
-                weights.append(0.20)
+                weights.append(0.35)
                 logger.info(f"[INST_SCORE] PriceMemory: {memory_score:.1f} (fresh={len(fresh_levels)}, memory={len(memory_signals)})")
 
-            # 2. MARKET FATIGUE (25%) - État du marché
-            market_fatigue = institutional_analysis.get('market_fatigue', {})
-            fatigue_state = str(market_fatigue.get('market_state', 'UNKNOWN')).upper()
-            fatigue_score_raw = float(market_fatigue.get('fatigue_score', 5.0))  # 0-10
-
-            # 06 JAN 2026 FIX: États réels retournés par MarketFatigueAnalyzer
-            # 'EXHAUSTED' (>=7), 'FATIGUED' (>=4), 'NORMAL' (>=2), 'ENERGETIC' (<2)
-            if fatigue_state != 'UNKNOWN':
-                # Fatigue high = bearish (épuisement), fatigue low = bullish (énergie)
-                fatigue_score = 50.0 + (5.0 - fatigue_score_raw) * 5.0  # 10→0, 5→50, 0→100
-
-                # Ajustement par état (06 JAN 2026: utiliser vrais états)
-                if fatigue_state == 'EXHAUSTED':
-                    # Marché épuisé → probable reversal → bearish (contre le mouvement actuel)
-                    fatigue_score = 30.0
-                elif fatigue_state == 'FATIGUED':
-                    # Marché fatigué → affaiblissement
-                    fatigue_score = 40.0
-                elif fatigue_state == 'NORMAL':
-                    # Marché sain → neutre
-                    fatigue_score = 50.0
-                elif fatigue_state == 'ENERGETIC':
-                    # Marché énergique → continuation probable → bullish
-                    fatigue_score = 65.0
-
-                scores.append(fatigue_score)
-                weights.append(0.25)
-                logger.info(f"[INST_SCORE] MarketFatigue: {fatigue_score:.1f} (state={fatigue_state}, raw={fatigue_score_raw:.1f}/10)")
-
-            # 3. MARKET PHYSICS (25%) - Bias physique
-            market_physics = institutional_analysis.get('market_physics', {})
-            physics_bias = str(market_physics.get('physics_bias', 'NEUTRAL')).upper()
-            price_inertia = market_physics.get('price_inertia', {})
-            inertia_dir = str(price_inertia.get('direction', 'NEUTRAL')).upper()
-
-            # 06 JAN 2026 FIX: MarketPhysicsAnalyzer retourne 'UP'/'DOWN', pas 'UPWARD'/'DOWNWARD'
-            if physics_bias != 'UNKNOWN':
-                # Convertir bias en score
-                if 'BULLISH' in physics_bias or 'BUY' in physics_bias:
-                    physics_score = 75.0
-                elif 'BEARISH' in physics_bias or 'SELL' in physics_bias:
-                    physics_score = 25.0
-                else:
-                    physics_score = 50.0
-
-                # Boost si inertie alignée (06 JAN 2026: accepter 'UP'/'DOWN')
-                if inertia_dir == 'UP' or inertia_dir == 'UPWARD':
-                    physics_score = min(100.0, physics_score + 10.0)
-                elif inertia_dir == 'DOWN' or inertia_dir == 'DOWNWARD':
-                    physics_score = max(0.0, physics_score - 10.0)
-
-                scores.append(physics_score)
-                weights.append(0.25)
-                logger.info(f"[INST_SCORE] MarketPhysics: {physics_score:.1f} (bias={physics_bias}, inertia={inertia_dir})")
-
-            # 4. TAPE SPEED (15%) - Vitesse du tape
+            # 2. TAPE SPEED (35%) - Vitesse du tape
             tape_speed = institutional_analysis.get('tape_speed', {})
             speed_ratio = float(tape_speed.get('speed_ratio', 1.0))
             speed_interp = str(tape_speed.get('interpretation', 'NORMAL')).upper()
@@ -553,10 +493,10 @@ class SimpleAdvancedScorer:
                     tape_score = 35.0  # Apathie
 
                 scores.append(tape_score)
-                weights.append(0.15)
+                weights.append(0.35)
                 logger.info(f"[INST_SCORE] TapeSpeed: {tape_score:.1f} (ratio={speed_ratio:.2f}, interp={speed_interp})")
 
-            # 5. PRESSURE RATIO (15%) - Pression buy/sell
+            # 3. PRESSURE RATIO (30%) - Pression buy/sell
             pressure_ratio = institutional_analysis.get('pressure_ratio', {})
             pressure_dir = str(pressure_ratio.get('direction', 'NEUTRAL')).upper()
             pressure_norm = float(pressure_ratio.get('normalized_pressure', 0.0))  # -1 à +1
@@ -566,7 +506,7 @@ class SimpleAdvancedScorer:
                 pressure_score = 50.0 + (pressure_norm * 50.0)  # -1→0, 0→50, +1→100
 
                 scores.append(pressure_score)
-                weights.append(0.15)
+                weights.append(0.30)
                 logger.info(f"[INST_SCORE] Pressure: {pressure_score:.1f} (dir={pressure_dir}, norm={pressure_norm:.2f})")
 
             # Calcul final pondéré
@@ -577,7 +517,7 @@ class SimpleAdvancedScorer:
 
                 logger.info(
                     f"[INST_SCORE] ✅ Score Institutionnel={institutional_score:.1f}/100 "
-                    f"({len(scores)}/5 analyseurs actifs)"
+                    f"({len(scores)}/3 analyseurs actifs)"
                 )
                 return round(institutional_score, 2)
             else:
