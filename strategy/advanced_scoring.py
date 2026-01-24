@@ -533,6 +533,9 @@ class SimpleAdvancedScorer:
         if orderflow_score > 0:
             result['components']['orderflow'] = orderflow_score
 
+        # Compatibilite: run_bot.py attend 'composite_score' pas 'final_score'
+        result['composite_score'] = result['final_score']
+
         return result
 
 
