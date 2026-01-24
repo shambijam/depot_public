@@ -536,6 +536,14 @@ class SimpleAdvancedScorer:
         # Compatibilite: run_bot.py attend 'composite_score' pas 'final_score'
         result['composite_score'] = result['final_score']
 
+        # Compatibilite: run_bot.py attend les anciennes cles de composants
+        # Mapper les nouvelles cles vers les anciennes
+        comps = result['components']
+        comps['microstructure'] = comps.get('technical', 50.0)
+        comps['liquidity'] = comps.get('context', 50.0)
+        comps['divergence'] = 50.0  # Neutre par defaut
+        comps['smart_money'] = comps.get('risk', 50.0)
+
         return result
 
 
